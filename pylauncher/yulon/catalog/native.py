@@ -135,6 +135,7 @@ from yulon.catalog.installer import (
     provision_lines,
     unsupported_platform_message,
 )
+from yulon.catalog.preflight import Facts as PreflightFacts
 from yulon.catalog.preflight import Spent
 from yulon.log import get_logger
 from yulon.manifest import Db
@@ -6406,6 +6407,8 @@ class Seams:
     `Callable[...]` for `recreate`'s reason: it is called with the stop's
     `control=` (`docker.StopControl`), whose load wait may hold it.
     """
+    update_compose: Callable[[], Iterator[str]] = platform.update_compose
+    """T658: put Docker's current static Compose in the user's plugin folder, asked first."""
     tag_image: Callable[[str, str], str] = docker.tag_image
     remove_image: Callable[..., str] = docker.remove_image
     """The rebuild's rollback: kept as a second tag before the compile, let go as one after.
@@ -12187,12 +12190,50 @@ class StagedInstaller:
         if facts.docker_ready:
             self._refuse_foreign_containers(server_dir, state.install_id)
         spent = self._spent(state, server_dir) if facts.docker_ready else preflight.NOTHING_SPENT
+        if facts.compose_offer and platform.compose_too_old(facts.compose_version):
+            # T658: a Compose that would stop this install's import and every Start, on a
+            # machine where Yu'lon can put a current one in place. Asked, never assumed.
+            updated = yield from self._offer_a_current_compose(facts, ask)
+            if updated:
+                facts = self._seams.gather(
+                    self.entry,
+                    server_dir,
+                    client_dir=options.client_dir,
+                    platform_id=self._seams.platform_id,
+                    docker_ready=self._seams.docker_ready,
+                    dir_problem=self._seams.dir_problem,
+                )
         report_checks = preflight.evaluate(self.entry, server_dir, facts, spent)
         yield from preflight.lines(report_checks)
         if not report_checks.ok():
             raise InstallerError(
                 "This machine cannot install the server yet:\n" + report_checks.message()
             )
+
+    def _offer_a_current_compose(
+        self, facts: PreflightFacts, ask: runner.Prompter | None
+    ) -> Generator[str, None, bool]:
+        """Ask to put Docker's current Compose in the user's plugin folder; True once it is (T658).
+
+        No one to ask, or anything but a deliberate yes, changes nothing: the
+        Compose row then refuses with the same offer in words.
+        """
+        version = facts.compose_version or platform.COMPOSE_OLDEST_WORKING
+        if ask is None:
+            return False
+        question = platform.UPDATE_COMPOSE_QUESTION.format(
+            have=".".join(str(part) for part in version),
+            new=platform.COMPOSE_DOWNLOAD_VERSION,
+            path=platform.users_compose_plugin_path(),
+        )
+        if not platform.explicit_yes(ask(question)):
+            yield "Docker Compose was left as it is."
+            return False
+        try:
+            yield from self._seams.update_compose()
+        except platform.ComposeUpdateError as exc:
+            raise InstallerError(f"{exc} The install was not started.") from exc
+        return True
 
     def _spent(self, state: InstallState, server_dir: Path) -> Spent:
         """What an earlier run of this install already spent, for the free-space rows (T112).

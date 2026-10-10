@@ -140,7 +140,13 @@ from yulon.catalog.installer import (
     rebuild_confirmation,
 )
 from yulon.character_pick import Roster
-from yulon.controller import Controller, DatabaseMissing, InstallStatus, PortConflictError
+from yulon.controller import (
+    ComposeTooOld,
+    Controller,
+    DatabaseMissing,
+    InstallStatus,
+    PortConflictError,
+)
 from yulon.controller_wow_centurion import accounts as centurion_accounts
 from yulon.controller_wow_centurion import characters as centurion_characters
 from yulon.controller_wow_centurion import console as centurion_console
@@ -8764,6 +8770,11 @@ class ControllerView(QWidget):
         self.repair_database_button.setVisible(False)
         self.restore_backup_button = QPushButton(RESTORE_BACKUP_LABEL, tab)
         self.restore_backup_button.setVisible(False)
+        # T658: hidden until a Start is refused because this machine's Docker Compose is too
+        # old, on a machine where Yu'lon can put Docker's current one in the user's folder.
+        self.update_compose_button = QPushButton(platform.UPDATE_COMPOSE_LABEL, tab)
+        self.update_compose_button.setProperty("primary", True)
+        self.update_compose_button.setVisible(False)
         # T160. Hidden unless this is a Steam Deck whose `docker` command is
         # gone, which is what a SteamOS update leaves behind. The press runs the
         # upstream fix script's repair through the app's own questions; the
@@ -8895,6 +8906,7 @@ class ControllerView(QWidget):
         self.stop_other_button.clicked.connect(self.stop_other_and_start)
         self.clear_reservation_button.clicked.connect(self.clear_the_leftover_reservation)
         self.repair_database_button.clicked.connect(self.repair_database)
+        self.update_compose_button.clicked.connect(self.update_compose)
         self.restore_backup_button.clicked.connect(self.go_to_the_backups)
         self.reinstall_docker_button.clicked.connect(self.reinstall_docker)
         self.stop_anyway_button.clicked.connect(self.stop_now_anyway)
@@ -8955,7 +8967,14 @@ class ControllerView(QWidget):
                 self.clear_reservation_button,
             )
         )
-        realm_column.addWidget(_bar(realm, self.repair_database_button, self.restore_backup_button))
+        realm_column.addWidget(
+            _bar(
+                realm,
+                self.update_compose_button,
+                self.repair_database_button,
+                self.restore_backup_button,
+            )
+        )
         box.addWidget(realm)
 
         play, play_column = section("Play", tab)
@@ -11073,6 +11092,8 @@ class ControllerView(QWidget):
         self._offer_to_clear_a_leftover(exc)
         if isinstance(exc, DatabaseMissing):
             self._offer_to_repair_the_database(str(exc))
+        # T658: the sentence names the press, so the press is there beside it.
+        self.update_compose_button.setVisible(isinstance(exc, ComposeTooOld) and exc.offer)
         raw = str(exc)
         msg = raw
         why = ""
@@ -11240,6 +11261,40 @@ class ControllerView(QWidget):
         self._show_page_of(self.backup_list)
 
     @Slot()
+    def update_compose(self) -> bool:
+        """Ask, then put Docker's current Compose in this user's plugin folder, in the panel (T658).
+
+        The player chooses: the question names the version, where it comes from and
+        where it goes. False if nothing ran. A Start after it is the player's press.
+        """
+        if self.rebuild_log.running or self._busy:
+            show_information(
+                self,
+                "Something else is running",
+                "This server is busy with another action — wait for it to finish, then press "
+                "this again. Nothing was started.",
+            )
+            return False
+        question = platform.UPDATE_COMPOSE_QUESTION.format(
+            have="older than " + ".".join(str(n) for n in platform.COMPOSE_OLDEST_WORKING),
+            new=platform.COMPOSE_DOWNLOAD_VERSION,
+            path=platform.users_compose_plugin_path(),
+        )
+        if not ask_yes_no(self, f"{platform.UPDATE_COMPOSE_LABEL}?", question):
+            return False
+        self.update_compose_button.setVisible(False)
+        self.problem_label.setText("")
+        started = self.rebuild_log.run(
+            platform.update_compose,
+            title=platform.UPDATE_COMPOSE_LABEL,
+            record_as=self._run_record_kind(),
+        )
+        if started:
+            self._show_page_of(self.rebuild_log)
+        else:
+            self.update_compose_button.setVisible(True)
+        return started
+
     def repair_database(self) -> bool:
         """Ask, then make a missing database again from the server files, in the panel (T377).
 

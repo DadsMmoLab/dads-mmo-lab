@@ -222,3 +222,38 @@ def test_the_apps_reset_seam_hands_everything_down(monkeypatch: pytest.MonkeyPat
     reset()
     reset(everything=True)
     assert asked == [False, True]
+
+
+# ------------------------------------------------------------------- Repair
+
+
+def test_repair_clears_what_an_ended_import_left_and_imports_again(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Repair ends a leftover importer too (T539): it must not then refuse "nothing to repair"."""
+    from tests.test_docker import SPEC, _probe, _repair_doubles
+
+    calls: list[list[str]] = []
+    _repair_doubles(monkeypatch, calls, running={SPEC.db})
+    docker.one_shot_ended_marker(tmp_path, SPEC.import_service).write_text("ended\n")
+    resets: list[bool] = []
+
+    def reset(*, everything: bool = False) -> tuple[str, ...]:
+        resets.append(everything)
+        return (AUTH, CHARACTERS, WORLD)
+
+    assert docker.repair_import(SPEC, tmp_path, _probe(IMPORTED, IMPORTED), reset=reset) is True
+    assert resets == [True]
+    assert ["docker", "compose", "up", "--no-deps", SPEC.import_service] in calls
+    assert not docker.one_shot_ended_marker(tmp_path, SPEC.import_service).exists()
+
+
+def test_a_repair_with_no_ended_import_still_refuses_a_finished_one(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from tests.test_docker import SPEC, _probe, _repair_doubles
+
+    calls: list[list[str]] = []
+    _repair_doubles(monkeypatch, calls, running={SPEC.db})
+    with pytest.raises(docker.DockerCommandError, match="nothing to repair"):
+        docker.repair_import(SPEC, tmp_path, _probe(IMPORTED), reset=lambda **_k: ())

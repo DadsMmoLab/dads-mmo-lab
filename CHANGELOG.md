@@ -30,7 +30,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - **Pack the whole server…** now carries a module added from a folder; **Bring from another computer…** installs it.
 
 ### Fixed
-- Install and Start say how to update a Docker Compose too old for them; a cut-off import is redone, not trusted.
+- WotLK and Unbound offer **Update Docker Compose** when it is too old for them; a cut-off database import is redone.
 - A small step back of your computer's clock no longer hides the "history was rewritten" line in the update question.
 - An install stops before building, naming the folder, when another install already holds its container names.
 - Moving a server says "1 account and 0 characters of players, plus 100 bot accounts with 1000 bot characters".

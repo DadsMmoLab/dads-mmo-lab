@@ -120,6 +120,18 @@ class StartRefused(RuntimeError, SaidByYulon):
     """
 
 
+class ComposeTooOld(StartRefused):
+    """A Start refused because this machine's Docker Compose cannot run it (T658).
+
+    `offer`: `platform.update_compose()` can put a current one in place here, so the
+    Server tab shows **Update Docker Compose** beside the sentence.
+    """
+
+    def __init__(self, message: str, *, offer: bool) -> None:
+        super().__init__(message)
+        self.offer = offer
+
+
 class DatabaseMissing(StartRefused):
     """Raised by `Controller.start()` when Docker no longer has this server's database (T377).
 
@@ -370,15 +382,23 @@ class Controller:
         """Raise `StartRefused` when this machine's Compose is one that stops every Start (T658).
 
         Compose 2.5.0-2.9.0 refuse `compose up -d --no-deps <db> <auth> <world>`
-        with "no such service: <the import>" (measured, `platform.COMPOSE_OLDEST_WORKING`).
+        with "no such service: <the import>" when the servers depend on an import
+        service outside that selection, which is an AzerothCore server's shape only
+        (measured, `platform.COMPOSE_OLDEST_WORKING`).
         Asked with one `docker compose version` before anything is changed, so the
         player reads what to update instead of Compose's own words after the realm
         row and the database were touched. A version that cannot be read refuses nothing.
         """
+        if not self.spec.import_service:
+            # CMaNGOS and TrinityCore start only services whose dependencies start with
+            # them, which Compose 2.5-2.9 run fine (measured on m910q, 2026-10-10).
+            return
         reason = docker.compose_refusal(wsl_distro=self.wsl_distro)
         if reason:
             logger.warning(f"start() refused: {reason}")
-            raise StartRefused(reason)
+            raise ComposeTooOld(
+                reason, offer=platform.compose_update_offered(wsl_distro=self.wsl_distro)
+            )
 
     def refuse_a_missing_image(self) -> None:
         """Raise `StartRefused` when Docker no longer has this server's built image (T627).

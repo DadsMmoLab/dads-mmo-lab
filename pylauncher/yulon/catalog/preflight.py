@@ -153,12 +153,14 @@ class Facts:
     """Whether `docker compose` works. `None` = not asked, because with no
     daemon there is nothing to ask (T56)."""
     compose_version: tuple[int, int, int] | None = None
-    """What `docker compose version` says, asked only when it answered (T658).
+    """What `docker compose version` says (T658), read only when it answered and only for an
+    entry with a compose import service: its import and its Start need what Compose 2.5-2.9
+    get wrong (`platform.COMPOSE_OLDEST_WORKING`). CMaNGOS and TrinityCore start only services
+    whose dependencies start with them, and run on those versions.
 
-    None is "not read", which refuses nothing; a version older than
-    `platform.COMPOSE_OLDEST_WORKING` refuses the press."""
-    compose_plugin: Path | None = None
-    """The `docker-compose` in the user's own Docker folder, which Docker uses first (T658)."""
+    None is "not read", which refuses nothing."""
+    compose_offer: bool = False
+    """Whether `platform.update_compose()` can put a current Compose in place here (T658)."""
     vm: platform.VmResources | None = None
     data_root: Path | None = None
     data_root_free: int | None = None
@@ -338,7 +340,7 @@ def gather(
     docker_ready: Callable[[], bool] = platform.docker_ready,
     compose_ready: Callable[[], bool] = platform.compose_ready,
     compose_version: Callable[[], tuple[int, int, int] | None] = platform.compose_version,
-    compose_plugin: Callable[[], Path | None] = platform.users_compose_plugin,
+    compose_offer: Callable[[], bool] = platform.compose_update_offered,
     vm_resources: Callable[[], platform.VmResources | None] = platform.vm_resources,
     data_root: Callable[[], Path | None] = platform.docker_desktop_data_root,
     disk_free: Callable[[Path], int | None] | None = None,
@@ -379,9 +381,9 @@ def gather(
     # with no Docker the plugin question has no meaning and its probe would
     # just be a second wait for the same absence.
     compose = compose_ready() if ready else None
-    # T658: the version only of a Compose that answered, and its user copy only on Linux,
-    # where the CLI looks in `~/.docker/cli-plugins` before the system's folders.
-    version = compose_version() if compose else None
+    # T658: the version only of a Compose that answered, and only for an entry whose import
+    # and Start select a service with a dependency outside the selection.
+    version = compose_version() if compose and entry.container_spec().import_service else None
     free = disk_free if disk_free is not None else free_bytes
     facts_vm = vm_resources() if ready else None
     root = data_root() if ready else None
@@ -496,9 +498,7 @@ def gather(
         steamos_docker_gone=docker_gone,
         compose_ready=compose,
         compose_version=version,
-        compose_plugin=(
-            compose_plugin() if here == "linux" and platform.compose_too_old(version) else None
-        ),
+        compose_offer=compose_offer() if platform.compose_too_old(version) else False,
         vm=facts_vm,
         data_root=root,
         data_root_free=root_free,
@@ -1077,7 +1077,10 @@ def _compose_check(facts: Facts) -> Check:
             "refuse",
             f"Docker Compose {'.'.join(str(part) for part in version)} is too old",
             platform.compose_too_old_sentence(
-                version, linux=facts.platform_id == "linux", plugin=facts.compose_plugin
+                version,
+                linux=facts.platform_id == "linux",
+                offer=facts.compose_offer,
+                asked_at_install=True,
             ),
         )
     if facts.compose_ready:

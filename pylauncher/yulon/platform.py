@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import errno
 import functools
+import hashlib
 import importlib
 import json
 import os
@@ -1611,15 +1612,18 @@ top-level `name:` outright; 2.3 and 2.4 ran the import but are older than the br
 range and were not measured for the rest, so the floor is the first release after it.
 """
 
-_COMPOSE_VERSION = re.compile(r"(\d+)\.(\d+)\.(\d+)")
+_COMPOSE_VERSION = re.compile(r"^Docker Compose version v?(\d+)\.(\d+)\.(\d+)", re.MULTILINE)
+"""Docker Compose's own answer only: `podman-compose version 1.0.6` is another program."""
 
 
 def parse_compose_version(said: str) -> tuple[int, int, int] | None:
-    """The version in `docker compose version`'s answer, or None if it names none.
+    """The version in Docker Compose's `docker compose version` answer, or None.
 
     Spelled `Docker Compose version v2.6.1` by Docker's own builds and
     `Docker Compose version 5.5.0` by Arch's (no `v`); a Desktop build adds a
-    suffix (`v2.39.1-desktop.1`). Only the first three numbers are read.
+    suffix (`v2.39.1-desktop.1`). Anything else -- podman-compose's
+    `podman-compose version 1.0.6`, a wrapper's banner -- is not a Docker Compose
+    version and reads as None, which refuses nothing.
     """
     found = _COMPOSE_VERSION.search(said or "")
     if found is None:
@@ -1658,53 +1662,155 @@ def compose_version(
     return None
 
 
-def users_compose_plugin(
+def users_compose_plugin_path(
     home: Path | None = None, env: Mapping[str, str] | None = None
-) -> Path | None:
-    """The `docker-compose` plugin in this user's own Docker folder, if there is one (T658).
+) -> Path:
+    """Where Docker looks first for this user's `docker compose` plugin (T658).
 
-    The Docker CLI looks for a plugin in `$DOCKER_CONFIG/cli-plugins` (default
-    `~/.docker/cli-plugins`) BEFORE the system's folders, so a copy put there by
-    hand from an old guide -- and on a Steam Deck that is where one survives a
-    SteamOS update -- keeps answering after the package manager installed a new
-    one. Only that folder is looked in: it is the one a package update cannot fix.
+    `$DOCKER_CONFIG/cli-plugins/docker-compose`, by default
+    `~/.docker/cli-plugins/docker-compose`. The Docker CLI searches it BEFORE the
+    system's folders; it needs no root, and on a Steam Deck it is the one place
+    a SteamOS update (which rewrites the read-only system image) leaves alone.
     """
     environ = os.environ if env is None else env
     config = environ.get("DOCKER_CONFIG") or ""
     base = Path(config) if config else (home if home is not None else Path.home()) / ".docker"
-    plugin = base / "cli-plugins" / "docker-compose"
-    return plugin if plugin.is_file() else None
+    return base / "cli-plugins" / "docker-compose"
+
+
+COMPOSE_DOWNLOAD_VERSION = "5.5.1"
+"""The Docker Compose `Update Docker Compose` puts in place (T658).
+
+Released 2026-09-03 and the line Yu'lon is gated on (m910q runs 5.5.0); a static
+binary from Docker's own GitHub releases, so it runs on SteamOS without a package."""
+
+COMPOSE_DOWNLOADS: dict[str, tuple[str, str]] = {
+    "x86_64": (
+        "https://github.com/docker/compose/releases/download/v5.5.1/docker-compose-linux-x86_64",
+        "db1889184726840f75c4f9c001048430d4f25b3be3cb084d3ddd762bc0aed576",
+    ),
+    "aarch64": (
+        "https://github.com/docker/compose/releases/download/v5.5.1/docker-compose-linux-aarch64",
+        "732e3a84c1a0f67256ce80bc2598a24546b10ca05f9faa97efceb1171ece2ef7",
+    ),
+}
+"""Machine -> (URL, sha256), copied from the release's own `.sha256` files (2026-10-10)."""
+
+UPDATE_COMPOSE_LABEL = "Update Docker Compose"
+
+UPDATE_COMPOSE_QUESTION = (
+    "This computer's Docker Compose is {have}, too old for Yu'lon. Download Docker Compose "
+    "{new} from Docker's own releases on GitHub (about 30 MB), check it against its published "
+    "checksum, and put it at {path}? Docker uses that copy first, it needs no administrator "
+    "password, and a SteamOS update leaves it in place. Nothing else is changed."
+)
+
+
+def compose_update_offered(
+    *, wsl_distro: str | None = None, system: str | None = None, machine: str | None = None
+) -> bool:
+    """Whether `update_compose()` can put a Compose in place here (T658).
+
+    Linux only, run where the server runs (not across into a WSL distro from
+    Windows), and only for a machine Docker publishes a static binary for.
+    """
+    here = system if system is not None else sys.platform
+    arch = machine if machine is not None else _machine()
+    return here.startswith("linux") and wsl_distro is None and arch in COMPOSE_DOWNLOADS
+
+
+def _machine() -> str:
+    """This computer's machine name as Linux spells it (`x86_64`, `aarch64`)."""
+    import platform as stdlib_platform  # this module's own name shadows it only as `yulon.platform`
+
+    return stdlib_platform.machine()
+
+
+class ComposeUpdateError(RuntimeError):
+    """`update_compose()` could not put a working Compose in place; nothing was replaced."""
+
+
+def update_compose(
+    *,
+    dest: Path | None = None,
+    machine: str | None = None,
+    download: Callable[[str, Path], Path] | None = None,
+    version: Callable[[], tuple[int, int, int] | None] | None = None,
+) -> Iterator[str]:
+    """Put Docker's static Compose `COMPOSE_DOWNLOAD_VERSION` at the user's plugin path (T658).
+
+    Downloaded beside the destination, checked against the pinned sha256, made
+    executable and moved over the old file in one rename, so a failure at any
+    step leaves the old plugin exactly as it was. Then `docker compose version`
+    is asked, and anything but a version Yu'lon can run is a failure.
+    """
+    arch = machine if machine is not None else _machine()
+    if arch not in COMPOSE_DOWNLOADS:
+        raise ComposeUpdateError(
+            f"Docker publishes no Compose for this kind of computer ({arch}), so nothing was "
+            "downloaded."
+        )
+    url, sha256 = COMPOSE_DOWNLOADS[arch]
+    target = dest if dest is not None else users_compose_plugin_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fresh = target.with_name(".docker-compose.yulon-download")
+    fresh.unlink(missing_ok=True)
+    fresh.with_name(fresh.name + ".part").unlink(missing_ok=True)
+    yield f"Downloading Docker Compose {COMPOSE_DOWNLOAD_VERSION} from {url}"
+    try:
+        (download if download is not None else download_verified)(url, fresh)
+    except OSError as exc:
+        raise ComposeUpdateError(f"Docker Compose could not be downloaded: {exc}") from exc
+    got = hashlib.sha256(fresh.read_bytes()).hexdigest()
+    if got != sha256:
+        fresh.unlink(missing_ok=True)
+        raise ComposeUpdateError(
+            "The downloaded Docker Compose did not match its published checksum, so it was "
+            "deleted and nothing was replaced."
+        )
+    yield "It matches its published checksum."
+    fresh.chmod(0o755)
+    os.replace(fresh, target)
+    yield f"Put it at {target}."
+    now = (version if version is not None else compose_version)()
+    if now is None or compose_too_old(now):
+        said = ".".join(str(part) for part in now) if now else "nothing Yu'lon can read"
+        raise ComposeUpdateError(
+            f"Docker Compose still answers {said}, so Docker is not using {target}. Its "
+            "DOCKER_CONFIG may point somewhere else."
+        )
+    yield f"Docker Compose now answers {'.'.join(str(part) for part in now)}."
 
 
 def compose_too_old_sentence(
-    version: tuple[int, int, int], *, linux: bool, plugin: Path | None = None
+    version: tuple[int, int, int], *, linux: bool, offer: bool, asked_at_install: bool = False
 ) -> str:
     """What a player reads when this machine's Compose is older than Yu'lon can run (T658).
 
-    One sentence for the preflight row and for the Start refusal, so the two say
-    the same thing. On Linux it names the package and, when there is one, the
-    copy in the user's own Docker folder that a package update leaves in front.
+    One sentence for the preflight row, the Start refusal and Repair. Where
+    `update_compose()` can run (`offer`) it points at that, and never at
+    `pacman`: on a Steam Deck the system image is read-only and a copy in the
+    user's own plugin folder would stay in front of anything a package put there.
     """
     have = ".".join(str(part) for part in version)
     need = ".".join(str(part) for part in COMPOSE_OLDEST_WORKING)
     said = (
         f"This computer's Docker Compose is {have}, and Yu'lon needs {need} or newer: older "
         "ones stop with “no such service” when one part of a server is started on its "
-        "own, so neither the database import nor Start can work. Nothing was started. "
+        "own, so this server's database import and Start cannot work. Nothing was started. "
     )
     if not linux:
         return said + "Update Docker Desktop, which brings a current Docker Compose, and try again."
-    said += (
-        "Update Docker Compose. On a Steam Deck or Arch:\nsudo pacman -S docker-compose\n"
-        "On Debian or Ubuntu:\nsudo apt install docker-compose-v2\n"
-    )
-    if plugin is not None:
-        said += (
-            f"This computer also has its own copy at {plugin}, which Docker uses before the "
-            f"system's, so remove it too:\nrm {plugin}\n"
+    if offer:
+        how = "Install asks whether to" if asked_at_install else f"Press **{UPDATE_COMPOSE_LABEL}**"
+        return said + (
+            f"{how}: Yu'lon downloads Docker Compose {COMPOSE_DOWNLOAD_VERSION} from Docker's own "
+            "releases, checks it, and puts it where Docker looks first."
         )
-    return (
-        said + f"Then check it, and try again; it must say {need} or newer:\ndocker compose version"
+    return said + (
+        "Install a newer Docker Compose. On Arch:\nsudo pacman -S docker-compose\n"
+        "On Debian or Ubuntu:\nsudo apt install docker-compose-v2\n"
+        f"Then check it, and try again; it must say {need} or newer:\ndocker compose version"
     )
 
 
@@ -1937,6 +2043,11 @@ def docker_setup_remedy(step: str, *, steamos: bool) -> str:
         f"sudo {command}"
     )
     return DOCKER_SETUP_FIRST_FAILURE_STEP.format(cause=cause)
+
+
+def explicit_yes(reply: str | None) -> bool:
+    """`_explicit_yes()` for a question asked outside this module (T658)."""
+    return _explicit_yes(reply)
 
 
 def _explicit_yes(reply: str | None) -> bool:

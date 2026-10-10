@@ -930,13 +930,14 @@ def start(server_dir: Path, *, wsl_distro: str | None = None) -> None:
 
 
 def compose_refusal(*, wsl_distro: str | None = None) -> str | None:
-    """The sentence a Start must refuse with when this Compose is too old, or None (T658).
+    """The sentence a press must refuse with when this Compose is too old, or None (T658).
 
-    Compose 2.5.0-2.9.0 stop `compose up -d --no-deps <db> <auth> <world>` with
-    "no such service: <the import>", so every Start fails on them, after the
-    realm row and the database were already touched. Asked once per press, where
-    the server's own commands run (the WSL distro, for a server inside one). A
-    version that cannot be read refuses nothing: the start then says what it says.
+    Compose 2.5.0-2.9.0 stop `compose up --no-deps <service>` whenever the service
+    has a dependency outside the selection: an AzerothCore Start (`<db> <auth>
+    <world>`, whose servers wait on the import) and its import and Repair. The
+    caller asks only for such an entry. Asked once per press, where the server's
+    own commands run (the WSL distro, for a server inside one). A version that
+    cannot be read refuses nothing: the press then says what it says.
     """
     asked = _docker(["compose", "version"], timeout=_ONE_SHOT_ASK_TIMEOUT, wsl_distro=wsl_distro)
     if asked.returncode != 0:
@@ -945,8 +946,8 @@ def compose_refusal(*, wsl_distro: str | None = None) -> str | None:
     if version is None or not platform.compose_too_old(version):
         return None
     linux = wsl_distro is not None or sys.platform.startswith("linux")
-    plugin = platform.users_compose_plugin() if wsl_distro is None and linux else None
-    return platform.compose_too_old_sentence(version, linux=linux, plugin=plugin)
+    offer = platform.compose_update_offered(wsl_distro=wsl_distro)
+    return platform.compose_too_old_sentence(version, linux=linux, offer=offer)
 
 
 PROJECT_NAME_VAR = "COMPOSE_PROJECT_NAME"
@@ -2579,6 +2580,10 @@ def repair_import(
             "this game does not say which compose service imports its databases, so there is "
             "nothing to re-run. Nothing was changed."
         )
+    # T658: `compose up --no-deps <importer>` is exactly what Compose 2.5-2.9 refuse.
+    too_old = compose_refusal(wsl_distro=wsl_distro)
+    if too_old:
+        raise DockerRefusal(too_old)
 
     project = install_project(spec, server_dir, wsl_distro=wsl_distro)
     if project is None:
@@ -2622,6 +2627,26 @@ def repair_import(
 
     before = probe()
     logger.info(f"repair_import(): the databases read as {before.state} — {before.detail}")
+    # T658: an importer ended before it finished (just above, or by an earlier Stop) leaves
+    # schemas that can read as `imported`. They are cleared whole and imported again, as the
+    # install's import stage does; player data still refuses, below and in `reset`.
+    ended = one_shot_ended_marker(server_dir, service).is_file()
+    if ended and before.state in ("imported", "partial"):
+        if reset is None:
+            raise DockerRefusal(
+                "an earlier import of this install was ended before it finished, and this "
+                "game has no way to clear what it left. Nothing was run."
+            )
+        logger.warning("repair_import(): clearing what an ended import left, whatever it reads as")
+        try:
+            dropped = reset(everything=True)
+        except Exception as exc:
+            raise DockerCommandError(
+                "the unfinished databases could not be cleared, so the import was not re-run "
+                f"and nothing else was changed: {exc}"
+            ) from exc
+        logger.warning(f"repair_import(): dropped {', '.join(dropped)}; re-running the import")
+        before = ImportState("absent", "cleared after an ended import")
     if before.state == "populated":
         raise DockerRefusal(
             f"this install's databases hold player data ({before.detail}). Re-running the import "
@@ -2674,6 +2699,8 @@ def repair_import(
     logger.warning(f"repair_import(): `compose up --no-deps {service}` in {server_dir}")
     run = run_one_shot(service, server_dir, wsl_distro=wsl_distro, sink=output)
     verify_import(probe, service, server_dir, run)
+    # T658: a verified import; an earlier ended one no longer describes these databases.
+    one_shot_ended_marker(server_dir, service).unlink(missing_ok=True)
     return True
 
 
