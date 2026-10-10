@@ -87,6 +87,7 @@ from yulon.catalog.catalog import (
     SqlPlan,
 )
 from yulon.catalog.families import conf, dockerfile, extract, patch, sqlplan
+from yulon.catalog.families.direction import moves_forward
 from yulon.catalog.installer import InstallerError, InstallStopped, UpdateRefused
 from yulon.catalog.native import (
     CORRECTIONS_BUTTON_LABEL,
@@ -102,6 +103,7 @@ from yulon.catalog.native import (
     CorrectionCheck,
     ImportGate,
     MarkerRow,
+    Seams,
     Secrets,
     ServersDownWork,
     Stage,
@@ -149,6 +151,32 @@ def _hashes_of(data: bytes, *, edited: bool) -> tuple[str, ...]:
     if edited:
         spellings.append(INSERT_IGNORE.sub(rb"\1INSERT IGNORE INTO", data))
     return tuple(dict.fromkeys(hashlib.sha1(one).hexdigest().upper() for one in spellings))
+
+
+@dataclass
+class _Direction:
+    """Whether a move goes forward, asked at most once and only when a file needs it (T632)."""
+
+    seams: Seams
+    repo: str
+    dest: Path
+    old: str
+    new: str
+    _said: bool | None = None
+
+    def known(self) -> bool:
+        """True when forward; refuses (fail closed) when neither git nor GitHub can say."""
+        if self._said is None:
+            said, why = moves_forward(self.seams, self.repo, self.dest, self.old, self.new)
+            if said is None:
+                raise InstallerError(
+                    updates_unread_sentence(
+                        f"going back takes away in {self.repo}",
+                        f"{why}, so the direction of the move is unknown",
+                    )
+                )
+            self._said = said
+        return self._said
 
 
 def updates_unread_sentence(source: str, why: str) -> str:
@@ -763,7 +791,7 @@ class CmangosInstaller(StagedInstaller):
             # Only a move FORWARD in history can have a deleted file: going back, every file
             # the running commit added since is one the target lacks, however its name is dated
             # (Tortoise dates a migration by when it was written, not merged).
-            forward = self._seams.is_ancestor(dest, old, new)
+            forward = _Direction(self._seams, source.repo, dest, old, new)
             before = self._migrations_at(source, dest, old, core=core)
             after = self._migrations_at(source, dest, new, core=core)
             for role, files in before.items():
@@ -771,7 +799,7 @@ class CmangosInstaller(StagedInstaller):
                 for name, hashes in files.items():
                     if shipped.intersection(hashes):
                         continue
-                    if forward and name not in after[role]:
+                    if name not in after[role] and forward.known():
                         continue
                     label = f"{module}/{name}" if module else name
                     lacked.setdefault(role, {})[label] = tuple(f"{module}:{h}" for h in hashes)

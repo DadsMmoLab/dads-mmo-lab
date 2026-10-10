@@ -668,6 +668,66 @@ def test_a_back_dated_migration_added_since_the_target_is_newer_on_a_backward_re
     _refused_clean(rec, server_dir, made._snapshot)  # type: ignore[attr-defined]
 
 
+def _squash_case(rec: Recorder, server_dir: Path) -> bytes:
+    """A forward Return over a squash: the running commit's file is gone from the target."""
+    dest = server_dir / CORE.dest
+    gone = b"-- deleted upstream\n"
+    rec.byte_trees[(dest, OLD, CORE_WORLD)] = {OLDER_NAME: OLDER, "20260601000000_world.sql": gone}
+    rec.byte_trees[(dest, CORE_PIN, CORE_WORLD)] = {OLDER_NAME: OLDER}
+    rec.migrations["tw_world"] = f":{_hash(gone)}\n"
+    rec.ancestry_undecided = True
+    return gone
+
+
+def test_a_shallow_checkout_asks_github_and_a_forward_answer_skips_the_deleted_file(
+    tmp_path: Path,
+) -> None:
+    """Git cannot tell in a depth-1 clone; GitHub says the target is ahead: a squash, not newer."""
+    rec, server_dir, made = _ready(tmp_path)
+    _squash_case(rec, server_dir)
+    rec.github[CORE.repo] = 12
+
+    _said, raised = _return(made, server_dir)
+
+    assert raised is None, raised
+    assert any("/compare/" in url for url in rec.gets), rec.gets
+
+
+def test_a_shallow_checkout_asks_github_and_a_backward_answer_counts_the_file(
+    tmp_path: Path,
+) -> None:
+    rec, server_dir, made = _ready(tmp_path)
+    _squash_case(rec, server_dir)
+    rec.github[CORE.repo] = 0
+    rec.github_behind[CORE.repo] = 12
+
+    _said, raised = _return(made, server_dir)
+
+    assert raised is not None and "20260601000000_world.sql" in str(raised)
+
+
+def test_a_direction_neither_git_nor_github_can_tell_refuses_and_says_so(tmp_path: Path) -> None:
+    rec, server_dir, made = _ready(tmp_path)
+    _squash_case(rec, server_dir)
+
+    _said, raised = _return(made, server_dir)
+
+    assert raised is not None
+    assert "could not show whether" in str(raised) and "GitHub did not answer" in str(raised)
+    _refused_clean(rec, server_dir, made._snapshot)  # type: ignore[attr-defined]
+
+
+def test_a_move_with_no_deleted_file_never_asks_the_direction(tmp_path: Path) -> None:
+    rec, server_dir, made = _ready(tmp_path)
+    rec.ancestry_undecided = True
+
+    _said, raised = _return(made, server_dir)
+
+    assert raised is None, raised
+    assert not any(call.startswith("is-ancestor") for call in rec.calls)
+    assert rec.gets == []
+
+
 def test_a_move_not_proved_forward_counts_a_file_the_target_lacks(tmp_path: Path) -> None:
     """A shallow clone cannot show the connection: no ancestry, so nothing is skipped."""
     rec, server_dir, made = _ready(tmp_path)
