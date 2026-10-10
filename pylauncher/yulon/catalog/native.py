@@ -1693,6 +1693,37 @@ def module_order_note(named: Sequence[str], press: str) -> str:
     )
 
 
+def ale_playerbots_note(press: str) -> str:
+    """Said instead of the module notes when the error was in mod-ale's Playerbots support (T645).
+
+    The generic note says mod-ale "may not build on the new server code yet" and to
+    update it: wrong here, twice over. The two modules disagree on a NAME that
+    `families/ale_playerbots` could not bridge, and mod-ale has no update for that
+    until its authors catch up (2026-10-10: mod-playerbots ed54b459 renamed its config
+    members; no mod-ale commit had). What works depends on the press: an update was put
+    back, so the build the player has keeps running; a Rebuild off the tested commits
+    has "Return to the tested pin…", the pair mod-ale was tested with.
+    """
+    said = (
+        "The error is in mod-ale's Playerbots support, which calls mod-playerbots by name: "
+        "one of the two has renamed something the other still calls by its old name, and "
+        "Yu'lon could not match it. Updating mod-ale on the Modules tab helps only once its "
+        "authors have caught up."
+    )
+    if press == server_build_presses.UPDATE_TO_LATEST:
+        return (
+            f"{said} Until then keep the build you have, and press "
+            f"{server_build_presses.under_server_build(press)} again later."
+        )
+    if press == server_build_presses.REBUILD:
+        return (
+            f"{said} If this server is not on the commits this version of Yu'lon was tested "
+            f"with, {server_build_presses.under_server_build(server_build_presses.RETURN_TO_PIN)} "
+            "builds those, which mod-ale was tested with."
+        )
+    return said
+
+
 def import_reads_as_finished(state: docker.ImportState) -> bool:
     """Do these databases read as an import that COMPLETED? The one predicate.
 

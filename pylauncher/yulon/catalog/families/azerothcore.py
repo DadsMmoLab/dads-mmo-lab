@@ -35,7 +35,7 @@ from typing import ClassVar
 from yulon import docker, git, networking, server_build_presses
 from yulon.catalog import snapshot
 from yulon.catalog.catalog import AzerothCoreData, CatalogEntry, EmulatorSource
-from yulon.catalog.families import carried, scriptdeploy
+from yulon.catalog.families import ale_playerbots, carried, scriptdeploy
 from yulon.catalog.installer import InstallerError, InstallStopped, OneShotLeftRunning
 from yulon.catalog.native import (
     DOWNLOAD_CANCEL_NOTE,
@@ -410,6 +410,29 @@ class AzerothCoreInstaller(StagedInstaller):
         if native is None or native.azerothcore is None:
             return AzerothCoreData()
         return native.azerothcore
+
+    def stage_build(self, ctx: StageContext) -> Iterator[str]:
+        """The spine's compile, with mod-ale's Playerbots names bridged for it alone (T645).
+
+        Every press that compiles comes through here: the install's `build` stage,
+        `rebuild()`'s (Rebuild, "Update the server to latest…", "Return to the tested
+        pin…", a moved-in server's rebuild). `ale_playerbots.bridge()` is a no-op unless
+        mod-ale and mod-playerbots disagree on a config name; whatever it rewrote is put
+        back once the compile returns, fails or is stopped, so no git question outside
+        the compile ever sees it. Not yielded from the `finally`: a generator closed
+        mid-compile must not yield, so there the lines go to the log.
+        """
+        yield from ale_playerbots.bridge(ctx.server_dir)
+        finished = False
+        try:
+            yield from super().stage_build(ctx)
+            finished = True
+        finally:
+            said = ale_playerbots.put_back(ctx.server_dir)
+            if not finished:
+                for line in said:
+                    logger.info(line)
+        yield from said
 
     # -- T553: the source patches and Lua scripts this entry carries ---------
 
