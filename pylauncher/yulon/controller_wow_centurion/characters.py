@@ -62,7 +62,7 @@ REVIVE_FIXED_PINS: Final[frozenset[str]] = frozenset(
 )
 """Catalog pins whose build answers a console or SOAP `revive` (T218).
 
-CENTURION 4948d1a9 and 25d3e6ef hold #1767 (`cs_misc.cpp`: `!session || session->HasPermission(...)`).
+CENTURION 4948d1a9 and 25d3e6ef hold #1767 (`cs_misc.cpp`: `!session || session->HasPermission`).
 A later pin is added here by whoever moves it, after reading that the fix is still in it:
 `test_the_shipped_pin_carries_the_revive_fix` fails until they do, and until then Revive is
 withheld again rather than offered on a build nobody has looked at."""
