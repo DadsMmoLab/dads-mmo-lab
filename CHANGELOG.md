@@ -30,6 +30,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - **Pack the whole server…** now carries a module added from a folder; **Bring from another computer…** installs it.
 
 ### Fixed
+- A small step back of your computer's clock no longer hides the "history was rewritten" line from a server's update question.
 - On Tortoise, a failed update puts the world database back too, and the copy it takes is one a return can use.
 - On Windows, opening the LAN ports asks for administrator rights itself, and the commands it shows now work when pasted.
 - The Lua engine builds again with the newest Playerbots, which renamed settings the engine still asked for.

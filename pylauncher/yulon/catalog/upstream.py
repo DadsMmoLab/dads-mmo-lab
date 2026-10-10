@@ -61,6 +61,10 @@ over on a machine GitHub is refusing (a rate limit is a 403) must not become a
 request per press.
 """
 
+CLOCK_STEP_BACK_SECONDS = 60 * 60
+"""How far back the wall clock may step (a resync, a wake) before a reading is from the future."""
+
+
 CACHE_VERSION = 1
 
 HttpGet = Callable[[str, str], bytes]
@@ -394,10 +398,12 @@ def read_cached(
     `checked_unix`. So a 403 on one source is asked about again within the
     hour without re-asking the sources that answered.
 
-    Nothing is served from a file that is damaged, from the future (a clock set
-    back), or about a different set of sources -- a newer app that moves a
-    different source, or follows one differently (`(repo, follow)` pairs), must
-    not be told a count about the old one.
+    Nothing is served from a file that is damaged, from far in the future (a
+    clock set back more than `CLOCK_STEP_BACK_SECONDS`; a small step back, as
+    a resync or a wake makes, still counts as fresh), or about a different set
+    of sources -- a newer app that moves a different source, or follows one
+    differently (`(repo, follow)` pairs), must not be told a count about the
+    old one.
     """
     path = server_dir / UPSTREAM_FILE
     try:
@@ -430,7 +436,7 @@ def read_cached(
     for row in rows:
         age = now - row.checked_unix
         limit = MAX_AGE_SECONDS if row.behind is not None else RETRY_SECONDS
-        if 0 <= age < limit:
+        if -CLOCK_STEP_BACK_SECONDS <= age < limit:
             fresh[row.repo] = row
     return fresh
 
