@@ -57,10 +57,12 @@ CONFIRMED_LIVE: Final[frozenset[str]] = frozenset(
 NOT_CONFIRMED = "each is offered once it has been checked against a live {game} server"
 """Why a verb nobody has tried is not drawn: the view says it after the verbs it names."""
 
-REVIVE_FIXED_PINS: Final[frozenset[str]] = frozenset({"4948d1a9290cb1046eede1dbf289789200ea050e"})
+REVIVE_FIXED_PINS: Final[frozenset[str]] = frozenset(
+    {"4948d1a9290cb1046eede1dbf289789200ea050e", "25d3e6efbee97c3cb38830003e2460d98e235f46"}
+)
 """Catalog pins whose build answers a console or SOAP `revive` (T218).
 
-CENTURION 4948d1a9 holds #1767 (`cs_misc.cpp`: `!session || session->HasPermission(...)`).
+CENTURION 4948d1a9 and 25d3e6ef hold #1767 (`cs_misc.cpp`: `!session || session->HasPermission`).
 A later pin is added here by whoever moves it, after reading that the fix is still in it:
 `test_the_shipped_pin_carries_the_revive_fix` fails until they do, and until then Revive is
 withheld again rather than offered on a build nobody has looked at."""

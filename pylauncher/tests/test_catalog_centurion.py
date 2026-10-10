@@ -36,6 +36,11 @@ Playerbot/Pve and Pvp), and the `printf` example in worldserver.conf.dist put on
 line 4548, after every rate line `server_rates.py` cites). No SQL, CMake, dbc, World.cpp or
 World.h change, so every reading above still holds.
 
+T654 (2026-10-10) moved the pin to 25d3e6ef, two commits after 4948d1a9: bot knock-ups (Heroic
+Leap) measured inside the spline initializer and drawn at 0.4 yd (MotionMaster.cpp and one
+game test). No SQL, conf, CMake, dbc, World.cpp, cs_misc.cpp or MapBuilder.cpp change, so every
+reading above and the revive fix still hold.
+
 The entry's family blocks were tested before this entry existed against the fixture in
 `tests/support_trinitycore.py`; the last test here holds the two together, so a template
 proved on the fixture is proved on what ships.
@@ -61,7 +66,7 @@ ENTRY: CatalogEntry = load_catalog().get("wow-centurion")
 NATIVE = ENTRY.install.native
 assert NATIVE is not None and NATIVE.trinitycore is not None
 TC = NATIVE.trinitycore
-REV = "4948d1a9290cb1046eede1dbf289789200ea050e"
+REV = "25d3e6efbee97c3cb38830003e2460d98e235f46"
 CHECKOUT = "src/centurion"
 PATCHES = f"{CHECKOUT}/centurion/patches"
 CORE = "/opt/trinitycore"
