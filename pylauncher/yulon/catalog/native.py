@@ -13765,6 +13765,19 @@ class StagedInstaller:
                 "An earlier import was ended before it finished, so these databases are "
                 "unfinished whatever their tables say. Clearing them first."
             )
+            # A player who started the server by hand has its world and login servers
+            # running on them (m910q, 2026-10-10: the world restarting over and over). They
+            # are stopped before anything is dropped, so nothing writes while it is imported.
+            try:
+                self._seams.stop_servers(self.entry.container_spec(), ctx.server_dir)
+            except docker.DockerCommandError as exc:
+                raise carry_detail(
+                    exc,
+                    InstallerError(
+                        "This server's own world and login servers could not be stopped, so "
+                        f"its unfinished databases were not cleared: {exc}"
+                    ),
+                ) from exc
         elif before.state == "partial":
             yield f"Clearing the half-written databases first ({before.detail})."
         if forced or before.state == "partial":

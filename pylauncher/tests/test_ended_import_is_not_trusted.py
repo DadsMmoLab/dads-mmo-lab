@@ -51,6 +51,8 @@ def test_an_importer_this_press_has_to_end_is_never_read_as_finished(tmp_path: P
     lines = _press(rec, server)
     assert "reset-everything" in rec.calls, rec.calls
     assert rec.calls.index("reset-everything") < rec.calls.index(f"one-shot:{IMPORTER}")
+    # A world the player started by hand is stopped before anything is dropped.
+    assert rec.calls.index("stop_servers") < rec.calls.index("reset-everything"), rec.calls
     assert any("ended before it finished" in line for line in lines), lines
     assert not any("leaving them alone" in line for line in lines), lines
     # The import that followed finished and was verified: the record goes.
@@ -77,6 +79,7 @@ def test_without_the_record_a_finished_import_is_left_alone(tmp_path: Path) -> N
     rec = Recorder(probe_answers=[IMPORTED])
     lines = _press(rec, tmp_path / "s")
     assert not any(call.startswith("reset") for call in rec.calls), rec.calls
+    assert "stop_servers" not in rec.calls, rec.calls
     assert f"one-shot:{IMPORTER}" not in rec.calls
     assert any("leaving them alone" in line for line in lines), lines
 
