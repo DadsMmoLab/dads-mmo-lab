@@ -708,6 +708,25 @@ def hold_the_server(
                 del _HELD[key]
 
 
+@contextmanager
+def reserve_the_server(
+    server_dir: Path | str,
+    press: str,
+    *,
+    spec: ContainerSpec | None,
+    wsl_distro: str | None = None,
+) -> Iterator[None]:
+    """Reserve the server across processes for a long job, without the in-process hold (T651).
+
+    For a job that stops and starts the server itself (a whole-server move's steps): another
+    Yu'lon is refused for the whole job, and this process's own Stop, rebuild and load run
+    inside the one reservation (a nested take shares it), not as presses of their own. A job
+    whose reservation is `moot` (Docker not answering) goes on, as `hold_the_server` does.
+    """
+    with _reserved_for(server_dir, press, spec, wsl_distro):
+        yield
+
+
 LOST_RESERVATION = (
     "This server's reservation in Docker ended from elsewhere while this job was running "
     "(another Yu'lon stopped it, or Docker restarted), so nothing was started."

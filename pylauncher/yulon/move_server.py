@@ -21,6 +21,7 @@ This file is the pure part and the pack. `MovedInInstall` (further down) is the 
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -34,7 +35,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from typing import Any, Literal, Protocol
 
-from yulon import apply, module_answers, module_source, move, reset_defaults
+from yulon import apply, docker, module_answers, module_source, move, reset_defaults
 from yulon.catalog.catalog import (
     LUA_SCRIPTS_DIR,
     CatalogEntry,
@@ -44,8 +45,8 @@ from yulon.catalog.families import conf as conf_patch
 from yulon.catalog.git_head import read_head_file
 from yulon.log import get_logger
 from yulon.manifest import Manifest, ManifestType
-from yulon.move import PackedModule, PackedSource, PackFile, ServerFacts, ServerSpec
-from yulon.move_flows import MoveError, MoveWorld
+from yulon.move import PackedModule, PackedSource, PackFile, ServerFacts, ServerSpec, counts_phrase
+from yulon.move_flows import PRESS_BRING_IN, MoveError, MoveWorld
 from yulon.server_build_presses import REBUILD, under_server_build
 from yulon.support import redact
 from yulon.support.sources import conf_files
@@ -707,8 +708,7 @@ class ServerImportPlan:
         lines = [
             f"A {m.game.name} server packed on {made} by Yu'lon {m.made_by.yulon}"
             + (f", realm {m.realm_name}" if m.realm_name else "")
-            + f": {m.counts.accounts} accounts, {m.counts.characters} characters, "
-            f"{m.counts.bot_accounts} bot accounts.",
+            + f": {counts_phrase(m.counts)}.",
             f"It is installed as a NEW server in {self.server_dir}, built at the version it was "
             "packed from, then its modules, settings and databases are put in. Building takes as "
             "long as any install, and a module that is compiled in builds the server once more.",
@@ -1229,6 +1229,31 @@ class MovedInInstall:
             # folder: whatever the install left, this file carries on in it.
             record.keep()
         server = self._server_for(server_dir, options.client_dir)
+        # One reservation of the server for every step, so another Yu'lon is refused for the
+        # whole bring-in and the steps' own Stop runs inside it, not as a press of its own.
+        with contextlib.ExitStack() as reserved:
+            try:
+                reserved.enter_context(
+                    docker.reserve_the_server(
+                        server_dir,
+                        PRESS_BRING_IN,
+                        spec=server.world.spec,
+                        wsl_distro=server.world.wsl_distro,
+                    )
+                )
+            except docker.ServerHeldError as exc:
+                raise MoveError(f"{exc} Nothing more was changed; {_CARRY_ON}") from exc
+            yield from self._each_stage(server, server_dir, package, record, cancel)
+        yield from self._closing(server_dir)
+
+    def _each_stage(
+        self,
+        server: MovedInServer,
+        server_dir: Path,
+        package: move.Package,
+        record: _Record,
+        cancel: threading.Event | None,
+    ) -> Iterator[str]:
         for step in STEPS:
             if step in record.done:
                 yield f"Already done: {_STEP_NAMES[step]}."
@@ -1264,7 +1289,6 @@ class MovedInInstall:
                     remember_address=record.remember_address,
                 )
             record.finished(step)
-        yield from self._closing(server_dir)
 
     def _reopen(self) -> move.Package:
         try:
@@ -1407,9 +1431,9 @@ class MovedInInstall:
         manifest = self.plan.manifest
         assert manifest is not None
         yield (
-            f"The server from the other computer is in {server_dir}: {manifest.counts.accounts} "
-            f"accounts and {manifest.counts.characters} characters, its world, modules and "
-            "settings. It is stopped. Start it on its Server tab; if the tab offers Repair for "
+            f"The server from the other computer is in {server_dir}: "
+            f"{counts_phrase(manifest.counts)}, its world, modules and settings. "
+            "It is stopped. Start it on its Server tab; if the tab offers Repair for "
             "Yu'lon's command channel, press it (its account was part of what was replaced)."
         )
         yield (

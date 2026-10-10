@@ -9,22 +9,24 @@ move's own, and every refusal comes from the move's own guard.
 from __future__ import annotations
 
 import hashlib
+import subprocess
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from tests.test_move_flows import AT, Box, Db, entry
-from yulon import apply, move, move_flows, move_server
+from yulon import apply, docker, forgetting, move, move_flows, move_server
 from yulon.catalog import native
 from yulon.catalog.catalog import load_catalog
 from yulon.catalog.installer import InstallOptions
 from yulon.manifest import Manifest
 from yulon.manifest_store import ManifestStore
 from yulon.move import PackedModule, PackedSource, PackFile, ServerFacts, ServerSpec
-from yulon.move_flows import MoveError
+from yulon.move_flows import MoveError, MoveWorld
 from yulon.resources import manifests_dir
 
 CATALOG = load_catalog()
@@ -85,10 +87,11 @@ def whole_package(
     tmp_path: Path,
     realm: str = "Old Realm",
     facts: Callable[[], ServerFacts] | None = None,
+    counts: tuple[int, int, int, int] = (0, 0, 0, 0),
 ) -> Path:
     root = tmp_path / "old-computer"
     root.mkdir(parents=True)
-    source = Box(root, running_now=("ac-database",), db=Db([], realm=realm))
+    source = Box(root, running_now=("ac-database",), db=Db([], realm=realm, counts=counts))
     folder = tmp_path / "docs"
     folder.mkdir()
     return move_flows.export_package(
@@ -420,8 +423,11 @@ class Move:
         *,
         fresh_db: Db | None = None,
         facts: Callable[[], ServerFacts] | None = None,
+        counts: tuple[int, int, int, int] = (0, 0, 0, 0),
+        reserving: bool = False,
     ) -> None:
-        self.path = whole_package(tmp_path, facts=facts)
+        self.reserving = reserving
+        self.path = whole_package(tmp_path, facts=facts, counts=counts)
         self.target = Box(
             tmp_path,
             running_now=("ac-database", "ac-authserver", "ac-worldserver"),
@@ -448,14 +454,35 @@ class Move:
             self.target.up[:] = [spec.db, spec.auth, spec.world]
             yield "rebuilt"
 
+        world = self.target.world
+        if self.reserving:
+            world = self._reserving(world)
         return move_server.MovedInServer(
-            world=self.target.world,
+            world=world,
             applier=self.applier,
             rebuild=rebuild,
             db_password="password",
             persist_manifest=lambda m: self.events.append(f"persist:{m.id}"),
             install_folder=self.applier.install_folder,
         )
+
+    def _reserving(self, world: MoveWorld) -> MoveWorld:
+        """The world as the app wires it (with its spec), its Stop a real lifecycle press."""
+        spec = self.target.spec
+        plain_stop = world.stop_server
+        self.stop_saw: list[tuple[bool, str | None]] = []
+
+        def stop_server() -> object:
+            with docker._in_flight(
+                world.server_dir, press=forgetting.PRESS_STOP, spec=spec, wsl_distro=None
+            ):
+                holder = docker.reservation_holder(world.server_dir)
+                self.stop_saw.append(
+                    (docker.reservation_held_here(world.server_dir), holder and holder.press)
+                )
+                return plain_stop()
+
+        return replace(world, spec=spec, wsl_distro=None, stop_server=stop_server)
 
     def install(self) -> move_server.MovedInInstall:
         def record(server_dir: Path, rows: object) -> bool:
@@ -475,6 +502,70 @@ class Move:
     def run(self) -> list[str]:
         options = InstallOptions(server_dir=self.target.server_dir)
         return list(self.install().run(options))
+
+
+def test_the_plan_and_the_closing_count_bot_characters_apart(tmp_path: Path) -> None:
+    """T650: players and bot characters are counted apart, never "0 characters" for a bot server."""
+    mv = Move(tmp_path, counts=(1, 0, 100, 1000))
+    assert mv.plan.allowed, mv.plan.refusals
+    phrase = "1 account and 0 characters of players, plus 100 bot accounts with 1000 bot characters"
+    assert f": {phrase}." in mv.plan.text()
+    assert phrase in "\n".join(mv.run())
+
+
+@pytest.fixture
+def reservations(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+    from tests.support_fake_docker import end_fake_containers, lay_fake_docker
+    from yulon import platform
+
+    cli, state = lay_fake_docker(tmp_path / "docker")
+    monkeypatch.setattr(platform, "docker_program", lambda: str(cli))
+    monkeypatch.setattr(docker, "RESERVATIONS_ON", True)
+    (state / "images-listed").write_text("yulon.local/wotlk-server:native\n", encoding="utf-8")
+    yield state
+    end_fake_containers(state)
+
+
+def test_the_steps_stop_under_the_moves_own_hold_without_taking_a_second(
+    tmp_path: Path, reservations: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """T651: the module and settings steps' Stop runs inside "Bring in a move", not as its own.
+
+    Mutation this catches: the steps loop run without the bring-in's reservation (each Stop then
+    took its own, press "Stop", and warned "without a reservation" when Docker was slow).
+    """
+    mv = Move(tmp_path, reserving=True)
+    with caplog.at_level("WARNING"):
+        mv.run()
+    assert mv.stop_saw and set(mv.stop_saw) == {(True, move_flows.PRESS_BRING_IN)}
+    assert "without a reservation" not in caplog.text
+    assert not docker.reservation_held_here(mv.target.server_dir)
+
+
+def test_another_yulon_is_refused_for_the_whole_bring_in(
+    tmp_path: Path, reservations: Path
+) -> None:
+    from tests.test_controller_reservation import _holds
+
+    mv = Move(tmp_path, reserving=True)
+    theirs: list[subprocess.Popen[bytes]] = []
+    install = mv.engine.run
+
+    def install_then_theirs(*a: object, **k: object) -> Iterator[str]:
+        yield from install(*a, **k)  # type: ignore[arg-type]
+        # The folder exists now, so another Yu'lon can reserve it: after the install, before steps.
+        theirs.append(
+            _holds(reservations, mv.target.server_dir, press="Update the server to latest…")
+        )
+
+    mv.engine.run = install_then_theirs  # type: ignore[method-assign]
+    try:
+        with pytest.raises(MoveError, match="Another Yu'lon is working on"):
+            mv.run()
+    finally:
+        for proc in theirs:
+            proc.kill()
+    assert not [e for e in mv.events if e.startswith(("module:", "load:", "stop"))]
 
 
 def test_the_run_installs_then_puts_everything_in_in_order(tmp_path: Path) -> None:

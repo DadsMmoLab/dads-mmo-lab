@@ -219,6 +219,26 @@ class Counts(_Strict):
     accounts: int = Field(ge=0)
     characters: int = Field(ge=0)
     bot_accounts: int = Field(ge=0)
+    bot_characters: int | None = Field(default=None, ge=0)
+    """Characters of the bot accounts. None in a package made before this was counted."""
+
+
+def _n(count: int, noun: str) -> str:
+    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
+
+
+def counts_phrase(counts: Counts) -> str:
+    """What travels, in plain words: the players' accounts and characters, then the bots.
+
+    "1 account and 0 characters of players, plus 100 bot accounts with 1000 bot characters".
+    A package made before bot characters were counted names the bot accounts only.
+    """
+    text = f"{_n(counts.accounts, 'account')} and {_n(counts.characters, 'character')} of players"
+    if counts.bot_accounts:
+        text += f", plus {_n(counts.bot_accounts, 'bot account')}"
+        if counts.bot_characters is not None:
+            text += f" with {_n(counts.bot_characters, 'bot character')}"
+    return text
 
 
 def _safe_target(value: str) -> str:

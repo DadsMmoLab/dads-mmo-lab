@@ -12176,6 +12176,11 @@ class StagedInstaller:
                 f"Docker answered once and then would not answer again, so nothing was started: "
                 f"{exc}"
             ) from exc
+        # T649: the names this install's compose would ask for may already be held, in any state,
+        # by a folder this app does not know. Said here, before the clone and the compile, not
+        # by `run()`'s guard after a preflight that passed.
+        if facts.docker_ready:
+            self._refuse_foreign_containers(server_dir, state.install_id)
         spent = self._spent(state, server_dir) if facts.docker_ready else preflight.NOTHING_SPENT
         report_checks = preflight.evaluate(self.entry, server_dir, facts, spent)
         yield from preflight.lines(report_checks)
@@ -12429,8 +12434,10 @@ class StagedInstaller:
                         f"A container called {name} already exists and belongs to another "
                         f"install this app made, brought up from {working_dir} when it was "
                         "created (if that folder has moved since, its own tab still knows "
-                        "it). Two servers cannot share that name. Open that install's tab "
-                        "and stop and remove its containers, then try again."
+                        "it). Two servers cannot share that name. If that install is on this "
+                        "app's Catalog, open its tab and stop and remove its containers; if it "
+                        "is not, remove those containers yourself or use that folder with "
+                        '"Use existing…" instead, then try again.'
                     )
                 raise InstallerError(
                     f"A container called {name} already exists and belongs to another "

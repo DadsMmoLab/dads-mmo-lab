@@ -56,7 +56,7 @@ class Db:
         present: tuple[str, ...] = ("acore_auth", "acore_characters", "acore_world"),
         *,
         updates: tuple[str, ...] = ("2024_01_a", "2024_01_b"),
-        counts: tuple[int, int, int] = (0, 0, 0),
+        counts: tuple[int, int, int, int] = (0, 0, 0, 0),
         realm: str = "Local Realm",
         version_table: str | None = "updates",
         fail_load_of: str | None = None,
@@ -272,12 +272,14 @@ def test_the_auth_dump_leaves_the_realm_row_behind(tmp_path: Path) -> None:
 
 
 def test_the_manifest_carries_the_evidence_the_counts_and_the_realm(tmp_path: Path) -> None:
-    db = Db([], counts=(2, 3, 500), realm="Baerthe's Realm", updates=("a", "b", "c"))
+    db = Db([], counts=(2, 3, 500, 1000), realm="Baerthe's Realm", updates=("a", "b", "c"))
     box = Box(tmp_path, running_now=("ac-database",), db=db)
     folder = tmp_path / "docs"
     folder.mkdir()
     manifest = move_flows.export_package(box.world, folder, stop_allowed=False).manifest
-    assert manifest.counts == Counts(accounts=2, characters=3, bot_accounts=500)
+    assert manifest.counts == Counts(
+        accounts=2, characters=3, bot_accounts=500, bot_characters=1000
+    )
     assert manifest.realm_name == "Baerthe's Realm"
     assert manifest.channel_account == "YULON_AAAA1111"
     assert manifest.bot_prefix == "RNDBOT"
@@ -485,7 +487,7 @@ def make_package(
         realm_name="Old Realm",
         channel_account="YULON_BBBB2222",
         bot_prefix="RNDBOT",
-        counts=Counts(accounts=1, characters=1, bot_accounts=0),
+        counts=Counts(accounts=1, characters=1, bot_accounts=0, bot_characters=0),
         schema_evidence=evidence,
         excluded=(),
         made=AT,
@@ -576,7 +578,7 @@ def test_a_damaged_install_record_refuses_the_import(tmp_path: Path) -> None:
 
 def test_a_target_with_players_must_be_asked_and_says_how_many(tmp_path: Path) -> None:
     package = packed(tmp_path)
-    box = target(tmp_path, db=Db([], counts=(2, 3, 500)))
+    box = target(tmp_path, db=Db([], counts=(2, 3, 500, 1000)))
     plan = move_flows.plan_import(box.world, package)
     assert plan.allowed
     assert plan.replaces is not None
@@ -588,7 +590,7 @@ def test_a_target_with_players_must_be_asked_and_says_how_many(tmp_path: Path) -
 
 def test_a_target_with_only_accounts_is_asked_too(tmp_path: Path) -> None:
     package = packed(tmp_path)
-    box = target(tmp_path, db=Db([], counts=(1, 0, 0)))
+    box = target(tmp_path, db=Db([], counts=(1, 0, 0, 0)))
     plan = move_flows.plan_import(box.world, package)
     assert plan.replaces is not None
     assert "1 account" in plan.replaces.sentence
@@ -597,7 +599,7 @@ def test_a_target_with_only_accounts_is_asked_too(tmp_path: Path) -> None:
 
 def test_bots_and_the_apps_own_account_are_not_players(tmp_path: Path) -> None:
     package = packed(tmp_path)
-    box = target(tmp_path, db=Db([], counts=(0, 0, 500)))
+    box = target(tmp_path, db=Db([], counts=(0, 0, 500, 1000)))
     plan = move_flows.plan_import(box.world, package)
     assert plan.replaces is None
     counting = [q for q in box.db.queries if "COUNT(*)" in q]
@@ -685,7 +687,7 @@ def test_the_extracted_dumps_do_not_stay_behind(tmp_path: Path) -> None:
 
 
 def test_replacing_players_needs_the_plans_own_token(tmp_path: Path) -> None:
-    box, _package, plan = ready(tmp_path, db=Db([], counts=(2, 3, 500)))
+    box, _package, plan = ready(tmp_path, db=Db([], counts=(2, 3, 500, 1000)))
     for wrong in (None, "", "yes", "True", plan.token[::-1]):
         with pytest.raises(MaintenanceError) as raised:
             move_flows.run_import(
@@ -698,7 +700,7 @@ def test_replacing_players_needs_the_plans_own_token(tmp_path: Path) -> None:
 def test_with_the_token_the_players_are_replaced_and_the_copy_exists_before_the_first_load(
     tmp_path: Path,
 ) -> None:
-    box, _package, plan = ready(tmp_path, db=Db([], counts=(2, 3, 500)))
+    box, _package, plan = ready(tmp_path, db=Db([], counts=(2, 3, 500, 1000)))
     result = move_flows.run_import(
         box.world, plan, confirm=plan.token, use_old_realm_name=False, stop_allowed=False
     )
@@ -711,7 +713,7 @@ def test_with_the_token_the_players_are_replaced_and_the_copy_exists_before_the_
 def test_the_target_gaining_players_since_the_plan_refuses(tmp_path: Path) -> None:
     box, _package, plan = ready(tmp_path)
     assert plan.replaces is None
-    box.db.counts = (1, 1, 0)  # somebody made a character after the plan was shown
+    box.db.counts = (1, 1, 0, 0)  # somebody made a character after the plan was shown
     with pytest.raises(MaintenanceError) as raised:
         move_flows.run_import(
             box.world, plan, confirm=plan.token, use_old_realm_name=False, stop_allowed=False
@@ -1035,7 +1037,7 @@ def test_a_dump_that_goes_on_to_write_into_another_database_is_not_loaded(
         realm_name=None,
         channel_account=None,
         bot_prefix=None,
-        counts=Counts(accounts=0, characters=0, bot_accounts=0),
+        counts=Counts(accounts=0, characters=0, bot_accounts=0, bot_characters=0),
         schema_evidence={
             s: Evidence(kind="updates", count=2, digest=_digest(("2024_01_a", "2024_01_b")))
             for s in ("acore_auth", "acore_characters")

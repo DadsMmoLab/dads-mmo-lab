@@ -53,7 +53,16 @@ from yulon.controller_wow_wotlk.maintenance import (
     RestoreReport,
 )
 from yulon.log import get_logger
-from yulon.move import Counts, DumpFile, Evidence, Header, Manifest, MovePackageError, Role
+from yulon.move import (
+    Counts,
+    DumpFile,
+    Evidence,
+    Header,
+    Manifest,
+    MovePackageError,
+    Role,
+    counts_phrase,
+)
 from yulon.ownership import Ownership
 
 logger = get_logger(__name__)
@@ -392,12 +401,19 @@ def _read_counts(world: MoveWorld, roles: Mapping[Role, str]) -> Counts:
         f"(SELECT COUNT(*) FROM `{auth}`.`account` WHERE NOT ({bot}) AND NOT ({app})), "
         f"(SELECT COUNT(*) FROM `{chars}`.`{table}` WHERE `{column}` NOT IN "
         f"(SELECT `id` FROM `{auth}`.`account` WHERE ({bot}) OR ({app}))), "
-        f"(SELECT COUNT(*) FROM `{auth}`.`account` WHERE ({bot}));"
+        f"(SELECT COUNT(*) FROM `{auth}`.`account` WHERE ({bot})), "
+        f"(SELECT COUNT(*) FROM `{chars}`.`{table}` WHERE `{column}` IN "
+        f"(SELECT `id` FROM `{auth}`.`account` WHERE ({bot})));"
     )
     fields = out.strip().split("\t")
-    if len(fields) != 3 or not all(f.strip().isdigit() for f in fields):
-        raise MoveError(f"The count of accounts came back as {out.strip()!r}, not three numbers.")
-    return Counts(accounts=int(fields[0]), characters=int(fields[1]), bot_accounts=int(fields[2]))
+    if len(fields) != 4 or not all(f.strip().isdigit() for f in fields):
+        raise MoveError(f"The count of accounts came back as {out.strip()!r}, not four numbers.")
+    return Counts(
+        accounts=int(fields[0]),
+        characters=int(fields[1]),
+        bot_accounts=int(fields[2]),
+        bot_characters=int(fields[3]),
+    )
 
 
 def _read_realm_name(world: MoveWorld, auth: str) -> str | None:
@@ -521,8 +537,7 @@ class ExportResult:
             ]
             return "\n".join(lines)
         lines = [
-            f"Packed {counts.accounts} accounts and {counts.characters} characters "
-            f"({counts.bot_accounts} bot accounts) into {self.path}.",
+            f"Packed {counts_phrase(counts)} into {self.path}.",
             f"{self.path.stat().st_size / (1024 * 1024):.1f} MB.",
             self.manifest.secrets,
             "The world database (custom items, NPCs, objects you placed) is not in it: it "
@@ -949,8 +964,7 @@ class ImportResult:
     def text(self) -> str:
         counts = self.manifest.counts
         lines = [
-            f"Brought in {counts.accounts} accounts and {counts.characters} characters "
-            f"(and {counts.bot_accounts} bot accounts): {', '.join(self.schemas)}.",
+            f"Brought in {counts_phrase(counts)}: {', '.join(self.schemas)}.",
             "GM levels came with the accounts. Logins and passwords are the old ones.",
             "The copy of this server taken first (before-move): "
             + (", ".join(str(p) for p in self.copies) or "none, there was nothing to copy")
