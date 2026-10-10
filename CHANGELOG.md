@@ -14,6 +14,14 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ## Unreleased
 
 ### New
+
+### Fixed
+
+### Changed
+
+## v0.9.16-Public — 2026-10-10
+
+### New
 - Every game's Modules tab adds a game add-on from a link, a folder or a zip with **Game add-ons you bring**.
 - **Play** puts the game add-ons you brought back into a ready-to-play client that was made again.
 - The support file now says how big your computer is: processor, memory, and how much of it Docker gets.
