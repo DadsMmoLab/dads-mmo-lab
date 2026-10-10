@@ -23,6 +23,7 @@ trees at `Recorder.blobs` (the `tree_bytes` seam).
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -300,3 +301,86 @@ def test_a_default_cmake_fills_in_is_never_written_into_the_live_conf(
     text = path.read_text(encoding="utf-8")
     assert tuning.conf_value(text, "AiPlayerbot.ConfDir") == "etc"
     assert tuning.conf_value(text, "AiPlayerbot.PoolBudgetWhenTickOverMs") == "0"
+
+
+def test_a_live_conf_without_the_key_is_not_given_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An absent key is the code's default, which moved with the template: nothing appended."""
+    rec, server_dir, made = _update(tmp_path)
+    _writes(monkeypatch, rec)
+    path = _live(server_dir)
+    text = path.read_text(encoding="utf-8", newline="")
+    path.write_bytes(
+        "".join(
+            line
+            for line in text.splitlines(keepends=True)
+            if "PoolBudgetWhenTickOverMs" not in line
+        ).encode("utf-8")
+    )
+    before = path.read_bytes()
+    _dists(rec, server_dir, running=BEFORE_663, target=AFTER_663, target_rev=NEW)
+    said, raised = _press(made, server_dir)
+    assert raised is None, raised
+    assert path.read_bytes() == before
+    assert tuning.backups_of(path) == ()
+    assert not any("PoolBudgetWhenTickOverMs" in line for line in said)
+
+
+def _world_work(rec: Recorder) -> native.ServersDownWork:
+    """T531's world catch-up as the family would hand it over, recorded."""
+
+    def forward(ctx: object) -> Iterator[str]:
+        rec.calls.append("world-forward")
+        yield "world forward"
+
+    def back(ctx: object) -> Iterator[str]:
+        rec.calls.append("world-back")
+        yield "world back"
+
+    return native.ServersDownWork(
+        prepare=lambda: iter(()), forward=forward, back=back, finishes_start_refusal=False
+    )
+
+
+def test_the_conf_is_carried_when_the_world_also_has_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both works run: the world's first, then the conf; neither replaces the other."""
+    rec, server_dir, made = _update(tmp_path)
+    _writes(monkeypatch, rec)
+    monkeypatch.setattr(made, "_world_catch_up_work", lambda catch_up: _world_work(rec))
+    path = _live(server_dir)
+    _dists(rec, server_dir, running=BEFORE_663, target=AFTER_663, target_rev=NEW)
+    _said, raised = _press(made, server_dir)
+    assert raised is None, raised
+    world = _at(rec.calls, "world-forward", _at(rec.calls, "stop_servers"))
+    wrote = _at(rec.calls, "conf-write:aiplayerbot.conf", world)
+    _at(rec.calls, "recreate", wrote)
+    assert (
+        tuning.conf_value(path.read_text(encoding="utf-8"), "AiPlayerbot.PoolBudgetWhenTickOverMs")
+        == "0"
+    )
+
+
+def test_a_rollback_with_world_work_puts_the_conf_back_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rec, server_dir, made = _update(tmp_path, wait_ready=_old_build_comes_back())
+    _writes(monkeypatch, rec)
+    monkeypatch.setattr(made, "_world_catch_up_work", lambda catch_up: _world_work(rec))
+    real_restore = tuning.restore
+
+    def restore(from_backup: Path, target: Path) -> None:
+        rec.calls.append(f"conf-restore:{target.name}")
+        real_restore(from_backup, target)
+
+    monkeypatch.setattr(tuning, "restore", restore)
+    path = _live(server_dir)
+    before = path.read_bytes()
+    _dists(rec, server_dir, running=BEFORE_663, target=AFTER_663, target_rev=NEW)
+    _said, raised = _press(made, server_dir)
+    assert raised is not None
+    assert path.read_bytes() == before
+    back = _at(rec.calls, "conf-restore:aiplayerbot.conf", _at(rec.calls, "recreate"))
+    _at(rec.calls, "world-back", back)
