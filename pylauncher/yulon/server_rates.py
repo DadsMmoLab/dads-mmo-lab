@@ -256,7 +256,7 @@ _GAMES: dict[str, _GameRates] = {
     "wow-centurion": _GameRates(
         file="etc/worldserver.conf",
         repo="thomasjteachey/TrinityCore112",
-        rev="4948d1a9290cb1046eede1dbf289789200ea050e",
+        rev="25d3e6efbee97c3cb38830003e2460d98e235f46",
         keys=_ALL_KEYS,
         notes={},
     ),
