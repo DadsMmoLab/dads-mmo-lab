@@ -693,12 +693,12 @@ class CmangosInstaller(StagedInstaller):
                 if path.endswith(".sql") and posixpath.dirname(path).startswith("data/sql")
             }
             parsed = {f"data/sql/{src}" for src in rules.values()}
-            for folder in sorted(folders):
-                if not any(folder == one or folder.startswith(f"{one}/") for one in parsed):
+            for uncovered in sorted(folders):
+                if not any(uncovered == one or uncovered.startswith(f"{one}/") for one in parsed):
                     raise InstallerError(
                         updates_unread_sentence(
                             f"going back takes away in {what}",
-                            f"{module}.cmake at {rev[:7]} does not say where {folder} is "
+                            f"{module}.cmake at {rev[:7]} does not say where {uncovered} is "
                             "installed",
                         )
                     )
