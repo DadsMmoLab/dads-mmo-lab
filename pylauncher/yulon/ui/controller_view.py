@@ -30,7 +30,7 @@ import shutil
 import threading
 import time
 from collections import deque
-from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path, PurePosixPath
@@ -13036,6 +13036,7 @@ class ControllerView(QWidget):
                 manifests,
                 [m.id for m in manifests],
                 clone=False,
+                what="outside add-on",
                 say=say,
             )
         except Exception as exc:  # boundary: the add-ons are a courtesy, Play is the job
@@ -17666,6 +17667,27 @@ class ControllerView(QWidget):
                 self._manifests[(manifest.type, manifest.id)] = manifest
         return manifests, broken
 
+    def _addons_held_elsewhere(
+        self, manifests: Iterable[Manifest], installed: Mapping[str, frozenset[str]]
+    ) -> frozenset[str]:
+        """Ids of recorded add-ons this server holds no copy of and another server does (T613)."""
+        route = self.services.client_addons
+        if route is None:
+            return frozenset()
+        here = installed.get("mod", frozenset())
+        found: set[str] = set()
+        for manifest in manifests:
+            origin = manifest.origin
+            if (
+                origin is not None
+                and origin.addon
+                and origin.kind != "link"
+                and manifest.id not in here
+                and route.held_on_another_server(manifest) is not None
+            ):
+                found.add(manifest.id)
+        return frozenset(found)
+
     def reload_modules(self) -> None:
         """Re-read the catalog and the clone folders, and redraw the cards.
 
@@ -17712,6 +17734,7 @@ class ControllerView(QWidget):
                 unknown=self._unknown_modules(),
                 notes=self._module_notes(),
                 server_updated=self._server_updated(),
+                held_elsewhere=self._addons_held_elsewhere(manifests, installed),
             )
         )
         if broken:
@@ -18440,9 +18463,12 @@ class ControllerView(QWidget):
         if self._stopped_for_the_client(what, manifest):
             read.discard()
             return
-        if route.applier.client_dir is None:
+        # The applier's own folder, whichever game: only two of the six build it through
+        # `_client_dir_for_addons()`, so the real validator is asked here for all of them.
+        applier_client = route.applier.client_dir
+        if applier_client is None or not _has_interface(applier_client):
             read.discard()
-            folder = self.services.play_client_dir or self.services.client_dir
+            folder = applier_client or self.services.play_client_dir or self.services.client_dir
             said = ADDON_NO_INTERFACE.format(
                 name=manifest.name,
                 folder=folder if folder is not None else "your game client",

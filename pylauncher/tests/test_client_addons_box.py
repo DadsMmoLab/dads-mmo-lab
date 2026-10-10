@@ -72,6 +72,10 @@ class _Route:
     rows: list[Manifest] = field(default_factory=list)
     calls: list[tuple[str, Any]] = field(default_factory=list)
     discarded: int = 0
+    elsewhere: set[str] = field(default_factory=set)
+
+    def held_on_another_server(self, manifest: Manifest) -> Path | None:
+        return Path("/server-a") if manifest.id in self.elsewhere else None
 
     def _prepared(self, via: str, what: object) -> Prepared:
         self.calls.append((via, what))
@@ -152,6 +156,8 @@ def _view(
         CATALOG.get(game), tmp_path / game, client_dir if client else None
     )
     services.client_addons = cast(Any, route)
+    # The fake applier writes where the tab's client is, so the box's own check of it is real.
+    route.applier.client_dir = client_dir if client else None
     view = ControllerView(
         CATALOG.get(game),
         services,
@@ -446,11 +452,17 @@ def test_the_note_does_not_promise_what_a_replace_breaks() -> None:
     assert "replaced only if you say yes" in ADDON_BOX_NOTE and "puts yours back" in ADDON_BOX_NOTE
 
 
-@pytest.mark.parametrize(("game", "interface"), [("wow-centurion", 30300), ("wow-tortoise", 11200)])
+@pytest.mark.parametrize("game", GAMES)
 def test_a_client_folder_with_no_interface_folder_refuses_the_add_on_and_writes_nothing(
-    game: str, interface: int, qapp: object, tmp_path: Path
+    game: str, qapp: object, tmp_path: Path
 ) -> None:
-    """The reproduced case: the install "succeeded", skipped its step, and listed the add-on."""
+    """The reproduced case: the install "succeeded", skipped its step, and listed the add-on.
+
+    Every game with an add-on box, not two of them: the others used to hand the applier the
+    raw client folder and said "client . -> addons" over files made in a folder nobody showed
+    to be a game client.
+    """
+    interface = CATALOG.get(game).client.addon_interface
     client = tmp_path / "client"
     client.mkdir()
     source = tmp_path / "src" / "pfUI"
@@ -528,3 +540,32 @@ def test_the_server_tab_points_at_the_box(qapp: object, tmp_path: Path) -> None:
     assert view.addon_pointer.text() == cv.ADDON_POINTER
     assert "Modules tab" in cv.ADDON_POINTER
     assert not view.addon_pointer.isHidden() or not view.isVisible()
+
+
+def test_the_modules_tab_marks_a_row_whose_copy_another_server_holds(
+    qapp: object, tmp_path: Path
+) -> None:
+    view, _route = _view(tmp_path, _Route(rows=[_manifest()], elsewhere={"pfui"}))
+    manifests = [_manifest(), _manifest("Other")]
+    assert view._addons_held_elsewhere(manifests, {}) == {"pfui"}
+    assert view._addons_held_elsewhere(manifests, {"mod": frozenset({"pfui"})}) == frozenset()
+
+
+def test_a_reloaded_modules_tab_hands_the_rows_the_copies_another_server_holds(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    view, _route = _view(
+        tmp_path, _Route(rows=[_manifest()], elsewhere={"pfui"}), game="wow-tortoise"
+    )
+    cast(Any, view)._load_manifests = lambda: ([_manifest()], [])
+    cast(Any, view)._installed_clones = lambda: {}
+    seen: list[object] = []
+    real = cv.build_module_rows
+
+    def spy(*args: Any, **kwargs: Any) -> Any:
+        seen.append(kwargs.get("held_elsewhere"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(cv, "build_module_rows", spy)
+    view.reload_modules()
+    assert seen == [frozenset({"pfui"})]

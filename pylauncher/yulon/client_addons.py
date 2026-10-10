@@ -49,6 +49,7 @@ from yulon import addon_archive, addon_layout, client_packs, module_source
 from yulon.addon_archive import AddonRefusal, Staged
 from yulon.addon_layout import NOTHING_CHANGED, Addon, Found
 from yulon.apply import (
+    CLONE_DIRS,
     Applier,
     ApplyRefusal,
     ApplyReport,
@@ -567,9 +568,37 @@ class ClientAddons:
             )
         return self.install(prepared, replacing=True)
 
+    def held_on_another_server(self, manifest: Manifest) -> Path | None:
+        """Another install of this game that holds this add-on's copy, while this one holds none.
+
+        The record is per GAME (the user layer) and the copy per SERVER (`modules/<id>`), so a
+        server with no copy of an add-on another one added is not where it can be forgotten.
+        None: this server holds the copy itself, or no other does (or none can be read).
+        """
+        try:
+            if self.applier.clone_dir(manifest).exists():
+                return None
+            others = self.applier.other_server_dirs
+            for server in others() if others is not None else ():
+                if (
+                    server != self.applier.server_dir
+                    and (server / CLONE_DIRS[manifest.type] / manifest.id).exists()
+                ):
+                    return server
+        except OSError:
+            return None
+        return None
+
     def remove(self, manifest: Manifest) -> ApplyReport:
         """Remove an outside add-on through the applier, then its record (after, never before)."""
         self._guard(manifest)
+        elsewhere = self.held_on_another_server(manifest)
+        if elsewhere is not None:
+            raise ApplyRefusal(
+                f"{manifest.name} was added on another server of this game ({elsewhere}); this "
+                "one holds no copy. Remove it there: taking it out here would forget it for "
+                f"that server too. {NOTHING_CHANGED}"
+            )
         report = self.applier.remove(manifest)
         self.forget(manifest)
         return report
@@ -646,13 +675,16 @@ def pack_addon_names(
             continue
     if client_dir is not None:
         try:
-            recorded = client_packs.pack_files(client_dir)
+            record = client_packs.read_record(client_dir).packs
         except Exception:  # noqa: BLE001 - an unreadable record adds nothing
-            recorded = frozenset()
-        for path in recorded:
-            parts = path.parts
-            if len(parts) > 3 and [p.casefold() for p in parts[:2]] == ["interface", "addons"]:
-                names.setdefault(parts[2], next(iter(labels.values()), "a client pack"))
+            record = {}
+        for pack_id, entry in record.items():
+            label = labels.get(pack_id, "a client pack")
+            for rel in entry["files"]:
+                clean = client_packs._clean_rel(rel)
+                parts = clean.parts if clean is not None else ()
+                if len(parts) > 3 and [p.casefold() for p in parts[:2]] == ["interface", "addons"]:
+                    names.setdefault(parts[2], label)
     return names
 
 

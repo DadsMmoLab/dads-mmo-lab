@@ -289,3 +289,15 @@ def test_the_play_log_names_the_addons_in_words() -> None:
         "Put TortoiseBots Manager into your game client.",
         "Put the missing files of Tortoise GM Manager back into your game client.",
     )
+
+
+def test_an_unreadable_memory_warns_in_the_words_of_what_was_asked(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    box = _Box(tmp_path)
+    (box.server / default_addons.DECLINED_FILE).write_text("{not json", encoding="utf-8")
+    box.put_in()
+    box.put_in(what="outside add-on")
+    texts = [r.getMessage() for r in caplog.records]
+    assert any("no default add-on is put in" in t for t in texts)
+    assert any("no outside add-on is put in" in t for t in texts)

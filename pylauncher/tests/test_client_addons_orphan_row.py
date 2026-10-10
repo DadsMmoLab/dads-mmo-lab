@@ -75,3 +75,17 @@ def test_a_folder_module_that_is_not_an_add_on_record_is_left_to_the_old_rules()
         }
     )
     assert _row(manifest, here=False).installable is True
+
+
+def test_a_row_whose_copy_is_on_another_server_says_so_and_does_not_point_at_forgetting() -> None:
+    rows = modules_panel.build_module_rows(
+        [_recorded("folder", path="/x/pfUI")],
+        {},
+        modules_panel.SessionState(),
+        None,
+        held_elsewhere={"pfui"},
+    )
+    row = next(r for r in rows if r.id == "pfui")
+    assert row.installable is False
+    reason = row.install_reason or ""
+    assert "another server" in reason and "forget" not in reason

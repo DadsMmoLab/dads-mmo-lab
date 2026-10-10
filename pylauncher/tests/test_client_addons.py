@@ -13,6 +13,7 @@ import io
 import os
 import zipfile
 from collections.abc import Mapping
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
 
@@ -692,3 +693,59 @@ def test_remove_still_works_for_an_add_on_whose_copy_was_deleted_by_hand(tmp_pat
     route.remove(manifest)
 
     assert route.installed() == []
+
+
+def _second_server(tmp_path: Path, first: ClientAddons) -> ClientAddons:
+    """Another install of the same game: its own server folder, the game's one record list."""
+    server = tmp_path / "server-b"
+    server.mkdir()
+    client = tmp_path / "client-b"
+    (client / "Interface" / "AddOns").mkdir(parents=True)
+    applier = Applier(server, client_dir=client)
+    applier.other_server_dirs = lambda: (first.applier.server_dir, server)
+    return replace(first, applier=applier)
+
+
+def test_remove_on_a_second_install_leaves_the_games_record_for_the_server_that_holds_it(
+    tmp_path: Path,
+) -> None:
+    """The record is per game, the copy per server: B has no copy, A does; B's Remove must not
+    forget the record A's box, A's Play and A's Update stand on."""
+    route, _addons = _route(tmp_path)
+    route.install(route.from_folder(_tree(tmp_path / "pfUI", {"pfUI.toc": TOC})))
+    (manifest,) = route.installed()
+    other = _second_server(tmp_path, route)
+
+    assert other.held_on_another_server(manifest) == route.applier.server_dir
+    with pytest.raises(ApplyRefusal, match="another server"):
+        other.remove(manifest)
+
+    assert [m.id for m in route.installed()] == ["pfui"]
+    assert route.held_on_another_server(manifest) is None
+
+
+def test_remove_forgets_once_no_server_holds_the_copy(tmp_path: Path) -> None:
+    import shutil
+
+    route, _addons = _route(tmp_path)
+    route.install(route.from_folder(_tree(tmp_path / "pfUI", {"pfUI.toc": TOC})))
+    (manifest,) = route.installed()
+    other = _second_server(tmp_path, route)
+    shutil.rmtree(route.applier.clone_dir(manifest))
+
+    other.remove(manifest)
+
+    assert route.installed() == []
+
+
+def test_a_server_holding_its_own_copy_is_never_told_to_go_elsewhere(tmp_path: Path) -> None:
+    import shutil
+
+    route, _addons = _route(tmp_path)
+    route.install(route.from_folder(_tree(tmp_path / "pfUI", {"pfUI.toc": TOC})))
+    (manifest,) = route.installed()
+    other = _second_server(tmp_path, route)
+    shutil.copytree(route.applier.clone_dir(manifest), other.applier.clone_dir(manifest))
+
+    assert route.held_on_another_server(manifest) is None
+    assert other.held_on_another_server(manifest) is None

@@ -49,16 +49,13 @@ def test_the_name_is_matched_in_any_case(tmp_path: Path) -> None:
         route.from_folder(_folder(tmp_path, "unboundtalents"))
 
 
-def test_an_add_on_the_pack_record_lists_in_the_client_is_refused_too(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_an_add_on_the_pack_record_lists_in_the_client_is_refused_too(tmp_path: Path) -> None:
+    import json
+
     route = _unbound(tmp_path, folders=()).client_addons
     assert route is not None
-    monkeypatch.setattr(
-        client_packs,
-        "pack_files",
-        lambda _dir: frozenset({Path("Interface/AddOns/Spellbook/a.lua")}),
-    )
+    record = {"version": 1, "packs": {"p": {"files": {"Interface/AddOns/Spellbook/a.lua": "x"}}}}
+    (tmp_path / "client" / client_packs.RECORD).write_text(json.dumps(record))
     with pytest.raises(AddonRefusal):
         route.from_folder(_folder(tmp_path, "Spellbook"))
 
@@ -88,3 +85,28 @@ def test_the_default_add_ons_of_tortoise_are_refused_through_the_box(tmp_path: P
     assert route is not None
     with pytest.raises(AddonRefusal):
         route.from_folder(_folder(tmp_path, "TortoiseBotsManager", 11200))
+
+
+def test_a_recorded_pack_folder_is_named_with_its_own_pack_not_the_first(tmp_path: Path) -> None:
+    import json
+    from types import SimpleNamespace
+
+    from yulon.client_addons import pack_addon_names
+
+    client = tmp_path / "client"
+    client.mkdir()
+    record = {
+        "version": 1,
+        "packs": {
+            "first": {"files": {"Data/patch-a.mpq": "x"}},
+            "second": {"files": {"Interface/AddOns/Second/Second.toc": "y"}},
+        },
+    }
+    (client / client_packs.RECORD).write_text(json.dumps(record))
+    source = SimpleNamespace(kind="url", path=None)
+    packs = [
+        SimpleNamespace(id="first", label="First pack", source=source),
+        SimpleNamespace(id="second", label="Second pack", source=source),
+    ]
+    names = pack_addon_names(packs, tmp_path / "server", client)  # type: ignore[arg-type]
+    assert names == {"Second": "Second pack"}

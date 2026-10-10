@@ -175,6 +175,7 @@ def put_in(
     ids: Sequence[str],
     *,
     clone: bool,
+    what: str = "default add-on",
     say: Callable[[str], None] = lambda _line: None,
     now: Callable[[], float] = time.time,
 ) -> Outcome:
@@ -182,7 +183,8 @@ def put_in(
 
     `clone=False` is Play: files only, from a clone already on disk, no git. `clone=True`
     also installs an add-on that has no clone, unless it failed within the last
-    `FAILED_BACKOFF_SECONDS`.
+    `FAILED_BACKOFF_SECONDS`. `what` names the kind in the log ("outside add-on" for the ones
+    the player brought).
 
     Never raises for one add-on: a failure is in `Outcome.failed` and the next add-on goes on,
     because a game that cannot reach GitHub must still start. Nothing is done without a client
@@ -194,7 +196,7 @@ def put_in(
         return out
     read = _read(server_dir)
     if read is None:
-        logger.warning(f"{server_dir / DECLINED_FILE} cannot be read; no default add-on is put in")
+        logger.warning(f"{server_dir / DECLINED_FILE} cannot be read; no {what} is put in")
         return out
     removed, failed_at = read
     by_id = {m.id: m for m in manifests if m.type == "mod"}
@@ -224,7 +226,7 @@ def put_in(
             if item in failed_at:
                 _change(server_dir, failed_drop=item)
         except Exception as exc:  # boundary: one add-on's failure must not stop the others or Play
-            logger.warning(f"default add-on {item}: {exc}")
+            logger.warning(f"{what} {item}: {exc}")
             out.failed[item] = str(exc)
             if item in installed:
                 installed.remove(item)
