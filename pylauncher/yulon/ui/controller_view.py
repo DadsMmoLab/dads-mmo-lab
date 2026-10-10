@@ -22694,10 +22694,10 @@ def _plan_details(plan: NetworkPlan) -> str:
     lines: list[str] = []
     if plan.firewall_commands:
         lines.append("Firewall commands:")
-        lines += ["  " + " ".join(c) for c in plan.firewall_commands]
+        lines += ["  " + platform.command_text(c) for c in plan.firewall_commands]
     if plan.portproxy_commands:
         lines.append("Port proxy commands:")
-        lines += ["  " + " ".join(c) for c in plan.portproxy_commands]
+        lines += ["  " + platform.command_text(c) for c in plan.portproxy_commands]
     if plan.realmlist_sql:
         lines.append("Realmlist SQL:")
         lines.append(f"  {plan.realmlist_sql}")

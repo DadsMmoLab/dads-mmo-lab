@@ -534,6 +534,7 @@ descriptions are written by hand.
 | `folder_swap.py::remove_quietly::rmtree.remove_tree` | **new (T538)** a folder under `.yulon-module-staging/` beside the real `modules/` folder: a partial copy after a copy that failed or a stop, or the old copy after a swap that finished. No build reads that folder; a failure is logged and the next settle tries again | yes — as above |
 | `folder_swap.py::tidy::rmdir` | **new (T538)** `.yulon-module-staging/` itself, once it is empty after a swap or a failed copy; a folder with anything in it is left (`rmdir` refuses) | yes — as above |
 | `networking.py::apply::run_statement` | the realmlist row: the address a client is sent to | yes |
+| `networking.py::apply::unlink` | the temp file the Windows administrator window wrote its netsh results to, removed once read | **yes** — a file in the temp folder, nothing the server reads |
 | `networking.py::record_network_intent::os.replace` | that record renamed into place | yes |
 | `networking.py::record_network_intent::unlink` | the temp record after a failure | yes |
 | `networking.py::record_network_intent::write_text` | the network-intent record, to a temp name | yes |

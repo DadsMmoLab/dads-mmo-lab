@@ -31,6 +31,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 
 ### Fixed
 - On Tortoise, a failed update puts the world database back too, and the copy it takes is one a return can use.
+- On Windows, opening the LAN ports asks for administrator rights itself, and the commands it shows now work when pasted.
 - Making the support file no longer takes minutes on big old logs: it keeps their newest lines and says what it cut.
 - While the world keeps crashing and restarting, the Server tab says so instead of "The server is already running."
 - **Start** on a server whose build is gone says so and names **Rebuild the server…** before starting anything.
