@@ -213,26 +213,42 @@ def test_mysql_error_text_and_ordinary_settings_are_untouched() -> None:
     assert Redactor.build([]).redact(text) == text
 
 
+def _huge_lines(k: int) -> list[str]:
+    """The pathological one-line inputs, each scaled by k half-thousand repeats."""
+    k = k * 500
+    return [
+        "sessionkey " * (5 * k) + "docker login " * (k + k // 4) + "-uroot " * (k + k // 4),
+        "C:\\Users\\a b c d e f g " * (5 * k),
+        "C:/Users/" + "%41" * (25 * k),
+        "Set-Cookie: " + "a=b; " * (10 * k),
+        "UPDATE x " * (7 * k) + "\n" + "mysql " * (7 * k),
+        "\\\\" * (25 * k) + "wsl.localhost",
+        "\\" * (25 * k) + "zephyrin",
+        "C:\\Users\\" + "%41%20" * (25 * k),
+        "C:\\Users\\" * (25 * k),
+        "C:\\Users\\a " * (25 * k),
+    ]
+
+
 def test_secret_masking_is_linear_on_one_huge_line() -> None:
+    """Masking 4x the input takes about 4x as long, not 16x: a ratio, so box load cancels."""
     import time
 
-    blobs = [
-        "sessionkey " * 20000 + "docker login " * 5000 + "-uroot " * 5000,
-        "C:\\Users\\a b c d e f g " * 20000,
-        "C:/Users/" + "%41" * 100000,
-        "Set-Cookie: " + "a=b; " * 40000,
-        "UPDATE x " * 30000 + "\n" + "mysql " * 30000,
-        "\\\\" * 100000 + "wsl.localhost",
-        "\\" * 100000 + "zephyrin",
-        "C:\\Users\\" + "%41%20" * 100000,
-        "C:\\Users\\" * 100000,
-        "C:\\Users\\a " * 100000,
-    ]
     redactor = Redactor.build(["Known12345"], home=Path(WIN_HOME), also_home=["/home/penguin"])
-    for blob in blobs:
-        started = time.monotonic()
-        redactor.redact(blob)
-        assert time.monotonic() - started < 4.0, blob[:30]
+
+    def best_of_three(blob: str) -> float:
+        best = float("inf")
+        for _ in range(3):
+            started = time.perf_counter()
+            redactor.redact(blob)
+            best = min(best, time.perf_counter() - started)
+        return best
+
+    for small, large in zip(_huge_lines(1), _huge_lines(4), strict=True):
+        # Floor the small time so timer noise on a fast case cannot inflate the ratio.
+        ratio = best_of_three(large) / max(best_of_three(small), 0.005)
+        # Linear is ~4, quadratic ~16; 10 sits between with room for noise.
+        assert ratio < 10, (small[:30], ratio)
 
 
 # ---------------------------------------------------------------- the home folder
