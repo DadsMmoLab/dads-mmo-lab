@@ -42,6 +42,7 @@ from string import Formatter
 from typing import IO, Any, Literal, Protocol
 
 from yulon import (
+    character_pick,
     client_names,
     docker,
     folder_swap,
@@ -57,6 +58,7 @@ from yulon import (
     tuning,
 )
 from yulon.catalog import composegen, upstream
+from yulon.catalog.catalog import CatalogEntry
 from yulon.dbreads import SqlReader
 from yulon.git import (
     CLONE_MARKER,
@@ -3122,7 +3124,7 @@ def stored_answer(prompt: Prompt, value: str) -> str:
             return format(decimal.Decimal(found.group(1)), "f")
         except decimal.InvalidOperation:
             return value
-    old = _STORED_INT.fullmatch(value) if prompt.kind == "int" else None
+    old = _STORED_INT.fullmatch(value) if prompt.kind in ("int", "character") else None
     return value if old is None else (old.group(1) or old.group(2))
 
 
@@ -3316,6 +3318,17 @@ def check_answer(prompt: Prompt, value: str) -> str:
     text = value.strip()
     if not text:
         return "this cannot be left empty"
+    if prompt.kind == "character":
+        # T637: a GUID (or an account id) is a uint32, and a list is those joined by commas,
+        # typed as the server reads them. Every piece is held to the `int` rule.
+        one = prompt.model_copy(update={"kind": "int", "unsigned": True, "multi": False})
+        if not prompt.multi:
+            return check_answer(one, value)
+        for piece in value.split(","):
+            problem = check_answer(one, piece)
+            if problem:
+                return problem
+        return ""
     if prompt.kind == "int":
         # The answer is written as given, so its spaces are checked too.
         if not _INT.fullmatch(value):
@@ -5265,6 +5278,18 @@ class Applier:
         check = prompt.exists
         if check is None:
             return
+        if prompt.kind == "character" and prompt.multi:
+            # A list is asked one GUID at a time, so a comma never reaches a query and the
+            # refusal names the GUID that is missing, not the list.
+            for guid in vals[prompt.key].split(","):
+                self._check_exists(
+                    manifest,
+                    prompt.model_copy(update={"multi": False}),
+                    {**vals, prompt.key: guid},
+                    log,
+                    db_asked,
+                )
+            return
         unsafe = sorted(
             key
             for key in _fields(check.query) | _fields(check.missing)
@@ -5311,6 +5336,22 @@ class Applier:
                 f"{manifest.id}: {_render(check.missing, vals, f'prompt {prompt.key}')}. "
                 f"Nothing was changed."
             )
+
+    def character_roster(self, entry: CatalogEntry) -> character_pick.Roster:
+        """This server's characters for a `character` question, read through this applier's seams.
+
+        Starts the database alone first where this applier can (T396's seam), as the
+        does-it-exist check does, under the server's cross-process hold as an install is
+        (T568). It is not stopped again: `Roster.database_started` lets the caller say it is
+        still running (`DATABASE_LEFT_UP`, as T476 does). Run on a worker: it is a docker exec.
+        """
+        try:
+            with self._held(f"List the characters of {entry.name}"):
+                return character_pick.read_roster(
+                    self.sql, entry, self.server_dir, start_database=self._start_database
+                )
+        except ApplyError as exc:
+            return character_pick.Roster(problem=str(exc))
 
     # -- the guard ---------------------------------------------------------
 
