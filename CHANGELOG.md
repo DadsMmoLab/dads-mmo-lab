@@ -64,6 +64,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - On disks with hard links, two Yu'lons pressing on one new folder at once no longer report a false id-file error.
 
 ### Changed
+- Tortoise now installs the newest TortoiseBots (10 October) on the newest core: bots fight closer to playerbots.
 - WoW Unbound is built on the same newer server core as WotLK; **Return to the tested pin…** moves an existing one there.
 - NPC Teleporter follows its author's new menu numbers; installing over an older install keeps the base game's menus.
 - The Tortoise bot dashboard switches on in seconds from TortoiseBots' ready-made program when one fits your server.

@@ -249,7 +249,7 @@ _GAMES: dict[str, _GameRates] = {
     "wow-tortoise": _GameRates(
         file="etc/mangosd.conf",
         repo="tortoise-wow/tortoise-wow",
-        rev="187af788177aa2f9f0e61eb8c5b9653d8f4f7199",
+        rev="6131a26f91d60e64f6d58c7f0a9b6333f2d9f25a",
         keys=_ALL_KEYS,
         notes={"Rate.XP.Kill": _TURTLE_MODE, "Rate.Drop.Money": _LEVEL_CAP_MONEY},
     ),

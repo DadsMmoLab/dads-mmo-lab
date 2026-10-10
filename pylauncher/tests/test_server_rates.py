@@ -288,7 +288,8 @@ VANILLA_RATES = (
     "Rate.Reputation.LowLevel.Kill    = 0.25\n"
 )
 TORTOISE_RATES = (
-    # tortoise-wow/tortoise-wow @187af788, mangosd.conf.dist.in:1702-1716,1744,1776
+    # tortoise-wow/tortoise-wow @187af788 (the file is unchanged at 6131a26f),
+    # mangosd.conf.dist.in:1702-1716,1744,1776
     "Rate.Drop.Item.Poor = 6\n"
     "Rate.Drop.Item.Normal = 7\n"
     "Rate.Drop.Item.Uncommon = 8\n"

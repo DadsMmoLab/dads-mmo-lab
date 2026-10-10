@@ -348,7 +348,7 @@ def test_every_tortoise_source_is_pinned_to_a_commit_not_a_moving_branch() -> No
     # rest are held to the SHAPE of a full commit id, because an abbreviation
     # is a prefix and a prefix can stop being unique.
     core = next(s for s in sources if s.repo.endswith("tortoise-wow"))
-    assert core.rev == "187af788177aa2f9f0e61eb8c5b9653d8f4f7199", (
+    assert core.rev == "6131a26f91d60e64f6d58c7f0a9b6333f2d9f25a", (
         f"the core is pinned to {core.rev!r}. It was 7c0fb278, then 3a8472e on the retired "
         "Shyalya fork, 9980181c on `tortoise-wow/tortoise-wow` branch `bot-helpers` since T30 "
         "(every measurement in this file taken against it on `yulon-arch` 2026-09-11, "
@@ -358,10 +358,16 @@ def test_every_tortoise_source_is_pinned_to_a_commit_not_a_moving_branch() -> No
         "2026-09-17 (.notes/gates/t86-*); since T136 187af788, the same branch two commits on "
         "(PR #525: a creature whose max health a rate truncates to 0 gets 1 HP, Creature.cpp "
         "only), installed fresh and pressed on `yulon-ubuntu` 2026-09-26 "
-        "(.notes/gates/t136-tortoise-pins/). Moving it again means taking them again"
+        "(.notes/gates/t136-tortoise-pins/); since T656 6131a26f, the 1181dev tip on "
+        "2026-10-10 (T597 read it on 2026-10-08), five commits on: main merged in with no "
+        "tree change, the world shutdown logging the headless (bot) sessions out before the "
+        "databases close (World.cpp, one line, PR #563), and two world-data updates (vendor "
+        "stock, five deleted Redridge creatures, starter throwing weapons, eleven Dark Iron "
+        "gameobjects); AutoUpdater.cpp, mangosd.conf.dist.in, CMake and sql/base unchanged. "
+        "Moving it again means taking them again"
     )
     module = next(s for s in sources if s.repo == "Sagiroth/TortoiseBots")
-    assert module.rev == "83d88fdc034b224d88a2ecade975e26f8d1d513c", (
+    assert module.rev == "1fbee39275259ee5f44902f057dc8d88fbf2c83c", (
         f"the bots module is pinned to {module.rev!r}. Its own pin is as load-bearing as the "
         "core's: the module is what decides the folder names its SQL is installed under, "
         "which conf keys exist, and what the world prints when it loads. It was fd7ec9ec "
@@ -400,7 +406,17 @@ def test_every_tortoise_source_is_pinned_to_a_commit_not_a_moving_branch() -> No
         "had pinned the world thread at 100% with a few hundred bots) and #521 (travel "
         "destinations looked up by hash and filtered by distance before the costly checks, "
         "cross-map distances without a heap allocation): 4 commits, no conf key, SQL or "
-        "build change"
+        "build change; and since T656 it is 1fbee392, the commit release v2026-10-10 names "
+        "at build v2 (T597 had measured a504a625, v2026-10-08 build v7, on the way): 81 "
+        "commits, one idempotent character migration (a `tortoise_bots_claimed` ledger, "
+        "CREATE TABLE IF NOT EXISTS), the character migrations' source folder renamed "
+        "`char` -> `character` with the installed folder and every file name unchanged, the "
+        "two confs installed as `.dist` templates with the live file made only when missing "
+        "(so a fresh image still ships `aiplayerbot.conf`), new default-on keys the install "
+        "does not write (`CombatTickBudgetUs`, `TravelPickBudgetUs`, `TargetWorldTickMs`, "
+        "`EquipUpgradeThreshold`), `PoolBudgetWhenTickOverMs` 150 -> 0 in the `.dist` only, "
+        "the `.dist`'s pool defaults now the 500 random bots the install already writes, "
+        "BOTPERF gaining fields Yu'lon does not parse, and the dashboard protocol still 8"
     )
     for source in sources:
         assert re.fullmatch(

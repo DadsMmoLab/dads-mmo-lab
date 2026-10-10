@@ -74,7 +74,7 @@ stdin is EOF, and the live Centurion press exited 255 (T241).
 VMAP_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "cmangos-vmap-8ec338a1"
 """`contrib/vmap_extractor/vmapextract/` of `mangos-classic` at `8ec338a1`; see `test_patch.py`."""
 
-TORTOISE_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "tortoise-187af788"
+TORTOISE_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "tortoise-6131a26f"
 """`AutoUpdater.cpp` of tortoise-wow at the pin, laid by its full path (T600)."""
 
 
