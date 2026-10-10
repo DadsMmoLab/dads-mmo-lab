@@ -34,6 +34,8 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A custom SQL fix the database refused now shows on the Server tab, and a fresh install says so at the end.
 - TBC and Vanilla servers now get the database's own data corrections, new installs and updates alike.
 - WotLK and Unbound offer **Update Docker Compose** when it is too old for them; a cut-off database import is redone.
+- After an update stopped mid-build, Start says the build is behind its sources and names **Rebuild the server…**.
+- A bot settings file renamed for the newest bots module also gets the settings that module added.
 - A small step back of your computer's clock no longer hides the "history was rewritten" line in the update question.
 - An install stops before building, naming the folder, when another install already holds its container names.
 - Moving a server says "1 account and 0 characters of players, plus 100 bot accounts with 1000 bot characters".

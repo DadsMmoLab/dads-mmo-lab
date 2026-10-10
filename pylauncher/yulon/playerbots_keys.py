@@ -97,6 +97,11 @@ def _read(path: Path) -> str | None:
         return None
 
 
+def read_dist(server_dir: Path) -> str | None:
+    """The module's `playerbots.conf.dist`, or None when the checkout has none."""
+    return _read(server_dir / DIST)
+
+
 def module_prefix(server_dir: Path) -> str | None:
     """The prefix this server's mod-playerbots checkout reads, or None when it cannot be told."""
     dist = _read(server_dir / DIST)

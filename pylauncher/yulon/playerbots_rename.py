@@ -13,6 +13,12 @@ and the player wrote to match, in the three files that hold such names:
 * the command channel's copy of the override from before its press
   (`<override>.before-channel`), which its rollback puts back.
 
+**Keys the new module added (T662).** A conf moved forward also gets the keys the module's
+`playerbots.conf.dist` assigns and the conf lacks, appended with their comment block under
+`ADDED_MARKER`, so the world does not log them as "Missing property". Keys the module dropped
+stay. Moving back renames the added keys with the rest and leaves them: the old module never
+reads them, and the next forward move finds them there and adds nothing.
+
 **When.** Right before every start of the world: the Server tab's Start, Restart and
 recreate (`Controller.start()`, also the Bots tab's Apply… recreate), the install's
 `up` and a rebuild's recreate (Rebuild, "Update the server to latest…", "Return to the
@@ -36,11 +42,13 @@ while Yu'lon's settings said otherwise.
 
 from __future__ import annotations
 
+import json
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from yulon import playerbots_keys, tuning
+from yulon import playerbots_keys, server_build_presses, tuning
 from yulon.catalog import compose_env, composegen
 from yulon.catalog.catalog import CatalogEntry
 from yulon.catalog.families import conf
@@ -65,10 +73,89 @@ REFUSED = (
     "this server's {old}* settings to match ({why}), so the server was not started: it would "
     "run on the module's defaults (500 bots, its command port open) instead of your settings."
 )
+BUILT_PREFIX_FILE = ".yulon-built-prefix.json"
+"""The prefix the server's BUILT image reads, as the checkout said when it was compiled (T660).
+
+`{"version": 1, "prefix": "AiPlayerbot."}`. The checkout cannot say it: Update to latest
+moves the sources before an hours-long compile, and a Yu'lon that dies in between leaves
+the old image beside the new sources. Written after the compile returned 0 (the install's
+`stage_build()`, a rebuild's build stage), and put back by a rollback; never forgotten
+at a rebuild's start, so a crash leaves the OLD image's prefix. Absent for a folder built
+before this existed, which is judged by its checkout alone, as T657 did.
+"""
+
+OLDER_BUILD = (
+    "This server's build is older than its sources: it was built from a mod-playerbots that "
+    "reads its settings as {built}*, but the folder now holds one that reads {now}* (an update "
+    "that stopped before its compile finished leaves this). Yu'lon did not rename your settings "
+    "and did not start the server, because the build that would run ignores {now}* settings. "
+    "Press {rebuild} to build what the folder holds."
+)
+
+ADDED_MARKER = "# --- Added by Yu'lon from the new module's playerbots.conf.dist ---"
+ADDED_NOTE = (
+    " It also added {added} setting{s} the new module has and this file lacked (under a "
+    "marker at the end of playerbots.conf), so the world does not log them as missing."
+)
+ROLLED_BACK = (
+    "The server build that is running reads its settings as {built}*, but this folder's "
+    "mod-playerbots reads {now}*, so Yu'lon renamed {count} of this server's {now}* setting{s} "
+    "back to {built}* (every value kept; the files as they were are backed up beside them) "
+    "and started that build on them. Starting it again is refused until you press {rebuild}, "
+    "which builds what the folder holds."
+)
+ADDED_ONLY = (
+    "mod-playerbots on this server has {added} setting{s} that {files} lacked, so Yu'lon added "
+    "them at the end under a marker, with their defaults, so the world does "
+    "not log them as missing; the file as it was is backed up beside it."
+)
 
 
 class RenameRefused(InstallerError):
     """The settings could not be renamed; nothing was started (the sentence says why)."""
+
+
+def read_built(server_dir: Path) -> str | None:
+    """The prefix the built image reads (`BUILT_PREFIX_FILE`), or None: absent or not one."""
+    try:
+        raw = json.loads((server_dir / BUILT_PREFIX_FILE).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as exc:
+        logger.warning(f"{server_dir / BUILT_PREFIX_FILE} could not be read ({exc})")
+        return None
+    prefix = raw.get("prefix") if isinstance(raw, dict) and raw.get("version") == 1 else None
+    if prefix in (playerbots_keys.OLD, playerbots_keys.NEW):
+        return str(prefix)
+    return None
+
+
+def write_built(server_dir: Path, prefix: str | None) -> None:
+    """Record `prefix` as the built image's, or forget the record when None. Never raises.
+
+    A record that cannot be written is logged and left absent: the server is then judged by
+    its checkout, as before this record existed.
+    """
+    path = server_dir / BUILT_PREFIX_FILE
+    staged = path.with_name(path.name + ".yulon-new")
+    try:
+        if prefix is None:
+            path.unlink(missing_ok=True)
+            return
+        staged.write_text(json.dumps({"version": 1, "prefix": prefix}) + "\n", encoding="utf-8")
+        os.replace(staged, path)
+    except OSError as exc:
+        logger.warning(f"{path} could not be updated ({exc}); the build is taken as not known")
+        try:
+            staged.unlink(missing_ok=True)
+            path.unlink(missing_ok=True)
+        except OSError as also:
+            logger.warning(f"could not clean up {path}: {also}")
+
+
+def remember_built(server_dir: Path) -> None:
+    """Record the prefix the checkout reads now as the one the image just compiled reads."""
+    write_built(server_dir, playerbots_keys.module_prefix(server_dir))
 
 
 def _active_keys(lines: list[str]) -> set[str]:
@@ -112,6 +199,46 @@ def rename_conf_text(text: str, prefix: str) -> tuple[str, int]:
     return "\n".join(lines), count
 
 
+def _dist_entries(dist: str) -> list[tuple[str, list[str]]]:
+    """`(key, lines)` for every ACTIVE assignment in `dist`, with the comment block above it."""
+    lines = dist.replace("\r\n", "\n").split("\n")
+    found: list[tuple[str, list[str]]] = []
+    for index, line in enumerate(lines):
+        match = _CONF_LINE.match(line)
+        if match is None or match.group("hash"):
+            continue
+        start = index
+        while start > 0 and lines[start - 1].lstrip().startswith("#"):
+            start -= 1
+        found.append((match.group("key"), lines[start : index + 1]))
+    return found
+
+
+def add_missing_keys(text: str, dist: str) -> tuple[str, int]:
+    """`text` with the keys `dist` assigns and `text` lacks added at its end, and how many.
+
+    For a conf already on the dist's prefix. Each comes with the comment block above it in
+    the dist, under `ADDED_MARKER` (written once). A key is there when the conf has it
+    active or commented out. Keys the module dropped are left where they are.
+    """
+    have = {
+        match.group("key")
+        for line in text.replace("\r\n", "\n").split("\n")
+        if (match := _CONF_LINE.match(line.removeprefix(BOM))) is not None
+    }
+    missing = [lines for key, lines in _dist_entries(dist) if key not in have]
+    if not missing:
+        return text, 0
+    ending = "\r\n" if "\r\n" in text else "\n"
+    block: list[str] = []
+    if ADDED_MARKER not in text:
+        block += ["", ADDED_MARKER]
+    for lines in missing:
+        block += ["", *lines]
+    lead = "" if text.endswith("\n") or not text else ending
+    return text + lead + ending.join(block) + ending, len(missing)
+
+
 def rename_env_text(text: str, service: str, prefix: str) -> tuple[str, int]:
     """`text` with `service`'s environment names under `prefix`, and how many lines changed."""
     lines = text.split("\n")
@@ -139,6 +266,7 @@ class _Change:
     text: str
     count: int
     backed_up: bool
+    added: int = 0
 
 
 def _read(path: Path) -> str:
@@ -151,8 +279,12 @@ def _changes(entry: CatalogEntry, server_dir: Path, prefix: str) -> list[_Change
     conf_path = server_dir / playerbots_keys.CONF
     if conf_path.is_file() and not conf_path.is_symlink():
         text, count = rename_conf_text(_read(conf_path), prefix)
-        if count:
-            found.append(_Change(conf_path, text, count, backed_up=True))
+        added = 0
+        dist = playerbots_keys.read_dist(server_dir)
+        if prefix == playerbots_keys.NEW and dist is not None:
+            text, added = add_missing_keys(text, dist)
+        if count or added:
+            found.append(_Change(conf_path, text, count, backed_up=True, added=added))
     base = server_dir / composegen.BASE_FILE
     if not (base.is_file() and composegen.is_ours(base)):
         return found
@@ -167,7 +299,7 @@ def _changes(entry: CatalogEntry, server_dir: Path, prefix: str) -> list[_Change
     return found
 
 
-def settle(entry: CatalogEntry, server_dir: Path) -> str | None:
+def settle(entry: CatalogEntry, server_dir: Path, *, rollback: bool = False) -> str | None:
     """Rename this server's bot settings to its module's prefix; the line to say, or None.
 
     Raises:
@@ -180,6 +312,16 @@ def settle(entry: CatalogEntry, server_dir: Path) -> str | None:
     prefix = playerbots_keys.module_prefix(server_dir)
     if prefix is None:
         return None
+    now = prefix
+    built = read_built(server_dir)
+    rebuild = server_build_presses.under_server_build(server_build_presses.REBUILD)
+    went_back = False
+    if built is not None and built != prefix:
+        if not rollback:
+            raise RenameRefused(OLDER_BUILD.format(built=built, now=prefix, rebuild=rebuild))
+        # A rollback starts the build from before, which reads the image's prefix: the
+        # settings follow IT even though the checkout is on the module's.
+        went_back, prefix = True, built
     old = playerbots_keys.other(prefix)
     try:
         changes = _changes(entry, server_dir, prefix)
@@ -196,4 +338,16 @@ def settle(entry: CatalogEntry, server_dir: Path) -> str | None:
         return None
     count = sum(change.count for change in said)
     files = ", ".join(change.path.name for change in said)
-    return SAID.format(new=prefix, old=old, count=count, s="" if count == 1 else "s", files=files)
+    added = sum(change.added for change in said)
+    if went_back:
+        if not count:
+            return None
+        return ROLLED_BACK.format(
+            built=prefix, now=now, count=count, s="" if count == 1 else "s", rebuild=rebuild
+        )
+    if not count:  # only keys the module added (T662)
+        return ADDED_ONLY.format(added=added, s="" if added == 1 else "s", files=files)
+    line = SAID.format(new=prefix, old=old, count=count, s="" if count == 1 else "s", files=files)
+    if added:
+        line += ADDED_NOTE.format(added=added, s="" if added == 1 else "s")
+    return line

@@ -17,7 +17,10 @@ from pathlib import Path
 
 import pytest
 
-from tests.support_native import Recorder
+from tests.support_native import Recorder, engine, install
+from tests.test_rebuild import _daemon_for, _seams_of, a_finished_install
+from tests.test_rebuild_parks_a_finished_build import _parked_once
+from tests.test_rebuild_waits_for_docker import SILENT_FOR_THE_WAIT, _Clock, _Probe
 from yulon import (
     bot_population,
     channel_setup,
@@ -33,7 +36,12 @@ from yulon.catalog import composegen, native
 from yulon.catalog.catalog import load_catalog
 from yulon.catalog.families import conf
 from yulon.catalog.families.azerothcore import AzerothCoreInstaller
-from yulon.catalog.installer import InstallerError
+from yulon.catalog.installer import (
+    InstallerError,
+    InstallOptions,
+    RollbackNotDone,
+    WorldStoppedAfterReadyError,
+)
 from yulon.controller import Controller, StartRefused
 
 CATALOG = load_catalog()
@@ -70,7 +78,9 @@ NEW_DIST = _DIST_BODY.format(p="Playerbots.")
 OLD_CONF = (
     "# my notes: ünïcode kept\n"
     "AiPlayerbot.Enabled = 1\n"
+    "AiPlayerbot.RandomBotAutologin = 1\n"
     "  AiPlayerbot.MinRandomBots = 50\r\n"
+    "AiPlayerbot.MaxRandomBots = 50\n"
     "#AiPlayerbot.CommandServerPort = 8888\n"
     'AiPlayerbot.RandomBotAccountPrefix = "mybot"\n'
     "AiPlayerbot.MaxAddedBots = 12\n"
@@ -607,3 +617,350 @@ def test_the_engine_reading_knows_a_build_on_either_side(
 
     read = party.read_engine_in_binary("ac-worldserver", binary=str(binary), run=run)
     assert read.engine is True, read
+
+
+# -- the build the server runs, not only the checkout (T660) --------------------------
+
+BUILT_PREFIX_FILE = ".yulon-built-prefix.json"
+
+
+def _crashed_update(server_dir: Path) -> None:
+    """An image built on the old module, a checkout already moved to the new one."""
+    _installed(server_dir, OLD_DIST, OLD_CONF)
+    playerbots_rename.remember_built(server_dir)
+    lay_module(server_dir, NEW_DIST)
+
+
+def test_a_checkout_ahead_of_the_image_is_not_renamed_forward(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _crashed_update(tmp_path)
+    conf_before = (tmp_path / CONF).read_bytes()
+    override_before = (tmp_path / OVERRIDE).read_bytes()
+
+    with pytest.raises(StartRefused) as refused:
+        _start(monkeypatch, tmp_path)
+
+    said = str(refused.value)
+    assert "older than its sources" in said
+    assert "Rebuild the server…" in said and "Server build ▾" in said
+    assert "AiPlayerbot.*" in said and "Playerbots.*" in said
+    assert (tmp_path / CONF).read_bytes() == conf_before
+    assert (tmp_path / OVERRIDE).read_bytes() == override_before
+    assert not tuning.backups_of(tmp_path / CONF)
+
+
+def test_the_installs_up_and_a_recreate_refuse_a_checkout_ahead_of_the_image(
+    tmp_path: Path,
+) -> None:
+    _crashed_update(tmp_path)
+    for run in (
+        lambda: list(_engine(Recorder()).stage_up(_context(tmp_path))),
+        lambda: list(
+            _engine(
+                Recorder(), docker_ready=lambda: True, recreate=lambda *a, **k: True
+            ).stage_recreate(_context(tmp_path))
+        ),
+    ):
+        with pytest.raises(InstallerError, match="older than its sources"):
+            run()
+    assert (tmp_path / CONF).read_bytes().decode("utf-8") == OLD_CONF
+
+
+def test_an_image_and_checkout_that_agree_start_as_before(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _installed(tmp_path, OLD_DIST, OLD_CONF)
+    playerbots_rename.remember_built(tmp_path)
+    _controller, started = _start(monkeypatch, tmp_path)
+    assert started == [tmp_path]
+    assert (tmp_path / CONF).read_bytes().decode("utf-8") == OLD_CONF
+
+
+def test_a_server_with_no_build_record_is_judged_by_its_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A folder built by an older Yu'lon has no record: T657's rename, as before."""
+    _v0915_server(tmp_path)
+    assert not (tmp_path / BUILT_PREFIX_FILE).exists()
+    _start(monkeypatch, tmp_path)
+    assert (tmp_path / CONF).read_bytes().decode("utf-8") == NEW_CONF
+
+
+def test_a_record_that_cannot_be_read_is_no_record(tmp_path: Path) -> None:
+    for body in ("not json", '{"version": 1, "prefix": "Other."}', '{"version": 2}', "[]"):
+        (tmp_path / BUILT_PREFIX_FILE).write_text(body, encoding="utf-8")
+        assert playerbots_rename.read_built(tmp_path) is None
+
+
+def test_the_record_is_the_prefix_the_checkout_read_when_it_was_built(tmp_path: Path) -> None:
+    lay_module(tmp_path, NEW_DIST)
+    playerbots_rename.remember_built(tmp_path)
+    assert playerbots_rename.read_built(tmp_path) == playerbots_keys.NEW
+    lay_module(tmp_path, OLD_DIST)
+    playerbots_rename.remember_built(tmp_path)
+    assert playerbots_rename.read_built(tmp_path) == playerbots_keys.OLD
+
+
+def test_a_module_that_cannot_be_told_forgets_the_record(tmp_path: Path) -> None:
+    lay_module(tmp_path, OLD_DIST)
+    playerbots_rename.remember_built(tmp_path)
+    (tmp_path / playerbots_keys.DIST).unlink()
+    playerbots_rename.remember_built(tmp_path)
+    assert playerbots_rename.read_built(tmp_path) is None
+
+
+def test_the_installs_compile_records_what_it_built(tmp_path: Path) -> None:
+    lay_module(tmp_path, NEW_DIST)
+    rec = Recorder()
+    ctx = _context(tmp_path)
+    list(_engine(rec).stage_build(ctx))
+    assert playerbots_rename.read_built(tmp_path) == playerbots_keys.NEW
+
+
+def _built_server(tmp_path: Path) -> tuple[Recorder, Path]:
+    """An install through the real stages, on the old module, built and recorded."""
+    rec = Recorder()
+    server_dir = tmp_path / "server"
+
+    def lay_on_clone(dest: Path) -> None:
+        if dest.name == "mod-playerbots":
+            lay_module(server_dir, OLD_DIST)
+
+    rec.on_clone = lay_on_clone
+    install(rec, server_dir)
+    assert playerbots_rename.read_built(server_dir) == playerbots_keys.OLD
+    return rec, server_dir
+
+
+def test_a_rebuild_on_the_moved_module_records_it_and_starts_renamed(tmp_path: Path) -> None:
+    rec, server_dir = _built_server(tmp_path)
+    conf_path = server_dir / CONF
+    conf_path.parent.mkdir(parents=True, exist_ok=True)
+    conf_path.write_bytes(OLD_CONF.encode("utf-8"))
+    lay_module(server_dir, NEW_DIST)
+
+    list(engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
+
+    assert playerbots_rename.read_built(server_dir) == playerbots_keys.NEW
+    assert conf_path.read_bytes().decode("utf-8") == NEW_CONF
+
+
+def test_an_update_that_died_in_its_compile_leaves_the_old_images_prefix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rec, server_dir = _built_server(tmp_path)
+    (server_dir / CONF).parent.mkdir(parents=True, exist_ok=True)
+    (server_dir / CONF).write_bytes(OLD_CONF.encode("utf-8"))
+    lay_module(server_dir, NEW_DIST)  # the update moved the sources, then died
+
+    gen = engine(rec).rebuild(InstallOptions(server_dir=server_dir))
+    for line in gen:
+        if line == "--- build":
+            break
+    gen.close()
+
+    assert playerbots_rename.read_built(server_dir) == playerbots_keys.OLD
+    with pytest.raises(StartRefused, match="older than its sources"):
+        _start(monkeypatch, server_dir)
+
+
+def test_a_rebuild_put_back_restores_the_old_images_prefix(tmp_path: Path) -> None:
+    rec, server_dir = _built_server(tmp_path)
+    lay_module(server_dir, NEW_DIST)
+    answers = [False, True]
+
+    def wait_ready(spec: object, ready: object) -> bool:
+        return answers.pop(0) if len(answers) > 1 else answers[0]
+
+    with pytest.raises(native.RebuildChangedTheServer):
+        list(engine(rec, wait_ready=wait_ready).rebuild(InstallOptions(server_dir=server_dir)))
+    assert "build" in rec.calls
+    assert playerbots_rename.read_built(server_dir) == playerbots_keys.OLD
+
+
+def test_a_build_kept_after_the_world_stopped_records_the_new_prefix(tmp_path: Path) -> None:
+    rec, server_dir = _built_server(tmp_path)
+    lay_module(server_dir, NEW_DIST)
+    aborted = native.WorldOutput(
+        text="ready...\nAvg Diff: 15ms\nWorld server is up and running\n>> ABORTED",
+        restarts=0,
+        status="exited",
+    )
+    with pytest.raises(WorldStoppedAfterReadyError):
+        list(
+            engine(rec, world_output=lambda spec: aborted).rebuild(
+                InstallOptions(server_dir=server_dir)
+            )
+        )
+    assert playerbots_rename.read_built(server_dir) == playerbots_keys.NEW
+
+
+def test_a_rebuild_that_uses_the_kept_build_records_the_prefix_it_was_made_from(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rec, daemon, server_dir = _parked_once(tmp_path)
+    # A file laid in the folder would change the kept build's fingerprint and so retire it.
+    monkeypatch.setattr(playerbots_keys, "module_prefix", lambda _dir: playerbots_keys.NEW)
+    playerbots_rename.write_built(server_dir, playerbots_keys.OLD)
+
+    list(engine(rec, **_seams_of(rec, daemon)).rebuild(InstallOptions(server_dir=server_dir)))
+
+    assert "build" not in rec.calls, "the kept build was used, nothing was compiled"
+    assert playerbots_rename.read_built(server_dir) == playerbots_keys.NEW
+
+
+# -- keys the newer module has and the old conf lacks (T662) --------------------------
+
+NEWER_DIST = (
+    NEW_DIST + "\n#\n#    Playerbots.ReactStrategies\n#    Strategies bots react with\n"
+    '#    Default: ""\n#\nPlayerbots.ReactStrategies = ""\n'
+    '\n# Random bots\' own\nPlayerbots.RandomBotReactStrategies = "x,y"\n'
+    "#Playerbots.ACommentedOne = 3\n"
+)
+MARKER = "Added by Yu'lon from the new module"
+
+
+def _forward_server(server_dir: Path) -> None:
+    _installed(server_dir, OLD_DIST, OLD_CONF)
+    lay_module(server_dir, NEWER_DIST)
+
+
+def test_a_conf_moved_forward_gets_the_keys_the_new_module_has(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _forward_server(tmp_path)
+
+    controller, _started = _start(monkeypatch, tmp_path)
+
+    text = (tmp_path / CONF).read_bytes().decode("utf-8")
+    assert text.startswith(NEW_CONF), "the renamed conf is untouched above the addition"
+    tail = text[len(NEW_CONF) :]
+    assert MARKER in tail
+    assert "#    Strategies bots react with" in tail, "its comment block comes with it"
+    assert 'Playerbots.ReactStrategies = ""' in tail
+    assert 'Playerbots.RandomBotReactStrategies = "x,y"' in tail
+    assert "ACommentedOne" not in tail, "a key the dist only comments out is not added"
+    assert "Playerbots.Enabled" not in tail, "a key the conf has is not added again"
+    said = controller.bot_settings_renamed
+    assert said is not None and "added 2" in said
+
+
+def test_adding_the_new_keys_is_done_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _forward_server(tmp_path)
+    _start(monkeypatch, tmp_path)
+    first = (tmp_path / CONF).read_bytes()
+    again, _started = _start(monkeypatch, tmp_path)
+    assert (tmp_path / CONF).read_bytes() == first
+    assert again.bot_settings_renamed is None
+    assert (tmp_path / CONF).read_bytes().count(MARKER.encode()) == 1
+
+
+def test_the_backward_rename_keeps_the_added_keys_under_the_old_prefix(tmp_path: Path) -> None:
+    _forward_server(tmp_path)
+    playerbots_rename.settle(WOTLK, tmp_path)
+    lay_module(tmp_path, OLD_DIST)
+    playerbots_rename.settle(WOTLK, tmp_path)
+    text = (tmp_path / CONF).read_bytes().decode("utf-8")
+    assert 'AiPlayerbot.ReactStrategies = ""' in text, "unread by the old module: harmless"
+    assert "\nPlayerbots.ReactStrategies" not in text
+    assert text.count(MARKER) == 1
+
+
+def test_the_backward_rename_adds_nothing_from_the_old_dist(tmp_path: Path) -> None:
+    _forward_server(tmp_path)
+    playerbots_rename.settle(WOTLK, tmp_path)
+    lay_module(tmp_path, OLD_DIST + "AiPlayerbot.OnlyOld = 1\n")
+    playerbots_rename.settle(WOTLK, tmp_path)
+    assert "OnlyOld" not in (tmp_path / CONF).read_bytes().decode("utf-8")
+
+
+def test_the_marker_is_written_once_however_many_times_keys_are_added() -> None:
+    first, _ = playerbots_rename.add_missing_keys(NEW_CONF, NEWER_DIST)
+    more = NEWER_DIST + "Playerbots.AnotherNew = 1\n"
+    second, added = playerbots_rename.add_missing_keys(first, more)
+    assert added == 1 and second.count(MARKER) == 1 and "Playerbots.AnotherNew = 1" in second
+
+
+def test_a_crlf_conf_gets_crlf_lines(tmp_path: Path) -> None:
+    _installed(tmp_path, OLD_DIST, OLD_CONF.replace("\r\n", "\n").replace("\n", "\r\n"))
+    lay_module(tmp_path, NEWER_DIST)
+    playerbots_rename.settle(WOTLK, tmp_path)
+    raw = (tmp_path / CONF).read_bytes()
+    assert b"\n" not in raw.replace(b"\r\n", b""), "no bare line feed was written"
+    assert b'Playerbots.ReactStrategies = ""' in raw
+
+
+# -- cold review of the first T660 build ----------------------------------------------
+
+
+def test_a_rollback_that_could_not_put_the_tags_back_keeps_the_new_images_prefix(
+    tmp_path: Path,
+) -> None:
+    """The tags still name the new build: its record must not go back to the old image's."""
+    rec = Recorder(images=True)
+    server_dir = a_finished_install(rec, tmp_path)
+    lay_module(server_dir, OLD_DIST)
+    playerbots_rename.remember_built(server_dir)
+    lay_module(server_dir, NEW_DIST)
+    daemon = _daemon_for(server_dir)
+    clock = _Clock()
+    moved_back: list[str] = []
+
+    def tag_image(src: str, dst: str) -> str:
+        if src.endswith(native.ROLLBACK_TAG_SUFFIX):
+            moved_back.append(dst)
+            if len(moved_back) == 2:
+                return "Error response from daemon: read-only file system"
+        return daemon.tag_image(src, dst)
+
+    with pytest.raises(RollbackNotDone):
+        list(
+            engine(
+                rec,
+                **{**_seams_of(rec, daemon), "tag_image": tag_image},
+                docker_ready=_Probe(clock, *SILENT_FOR_THE_WAIT, then=True),
+                monotonic=clock.monotonic,
+                sleep=clock.sleep,
+            ).rebuild(InstallOptions(server_dir=server_dir))
+        )
+    assert playerbots_rename.read_built(server_dir) == playerbots_keys.NEW
+
+
+def test_a_rebuild_that_never_got_ready_puts_the_conf_back_for_the_old_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rec, server_dir = _built_server(tmp_path)
+    (server_dir / CONF).parent.mkdir(parents=True, exist_ok=True)
+    (server_dir / CONF).write_bytes(OLD_CONF.encode("utf-8"))
+    lay_module(server_dir, NEW_DIST)  # the checkout moved on, as the Modules tab does
+    answers = [False, True]
+
+    def wait_ready(spec: object, ready: object) -> bool:
+        return answers.pop(0) if len(answers) > 1 else answers[0]
+
+    lines: list[str] = []
+    with pytest.raises(native.RebuildChangedTheServer) as raised:
+        for line in engine(rec, wait_ready=wait_ready).rebuild(
+            InstallOptions(server_dir=server_dir)
+        ):
+            lines.append(line)
+
+    said = "\n".join(lines) + str(raised.value)
+    assert "did not rename your settings" not in said and "an update that stopped" not in said
+    assert "renamed" in said and "AiPlayerbot.*" in said and "Playerbots.*" in said
+    assert "Rebuild the server…" in said
+    assert (server_dir / CONF).read_bytes().decode("utf-8") == OLD_CONF, "for the old binary"
+    # The old build runs again; a later Start is honest about it and names the way out.
+    with pytest.raises(StartRefused, match="older than its sources"):
+        _start(monkeypatch, server_dir)
+
+
+def test_a_conf_the_rename_already_moved_still_gets_the_keys_it_lacks(tmp_path: Path) -> None:
+    _installed(tmp_path, NEWER_DIST, NEW_CONF)
+    said = playerbots_rename.settle(WOTLK, tmp_path)
+    text = (tmp_path / CONF).read_bytes().decode("utf-8")
+    assert text.startswith(NEW_CONF) and MARKER in text
+    assert 'Playerbots.ReactStrategies = ""' in text
+    assert said is not None and "has 2 settings" in said and "renamed" not in said
+    assert playerbots_rename.settle(WOTLK, tmp_path) is None
