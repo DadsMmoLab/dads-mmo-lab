@@ -533,6 +533,21 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         hits=(".cmangos",),
     ),
     Site(
+        "yulon.playerbots_rename",
+        "settle",
+        "the bot settings renamed to the config prefix the server's mod-playerbots reads (T657)",
+        {
+            "azerothcore": supported(),
+            "cmangos": not_applicable(
+                "cmangos/playerbots and TortoiseBots kept the AiPlayerbot. names; no mod-playerbots"
+            ),
+            "trinitycore": not_applicable(
+                "Centurion's bot module reads Playerbot.* keys of its own; no mod-playerbots"
+            ),
+        },
+        hits=("'azerothcore'",),
+    ),
+    Site(
         "yulon.bot_population",
         "where",
         "the file the Bots tab writes the random-bot count into",
