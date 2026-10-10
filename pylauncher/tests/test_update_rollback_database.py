@@ -64,7 +64,7 @@ NEW_BUILD_CHANGES: dict[str, tuple[str, ...]] = {
     "wow-unbound": ("auth", "characters", "world", "playerbots"),  # WotLK's family and pin
     "wow-tbc": (),
     "wow-vanilla": (),
-    "wow-tortoise": ("auth", "characters"),
+    "wow-tortoise": ("auth", "characters", "world"),
     "wow-centurion": (),
 }
 """Per shipped entry, by role: what its new build can write at its first start.
@@ -76,8 +76,9 @@ NEW_BUILD_CHANGES: dict[str, tuple[str, ...]] = {
   updates before the first start, so those three are copied first too.
 * Tortoise: the worldserver's own AutoUpdater (`Database.AutoUpdate.Enabled`
   in its conf table) migrates the login, characters and world databases at
-  start. World is left out on the owner's word of 2026-10-04: it is the biggest
-  and the slowest to copy, so its rollback says it is not put back.
+  start, so all three are copied. World was left out on the owner's word of
+  2026-10-04 until T643 measured it (144 MB in 4.1 s on yulon-ubuntu, 2026-10-10)
+  and found a world migration could not be undone without it.
 * TBC, Vanilla: no start-time updater (no AutoUpdate key; their `*-db`
   repositories stay on their pin).
 * Centurion: `Updates.EnableDatabases` is forced to 0 by the catalog's own
@@ -101,7 +102,7 @@ def test_every_shipped_entry_names_the_databases_its_new_build_changes() -> None
     ("game", "names"),
     [
         ("wow-wotlk", WOTLK_COPY),
-        ("wow-tortoise", ("tw_logon", "tw_char")),
+        ("wow-tortoise", ("tw_logon", "tw_char", "tw_world")),
         ("wow-tbc", ()),
         ("wow-vanilla", ()),
         ("wow-centurion", ()),
@@ -360,16 +361,14 @@ def test_a_copy_that_cannot_be_taken_never_starts_the_new_build(tmp_path: Path) 
     assert "is NOT put back" not in text
 
 
-def test_tortoise_copies_login_and_characters_and_says_world_is_not_put_back(
-    tmp_path: Path,
-) -> None:
+def test_tortoise_copies_and_puts_back_login_characters_and_world(tmp_path: Path) -> None:
+    """Since T643 the world goes back with the other two (`tests/test_tortoise_world_copy.py`)."""
     rec, _dir, _made, fake, _said, raised = _press(
         tmp_path, TORTOISE, wait_ready=_old_build_comes_back()
     )
-    assert [copy.databases for copy in fake.taken] == [("tw_logon", "tw_char")]
-    assert "put-back:tw_logon,tw_char" in rec.calls
-    text = str(raised)
-    assert "tw_world" in text and "not copied" in text
+    assert [copy.databases for copy in fake.taken] == [("tw_logon", "tw_char", "tw_world")]
+    assert "put-back:tw_logon,tw_char,tw_world" in rec.calls
+    assert "not copied" not in str(raised)
 
 
 @pytest.mark.parametrize("entry", [TBC, VANILLA], ids=lambda entry: entry.id)
@@ -1150,7 +1149,8 @@ def test_the_wotlk_question_names_all_four_databases_and_what_copying_them_costs
     assert "only the newest" in text
 
 
-def test_the_tortoise_question_says_its_world_database_is_not_copied() -> None:
+def test_a_database_a_family_leaves_out_of_the_copy_is_named_in_the_question() -> None:
+    """The spine's `databases_changed_but_not_copied()` hook; unused by shipped games (T643)."""
     text = native.update_to_latest_confirmation(
         TORTOISE, Path("/srv"), "x/y", copied=("tw_logon", "tw_char"), not_copied=("tw_world",)
     )
