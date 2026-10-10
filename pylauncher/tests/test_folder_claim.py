@@ -165,6 +165,15 @@ def _other_yulons_claim(cli: Path, name: str) -> subprocess.Popen[bytes]:
     return proc
 
 
+def _wait_for_the_run(state: Path) -> None:
+    """Until the fake daemon has been asked to `run` a claim (T631c): a Stop before that has
+    nothing to end or to sweep, and a sleep only makes that unlikely on a loaded runner."""
+    deadline = time.monotonic() + HANG_BOUND
+    while not (state / "claim-images.log").exists():
+        assert time.monotonic() < deadline, "the press never started its run"
+        time.sleep(0.005)
+
+
 def _wait_for(state: Path, name: str, there: bool) -> None:
     deadline = time.monotonic() + HANG_BOUND
     while (name in fake_containers(state)) != there:
@@ -378,7 +387,7 @@ def test_a_stop_while_the_claim_comes_up_ends_the_wait_at_once(
 
     worker = threading.Thread(target=press)
     worker.start()
-    time.sleep(0.3)
+    _wait_for_the_run(fake_docker)
     stopped = time.monotonic()
     cancel.set()
     worker.join(HANG_BOUND)
@@ -435,7 +444,10 @@ def test_a_stop_is_not_held_up_by_a_slow_docker_question(
     folder.mkdir()
     (fake_docker / "claim-slow").write_text("", encoding="utf-8")
 
+    asking = threading.Event()
+
     def slow(_name: str, timeout: float = docker._ASK_AGAIN_TIMEOUT, **_kw: object) -> None:
+        asking.set()  # the press has started its run and is in a look
         time.sleep(timeout)  # Docker does not answer: the question runs to its bound
 
     monkeypatch.setattr(docker, "_claim_facts", slow)
@@ -451,7 +463,7 @@ def test_a_stop_is_not_held_up_by_a_slow_docker_question(
 
     worker = threading.Thread(target=press)
     worker.start()
-    time.sleep(0.3)
+    assert asking.wait(HANG_BOUND), "the press never asked Docker"
     stopped = time.monotonic()
     cancel.set()
     worker.join(HANG_BOUND)
@@ -607,8 +619,11 @@ def test_a_late_claim_whose_first_removal_fails_is_swept_again(
     cancel = threading.Event()
     tries: list[str] = []
     gone = threading.Event()
+    run_started = threading.Event()
 
     def facts(_name: str, timeout: float = 5.0, **_kw: object) -> object:
+        if not cancel.is_set():
+            run_started.set()  # the press has started its run and is looking for it
         if not cancel.is_set() or gone.is_set():
             return None
         return docker._ClaimFacts("mine-id", "created", nonce, docker.owner_id())
@@ -622,16 +637,16 @@ def test_a_late_claim_whose_first_removal_fails_is_swept_again(
     monkeypatch.setattr(docker, "_claim_facts", facts)
     monkeypatch.setattr(docker, "_remove_claim", remove)
     monkeypatch.setattr(docker, "_CLAIM_SWEEP_POLL", 0.05)
-    monkeypatch.setattr(docker, "_CLAIM_SWEEP_SECONDS", 10.0)
+    monkeypatch.setattr(docker, "_CLAIM_SWEEP_SECONDS", 30.0)
     worker = threading.Thread(
         target=lambda: pytest.raises(docker.ClaimStopped, _hold, folder, cancel)
     )
     worker.start()
-    time.sleep(0.3)
+    assert run_started.wait(HANG_BOUND), "the press never started its run"
     cancel.set()
     worker.join(HANG_BOUND)
     (fake_docker / "claim-slow").unlink()
-    assert gone.wait(HANG_BOUND), f"removal tried {tries}, never done"
+    assert gone.wait(20.0), f"removal tried {tries}, never done"
     assert tries[:2] == ["mine-id", "mine-id"], tries
 
 
@@ -685,7 +700,7 @@ def test_a_released_claim_whose_removal_failed_is_swept(
 
     with docker.folder_claim(folder, IMAGE):
         pass  # the CLI is killed without its stdin closing: the claim stays, as on a slow daemon
-    assert gone.wait(HANG_BOUND), f"removal tried {tries}"
+    assert gone.wait(20.0), f"removal tried {tries}"
     deadline = time.monotonic() + HANG_BOUND
     while name in fake_containers(fake_docker):
         assert time.monotonic() < deadline, "the claim stayed"
