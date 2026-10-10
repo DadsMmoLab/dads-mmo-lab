@@ -389,6 +389,14 @@ compiler's words.
 """
 
 
+ALE_PLAYERBOTS_ERROR = re.compile(
+    r"(?:/azerothcore|(?<![\w./-])/src)/modules/mod-ale/src/LuaEngine/methods/Playerbots/"
+    r"[^\s:'\"]+:\d+(?::\d+)?: (?:fatal )?error:"
+)
+"""A compiler error inside mod-ale's Playerbots bindings (T645), the one place mod-ale calls
+mod-playerbots by name: the two modules disagree on a name (`ale_playerbots`)."""
+
+
 class BuildErrorScanner:
     """The module folders a build's compiler, linker or CMake errors name, in the order met.
 
@@ -398,11 +406,15 @@ class BuildErrorScanner:
 
     def __init__(self) -> None:
         self._named: dict[str, None] = {}
+        self.ale_playerbots_failed = False
+        """An error was in mod-ale's Playerbots support (T645): `ALE_PLAYERBOTS_ERROR`."""
 
     def feed(self, line: str) -> None:
         for pattern in _ERRORS:
             for found in pattern.finditer(line):
                 self._named.setdefault(found.group("id"), None)
+        if ALE_PLAYERBOTS_ERROR.search(line):
+            self.ale_playerbots_failed = True
 
     @property
     def named(self) -> tuple[str, ...]:

@@ -64,6 +64,7 @@ from yulon.catalog.native import (
     Seams,
     SourceVersion,
     StagedInstaller,
+    ale_playerbots_note,
     core_off_its_moved_pin_note,
     correction_phases,
     module_order_note,
@@ -454,6 +455,7 @@ def with_module_moves(
     put_back: ModulePutBack | None,
     kept_settles: bool = True,
     note: ModuleNote | None = None,
+    lag: str = "",
 ) -> Iterator[str]:
     """A build press's lines, passed through, with the module-update record kept true (T557).
 
@@ -483,6 +485,9 @@ def with_module_moves(
     `note` (T586) is asked, after any put-back, for one more sentence about the
     modules the errors named -- which press builds them, and in which order --
     on the same failures the put-back runs on; nothing when no module was named.
+    `lag` (T645) is said INSTEAD when an error was inside mod-ale's Playerbots
+    support (`BuildErrorScanner.ale_playerbots_failed`): there the cause is known,
+    and "update mod-ale" is not the way out (`native.ale_playerbots_note()`).
     """
     scanner = module_moves.BuildErrorScanner()
     try:
@@ -506,7 +511,9 @@ def with_module_moves(
                 )
                 said = ""
         noted = ""
-        if note is not None and scanner.named:
+        if lag and scanner.ale_playerbots_failed:
+            noted = lag
+        elif note is not None and scanner.named:
             try:
                 noted = note(scanner.named)
             except Exception as failure:  # noqa: BLE001 - never hide the build's own failure
@@ -607,6 +614,7 @@ def rebuild_for_app(
             server_dir,
             put_back=put_back,
             note=_core_note(entry, server_dir, wsl_distro),
+            lag=ale_playerbots_note(server_build_presses.REBUILD),
         )
 
     return rebuild
@@ -778,6 +786,7 @@ def update_to_latest_for_app(
                 put_back=None,
                 kept_settles=False,
                 note=partial(module_order_note, press=server_build_presses.UPDATE_TO_LATEST),
+                lag=ale_playerbots_note(server_build_presses.UPDATE_TO_LATEST),
             )
         except RewrittenHistory as exc:
             met[exc.repo] = exc.line
@@ -791,6 +800,7 @@ def update_to_latest_for_app(
             put_back=None,
             kept_settles=False,
             note=partial(module_order_note, press=server_build_presses.RETURN_TO_PIN),
+            lag=ale_playerbots_note(server_build_presses.RETURN_TO_PIN),
         )
 
     def pins() -> tuple[CatalogPin, ...]:

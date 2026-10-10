@@ -32,7 +32,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import ClassVar
 
-from yulon import docker, git, networking, server_build_presses
+from yulon import ale_playerbots, docker, git, networking, server_build_presses
 from yulon.catalog import snapshot
 from yulon.catalog.catalog import AzerothCoreData, CatalogEntry, EmulatorSource
 from yulon.catalog.families import carried, scriptdeploy
@@ -410,6 +410,50 @@ class AzerothCoreInstaller(StagedInstaller):
         if native is None or native.azerothcore is None:
             return AzerothCoreData()
         return native.azerothcore
+
+    def stage_build(self, ctx: StageContext) -> Iterator[str]:
+        """The spine's compile, with mod-ale's Playerbots names bridged for it alone (T645).
+
+        Every press that compiles comes through here: the install's `build` stage,
+        `rebuild()`'s (Rebuild, "Update the server to latest…", "Return to the tested
+        pin…", a moved-in server's rebuild). `ale_playerbots.bridge()` is a no-op unless
+        mod-ale and mod-playerbots disagree on a config name; whatever it rewrote is put
+        back once the compile returns, fails or is stopped, so no git question outside
+        the compile ever sees it. Not yielded from the `finally`: a generator closed
+        mid-compile must not yield, so there the lines go to the log.
+
+        The bridge runs INSIDE the `try` and returns its lines only once every write is
+        done (cold review of db5da4df): a press closed at one of those lines (GeneratorExit)
+        still reaches the put-back.
+
+        Also before the update route's dirty-tree guard: `_refuse_unless_updatable()`.
+        """
+        finished = False
+        try:
+            yield from ale_playerbots.bridge(ctx.server_dir)
+            yield from super().stage_build(ctx)
+            finished = True
+        finally:
+            said = ale_playerbots.put_back(ctx.server_dir)
+            if not finished:
+                for line in said:
+                    logger.info(line)
+        yield from said
+
+    def _refuse_unless_updatable(
+        self, server_dir: Path, moving: Sequence[EmulatorSource]
+    ) -> tuple[tuple[EmulatorSource, Path, str], ...]:
+        """The spine's source refusals, after putting back a mod-ale bridge left on disk (T645).
+
+        On Unbound mod-ale is a source this route moves, and a compile Yu'lon never saw
+        finish leaves the bridged file behind: the dirty-tree guard would refuse it as the
+        player's own change, before any compile could clean it up. Called inside the
+        press's reservation (T568), so no other Yu'lon's compile is under way; the
+        put-back touches only a file whose bytes are still the ones the bridge wrote.
+        """
+        for line in ale_playerbots.put_back(server_dir):
+            logger.info(line)
+        return super()._refuse_unless_updatable(server_dir, moving)
 
     # -- T553: the source patches and Lua scripts this entry carries ---------
 

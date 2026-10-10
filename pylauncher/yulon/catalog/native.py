@@ -1724,6 +1724,41 @@ def module_order_note(named: Sequence[str], press: str) -> str:
     )
 
 
+def ale_playerbots_note(press: str) -> str:
+    """Said instead of the module notes when the error was in mod-ale's Playerbots support (T645).
+
+    The generic note says mod-ale "may not build on the new server code yet" and to
+    update it: wrong here. The two modules disagree on a NAME that `yulon/ale_playerbots`
+    could not bridge, and either one can be the one behind: mod-playerbots ed54b459
+    renamed its config members (2026-10-06) with mod-ale still on the old names, and
+    azerothcore/mod-ale#409 (84b85cc, 2026-10-10) then took the new names while WotLK's
+    tested mod-playerbots (037c0141) still has the old. So the sentence names both ways
+    out and does not guess which one applies. An update or a return was put back, so the
+    build the player has keeps running.
+    """
+    said = (
+        "The error is in mod-ale's Playerbots support, which calls mod-playerbots by name: "
+        "one of the two has renamed something the other still calls by its old name, and "
+        "Yu'lon could not match it."
+    )
+    if press == server_build_presses.UPDATE_TO_LATEST:
+        return (
+            f"{said} Keep the build you have, and press "
+            f"{server_build_presses.under_server_build(press)} again once mod-ale has caught up."
+        )
+    if press == server_build_presses.REBUILD:
+        return (
+            f"{said} If mod-ale is the newer one, "
+            f"{server_build_presses.under_server_build(server_build_presses.UPDATE_TO_LATEST)} "
+            "brings the newest mod-playerbots. If this server is past the commits this version "
+            "of Yu'lon was tested with, "
+            f"{server_build_presses.under_server_build(server_build_presses.RETURN_TO_PIN)} "
+            "builds those. If mod-ale is the older one, updating it on the Modules tab helps "
+            "once its authors have caught up."
+        )
+    return f"{said} Keep the build you have until mod-ale and the tested commits agree again."
+
+
 def import_reads_as_finished(state: docker.ImportState) -> bool:
     """Do these databases read as an import that COMPLETED? The one predicate.
 

@@ -3690,6 +3690,7 @@ class Applier:
         """
         self._refuse_a_server_source(manifest)
         self._refuse_a_route_item_that_is_more(manifest)
+        self._put_back_a_bridge(f"Install {manifest.name}")
         log = _Log()
         if complete is None:
             complete = self._recompleter_for(manifest)
@@ -4359,6 +4360,7 @@ class Applier:
         release only (`UncheckedApproval`).
         """
         self._refuse_a_server_source(manifest)
+        self._put_back_a_bridge(f"Update {manifest.name}")
         refusal = self._update_refusal(manifest)
         if refusal is not None:
             raise ApplyRefusal(refusal)
@@ -6000,6 +6002,27 @@ class Applier:
         direct = any(step.when == when and step.applied_by != "db-import" for step in manifest.sql)
         with self._held(f"{when.capitalize()} {manifest.name}", needed=direct):
             self._sql_held(manifest, clone, vals, when, log, undo)
+
+    def _put_back_a_bridge(self, press: str) -> None:
+        """Put back mod-ale files a compile Yu'lon never saw finish left bridged (T645).
+
+        `ale_playerbots` rewrites mod-ale's Playerbots names for one compile and puts the
+        files back after it; a crash inside that window leaves them, with their record in
+        the server folder, and the reset questions below would then refuse mod-ale's
+        Update as "changes that are not committed". Only where a record is there, and
+        under this server's hold (T568): another Yu'lon's compile holds it for the whole
+        window, so its bridged file is never put back under it -- the press refuses in the
+        holder's words instead. Touches only a file whose bytes are still the bridge's.
+        """
+        # Here and not at the top: `ale_playerbots` writes through the families' conf
+        # writer, and the families import this module.
+        from yulon import ale_playerbots  # noqa: PLC0415
+
+        if not (self.server_dir / ale_playerbots.RECORD).exists():
+            return
+        with self._held(press):
+            for line in ale_playerbots.put_back(self.server_dir):
+                logger.info(line)
 
     @contextmanager
     def _held(self, press: str, *, needed: bool = True) -> Iterator[None]:

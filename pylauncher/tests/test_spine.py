@@ -2910,6 +2910,14 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "T613. Lists one candidate add-on folder for its `.toc` files, never through a link. "
         "Read-only; it decides an add-on's name and which toc counts, never a write"
     ),
+    ("ale_playerbots.py", "_sources"): (
+        "T645. Walks `modules/mod-ale/src` (os.walk, followlinks=False; linked files skipped) for "
+        "the C++ files that read `sPlayerbotAIConfig.<name>`, to rewrite the names "
+        "mod-playerbots' header no longer declares for ONE compile. It decides a write, but "
+        "only into upstream source files the bridge records first and puts back byte for byte "
+        "after the compile, and only a file whose name and contents it read itself: never a "
+        "player's file (a file changed since the bridge wrote it is left), never through a link"
+    ),
     ("addon_archive.py", "check_folder"): (
         "T613. Walks a folder the player chose (or a clone) with `links.walk`, `.git` aside, "
         "to hold it to the zip's caps and rules before it is copied: a link, a program file, "
