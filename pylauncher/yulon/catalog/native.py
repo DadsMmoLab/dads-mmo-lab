@@ -8708,7 +8708,7 @@ class StagedInstaller:
         # T657: right before the replace, with the old world already down on the update route:
         # the bot settings under the prefix the checkout being started reads (a Return and a
         # rollback rename back), or the refusal, with the old containers untouched.
-        renamed = self._rename_bot_settings(ctx.server_dir)
+        renamed = self._rename_bot_settings(ctx.server_dir, rollback=rollback)
         if renamed is not None:
             yield renamed
         # T577: marked offline before the replace starts the new world, so the realm list says
@@ -9169,7 +9169,9 @@ class StagedInstaller:
                 if touched:
                     raise carry_detail(exc, RebuildChangedTheServer(message, up=False)) from exc
                 raise carry_detail(exc, InstallerError(message)) from exc
-            # T660: the old build is what the tags name again, and its prefix with it.
+            # T660: the old build is about to be what the tags name, and its recreate reads
+            # the old prefix. If the tags could not go back (below), the new build's is put back.
+            prefix_after = self._built_prefix(server_dir)
             self._restore_built_prefix(server_dir, prefix_before)
             message = yield from self._restore_rollback(
                 ctx,
@@ -9186,6 +9188,10 @@ class StagedInstaller:
                 hold_rollback=hold and not touched,
                 mixed_scripts=mixed,
             )
+            if isinstance(message, _NotPutBack) and not message.mixed:
+                # The tags still name the new build (its containers may have run): its
+                # prefix is the image's, and the checkout is the new one too.
+                self._restore_built_prefix(server_dir, prefix_after)
             also = self._forget_the_stopped_build(server_dir) if touched and hold else ""
             message_said = f"{message}{also}"
             self._record_error(server_dir, ctx.state, message_said)
@@ -12818,7 +12824,7 @@ class StagedInstaller:
         except world_data.FingerprintNotRecorded as exc:
             raise InstallerError(str(exc)) from exc
 
-    def _rename_bot_settings(self, server_dir: Path) -> str | None:
+    def _rename_bot_settings(self, server_dir: Path, *, rollback: bool = False) -> str | None:
         """T657: `playerbots_rename.settle()`, before this engine's own starts; its line or None.
 
         The install's `up` and a rebuild's recreate (Rebuild, Update to latest, Return to
@@ -12832,7 +12838,7 @@ class StagedInstaller:
         # families package imports this module.
         from yulon import playerbots_rename
 
-        return playerbots_rename.settle(self.entry, server_dir)
+        return playerbots_rename.settle(self.entry, server_dir, rollback=rollback)
 
     def _remember_built_prefix(self, server_dir: Path) -> None:
         """T660: the prefix the image just compiled reads, for the rename before a Start.

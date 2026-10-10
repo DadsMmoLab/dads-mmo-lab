@@ -97,6 +97,18 @@ ADDED_NOTE = (
     " It also added {added} setting{s} the new module has and this file lacked (under a "
     "marker at the end of playerbots.conf), so the world does not log them as missing."
 )
+ROLLED_BACK = (
+    "The server build that is running reads its settings as {built}*, but this folder's "
+    "mod-playerbots reads {now}*, so Yu'lon renamed {count} of this server's {now}* setting{s} "
+    "back to {built}* (every value kept; the files as they were are backed up beside them) "
+    "and started that build on them. Starting it again is refused until you press {rebuild}, "
+    "which builds what the folder holds."
+)
+ADDED_ONLY = (
+    "mod-playerbots on this server has {added} setting{s} that {files} lacked, so Yu'lon added "
+    "them at the end under a marker, with their defaults, so the world does "
+    "not log them as missing; the file as it was is backed up beside it."
+)
 
 
 class RenameRefused(InstallerError):
@@ -271,7 +283,7 @@ def _changes(entry: CatalogEntry, server_dir: Path, prefix: str) -> list[_Change
         dist = playerbots_keys.read_dist(server_dir)
         if prefix == playerbots_keys.NEW and dist is not None:
             text, added = add_missing_keys(text, dist)
-        if count:
+        if count or added:
             found.append(_Change(conf_path, text, count, backed_up=True, added=added))
     base = server_dir / composegen.BASE_FILE
     if not (base.is_file() and composegen.is_ours(base)):
@@ -287,7 +299,7 @@ def _changes(entry: CatalogEntry, server_dir: Path, prefix: str) -> list[_Change
     return found
 
 
-def settle(entry: CatalogEntry, server_dir: Path) -> str | None:
+def settle(entry: CatalogEntry, server_dir: Path, *, rollback: bool = False) -> str | None:
     """Rename this server's bot settings to its module's prefix; the line to say, or None.
 
     Raises:
@@ -300,16 +312,17 @@ def settle(entry: CatalogEntry, server_dir: Path) -> str | None:
     prefix = playerbots_keys.module_prefix(server_dir)
     if prefix is None:
         return None
-    old = playerbots_keys.other(prefix)
+    now = prefix
     built = read_built(server_dir)
+    rebuild = server_build_presses.under_server_build(server_build_presses.REBUILD)
+    went_back = False
     if built is not None and built != prefix:
-        raise RenameRefused(
-            OLDER_BUILD.format(
-                built=built,
-                now=prefix,
-                rebuild=server_build_presses.under_server_build(server_build_presses.REBUILD),
-            )
-        )
+        if not rollback:
+            raise RenameRefused(OLDER_BUILD.format(built=built, now=prefix, rebuild=rebuild))
+        # A rollback starts the build from before, which reads the image's prefix: the
+        # settings follow IT even though the checkout is on the module's.
+        went_back, prefix = True, built
+    old = playerbots_keys.other(prefix)
     try:
         changes = _changes(entry, server_dir, prefix)
         for change in changes:
@@ -325,8 +338,16 @@ def settle(entry: CatalogEntry, server_dir: Path) -> str | None:
         return None
     count = sum(change.count for change in said)
     files = ", ".join(change.path.name for change in said)
-    line = SAID.format(new=prefix, old=old, count=count, s="" if count == 1 else "s", files=files)
     added = sum(change.added for change in said)
+    if went_back:
+        if not count:
+            return None
+        return ROLLED_BACK.format(
+            built=prefix, now=now, count=count, s="" if count == 1 else "s", rebuild=rebuild
+        )
+    if not count:  # only keys the module added (T662)
+        return ADDED_ONLY.format(added=added, s="" if added == 1 else "s", files=files)
+    line = SAID.format(new=prefix, old=old, count=count, s="" if count == 1 else "s", files=files)
     if added:
         line += ADDED_NOTE.format(added=added, s="" if added == 1 else "s")
     return line
