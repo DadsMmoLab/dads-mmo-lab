@@ -32,7 +32,8 @@ read, the module's own commit date is read, and only releases CREATED at or befo
 that date are candidates (a release created after the commit cannot be tagged at or
 before it). Of those, the newest few are compared with the commit. That is about
 five requests however far behind the module is (unauthenticated GitHub allows 60
-an hour). When none fits the sentence says how many releases were looked through.
+an hour). When none fits the sentence says how many releases were compared (a tag GitHub no
+longer has is skipped).
 
 **Fail closed.** The binary is downloaded only after the release's sha256 file
 has been read and names it; the download is held to the size the release
@@ -269,13 +270,18 @@ def pick(
         ]
         outran: str | None = None
         unknown: str | None = None
+        compared = 0
         for candidate in eligible[:MAX_COMPARES]:
-            behind = ask.behind(f"{api}/compare/{candidate.tag}...{rev}?per_page=1&page=2")
-            if behind is None:
-                raise Unavailable("GitHub did not answer, so Yu'lon could not look for one")
-            if behind != 0:
-                continue
-            made = ask.moment(f"{api}/commits/{candidate.tag}")
+            compared += 1
+            try:
+                behind = ask.behind(f"{api}/compare/{candidate.tag}...{rev}?per_page=1&page=2")
+                if behind is None:
+                    raise Unavailable("GitHub did not answer, so Yu'lon could not look for one")
+                if behind != 0:
+                    continue
+                made = ask.moment(f"{api}/commits/{candidate.tag}")
+            except _Missing:
+                continue  # this tag is gone from GitHub (the module's own commit was found)
             uploaded = _moment(candidate.uploaded)
             if made is None or uploaded is None:
                 unknown = unknown or (
@@ -297,8 +303,13 @@ def pick(
     raise Unavailable(
         outran
         or unknown
-        or f"none of the {looked} newest releases of the bots module has a dashboard built "
-        "from this server's bots version"
+        or (
+            f"none of the {compared} releases made just before this server's bots version has "
+            "a dashboard built from it"
+            if compared
+            else f"none of the {looked} newest releases of the bots module was made before "
+            "this server's bots version"
+        )
     )
 
 
