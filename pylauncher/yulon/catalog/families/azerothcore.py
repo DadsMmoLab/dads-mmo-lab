@@ -652,10 +652,13 @@ class AzerothCoreInstaller(StagedInstaller):
         * the target ships the same name for the same database (`_database_part()`:
           an update upstream moved to its archive), never one for another database --
           `db_characters/2026_09_21_00.sql` is not `db_world/2026_09_21_00.sql`; or
-        * it and a file the target ships in the same folder are both dated
-          (`YYYY_MM_DD_NN`, how AzerothCore and mod-playerbots name their updates) and
-          the target's sorts at or after it: it is older than what the target has,
-          which a Return that moves forward (T588) over a squash removes. A name that
+        * the move goes forward in history (`Seams.is_ancestor`; a checkout that cannot
+          show it is never forward), and it and a file the target ships in the same folder
+          are both dated (`YYYY_MM_DD_NN`, how AzerothCore and mod-playerbots name their
+          updates) and the target's sorts at or after it: it is older than what the target
+          has, which a Return that moves forward (T588) over a squash removes. Going back
+          the name says nothing: an update written before the target's newest but merged
+          after it is newer. A name that
           is not dated says nothing about order (cold review of a72e048f).
         """
         lacked: dict[str, None] = {}
@@ -699,14 +702,22 @@ class AzerothCoreInstaller(StagedInstaller):
             for path in tracked:
                 if path.endswith(".sql"):
                     beside.setdefault(posixpath.dirname(path), []).append(posixpath.basename(path))
+            # Only a move FORWARD in history can have a squashed-away file: going back,
+            # every update the running commit added since is one the target lacks, however
+            # its name is dated (mod-playerbots names one by the day it was written).
+            forward = self._seams.is_ancestor(dest, old, new)
             left: list[str] = []
             for path in removed:
                 name = posixpath.basename(path)
                 if (_database_part(path), name) in shipped:
                     continue
-                if _DATED.match(name) and any(
-                    _DATED.match(other) and other >= name
-                    for other in beside.get(posixpath.dirname(path), ())
+                if (
+                    forward
+                    and _DATED.match(name)
+                    and any(
+                        _DATED.match(other) and other >= name
+                        for other in beside.get(posixpath.dirname(path), ())
+                    )
                 ):
                     continue
                 left.append(path)

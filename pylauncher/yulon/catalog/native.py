@@ -4871,6 +4871,11 @@ def _git_changed_files(
     return git.ContainerGit().changed_files(dest, old, new, paths)
 
 
+def _git_is_ancestor(dest: Path, old: str, new: str) -> bool:
+    """Is `old` in `new`'s history in this checkout, containerised (T632)."""
+    return git.ContainerGit().is_ancestor(dest, old, new)
+
+
 def _git_tree_files(dest: Path, rev: str, paths: Sequence[str]) -> tuple[str, ...] | None:
     """The files one commit of this checkout tracks under `paths`, containerised (T630)."""
     return git.ContainerGit().tree_files(dest, rev, paths)
@@ -6200,6 +6205,12 @@ class Seams:
     """
     changed_lines: Callable[[Path, str, str, str], tuple[str, ...] | None] = _git_changed_lines
     """T179: one file's `+`/`-` lines between two commits; `None` when git could not say."""
+    is_ancestor: Callable[[Path, str, str], bool] = _git_is_ancestor
+    """Is the first commit in the second's history (a move from it goes forward)?
+
+    False when git cannot show it, as in a shallow clone: a Return that cannot prove it
+    moves forward never skips a file the target lacks for being "older".
+    """
     tree_files: Callable[[Path, str, Sequence[str]], tuple[str, ...] | None] = _git_tree_files
     """T630: the files a commit tracks under some paths (`git ls-tree`); None = could not say.
 
@@ -6622,6 +6633,7 @@ class Seams:
             changed_files=repo.changed_files,
             changed_lines=repo.changed_lines,
             tree_files=repo.tree_files,
+            is_ancestor=repo.is_ancestor,
             file_lines=repo.file_lines,
             images_built=on(docker.images_built, wsl_distro=distro),
             build_cache_bytes=on(docker.build_cache_bytes, wsl_distro=distro),

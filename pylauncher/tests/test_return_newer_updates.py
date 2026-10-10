@@ -271,11 +271,30 @@ def test_an_older_update_the_target_squashed_away_is_not_newer(tmp_path: Path) -
     rec.diffs[(server_dir / BOTS.dest, OLD, BOTS_PIN)] = (("D", f"{BOTS_UPDATES}/{old_one}"),)
     _target_ships(rec, server_dir, BOTS_UPDATES, TARGET_NEWEST)
     rec.applied_updates["acore_playerbots"] = f"{old_one}\n"
+    rec.ancestors.add((server_dir / BOTS.dest, OLD, BOTS_PIN))
 
     _said, raised, _fake = _return(rec, server_dir)
 
     assert raised is None, raised
     assert _asked_updates(rec) == []
+
+
+def test_a_back_dated_update_added_since_the_target_is_newer_on_a_backward_return(
+    tmp_path: Path,
+) -> None:
+    """mod-playerbots names an update by the day it was written, not merged: the one the
+    running commit added since the target can sort before the target's newest, and the
+    database holds it all the same. Going back, no name order may skip it."""
+    rec, server_dir = _ready(tmp_path)
+    late = "2026_07_01_00_ai_playerbot_written_in_july.sql"
+    rec.diffs[(server_dir / BOTS.dest, OLD, BOTS_PIN)] = (("D", f"{BOTS_UPDATES}/{late}"),)
+    _target_ships(rec, server_dir, BOTS_UPDATES, TARGET_NEWEST)
+    rec.applied_updates["acore_playerbots"] = f"{late}\n"
+
+    _said, raised, _fake = _return(rec, server_dir)
+
+    assert raised is not None, "an applied back-dated update was skipped by its name"
+    assert late in str(raised)
 
 
 def test_update_to_latest_asks_nothing_of_the_kind(tmp_path: Path) -> None:
