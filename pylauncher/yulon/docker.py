@@ -7816,8 +7816,11 @@ def folder_id(folder: Path) -> str | None:
     the same NTFS folder.
     """
     target = folder / FOLDER_ID_FILE
+    # Look before reading (T642): a file that appears between the two is then read whole
+    # (it is published by link) and never counted as present-but-unreadable.
+    present = os.path.lexists(target)
     found = _read_folder_id(target)
-    if found is not None or os.path.lexists(target):
+    if found is not None or present:
         return found
     try:
         fd, name = tempfile.mkstemp(prefix=f"{FOLDER_ID_FILE}.", suffix=".yulon-new", dir=folder)

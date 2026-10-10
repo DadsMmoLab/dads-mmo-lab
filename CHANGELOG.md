@@ -10,6 +10,7 @@ New: Set a server's time zone on the Tuning tab with **Server time zone**.
 Fixed: Sending gold to a character no longer crashes the app.
 Changed: Opening Yu'lon while it is already running brings the open window to the front.
 -->
+- Two Yu'lons pressing on one new server folder at once no longer give one a false "folder will not take an id file".
 
 ## Unreleased
 

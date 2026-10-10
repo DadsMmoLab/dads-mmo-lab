@@ -861,6 +861,27 @@ def test_a_folder_id_made_by_the_other_yulon_meanwhile_is_the_one_used(
     assert [p.name for p in tmp_path.iterdir()] == [docker.FOLDER_ID_FILE], "no temp file left"
 
 
+def test_an_id_file_that_appears_between_the_read_and_the_look_is_read_not_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T642: the other Yu'lon links the file after this one's first read found none. That is
+    an id to read, never a folder that "would not give or take" one."""
+    theirs = "e" * 32
+    target = tmp_path / docker.FOLDER_ID_FILE
+    real_read = docker._read_folder_id
+    reads = []
+
+    def read_then_they_publish(path: Path) -> str | None:
+        answer = real_read(path)
+        if not reads:
+            target.write_text(theirs + "\n", encoding="ascii")
+        reads.append(path)
+        return answer
+
+    monkeypatch.setattr(docker, "_read_folder_id", read_then_they_publish)
+    assert docker.folder_id(tmp_path) == theirs
+
+
 @pytest.mark.parametrize("why", ["missing", "garbage", "read-only"])
 def test_a_folder_without_a_readable_id_falls_back_to_the_safe_side(
     fake_docker: tuple[Path, Path],
