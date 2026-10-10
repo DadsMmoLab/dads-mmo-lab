@@ -217,12 +217,12 @@ _GAMES: dict[str, _GameRates] = {
         keys=_ALL_KEYS,
         notes={},
     ),
-    # T554: the same core and the same world conf as wow-wotlk, at Unbound's OWN pin (7f12e89e)
-    # until T580 moves it; wow-wotlk moved on to f19a1879 (T389).
+    # T554: the same core and the same world conf as wow-wotlk, at Unbound's OWN pin. It shipped on
+    # 7f12e89e; T580 (2026-10-09) moved it to f19a1879, wow-wotlk's pin since T389.
     "wow-unbound": _GameRates(
         file="env/dist/etc/worldserver.conf",
         repo="mod-playerbots/azerothcore-wotlk",
-        rev="7f12e89ee5f467a50e62eba1d525eac7dc953d03",
+        rev="f19a18799a35f7c24bdcdc9ea399c601f166259b",
         keys=_ALL_KEYS,
         notes={},
     ),

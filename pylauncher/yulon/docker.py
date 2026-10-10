@@ -948,6 +948,41 @@ def compose_project_name(server_dir: Path, *, wsl_distro: str | None = None) -> 
     return name if isinstance(name, str) and name else None
 
 
+def compose_service_images(
+    server_dir: Path, services: Sequence[str], *, wsl_distro: str | None = None
+) -> dict[str, str] | None:
+    """The image each of `services` runs, as compose reads this folder; None if it cannot say.
+
+    Asked of `compose config`, which layers the override over the base as `up` will, so
+    it is what compose would start. A folder moved since it was made still names its images
+    after the id it was made with, whatever its new path hashes to (T627).
+    """
+    proc = _docker(
+        ["compose", "config", "--format", "json"],
+        cwd=server_dir,
+        timeout=_COMPOSE_CONFIG_TIMEOUT_SECONDS,
+        wsl_distro=wsl_distro,
+    )
+    if proc.returncode != 0:
+        logger.debug(f"compose config failed in {server_dir}: {proc.stderr.strip()}")
+        return None
+    try:
+        parsed = json.loads(proc.stdout)
+    except ValueError:
+        logger.debug("compose config did not return JSON")
+        return None
+    named = parsed.get("services") if isinstance(parsed, dict) else None
+    if not isinstance(named, dict):
+        return None
+    found: dict[str, str] = {}
+    for service in services:
+        entry = named.get(service)
+        image = entry.get("image") if isinstance(entry, dict) else None
+        if isinstance(image, str) and image:
+            found[service] = image
+    return found
+
+
 def pin_project_name(server_dir: Path, *, wsl_distro: str | None = None) -> str | None:
     """Freeze this install's compose project name into its own `.env`.
 
@@ -2045,6 +2080,21 @@ def server_version(*, wsl_distro: str | None = None, timeout: float = 20.0) -> s
     if proc.returncode != 0:
         return None
     return proc.stdout.strip() or None
+
+
+def engine_size(*, wsl_distro: str | None = None, timeout: float = 10.0) -> tuple[int, int] | None:
+    """The daemon's own CPU count and memory in bytes (T636), or `None` when it does not say.
+
+    On Docker Desktop this is the WSL2 VM's limit, not the PC's. A read, bounded,
+    never raising, like `server_version`.
+    """
+    proc = _docker(
+        ["info", "--format", "{{.NCPU}} {{.MemTotal}}"], wsl_distro=wsl_distro, timeout=timeout
+    )
+    parts = proc.stdout.split()
+    if proc.returncode != 0 or len(parts) != 2 or not all(p.isdigit() for p in parts):
+        return None
+    return int(parts[0]), int(parts[1])
 
 
 @_a_lifecycle_command
@@ -7766,8 +7816,11 @@ def folder_id(folder: Path) -> str | None:
     the same NTFS folder.
     """
     target = folder / FOLDER_ID_FILE
+    # Look before reading (T642): a file that appears between the two is then read whole
+    # (it is published by link) and never counted as present-but-unreadable.
+    present = os.path.lexists(target)
     found = _read_folder_id(target)
-    if found is not None or os.path.lexists(target):
+    if found is not None or present:
         return found
     try:
         fd, name = tempfile.mkstemp(prefix=f"{FOLDER_ID_FILE}.", suffix=".yulon-new", dir=folder)
@@ -9232,7 +9285,13 @@ def container_exit(
     return ContainerExit(status, exit_code, finished, cid)
 
 
-def daemon_cpus(*, timeout: float | None = None, wsl_distro: str | None = None) -> int | None:
+DAEMON_INFO_TIMEOUT = 10.0
+"""Seconds a default `docker info` question may take: a wedged Docker must not hang a press."""
+
+
+def daemon_cpus(
+    *, timeout: float | None = DAEMON_INFO_TIMEOUT, wsl_distro: str | None = None
+) -> int | None:
     """How many CPUs the Docker DAEMON has (`docker info --format {{.NCPU}}`); None if unknown.
 
     The daemon's, not this process's host: on Docker Desktop the containers run in
@@ -9245,6 +9304,27 @@ def daemon_cpus(*, timeout: float | None = None, wsl_distro: str | None = None) 
         logger.warning(f"could not read the daemon's CPU count: {proc.stderr.strip()}")
         return None
     return int(text)
+
+
+def daemon_arch(
+    *, timeout: float | None = DAEMON_INFO_TIMEOUT, wsl_distro: str | None = None
+) -> str | None:
+    """The Docker DAEMON's CPU architecture, as `"amd64"` or `"arm64"` (anything else as the
+    daemon spells it); None if it would not say (T542).
+
+    The daemon's, for `daemon_cpus()`'s reason: Docker Desktop's VM may differ from the host.
+    `docker info` says `x86_64` or `aarch64`; those are folded to the names release assets use.
+    """
+    proc = _docker(
+        ["info", "--format", "{{.Architecture}}"], timeout=timeout, wsl_distro=wsl_distro
+    )
+    text = proc.stdout.strip().lower()
+    if proc.returncode != 0 or not text:
+        logger.warning(f"could not read the daemon's architecture: {proc.stderr.strip()}")
+        return None
+    return {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}.get(
+        text, text
+    )
 
 
 def remove_container(

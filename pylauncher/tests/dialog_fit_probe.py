@@ -76,8 +76,7 @@ def _update_text(server_dir: Path) -> str:
         server_dir,
         "Penqle/Tortoise-WoW-Server",
         (native.rewritten_line("Penqle/Tortoise-WoW-Server", "v2.4.1", 3),),
-        copied=("tw_logon", "tw_char"),
-        not_copied=("tw_world",),
+        copied=("tw_logon", "tw_char", "tw_world"),
     )
 
 

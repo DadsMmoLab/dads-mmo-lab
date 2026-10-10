@@ -43,7 +43,7 @@ ManifestType = Literal["module", "ale", "mod", "keg"]
 Db = Literal["auth", "characters", "world", "playerbots", "ale"]
 When = Literal["install", "remove", "configure"]
 ClientDest = Literal["addons", "interface", "data"]
-PromptKind = Literal["string", "int", "float", "bool", "choice"]
+PromptKind = Literal["string", "int", "float", "bool", "choice", "character"]
 
 
 class _Strict(BaseModel):
@@ -523,6 +523,45 @@ class Prompt(_Strict):
         ),
     )
 
+    multi: bool = Field(
+        default=False,
+        description=(
+            "character only (T637): the answer is a comma list of GUIDs, one per ticked "
+            "character, as `AuctionHouseBot.GUIDs` reads it. False: exactly one GUID."
+        ),
+    )
+    part: Literal["guid", "account"] = Field(
+        default="guid",
+        description=(
+            "character only (T637): which part of the picked character this answer is: its "
+            "`guid`, or the id of its `account`. `account` needs `follows`."
+        ),
+    )
+    follows: str | None = Field(
+        default=None,
+        description=(
+            "character only (T637): the key of another character prompt. This one gets no "
+            "row of its own: it takes its answer from the character picked for that prompt "
+            "(`mod-ah-bot`'s `bot_account` follows `bot_guid`: one pick, two answers)."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _character_fields(self) -> Prompt:
+        if self.kind != "character":
+            if self.multi:
+                raise ValueError("`multi` only valid with kind='character'")
+            if self.follows is not None or self.part != "guid":
+                raise ValueError("`follows` and `part` only valid with kind='character'")
+            return self
+        if (self.part == "account") != (self.follows is not None):
+            raise ValueError("`part`='account' and `follows` go together")
+        if self.follows is not None and self.multi:
+            raise ValueError("a prompt that follows another cannot be `multi`")
+        if self.default is not None:
+            raise ValueError("a character prompt has no `default`")
+        return self
+
     @model_validator(mode="after")
     def _unsigned_needs_an_int(self) -> Prompt:
         if self.unsigned and self.kind != "int":
@@ -735,6 +774,13 @@ class Manifest(_Strict):
             raise ValueError("type='keg' requires `source.sparse_path` (kegs live inside a repo)")
         if self.id in self.requires or self.id in self.conflicts_with:
             raise ValueError("an item cannot require or conflict with itself")
+        picked = {p.key for p in self.prompts if p.kind == "character" and p.follows is None}
+        for prompt in self.prompts:
+            if prompt.follows is not None and prompt.follows not in picked:
+                raise ValueError(
+                    f"prompt {prompt.key!r}: `follows` {prompt.follows!r} is not a character "
+                    "prompt of this manifest"
+                )
         return self
 
 

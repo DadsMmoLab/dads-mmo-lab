@@ -26,10 +26,16 @@ def moves_forward(
     local = seams.is_ancestor(dest, old, new)
     if local is not None:
         return local, ""
-    said = upstream.compare(repo, old, new, get=seams.upstream_get)
+    slug = upstream.github_slug(repo)
+    if slug is None:
+        return None, (
+            f"git could not show whether {old[:7]} is behind {new[:7]}, and {repo} is not "
+            "on GitHub, which is the only place Yu'lon can ask"
+        )
+    said = upstream.compare(slug, old, new, get=seams.upstream_get)
     if said is None:
         return None, (
-            f"git could not show whether {old[:7]} is behind {new[:7]} (a shallow checkout "
-            f"keeps no history to walk) and GitHub did not answer for {repo}"
+            f"git could not show whether {old[:7]} is behind {new[:7]}, and GitHub did not "
+            f"answer for {slug} (it may be rate-limiting this machine: try again later)"
         )
     return said.behind == 0, ""

@@ -503,7 +503,7 @@ class CmangosInstaller(StagedInstaller):
     """The conf key that switches a CMaNGOS-lineage world server's own start-time updater on."""
 
     def databases_a_new_build_changes(self) -> tuple[Db, ...]:
-        """Login and characters when this tree's world server migrates them at start (T217).
+        """Login, characters and world when this tree's world server migrates them at start.
 
         Read off the entry's own conf table, never off its id: a tree whose
         `mangosd.conf` sets `Database.AutoUpdate.Enabled` to 1 runs its AutoUpdater
@@ -517,15 +517,14 @@ class CmangosInstaller(StagedInstaller):
         files once -- happens with the servers down, before that start, and stays
         if the build is put back.)
 
-        World is left out on the owner's word of 2026-10-04: it is the biggest of
-        the three and the slowest to copy, so a rollback puts back login and
-        characters and says that the world database is not put back.
+        World is copied too since T643. T217 left it out on the owner's word of
+        2026-10-04 ("the biggest and the slowest to copy"); measured on yulon-ubuntu's
+        Tortoise install on 2026-10-10 it dumped to 144 MB in 4.1 s (tw_char: 94 MB in
+        5.6 s), and without it a world migration could not be undone: the rollback
+        started the old build on the migrated world, and "Return to the tested pin…"
+        found no copy of it to name.
         """
-        return ("auth", "characters") if self._updates_at_start() else ()
-
-    def databases_changed_but_not_copied(self) -> tuple[Db, ...]:
-        """World, on a tree whose updater migrates it at start but whose copy leaves it out."""
-        return ("world",) if self._updates_at_start() else ()
+        return ("auth", "characters", "world") if self._updates_at_start() else ()
 
     def _updates_at_start(self) -> bool:
         """Whether this tree's conf table switches the world server's AutoUpdater on."""
@@ -994,9 +993,10 @@ class CmangosInstaller(StagedInstaller):
         """Bring the world the `apply_new` files its `*-db` pin adds, servers down (T531).
 
         `forward()` -- the old servers stopped, the new build not yet started -- is
-        `_catch_up_world()`. Nothing to undo in `back()`: the world is not copied
-        (owner, 2026-10-04), so what went in stays with its ledger rows, and the next
-        press applies only what is still missing. `finishes_start_refusal` is False:
+        `_catch_up_world()`. Nothing to undo in `back()`: the world is not copied on the
+        trees this runs on (TBC and Vanilla have no start-time updater, so their update
+        copies nothing; owner, 2026-10-04), so what went in stays with its ledger rows, and
+        the next press applies only what is still missing. `finishes_start_refusal` is False:
         this work clears nothing that refuses a start.
         """
         if not isinstance(changes, _WorldCatchUp) or not (

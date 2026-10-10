@@ -157,3 +157,65 @@ def test_the_container_argv_carries_the_environment_before_the_image(tmp_path: P
 
     assert argv.index("-e") < argv.index(git.ContainerGit().image)
     assert argv[argv.index("-e") + 1] == "A=b"
+
+
+def test_a_backward_move_is_proved_by_the_reverse_ancestry_in_the_production_clone(
+    tmp_path: Path,
+) -> None:
+    """Install: tip at depth 1, the pin at depth 1; the update then fetches with NO depth
+    (`_update()`), which connects the new commits down to the pin. Going back from the new
+    head to the pin: the pin is an ancestor of the head, so the move is backward, with no
+    history read and no GitHub."""
+    up, c = _upstream(tmp_path)
+    cl = _clone(tmp_path, up, c[2], c[5])  # tip c2 (a graft), pin c5
+    _git(cl, "fetch", "-q", "origin", c[7])  # the update's fetch, no --depth
+    assert (cl / ".git" / "shallow").is_file()
+    impl = git.RunnerGit()
+
+    assert impl.is_ancestor(cl, c[7], c[5]) is False
+    assert impl.is_ancestor(cl, c[5], c[7]) is True
+    assert impl.is_ancestor(cl, c[5], c[5]) is True
+
+
+class _Seams:
+    """Just the two seams `moves_forward()` reads."""
+
+    def __init__(self, local: bool | None, body: bytes | None) -> None:
+        self.local, self.body, self.urls = local, body, []  # type: ignore[var-annotated]
+
+    def is_ancestor(self, dest: Path, old: str, new: str) -> bool | None:
+        return self.local
+
+    def upstream_get(self, url: str, accept: str) -> bytes:
+        self.urls.append(url)
+        if self.body is None:
+            raise OSError("rate limited")
+        return self.body
+
+
+def test_a_url_repo_is_asked_of_github_by_its_slug(tmp_path: Path) -> None:
+    import json
+
+    from yulon.catalog.families.direction import moves_forward
+
+    seams = _Seams(None, json.dumps({"status": "ahead", "ahead_by": 3, "behind_by": 0}).encode())
+
+    said = moves_forward(seams, "https://github.com/Sagiroth/TortoiseBots", tmp_path, "a", "b")  # type: ignore[arg-type]
+
+    assert said == (True, "")
+    assert seams.urls and "/repos/Sagiroth/TortoiseBots/compare/" in seams.urls[0], seams.urls
+
+
+def test_a_repo_off_github_and_a_silent_github_are_each_said(tmp_path: Path) -> None:
+    from yulon.catalog.families.direction import moves_forward
+
+    off, why_off = moves_forward(_Seams(None, None), "https://gitlab.com/o/n", tmp_path, "a", "b")  # type: ignore[arg-type]
+    silent, why = moves_forward(_Seams(None, None), "o/n", tmp_path, "a", "b")  # type: ignore[arg-type]
+
+    assert off is None and "not on GitHub" in why_off
+    assert silent is None and "try again later" in why and "walk" not in why
+
+
+def test_the_container_environment_is_the_literal_null_device() -> None:
+    source = Path(git.__file__).read_text(encoding="utf-8")
+    assert "GIT_SHALLOW_FILE=/dev/null" in source and "os.devnull" not in source

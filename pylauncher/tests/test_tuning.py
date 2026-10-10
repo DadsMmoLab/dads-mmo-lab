@@ -460,7 +460,8 @@ def test_the_shipped_ah_bot_keys_are_unsigned() -> None:
         manifest = parse_manifest(json.loads((base / f"{name}.json").read_text(encoding="utf-8")))
         keys = {k.key: k for conf in manifest.conf for k in conf.keys}
         assert {k for k in wanted if keys[k].unsigned} == wanted, name
-        assert {p.key for p in manifest.prompts if p.unsigned} == prompts, name
+        # T637: the two GUID/account questions are `character` prompts, read as uint32 too.
+        assert {p.key for p in manifest.prompts if p.unsigned or p.kind == "character"} == prompts
 
 
 def test_a_raw_conf_text_names_each_declared_int_key_whose_value_fails_check() -> None:

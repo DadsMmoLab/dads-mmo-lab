@@ -28,7 +28,7 @@ import re
 import stat
 import tempfile
 from collections.abc import Generator, Iterator, Mapping, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import ClassVar
 
@@ -36,6 +36,7 @@ from yulon import docker, git, networking, server_build_presses
 from yulon.catalog import snapshot
 from yulon.catalog.catalog import AzerothCoreData, CatalogEntry, EmulatorSource
 from yulon.catalog.families import carried, scriptdeploy
+from yulon.catalog.families.direction import moves_forward
 from yulon.catalog.installer import InstallerError, InstallStopped, OneShotLeftRunning
 from yulon.catalog.native import (
     DOWNLOAD_CANCEL_NOTE,
@@ -44,6 +45,7 @@ from yulon.catalog.native import (
     CallableGate,
     ConfCheck,
     ConfRepaired,
+    Seams,
     ServersDownWork,
     Stage,
     StageContext,
@@ -142,6 +144,32 @@ def newer_updates_refusal(
         f"copy was taken. Do not press Clean up… on Maintenance before restoring: it keeps "
         f"only the newest copies and may remove {'this one' if len(found) == 1 else 'these'}."
     )
+
+
+@dataclass
+class _Direction:
+    """Whether a move goes forward, asked at most once and only when a file needs it."""
+
+    seams: Seams
+    repo: str
+    dest: Path
+    old: str
+    new: str
+    _said: bool | None = None
+
+    def known(self) -> bool:
+        """True when forward; refuses (fail closed) when neither git nor GitHub can say."""
+        if self._said is None:
+            said, why = moves_forward(self.seams, self.repo, self.dest, self.old, self.new)
+            if said is None:
+                raise InstallerError(
+                    updates_unread(
+                        f"the move takes away in {self.repo}",
+                        f"{why}, so the direction of the move is unknown",
+                    )
+                )
+            self._said = said
+        return self._said
 
 
 def updates_unread(source: str, why: str) -> str:
@@ -652,11 +680,14 @@ class AzerothCoreInstaller(StagedInstaller):
         * the target ships the same name for the same database (`_database_part()`:
           an update upstream moved to its archive), never one for another database --
           `db_characters/2026_09_21_00.sql` is not `db_world/2026_09_21_00.sql`; or
-        * it and a file the target ships in the same folder are both dated
-          (`YYYY_MM_DD_NN`, how AzerothCore and mod-playerbots name their updates) and
-          the target's sorts at or after it: it is older than what the target has,
-          which a Return that moves forward (T588) over a squash removes. A name that
-          is not dated says nothing about order (cold review of a72e048f).
+        * the move goes forward in history (`direction.moves_forward()`: git, else GitHub's
+          compare; when neither can say the Return refuses), and it and a file the target
+          ships in the same folder are both dated (`YYYY_MM_DD_NN`, how AzerothCore and
+          mod-playerbots name their updates) and the target's sorts at or after it: it is
+          older than what the target has, which a Return that moves forward (T588) over a
+          squash removes. Going back the name says nothing: an update written before the
+          target's newest but merged after it is newer. A name that is not dated says
+          nothing about order (cold review of a72e048f).
         """
         lacked: dict[str, None] = {}
         for source, dest, old in moved:
@@ -699,14 +730,22 @@ class AzerothCoreInstaller(StagedInstaller):
             for path in tracked:
                 if path.endswith(".sql"):
                     beside.setdefault(posixpath.dirname(path), []).append(posixpath.basename(path))
+            # Only a move FORWARD in history can have a squashed-away file: going back,
+            # every update the running commit added since is one the target lacks, however
+            # its name is dated (mod-playerbots names one by the day it was written).
+            forward = _Direction(self._seams, source.repo, dest, old, new)
             left: list[str] = []
             for path in removed:
                 name = posixpath.basename(path)
                 if (_database_part(path), name) in shipped:
                     continue
-                if _DATED.match(name) and any(
-                    _DATED.match(other) and other >= name
-                    for other in beside.get(posixpath.dirname(path), ())
+                if (
+                    _DATED.match(name)
+                    and any(
+                        _DATED.match(other) and other >= name
+                        for other in beside.get(posixpath.dirname(path), ())
+                    )
+                    and forward.known()
                 ):
                     continue
                 left.append(path)

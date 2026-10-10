@@ -90,6 +90,7 @@ from yulon import (
     realm_flag,
     resources,
     runner,
+    server_build_gone,
     server_build_presses,
     serverlock,
     update_failure,
@@ -4870,14 +4871,14 @@ def _git_changed_files(
     return git.ContainerGit().changed_files(dest, old, new, paths)
 
 
-def _git_tree_files(dest: Path, rev: str, paths: Sequence[str]) -> tuple[str, ...] | None:
-    """The files one commit of this checkout tracks under `paths`, containerised (T630)."""
-    return git.ContainerGit().tree_files(dest, rev, paths)
-
-
 def _git_is_ancestor(dest: Path, old: str, new: str) -> bool | None:
     """Is `old` in `new`'s history in this checkout, containerised (T632)."""
     return git.ContainerGit().is_ancestor(dest, old, new)
+
+
+def _git_tree_files(dest: Path, rev: str, paths: Sequence[str]) -> tuple[str, ...] | None:
+    """The files one commit of this checkout tracks under `paths`, containerised (T630)."""
+    return git.ContainerGit().tree_files(dest, rev, paths)
 
 
 def _git_tree_bytes(dest: Path, rev: str, path: str) -> dict[str, bytes] | None:
@@ -6209,6 +6210,12 @@ class Seams:
     """
     changed_lines: Callable[[Path, str, str, str], tuple[str, ...] | None] = _git_changed_lines
     """T179: one file's `+`/`-` lines between two commits; `None` when git could not say."""
+    is_ancestor: Callable[[Path, str, str], bool | None] = _git_is_ancestor
+    """Is the first commit in the second's history (a move from it goes forward)?
+
+    None when git cannot show it either way (a shallow clone's grafts): the caller then asks
+    GitHub (`families/direction.py`), and refuses if that cannot answer.
+    """
     tree_files: Callable[[Path, str, Sequence[str]], tuple[str, ...] | None] = _git_tree_files
     """T630: the files a commit tracks under some paths (`git ls-tree`); None = could not say.
 
@@ -6223,12 +6230,6 @@ class Seams:
     What "Return to the tested pin…" reads of an update file the move removes and of
     the ones it adds beside it, to tell an update upstream re-filed (AzerothCore's
     pending squash) from one the target does not have.
-    """
-    is_ancestor: Callable[[Path, str, str], bool | None] = _git_is_ancestor
-    """T632: is the first commit in the second's history (a move from it goes forward)?
-
-    None when git cannot show it either way (a shallow clone's grafts): the caller then asks
-    GitHub (`families/direction.py`), and refuses if that cannot answer.
     """
     tree_bytes: Callable[[Path, str, str], dict[str, bytes] | None] = _git_tree_bytes
     """T632: `{repository path: bytes}` of the files under a path (file or folder) at a commit.
@@ -6645,9 +6646,9 @@ class Seams:
             changed_files=repo.changed_files,
             changed_lines=repo.changed_lines,
             tree_files=repo.tree_files,
+            is_ancestor=repo.is_ancestor,
             file_lines=repo.file_lines,
             tree_bytes=repo.tree_bytes,
-            is_ancestor=repo.is_ancestor,
             images_built=on(docker.images_built, wsl_distro=distro),
             build_cache_bytes=on(docker.build_cache_bytes, wsl_distro=distro),
             image_id=on(docker.image_id, wsl_distro=distro),
@@ -8798,6 +8799,11 @@ class StagedInstaller:
         opts = options or InstallOptions()
         server_dir = self.server_dir(opts)
         state = self._refuse_unless_rebuildable(server_dir)
+        if servers_down is None:
+            # T628: before the first stage, so the recipe is not rewritten and no compile starts.
+            retired = server_build_gone.rebuild_refusal(self.entry, server_dir)
+            if retired is not None:
+                raise InstallerError(retired)
         if servers_down is None or not servers_down.finishes_start_refusal:
             # T179: a rebuild ends in a start, and this press does not finish what
             # refuses one (the update route's `servers_down` does, when it says so).
@@ -11672,6 +11678,9 @@ class StagedInstaller:
         (`Seams.head_sha`). Where git cannot answer the press goes on, and so
         does this: None. No record or no recorded build is None too.
         """
+        retired = server_build_gone.rebuild_refusal(self.entry, server_dir)
+        if retired is not None:
+            return retired
         clash = self._modules_that_take_the_cores_names(server_dir)
         if clash is not None:
             return clash

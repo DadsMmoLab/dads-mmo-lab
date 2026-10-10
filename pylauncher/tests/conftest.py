@@ -31,7 +31,7 @@ import pytest
 from yulon import apply as apply_module
 from yulon import docker as docker_module
 from yulon import log as log_module
-from yulon import platform
+from yulon import platform, server_build_gone
 from yulon.catalog import upstream
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -1236,6 +1236,27 @@ def _no_unit_test_asks_whether_the_database_is_there(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(docker_module, "database_volume", lambda *_a, **_k: None)
 
 
+REAL_IMAGE_REFUSAL = server_build_gone.refusal_before_start
+"""The real `server_build_gone.refusal_before_start`, for the tests about Start's image check."""
+
+
+@pytest.fixture(autouse=True)
+def _no_unit_test_asks_whether_the_image_is_there(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every Start asks Docker whether the built image is there (T627); a unit test hears nothing.
+
+    No refusal lets the Start go on as it did before T627, so every test written about
+    something else keeps testing that. The tests about the question put the real one back
+    with `real_image_read`.
+    """
+    monkeypatch.setattr(server_build_gone, "refusal_before_start", lambda *_a, **_k: None)
+
+
+@pytest.fixture
+def real_image_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Undo `_no_unit_test_asks_whether_the_image_is_there` for a test about the question."""
+    monkeypatch.setattr(server_build_gone, "refusal_before_start", REAL_IMAGE_REFUSAL)
+
+
 @pytest.fixture
 def real_database_read(monkeypatch: pytest.MonkeyPatch) -> None:
     """Undo `_no_unit_test_asks_whether_the_database_is_there` for a test about the question."""
@@ -1549,3 +1570,20 @@ def _no_server_reservation_runs_at_a_real_docker() -> Iterator[None]:
     docker.RESERVATIONS_ON = False
     yield
     docker.RESERVATIONS_ON = was
+
+
+@pytest.fixture(autouse=True)
+def _no_machine_probes_in_the_support_file(
+    monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+) -> None:
+    """`system-info.txt` (T636) asks Docker and the OS how big the machine is; no unit test does.
+
+    Patched where `system_info` looks them up, so a test that hands its own
+    `machine=`/`engine=` (or calls `machine.machine_lines` itself) is untouched.
+    """
+    if request.node.get_closest_marker("integration"):
+        return
+    from yulon.support import sources
+
+    monkeypatch.setattr(sources, "docker_size", lambda distro: None)
+    monkeypatch.setattr(sources, "machine_lines", lambda: ["CPU: test"])

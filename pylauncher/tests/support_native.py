@@ -612,6 +612,12 @@ class Recorder:
             if any(path == spec or path.startswith(f"{spec.rstrip('/')}/") for spec in paths)
         )
 
+    def is_ancestor(self, dest: Path, old: str, new: str) -> bool | None:
+        self.calls.append(f"is-ancestor:{dest.name}:{old[:7]}:{new[:7]}")
+        if self.ancestry_undecided:
+            return None
+        return (dest, old, new) in self.ancestors
+
     def tree_files(self, dest: Path, rev: str, paths: Sequence[str]) -> tuple[str, ...] | None:
         self.calls.append(f"tree-files:{dest.name}:{rev[:7]}")
         said = self.trees.get((dest, rev), ())
@@ -622,12 +628,6 @@ class Recorder:
             for path in said
             if any(path == spec or path.startswith(f"{spec.rstrip('/')}/") for spec in paths)
         )
-
-    def is_ancestor(self, dest: Path, old: str, new: str) -> bool | None:
-        self.calls.append(f"is-ancestor:{dest.name}:{old[:7]}:{new[:7]}")
-        if self.ancestry_undecided:
-            return None
-        return (dest, old, new) in self.ancestors
 
     def tree_bytes(self, dest: Path, rev: str, path: str) -> dict[str, bytes] | None:
         self.calls.append(f"tree-bytes:{dest.name}:{rev[:7]}:{path}")
@@ -984,9 +984,9 @@ class Recorder:
             restore_rev=self.restore_rev,
             changed_files=self.changed_files,
             tree_files=self.tree_files,
+            is_ancestor=self.is_ancestor,
             file_lines=self.file_lines,
             tree_bytes=self.tree_bytes,
-            is_ancestor=self.is_ancestor,
             db_running=self.db_running,
             stop_db=self.stop_db,
             changed_lines=self.changed_lines,

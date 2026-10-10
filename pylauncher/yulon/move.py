@@ -32,10 +32,10 @@ import json
 import re
 import sys
 import zipfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import IO, Literal
 
 from pydantic import (
@@ -48,9 +48,11 @@ from pydantic import (
 )
 
 import yulon
+from yulon.catalog.catalog import LUA_SCRIPTS_DIR
 from yulon.controller_wow_wotlk.maintenance import MaintenanceError
 from yulon.log import get_logger
 from yulon.server_build_presses import UPDATE_TO_LATEST, under_server_build
+from yulon.support.sources import CONF_DIRS
 
 logger = get_logger(__name__)
 
@@ -77,6 +79,22 @@ _SCHEMA = re.compile(r"[A-Za-z0-9_]{1,64}")
 _CHANNEL_ACCOUNT = re.compile(r"YULON_[A-Z0-9]{1,64}")
 _BOT_PREFIX = re.compile(r"[A-Za-z0-9_.-]{1,64}")
 _DRIVE = re.compile(r"^[A-Za-z]:")
+_DEVICE = re.compile(
+    r"^(?:con|prn|aux|nul|com[0-9¹²³]|lpt[0-9¹²³]|conin\$|conout\$)$", re.IGNORECASE
+)
+"""A Windows device name: `CON`, `NUL.txt` and `COM1.x` open the device, not a file."""
+MAX_FILE_MEMBER_BYTES = 256 * 1024**2
+"""The most one non-database member may declare: a conf, a script or a module file is read whole."""
+_WINDOWS_INVALID = frozenset('?*<>|"')
+"""Characters no Windows file name holds: a bring-in there would fail part-way with an OSError."""
+SETTINGS_MAX_BYTES = 50 * 1024**2
+SETTINGS_MAX_FILES = 5000
+"""What the conf and Lua members of one package may weigh together, packed and brought in."""
+_FORBIDDEN_PART = re.compile(r"\.git|\.yulon-.*|\.?[^.]*~[0-9]+(?:\.[^.]{0,3})?", re.IGNORECASE)
+"""A path part no file member may have, in any case: a git folder, where a hook is code that
+runs, a Yu'lon record, and any name shaped like a Windows short name (`GIT~1`, `YULON-~1.JSO`,
+or a hashed `YU1A2B~1.JSO`): on a disk that keeps short names, one of those IS a git folder or a
+record, and which number or hash it got cannot be told from the name."""
 
 
 class MovePackageError(MaintenanceError):
@@ -109,7 +127,7 @@ Role = Literal["auth", "characters", "world", "playerbots", "ale"]
 Kind = Literal["characters", "server"]
 """What a package holds: accounts and characters (level 1), or the whole server (level 2)."""
 
-FileKind = Literal["conf", "answers", "manifest", "lua"]
+FileKind = Literal["conf", "answers", "manifest", "lua", "module"]
 """The non-database files of a whole-server package, each in its own folder of the zip."""
 
 FILE_FOLDERS: dict[str, str] = {
@@ -117,19 +135,23 @@ FILE_FOLDERS: dict[str, str] = {
     "answers": "answers/",
     "manifest": "manifests/",
     "lua": "lua/",
+    "module": "modfiles/",
 }
 
 ANSWERS_TARGET = ".yulon-module-answers.json"
 """The one Yu'lon record that travels: it describes the databases, which travel too."""
 
-_NEVER_PACKED = re.compile(
-    r"(?:^|/)(?:\.yulon-[^/]*|\.db_password|\.env|db-secrets|credentials)(?:/|$)"
+NEVER_PACKED = re.compile(
+    r"(?:^|/)(?:\.yulon-[^/]*|\.db_password|\.env|db-secrets|credentials)(?:/|$)", re.IGNORECASE
 )
 """Paths no file member may name: Yu'lon's records (the install claim, the folder id T568
 says a copy must make again), the database password, the channel credentials."""
 
 _SHA = r"^[0-9a-f]{40}$"
 _MANIFEST_TARGET = re.compile(r"(?:module|ale|mod|keg)/[a-z0-9]+(?:-[a-z0-9]+)*")
+_MODULE_FILE_TARGET = re.compile(r"((?:module|ale|mod|keg)/[a-z0-9]+(?:-[a-z0-9]+)*)/(.+)")
+MODULE_FILE_DEPTH = 16
+"""Folders above a file inside a folder module's package members."""
 
 
 class Member(_Strict):
@@ -203,7 +225,7 @@ def _safe_target(value: str) -> str:
     """A server-relative POSIX path that stays inside the server folder and is not a record."""
     if not value or len(value) > 400 or any(ord(c) < 32 for c in value) or _unsafe_name(value):
         raise ValueError("a file target is a relative path inside the server folder")
-    if _NEVER_PACKED.search(value):
+    if NEVER_PACKED.search(value):
         raise ValueError("a Yu'lon record, the database password or a credential never travels")
     return value
 
@@ -230,9 +252,18 @@ class PackedModule(_Strict):
 
     type: Literal["module", "ale", "mod", "keg"]
     id: str = Field(pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$", max_length=100)
-    origin: Literal["catalog", "link"]
-    repo: str = Field(min_length=3, max_length=200)
-    commit: str = Field(pattern=_SHA)
+    origin: Literal["catalog", "link", "folder"]
+    repo: str | None = Field(default=None, min_length=3, max_length=200)
+    commit: str | None = Field(default=None, pattern=_SHA)
+    """Both None for a module added from a folder: it has no repository, its files travel."""
+
+    @model_validator(mode="after")
+    def _a_folder_module_has_no_repository_and_every_other_has(self) -> PackedModule:
+        if (self.origin == "folder") != (self.repo is None and self.commit is None):
+            raise ValueError("a folder module has no repository or commit, any other has both")
+        if self.origin != "folder" and (self.repo is None or self.commit is None):
+            raise ValueError("a catalog or link module names its repository and commit")
+        return self
 
 
 class FileMember(_Strict):
@@ -252,18 +283,67 @@ class FileMember(_Strict):
         return self
 
 
+class TargetRefused(ValueError):
+    """A conf or Lua target outside the folders the pack reads them from, or a git or record part.
+
+    Its own type, so the reader can say which file in a sentence instead of "damaged".
+    """
+
+    def __init__(self, target: str) -> None:
+        super().__init__("a file member goes only where the pack reads that kind of file from")
+        self.target = target
+
+
+def laid_root(kind: str, target: str) -> tuple[str, str]:
+    """`(folder, rest)` for a conf or Lua target, or `TargetRefused`.
+
+    The places are the pack's own, read from the same names: a Lua file lies below
+    `LUA_SCRIPTS_DIR` with no dot-named part (`move_server._lua_members` skips those), a conf is a
+    `*.conf` file directly in one of `CONF_DIRS` (`support.sources.conf_files`). Neither may have a
+    `.git` part or a `.yulon-*` one in any case. Checked when a package is read and again just
+    before a file is laid.
+    """
+    parts = target.split("/")
+    if any(_FORBIDDEN_PART.fullmatch(part) for part in parts):
+        raise TargetRefused(target)
+    if kind == "lua":
+        rest = target[len(LUA_SCRIPTS_DIR) + 1 :]
+        if (
+            not target.startswith(LUA_SCRIPTS_DIR + "/")
+            or not rest
+            or any(not part or part.startswith(".") for part in rest.split("/"))
+        ):
+            raise TargetRefused(target)
+        return LUA_SCRIPTS_DIR, rest
+    if kind == "conf":
+        folder, _, name = target.rpartition("/")
+        if folder not in CONF_DIRS or PurePosixPath(name).suffix != ".conf":
+            raise TargetRefused(target)
+        return folder, name
+    raise TargetRefused(target)
+
+
 def _check_target(kind: str, target: str) -> None:
     if kind == "manifest":
         if not _MANIFEST_TARGET.fullmatch(target):
             raise ValueError("a manifest member is <type>/<id>")
         return
+    if kind == "module":
+        found = _MODULE_FILE_TARGET.fullmatch(target)
+        if found is None:
+            raise ValueError("a module file member is <type>/<id>/<path inside the module>")
+        inside = found.group(2)
+        _safe_target(inside)
+        parts = inside.split("/")
+        if len(parts) - 1 > MODULE_FILE_DEPTH or any(_FORBIDDEN_PART.fullmatch(p) for p in parts):
+            raise ValueError("a module file is not inside .git and is not too deep")
+        return
     if kind == "answers":
         if target != ANSWERS_TARGET:
             raise ValueError(f"the answers member is {ANSWERS_TARGET}")
         return
+    laid_root(kind, target)
     _safe_target(target)
-    if kind == "conf" and not target.endswith(".conf"):
-        raise ValueError("a conf member is a .conf file")
 
 
 class ServerPart(_Strict):
@@ -528,8 +608,10 @@ class Package:
     def file_bytes(self, member: FileMember) -> bytes:
         """One small file member, checked again as it is read."""
         try:
-            with zipfile.ZipFile(self.path) as archive:
-                data = archive.read(member.file)
+            with zipfile.ZipFile(self.path) as archive, archive.open(member.file) as fh:
+                # One byte more than the list says: a member that grew since it was checked is
+                # refused without being read whole.
+                data = fh.read(member.bytes + 1)
         except (OSError, KeyError, zipfile.BadZipFile) as exc:
             raise MovePackageError(_changed(self.path.name)) from exc
         if hashlib.sha256(data).hexdigest() != member.sha256 or len(data) != member.bytes:
@@ -592,13 +674,95 @@ def _changed(name: str) -> str:
     )
 
 
+def place_refused(name: str, target: str) -> str:
+    return (
+        f"{name} holds a file meant for {shown(target)}, which is not a place a move package puts "
+        "files, so Yu'lon will not open it. Nothing was brought in."
+    )
+
+
+def shown(rel: str) -> str:
+    """A file name for a sentence: as it is, unless it holds a character that cannot be shown."""
+    return rel if rel.isprintable() and "\\" not in rel else ascii(rel)
+
+
+def case_clash(paths: Iterable[str]) -> tuple[str, str] | None:
+    """The first two paths that are one path on a case-insensitive disk, sorted, or None."""
+    seen: dict[str, str] = {}
+    for path in sorted(paths):
+        key = path.casefold()
+        if key in seen:
+            return seen[key], path
+        seen[key] = path
+    return None
+
+
+def file_and_folder(paths: Iterable[str]) -> tuple[str, str] | None:
+    """A path that is also a folder on the way to another, casefolded, with that other, or None.
+
+    `a` and `a/b.lua` cannot both be laid: the second needs `a` to be a folder. Casefolded, as
+    Windows reads it, so a pack made on Linux with `A` and `a/x.lua` is refused too.
+    """
+    listed = sorted(paths)
+    files = {path.casefold(): path for path in listed}
+    for path in listed:
+        parts = path.casefold().split("/")
+        for depth in range(1, len(parts)):
+            above = "/".join(parts[:depth])
+            if above in files:
+                return files[above], path
+    return None
+
+
+def settings_problem(members: Sequence[FileMember]) -> str | None:
+    """A sentence when the conf and Lua members are past the bound or collide; reads nothing.
+
+    On the DECLARED sizes, so it runs before any member is opened: when a package is read, and
+    again just before the files are laid. Two targets one Windows folder cannot keep apart are
+    refused too: the second would be laid over the first.
+    """
+    if len(members) > SETTINGS_MAX_FILES or sum(m.bytes for m in members) > SETTINGS_MAX_BYTES:
+        return (
+            "The package holds more settings and Lua files than Yu'lon brings in (the limit is "
+            f"{SETTINGS_MAX_BYTES // 1024**2} MB and {SETTINGS_MAX_FILES} files), so nothing was "
+            "brought in. Pack it again on the old computer with less in it."
+        )
+    nested = file_and_folder(m.target for m in members)
+    if nested:
+        return (
+            f"The package holds {shown(nested[0])} as a file and as a folder ({shown(nested[1])}), "
+            "which no disk can keep, so nothing was brought in. Pack again on the old computer."
+        )
+    clash = case_clash(m.target for m in members)
+    if clash:
+        return (
+            "The package holds two settings or Lua files whose names differ only in capital "
+            f"letters ({shown(clash[0])} and {shown(clash[1])}), which one Windows folder cannot "
+            "keep apart, so nothing was brought in. Pack again on the old computer."
+        )
+    return None
+
+
 def _unsafe_name(name: str) -> bool:
-    """A member name a zip can use to write somewhere it was not asked to."""
+    """A member name a zip can use to write somewhere it was not asked to.
+
+    Checked as Windows reads it too, because a package travels between systems: a `:` in ANY
+    part (`sub/C:../x` is drive-relative to `C:` once joined there), a trailing dot or space
+    (Windows drops them, so `x.` and `x` are one file), a device name (`CON`, `NUL.txt`), a
+    backslash, one of `? * < > | "` (no Windows name holds them), and every control character.
+    """
     if not name or name.startswith(("/", "\\")) or "\\" in name or _DRIVE.match(name):
         return True
     if "\x00" in name:
         return True
-    return any(part in ("..", ".", "") for part in name.split("/"))
+    for part in name.split("/"):
+        if part in ("..", ".", ""):
+            return True
+        if ":" in part or any(ord(c) < 32 or ord(c) == 127 or c in _WINDOWS_INVALID for c in part):
+            return True
+        if part.endswith((".", " ")) or _DEVICE.match(part.split(".", 1)[0].rstrip(" ")):
+            return True
+    return False
 
 
 def read_package(path: Path) -> Package:
@@ -643,6 +807,10 @@ def read_package(path: Path) -> Package:
             manifest = Manifest.model_validate(raw)
         except ValidationError as exc:
             logger.info(f"{path.name}: manifest rejected: {exc}")
+            for error in exc.errors():
+                refused = (error.get("ctx") or {}).get("error")
+                if isinstance(refused, TargetRefused):
+                    raise MovePackageError(place_refused(path.name, refused.target)) from exc
             raise MovePackageError(NOT_A_PACKAGE) from exc
         extra = manifest.server.files if manifest.server is not None else ()
         listed = {m.file for m in manifest.databases} | {f.file for f in extra}
@@ -659,6 +827,11 @@ def read_package(path: Path) -> Package:
         checked: list[tuple[str, str, int]] = [
             (m.file, m.sha256, m.bytes) for m in manifest.databases
         ] + [(f.file, f.sha256, f.bytes) for f in extra]
+        if any(f.bytes > MAX_FILE_MEMBER_BYTES for f in extra):
+            raise MovePackageError(NOT_A_PACKAGE)
+        too_much = settings_problem([f for f in extra if f.kind in ("conf", "lua")])
+        if too_much:
+            raise MovePackageError(too_much)
         for file, sha256, length in checked:
             if file not in names:
                 raise MovePackageError(
@@ -667,7 +840,7 @@ def read_package(path: Path) -> Package:
                 )
             try:
                 with archive.open(file, mode="r") as fh:
-                    digest, size = _hash_stream(fh)
+                    digest, size = _hash_stream(fh, limit=length)
             except (OSError, zipfile.BadZipFile) as exc:
                 raise MovePackageError(_changed(path.name)) from exc
             if digest != sha256 or size != length:
@@ -675,12 +848,15 @@ def read_package(path: Path) -> Package:
     return Package(path=path, manifest=manifest)
 
 
-def _hash_stream(fh: IO[bytes]) -> tuple[str, int]:
+def _hash_stream(fh: IO[bytes], limit: int | None = None) -> tuple[str, int]:
+    """SHA-256 and length of a stream; with `limit`, it stops one byte past it (a lying header)."""
     digest = hashlib.sha256()
     size = 0
     while chunk := fh.read(_CHUNK):
         digest.update(chunk)
         size += len(chunk)
+        if limit is not None and size > limit:
+            break
     return digest.hexdigest(), size
 
 

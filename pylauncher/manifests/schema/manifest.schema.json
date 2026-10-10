@@ -496,6 +496,19 @@
           "default": null,
           "description": "A row that must be found before this answer is used; see `ExistsCheck`."
         },
+        "follows": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "character only (T637): the key of another character prompt. This one gets no row of its own: it takes its answer from the character picked for that prompt (`mod-ah-bot`'s `bot_account` follows `bot_guid`: one pick, two answers).",
+          "title": "Follows"
+        },
         "key": {
           "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
           "title": "Key",
@@ -508,7 +521,8 @@
             "int",
             "float",
             "bool",
-            "choice"
+            "choice",
+            "character"
           ],
           "title": "Kind",
           "type": "string"
@@ -538,6 +552,22 @@
           "default": null,
           "description": "int/float only: the smallest answer accepted, inclusive (T122). The mob multipliers declare 0.01: `X=X*{m}` at 0 -- or at 1e-50, which a FLOAT column rounds to 0 -- cannot be divided back by their Remove.",
           "title": "Min"
+        },
+        "multi": {
+          "default": false,
+          "description": "character only (T637): the answer is a comma list of GUIDs, one per ticked character, as `AuctionHouseBot.GUIDs` reads it. False: exactly one GUID.",
+          "title": "Multi",
+          "type": "boolean"
+        },
+        "part": {
+          "default": "guid",
+          "description": "character only (T637): which part of the picked character this answer is: its `guid`, or the id of its `account`. `account` needs `follows`.",
+          "enum": [
+            "guid",
+            "account"
+          ],
+          "title": "Part",
+          "type": "string"
         },
         "question": {
           "minLength": 1,

@@ -2406,25 +2406,25 @@
             "branch": "Playerbot",
             "depth": null,
             "dest": ".",
-            "rev": "7f12e89ee5f467a50e62eba1d525eac7dc953d03"
+            "rev": "f19a18799a35f7c24bdcdc9ea399c601f166259b"
           },
           {
             "repo": "mod-playerbots/mod-playerbots",
             "branch": "master",
             "dest": "modules/mod-playerbots",
-            "rev": "7bae1b5c58c76a0aa20381155edc08096d1485b2"
+            "rev": "037c01418b5d01506917a3db9b44fd56ac5f965c"
           },
           {
             "repo": "azerothcore/mod-ale",
             "branch": "master",
             "dest": "modules/mod-ale",
-            "rev": "1cb86c9600260c3731c96dc3c98d25b4fc3f2153"
+            "rev": "cead0cb2e58ec0f73676ba578eff26cddb79fc01"
           },
           {
             "repo": "DadsMmoLab/dads-mmo-lab",
             "branch": "mod-unbound",
             "dest": "modules/mod-unbound",
-            "rev": "49b334be72d4f1837c712d4f9ec7bcca05742155"
+            "rev": "e52e7d0472039050b352141a0756e0660825abde"
           }
         ]
       },

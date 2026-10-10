@@ -14,6 +14,8 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ## Unreleased
 
 ### New
+- The support file now says how big your computer is: processor, memory, and how much of it Docker gets.
+- **Auction House Bot** asks you to pick its character from your server's list; the Characters tab shows each GUID.
 - A module you add from a link or a folder gets a settings card on the Tuning tab, made from its own settings file.
 - A Tortoise server puts its TortoiseBots and GM Manager addons into your game client by itself, until you remove them.
 - On Tortoise, **Install from link…** and **Install from folder…** take a client add-on or a set of database changes.
@@ -23,8 +25,14 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - **Delete…** and **Clean up…** on the Maintenance tab remove old backups, always keeping the newest good copy of each.
 - Addon and module update chips now fill in by themselves once a day, without pressing **Check for updates**.
 - **Pack the whole server…** and **Bring from another computer…** rebuild a server, world and modules, on another PC.
+- **Pack the whole server…** now carries a module added from a folder; **Bring from another computer…** installs it.
 
 ### Fixed
+- On Tortoise, a failed update puts the world database back too, and the copy it takes is one a return can use.
+- Making the support file no longer takes minutes on big old logs: it keeps their newest lines and says what it cut.
+- While the world keeps crashing and restarting, the Server tab says so instead of "The server is already running."
+- **Start** on a server whose build is gone says so and names **Rebuild the server…** before starting anything.
+- **Rebuild the server…** on a server from the retired playerbots fork says so at once, not after half an hour.
 - **Return to the tested pin…** no longer builds onto databases a newer build updated; it names the backup to restore.
 - A failed, stopped or rolled-back update keeps every earlier database copy; only a successful one clears them.
 - On Tortoise, **Return to the tested pin…** no longer builds onto databases a newer build migrated; it names the backup.
@@ -49,8 +57,12 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Saving settings no longer freezes the window.
 - Network **Apply**, uninstall and the time zone refuse while another Yu'lon works on the server, and name who holds it.
 - Starting and stopping the pathfinding data refuse while another Yu'lon works on the server; finishing waits for it.
+- On disks with hard links, two Yu'lons pressing on one new folder at once no longer report a false id-file error.
 
 ### Changed
+- WoW Unbound is built on the same newer server core as WotLK; **Return to the tested pin…** moves an existing one there.
+- NPC Teleporter follows its author's new menu numbers; installing over an older install keeps the base game's menus.
+- The Tortoise bot dashboard switches on in seconds from TortoiseBots' ready-made program when one fits your server.
 
 ## v0.9.15-Public — 2026-10-09
 

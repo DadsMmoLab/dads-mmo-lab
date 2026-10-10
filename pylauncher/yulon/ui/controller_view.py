@@ -101,6 +101,7 @@ from yulon import (
     purge,
     reset_defaults,
     resources,
+    server_build_gone,
     server_build_presses,
     server_rates,
     server_time_zone,
@@ -136,6 +137,7 @@ from yulon.catalog.installer import (
     WorldStoppedAfterReadyError,
     rebuild_confirmation,
 )
+from yulon.character_pick import Roster
 from yulon.controller import Controller, DatabaseMissing, InstallStatus, PortConflictError
 from yulon.controller_wow_centurion import accounts as centurion_accounts
 from yulon.controller_wow_centurion import characters as centurion_characters
@@ -769,6 +771,8 @@ class PromptAsker(Protocol):
         remembered: Mapping[str, str] | None = None,
         removing: bool = False,
         notes: Sequence[str] = (),
+        characters: Callable[[], Roster] | None = None,
+        run_job: JobRunner | None = None,
     ) -> Mapping[str, str] | None: ...
 
 
@@ -5381,6 +5385,19 @@ ARMED_LAST_LINE = "Press it again to go ahead, or Cancel."
 
 SERVER_NOT_RUNNING = "The server is not running."
 SERVER_ALL_RUNNING = "The server is already running."
+SERVER_LOOPING = (
+    "The world server keeps restarting and is not ready ({restarts} restarts). "
+    "The world log, in Logs, says why."
+)
+"""Start's reason while the world crash-loops: its containers are up, between two crashes (T629)."""
+SERVER_LOOPING_CORRECTIONS = (
+    "The world server keeps restarting and is not ready ({restarts} restarts): the weekly honor "
+    "maintenance cannot find the character_inventory_copy table. "
+    "Press Apply database corrections… above to make it."
+)
+"""The same, when the log carries T159's signature and the banner offers the press (T629)."""
+_LOOPING_OPENING = "The world server keeps restarting"
+"""How both loop sentences begin: tells one of ours from another reason on Start (T629)."""
 
 RESTART_LABEL = "Restart"
 RESTART_TIP = (
@@ -5606,9 +5623,11 @@ def dashboard_on_question(*, lan: bool) -> str:
         else f"Only this PC will be able to reach it, at {bot_dashboard.URL}."
     )
     return (
-        "Yu'lon builds the bots module's own dashboard (a few minutes the first time), turns "
-        "the bots module's telemetry on in tortoise_bots.conf (a copy of the file is kept), adds "
-        "the dashboard to this server's docker-compose.yml and starts it.\n\n"
+        "Yu'lon sets up the dashboard from TortoiseBots' ready-made program when one fits this "
+        "server's bots module (the download is checked against the checksum its release "
+        "published), otherwise it builds the module's own (a few minutes the first time). It "
+        "turns the bots module's telemetry on in tortoise_bots.conf (a copy of the file is kept), "
+        "adds the dashboard to this server's docker-compose.yml and starts it.\n\n"
         "If the server is running, it is then restarted so the bots module starts sending. "
         "Anyone playing is disconnected for a few minutes.\n\n"
         f"{where}\n\nSwitch it on?"
@@ -9317,6 +9336,7 @@ class ControllerView(QWidget):
         self.last_verdict = result
         self.enable_channel_button.setEnabled(_press_is_allowed(result))
         self._world_loops = result.state == "restart_loop"
+        self._refresh_start_reason()
         # A stopped verdict only keeps the sentence on the tab (T608); it is not a world that
         # sits at the update, and the next run, started outside Yu'lon, must not inherit it.
         self._world_failed = bool(result.failure) and result.state != "stopped"
@@ -9325,6 +9345,45 @@ class ControllerView(QWidget):
             # T391: a loop seen after the poll takes REALM ONLINE down now, and
             # the first verdict past it gives the badge back, not a poll later.
             self.realm_badge.set_status(self._badge_word(self._last_polled))
+
+    def _start_reason(self) -> str:
+        """Why Start is greyed over containers that are all up (T629).
+
+        "Already running" is true of a healthy world only: a crash-looping one is in
+        `docker ps` between its restarts, so the poll alone cannot tell them apart (the
+        badge and the realm line already say loop, from the verdict). T159's signature
+        points at the press that fixes it, but only while that press is on the tab.
+        """
+        verdict = self.last_verdict
+        if not self._world_loops or verdict is None:
+            return SERVER_ALL_RUNNING
+        if verdict.honor_copy_missing and self._corrections_offered():
+            return SERVER_LOOPING_CORRECTIONS.format(restarts=verdict.restarts)
+        return SERVER_LOOPING.format(restarts=verdict.restarts)
+
+    def _corrections_offered(self) -> bool:
+        banner = self.corrections_banner
+        return banner.isVisibleTo(self) and not self.corrections_banner_button.isHidden()
+
+    def _refresh_start_reason(self) -> None:
+        """Say the loop (or its end) on Start's reason as soon as the verdict lands (T629).
+
+        The poll sets it every five seconds, but a verdict that lands after the poll must
+        not leave "already running" up until the next one. Never over a job's own words.
+        """
+        status = self._last_polled
+        if status is None or self._busy or not status.all_running:
+            return
+        if (
+            self._badge_held is not None
+            or not self.docker_banner.isHidden()
+            or self._distro not in (None, "running")
+        ):
+            return  # Docker's, the hold's or the distro's words stand
+        now = reason_of(self.start_button)
+        if now and now != SERVER_ALL_RUNNING and not now.startswith(_LOOPING_OPENING):
+            return  # not a sentence of ours: it was set by something that knows more
+        set_enabled_why(self.start_button, self._start_reason())
 
     def _badge_word(self, status: InstallStatus) -> str:
         """The realm badge's word for a status poll, with the verdict's word on the world (T391).
@@ -9349,7 +9408,7 @@ class ControllerView(QWidget):
             return "starting"
         return word
 
-    def _clear_the_verdict(self) -> None:
+    def _clear_the_verdict(self, *, refresh_start: bool = True) -> None:
         """No verdict line: the distro is not known to run, so no world to describe (T133).
 
         Its loop goes with it (T391): a held badge, a stopped distro or Docker's
@@ -9361,6 +9420,8 @@ class ControllerView(QWidget):
         self._world_loops = False
         self._world_failed = False
         self._world_ready = False
+        if refresh_start:
+            self._refresh_start_reason()
 
     # ------------------------------------------- the movement-map job (T179)
 
@@ -9637,7 +9698,8 @@ class ControllerView(QWidget):
             # T194 C7: Docker not answering is the banner's to say -- and the
             # status poll's to log -- even when this lands first, or under a
             # hold that keeps the banner down.
-            self._clear_the_verdict()
+            # Nor is Start's line: the poll has not failed yet, and what it set stands (T629).
+            self._clear_the_verdict(refresh_start=False)
             return
         said = str(exc)
         if said != self._verdict_said:
@@ -9856,7 +9918,7 @@ class ControllerView(QWidget):
         # T195: each greyed one says why, on the Server tab's reason line.
         waiting = wait_for(self._busy_job) if self._busy else None
         set_enabled_why(
-            self.start_button, waiting or (SERVER_ALL_RUNNING if status.all_running else None)
+            self.start_button, waiting or (self._start_reason() if status.all_running else None)
         )
         set_enabled_why(
             self.stop_button, waiting or (None if status.any_running else SERVER_NOT_RUNNING)
@@ -10947,6 +11009,14 @@ class ControllerView(QWidget):
             logger.warning(f"{self.entry.name}: Start could not reach Docker: {exc}")
             msg = START_FAILED_NO_DOCKER
             self._put_the_docker_banner_up(exc)
+        elif not _said_by_yulon(exc) and server_build_gone.names_a_gone_build(self.entry, raw):
+            # T627: compose tried to pull this server's `yulon.local` image because Docker has
+            # lost it (the check before Start missed it, or Docker was not asked). The player
+            # is told what is gone and what moves it on; Docker's words stay under Details.
+            msg = server_build_gone.gone_sentence(
+                self.entry, self.services.controller.server_dir, after_an_attempt=True
+            )
+            why = raw
         elif not _said_by_yulon(exc):
             # T214: something broke -- Docker's or the system's own words. The
             # line says so; the words go under Details and, through
@@ -14437,6 +14507,7 @@ class ControllerView(QWidget):
             where = "online" if character.online else "offline"
             item = QListWidgetItem(
                 f"{character.name} — level {character.level} — {where} — {character.account}"
+                f" — GUID {character.guid}"
             )
             item.setData(Qt.ItemDataRole.UserRole, character.name)
             item.setData(Qt.ItemDataRole.UserRole + 1, bool(character.online))
@@ -17868,6 +17939,7 @@ class ControllerView(QWidget):
             self._module_pending = None
             self.module_report.setPlainText(
                 f"{action} {manifest.id}: cancelled — nothing on this machine was changed."
+                + self._database_left_up()
             )
             return
         # T302: an answer written to a Server rates key is held to that key's rule,
@@ -17877,6 +17949,7 @@ class ControllerView(QWidget):
             self._module_pending = None
             self.module_report.setPlainText(
                 f"{action} {manifest.id}: nothing on this machine was changed — {problem}"
+                + self._database_left_up()
             )
             self.action_failed.emit(problem)
             return
@@ -17904,6 +17977,13 @@ class ControllerView(QWidget):
             return run(manifest, values)
 
         self._run_module_job(update_anyway, self._module_done, self._module_failed)
+
+    _picker_started_db = False
+    """The character picker's read started the database in this press (T637)."""
+
+    def _database_left_up(self) -> str:
+        """` DATABASE_LEFT_UP` where the picker had to start the database and the press stops."""
+        return f" {apply_module.DATABASE_LEFT_UP}" if self._picker_started_db else ""
 
     def _module_values(
         self, manifest: Manifest, action: When, *, again: bool = False
@@ -17938,6 +18018,7 @@ class ControllerView(QWidget):
         A default shown in a box the person can change is an answer; a default
         written unseen is not.
         """
+        self._picker_started_db = False
         needed = required_prompts(manifest, action)
         if not needed:
             return True, None
@@ -17955,7 +18036,7 @@ class ControllerView(QWidget):
         asked = tuple(p for p in needed if must_ask(p, action, known))
         if not asked:
             return True, None
-        extra: dict[str, tuple[str, ...]] = {}
+        extra: dict[str, Any] = {}
         if action != "remove":
             # T302 (cold review): an answer written to a key the Server rates card
             # writes starts at what the card says now -- over the mod's default and
@@ -17971,6 +18052,19 @@ class ControllerView(QWidget):
                 note = server_rates.prompt_note(manifest, rates)
                 if note is not None:
                     extra["notes"] = (note,)
+        if applier is not None and any(p.kind == "character" for p in asked):
+            # T637: the server's own characters to pick from, read on a worker by the dialog
+            # (the answers' check and this read both go through the applier's seams).
+            entry = self.entry
+
+            def read_characters() -> Roster:
+                roster = applier.character_roster(entry)
+                if roster.database_started:
+                    self._picker_started_db = True
+                return roster
+
+            extra["characters"] = read_characters
+            extra["run_job"] = self._jobs
         answers = self._prompt_asker(
             self,
             manifest,
@@ -19344,13 +19438,16 @@ class ControllerView(QWidget):
             self.corrections_banner_label.setText(check.why)
             self.corrections_banner_button.setVisible(False)
             self.corrections_banner.setVisible(True)
+            self._refresh_start_reason()
             return
         if check is None or check.state != "stale":
             self.corrections_banner.setVisible(False)
+            self._refresh_start_reason()
             return
         self.corrections_banner_label.setText(native.corrections_banner_text(check))
         self.corrections_banner_button.setVisible(True)
         self.corrections_banner.setVisible(True)
+        self._refresh_start_reason()
 
     def apply_database_corrections(self) -> bool:
         """Ask, then apply the corrected steps the banner names (T129). False if not started.
