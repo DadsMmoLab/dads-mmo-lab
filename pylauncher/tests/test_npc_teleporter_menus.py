@@ -47,6 +47,7 @@ EXPECTED_MENUS = {"035da5d": (60000, 60010), "70000": (70000, 70010)}
 PINS_MEASURED = (
     "7f12e89ee5f467a50e62eba1d525eac7dc953d03",
     "f19a18799",
+    "2a2211cd8",
 )
 USED_AT_BOTH_PINS = (
     (50000, 50008),
@@ -68,7 +69,10 @@ USED_AT_BOTH_PINS = (
 menu: `gossip_menu.MenuID`, `gossip_menu_option.MenuID` and `.ActionMenuID`, `conditions.SourceGroup`
 of types 14 and 15, `smart_scripts.event_param1` of event 62 (and the menu of action 98),
 `creature_template.gossip_menu_id`. Measured 2026-10-08 over base SQL plus every db_world
-update, at 7f12e89e AND at f19a1879: the two sets are identical. Unbound's Mentor (900001)
+update, at 7f12e89e AND at f19a1879: the two sets are identical. T655 (2026-10-10) checked 2a2211cd:
+no base SQL changed since f19a1879, and its 66 db_world updates touch gossip menus 5853/5854, 8554,
+8799/8874/8881/8927 and 10854 only (no event-62 or action-98 smart_scripts row and no
+`gossip_menu_id` in the range; the ids in the range they name are `*_locale` rows). Unbound's Mentor (900001)
 carries `gossip_menu_id` 0 and talks through Lua. 58000..60999 and 62000..89999 are unused.
 """
 

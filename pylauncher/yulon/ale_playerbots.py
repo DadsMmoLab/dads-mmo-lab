@@ -18,7 +18,9 @@ in both directions (a mod-ale that renamed first, against a pinned mod-playerbot
 that has not, is bridged back the same way) and it does nothing at all:
 
 * when either module is not in the server folder;
-* when mod-playerbots still has the old names (every catalog pin as of T645);
+* when mod-playerbots still has the old names (every catalog pin had them when this was
+  written for T645; T655 then moved WotLK and Unbound to mod-playerbots 79bd4281, which
+  has the new ones);
 * when mod-ale has caught up (every name it uses is declared);
 * for a name with no twin, or with two: the compiler's own error stands, and the
   failed build's note (`native.ale_playerbots_note()`) says what it means.

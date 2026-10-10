@@ -66,7 +66,7 @@ pylauncher/tests/data/centurion-rendered/**/*.yml  text eol=lf
 # mod-playerbots/azerothcore-wotlk's recipe files at the catalog pin, vendored byte for
 # byte: `test_build_context.py` checks their sha256 against the table `build_context`
 # recognises the recipe by (T230), so a CRLF checkout would fail it on Windows.
-pylauncher/tests/data/azerothcore-wotlk-f19a1879/**           -text
+pylauncher/tests/data/azerothcore-wotlk-2a2211cd/**           -text
 
 # mod-unbound's data/sql at the catalog pin, vendored byte for byte: `test_unbound_world_sql.py`
 # checks each file against the module's own MANIFEST.sha256, so no checkout may rewrite a byte.

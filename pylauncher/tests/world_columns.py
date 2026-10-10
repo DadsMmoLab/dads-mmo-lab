@@ -8,18 +8,26 @@ from __future__ import annotations
 
 import re
 
-PIN = "f19a18799a35f7c24bdcdc9ea399c601f166259b"
-"""mod-playerbots/azerothcore-wotlk, the revision `PIN_COLUMNS` was read at (wow-wotlk's pin)."""
+PIN = "2a2211cd8f3d157da432ec0175ddd4b8a191931f"
+"""mod-playerbots/azerothcore-wotlk: wow-wotlk's pin, and wow-unbound's core, since T655
+(2026-10-10). `PIN_COLUMNS` was read at `FORMER_PINS[0]` and shown to hold here (see `VALID_AT`)."""
 
-FORMER_PIN = "7f12e89ee5f467a50e62eba1d525eac7dc953d03"
-"""wow-wotlk's pin until T389 (2026-10-08), and the core wow-unbound shipped on until T580
-(2026-10-09) moved it to `PIN`."""
+FORMER_PINS = (
+    "f19a18799a35f7c24bdcdc9ea399c601f166259b",
+    "7f12e89ee5f467a50e62eba1d525eac7dc953d03",
+)
+"""wow-wotlk's earlier pins, newest first: f19a1879 from T389 (2026-10-08, the revision
+`PIN_COLUMNS` was read at; wow-unbound's core from T580, 2026-10-09) until T655; 7f12e89e
+before that (and the core wow-unbound shipped on)."""
 
-VALID_AT = frozenset({PIN, FORMER_PIN})
-"""The core revisions `PIN_COLUMNS` is known to describe. It holds at `FORMER_PIN` too:
-no base `db_world` SQL file changed between the two revisions, and the 20 `db_world` updates
-between them alter no table (their one DDL is `CREATE TABLE IF NOT EXISTS` for two new `*_dbc`
-tables; T389). Each pin move must add its revision here after checking the same two things."""
+VALID_AT = frozenset({PIN, *FORMER_PINS})
+"""The core revisions `PIN_COLUMNS` is known to describe. Between 7f12e89e and f19a1879 no base
+`db_world` SQL file changed and the 20 `db_world` updates alter no table (their one DDL is
+`CREATE TABLE IF NOT EXISTS` for two new `*_dbc` tables; T389). Between f19a1879 and 2a2211cd
+(175 commits) no file under `data/sql/base` changed and the 66 `db_world` updates hold no
+ALTER, CREATE, DROP, RENAME or TRUNCATE (the range's one DDL is `db_auth` 2026_09_27_00 on
+`uptime`; T655, read in checkouts 2026-10-10). Each pin move must add its revision here after
+checking the same two things."""
 
 PIN_COLUMNS: dict[str, frozenset[str]] = {
     "creature": frozenset(

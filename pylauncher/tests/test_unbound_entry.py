@@ -63,9 +63,11 @@ UNBOUND_REV = "e52e7d0472039050b352141a0756e0660825abde"
 """The `mod-unbound` head that carries U1-U7 (the AzerothCore module layout, T556's fixes, the
 mana-regen patch) and M1 (the Mentor spawns), as DadsMmoLab/dads-mmo-lab says it. The five patch
 files here equal that head's `core-patch/` files byte for byte (checked when this was set)."""
-MOD_ALE_REV = "cead0cb2e58ec0f73676ba578eff26cddb79fc01"
-"""azerothcore/mod-ale master on 2026-10-09: one commit past #408 (54720135), which made its
-`Player:IsBot()` call `WorldSession::IsHeadless()`. Pinned, not tracked: it moves with the core."""
+MOD_ALE_REV = "84b85cc55980dbf67d596f3d5cb34ded10c59102"
+"""azerothcore/mod-ale master on 2026-10-10, its #409: the Playerbots bindings read mod-playerbots'
+renamed config members (`SightDistance`, `ReactDistance`). T580 pinned cead0cb (one past #408,
+54720135, which made `Player:IsBot()` call `WorldSession::IsHeadless()`); T655 moved it here with
+the core and mod-playerbots. Pinned, not tracked: it moves with the core."""
 DK_SENTENCE = "Death Knight can be your first class, not an added one."
 
 
@@ -126,14 +128,16 @@ def test_its_database_password_plan_is_the_fixed_one_the_import_gate_reads() -> 
     assert probe is not None and reset is not None
 
 
-CORE_REV = "f19a18799a35f7c24bdcdc9ea399c601f166259b"
-PLAYERBOTS_REV = "037c01418b5d01506917a3db9b44fd56ac5f965c"
+CORE_REV = "2a2211cd8f3d157da432ec0175ddd4b8a191931f"
+PLAYERBOTS_REV = "79bd428115c8f33b74b13de23b133d49c3f75c60"
 """Unbound's own core and bots pins. Unbound shipped on 7f12e89e / 7bae1b5c; T580 (2026-10-09)
-moved it to the pair T389 proved for wow-wotlk. They are literals, not read from wow-wotlk, and no
-test asserts the two entries agree: they move separately on purpose. A move of Unbound's core or
-mod-ale re-checks its five core patches and the module's Lua against the new revisions (T580 found
-mod-ale #391 changed what the Mentor's `SetSkill` call grants), so a WotLK bump must not drag
-Unbound along, and a test tying them would push the next WotLK lane to bump Unbound untested."""
+moved it to the pair T389 proved for wow-wotlk (f19a1879 / 037c0141), and T655 (2026-10-10) to the
+two test-staging merges of 2026-10-09 (core #264, module #2903). They are literals, not read from
+wow-wotlk, and no test asserts the two entries agree: they move separately on purpose. A move of
+Unbound's core or mod-ale re-checks its five core patches and the module's Lua against the new
+revisions (T580 found mod-ale #391 changed what the Mentor's `SetSkill` call grants), so a WotLK
+bump must not drag Unbound along, and a test tying them would push the next WotLK lane to bump
+Unbound untested."""
 
 BOT_SESSION_CALL: dict[tuple[str, str], str] = {
     # mod-playerbots/azerothcore-wotlk src/server/game/Server/WorldSession.h
@@ -145,6 +149,10 @@ BOT_SESSION_CALL: dict[tuple[str, str], str] = {
     # mod-ale src/LuaEngine/methods/PlayerMethods.h
     ("azerothcore/mod-ale", "1cb86c9600260c3731c96dc3c98d25b4fc3f2153"): "IsBot",
     ("azerothcore/mod-ale", "cead0cb2e58ec0f73676ba578eff26cddb79fc01"): "IsHeadless",
+    # T655, read in checkouts of each revision 2026-10-10:
+    ("mod-playerbots/azerothcore-wotlk", "2a2211cd8f3d157da432ec0175ddd4b8a191931f"): "IsHeadless",
+    ("mod-playerbots/mod-playerbots", "79bd428115c8f33b74b13de23b133d49c3f75c60"): "IsHeadless",
+    ("azerothcore/mod-ale", "84b85cc55980dbf67d596f3d5cb34ded10c59102"): "IsHeadless",
 }
 """The name of the core's "is this session a bot" call, as each source has it at a revision.
 
@@ -152,7 +160,10 @@ Read with `git grep` on m910q 2026-10-09 (T580): the core declares `IsBot()` at 
 (WorldSession.h:1231) and `IsHeadless()` with no `IsBot()` at f19a1879 (WorldSession.h:1234,
 AzerothCore #27533); mod-playerbots calls `GetSession()->IsBot()` at 7bae1b5c (Playerbots.cpp:138)
 and `IsHeadless()` at 037c0141 (Playerbots.cpp:147); mod-ale calls `IsBot()` at 1cb86c96
-(PlayerMethods.h:5145) and `IsHeadless()` at cead0cb (PlayerMethods.h:5205, its #408). A core and
+(PlayerMethods.h:5145) and `IsHeadless()` at cead0cb (PlayerMethods.h:5205, its #408). T655 read
+the next trio the same way: the core has `IsHeadless()` (WorldSession.h:1234) and no `IsBot()`
+anywhere in `src` at 2a2211cd; mod-playerbots calls `IsHeadless()` at 79bd4281 (Playerbots.cpp:147,
+PlayerbotAI.cpp:2549); mod-ale at 84b85cc (PlayerMethods.h:5205). A core and
 a module that name it differently do not compile together (T389's user report). mod-unbound asks
 whichever the core has (its 456ce5b6), so it is not listed."""
 
@@ -175,6 +186,8 @@ ALE_SET_SKILL_SLOTS: dict[str, tuple[int, int, int]] = {
     # src/LuaEngine/methods/PlayerMethods.h, `int SetSkill(lua_State* L, Player* player)`, line 1877
     "1cb86c9600260c3731c96dc3c98d25b4fc3f2153": (2, 3, 1),
     "cead0cb2e58ec0f73676ba578eff26cddb79fc01": (1, 2, 3),
+    # T655: read in a checkout of 84b85cc 2026-10-10 (lines 1877-1884, the same as cead0cb).
+    "84b85cc55980dbf67d596f3d5cb34ded10c59102": (1, 2, 3),
 }
 """Which argument of a Lua `player:SetSkill(skill, a1, a2, a3)` reaches the core's
 `Player::SetSkill(id, step, newVal, maxVal)` as (step, value, max), per mod-ale revision.
@@ -184,6 +197,17 @@ Read on GitHub at both revisions 2026-10-09 (T580): the binding reads its Lua ar
 1cb86c96 (so a3 became the value and a1 the max) and `player->SetSkill(id, step, currVal, maxVal)`
 at cead0cb, the order mod-ale #391 (9e5b8c66) corrected. The core's signature is
 `SetSkill(uint16 id, uint16 step, uint16 currVal, uint16 maxVal)` at 7f12e89e and f19a1879."""
+
+CORE_SET_SKILL_PARAMS: dict[str, tuple[str, str, str, str]] = {
+    # src/server/game/Entities/Player/Player.h, `void SetSkill(...)`
+    "7f12e89ee5f467a50e62eba1d525eac7dc953d03": ("id", "step", "currVal", "maxVal"),
+    "f19a18799a35f7c24bdcdc9ea399c601f166259b": ("id", "step", "currVal", "maxVal"),  # :2108
+    "2a2211cd8f3d157da432ec0175ddd4b8a191931f": ("id", "step", "currVal", "maxVal"),  # :2109
+}
+"""The core's `Player::SetSkill` parameters, per core revision: the other half of what
+`ALE_SET_SKILL_SLOTS` assumes (step, value, max after the id). 7f12e89e and f19a1879 as T580 read
+them on GitHub; f19a1879 and 2a2211cd re-read in checkouts 2026-10-10 (T655). Its re-review noted
+a core-side reorder would slip past a table keyed on mod-ale alone."""
 
 MENTOR_LUA = (
     Path(__file__).parent / "fixtures" / "mod-unbound" / "lua_scripts" / "unbound_mentor.lua"
@@ -218,6 +242,15 @@ def test_every_mentor_skill_grant_gives_value_equal_to_max_on_the_pinned_mod_ale
         "PlayerMethods.h's SetSkill at that revision and add its order to ALE_SET_SKILL_SLOTS"
     )
     step, value, maximum = ALE_SET_SKILL_SLOTS[ale]
+    core = sources["mod-playerbots/azerothcore-wotlk"]
+    assert core in CORE_SET_SKILL_PARAMS, (
+        f"the core is pinned at {core}, whose Player::SetSkill was not read: read Player.h's "
+        "SetSkill at that revision and add its parameters to CORE_SET_SKILL_PARAMS"
+    )
+    assert CORE_SET_SKILL_PARAMS[core] == ("id", "step", "currVal", "maxVal"), (
+        f"the core at {core[:8]} takes SetSkill{CORE_SET_SKILL_PARAMS[core]}: "
+        "ALE_SET_SKILL_SLOTS no longer says what reaches it"
+    )
     calls = _set_skill_calls(MENTOR_LUA.read_text(encoding="utf-8"))
     assert calls, "the Mentor script makes no SetSkill call: the read found nothing to check"
     for args in calls:
@@ -256,6 +289,59 @@ def test_the_core_and_the_two_modules_that_call_it_agree_on_the_bot_call() -> No
         )
         said[repo] = BOT_SESSION_CALL[(repo, rev)]
     assert len(set(said.values())) == 1, f"the pins disagree on the bot call: {said}"
+
+
+PLAYERBOTS_CONFIG_MEMBERS: dict[tuple[str, str], tuple[str, ...]] = {
+    # mod-playerbots src/PlayerbotAIConfig.h:113, the two members mod-ale reads, as declared
+    ("mod-playerbots/mod-playerbots", "037c01418b5d01506917a3db9b44fd56ac5f965c"): (
+        "sightDistance",
+        "reactDistance",
+    ),
+    ("mod-playerbots/mod-playerbots", "79bd428115c8f33b74b13de23b133d49c3f75c60"): (
+        "SightDistance",
+        "ReactDistance",
+    ),
+    # mod-ale: every `sPlayerbotAIConfig.<name>` in src (PlayerBotAIMethods.h:515, :528)
+    ("azerothcore/mod-ale", "cead0cb2e58ec0f73676ba578eff26cddb79fc01"): (
+        "sightDistance",
+        "reactDistance",
+    ),
+    ("azerothcore/mod-ale", "84b85cc55980dbf67d596f3d5cb34ded10c59102"): (
+        "SightDistance",
+        "ReactDistance",
+    ),
+}
+"""mod-playerbots' config members that mod-ale's Playerbots bindings read, as each side spells them.
+
+mod-playerbots ed54b459 (#2854, 2026-10-06) renamed every public `PlayerbotAIConfig` member to
+UpperCamelCase; mod-ale #409 (84b85cc, 2026-10-10) followed. Read in checkouts 2026-10-10 (T655):
+`grep -rn "sPlayerbotAIConfig\\."` over mod-ale's `src` finds exactly these two uses at cead0cb and
+at 84b85cc, and `PlayerbotAIConfig.h:113` declares them lowercase at 037c0141 and capitalised at
+79bd4281. A disagreeing pair is the T645 build error (Yu'lon's compile-time bridge then rewrites
+mod-ale for the build; pins that need it are not a tested pair)."""
+
+
+def test_mod_ale_reads_the_playerbots_config_members_by_the_names_the_pinned_module_declares() -> (
+    None
+):
+    """T655: the pinned mod-ale and mod-playerbots spell the config members the same way.
+
+    An unread revision of either fails by name; a pin pair the T645 bridge would have to rewrite
+    fails as a disagreement."""
+    sources = {s.repo: s.rev for s in unbound().emulator.sources}
+    said = {}
+    for repo in ("mod-playerbots/mod-playerbots", "azerothcore/mod-ale"):
+        rev = sources[repo]
+        assert rev is not None, f"{repo} is not pinned"
+        assert (repo, rev) in PLAYERBOTS_CONFIG_MEMBERS, (
+            f"{repo} is pinned at {rev}, which was not read: read PlayerbotAIConfig.h's members "
+            "(mod-playerbots) or every sPlayerbotAIConfig.<name> (mod-ale) at that revision and "
+            "add them to PLAYERBOTS_CONFIG_MEMBERS"
+        )
+        said[repo] = PLAYERBOTS_CONFIG_MEMBERS[(repo, rev)]
+    assert (
+        said["azerothcore/mod-ale"] == said["mod-playerbots/mod-playerbots"]
+    ), f"mod-ale reads config members mod-playerbots does not declare: {said}"
 
 
 def test_the_five_core_patches_are_applied_in_order_to_the_core() -> None:

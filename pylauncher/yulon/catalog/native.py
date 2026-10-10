@@ -1743,7 +1743,8 @@ def ale_playerbots_note(press: str) -> str:
     could not bridge, and either one can be the one behind: mod-playerbots ed54b459
     renamed its config members (2026-10-06) with mod-ale still on the old names, and
     azerothcore/mod-ale#409 (84b85cc, 2026-10-10) then took the new names while WotLK's
-    tested mod-playerbots (037c0141) still has the old. So the sentence names both ways
+    tested mod-playerbots of the time (037c0141) still had the old ones (T655 moved the
+    pin to 79bd4281, after the rename, the same day). So the sentence names both ways
     out and does not guess which one applies. An update or a return was put back, so the
     build the player has keeps running.
     """

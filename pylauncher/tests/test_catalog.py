@@ -232,8 +232,8 @@ def test_every_shipped_entry_is_installable_on_linux_and_names_its_family() -> N
 
 GATE_PINS = {
     "wow-wotlk": {
-        "mod-playerbots/azerothcore-wotlk": "f19a18799a35f7c24bdcdc9ea399c601f166259b",
-        "mod-playerbots/mod-playerbots": "037c01418b5d01506917a3db9b44fd56ac5f965c",
+        "mod-playerbots/azerothcore-wotlk": "2a2211cd8f3d157da432ec0175ddd4b8a191931f",
+        "mod-playerbots/mod-playerbots": "79bd428115c8f33b74b13de23b133d49c3f75c60",
     },
     "wow-tbc": {
         "cmangos/mangos-tbc": "15b6ddb4ec9e443d49f4e438af73782ce5c16491",
@@ -249,11 +249,19 @@ GATE_PINS = {
 """The commit each shipped source is pinned to, and the gate that ran on it.
 
 Read out of the gate boxes' own checkouts (`git rev-parse HEAD` in each source's
-`dest`), never off a branch tip. Pinned 2026-09-05; `wow-wotlk` moved 2026-09-26 and 2026-10-08:
+`dest`), never off a branch tip. Pinned 2026-09-05; `wow-wotlk` moved 2026-09-26, 2026-10-08 and
+2026-10-10:
 
-* `wow-wotlk`: T389's fresh install on `yulon-fedora-gate` 2026-10-08, core `f19a1879`
+* `wow-wotlk`: T655 (2026-10-10), core `2a2211cd` and module `79bd4281`, the two `test-staging`
+  merges of 2026-10-09 (core #264, module #2903, ten minutes apart). The module reads its
+  settings as `Playerbots.*` since ed54b459 (#2854), which T657 taught Yu'lon to follow, and
+  declares the config members mod-ale master reads since its #409 (84b85cc). Gate: T655's
+  "Return to the tested pin…" on `yulon-fedora` 2026-10-10, which moved T657's install from
+  `f19a1879`/`037c0141` to these two and read them back out of its checkouts (world
+  `AzerothCore rev. 2a2211cd8f3d+`; WoW Unbound on the same pair the same day). Before that,
+  T389's fresh install on `yulon-fedora-gate` 2026-10-08, core `f19a1879`
   and module `037c0141`, the two `test-staging` merges of 2026-10-02 (core #258, module
-  #2873). The core has `WorldSession::IsHeadless()` where `7f12e89e` had `IsBot()`
+  #2873). That core has `WorldSession::IsHeadless()` where `7f12e89e` had `IsBot()`
   (AzerothCore #27533), which mod-ale's master calls since its #408; and the module's
   b0cd0ea7 takes the core's async module database (ff8d11773), so the two are one pair.
   Before that, T134's `7f12e89e`/`7bae1b5c` (2026-09-26, the same box), and until then
