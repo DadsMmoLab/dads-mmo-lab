@@ -1698,7 +1698,7 @@ def ale_playerbots_note(press: str) -> str:
 
     The generic note says mod-ale "may not build on the new server code yet" and to
     update it: wrong here, twice over. The two modules disagree on a NAME that
-    `families/ale_playerbots` could not bridge, and mod-ale has no update for that
+    `yulon/ale_playerbots` could not bridge, and mod-ale has no update for that
     until its authors catch up (2026-10-10: mod-playerbots ed54b459 renamed its config
     members; no mod-ale commit had). What works depends on the press: an update was put
     back, so the build the player has keeps running; a Rebuild off the tested commits

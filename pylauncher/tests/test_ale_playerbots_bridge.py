@@ -6,7 +6,7 @@ onwards, cead0cb today) still read two of them by the old names, so every build
 with both failed at `PlayerBotAIMethods.h:515` ("no member named 'sightDistance' in
 'PlayerbotAIConfig'; did you mean 'SightDistance'?").
 
-`families/ale_playerbots.py` bridges the names for the compile only: these tests
+`yulon/ale_playerbots.py` bridges the names for the compile only: these tests
 pin what it rewrites (only `sPlayerbotAIConfig.<name>` where the header lost the name
 and has exactly one twin that differs in case), what it leaves alone (every pin
 today, and a mod-ale that has caught up), that it puts every file back byte for byte,
@@ -29,9 +29,8 @@ from typing import Any
 import pytest
 
 from tests.support_native import ENTRY, Recorder
-from yulon import docker, install_wiring, resources, server_build_presses
+from yulon import ale_playerbots, docker, install_wiring, resources, server_build_presses
 from yulon.catalog import native
-from yulon.catalog.families import ale_playerbots
 from yulon.catalog.families.azerothcore import AzerothCoreInstaller
 from yulon.catalog.installer import InstallerError, InstallOptions
 from yulon.module_moves import BuildErrorScanner

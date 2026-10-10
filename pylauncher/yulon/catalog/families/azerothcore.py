@@ -32,10 +32,10 @@ from dataclasses import replace
 from pathlib import Path
 from typing import ClassVar
 
-from yulon import docker, git, networking, server_build_presses
+from yulon import ale_playerbots, docker, git, networking, server_build_presses
 from yulon.catalog import snapshot
 from yulon.catalog.catalog import AzerothCoreData, CatalogEntry, EmulatorSource
-from yulon.catalog.families import ale_playerbots, carried, scriptdeploy
+from yulon.catalog.families import carried, scriptdeploy
 from yulon.catalog.installer import InstallerError, InstallStopped, OneShotLeftRunning
 from yulon.catalog.native import (
     DOWNLOAD_CANCEL_NOTE,
