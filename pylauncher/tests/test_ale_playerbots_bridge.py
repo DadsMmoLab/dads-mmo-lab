@@ -29,11 +29,15 @@ from typing import Any
 import pytest
 
 from tests.support_native import ENTRY, Recorder
+from tests.test_apply import _installed_clone
 from yulon import ale_playerbots, docker, install_wiring, resources, server_build_presses
+from yulon.apply import ApplyRefusal
 from yulon.catalog import native
 from yulon.catalog.families.azerothcore import AzerothCoreInstaller
 from yulon.catalog.installer import InstallerError, InstallOptions
+from yulon.git import git_available
 from yulon.module_moves import BuildErrorScanner
+from yulon.said import SaidByYulon
 
 HEADER = "modules/mod-playerbots/src/PlayerbotAIConfig.h"
 BINDING = "modules/mod-ale/src/LuaEngine/methods/Playerbots/PlayerBotAIMethods.h"
@@ -455,3 +459,220 @@ def test_any_other_mod_ale_error_keeps_the_generic_note(tmp_path: Path) -> None:
     said = str(raised.value)
     assert "If mod-ale has an update" in said, said
     assert "mod-ale's Playerbots support" not in said, said
+
+
+# -- cold review of db5da4df: a press closed at the bridge's line, and leftovers ----
+
+
+def test_a_press_closed_at_the_bridge_line_still_puts_upstreams_file_back(tmp_path: Path) -> None:
+    """GeneratorExit at the bridge's own yield (a consumer that walks away) skips nothing."""
+    rec, server_dir, made = _installed_wotlk(tmp_path)
+    press = made.rebuild(InstallOptions(server_dir=server_dir))
+    for line in press:
+        if "spell some config names differently" in line:
+            assert binding_bytes(server_dir) == ALE_BRIDGED.encode("utf-8")
+            break
+    else:
+        pytest.fail("the bridge never said its line")
+
+    press.close()
+
+    assert binding_bytes(server_dir) == ALE_OLD.encode("utf-8")
+    assert not (server_dir / ale_playerbots.RECORD).exists()
+
+
+def test_the_update_routes_dirty_tree_guard_meets_upstreams_file_not_a_leftover(
+    tmp_path: Path,
+) -> None:
+    """A bridge left on disk (Yu'lon died mid-compile) is put back before git is asked."""
+    rec, server_dir, made = _installed_wotlk(tmp_path)
+    list(ale_playerbots.bridge(server_dir))  # ... and the process died here
+    seen: list[bytes] = []
+
+    def local_edits(dest: Path, ignoring: object = ()) -> tuple[str, ...]:
+        seen.append(binding_bytes(server_dir))
+        return ()
+
+    made._seams = rec.seams(local_edits=local_edits)
+    made._refuse_unless_updatable(server_dir, made.sources_that_move())
+
+    assert seen and set(seen) == {ALE_OLD.encode("utf-8")}, "git was asked about the leftover"
+    assert not (server_dir / ale_playerbots.RECORD).exists()
+
+
+@pytest.mark.skipif(not git_available(), reason="needs a host git to make a real checkout")
+def test_a_modules_tab_update_puts_a_leftover_back_before_asking_about_the_tree(
+    tmp_path: Path,
+) -> None:
+    applier, manifest, clone = _installed_clone(tmp_path)
+    tracked = clone / "src" / "LuaEngine" / "ALEConfig.cpp"
+    original = tracked.read_text(encoding="utf-8")
+    left = original + "sPlayerbotAIConfig.SightDistance;\n"
+    tracked.write_text(left, encoding="utf-8")
+    relative = tracked.relative_to(applier.server_dir).as_posix()
+    (applier.server_dir / ale_playerbots.RECORD).write_text(
+        json.dumps({"files": {relative: {"original": original, "bridged_sha256": _sha(left)}}}),
+        encoding="utf-8",
+    )
+
+    applier.update(manifest)
+
+    assert tracked.read_text(encoding="utf-8") == original
+    assert not (applier.server_dir / ale_playerbots.RECORD).exists()
+
+
+@pytest.mark.skipif(not git_available(), reason="needs a host git to make a real checkout")
+def test_a_modules_tab_update_held_off_by_another_press_touches_nothing(tmp_path: Path) -> None:
+    """Another Yu'lon compiling holds the server: its bridged file is not put back under it."""
+    applier, manifest, clone = _installed_clone(tmp_path)
+    tracked = clone / "src" / "LuaEngine" / "ALEConfig.cpp"
+    original = tracked.read_text(encoding="utf-8")
+    left = original + "sPlayerbotAIConfig.SightDistance;\n"
+    tracked.write_text(left, encoding="utf-8")
+    relative = tracked.relative_to(applier.server_dir).as_posix()
+    record = applier.server_dir / ale_playerbots.RECORD
+    record.write_text(
+        json.dumps({"files": {relative: {"original": original, "bridged_sha256": _sha(left)}}}),
+        encoding="utf-8",
+    )
+
+    def held_elsewhere(press: str) -> Any:
+        raise SaidByYulon("Another Yu'lon is working on this server (Rebuild the server…).")
+
+    applier._hold_server = held_elsewhere
+
+    with pytest.raises(ApplyRefusal, match="Another Yu'lon"):
+        applier.update(manifest)
+    assert tracked.read_text(encoding="utf-8") == left
+    assert record.is_file()
+
+
+# -- cold review of db5da4df: the record never points outside mod-ale ----------
+
+
+def _sha(text: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _craft(server_dir: Path, relative: str, now: str, original: str) -> None:
+    (server_dir / ale_playerbots.RECORD).write_text(
+        json.dumps({"files": {relative: {"original": original, "bridged_sha256": _sha(now)}}}),
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "modules/mod-ale/../../../victim.h",
+        "modules/mod-ale/src/../../../../victim.h",
+    ],
+)
+def test_a_record_that_climbs_out_writes_nothing(tmp_path: Path, relative: str) -> None:
+    server_dir = tmp_path / "server"
+    (server_dir / "modules/mod-ale/src").mkdir(parents=True)
+    victim = tmp_path / "victim.h"
+    victim.write_text("theirs\n", encoding="utf-8")
+    _craft(server_dir, relative, "theirs\n", "overwritten\n")
+
+    ale_playerbots.put_back(server_dir)
+
+    assert victim.read_text(encoding="utf-8") == "theirs\n"
+
+
+def test_a_record_with_an_absolute_path_writes_nothing(tmp_path: Path) -> None:
+    server_dir = tmp_path / "server"
+    (server_dir / "modules/mod-ale/src").mkdir(parents=True)
+    victim = tmp_path / "victim.h"
+    victim.write_text("theirs\n", encoding="utf-8")
+    _craft(server_dir, str(victim), "theirs\n", "overwritten\n")
+
+    ale_playerbots.put_back(server_dir)
+
+    assert victim.read_text(encoding="utf-8") == "theirs\n"
+
+
+def test_a_linked_mod_ale_folder_is_never_written_through(tmp_path: Path) -> None:
+    """`modules/mod-ale` itself a link: neither the record nor the bridge writes through it."""
+    server_dir = tmp_path / "server"
+    outside = tmp_path / "outside-ale"
+    (outside / "src/LuaEngine/methods/Playerbots").mkdir(parents=True)
+    victim = outside / "src/LuaEngine/methods/Playerbots/PlayerBotAIMethods.h"
+    victim.write_bytes(ALE_OLD.encode("utf-8"))
+    lay(server_dir, POST_RENAME_HEADER, None)
+    (server_dir / "modules/mod-ale").symlink_to(outside, target_is_directory=True)
+
+    assert list(ale_playerbots.bridge(server_dir)) == []
+    assert victim.read_bytes() == ALE_OLD.encode("utf-8")
+
+    _craft(server_dir, BINDING, ALE_OLD, "overwritten\n")
+    ale_playerbots.put_back(server_dir)
+    assert victim.read_bytes() == ALE_OLD.encode("utf-8")
+
+
+def test_a_linked_src_folder_inside_mod_ale_is_never_written_through(tmp_path: Path) -> None:
+    server_dir = tmp_path / "server"
+    outside = tmp_path / "outside-src"
+    (outside / "LuaEngine/methods/Playerbots").mkdir(parents=True)
+    victim = outside / "LuaEngine/methods/Playerbots/PlayerBotAIMethods.h"
+    victim.write_bytes(ALE_OLD.encode("utf-8"))
+    lay(server_dir, POST_RENAME_HEADER, None)
+    (server_dir / "modules/mod-ale").mkdir(parents=True)
+    (server_dir / "modules/mod-ale/src").symlink_to(outside, target_is_directory=True)
+
+    _craft(server_dir, BINDING, ALE_OLD, "overwritten\n")
+    ale_playerbots.put_back(server_dir)
+    assert victim.read_bytes() == ALE_OLD.encode("utf-8")
+
+
+def test_a_link_the_link_check_cannot_see_is_still_caught_by_where_it_resolves(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Windows junction reads as a plain folder to `is_symlink()` on Python 3.11 (T375):
+    where the path RESOLVES, inside this server folder's own mod-ale, is what keeps the
+    record and the bridge from writing outside it."""
+    server_dir = tmp_path / "server"
+    outside = tmp_path / "outside-ale"
+    (outside / "src/LuaEngine/methods/Playerbots").mkdir(parents=True)
+    victim = outside / "src/LuaEngine/methods/Playerbots/PlayerBotAIMethods.h"
+    victim.write_bytes(ALE_OLD.encode("utf-8"))
+    lay(server_dir, POST_RENAME_HEADER, None)
+    (server_dir / "modules/mod-ale").symlink_to(outside, target_is_directory=True)
+    monkeypatch.setattr(ale_playerbots, "_linked_on_the_way", lambda *_: False)
+
+    assert list(ale_playerbots.bridge(server_dir)) == []
+    assert victim.read_bytes() == ALE_OLD.encode("utf-8")
+
+    _craft(server_dir, BINDING, ALE_OLD, "overwritten\n")
+    ale_playerbots.put_back(server_dir)
+    assert victim.read_bytes() == ALE_OLD.encode("utf-8")
+
+
+def test_the_link_and_climb_checks_hold_on_their_own_without_the_resolve_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each layer refuses alone: with the resolve check blinded, a linked mod-ale and a
+    `..` in the record are still refused by the checks made before it."""
+    monkeypatch.setattr(ale_playerbots, "_under_mod_ale", lambda *_: True)
+    server_dir = tmp_path / "server"
+    outside = tmp_path / "outside-ale"
+    (outside / "src/LuaEngine/methods/Playerbots").mkdir(parents=True)
+    victim = outside / "src/LuaEngine/methods/Playerbots/PlayerBotAIMethods.h"
+    victim.write_bytes(ALE_OLD.encode("utf-8"))
+    lay(server_dir, POST_RENAME_HEADER, None)
+    (server_dir / "modules/mod-ale").symlink_to(outside, target_is_directory=True)
+
+    assert list(ale_playerbots.bridge(server_dir)) == []
+    _craft(server_dir, BINDING, ALE_OLD, "overwritten\n")
+    ale_playerbots.put_back(server_dir)
+    assert victim.read_bytes() == ALE_OLD.encode("utf-8")
+
+    climbed = tmp_path / "victim.h"
+    climbed.write_text("theirs\n", encoding="utf-8")
+    other = tmp_path / "other"
+    (other / "modules/mod-ale").mkdir(parents=True)
+    _craft(other, "modules/mod-ale/../../../victim.h", "theirs\n", "overwritten\n")
+    ale_playerbots.put_back(other)
+    assert climbed.read_text(encoding="utf-8") == "theirs\n"

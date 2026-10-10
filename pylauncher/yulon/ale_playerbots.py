@@ -46,7 +46,7 @@ import os
 import re
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from yulon.catalog.families import conf
 from yulon.catalog.installer import InstallerError
@@ -114,10 +114,37 @@ def _read_text(path: Path) -> str | None:
         return None
 
 
+def _linked_on_the_way(server_dir: Path, relative: str) -> bool:
+    """Is any part of `relative`, walked down from `server_dir`, a link? (cold review)"""
+    here = server_dir
+    for part in PurePosixPath(relative).parts:
+        here = here / part
+        if here.is_symlink():
+            return True
+    return False
+
+
+def _under_mod_ale(server_dir: Path, path: Path) -> bool:
+    """Does `path` resolve inside this server folder's own `modules/mod-ale`? (cold review)
+
+    Both halves resolved: `modules/mod-ale` itself must resolve inside the server folder
+    (a junction there, which `is_symlink()` does not see on Windows' Python 3.11, moves
+    it out), and `path` inside that.
+    """
+    try:
+        server = server_dir.resolve(strict=True)
+        root = (server_dir / ALE).resolve(strict=True)
+        return root == server / ALE and path.resolve(strict=True).is_relative_to(root)
+    except (OSError, RuntimeError):
+        return False
+
+
 def _sources(server_dir: Path) -> Iterator[Path]:
-    """mod-ale's C++ files under `src/`, never through a link (folder or file)."""
+    """mod-ale's C++ files under `src/`, never through a link (folder or file, anywhere)."""
     root = server_dir / ALE / "src"
-    if root.is_symlink() or not root.is_dir():
+    if _linked_on_the_way(server_dir, f"{ALE}/src") or not root.is_dir():
+        return
+    if not _under_mod_ale(server_dir, root):
         return
     for folder, dirs, files in os.walk(root, followlinks=False):
         dirs.sort()
@@ -181,11 +208,22 @@ def _read_record(server_dir: Path) -> dict[str, dict[str, str]] | None:
 
 
 def _inside(server_dir: Path, relative: str) -> Path | None:
-    """`relative` as a file under `server_dir`/modules/mod-ale, never through a link."""
-    path = server_dir / relative
-    if not relative.startswith(f"{ALE}/") or ".." in Path(relative).parts:
+    """A record's path as a file inside `server_dir`/modules/mod-ale, or None (cold review).
+
+    The record is a file in the server folder, so its paths are not trusted: relative,
+    under `modules/mod-ale/`, no `..`, no link on ANY part of the way down (a linked
+    `modules/mod-ale` would otherwise be written through), and resolving inside the
+    resolved `modules/mod-ale`.
+    """
+    parts = PurePosixPath(relative)
+    if parts.is_absolute() or Path(relative).is_absolute():
         return None
-    if path.is_symlink() or not path.is_file():
+    if not relative.startswith(f"{ALE}/") or ".." in parts.parts:
+        return None
+    if _linked_on_the_way(server_dir, relative):
+        return None
+    path = server_dir / relative
+    if not path.is_file() or not _under_mod_ale(server_dir, path):
         return None
     return path
 
@@ -236,11 +274,14 @@ def put_back(server_dir: Path) -> list[str]:
     return said
 
 
-def bridge(server_dir: Path) -> Iterator[str]:
+def bridge(server_dir: Path) -> list[str]:
     """Rewrite mod-ale's config names to mod-playerbots' for the compile that follows (T645).
 
     A record left by a compile that never finished is put back first. Then the plan is
-    made from the files as they stand; nothing to bridge says nothing.
+    made from the files as they stand; nothing to bridge says nothing. A list and not a
+    generator (cold review of db5da4df): every write is done when this returns, so the
+    caller holds its `finally` around the lines and a consumer that closes the press at
+    one of them still reaches `put_back()`.
 
     Raises:
         InstallerError: an old record that cannot be read, or a file that cannot be
@@ -254,11 +295,10 @@ def bridge(server_dir: Path) -> Iterator[str]:
             "ships them. Put modules/mod-ale back as git has it, delete that file, and press "
             "this again. Nothing was built."
         )
-    if old:
-        yield from put_back(server_dir)
+    said = put_back(server_dir) if old else []
     planned = _plan(server_dir)
     if not planned:
-        return
+        return said
     record = {
         "files": {
             item.path: {"original": item.original, "bridged_sha256": _digest(item.bridged)}
@@ -277,8 +317,9 @@ def bridge(server_dir: Path) -> Iterator[str]:
         ) from exc
     for item in planned:
         names = ", ".join(f"{old} -> {new}" for old, new in item.renames.items())
-        yield (
+        said.append(
             f"mod-playerbots and mod-ale's Playerbots support spell some config names "
             f"differently ({names}); Yu'lon compiles {item.path} with mod-playerbots' "
             "spelling and puts the file back as mod-ale ships it once the compile ends."
         )
+    return said
