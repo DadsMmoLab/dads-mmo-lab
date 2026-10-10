@@ -22,7 +22,15 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from yulon import database_presence, docker, forgetting, platform, server_build_gone, wsl
+from yulon import (
+    database_presence,
+    docker,
+    forgetting,
+    platform,
+    playerbots_rename,
+    server_build_gone,
+    wsl,
+)
 from yulon.catalog import composegen, native, time_zone, world_data
 from yulon.catalog.catalog import CatalogEntry, load_catalog
 from yulon.log import get_logger
@@ -207,6 +215,9 @@ class Controller:
         # the map data (T219, `world_data.refresh()`): `None` when nothing. Read by the
         # tab beside `zone_problem`.
         self.world_data_problem: str | None = None
+        # The line the last `start()` said when it renamed the server's bot settings to
+        # the prefix its mod-playerbots reads (T657): `None` when there was nothing to do.
+        self.bot_settings_renamed: str | None = None
         # The catalog entry this install is, where the subclass knows it (T179).
         # `None` reads it off the shipped catalog by container names
         # (`_entry_for`), which every game but one in the making can answer.
@@ -347,6 +358,9 @@ class Controller:
             if conflicts:
                 logger.warning(f"start() refused: ports {self.spec.ports} bound by {conflicts}")
                 raise PortConflictError(conflicts, self.spec.ports, self._owners_of(conflicts))
+            # T657: files only, and before the database is started to be asked about, so a
+            # rename that cannot be written refuses with nothing started.
+            self.bot_settings_renamed = self._rename_bot_settings()
             self.refuse_a_missing_image()
             self.refuse_a_missing_database()
             if not asked_before_the_servers:
@@ -364,6 +378,21 @@ class Controller:
                 # would otherwise stop 15-25 s after this app's last call into it,
                 # killing the server it just started (T132, `wsl.hold()`).
                 self._hold = wsl.hold(self.wsl_distro, self.spec.world)
+
+    def _rename_bot_settings(self) -> str | None:
+        """T657: the bot settings under the prefix this server's mod-playerbots reads.
+
+        Raises:
+            StartRefused: they could not be renamed; nothing is started.
+        """
+        entry = self.entry or _entry_for(self.spec)
+        if entry is None:
+            return None
+        try:
+            return playerbots_rename.settle(entry, self.server_dir)
+        except playerbots_rename.RenameRefused as exc:
+            logger.warning(f"start() refused: {exc}")
+            raise StartRefused(str(exc)) from exc
 
     def refuse_a_missing_image(self) -> None:
         """Raise `StartRefused` when Docker no longer has this server's built image (T627).

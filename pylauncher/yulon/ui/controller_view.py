@@ -10862,8 +10862,13 @@ class ControllerView(QWidget):
             )
             if isinstance(problem, str) and problem
         ]
+        # T657: the one line a Start says when it renamed the bot settings for the module.
+        renamed = getattr(self.services.controller, "bot_settings_renamed", None)
+        lines = [renamed] if isinstance(renamed, str) and renamed else []
         if said:
-            text = "The server started, but " + " Also, ".join(said)
+            lines.append("The server started, but " + " Also, ".join(said))
+        if lines:
+            text = " ".join(lines)
             self.problem_label.setText(text)
             return text
         return None
@@ -21988,9 +21993,7 @@ class ControllerView(QWidget):
             # (`channel_world_env`, T137 review), or a shipped
             # `AiPlayerbot.CommandServerPort` went unflagged under its `=0` row.
             shadowed=composegen.shadowed_by_env(
-                raw,
-                composegen.channel_world_env(self.entry, self.services.controller.server_dir)
-                or composegen.world_env(self.entry),
+                raw, composegen.shadowing_env(self.entry, self.services.controller.server_dir)
             ),
         )
 

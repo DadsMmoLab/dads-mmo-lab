@@ -30,6 +30,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - **Pack the whole server…** now carries a module added from a folder; **Bring from another computer…** installs it.
 
 ### Fixed
+- WotLK and Unbound bot settings work again on the newest bots module: Yu'lon renames them for it, and back.
 - A small step back of your computer's clock no longer hides the "history was rewritten" line in the update question.
 - On Tortoise, a failed update puts the world database back too, and the copy it takes is one a return can use.
 - On Windows, opening the LAN ports asks for administrator rights itself, and the commands it shows now work when pasted.

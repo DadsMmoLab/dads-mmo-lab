@@ -63,7 +63,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TypeVar, cast
 
-from yulon import bot_population, commands, docker, platform, soap, winacl
+from yulon import bot_population, commands, docker, platform, playerbots_keys, soap, winacl
 from yulon.catalog import bot_count, composegen, time_zone
 from yulon.catalog.catalog import CatalogEntry, ConfPatch
 from yulon.catalog.families import conf
@@ -1813,11 +1813,11 @@ class InstallChannel:
         # the channel's own lines are what is compared: each line the channel-on
         # render has for one of its env keys, found or not in the file.
         mine = {line.strip() for line in now.splitlines()}
-        lines = [
-            line.strip()
-            for line in texts[0].splitlines()
-            if any(key in line for key in operations.enable_env)
-        ]
+        # T657: the channel's keys as the render spelled them, for this server's module.
+        keys = playerbots_keys.env_map(
+            operations.enable_env, playerbots_keys.module_prefix(self.server_dir)
+        )
+        lines = [line.strip() for line in texts[0].splitlines() if any(key in line for key in keys)]
         if not lines:
             return None
         present = [line in mine for line in lines]

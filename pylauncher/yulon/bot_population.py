@@ -50,7 +50,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
-from yulon import reset_defaults, tuning
+from yulon import playerbots_keys, reset_defaults, tuning
 from yulon.catalog import bot_count, composegen
 from yulon.catalog.catalog import CatalogEntry, ConfPatch
 from yulon.catalog.families import conf
@@ -307,14 +307,22 @@ def _world_service(entry: CatalogEntry) -> str:
     return entry.container_spec().world
 
 
-def _env_line(lines: list[str], entry: CatalogEntry, name: str, file: str) -> int:
+def _env_line(
+    lines: list[str], entry: CatalogEntry, name: str, file: str, prefix: str | None = None
+) -> int:
     """The index of the ONE line of `name` in the world service's environment.
+
+    `name` under either of mod-playerbots' prefixes, `prefix`'s first (T657): a file the
+    next start renames still has its line, and that line is the one read or changed.
 
     Raises:
         BotCountError: the key is not there, or is there more than once.
     """
     service = _world_service(entry)
-    found = bot_count.env_lines(lines, service).get(name, [])
+    at = bot_count.env_lines(lines, service)
+    spellings = playerbots_keys.reading_order(name, prefix, of_env=True)
+    found = next((at[each] for each in spellings if at.get(each)), [])
+    name = spellings[0]
     if not found:
         raise BotCountError(ENV_MISSING.format(name=name, service=service, file=file))
     if len(found) > 1:
@@ -333,17 +341,20 @@ def _set_env_value(line: str, value: str) -> str:
     return f"{match.group('head')}{quote}{value}{quote}{match.group('tail')}{ending}"
 
 
-def patch_env(text: str, entry: CatalogEntry, file: str, values: dict[str, str]) -> str:
+def patch_env(
+    text: str, entry: CatalogEntry, file: str, values: dict[str, str], prefix: str | None = None
+) -> str:
     """`text` with each named key's value replaced in the world's environment, nothing else.
 
-    Split on LF alone, so a CRLF file's CR stays on every line.
+    Split on LF alone, so a CRLF file's CR stays on every line. A bot name is found under
+    either prefix, `prefix`'s first (`_env_line`).
 
     Raises:
         BotCountError: a key is missing from that environment, or is in it twice.
     """
     lines = text.split("\n")
     for name, value in values.items():
-        index = _env_line(lines, entry, name, file)
+        index = _env_line(lines, entry, name, file, prefix)
         lines[index] = _set_env_value(lines[index], value)
     return "\n".join(lines)
 
@@ -383,9 +394,10 @@ def read(entry: CatalogEntry, server_dir: Path) -> Reading:
         )
         return Reading(file, route, low, high, ceiling, why, rows=_rows(entry, text))
     lines = text.split("\n")
+    prefix = playerbots_keys.module_prefix(server_dir)
     try:
         low, high = (
-            _number(bot_count.env_value(lines[_env_line(lines, entry, name, path.name)]))
+            _number(bot_count.env_value(lines[_env_line(lines, entry, name, path.name, prefix)]))
             for name in (MIN_ENV, MAX_ENV)
         )
     except BotCountError as exc:
@@ -452,7 +464,13 @@ def write(entry: CatalogEntry, server_dir: Path, n: int) -> Written:
                 {},
             )
         else:
-            text = patch_env(_read_text(path), entry, path.name, {MIN_ENV: str(n), MAX_ENV: str(n)})
+            text = patch_env(
+                _read_text(path),
+                entry,
+                path.name,
+                {MIN_ENV: str(n), MAX_ENV: str(n)},
+                playerbots_keys.module_prefix(server_dir),
+            )
     except (OSError, UnicodeDecodeError, InstallerError) as exc:
         raise BotCountError(WRITE_FAILED.format(file=path.name, exc=exc)) from exc
     try:
