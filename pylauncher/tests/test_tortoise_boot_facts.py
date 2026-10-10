@@ -367,7 +367,7 @@ def test_every_tortoise_source_is_pinned_to_a_commit_not_a_moving_branch() -> No
         "Moving it again means taking them again"
     )
     module = next(s for s in sources if s.repo == "Sagiroth/TortoiseBots")
-    assert module.rev == "fb0b2eb54634db93d855011342e01750478d1702", (
+    assert module.rev == "18d4d14b3efdd804dccc527003f5c92a02ff0c2c", (
         f"the bots module is pinned to {module.rev!r}. Its own pin is as load-bearing as the "
         "core's: the module is what decides the folder names its SQL is installed under, "
         "which conf keys exist, and what the world prints when it loads. It was fd7ec9ec "
@@ -418,7 +418,13 @@ def test_every_tortoise_source_is_pinned_to_a_commit_not_a_moving_branch() -> No
         "does not write (`CombatTickBudgetUs`, `TravelPickBudgetUs`, `TargetWorldTickMs`, "
         "`EquipUpgradeThreshold`), `PoolBudgetWhenTickOverMs` 150 -> 0 in the `.dist` only, "
         "the `.dist`'s pool defaults now the 500 random bots the install already writes, "
-        "BOTPERF gaining fields Yu'lon does not parse, and the dashboard protocol still 8"
+        "BOTPERF gaining fields Yu'lon does not parse, and the dashboard protocol still 8; "
+        "T664 moved it on to 18d4d14b, the commit release v2026-10-10 names at build v15 "
+        "(chosen without a live run, code and CI only): 20 commits past fb0b2eb5, no SQL, "
+        "CMake or core change, no conf key renamed; `TargetWorldTickMs` 50 -> 100 in the "
+        "`.dist` and the code (Yu'lon's conf carry moves a live 50), the pool AI one turn "
+        "queue, and new `LogRetentionDays` 3: bot logs on by default, packed to .csv.gz each "
+        "hour, packs older than 3 days deleted"
     )
     for source in sources:
         assert re.fullmatch(

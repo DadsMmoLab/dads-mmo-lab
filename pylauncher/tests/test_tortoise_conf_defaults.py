@@ -384,3 +384,31 @@ def test_a_rollback_with_world_work_puts_the_conf_back_first(
     assert path.read_bytes() == before
     back = _at(rec.calls, "conf-restore:aiplayerbot.conf", _at(rec.calls, "recreate"))
     _at(rec.calls, "world-back", back)
+
+
+def test_an_update_past_t664_moves_the_old_tick_target_and_leaves_a_new_key_to_the_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """fb0b2eb5 -> 18d4d14b: `TargetWorldTickMs` 50 -> 100; `LogRetentionDays` is a new key.
+
+    A conf made at fb0b2eb5 holds 50 (that `.dist`'s value) and no retention key. The 50 is
+    the old default, so it follows; the absent key is not given a line (the code's 3 applies).
+    """
+    rec, server_dir, made = _update(tmp_path)
+    _writes(monkeypatch, rec)
+    path = server_dir / ETC_DIR / "aiplayerbot.conf"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(
+        b"AiPlayerbot.TargetWorldTickMs = 50\r\nAiPlayerbot.AllowedLogFiles = a.csv\r\n"
+    )
+    running = AFTER_663
+    target = AFTER_663.replace(b"TargetWorldTickMs = 50", b"TargetWorldTickMs = 100") + (
+        b"AiPlayerbot.LogRetentionDays = 3\n"
+    )
+    _dists(rec, server_dir, running=running, target=target, target_rev=NEW)
+    said, raised = _press(made, server_dir)
+    assert raised is None, raised
+    assert path.read_bytes() == (
+        b"AiPlayerbot.TargetWorldTickMs = 100\r\nAiPlayerbot.AllowedLogFiles = a.csv\r\n"
+    )
+    assert any("TargetWorldTickMs 50 -> 100" in line for line in said), said
