@@ -37,10 +37,11 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
 import threading
 import uuid
 from collections import deque
-from collections.abc import Callable, Generator, Iterator, Sequence
+from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
@@ -937,8 +938,88 @@ def parse_tree_files(raw: str) -> tuple[str, ...]:
     return tuple(path for path in raw.split("\0") if path)
 
 
-ANCESTRY_WALK_ARGS = ["rev-list", "--parents", "--missing=allow-any", "-n", "20000"]
-"""Every commit reachable from a rev, with its parents' ids, missing objects allowed (T632)."""
+ANCESTRY_COMMITS_ARGS = [
+    "cat-file",
+    "--batch-all-objects",
+    "--batch-check=%(objecttype) %(objectname)",
+]
+"""Every object this checkout holds, as `<type> <id>`; the commits are the ones read next."""
+
+ANCESTRY_READ_ARGS = ["cat-file", "--batch"]
+"""Prints each commit id on stdin as a header and the raw object: no traversal, any git."""
+
+ANCESTRY_LIMIT = 20000
+"""How many commit objects one ancestry question reads at most."""
+
+
+def commit_ids(listing: str, *, limit: int = ANCESTRY_LIMIT) -> list[str]:
+    """The ids of the commits in a `--batch-check=%(objecttype) %(objectname)` listing."""
+    ids: list[str] = []
+    for line in listing.splitlines():
+        kind, _, sha = line.partition(" ")
+        if kind == "commit" and sha:
+            ids.append(sha.strip())
+            if len(ids) >= limit:
+                break
+    return ids
+
+
+def parse_commit_parents(raw: bytes) -> dict[str, tuple[str, ...]] | None:
+    """`{commit id: its parent ids}` from `git cat-file --batch` output, or None if it is cut.
+
+    Each object is `<id> <type> <size>\\n`, exactly `size` bytes, `\\n`; an id git does not
+    have is `<id> missing\\n`. The sizes are bytes, so this reads bytes (a commit message
+    in UTF-8 would throw a text read off by its multibyte characters), and a message that
+    looks like a header is skipped by its size and never read as one. The parent ids are
+    the real ones written in the object: a graft (`.git/shallow`) is applied by git's
+    traversal, not by reading the object.
+    """
+    found: dict[str, tuple[str, ...]] = {}
+    at = 0
+    while at < len(raw):
+        end = raw.find(b"\n", at)
+        if end < 0:
+            return None
+        header = raw[at:end].split()
+        at = end + 1
+        if len(header) == 2 and header[1] == b"missing":
+            continue
+        if len(header) != 3 or not header[2].isdigit():
+            return None
+        size = int(header[2])
+        body = raw[at : at + size]
+        if len(body) != size or raw[at + size : at + size + 1] != b"\n":
+            return None
+        at += size + 1
+        if header[1] != b"commit":
+            continue
+        top = body.split(b"\n\n", 1)[0]
+        found[header[0].decode("ascii", "replace")] = tuple(
+            line[7:].decode("ascii", "replace")
+            for line in top.split(b"\n")
+            if line.startswith(b"parent ")
+        )
+    return found
+
+
+def reaches(parents: Mapping[str, Sequence[str]], new: str, old: str) -> bool:
+    """Is `old` `new`, or named as a parent on any path from `new` through `parents`?
+
+    A parent that is not itself in `parents` (a graft's cut-off parent, an object this
+    checkout never fetched) still counts when it IS `old`: its id is written in the commit
+    that names it. Breadth first, each id once, so a malformed cycle ends.
+    """
+    seen = {new}
+    queue = deque([new])
+    while queue:
+        sha = queue.popleft()
+        if sha == old:
+            return True
+        for parent in parents.get(sha, ()):
+            if parent not in seen:
+                seen.add(parent)
+                queue.append(parent)
+    return False
 
 
 def ancestry(
@@ -946,7 +1027,7 @@ def ancestry(
     old: str,
     new: str,
     merge_base: Callable[[str, str], int | None],
-    history: Callable[[], str | None],
+    history: Callable[[], Mapping[str, Sequence[str]] | None],
 ) -> bool | None:
     """Is `old` an ancestor of a commit? True / False / None (cannot tell). Read-only (T632).
 
@@ -956,9 +1037,10 @@ def ancestry(
     command answers 1 for a REAL forward move through a graft (never 0 for a false one),
     so on a shallow checkout the answer 1 is followed by the reverse question: `new`
     already in `old`'s history proves a move BACK. The parent ids written in
-    the commit objects survive grafting, so the history is read with the grafts switched
-    off (`GIT_SHALLOW_FILE=/dev/null`, `--missing=allow-any`) and looks for `old` among
-    every id it names, held or not. Not found there is no proof of anything: None, and
+    the commit objects survive grafting, so `history()` reads the commit objects
+    themselves (`cat-file`, which traverses nothing: `rev-list` with the grafts off stops
+    at a graft on git 2.34) and `reaches()` looks for `old` among every id they name, held
+    or not. Not found there is no proof of anything: None, and
     the caller asks GitHub. Never `fetch --unshallow` or `--deepen` (see `_pin()`).
     """
     said = merge_base(old, new)
@@ -971,8 +1053,8 @@ def ancestry(
         # `old`'s history, and this is a move back.
         if old != new and merge_base(new, old) == 0:
             return False
-    listing = history()
-    if listing is not None and any(old in line.split() for line in listing.splitlines()):
+    parents = history()
+    if parents is not None and reaches(parents, new, old):
         return True
     return None
 
@@ -1755,16 +1837,23 @@ class RunnerGit:
             except OSError:
                 return None
 
-        def history() -> str | None:
+        def history() -> dict[str, tuple[str, ...]] | None:
             try:
-                proc = runner.run(
-                    ["git", *ANCESTRY_WALK_ARGS, new],
-                    cwd=dest,
-                    env={**_no_prompt_env(), "GIT_SHALLOW_FILE": "/dev/null"},
+                listing = runner.run(
+                    ["git", *ANCESTRY_COMMITS_ARGS], cwd=dest, env=_no_prompt_env()
                 )
+                if listing.returncode != 0:
+                    return None
+                ids = commit_ids(listing.stdout)
+                with tempfile.TemporaryFile() as stdin:
+                    stdin.write("".join(f"{sha}\n" for sha in ids).encode("ascii"))
+                    stdin.seek(0)
+                    proc = runner.run_bytes(
+                        ["git", *ANCESTRY_READ_ARGS], cwd=dest, env=_no_prompt_env(), stdin=stdin
+                    )
             except OSError:
                 return None
-            return proc.stdout if proc.returncode == 0 else None
+            return parse_commit_parents(proc.stdout) if proc.returncode == 0 else None
 
         return ancestry(dest, old, new, merge_base, history)
 
@@ -2741,17 +2830,20 @@ class ContainerGit:
                 return 1 if " exited 1:" in str(exc) else None
             return 0
 
-        def history() -> str | None:
+        def history() -> dict[str, tuple[str, ...]] | None:
             try:
-                proc = self._capture(
-                    dest,
-                    [*ANCESTRY_WALK_ARGS, new],
-                    writes=False,
-                    container_env=("GIT_SHALLOW_FILE=/dev/null",),
+                listing = self._capture(dest, ANCESTRY_COMMITS_ARGS, writes=False)
+                ids = commit_ids(listing.stdout)
+                argv = self._argv(
+                    self._launcher(), dest, ANCESTRY_READ_ARGS, writes=False, interactive=True
                 )
-            except GitError:
+                with tempfile.TemporaryFile() as stdin:
+                    stdin.write("".join(f"{sha}\n" for sha in ids).encode("ascii"))
+                    stdin.seek(0)
+                    proc = runner.run_bytes(argv, env=_no_prompt_env(), stdin=stdin)
+            except (GitError, OSError):
                 return None
-            return proc.stdout
+            return parse_commit_parents(proc.stdout) if proc.returncode == 0 else None
 
         return ancestry(dest, old, new, merge_base, history)
 
@@ -3063,7 +3155,6 @@ class ContainerGit:
         git_args: list[str],
         *,
         writes: bool,
-        container_env: Sequence[str] = (),
     ) -> subprocess.CompletedProcess[str]:
         """One containerized `git` invocation, or `GitError` if it fails.
 
@@ -3200,7 +3291,7 @@ class ContainerGit:
         # unconfined container a READ-WRITE mount of a folder this app had just
         # decided was not its own, on a justification (`:ro`, entrypoint `ls`,
         # pinned digest) that belonged to `docker.bind_mount_ok()`'s probe.
-        argv = self._argv(program, dest, git_args, writes=writes, container_env=container_env)
+        argv = self._argv(program, dest, git_args, writes=writes)
         # At INFO, and the mount is the point. A Mac tester's clone failed with
         # `/git/.git: No such file or directory` (2026-08-26) and the one fact
         # needed to diagnose it — which host directory was mounted at `/git` —
@@ -3246,7 +3337,7 @@ class ContainerGit:
         *,
         writes: bool,
         name: str | None = None,
-        container_env: Sequence[str] = (),
+        interactive: bool = False,
     ) -> list[str]:
         """The one docker argv every containerized git call here runs.
 
@@ -3279,11 +3370,11 @@ class ContainerGit:
             *launcher,
             "run",
             "--rm",
+            *(["-i"] if interactive else []),
             *(["--name", name] if name is not None else []),
             *hardening,
             "-v",
             f"{mount}:/git{label}",
-            *(arg for one in container_env for arg in ("-e", one)),
             # State the working directory rather than inheriting the image's.
             # `image` is a public field, so an override would otherwise clone
             # into the wrong place — silently, since `.` would resolve

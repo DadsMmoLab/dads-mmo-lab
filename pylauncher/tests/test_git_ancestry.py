@@ -8,9 +8,7 @@ move through a graft; the parent ids in the commit objects survive grafting.
 
 from __future__ import annotations
 
-import os
 import subprocess
-from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
@@ -119,44 +117,148 @@ def test_a_directory_that_is_no_checkout_is_undecided(tmp_path: Path) -> None:
     assert git.RunnerGit().is_ancestor(tmp_path, "a" * 40, "b" * 40) is None
 
 
-def test_the_containerised_seam_walks_with_the_grafts_switched_off(
+def _no_traversal(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+    """Make any git that WALKS history fail, as git 2.34 does at a graft with the grafts off.
+
+    The fixture tests then pass only for a reader that takes the commit objects as they are
+    (`cat-file`), whatever version of git the host has.
+    """
+    seen: list[list[str]] = []
+    real_run, real_bytes = git.runner.run, git.runner.run_bytes
+
+    def refuse(argv: list[str]) -> bool:
+        seen.append(list(argv))
+        return any(word in argv for word in ("rev-list", "log"))
+
+    def run(argv: list[str], *args: object, **kw: object) -> subprocess.CompletedProcess[str]:
+        if refuse(argv):
+            return subprocess.CompletedProcess(argv, 128, "", "fatal: Could not read parent")
+        return real_run(argv, *args, **kw)  # type: ignore[arg-type]
+
+    def run_bytes(
+        argv: list[str], *args: object, **kw: object
+    ) -> subprocess.CompletedProcess[bytes]:
+        if refuse(argv):
+            return subprocess.CompletedProcess(argv, 128, b"", b"fatal")
+        return real_bytes(argv, *args, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(git.runner, "run", run)
+    monkeypatch.setattr(git.runner, "run_bytes", run_bytes)
+    return seen
+
+
+def test_the_history_is_read_from_the_commit_objects_not_by_a_traversal(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Only the transport is swapped: the argv each question picks runs as host git."""
     up, c = _upstream(tmp_path)
     cl = _clone(tmp_path, up, c[5], c[4], c[6])
-    seen: list[tuple[list[str], tuple[str, ...]]] = []
+    seen = _no_traversal(monkeypatch)
+
+    assert git.RunnerGit().is_ancestor(cl, c[4], c[6]) is True
+    assert any("cat-file" in argv for argv in seen), seen
+    assert git.RunnerGit().is_ancestor(cl, c[2], c[7]) is None
+
+
+def test_the_containerised_seam_reads_the_same_way(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Only the transport is swapped: each argv the container would run runs as host git."""
+    up, c = _upstream(tmp_path)
+    cl = _clone(tmp_path, up, c[5], c[4], c[6])
+
+    def argv(
+        self: git.ContainerGit, program: object, dest: Path, git_args: list[str], **kw: object
+    ) -> list[str]:
+        assert kw.get("writes") is False
+        return ["git", "-C", str(dest), *git_args]
 
     def capture(
-        self: git.ContainerGit,
-        dest: Path,
-        git_args: list[str],
-        *,
-        writes: bool,
-        container_env: Sequence[str] = (),
+        self: git.ContainerGit, dest: Path, git_args: list[str], *, writes: bool
     ) -> subprocess.CompletedProcess[str]:
-        seen.append((git_args, tuple(container_env)))
-        assert writes is False
-        env = {**os.environ, **dict(one.split("=", 1) for one in container_env)}
-        proc = subprocess.run(["git", *git_args], cwd=dest, env=env, capture_output=True, text=True)
+        proc = subprocess.run(["git", *git_args], cwd=dest, capture_output=True, text=True)
         if proc.returncode != 0:
             raise git.GitError(f"containerized git x in {dest} exited {proc.returncode}: ")
         return proc
 
+    monkeypatch.setattr(git.ContainerGit, "_argv", argv)
     monkeypatch.setattr(git.ContainerGit, "_capture", capture)
+    monkeypatch.setattr(git.ContainerGit, "_launcher", lambda self: "docker")
+    _no_traversal(monkeypatch)
 
     assert git.ContainerGit().is_ancestor(cl, c[4], c[6]) is True
-    assert seen[-1][1] == ("GIT_SHALLOW_FILE=/dev/null",), seen
     assert git.ContainerGit().is_ancestor(cl, c[2], c[7]) is None
 
 
-def test_the_container_argv_carries_the_environment_before_the_image(tmp_path: Path) -> None:
-    argv = git.ContainerGit(selinux_enforcing=lambda: False)._argv(
-        "docker", tmp_path, ["rev-list"], writes=False, container_env=("A=b",)
+def test_the_container_argv_keeps_stdin_open_only_when_asked(tmp_path: Path) -> None:
+    impl = git.ContainerGit(selinux_enforcing=lambda: False)
+    asked = impl._argv("docker", tmp_path, ["cat-file"], writes=False, interactive=True)
+    plain = impl._argv("docker", tmp_path, ["cat-file"], writes=False)
+
+    assert "-i" in asked[: asked.index(impl.image)]
+    assert "-i" not in plain
+
+
+SHA = [f"{n:040x}" for n in range(1, 9)]
+
+
+def _batch(*objects: tuple[str, bytes | None]) -> bytes:
+    """What `git cat-file --batch` prints: a header and the body, or `<id> missing`."""
+    out = b""
+    for sha, body in objects:
+        if body is None:
+            out += f"{sha} missing\n".encode()
+        else:
+            out += f"{sha} commit {len(body)}\n".encode() + body + b"\n"
+    return out
+
+
+def _commit(*parents: str, message: str = "m") -> bytes:
+    lines = ["tree " + "0" * 40, *(f"parent {p}" for p in parents)]
+    lines += ["author a <a@a> 1 +0000", "committer a <a@a> 1 +0000", "", message]
+    return "\n".join(lines).encode()
+
+
+def test_the_batch_output_gives_each_commits_parents() -> None:
+    raw = _batch(
+        (SHA[0], _commit(SHA[1], SHA[2], message="merge \u00e9 \u00fc")),
+        (SHA[1], _commit()),
+        (SHA[3], None),
     )
 
-    assert argv.index("-e") < argv.index(git.ContainerGit().image)
-    assert argv[argv.index("-e") + 1] == "A=b"
+    assert git.parse_commit_parents(raw) == {SHA[0]: (SHA[1], SHA[2]), SHA[1]: ()}
+
+
+def test_a_message_that_looks_like_a_header_does_not_confuse_the_batch_reader() -> None:
+    fake = f"{SHA[5]} commit 3\nparent {SHA[6]}"
+    raw = _batch((SHA[0], _commit(SHA[1], message=fake)), (SHA[1], _commit()))
+
+    assert git.parse_commit_parents(raw) == {SHA[0]: (SHA[1],), SHA[1]: ()}
+
+
+def test_a_batch_output_that_is_cut_short_reads_nothing() -> None:
+    raw = _batch((SHA[0], _commit(SHA[1])))
+
+    assert git.parse_commit_parents(raw[:-30]) is None
+
+
+def test_the_walk_finds_an_id_named_only_as_a_parent() -> None:
+    parents = {SHA[0]: (SHA[1],), SHA[1]: (SHA[2],)}
+
+    assert git.reaches(parents, SHA[0], SHA[2]) is True
+    assert git.reaches(parents, SHA[0], SHA[0]) is True
+    assert git.reaches(parents, SHA[0], SHA[3]) is False
+    assert git.reaches(parents, SHA[1], SHA[0]) is False
+
+
+def test_a_cycle_does_not_loop_forever() -> None:
+    assert git.reaches({SHA[0]: (SHA[1],), SHA[1]: (SHA[0],)}, SHA[0], SHA[5]) is False
+
+
+def test_only_commits_are_listed_and_the_list_is_capped() -> None:
+    listing = f"commit {SHA[0]}\nblob {SHA[1]}\ntree {SHA[2]}\ncommit {SHA[3]}\n"
+
+    assert git.commit_ids(listing, limit=10) == [SHA[0], SHA[3]]
+    assert git.commit_ids(listing, limit=1) == [SHA[0]]
 
 
 def test_a_backward_move_is_proved_by_the_reverse_ancestry_in_the_production_clone(
@@ -214,8 +316,3 @@ def test_a_repo_off_github_and_a_silent_github_are_each_said(tmp_path: Path) -> 
 
     assert off is None and "not on GitHub" in why_off
     assert silent is None and "try again later" in why and "walk" not in why
-
-
-def test_the_container_environment_is_the_literal_null_device() -> None:
-    source = Path(git.__file__).read_text(encoding="utf-8")
-    assert "GIT_SHALLOW_FILE=/dev/null" in source and "os.devnull" not in source

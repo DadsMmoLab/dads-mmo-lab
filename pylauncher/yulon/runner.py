@@ -28,7 +28,7 @@ import time
 import weakref
 from collections.abc import Callable, Generator, Iterator, Mapping
 from pathlib import Path
-from typing import TypeVar
+from typing import IO, TypeVar
 
 from yulon import ansi, winjob
 from yulon.after_stop import StopTookEffect
@@ -1439,6 +1439,8 @@ def run_bytes(
     cwd: Path | None = None,
     env: Mapping[str, str] | None = None,
     timeout: float | None = None,
+    *,
+    stdin: int | IO[bytes] | None = subprocess.DEVNULL,
 ) -> subprocess.CompletedProcess[bytes]:
     """`run()` for an answer that is bytes: stdout is not decoded or newline-translated (T632).
 
@@ -1456,7 +1458,7 @@ def run_bytes(
             check=False,
             timeout=timeout,
             creationflags=creationflags(),
-            stdin=subprocess.DEVNULL,
+            stdin=stdin,
         )
     except subprocess.TimeoutExpired:
         _note_unanswered(command, timeout)
