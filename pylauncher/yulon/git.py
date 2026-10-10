@@ -935,6 +935,35 @@ def parse_tree_files(raw: str) -> tuple[str, ...]:
     return tuple(path for path in raw.split("\0") if path)
 
 
+ANCESTRY_WALK_ARGS = ["rev-list", "--parents", "--missing=allow-any", "-n", "20000"]
+"""Every commit reachable from a rev, with its parents' ids, missing objects allowed (T632)."""
+
+
+def ancestry(
+    dest: Path, old: str, merge_base: Callable[[], int | None], walk: Callable[[], str | None]
+) -> bool | None:
+    """Is `old` an ancestor of a commit? True / False / None (cannot tell). Read-only (T632).
+
+    `merge-base --is-ancestor` is the answer unless the checkout is SHALLOW. Every source
+    but AzerothCore's core is a depth-1 clone: the tip and the pin are grafts in
+    `.git/shallow` and later fetches connect new commits back only to what is held, so the
+    command answers 1 for a REAL forward move through a graft. The parent ids written in
+    the commit objects survive grafting, so the walk reads them with the grafts switched
+    off (`GIT_SHALLOW_FILE=/dev/null`, `--missing=allow-any`) and looks for `old` among
+    every id it names, held or not. Not found there is no proof of anything: None, and
+    the caller asks GitHub. Never `fetch --unshallow` or `--deepen` (see `_pin()`).
+    """
+    said = merge_base()
+    if said == 0:
+        return True
+    if said == 1 and not (dest / ".git" / "shallow").is_file():
+        return False
+    listing = walk()
+    if listing is not None and any(old in line.split() for line in listing.splitlines()):
+        return True
+    return None
+
+
 _LOGGED_ARGV_CHARS = 1000
 """How much of a containerized git command line one log line shows (T630 re-review)."""
 
@@ -1662,21 +1691,38 @@ class RunnerGit:
             return None
         return parse_file_lines(proc.stdout, rev, paths)
 
-    def is_ancestor(self, dest: Path, old: str, new: str) -> bool:
+    def is_ancestor(self, dest: Path, old: str, new: str) -> bool | None:
         """Is `old` in `new`'s history, so a move from it to `new` goes FORWARD? (T632)
 
-        `git merge-base --is-ancestor`. False is also what a checkout that cannot
-        show the connection answers (a shallow clone; git that cannot run): a move
-        whose direction is not proved is never treated as forward.
+        True / False are answers; None is "git could not tell", which a caller must not
+        read as either. Read-only: nothing is fetched and the checkout is never deepened.
+        `ancestry()` carries the reasoning (a shallow checkout's grafts).
         """
         if not (dest / ".git").is_dir():
-            return False
-        try:
-            _run_git(["git", "merge-base", "--is-ancestor", old, new], cwd=dest)
-        except (GitError, OSError) as exc:
-            logger.debug(f"could not tell whether {old} is behind {new} in {dest}: {exc}")
-            return False
-        return True
+            return None
+
+        def merge_base() -> int | None:
+            try:
+                return runner.run(
+                    ["git", "merge-base", "--is-ancestor", old, new],
+                    cwd=dest,
+                    env=_no_prompt_env(),
+                ).returncode
+            except OSError:
+                return None
+
+        def walk() -> str | None:
+            try:
+                proc = runner.run(
+                    ["git", *ANCESTRY_WALK_ARGS, new],
+                    cwd=dest,
+                    env={**_no_prompt_env(), "GIT_SHALLOW_FILE": os.devnull},
+                )
+            except OSError:
+                return None
+            return proc.stdout if proc.returncode == 0 else None
+
+        return ancestry(dest, old, merge_base, walk)
 
     def tree_files(self, dest: Path, rev: str, paths: Sequence[str]) -> tuple[str, ...] | None:
         """The files commit `rev` tracks under `paths`, from its tree. None = cannot ask (T630).
@@ -2617,16 +2663,32 @@ class ContainerGit:
             return None
         return parse_file_lines(proc.stdout, rev, paths)
 
-    def is_ancestor(self, dest: Path, old: str, new: str) -> bool:
+    def is_ancestor(self, dest: Path, old: str, new: str) -> bool | None:
         """`RunnerGit.is_ancestor()`, containerised; `writes=False`, nothing is fetched (T632)."""
         if not (dest / ".git").is_dir():
-            return False
-        try:
-            self._capture(dest, ["merge-base", "--is-ancestor", old, new], writes=False)
-        except GitError as exc:
-            logger.debug(f"could not tell whether {old} is behind {new} in {dest}: {exc}")
-            return False
-        return True
+            return None
+
+        def merge_base() -> int | None:
+            try:
+                self._capture(dest, ["merge-base", "--is-ancestor", old, new], writes=False)
+            except GitError as exc:
+                # `_capture()` words a non-zero exit as "exited <n>:".
+                return 1 if " exited 1:" in str(exc) else None
+            return 0
+
+        def walk() -> str | None:
+            try:
+                proc = self._capture(
+                    dest,
+                    [*ANCESTRY_WALK_ARGS, new],
+                    writes=False,
+                    container_env=(f"GIT_SHALLOW_FILE={os.devnull}",),
+                )
+            except GitError:
+                return None
+            return proc.stdout
+
+        return ancestry(dest, old, merge_base, walk)
 
     def tree_files(self, dest: Path, rev: str, paths: Sequence[str]) -> tuple[str, ...] | None:
         """`RunnerGit.tree_files()`, containerised; `writes=False`, nothing is fetched (T630)."""
@@ -2914,7 +2976,12 @@ class ContainerGit:
             self._capture(spec.dest, git_args, writes=True)
 
     def _capture(
-        self, dest: Path, git_args: list[str], *, writes: bool
+        self,
+        dest: Path,
+        git_args: list[str],
+        *,
+        writes: bool,
+        container_env: Sequence[str] = (),
     ) -> subprocess.CompletedProcess[str]:
         """One containerized `git` invocation, or `GitError` if it fails.
 
@@ -3051,7 +3118,7 @@ class ContainerGit:
         # unconfined container a READ-WRITE mount of a folder this app had just
         # decided was not its own, on a justification (`:ro`, entrypoint `ls`,
         # pinned digest) that belonged to `docker.bind_mount_ok()`'s probe.
-        argv = self._argv(program, dest, git_args, writes=writes)
+        argv = self._argv(program, dest, git_args, writes=writes, container_env=container_env)
         # At INFO, and the mount is the point. A Mac tester's clone failed with
         # `/git/.git: No such file or directory` (2026-08-26) and the one fact
         # needed to diagnose it — which host directory was mounted at `/git` —
@@ -3097,6 +3164,7 @@ class ContainerGit:
         *,
         writes: bool,
         name: str | None = None,
+        container_env: Sequence[str] = (),
     ) -> list[str]:
         """The one docker argv every containerized git call here runs.
 
@@ -3133,6 +3201,7 @@ class ContainerGit:
             *hardening,
             "-v",
             f"{mount}:/git{label}",
+            *(arg for one in container_env for arg in ("-e", one)),
             # State the working directory rather than inheriting the image's.
             # `image` is a public field, so an override would otherwise clone
             # into the wrong place — silently, since `.` would resolve

@@ -4871,7 +4871,7 @@ def _git_changed_files(
     return git.ContainerGit().changed_files(dest, old, new, paths)
 
 
-def _git_is_ancestor(dest: Path, old: str, new: str) -> bool:
+def _git_is_ancestor(dest: Path, old: str, new: str) -> bool | None:
     """Is `old` in `new`'s history in this checkout, containerised (T632)."""
     return git.ContainerGit().is_ancestor(dest, old, new)
 
@@ -6205,11 +6205,11 @@ class Seams:
     """
     changed_lines: Callable[[Path, str, str, str], tuple[str, ...] | None] = _git_changed_lines
     """T179: one file's `+`/`-` lines between two commits; `None` when git could not say."""
-    is_ancestor: Callable[[Path, str, str], bool] = _git_is_ancestor
+    is_ancestor: Callable[[Path, str, str], bool | None] = _git_is_ancestor
     """Is the first commit in the second's history (a move from it goes forward)?
 
-    False when git cannot show it, as in a shallow clone: a Return that cannot prove it
-    moves forward never skips a file the target lacks for being "older".
+    None when git cannot show it either way (a shallow clone's grafts): the caller then asks
+    GitHub (`families/direction.py`), and refuses if that cannot answer.
     """
     tree_files: Callable[[Path, str, Sequence[str]], tuple[str, ...] | None] = _git_tree_files
     """T630: the files a commit tracks under some paths (`git ls-tree`); None = could not say.
