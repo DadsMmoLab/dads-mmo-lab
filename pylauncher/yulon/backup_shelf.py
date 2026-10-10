@@ -252,7 +252,7 @@ def _why_not(r: ShelfRow, kept: str | None, firm: bool, refused: str | None) -> 
             "Yu'lon did not make this file (its name is not one of Yu'lon's backup names), so "
             "it will not delete it. Delete it in your file manager if you want it gone."
         )
-    if kept and (firm or not r.unchecked):
+    if kept and firm:
         return f"Yu'lon keeps this one: {kept}"
     if r.links > 1:
         return (
@@ -475,7 +475,9 @@ def _protections(
                 )
 
     # 2a. the newest update copy per distinct migration ledger (T646)
-    _keep_each_update_state(backups_dir(server_dir), updates, keep)
+    _keep_each_update_state(
+        backups_dir(server_dir), [r for r in updates if not _foreign(r, game_id)], keep
+    )
 
     # 2b. the newest copies a move into this server took, per label and database
     newest_move: dict[tuple[str, str], ShelfRow] = {}
@@ -541,11 +543,23 @@ _QUOTED = re.compile(rb"'((?:[^'\\]|\\.)*)'")
 _TIMESTAMP = re.compile(rb"\d{4}-\d\d-\d\d \d\d:\d\d:\d\d")
 
 
+_LEDGER_CACHE: dict[tuple[str, int, int, int, int], frozenset[bytes]] = {}
+_LEDGER_CACHE_MAX = 512
+"""Each dump's ledger, by file identity: a dump is read end to end once, not on every refresh."""
+
+
 def _ledger_state(path: Path) -> frozenset[bytes]:
     """The names a dump's migration ledger holds (`updates` / `migrations`), timestamps left out.
 
-    Raises OSError when the file cannot be read. A dump with no ledger table gives the empty set.
+    Reads the whole dump once and remembers the answer for as long as the file's identity
+    (path, device, inode, size, mtime) is the same. Raises OSError when the file cannot be read.
+    A dump with no ledger table gives the empty set.
     """
+    st = os.stat(path)
+    key = (str(path), st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+    known = _LEDGER_CACHE.get(key)
+    if known is not None:
+        return known
     found: set[bytes] = set()
     with path.open("rb") as dump:
         for line in dump:
@@ -553,7 +567,11 @@ def _ledger_state(path: Path) -> frozenset[bytes]:
                 found.update(
                     token for token in _QUOTED.findall(line) if not _TIMESTAMP.fullmatch(token)
                 )
-    return frozenset(found)
+    state = frozenset(found)
+    if len(_LEDGER_CACHE) >= _LEDGER_CACHE_MAX:
+        _LEDGER_CACHE.clear()
+    _LEDGER_CACHE[key] = state
+    return state
 
 
 def _keep_each_update_state(
@@ -563,10 +581,15 @@ def _keep_each_update_state(
 
     Failed updates keep their sets (T633): after one success and two failures the folder holds
     three, and the newest holds the first update's migrations. "Return to the tested pin"
-    (T630/T632) looks for the newest dump from BEFORE the migrations the tested commit lacks,
-    reading each dump's ledger and recording nothing, so Clean up reads the same ledgers and
-    keeps one copy per state: the older copies of a state are the sweep's to remove. A copy whose
-    ledger cannot be read is kept.
+    (T630/T632) reads each dump's ledger to find a dump from before the migrations the tested
+    commit lacks and records no file, so this keeps what that search could be asked to name: the
+    newest of this game's update copies per distinct ledger. It protects update copies only;
+    a dump of another label that the search could also pick is protected only as the newest good
+    copy of its database. A copy whose ledger cannot be read is kept as well.
+
+    Soft keeps: every Clean up leaves them, a deliberate single Delete is still allowed. Each
+    dump is read once (`_ledger_state()` remembers it by file identity), but still end to end,
+    so callers run this off the GUI thread.
     """
     by_database: dict[str, list[ShelfRow]] = {}
     for r in updates:
@@ -585,6 +608,7 @@ def _keep_each_update_state(
                     r.name,
                     f"Yu'lon could not read which updates it holds ({exc}), so it cannot tell "
                     "whether going back to the tested commit needs it.",
+                    hard=False,
                 )
                 continue
             if state in seen:
@@ -594,6 +618,7 @@ def _keep_each_update_state(
                 r.name,
                 "it is the newest copy from before the updates that came after it, "
                 "which going back to the tested commit may need.",
+                hard=False,
             )
 
 

@@ -5495,6 +5495,7 @@ APPLY_DID_NOT_FINISH = "Apply did not finish. Details below says why."
 PLAN_DID_NOT_FINISH = "Yu'lon could not work out the plan. Details below says why."
 MAINTENANCE_BACKUP_FAILED = "The backup did not finish. Details below says why."
 DELETE_BACKUP_LABEL = "Delete\u2026"
+READING_BACKUPS = "Reading backups\u2026"
 CLEAN_UP_LABEL = "Clean up\u2026"
 DELETE_PICK = "Pick a backup to delete."
 CLEAN_UP_NO_FOLDER_ACCESS = "Yu'lon cannot list the backups yet."
@@ -16160,6 +16161,8 @@ class ControllerView(QWidget):
         self.delete_backup_button.setVisible(self.services.shelf is not None)
         self.clean_up_button.setVisible(self.services.shelf is not None)
         self._shelf: backup_shelf.Shelf | None = None
+        self._shelf_reading = 0
+        self._shelf_generation = 0
         self._shelf_job = ""
         self._retain_after_backup = False
         actions.addWidget(self.plan_restore_button)
@@ -16251,6 +16254,8 @@ class ControllerView(QWidget):
         """
         if "backups" in self._waiting_on_distro:
             return RESTORE_WAITS_FOR_DISTRO
+        if self._shelf_reading:
+            return READING_BACKUPS
         return RESTORE_PICK if self.backup_list.count() else RESTORE_NO_BACKUPS
 
     @Slot()
@@ -16263,13 +16268,17 @@ class ControllerView(QWidget):
         self.backup_list.clear()
         directory = self.services.backups_dir()
         if self.services.shelf is not None:
-            self._list_the_shelf(self.services.shelf)
-        else:
-            for path in sorted(directory.glob("*.sql"), reverse=True):
-                size = path.stat().st_size / (1024 * 1024)
-                item = QListWidgetItem(f"{path.name}  ({size:.1f} MB)")
-                item.setData(Qt.ItemDataRole.UserRole, str(path))
-                self.backup_list.addItem(item)
+            self._read_the_shelf(self.services.shelf)
+            return
+        for path in sorted(directory.glob("*.sql"), reverse=True):
+            size = path.stat().st_size / (1024 * 1024)
+            item = QListWidgetItem(f"{path.name}  ({size:.1f} MB)")
+            item.setData(Qt.ItemDataRole.UserRole, str(path))
+            self.backup_list.addItem(item)
+        self._listing_settled(directory)
+
+    def _listing_settled(self, directory: Path) -> None:
+        """What follows the Backups list being filled: buttons, hint, the interrupted restore."""
         set_enabled_why(self.restore_button, self._restore_waits_for())
         self._settle_shelf_buttons()
         # A10 (T195): an empty report beside a list of backups says what to do.
@@ -16277,21 +16286,54 @@ class ControllerView(QWidget):
         none_yet = f"No backups yet in {directory}."
         if self.backup_list.count() == 0:
             self.maintenance_report.setPlainText(none_yet)
-        elif self.maintenance_report.toPlainText() == none_yet:
+        elif self.maintenance_report.toPlainText() in (none_yet, READING_BACKUPS):
             # Backups arrived since: the hint above is what the empty box says now.
             self.maintenance_report.setPlainText("")
         self._show_interrupted()
 
     # ------------------------------------------------ delete and clean up (T604)
 
-    def _list_the_shelf(self, seam: backup_shelf.Seam) -> None:
-        """Fill the Backups list from the shelf: date, database, size, what made it, game."""
-        try:
-            shelf = seam.read()
-        except Exception as exc:  # noqa: BLE001 - an unreadable folder is an empty list, said
-            logger.warning(f"could not read the backups folder: {exc}")
-            self._shelf = None
+    def _read_the_shelf(self, seam: backup_shelf.Seam) -> None:
+        """Read the backups folder off the GUI thread; the list says so until it is done (T646).
+
+        Reading it can open every update copy to compare their migrations, which on a cold
+        WSL disk takes long enough to freeze the tab if it ran in this slot.
+        """
+        self._shelf = None
+        self._shelf_reading += 1
+        generation = self._shelf_reading
+        self._shelf_generation = generation
+        waiting = QListWidgetItem(READING_BACKUPS)
+        waiting.setFlags(Qt.ItemFlag.NoItemFlags)
+        self.backup_list.addItem(waiting)
+        if not self.maintenance_report.toPlainText():
+            self.maintenance_report.setPlainText(READING_BACKUPS)
+        set_enabled_why(self.restore_button, READING_BACKUPS)
+        self._settle_shelf_buttons()
+        self._run(seam.read, self._shelf_read, self._shelf_unreadable)
+
+    @Slot(object)
+    def _shelf_read(self, found: object) -> None:
+        if self._shelf_reading != self._shelf_generation:
             return
+        self._shelf_reading = self._shelf_generation = 0
+        self._restore_plan = None
+        self.backup_list.clear()
+        if isinstance(found, backup_shelf.Shelf):
+            self._fill_the_shelf(found)
+        self._listing_settled(self.services.backups_dir())
+
+    @Slot(object)
+    def _shelf_unreadable(self, exc: object) -> None:
+        # An unreadable folder is an empty list, said.
+        logger.warning(f"could not read the backups folder: {exc}")
+        self._shelf_reading = self._shelf_generation = 0
+        self._shelf = None
+        self.backup_list.clear()
+        self._listing_settled(self.services.backups_dir())
+
+    def _fill_the_shelf(self, shelf: backup_shelf.Shelf) -> None:
+        """Fill the Backups list from the shelf: date, database, size, what made it, game."""
         self._shelf = shelf
         for r in shelf.rows:
             text = backup_shelf.describe(r, shelf.game_id)
@@ -16317,6 +16359,8 @@ class ControllerView(QWidget):
         """Why Delete and Clean up are greyed whatever is selected: a job is in flight."""
         if self._shelf_job:
             return wait_for(self._shelf_job)
+        if self._shelf_reading:
+            return wait_for("reading the backups")
         if self._backup_running:
             return wait_for("the backup")
         if self._backup_before_update:
@@ -16381,12 +16425,15 @@ class ControllerView(QWidget):
         seam = self.services.shelf
         if seam is None:
             return
-        try:
-            shelf = seam.read()
-        except Exception as exc:  # noqa: BLE001
-            self.maintenance_report.setPlainText(f"{CLEAN_UP_NO_FOLDER_ACCESS} ({exc})")
+        # The list the player is looking at, read off this thread (T646): the plan is re-checked
+        # against the folder by the worker before anything goes, so a folder that changed since
+        # is refused, never half-cleaned.
+        shelf = self._shelf
+        if shelf is None or self._shelf_reading:
+            self.maintenance_report.setPlainText(
+                READING_BACKUPS if self._shelf_reading else CLEAN_UP_NO_FOLDER_ACCESS
+            )
             return
-        self._shelf = shelf
         if shelf.delete_refused:
             self.maintenance_report.setPlainText(shelf.delete_refused)
             return

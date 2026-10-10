@@ -9,7 +9,6 @@ them and found none. The refusal names no recorded file -- it reads each dump's 
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
@@ -24,12 +23,18 @@ server = base.server  # the fixture, re-exported so this file's tests receive it
 DB = "acore_world"
 
 
-def _ledger_dump(updates: tuple[str, ...], table: str = "updates") -> bytes:
+def _ledger_dump(
+    updates: tuple[str, ...],
+    table: str = "updates",
+    *,
+    game: str = GAME,
+    applied: str = "2026-10-01",
+) -> bytes:
     rows = ",".join(
-        f"('{name}','RELEASED','2026-10-0{n} 10:00:00',{n})" for n, name in enumerate(updates, 1)
+        f"('{name}','RELEASED','{applied} 10:0{n}:00',{n})" for n, name in enumerate(updates, 1)
     )
     return (
-        f"-- yulon-backup: game={GAME}\n".encode()
+        f"-- yulon-backup: game={game}\n".encode()
         + BANNER
         + f"USE `{DB}`;\nCREATE TABLE `{table}` (`name` varchar(200));\n".encode()
         + f"INSERT INTO `{table}` VALUES {rows};\n".encode()
@@ -44,11 +49,19 @@ def _put(
     updates: tuple[str, ...],
     label: str = "before-new-build",
     table: str = "updates",
+    *,
+    game: str = GAME,
+    applied: str = "2026-10-01",
 ) -> Path:
     middle = f"{label}_" if label else ""
     path = folder_of(server) / f"{stamp}_{middle}{DB}.sql"
-    path.write_bytes(_ledger_dump(updates, table))
+    path.write_bytes(_ledger_dump(updates, table, game=game, applied=applied))
     return path
+
+
+@pytest.fixture(autouse=True)
+def _fresh_ledger_cache() -> None:
+    backup_shelf._LEDGER_CACHE.clear()
 
 
 def _swept(server: Path) -> set[str]:
@@ -78,11 +91,57 @@ def test_clean_up_removes_older_sets_that_hold_the_same_migrations(server: Path)
     assert older.name in swept and newer.name not in swept
 
 
-def test_a_changed_timestamp_in_the_ledger_is_not_a_new_state(server: Path) -> None:
-    a = _put(server, "20261001_100000", ("u1", "u2"))
-    b = folder_of(server) / "20261005_100000_before-new-build_acore_world.sql"
-    b.write_bytes(_ledger_dump(("u1", "u2")).replace(b"2026-10-01", b"2026-11-09"))
-    assert a.name in _swept(server)
+@pytest.mark.parametrize("table", ["updates", "migrations"])
+def test_a_different_applied_time_in_the_ledger_is_not_a_new_state(
+    server: Path, table: str
+) -> None:
+    """Rolling back loads a copy back, but a retry's rows may carry other times: same updates."""
+    a = _put(server, "20261001_100000", ("u1", "u2"), table=table, applied="2026-10-01")
+    b = _put(server, "20261003_100000", ("u1", "u2"), table=table, applied="2026-10-02")
+    c = _put(server, "20261005_100000", ("u1", "u2"), table=table, applied="2026-11-09")
+    assert _swept(server) == {a.name, b.name}
+    assert row(shelf(server), a.name).kept_because is None
+    assert row(shelf(server), c.name).kept_because
+
+
+def test_another_games_update_copy_does_not_shadow_this_games(server: Path) -> None:
+    """WotLK and Unbound share schema names: the other game's newest copy is not this game's."""
+    before = _put(server, "20261001_100000", ("u1",))
+    _put(server, "20261005_100000", ("u1", "u2"))
+    _put(server, "20261006_100000", ("u1",), game="wow-unbound")
+    assert before.name not in _swept(server)
+    assert row(shelf(server), before.name).kept_because
+
+
+def test_a_dump_is_read_once_while_the_file_is_unchanged(
+    server: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _put(server, "20261001_100000", ("u1",))
+    _put(server, "20261005_100000", ("u1", "u2"))
+    reads: list[bytes] = []
+    real = backup_shelf._QUOTED
+
+    class Counting:
+        def findall(self, line: bytes) -> list[bytes]:
+            reads.append(line)
+            return real.findall(line)  # type: ignore[no-any-return]
+
+    monkeypatch.setattr(backup_shelf, "_QUOTED", Counting())
+    shelf(server)
+    first = len(reads)
+    assert first == 2
+    shelf(server)
+    shelf(server)
+    assert len(reads) == first, "a refresh of an unchanged folder must not read the dumps again"
+
+
+def test_a_dump_that_changed_is_read_again(server: Path) -> None:
+    old = _put(server, "20261001_100000", ("u1",))
+    newest = _put(server, "20261005_100000", ("u1", "u2"))
+    assert row(shelf(server), old.name).kept_because
+    old.write_bytes(_ledger_dump(("u1", "u2")) + b"-- more\n")  # now the same state
+    assert row(shelf(server), old.name).kept_because is None
+    assert row(shelf(server), newest.name).kept_because
 
 
 def test_a_dump_whose_ledger_cannot_be_read_is_never_swept(
@@ -100,14 +159,20 @@ def test_a_dump_whose_ledger_cannot_be_read_is_never_swept(
 
     monkeypatch.setattr(backup_shelf, "_ledger_state", refuse)
     assert old.name not in _swept(server)
-    assert "could not read which updates" in str(row(shelf(server), old.name).kept_because)
+    found = row(shelf(server), old.name)
+    assert "could not read which updates" in str(found.kept_because)
+    assert found.cannot_delete is None, "a deliberate single Delete is still allowed"
 
 
-def test_the_player_cannot_lose_the_copy_through_the_single_delete_either_unasked(
+def test_a_single_delete_of_an_older_distinct_copy_is_allowed_but_clean_up_never_takes_it(
     server: Path,
 ) -> None:
     before_first = _put(server, "20261001_100000", ("u1",))
     _put(server, "20261005_100000", ("u1", "u2"))
-    r = row(shelf(server), before_first.name)
+    found = shelf(server)
+    r = row(found, before_first.name)
     assert r.kept_because is not None
-    assert os.path.exists(before_first)
+    assert r.cannot_delete is None
+    plan = backup_shelf.plan_delete(found, before_first.name)
+    assert plan.names == (before_first.name,)
+    assert before_first.name not in _swept(server)

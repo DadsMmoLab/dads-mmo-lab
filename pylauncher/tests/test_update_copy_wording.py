@@ -95,9 +95,9 @@ def test_the_kept_size_counts_update_copies_and_their_safety_copies_only(tmp_pat
     ("size", "said"),
     [
         (2 * MB, "less than a minute"),
-        (144 * MB, "about 1 minute"),
-        (238 * MB, "about 2 minutes"),
-        (900 * MB, "about 6 minutes"),
+        (144 * MB, "at least about 1 minute"),
+        (238 * MB, "at least about 2 minutes"),
+        (900 * MB, "at least about 6 minutes"),
     ],
 )
 def test_the_restore_line_names_a_rough_duration_from_the_size(size: int, said: str) -> None:
@@ -121,4 +121,4 @@ def test_a_rollback_says_how_long_the_put_back_takes(tmp_path: Path) -> None:
     )
     assert raised is not None
     putting = [line for line in said if line.startswith("Putting")]
-    assert putting and "about 2 minutes" in putting[0], said
+    assert putting and "at least about 2 minutes" in putting[0], said

@@ -3109,7 +3109,10 @@ def restore_duration(size_bytes: int) -> str:
     if minutes < 1:
         return "This takes less than a minute."
     unit = "minute" if minutes == 1 else "minutes"
-    return f"This takes about {minutes} {unit}, and your server stays down until it is done."
+    return (
+        f"This takes at least about {minutes} {unit} (slower on some computers), and your "
+        "server stays down until it is done."
+    )
 
 
 def copy_put_back_line(put: snapshot.PutBack) -> str:
