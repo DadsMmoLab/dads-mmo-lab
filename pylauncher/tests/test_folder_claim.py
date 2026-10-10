@@ -503,9 +503,11 @@ def test_a_claim_docker_makes_after_a_stop_gave_it_up_is_still_removed(
     looks_after_stop = [0]
     removed: list[str] = []
     gone = threading.Event()
+    run_started = threading.Event()
 
     def facts(_name: str, timeout: float = 5.0, **_kw: object) -> object:
         if not cancel.is_set():
+            run_started.set()  # the press has started its `docker run` and is looking for it
             return None
         looks_after_stop[0] += 1
         if looks_after_stop[0] < 3:
@@ -535,7 +537,9 @@ def test_a_claim_docker_makes_after_a_stop_gave_it_up_is_still_removed(
 
     worker = threading.Thread(target=press)
     worker.start()
-    time.sleep(0.3)
+    # Not a sleep: a loaded runner may not have started the `run` yet, and a Stop before it
+    # leaves no late claim to remove (T631b).
+    assert run_started.wait(HANG_BOUND), "the press never started its run"
     stopped = time.monotonic()
     cancel.set()
     worker.join(HANG_BOUND)
