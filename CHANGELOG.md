@@ -31,6 +31,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 
 ### Fixed
 - WotLK and Unbound bot settings work again on the newest bots module: Yu'lon renames them for it, and back.
+- After an update that stopped mid-build, Start says the build is older than its sources and points to **Rebuild the server…**.
 - A small step back of your computer's clock no longer hides the "history was rewritten" line in the update question.
 - An install stops before building, naming the folder, when another install already holds its container names.
 - Moving a server says "1 account and 0 characters of players, plus 100 bot accounts with 1000 bot characters".

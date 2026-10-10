@@ -8969,6 +8969,8 @@ class StagedInstaller:
         self._build_exit = None
         compiled_from: dict[str, str] = {}
         """T589: the commits the build stage compiled (or the kept build it used) came from."""
+        prefix_before = self._built_prefix(server_dir)
+        """T660: the prefix the build from before this press reads; a rollback puts it back."""
 
         def may_have_tagged() -> bool:
             """Whether this press ran something that moves the live tags (T225, cold review).
@@ -8988,6 +8990,7 @@ class StagedInstaller:
             used = yield from self._use_or_clear_the_kept_build(server_dir, refs, kept, parking)
             if used:
                 parking.after = parking.fingerprint
+                self._remember_built_prefix(server_dir)
             else:
                 try:
                     yield from self.stage_build(stage_ctx)
@@ -9166,6 +9169,8 @@ class StagedInstaller:
                 if touched:
                     raise carry_detail(exc, RebuildChangedTheServer(message, up=False)) from exc
                 raise carry_detail(exc, InstallerError(message)) from exc
+            # T660: the old build is what the tags name again, and its prefix with it.
+            self._restore_built_prefix(server_dir, prefix_before)
             message = yield from self._restore_rollback(
                 ctx,
                 refs,
@@ -12829,6 +12834,27 @@ class StagedInstaller:
 
         return playerbots_rename.settle(self.entry, server_dir)
 
+    def _remember_built_prefix(self, server_dir: Path) -> None:
+        """T660: the prefix the image just compiled reads, for the rename before a Start.
+
+        A game with no mod-playerbots reads no prefix, and the record is then forgotten.
+        """
+        from yulon import playerbots_rename
+
+        playerbots_rename.remember_built(server_dir)
+
+    def _built_prefix(self, server_dir: Path) -> str | None:
+        """T660: the recorded prefix of the build in `server_dir`, or None."""
+        from yulon import playerbots_rename
+
+        return playerbots_rename.read_built(server_dir)
+
+    def _restore_built_prefix(self, server_dir: Path, prefix: str | None) -> None:
+        """T660: put the build-from-before's prefix record back (forgotten when it had none)."""
+        from yulon import playerbots_rename
+
+        playerbots_rename.write_built(server_dir, prefix)
+
     def _put_back_the_zone_file(self, server_dir: Path) -> str | None:
         """T171: the zone file `Controller.start()` puts back, before this engine's own starts.
 
@@ -13662,6 +13688,7 @@ class StagedInstaller:
             # compile tagged is the server's build. A rebuild records it once the press is
             # over (`rebuild()`), because until then a rollback can put the old one back.
             remember_built_from(ctx.server_dir, heads)
+        self._remember_built_prefix(ctx.server_dir)
         yield "The build finished."
 
     def stage_start_db(self, ctx: StageContext) -> Iterator[str]:

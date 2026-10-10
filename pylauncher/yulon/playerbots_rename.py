@@ -36,11 +36,13 @@ while Yu'lon's settings said otherwise.
 
 from __future__ import annotations
 
+import json
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from yulon import playerbots_keys, tuning
+from yulon import playerbots_keys, server_build_presses, tuning
 from yulon.catalog import compose_env, composegen
 from yulon.catalog.catalog import CatalogEntry
 from yulon.catalog.families import conf
@@ -65,10 +67,71 @@ REFUSED = (
     "this server's {old}* settings to match ({why}), so the server was not started: it would "
     "run on the module's defaults (500 bots, its command port open) instead of your settings."
 )
+BUILT_PREFIX_FILE = ".yulon-built-prefix.json"
+"""The prefix the server's BUILT image reads, as the checkout said when it was compiled (T660).
+
+`{"version": 1, "prefix": "AiPlayerbot."}`. The checkout cannot say it: Update to latest
+moves the sources before an hours-long compile, and a Yu'lon that dies in between leaves
+the old image beside the new sources. Written after the compile returned 0 (the install's
+`stage_build()`, a rebuild's build stage), and put back by a rollback; never forgotten
+at a rebuild's start, so a crash leaves the OLD image's prefix. Absent for a folder built
+before this existed, which is judged by its checkout alone, as T657 did.
+"""
+
+OLDER_BUILD = (
+    "This server's build is older than its sources: it was built from a mod-playerbots that "
+    "reads its settings as {built}*, but the folder now holds one that reads {now}* (an update "
+    "that stopped before its compile finished leaves this). Yu'lon did not rename your settings "
+    "and did not start the server, because the build that would run ignores {now}* settings. "
+    "Press {rebuild} to build what the folder holds."
+)
 
 
 class RenameRefused(InstallerError):
     """The settings could not be renamed; nothing was started (the sentence says why)."""
+
+
+def read_built(server_dir: Path) -> str | None:
+    """The prefix the built image reads (`BUILT_PREFIX_FILE`), or None: absent or not one."""
+    try:
+        raw = json.loads((server_dir / BUILT_PREFIX_FILE).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as exc:
+        logger.warning(f"{server_dir / BUILT_PREFIX_FILE} could not be read ({exc})")
+        return None
+    prefix = raw.get("prefix") if isinstance(raw, dict) and raw.get("version") == 1 else None
+    if prefix in (playerbots_keys.OLD, playerbots_keys.NEW):
+        return str(prefix)
+    return None
+
+
+def write_built(server_dir: Path, prefix: str | None) -> None:
+    """Record `prefix` as the built image's, or forget the record when None. Never raises.
+
+    A record that cannot be written is logged and left absent: the server is then judged by
+    its checkout, as before this record existed.
+    """
+    path = server_dir / BUILT_PREFIX_FILE
+    staged = path.with_name(path.name + ".yulon-new")
+    try:
+        if prefix is None:
+            path.unlink(missing_ok=True)
+            return
+        staged.write_text(json.dumps({"version": 1, "prefix": prefix}) + "\n", encoding="utf-8")
+        os.replace(staged, path)
+    except OSError as exc:
+        logger.warning(f"{path} could not be updated ({exc}); the build is taken as not known")
+        try:
+            staged.unlink(missing_ok=True)
+            path.unlink(missing_ok=True)
+        except OSError as also:
+            logger.warning(f"could not clean up {path}: {also}")
+
+
+def remember_built(server_dir: Path) -> None:
+    """Record the prefix the checkout reads now as the one the image just compiled reads."""
+    write_built(server_dir, playerbots_keys.module_prefix(server_dir))
 
 
 def _active_keys(lines: list[str]) -> set[str]:
@@ -181,6 +244,15 @@ def settle(entry: CatalogEntry, server_dir: Path) -> str | None:
     if prefix is None:
         return None
     old = playerbots_keys.other(prefix)
+    built = read_built(server_dir)
+    if built is not None and built != prefix:
+        raise RenameRefused(
+            OLDER_BUILD.format(
+                built=built,
+                now=prefix,
+                rebuild=server_build_presses.under_server_build(server_build_presses.REBUILD),
+            )
+        )
     try:
         changes = _changes(entry, server_dir, prefix)
         for change in changes:
