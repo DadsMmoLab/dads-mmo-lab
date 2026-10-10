@@ -358,13 +358,16 @@ class Controller:
             if conflicts:
                 logger.warning(f"start() refused: ports {self.spec.ports} bound by {conflicts}")
                 raise PortConflictError(conflicts, self.spec.ports, self._owners_of(conflicts))
-            # T657: files only, and before the database is started to be asked about, so a
-            # rename that cannot be written refuses with nothing started.
-            self.bot_settings_renamed = self._rename_bot_settings()
+            self.bot_settings_renamed = None
             self.refuse_a_missing_image()
             self.refuse_a_missing_database()
             if not asked_before_the_servers:
                 self._ask_before_the_servers()
+            # T657: after every refusal and the player's own answer, so a Start that does not
+            # happen renames nothing and the line is said only when it did. A rename that
+            # cannot be written refuses here, with the database `refuse_a_missing_database`
+            # started left up, as a refused `before_servers` answer leaves it.
+            self.bot_settings_renamed = self._rename_bot_settings()
             self._before_the_servers_start()
             self.zone_problem = self._put_back_the_zone_file()
             # The map-data fingerprint was written by `refuse_start()` above (T219).

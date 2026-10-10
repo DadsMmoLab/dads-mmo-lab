@@ -80,8 +80,17 @@ def _active_keys(lines: list[str]) -> set[str]:
     return found
 
 
+BOM = "\ufeff"
+
+
 def rename_conf_text(text: str, prefix: str) -> tuple[str, int]:
-    """`text` with every bot key line under `prefix`, and how many lines changed."""
+    """`text` with every bot key line under `prefix`, and how many lines changed.
+
+    A UTF-8 byte-order mark (a Windows editor's save) is kept and does not hide the first line.
+    """
+    if text.startswith(BOM):
+        renamed, count = rename_conf_text(text[len(BOM) :], prefix)
+        return BOM + renamed, count
     lines = text.split("\n")
     active = _active_keys(lines)
     count = 0

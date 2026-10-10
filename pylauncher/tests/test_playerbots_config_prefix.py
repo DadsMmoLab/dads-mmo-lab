@@ -196,6 +196,27 @@ def test_a_dist_that_says_nothing_falls_back_to_the_config_source(tmp_path: Path
     assert playerbots_keys.module_prefix(tmp_path) == "Playerbots."
 
 
+def test_the_old_config_source_reads_as_old_despite_its_include(tmp_path: Path) -> None:
+    """Lines copied from 037c0141's PlayerbotAIConfig.cpp (14, 83, 162-163, 443, 494).
+
+    `#include "Playerbots.h"` is a file name; read as a key it made every old source mixed.
+    """
+    lay_module(tmp_path, "# nothing here\n")
+    source = tmp_path / playerbots_keys.SOURCE
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        '#include "Playerbots.h"\n'
+        '    enabled = sConfigMgr->GetOption<bool>("AiPlayerbot.Enabled", true);\n'
+        "    missingBuffReagentMessageCooldown = sConfigMgr->GetOption<int32>(\n"
+        '        "AiPlayerbot.MissingBuffReagentMessageCooldown", 300);\n'
+        '        std::string setting = "AiPlayerbot.ZoneBracket." + std::to_string(zoneId);\n'
+        '            os << "AiPlayerbot.PremadeSpecName." << cls << "." << spec;\n'
+        '// "Playerbots.Something" in a comment is no key either\n',
+        encoding="utf-8",
+    )
+    assert playerbots_keys.module_prefix(tmp_path) == "AiPlayerbot."
+
+
 @pytest.mark.parametrize(
     "key", ["AiPlayerbot.MinRandomBots", "AiPlayerbot.CommandServerPort", "AiPlayerbot.X.1.0"]
 )
@@ -461,6 +482,77 @@ def test_a_rename_that_cannot_be_written_stops_the_start(
         _start(monkeypatch, tmp_path)
     with pytest.raises(InstallerError, match="not started"):
         list(_engine(Recorder()).stage_up(_context(tmp_path)))
+
+
+def test_a_start_that_is_refused_renames_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _v0915_server(tmp_path)
+
+    def gone() -> None:
+        raise StartRefused("the server's build is gone")
+
+    monkeypatch.setattr(Controller, "refuse_a_missing_image", lambda self: gone())
+    with pytest.raises(StartRefused, match="gone"):
+        _start(monkeypatch, tmp_path)
+    assert (tmp_path / CONF).read_bytes() == OLD_CONF.encode("utf-8")
+    assert not tuning.backups_of(tmp_path / CONF)
+
+
+def test_a_start_the_player_declines_renames_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _v0915_server(tmp_path)
+
+    def declined(self: Controller) -> None:
+        raise StartRefused("you kept the other server running")
+
+    monkeypatch.setattr(Controller, "_ask_before_the_servers", declined)
+    with pytest.raises(StartRefused, match="other server"):
+        _start(monkeypatch, tmp_path)
+    assert (tmp_path / CONF).read_bytes() == OLD_CONF.encode("utf-8")
+
+
+def test_a_conf_saved_with_a_byte_order_mark_is_renamed_and_keeps_it() -> None:
+    text = "\ufeffAiPlayerbot.MinRandomBots = 50\nAiPlayerbot.MaxRandomBots = 50\n"
+    renamed, count = playerbots_rename.rename_conf_text(text, "Playerbots.")
+    assert renamed == "\ufeffPlayerbots.MinRandomBots = 50\nPlayerbots.MaxRandomBots = 50\n"
+    assert count == 2
+
+
+class _Label:
+    def __init__(self) -> None:
+        self.text, self.visible = "", False
+
+    def setText(self, text: str) -> None:  # noqa: N802 - Qt's spelling
+        self.text = text
+
+    def setVisible(self, visible: bool) -> None:  # noqa: N802 - Qt's spelling
+        self.visible = visible
+
+
+def test_the_server_tab_says_a_rename_as_a_note_not_a_problem() -> None:
+    from types import SimpleNamespace
+
+    from yulon.ui.controller_view import ControllerView
+
+    controller = SimpleNamespace(
+        bot_settings_renamed="Yu'lon renamed 5 settings", zone_problem=None
+    )
+    view = SimpleNamespace(
+        services=SimpleNamespace(controller=controller),
+        problem_label=_Label(),
+        notice_label=_Label(),
+    )
+    assert ControllerView._say_zone_problem(view) is None  # type: ignore[arg-type]
+    assert (view.notice_label.text, view.notice_label.visible) == (
+        "Yu'lon renamed 5 settings",
+        True,
+    )
+    assert view.problem_label.text == ""
+    controller.bot_settings_renamed = None
+    ControllerView._say_zone_problem(view)  # type: ignore[arg-type]
+    assert (view.notice_label.text, view.notice_label.visible) == ("", False)
 
 
 def test_a_key_set_under_both_names_keeps_the_one_the_module_reads() -> None:
