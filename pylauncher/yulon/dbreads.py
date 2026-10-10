@@ -53,6 +53,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
+from yulon import playerbots_keys
 from yulon.catalog.catalog import BotMarker, CatalogEntry
 from yulon.log import get_logger
 from yulon.manifest import Db
@@ -166,11 +167,13 @@ def resolve_marker(entry: CatalogEntry, server_dir: Path) -> MarkerAnswer:
         # A file that IS there and will not open says nothing about what is in
         # it. That is the half of the old rule the measurement leaves standing.
         return MarkerAnswer(problem=f"could not read {conf}: {exc}")
-    values = _conf_values(text, bots.prefix_conf_key)
+    # T657: the key as this server's mod-playerbots reads it (`Playerbots.` since ed54b459).
+    key = playerbots_keys.key(bots.prefix_conf_key, playerbots_keys.module_prefix(server_dir))
+    values = _conf_values(text, key)
     if len(set(values)) > 1:
         return MarkerAnswer(
             problem=(
-                f"{bots.prefix_conf_key} is set more than once in {conf.name}, to "
+                f"{key} is set more than once in {conf.name}, to "
                 f"{' and '.join(repr(v) for v in sorted(set(values)))}; which one the server "
                 "takes is not something this can decide"
             )
@@ -180,7 +183,7 @@ def resolve_marker(entry: CatalogEntry, server_dir: Path) -> MarkerAnswer:
     if not values[0]:
         return MarkerAnswer(
             problem=(
-                f"{bots.prefix_conf_key} is blank in {conf.name}. An empty prefix matches every "
+                f"{key} is blank in {conf.name}. An empty prefix matches every "
                 "account, which would report every player as a bot, so nothing is counted "
                 "until it is set."
             )

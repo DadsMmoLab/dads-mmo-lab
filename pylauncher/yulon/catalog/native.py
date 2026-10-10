@@ -8705,6 +8705,12 @@ class StagedInstaller:
             if servers_down is not None:
                 yield from servers_down.forward(ctx)
 
+        # T657: right before the replace, with the old world already down on the update route:
+        # the bot settings under the prefix the checkout being started reads (a Return and a
+        # rollback rename back), or the refusal, with the old containers untouched.
+        renamed = self._rename_bot_settings(ctx.server_dir)
+        if renamed is not None:
+            yield renamed
         # T577: marked offline before the replace starts the new world, so the realm list says
         # Offline for the whole load. On the update route the old world is already down here,
         # and the bit is set within seconds of that. Best effort, never raising; a replace
@@ -12807,6 +12813,22 @@ class StagedInstaller:
         except world_data.FingerprintNotRecorded as exc:
             raise InstallerError(str(exc)) from exc
 
+    def _rename_bot_settings(self, server_dir: Path) -> str | None:
+        """T657: `playerbots_rename.settle()`, before this engine's own starts; its line or None.
+
+        The install's `up` and a rebuild's recreate (Rebuild, Update to latest, Return to
+        the tested pin, a rollback) start containers without `Controller.start()`, which
+        asks the same function. Nothing for an entry without mod-playerbots.
+
+        Raises:
+            InstallerError: the settings could not be renamed; nothing was started.
+        """
+        # Imported here: `playerbots_rename` writes through `families.conf`, and the
+        # families package imports this module.
+        from yulon import playerbots_rename
+
+        return playerbots_rename.settle(self.entry, server_dir)
+
     def _put_back_the_zone_file(self, server_dir: Path) -> str | None:
         """T171: the zone file `Controller.start()` puts back, before this engine's own starts.
 
@@ -13860,6 +13882,9 @@ class StagedInstaller:
         warned = self._refresh_world_data(ctx.server_dir)
         if warned is not None:
             yield warned
+        renamed = self._rename_bot_settings(ctx.server_dir)
+        if renamed is not None:
+            yield renamed
         # T577: a core whose world never marks its realm offline while it loads is marked
         # here, before the world exists to be logged in to. Best effort, never raising.
         self._seams.mark_realm_offline(

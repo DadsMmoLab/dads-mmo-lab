@@ -70,7 +70,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from yulon import dbreads, platform, play, resources, runner, tuning
+from yulon import dbreads, platform, play, playerbots_keys, resources, runner, tuning
 from yulon.actions import Outcome
 from yulon.catalog import composegen
 from yulon.catalog.catalog import CatalogEntry
@@ -111,6 +111,10 @@ CONTROL_MARKER = "AiPlayerbot.Enabled"
 """A string the binary MUST have, so a zero for `ALE_MARKER` can be told apart
 from a reading that never happened. Both were measured on `yulon-ubuntu`
 2026-09-08: `ALE.ScriptPath` 0, `AiPlayerbot.Enabled` 1."""
+
+CONTROL_MARKERS = (CONTROL_MARKER, playerbots_keys.key(CONTROL_MARKER, playerbots_keys.NEW))
+"""Either spelling counts (T657): a build of mod-playerbots past ed54b459 reads
+`Playerbots.Enabled` and has no `AiPlayerbot.Enabled` in it (`PlayerbotAIConfig.cpp:83`)."""
 
 
 class NothingToDeploy(RuntimeError):
@@ -198,6 +202,11 @@ class BinaryRead:
     sentence: str
 
 
+def _each_pattern(patterns: tuple[str, ...]) -> str:
+    """`-e "<a>" -e "<b>"`: grep counts the lines holding any of them."""
+    return " ".join(f'-e "{pattern}"' for pattern in patterns)
+
+
 def read_engine_in_binary(
     container: str,
     *,
@@ -221,7 +230,8 @@ def read_engine_in_binary(
         return BinaryRead(None, "the Lua engine could not be read: there is no docker command here")
     script = (
         f'printf "ALE %s\\n" "$(grep -c -a -F "{ALE_MARKER}" "{binary}" || true)"; '
-        f'printf "CONTROL %s\\n" "$(grep -c -a -F "{CONTROL_MARKER}" "{binary}" || true)"'
+        f'printf "CONTROL %s\\n" "$(grep -c -a -F {_each_pattern(CONTROL_MARKERS)} "{binary}" '
+        f'|| true)"'
     )
     argv = [*prefix, "exec", container, "sh", "-c", script]
     try:
@@ -238,8 +248,9 @@ def read_engine_in_binary(
         return BinaryRead(
             None,
             _unreadable(
-                f"the reading found no {CONTROL_MARKER} either, and every build of this "
-                "server has that — so what was read was not this server's executable"
+                f"the reading found no {' or '.join(CONTROL_MARKERS)} either, and every "
+                "build of this server has one of them — so what was read was not this "
+                "server's executable"
             ),
         )
     if counts.get("ALE", 0) < 1:
@@ -925,7 +936,7 @@ def spec_command(player: str, bot: str, spec: str) -> str:
     return f"{_whisper(player, bot)} talents spec {spec}"
 
 
-def read_spec_names(text: str) -> dict[int, tuple[str, ...]]:
+def read_spec_names(text: str, prefix: str | None = None) -> dict[int, tuple[str, ...]]:
     """Every premade spec this conf defines, per class id, in the module's order.
 
     Two measured rules, both from `mod-playerbots` on `yulon-ubuntu2` 2026-09-09,
@@ -960,6 +971,7 @@ def read_spec_names(text: str) -> dict[int, tuple[str, ...]]:
     can hear it. Measuring `sConfigMgr`'s comment handling is what would let this
     read the value the module actually holds.
     """
+    spec_key = playerbots_keys.key(SPEC_NAME_KEY, prefix)  # T657: the server's own prefix
     seen: dict[int, dict[int, str]] = {}
     taken: set[str] = set()
     for line in text.splitlines():
@@ -972,9 +984,9 @@ def read_spec_names(text: str) -> dict[int, tuple[str, ...]]:
         if not sep or key in taken:
             continue
         taken.add(key)
-        if not key.startswith(SPEC_NAME_KEY):
+        if not key.startswith(spec_key):
             continue
-        parts = key[len(SPEC_NAME_KEY) :].split(".")
+        parts = key[len(spec_key) :].split(".")
         if len(parts) != 2 or not all(part.isdigit() for part in parts):
             continue
         value = tail.strip().strip('"')
@@ -998,7 +1010,9 @@ def spec_names(server_dir: Path) -> dict[int, tuple[str, ...]]:
     full of names the running server had never loaded, refused one at a time in
     a chat window nothing here can read.
     """
-    return read_spec_names(_conf_text(server_dir / PLAYERBOTS_CONF))
+    return read_spec_names(
+        _conf_text(server_dir / PLAYERBOTS_CONF), playerbots_keys.module_prefix(server_dir)
+    )
 
 
 def max_player_level(server_dir: Path) -> int | None:
@@ -2212,7 +2226,8 @@ def max_added_bots(server_dir: Path) -> int | None:
     cap nobody could read means no row is refused for it here -- the server
     still enforces whatever it has -- and the picker's note says so.
     """
-    value = _conf_value(_conf_text(server_dir / PLAYERBOTS_CONF), MAX_ADDED_BOTS_KEY)
+    key = playerbots_keys.key(MAX_ADDED_BOTS_KEY, playerbots_keys.module_prefix(server_dir))
+    value = _conf_value(_conf_text(server_dir / PLAYERBOTS_CONF), key)
     return int(value) if value is not None and value.isdigit() else None
 
 
@@ -2249,10 +2264,12 @@ def allow_flags(server_dir: Path) -> AllowFlags:
     for reading one as though it were configuration.
     """
     text = _conf_text(server_dir / PLAYERBOTS_CONF)
+    prefix = playerbots_keys.module_prefix(server_dir)
     return AllowFlags(
-        _flag(_conf_value(text, ALLOW_ACCOUNT_KEY)),
-        _flag(_conf_value(text, ALLOW_GUILD_KEY)),
-        _flag(_conf_value(text, ALLOW_LINKED_KEY)),
+        *(
+            _flag(_conf_value(text, playerbots_keys.key(name, prefix)))
+            for name in (ALLOW_ACCOUNT_KEY, ALLOW_GUILD_KEY, ALLOW_LINKED_KEY)
+        )
     )
 
 
