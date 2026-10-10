@@ -135,6 +135,7 @@ from yulon.catalog.installer import (
     provision_lines,
     unsupported_platform_message,
 )
+from yulon.catalog.preflight import Facts as PreflightFacts
 from yulon.catalog.preflight import Spent
 from yulon.log import get_logger
 from yulon.manifest import Db
@@ -4845,7 +4846,7 @@ class ImportGate(Protocol):
 
     def probe(self) -> docker.ImportState: ...
 
-    def reset(self) -> tuple[str, ...]: ...
+    def reset(self, *, everything: bool = False) -> tuple[str, ...]: ...
 
     def adoption_gaps(self) -> tuple[str, ...]: ...
 
@@ -4885,13 +4886,18 @@ class CallableGate:
             return ("these databases cannot be checked table by table by this install's probe",)
         return self.gaps_fn()
 
-    def reset(self) -> tuple[str, ...]:
+    def reset(self, *, everything: bool = False) -> tuple[str, ...]:
+        """Drop the half-written schemas; with `everything`, every one there (T658).
+
+        `everything` is for schemas an ended import left, which may read as
+        finished: see `docker.one_shot_ended_marker()`.
+        """
         if self.reset_fn is None:
             raise InstallerError(
                 "This install's databases were left half-written and this installer has no way "
                 "to clear them, so nothing was run."
             )
-        return self.reset_fn()
+        return self.reset_fn(everything=True) if everything else self.reset_fn()
 
 
 def _git_file_unmodified(dest: Path, relative_path: str) -> bool | None:
@@ -6415,6 +6421,8 @@ class Seams:
     `Callable[...]` for `recreate`'s reason: it is called with the stop's
     `control=` (`docker.StopControl`), whose load wait may hold it.
     """
+    update_compose: Callable[[], Iterator[str]] = platform.update_compose
+    """T658: put Docker's current static Compose in the user's plugin folder, asked first."""
     tag_image: Callable[[str, str], str] = docker.tag_image
     remove_image: Callable[..., str] = docker.remove_image
     """The rebuild's rollback: kept as a second tag before the compile, let go as one after.
@@ -12202,12 +12210,50 @@ class StagedInstaller:
         if facts.docker_ready:
             self._refuse_foreign_containers(server_dir, state.install_id)
         spent = self._spent(state, server_dir) if facts.docker_ready else preflight.NOTHING_SPENT
+        if facts.compose_offer and platform.compose_too_old(facts.compose_version):
+            # T658: a Compose that would stop this install's import and every Start, on a
+            # machine where Yu'lon can put a current one in place. Asked, never assumed.
+            updated = yield from self._offer_a_current_compose(facts, ask)
+            if updated:
+                facts = self._seams.gather(
+                    self.entry,
+                    server_dir,
+                    client_dir=options.client_dir,
+                    platform_id=self._seams.platform_id,
+                    docker_ready=self._seams.docker_ready,
+                    dir_problem=self._seams.dir_problem,
+                )
         report_checks = preflight.evaluate(self.entry, server_dir, facts, spent)
         yield from preflight.lines(report_checks)
         if not report_checks.ok():
             raise InstallerError(
                 "This machine cannot install the server yet:\n" + report_checks.message()
             )
+
+    def _offer_a_current_compose(
+        self, facts: PreflightFacts, ask: runner.Prompter | None
+    ) -> Generator[str, None, bool]:
+        """Ask to put Docker's current Compose in the user's plugin folder; True once it is (T658).
+
+        No one to ask, or anything but a deliberate yes, changes nothing: the
+        Compose row then refuses with the same offer in words.
+        """
+        version = facts.compose_version or platform.COMPOSE_OLDEST_WORKING
+        if ask is None:
+            return False
+        question = platform.UPDATE_COMPOSE_QUESTION.format(
+            have=".".join(str(part) for part in version),
+            new=platform.COMPOSE_DOWNLOAD_VERSION,
+            path=platform.users_compose_plugin_path(),
+        )
+        if not platform.explicit_yes(ask(question)):
+            yield "Docker Compose was left as it is."
+            return False
+        try:
+            yield from self._seams.update_compose()
+        except platform.ComposeUpdateError as exc:
+            raise InstallerError(f"{exc} The install was not started.") from exc
+        return True
 
     def _spent(self, state: InstallState, server_dir: Path) -> Spent:
         """What an earlier run of this install already spent, for the free-space rows (T112).
@@ -13762,12 +13808,22 @@ class StagedInstaller:
             # an earlier run -- a Stop whose importer outlived it, or a Yu'lon that
             # closed mid-import. One that can be ended is ended first, and BEFORE the
             # probe (cold review): a live importer changes what the probe would read.
-            left = self._seams.end_one_shot(service, ctx.server_dir)
+            left = self._seams.end_one_shot(service, ctx.server_dir, record_ended=True)
             if left is not None:
                 raise OneShotLeftRunning(_one_shot_left_sentence(left, earlier=True))
         before = gate.probe()
         yield f"The databases read as {before.state}: {before.detail}"
-        if before.state == "imported" or (before.state == "populated" and before.complete):
+        # T658: an import ended before it finished -- by a Stop, a closed Yu'lon, or the
+        # end of a leftover importer just above -- leaves schemas that can read as
+        # `imported`. Never trusted then: they are cleared and imported again. Player data
+        # still refuses (`populated`, and `reset_unfinished()` asks again).
+        ended = (
+            service is not None and docker.one_shot_ended_marker(ctx.server_dir, service).is_file()
+        )
+        forced = ended and before.state in ("imported", "partial")
+        if not forced and (
+            before.state == "imported" or (before.state == "populated" and before.complete)
+        ):
             yield "They are already imported; leaving them alone."
             return
         if before.state == "unreadable":
@@ -13781,8 +13837,27 @@ class StagedInstaller:
                 "Importing over them would overwrite it, so nothing was run. Use an empty "
                 "folder for a new install."
             )
-        if before.state == "partial":
+        if forced:
+            yield (
+                "An earlier import was ended before it finished, so these databases are "
+                "unfinished whatever their tables say. Clearing them first."
+            )
+            # A player who started the server by hand has its world and login servers
+            # running on them (m910q, 2026-10-10: the world restarting over and over). They
+            # are stopped before anything is dropped, so nothing writes while it is imported.
+            try:
+                self._seams.stop_servers(self.entry.container_spec(), ctx.server_dir)
+            except docker.DockerCommandError as exc:
+                raise carry_detail(
+                    exc,
+                    InstallerError(
+                        "This server's own world and login servers could not be stopped, so "
+                        f"its unfinished databases were not cleared: {exc}"
+                    ),
+                ) from exc
+        elif before.state == "partial":
             yield f"Clearing the half-written databases first ({before.detail})."
+        if forced or before.state == "partial":
             # `reset()` INSIDE a `try`. It was called bare until 2026-09-02, and
             # the seam behind it on the AzerothCore path,
             # `controller_wow_wotlk.repair.reset_unfinished()`, names three
@@ -13810,7 +13885,7 @@ class StagedInstaller:
             # engine built with no reset seam at all -- and re-wrapping it would
             # bury that sentence inside this one.
             try:
-                dropped = gate.reset()
+                dropped = gate.reset(everything=True) if forced else gate.reset()
             except InstallerError:
                 raise
             except Exception as exc:
@@ -13835,7 +13910,7 @@ class StagedInstaller:
         yield f"Importing the databases ({service}). This takes several minutes."
         run = yield from self._pump(
             lambda sink: self._seams.one_shot(
-                service, ctx.server_dir, sink=sink, cancel=ctx.cancel
+                service, ctx.server_dir, sink=sink, cancel=ctx.cancel, record_ended=True
             ),
             cancel=ctx.cancel,
             stage="import",
@@ -13843,7 +13918,7 @@ class StagedInstaller:
         if run.returncode == docker.CANCELLED_RETURNCODE:
             # T539: the note promises the half-written databases are cleared before the
             # import runs again, which is true only once nothing is still writing them.
-            left = self._seams.end_one_shot(service, ctx.server_dir)
+            left = self._seams.end_one_shot(service, ctx.server_dir, record_ended=True)
             if left is not None:
                 raise OneShotLeftRunning(_one_shot_left_sentence(left, earlier=False))
             raise InstallStopped(_cancelled_message("the database import", IMPORT_CANCEL_NOTE))
@@ -13851,6 +13926,9 @@ class StagedInstaller:
             after = self._seams.verify_import(gate.probe, service, ctx.server_dir, run)
         except docker.DockerCommandError as exc:
             raise carry_detail(exc, InstallerError(str(exc))) from exc
+        # T658: this run finished and was verified, so an earlier ended one no longer
+        # describes these databases.
+        docker.one_shot_ended_marker(ctx.server_dir, service).unlink(missing_ok=True)
         yield f"The databases now read as {after.state}."
 
     def _forget_old_database_records(self, ctx: StageContext) -> Iterator[str]:

@@ -929,6 +929,27 @@ def start(server_dir: Path, *, wsl_distro: str | None = None) -> None:
     _run(["compose", "up", "-d"], cwd=server_dir, wsl_distro=wsl_distro)
 
 
+def compose_refusal(*, wsl_distro: str | None = None) -> str | None:
+    """The sentence a press must refuse with when this Compose is too old, or None (T658).
+
+    Compose 2.5.0-2.9.0 stop `compose up --no-deps <service>` whenever the service
+    has a dependency outside the selection: an AzerothCore Start (`<db> <auth>
+    <world>`, whose servers wait on the import) and its import and Repair. The
+    caller asks only for such an entry. Asked once per press, where the server's
+    own commands run (the WSL distro, for a server inside one). A version that
+    cannot be read refuses nothing: the press then says what it says.
+    """
+    asked = _docker(["compose", "version"], timeout=_ONE_SHOT_ASK_TIMEOUT, wsl_distro=wsl_distro)
+    if asked.returncode != 0:
+        return None
+    version = platform.parse_compose_version(asked.stdout or "")
+    if version is None or not platform.compose_too_old(version):
+        return None
+    linux = wsl_distro is not None or sys.platform.startswith("linux")
+    offer = platform.compose_update_offered(wsl_distro=wsl_distro)
+    return platform.compose_too_old_sentence(version, linux=linux, offer=offer)
+
+
 PROJECT_NAME_VAR = "COMPOSE_PROJECT_NAME"
 
 
@@ -2412,7 +2433,7 @@ class ImportState:
         return self.state in ("absent", "partial")
 
 
-ResetUnfinished = Callable[[], tuple[str, ...]]
+ResetUnfinished = Callable[..., tuple[str, ...]]
 """Drops the schemas an interrupted import left half-written; returns their names.
 
 A second seam rather than a wider `ImportProbe`, for the same reason the probe
@@ -2559,6 +2580,10 @@ def repair_import(
             "this game does not say which compose service imports its databases, so there is "
             "nothing to re-run. Nothing was changed."
         )
+    # T658: `compose up --no-deps <importer>` is exactly what Compose 2.5-2.9 refuse.
+    too_old = compose_refusal(wsl_distro=wsl_distro)
+    if too_old:
+        raise DockerRefusal(too_old)
 
     project = install_project(spec, server_dir, wsl_distro=wsl_distro)
     if project is None:
@@ -2593,7 +2618,7 @@ def repair_import(
     # an orphaned importer leaves -- Yu'lon closed mid-import, and Docker Desktop keeps
     # the container -- so that importer is ended before anything else: before the
     # database it writes to is started (Codex review), and before it is read.
-    left = end_one_shot(service, server_dir, wsl_distro=wsl_distro)
+    left = end_one_shot(service, server_dir, wsl_distro=wsl_distro, record_ended=True)
     if left is not None:
         raise DockerRefusal(importer_left_sentence(left, "the import was not re-run"))
     start_database(
@@ -2602,6 +2627,26 @@ def repair_import(
 
     before = probe()
     logger.info(f"repair_import(): the databases read as {before.state} — {before.detail}")
+    # T658: an importer ended before it finished (just above, or by an earlier Stop) leaves
+    # schemas that can read as `imported`. They are cleared whole and imported again, as the
+    # install's import stage does; player data still refuses, below and in `reset`.
+    ended = one_shot_ended_marker(server_dir, service).is_file()
+    if ended and before.state in ("imported", "partial"):
+        if reset is None:
+            raise DockerRefusal(
+                "an earlier import of this install was ended before it finished, and this "
+                "game has no way to clear what it left. Nothing was run."
+            )
+        logger.warning("repair_import(): clearing what an ended import left, whatever it reads as")
+        try:
+            dropped = reset(everything=True)
+        except Exception as exc:
+            raise DockerCommandError(
+                "the unfinished databases could not be cleared, so the import was not re-run "
+                f"and nothing else was changed: {exc}"
+            ) from exc
+        logger.warning(f"repair_import(): dropped {', '.join(dropped)}; re-running the import")
+        before = ImportState("absent", "cleared after an ended import")
     if before.state == "populated":
         raise DockerRefusal(
             f"this install's databases hold player data ({before.detail}). Re-running the import "
@@ -2652,8 +2697,10 @@ def repair_import(
         )
 
     logger.warning(f"repair_import(): `compose up --no-deps {service}` in {server_dir}")
-    run = run_one_shot(service, server_dir, wsl_distro=wsl_distro, sink=output)
+    run = run_one_shot(service, server_dir, wsl_distro=wsl_distro, sink=output, record_ended=True)
     verify_import(probe, service, server_dir, run)
+    # T658: a verified import; an earlier ended one no longer describes these databases.
+    one_shot_ended_marker(server_dir, service).unlink(missing_ok=True)
     return True
 
 
@@ -2922,8 +2969,11 @@ def run_one_shot(
     wsl_distro: str | None = None,
     sink: OutputSink | None = None,
     cancel: threading.Event | None = None,
+    record_ended: bool = False,
 ) -> AttachedRun:
     """Run one compose one-shot service attached, and return what it left behind.
+
+    `record_ended` is handed to the `end_one_shot()` a cancel runs (T658).
 
     Byte-identical argv to the version live-gated against a real AzerothCore
     import on yulon-ubuntu (2026-08-23) — `--no-deps` is what makes an attached
@@ -2980,7 +3030,9 @@ def run_one_shot(
         cancel=cancel,
         # T539: the container goes with a Stop at once, `up` and `run` alike. See
         # `end_one_shot()`; the caller asks it again before it reports the Stop.
-        on_cancel=lambda: end_one_shot(service, server_dir, wsl_distro=wsl_distro),
+        on_cancel=lambda: end_one_shot(
+            service, server_dir, wsl_distro=wsl_distro, record_ended=record_ended
+        ),
     )
     if run.returncode != 0:
         # Not raised here. See above — the probe is the only thing that can
@@ -3285,10 +3337,38 @@ def importer_left_sentence(left: OneShotLeft, nothing_done: str) -> str:
     return f"{said} To end it, run this in a terminal:\ndocker rm -f {' '.join(left.names)}"
 
 
+def one_shot_ended_marker(server_dir: Path, service: str) -> Path:
+    """The file that says a run of `service` in this folder was ended before it finished (T658).
+
+    Written by `end_one_shot()` when it has to kill one, and left until a later
+    run of that one-shot is seen to finish. For the database import that is the
+    only reliable record: AzerothCore's importer creates every schema's
+    `updates` tables before it applies the updates, so one killed while it
+    applies them leaves schemas the probe reads as `imported` (measured on
+    m910q, 2026-10-10: a player's hand-started import, ended by the next press,
+    then read "imported" and the server came up with an empty realm list).
+    """
+    return Path(server_dir) / f".yulon-{service}-ended"
+
+
+def _mark_one_shot_ended(server_dir: Path, service: str) -> None:
+    """Write `one_shot_ended_marker()`; a folder that will not take it is logged, not raised."""
+    try:
+        one_shot_ended_marker(server_dir, service).write_text(
+            f"{service} was ended before it finished\n", encoding="utf-8"
+        )
+    except OSError as exc:
+        logger.warning(f"could not record that {service} was ended in {server_dir}: {exc}")
+
+
 def end_one_shot(
-    service: str, server_dir: Path, *, wsl_distro: str | None = None
+    service: str, server_dir: Path, *, wsl_distro: str | None = None, record_ended: bool = False
 ) -> OneShotLeft | None:
     """End every running container of this install's one-shot `service`; None once none runs.
+
+    `record_ended` (T658): a kill also writes `one_shot_ended_marker()`. Only the
+    database import's callers pass it; nothing reads a record for the
+    server-data download, which re-checks its own volume on every run.
 
     T539. The install's import is `compose up --no-deps <importer>`, attached, and a
     Stop ends the CLI. Whether the importer goes with it is not this app's to
@@ -3361,6 +3441,10 @@ def end_one_shot(
             # Each container is killed once; one that appears later (a create the
             # daemon finished late) is killed when it is first seen.
             logger.warning(f"end_one_shot(): {', '.join(fresh)} still running; killing")
+            # T658: recorded BEFORE the kill, so a Yu'lon that dies right after it still
+            # leaves the next press knowing what the one-shot left is unfinished.
+            if record_ended:
+                _mark_one_shot_ended(server_dir, service)
             killed = (*killed, *fresh)
             _docker(["kill", *fresh], timeout=_ONE_SHOT_ASK_TIMEOUT, wsl_distro=wsl_distro)
         if time.monotonic() >= deadline:

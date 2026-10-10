@@ -143,6 +143,8 @@ class Recorder:
     one_shot_result: docker.AttachedRun = docker.AttachedRun(0, ("ran",))
     one_shot_left: docker.OneShotLeft | None = None
     """What `end_one_shot()` answers (T539): None, nothing of the one-shot is running."""
+    one_shots_running: list[str] = field(default_factory=list)
+    """One-shots still running from an earlier run, which `end_one_shot()` kills (T658)."""
     ended_one_shots: list[str] = field(default_factory=list)
     """Every service `end_one_shot()` was asked to end, in order. Not in `calls`, so the
     recorded call lists every other test pins stay as they were."""
@@ -701,8 +703,8 @@ class Recorder:
             return UNREADABLE
         return self.probe_answers.pop(0) if len(self.probe_answers) > 1 else self.probe_answers[0]
 
-    def reset(self) -> tuple[str, ...]:
-        self.calls.append("reset")
+    def reset(self, *, everything: bool = False) -> tuple[str, ...]:
+        self.calls.append("reset-everything" if everything else "reset")
         if self.reset_error is not None:
             raise self.reset_error
         return self.reset_answer
@@ -940,15 +942,28 @@ class Recorder:
             return self.build_result
 
         def one_shot(
-            service: str, server_dir: Path, *, sink: object = None, cancel: object = None
+            service: str,
+            server_dir: Path,
+            *,
+            sink: object = None,
+            cancel: object = None,
+            record_ended: bool = False,
         ) -> docker.AttachedRun:
             self.calls.append(f"one-shot:{service}")
             if callable(sink):
                 sink(f"{service} said something")
             return self.one_shot_result
 
-        def end_one_shot(service: str, server_dir: Path) -> docker.OneShotLeft | None:
+        def end_one_shot(
+            service: str, server_dir: Path, *, record_ended: bool = False
+        ) -> docker.OneShotLeft | None:
             self.ended_one_shots.append(service)
+            if service in self.one_shots_running:
+                # What the real one does when it has to kill one (T658): a record only when
+                # the caller asked for one, which is the import's callers.
+                self.one_shots_running.remove(service)
+                if record_ended:
+                    docker.one_shot_ended_marker(server_dir, service).write_text("ended\n")
             return self.one_shot_left
 
         def verify(

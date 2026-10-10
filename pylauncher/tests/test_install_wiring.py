@@ -92,7 +92,9 @@ def test_the_probe_reaches_repair_through_this_entry_s_db_container(
         assert sql.root_password == install_wiring.fixed_db_password(WOTLK)
         return docker.ImportState("imported", "every acore_* schema has tables", complete=True)
 
-    def fake_reset(sql: DockerSql, mysql: DockerMysql) -> tuple[str, ...]:
+    def fake_reset(
+        sql: DockerSql, mysql: DockerMysql, *, everything: bool = False
+    ) -> tuple[str, ...]:
         seen.append((sql.db_container, mysql.db_container))
         return ("acore_world",)
 

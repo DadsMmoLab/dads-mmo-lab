@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import errno
 import functools
+import hashlib
 import importlib
 import json
 import os
@@ -1596,6 +1597,299 @@ def docker_ready(run: RunCmd | None = None, *, timeout: float = _DOCKER_PROBE_SE
     return False
 
 
+COMPOSE_OLDEST_WORKING: tuple[int, int, int] = (2, 10, 0)
+"""The oldest Docker Compose Yu'lon runs (T658).
+
+Measured on m910q, 2026-10-10, with the official release binaries against a copy of
+a generated WoW WotLK compose file: Compose 2.5.0 through 2.9.0 refuse
+`compose up --no-deps <service>` whenever that service has a `depends_on` outside the
+selection, with `no such service: <the dependency>`. That is the database import
+(`up --no-deps ac-db-import` -> `no such service: ac-database`, a Steam Deck player's
+exact words) AND every Start (`up -d --no-deps <db> <auth> <world>` -> `no such service:
+ac-db-import`), so nothing Yu'lon does past the build can work on them. 2.10.0 and every
+later release measured (to 5.6.0) run both. 2.0-2.2 reject the generated files'
+top-level `name:` outright; 2.3 and 2.4 ran the import but are older than the broken
+range and were not measured for the rest, so the floor is the first release after it.
+"""
+
+_COMPOSE_VERSION = re.compile(r"^Docker Compose version v?(\d+)\.(\d+)\.(\d+)", re.MULTILINE)
+"""Docker Compose's own answer only: `podman-compose version 1.0.6` is another program."""
+
+
+def parse_compose_version(said: str) -> tuple[int, int, int] | None:
+    """The version in Docker Compose's `docker compose version` answer, or None.
+
+    Spelled `Docker Compose version v2.6.1` by Docker's own builds and
+    `Docker Compose version 5.5.0` by Arch's (no `v`); a Desktop build adds a
+    suffix (`v2.39.1-desktop.1`). Anything else -- podman-compose's
+    `podman-compose version 1.0.6`, a wrapper's banner -- is not a Docker Compose
+    version and reads as None, which refuses nothing.
+    """
+    found = _COMPOSE_VERSION.search(said or "")
+    if found is None:
+        return None
+    major, minor, patch = (int(part) for part in found.groups())
+    return (major, minor, patch)
+
+
+def compose_too_old(version: tuple[int, int, int] | None) -> bool:
+    """True for a Compose known to be older than `COMPOSE_OLDEST_WORKING`; unknown is not."""
+    return version is not None and version < COMPOSE_OLDEST_WORKING
+
+
+def compose_version(
+    run: RunCmd | None = None, *, timeout: float = _DOCKER_PROBE_SECONDS
+) -> tuple[int, int, int] | None:
+    """The version `docker compose version` reports, or None if it cannot be read (T658).
+
+    Asked the way `compose_ready()` asks, through the same candidate list and one
+    shared, bounded budget. None is "not established", never "too old": a Compose
+    whose answer this cannot read is left to say for itself what is wrong.
+    """
+    do = run if run is not None else _DefaultRunner()
+    deadline = time.monotonic() + timeout
+    for program in docker_programs():
+        left = deadline - time.monotonic()
+        if left <= 0.0:
+            return None
+        try:
+            done = _bounded(do, left)([program, "compose", "version"])
+        except OSError as exc:
+            logger.debug(f"could not start {program}: {exc}")
+            continue
+        if done.returncode == 0:
+            return parse_compose_version(done.stdout or "")
+    return None
+
+
+def users_compose_plugin_path(
+    home: Path | None = None, env: Mapping[str, str] | None = None
+) -> Path:
+    """Where Docker looks first for this user's `docker compose` plugin (T658).
+
+    `$DOCKER_CONFIG/cli-plugins/docker-compose`, by default
+    `~/.docker/cli-plugins/docker-compose`. The Docker CLI searches it BEFORE the
+    system's folders; it needs no root, and on a Steam Deck it is the one place
+    a SteamOS update (which rewrites the read-only system image) leaves alone.
+    """
+    environ = os.environ if env is None else env
+    config = environ.get("DOCKER_CONFIG") or ""
+    base = Path(config) if config else (home if home is not None else Path.home()) / ".docker"
+    return base / "cli-plugins" / "docker-compose"
+
+
+COMPOSE_DOWNLOAD_VERSION = "5.5.1"
+"""The Docker Compose `Update Docker Compose` puts in place (T658).
+
+Released 2026-09-03 and the line Yu'lon is gated on (m910q runs 5.5.0); a static
+binary from Docker's own GitHub releases, so it runs on SteamOS without a package."""
+
+COMPOSE_DOWNLOADS: dict[str, tuple[str, str]] = {
+    "x86_64": (
+        "https://github.com/docker/compose/releases/download/v5.5.1/docker-compose-linux-x86_64",
+        "db1889184726840f75c4f9c001048430d4f25b3be3cb084d3ddd762bc0aed576",
+    ),
+    "aarch64": (
+        "https://github.com/docker/compose/releases/download/v5.5.1/docker-compose-linux-aarch64",
+        "732e3a84c1a0f67256ce80bc2598a24546b10ca05f9faa97efceb1171ece2ef7",
+    ),
+}
+"""Machine -> (URL, sha256), copied from the release's own `.sha256` files (2026-10-10)."""
+
+UPDATE_COMPOSE_LABEL = "Update Docker Compose"
+
+UPDATE_COMPOSE_QUESTION = (
+    "This computer's Docker Compose is {have}, too old for Yu'lon. Download Docker Compose "
+    "{new} from Docker's own releases on GitHub (about 30 MB), check it against its published "
+    "checksum, and put it at {path}? Docker uses that copy first, it needs no administrator "
+    "password, and a SteamOS update leaves it in place. Nothing else is changed."
+)
+
+
+def compose_update_offered(
+    *, wsl_distro: str | None = None, system: str | None = None, machine: str | None = None
+) -> bool:
+    """Whether `update_compose()` can put a Compose in place here (T658).
+
+    Linux only, run where the server runs (not across into a WSL distro from
+    Windows), and only for a machine Docker publishes a static binary for.
+    """
+    here = system if system is not None else sys.platform
+    arch = machine if machine is not None else _machine()
+    return here.startswith("linux") and wsl_distro is None and arch in COMPOSE_DOWNLOADS
+
+
+def _machine() -> str:
+    """This computer's machine name as Linux spells it (`x86_64`, `aarch64`)."""
+    import platform as stdlib_platform  # this module's own name shadows it only as `yulon.platform`
+
+    return stdlib_platform.machine()
+
+
+class ComposeUpdateError(RuntimeError):
+    """`update_compose()` could not put a working Compose in place; nothing was replaced."""
+
+
+COMPOSE_DOWNLOAD_CAP_BYTES = 200 * 1024 * 1024
+"""The most `update_compose()` reads: the 5.5.1 binary is 31 MB; anything past this is not it."""
+
+
+def _download_capped(
+    url: str,
+    dest: Path,
+    *,
+    cap: int = COMPOSE_DOWNLOAD_CAP_BYTES,
+    open_url: UrlOpener | None = None,
+) -> Path:
+    """Stream `url` into `dest` over a verified HTTPS connection, stopping past `cap` bytes (T658).
+
+    No resume: a partial file is deleted by the caller, never continued. A
+    redirect off HTTPS, a body longer than `cap` (said or sent) and a body
+    shorter than the server said are each a `DownloadError`.
+    """
+    request = urllib.request.Request(url, headers={"User-Agent": "yulon"})
+    with closing((open_url if open_url is not None else _open_url)(request)) as resp:
+        final = resp.geturl()
+        if not final.startswith("https://"):
+            raise DownloadError(f"{url} redirected to {final}, which is not HTTPS")
+        expected = _expected_total(resp)
+        if expected is not None and expected > cap:
+            raise DownloadError(f"{url} is {expected} bytes, more than the {cap} allowed")
+        written = 0
+        with dest.open("wb") as out:
+            while chunk := resp.read(_DOWNLOAD_CHUNK_BYTES):
+                written += len(chunk)
+                if written > cap:
+                    raise DownloadError(f"{url} sent more than the {cap} bytes allowed")
+                out.write(chunk)
+    if expected is not None and written != expected:
+        raise DownloadError(f"{url}: transfer ended at {written} of {expected} bytes")
+    return dest
+
+
+def update_compose(
+    *,
+    dest: Path | None = None,
+    machine: str | None = None,
+    download: Callable[[str, Path], Path] | None = None,
+    version: Callable[[], tuple[int, int, int] | None] | None = None,
+) -> Iterator[str]:
+    """Put Docker's static Compose `COMPOSE_DOWNLOAD_VERSION` at the user's plugin path (T658).
+
+    Downloaded beside the destination (at most `COMPOSE_DOWNLOAD_CAP_BYTES`),
+    checked against the pinned sha256, made executable, and renamed over the old
+    plugin, which is first renamed aside. If `docker compose version` then does
+    not answer a version Yu'lon can run, the old plugin is put back. Every
+    failure -- the network, the checksum, a folder that refuses a write -- is a
+    `ComposeUpdateError` with a plain sentence, and leaves the old plugin as it was.
+    """
+    arch = machine if machine is not None else _machine()
+    if arch not in COMPOSE_DOWNLOADS:
+        raise ComposeUpdateError(
+            f"Docker publishes no Compose for this kind of computer ({arch}), so nothing was "
+            "downloaded."
+        )
+    url, sha256 = COMPOSE_DOWNLOADS[arch]
+    target = dest if dest is not None else users_compose_plugin_path()
+    fresh = target.with_name(".docker-compose.yulon-download")
+    aside = target.with_name(".docker-compose.yulon-old")
+    folder = target.parent
+
+    def unwritable(exc: OSError) -> ComposeUpdateError:
+        return ComposeUpdateError(
+            f"Yu'lon could not write Docker Compose into {folder} ({exc.strerror or exc}), so "
+            "nothing was replaced. That folder needs to be writable by you."
+        )
+
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        fresh.unlink(missing_ok=True)
+    except OSError as exc:
+        raise unwritable(exc) from exc
+    yield f"Downloading Docker Compose {COMPOSE_DOWNLOAD_VERSION} from {url}"
+    try:
+        (download if download is not None else _download_capped)(url, fresh)
+        got = hashlib.sha256(fresh.read_bytes()).hexdigest()
+    except OSError as exc:
+        fresh.unlink(missing_ok=True)
+        raise ComposeUpdateError(
+            f"Docker Compose could not be downloaded, so nothing was replaced: {exc}"
+        ) from exc
+    if got != sha256:
+        fresh.unlink(missing_ok=True)
+        raise ComposeUpdateError(
+            "The downloaded Docker Compose did not match its published checksum, so it was "
+            "deleted and nothing was replaced."
+        )
+    yield "It matches its published checksum."
+    had_one = target.exists()
+    try:
+        fresh.chmod(0o755)
+        if had_one:
+            os.replace(target, aside)
+        os.replace(fresh, target)
+    except OSError as exc:
+        fresh.unlink(missing_ok=True)
+        _put_back(aside, target, had_one)
+        raise unwritable(exc) from exc
+    yield f"Put it at {target}."
+    now = (version if version is not None else compose_version)()
+    if now is None or compose_too_old(now):
+        said = ".".join(str(part) for part in now) if now else "nothing Yu'lon can read"
+        _put_back(aside, target, had_one)
+        raise ComposeUpdateError(
+            f"Docker Compose still answered {said} with the new one in place, so Docker is not "
+            f"using {target} (its DOCKER_CONFIG may point somewhere else). The old one was put "
+            "back."
+        )
+    if had_one:
+        aside.unlink(missing_ok=True)
+    yield f"Docker Compose now answers {'.'.join(str(part) for part in now)}."
+
+
+def _put_back(aside: Path, target: Path, had_one: bool) -> None:
+    """Undo `update_compose()`'s rename: the old plugin back, or no plugin where there was none."""
+    try:
+        if had_one and aside.exists():
+            os.replace(aside, target)
+        elif not had_one:
+            target.unlink(missing_ok=True)
+    except OSError as exc:
+        logger.warning(f"could not put the old Docker Compose back at {target}: {exc}")
+
+
+def compose_too_old_sentence(
+    version: tuple[int, int, int], *, linux: bool, offer: bool, asked_at_install: bool = False
+) -> str:
+    """What a player reads when this machine's Compose is older than Yu'lon can run (T658).
+
+    One sentence for the preflight row, the Start refusal and Repair. Where
+    `update_compose()` can run (`offer`) it points at that, and never at
+    `pacman`: on a Steam Deck the system image is read-only and a copy in the
+    user's own plugin folder would stay in front of anything a package put there.
+    """
+    have = ".".join(str(part) for part in version)
+    need = ".".join(str(part) for part in COMPOSE_OLDEST_WORKING)
+    said = (
+        f"This computer's Docker Compose is {have}, and Yu'lon needs {need} or newer: older "
+        "ones stop with “no such service” when one part of a server is started on its "
+        "own, so this server's database import and Start cannot work. Nothing was started. "
+    )
+    if not linux:
+        return said + "Update Docker Desktop, which brings a current Docker Compose, and try again."
+    if offer:
+        how = "Install asks whether to" if asked_at_install else f"Press **{UPDATE_COMPOSE_LABEL}**"
+        return said + (
+            f"{how}: Yu'lon downloads Docker Compose {COMPOSE_DOWNLOAD_VERSION} from Docker's own "
+            "releases, checks it, and puts it where Docker looks first."
+        )
+    return said + (
+        "Install a newer Docker Compose. On Arch:\nsudo pacman -S docker-compose\n"
+        "On Debian or Ubuntu:\nsudo apt install docker-compose-v2\n"
+        f"Then check it, and try again; it must say {need} or newer:\ndocker compose version"
+    )
+
+
 def compose_ready(run: RunCmd | None = None, *, timeout: float = _DOCKER_PROBE_SECONDS) -> bool:
     """True if `docker compose version` succeeds — the PLUGIN, not the daemon.
 
@@ -1825,6 +2119,11 @@ def docker_setup_remedy(step: str, *, steamos: bool) -> str:
         f"sudo {command}"
     )
     return DOCKER_SETUP_FIRST_FAILURE_STEP.format(cause=cause)
+
+
+def explicit_yes(reply: str | None) -> bool:
+    """`_explicit_yes()` for a question asked outside this module (T658)."""
+    return _explicit_yes(reply)
 
 
 def _explicit_yes(reply: str | None) -> bool:

@@ -60,7 +60,12 @@ def importing(rec: Recorder, mode: int = 0o644) -> Callable[..., docker.Attached
     """The `one_shot` seam, with `ac-db-import` doing what the real one does to the etc folder."""
 
     def one_shot(
-        service: str, where: Path, *, sink: object = None, cancel: object = None
+        service: str,
+        where: Path,
+        *,
+        sink: object = None,
+        cancel: object = None,
+        record_ended: bool = False,
     ) -> docker.AttachedRun:
         rec.calls.append(f"one-shot:{service}")
         if service == WOTLK.containers.db_import:
@@ -153,7 +158,12 @@ def test_a_conf_that_cannot_be_written_does_not_fail_the_install(tmp_path: Path)
     rec = Recorder(images=False)
 
     def one_shot(
-        service: str, where: Path, *, sink: object = None, cancel: object = None
+        service: str,
+        where: Path,
+        *,
+        sink: object = None,
+        cancel: object = None,
+        record_ended: bool = False,
     ) -> docker.AttachedRun:
         if service == WOTLK.containers.db_import:
             put_dist(where)
