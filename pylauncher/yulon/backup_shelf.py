@@ -22,6 +22,8 @@ a statement about the folder at that moment, never a permission slip.
   or a file recorded for another game is not cover for the older one;
 * the newest update copy set (`before-new-build`): the copy "Update the server"
   put back from;
+* the newest update copy of each distinct migration state: failed updates keep their sets
+  (T633), and a return past a migration needs the copy from before it (T646);
 * every file the restore marker names, and ALL files while the marker cannot be
   read (an unreadable marker is a restore in flight that names nothing);
 * the earliest `before-<id>` set while `<id>` is installed: it is the undo a
@@ -52,7 +54,7 @@ import json
 import os
 import re
 import stat
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from functools import lru_cache
@@ -472,6 +474,9 @@ def _protections(
                     r.name, "it is the copy the last update took, kept so the update can be undone."
                 )
 
+    # 2a. the newest update copy per distinct migration ledger (T646)
+    _keep_each_update_state(backups_dir(server_dir), updates, keep)
+
     # 2b. the newest copies a move into this server took, per label and database
     newest_move: dict[tuple[str, str], ShelfRow] = {}
     for r in rows:
@@ -529,6 +534,67 @@ def _protections(
                             f"it was taken before {item} was installed, and {item} still is.",
                         )
     return kept, firm
+
+
+_LEDGER_INSERTS = (b"INSERT INTO `updates` ", b"INSERT INTO `migrations` ")
+_QUOTED = re.compile(rb"'((?:[^'\\]|\\.)*)'")
+_TIMESTAMP = re.compile(rb"\d{4}-\d\d-\d\d \d\d:\d\d:\d\d")
+
+
+def _ledger_state(path: Path) -> frozenset[bytes]:
+    """The names a dump's migration ledger holds (`updates` / `migrations`), timestamps left out.
+
+    Raises OSError when the file cannot be read. A dump with no ledger table gives the empty set.
+    """
+    found: set[bytes] = set()
+    with path.open("rb") as dump:
+        for line in dump:
+            if line.startswith(_LEDGER_INSERTS):
+                found.update(
+                    token for token in _QUOTED.findall(line) if not _TIMESTAMP.fullmatch(token)
+                )
+    return frozenset(found)
+
+
+def _keep_each_update_state(
+    folder: Path, updates: list[ShelfRow], keep: Callable[..., None]
+) -> None:
+    """Keep the newest update copy of each distinct migration state, per database.
+
+    Failed updates keep their sets (T633): after one success and two failures the folder holds
+    three, and the newest holds the first update's migrations. "Return to the tested pin"
+    (T630/T632) looks for the newest dump from BEFORE the migrations the tested commit lacks,
+    reading each dump's ledger and recording nothing, so Clean up reads the same ledgers and
+    keeps one copy per state: the older copies of a state are the sweep's to remove. A copy whose
+    ledger cannot be read is kept.
+    """
+    by_database: dict[str, list[ShelfRow]] = {}
+    for r in updates:
+        if r.database is not None:
+            by_database.setdefault(r.database, []).append(r)
+    for copies in by_database.values():
+        if len(copies) < 2:
+            continue
+        copies.sort(key=lambda r: (r.made_at, r.name), reverse=True)
+        seen: set[frozenset[bytes]] = set()
+        for r in copies:
+            try:
+                state = _ledger_state(folder / r.name)
+            except OSError as exc:
+                keep(
+                    r.name,
+                    f"Yu'lon could not read which updates it holds ({exc}), so it cannot tell "
+                    "whether going back to the tested commit needs it.",
+                )
+                continue
+            if state in seen:
+                continue
+            seen.add(state)
+            keep(
+                r.name,
+                "it is the newest copy from before the updates that came after it, "
+                "which going back to the tested commit may need.",
+            )
 
 
 def _installed_here(server_dir: Path) -> set[str]:
