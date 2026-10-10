@@ -57,6 +57,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ### Changed
 - WoW Unbound is built on the same newer server core as WotLK; **Return to the tested pin…** moves an existing one there.
 - NPC Teleporter follows its author's new menu numbers; installing over an older install keeps the base game's menus.
+- The Tortoise bot dashboard switches on in seconds from TortoiseBots' ready-made program when one fits your server.
 
 ## v0.9.15-Public — 2026-10-09
 

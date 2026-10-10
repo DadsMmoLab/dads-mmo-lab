@@ -86,6 +86,8 @@ class _Docker:
         self.state_after = docker.ContainerState(missing=True)
         """What `container_state` reads (T162): gone, by default, as after a removal."""
         self.ips = iter(["10.0.0.5", "10.0.0.5"])
+        # T542: an arm64 daemon keeps the switch off GitHub and on the Go build these tests drive.
+        monkeypatch.setattr(docker, "daemon_arch", lambda **_kw: "arm64")
         monkeypatch.setattr(docker, "build_image", self.build_image)
         monkeypatch.setattr(docker, "compose_up_service", self.compose_up_service)
         monkeypatch.setattr(docker, "compose_remove_service", self.compose_remove_service)
