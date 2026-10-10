@@ -1243,10 +1243,10 @@ class MovedInInstall:
                 )
             except docker.ServerHeldError as exc:
                 raise MoveError(f"{exc} Nothing more was changed; {_CARRY_ON}") from exc
-            yield from self._steps(server, server_dir, package, record, cancel)
+            yield from self._each_stage(server, server_dir, package, record, cancel)
         yield from self._closing(server_dir)
 
-    def _steps(
+    def _each_stage(
         self,
         server: MovedInServer,
         server_dir: Path,
