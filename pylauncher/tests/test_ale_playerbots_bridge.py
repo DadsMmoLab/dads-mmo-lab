@@ -403,13 +403,16 @@ def test_the_note_names_the_lag_and_never_promises_a_mod_ale_update(press: str) 
     said = native.ale_playerbots_note(press)
     assert "mod-ale's Playerbots support" in said and "mod-playerbots" in said
     assert "renamed" in said
-    assert "once its authors" in said
     assert "If mod-ale has an update" not in said
 
 
-def test_the_rebuild_note_points_at_the_tested_pin() -> None:
+def test_the_rebuild_note_gives_the_way_out_in_both_directions() -> None:
+    """mod-ale behind the server's mod-playerbots, or AHEAD of it: azerothcore/mod-ale#409
+    (84b85cc, 2026-10-10) took the new names while WotLK's tested pin still has the old."""
     said = native.ale_playerbots_note(server_build_presses.REBUILD)
     assert server_build_presses.RETURN_TO_PIN in said
+    assert server_build_presses.UPDATE_TO_LATEST in said
+    assert "newer" in said and "once its authors" in said
 
 
 def test_a_failed_build_in_the_bindings_ends_with_the_lag_note_not_the_generic_one(
