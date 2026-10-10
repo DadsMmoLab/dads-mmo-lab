@@ -132,6 +132,31 @@ class ComposeTooOld(StartRefused):
         self.offer = offer
 
 
+class ImportEnded(StartRefused):
+    """A Start refused because this server's last database import was cut off (T658).
+
+    `docker.one_shot_ended_marker()` is there and the databases read as imported or
+    half-written: they are unfinished whatever their tables say. `state` is the
+    reading the Server tab offers Repair on.
+    """
+
+    def __init__(self, message: str, *, state: docker.ImportState) -> None:
+        super().__init__(message)
+        self.state = state
+
+
+ENDED_IMPORT_DETAIL = (
+    "an earlier import was cut off before it finished, so these databases are unfinished "
+    "whatever their tables say"
+)
+"""The import state's detail while `docker.one_shot_ended_marker()` stands (T658)."""
+
+IMPORT_ENDED = (
+    "This server's last database import was cut off before it finished, so its databases are "
+    "unfinished. Nothing was started. Press **Repair** to clear them and import again."
+)
+
+
 class DatabaseMissing(StartRefused):
     """Raised by `Controller.start()` when Docker no longer has this server's database (T377).
 
@@ -362,6 +387,7 @@ class Controller:
                 raise PortConflictError(conflicts, self.spec.ports, self._owners_of(conflicts))
             self.refuse_a_missing_image()
             self.refuse_a_missing_database()
+            self.refuse_an_ended_import()
             if not asked_before_the_servers:
                 self._ask_before_the_servers()
             self._before_the_servers_start()
@@ -399,6 +425,23 @@ class Controller:
             raise ComposeTooOld(
                 reason, offer=platform.compose_update_offered(wsl_distro=self.wsl_distro)
             )
+
+    def refuse_an_ended_import(self) -> None:
+        """Raise `ImportEnded` while this server's last import stands cut off (T658).
+
+        The record alone asks nothing: only with `docker.one_shot_ended_marker()`
+        present are the databases asked, after `refuse_a_missing_database()` has
+        them up. Player data never refuses here (`populated` is not touched).
+        """
+        service = self.spec.import_service
+        if not service or self.import_probe is None:
+            return
+        if not docker.one_shot_ended_marker(self.server_dir, service).is_file():
+            return
+        state = self.import_state()
+        if state.detail == ENDED_IMPORT_DETAIL:
+            logger.warning(f"start() refused: {IMPORT_ENDED}")
+            raise ImportEnded(IMPORT_ENDED, state=state)
 
     def refuse_a_missing_image(self) -> None:
         """Raise `StartRefused` when Docker no longer has this server's built image (T627).
@@ -667,6 +710,7 @@ class Controller:
         self.refuse_an_old_compose()
         self.refuse_a_missing_image()
         self.refuse_a_missing_database()
+        self.refuse_an_ended_import()
         self._ask_before_the_servers()
 
     def _ask_before_the_servers(self) -> None:
@@ -697,6 +741,7 @@ class Controller:
             self.refuse_an_old_compose()
             self.refuse_a_missing_image()
             self.refuse_a_missing_database()
+            self.refuse_an_ended_import()
             asked = not self.port_conflicts()
             if asked:
                 self._ask_before_the_servers()
@@ -817,7 +862,17 @@ class Controller:
             return docker.ImportState(
                 "unreadable", "this game has no way to ask its databases what state they are in"
             )
-        return self.import_probe()
+        state = self.import_probe()
+        service = self.spec.import_service
+        if (
+            service
+            and state.state in ("imported", "partial")
+            and docker.one_shot_ended_marker(self.server_dir, service).is_file()
+        ):
+            # T658: a cut-off import can read `imported`; it is `partial`, so Repair is offered,
+            # and Repair clears it whole (`docker.repair_import()` reads the same record).
+            return docker.ImportState("partial", ENDED_IMPORT_DETAIL)
+        return state
 
     def repair_import(self, output: docker.OutputSink | None = None) -> bool:
         """Re-run the one-shot database import. Only for an install broken before it ran.

@@ -181,7 +181,7 @@ def test_a_stopped_import_whose_importer_would_not_end_says_so_after_the_stop(
     rec = Recorder()
     cancel = threading.Event()
 
-    def end_one_shot(service: str, server_dir: Path) -> docker.OneShotLeft | None:
+    def end_one_shot(service: str, server_dir: Path, **_kw: object) -> docker.OneShotLeft | None:
         # Nothing before the import; after its Stop, an importer that would not go.
         if not cancel.is_set():
             return None
@@ -373,7 +373,7 @@ def test_a_leftover_importer_is_ended_before_the_databases_are_read(
         order.append("probe")
         return real_probe()
 
-    def end_one_shot(service: str, server_dir: Path) -> docker.OneShotLeft | None:
+    def end_one_shot(service: str, server_dir: Path, **_kw: object) -> docker.OneShotLeft | None:
         order.append("end-one-shot")
         return None
 
@@ -567,7 +567,7 @@ def test_a_download_left_running_is_ended_before_another_starts_and_refused_if_n
     assert ENTRY.containers.client_data == DOWNLOADER
     rec = Recorder()
 
-    def end_one_shot(service: str, server_dir: Path) -> docker.OneShotLeft | None:
+    def end_one_shot(service: str, server_dir: Path, **_kw: object) -> docker.OneShotLeft | None:
         rec.ended_one_shots.append(service)
         if service == DOWNLOADER:
             return docker.OneShotLeft((DOWNLOADER,), "Docker would not kill it")
@@ -595,7 +595,7 @@ def test_a_stopped_download_whose_container_would_not_end_is_not_a_clean_stop(
         cancel.set()
         return docker.AttachedRun(docker.CANCELLED_RETURNCODE, ("downloading maps",))
 
-    def end_one_shot(service: str, server_dir: Path) -> docker.OneShotLeft | None:
+    def end_one_shot(service: str, server_dir: Path, **_kw: object) -> docker.OneShotLeft | None:
         if service == DOWNLOADER and cancel.is_set():
             return docker.OneShotLeft((DOWNLOADER,), "it was still running 30 s after the kill")
         return None

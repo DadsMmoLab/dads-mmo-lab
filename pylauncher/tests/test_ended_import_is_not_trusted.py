@@ -139,8 +139,26 @@ def test_ending_a_running_importer_records_it(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setattr(docker, "_docker", _Daemon([IMPORTER], tmp_path))
-    assert docker.end_one_shot(IMPORTER, tmp_path) is None
+    assert docker.end_one_shot(IMPORTER, tmp_path, record_ended=True) is None
     assert docker.one_shot_ended_marker(tmp_path, IMPORTER).is_file()
+
+
+@pytest.mark.usefixtures("_quiet")
+def test_ending_a_download_leaves_no_record_nothing_would_read(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The server-data download re-checks its own volume; a record of it would only pile up."""
+    monkeypatch.setattr(docker, "_docker", _Daemon(["ac-client-data-init"], tmp_path))
+    assert docker.end_one_shot("ac-client-data-init", tmp_path) is None
+    assert not list(tmp_path.glob(".yulon-*-ended"))
+
+
+def test_the_install_ends_a_leftover_download_without_a_record(tmp_path: Path) -> None:
+    server = tmp_path / "s"
+    rec = Recorder(probe_answers=[ABSENT, IMPORTED])
+    rec.one_shots_running = ["ac-client-data-init"]
+    _press(rec, server)
+    assert not list(server.glob(".yulon-*-ended"))
 
 
 @pytest.mark.usefixtures("_quiet")
@@ -257,3 +275,76 @@ def test_a_repair_with_no_ended_import_still_refuses_a_finished_one(
     _repair_doubles(monkeypatch, calls, running={SPEC.db})
     with pytest.raises(docker.DockerCommandError, match="nothing to repair"):
         docker.repair_import(SPEC, tmp_path, _probe(IMPORTED), reset=lambda **_k: ())
+
+
+# ------------------------------------------------------- Start and the Server tab
+
+
+def _controller(tmp_path: Path, state: docker.ImportState):  # type: ignore[no-untyped-def]
+    from yulon.controller import Controller
+    from yulon.docker import ContainerSpec
+
+    asked: list[str] = []
+
+    def probe() -> docker.ImportState:
+        asked.append("probe")
+        return state
+
+    spec = ContainerSpec(
+        db="t-db", auth="t-auth", world="t-world", ports=(1, 2), import_service=IMPORTER
+    )
+    return Controller(spec, tmp_path, import_probe=probe), asked
+
+
+def test_a_cut_off_import_reads_as_unfinished_to_the_server_tab(tmp_path: Path) -> None:
+    from yulon.controller import ENDED_IMPORT_DETAIL
+
+    ctl, _ = _controller(tmp_path, IMPORTED)
+    assert ctl.import_state() == IMPORTED
+    docker.one_shot_ended_marker(tmp_path, IMPORTER).write_text("ended\n")
+    state = ctl.import_state()
+    assert state.state == "partial" and state.repairable
+    assert state.detail == ENDED_IMPORT_DETAIL
+    played, _ = _controller(tmp_path, POPULATED_DONE)
+    assert played.import_state() == POPULATED_DONE, "player data is never offered a repair"
+
+
+def test_start_refuses_a_cut_off_import_and_points_at_repair(tmp_path: Path) -> None:
+    from yulon.controller import IMPORT_ENDED, ImportEnded
+
+    ctl, asked = _controller(tmp_path, IMPORTED)
+    ctl.refuse_an_ended_import()
+    assert asked == [], "no record, no question"
+    docker.one_shot_ended_marker(tmp_path, IMPORTER).write_text("ended\n")
+    with pytest.raises(ImportEnded) as refused:
+        ctl.refuse_an_ended_import()
+    assert str(refused.value) == IMPORT_ENDED
+    assert "Repair" in IMPORT_ENDED
+    assert refused.value.state.repairable
+    played, _ = _controller(tmp_path, POPULATED_DONE)
+    played.refuse_an_ended_import()
+
+
+def test_the_server_tab_offers_repair_beside_the_refusal(
+    qapp: object, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from tests.test_controller_view import WOTLK, _Ps, _services
+    from yulon import runner
+    from yulon.controller import ENDED_IMPORT_DETAIL, IMPORT_ENDED, ImportEnded
+    from yulon.ui.controller_view import ControllerView
+    from yulon.ui.widgets.job import run_inline
+
+    monkeypatch.setattr(runner, "run", _Ps())
+    view = ControllerView(
+        WOTLK, _services(_Ps(), tmp_path, []), status_poll_ms=0, job_runner=run_inline
+    )
+    assert not view.repair_button.isVisibleTo(view)
+
+    def refused(*_a: object, **_k: object) -> None:
+        raise ImportEnded(IMPORT_ENDED, state=docker.ImportState("partial", ENDED_IMPORT_DETAIL))
+
+    monkeypatch.setattr(view.services.controller, "start", refused)
+    view.start_server()
+    assert view.problem_label.text().startswith(IMPORT_ENDED[:40])
+    assert view.repair_button.isVisibleTo(view)
+    assert ENDED_IMPORT_DETAIL in view.repair_label.text()

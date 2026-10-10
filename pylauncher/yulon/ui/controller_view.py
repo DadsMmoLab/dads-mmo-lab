@@ -144,6 +144,7 @@ from yulon.controller import (
     ComposeTooOld,
     Controller,
     DatabaseMissing,
+    ImportEnded,
     InstallStatus,
     PortConflictError,
 )
@@ -10840,8 +10841,8 @@ class ControllerView(QWidget):
     def _restart_failed(self, exc: object) -> None:
         if isinstance(exc, _StartHalfFailed):
             self._start_failed(exc.cause)
-        elif isinstance(exc, DatabaseMissing):
-            self._start_failed(exc)  # refused before the Stop; Start's offer is the repair
+        elif isinstance(exc, (DatabaseMissing, ImportEnded, ComposeTooOld)):
+            self._start_failed(exc)  # refused before the Stop; Start's offer is the way out
         else:
             self._stop_asked = True  # T568: a Restart is not a Stop; "Stop anyway" is Stop's
             self._stop_failed(exc)
@@ -11094,6 +11095,11 @@ class ControllerView(QWidget):
             self._offer_to_repair_the_database(str(exc))
         # T658: the sentence names the press, so the press is there beside it.
         self.update_compose_button.setVisible(isinstance(exc, ComposeTooOld) and exc.offer)
+        if isinstance(exc, ImportEnded):
+            # T658: the refusal points at Repair; the reading it was refused on is the one
+            # Repair is offered on, now, not at the next status poll.
+            self._import_state = exc.state
+            self._show_repair()
         raw = str(exc)
         msg = raw
         why = ""

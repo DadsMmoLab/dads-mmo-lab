@@ -2618,7 +2618,7 @@ def repair_import(
     # an orphaned importer leaves -- Yu'lon closed mid-import, and Docker Desktop keeps
     # the container -- so that importer is ended before anything else: before the
     # database it writes to is started (Codex review), and before it is read.
-    left = end_one_shot(service, server_dir, wsl_distro=wsl_distro)
+    left = end_one_shot(service, server_dir, wsl_distro=wsl_distro, record_ended=True)
     if left is not None:
         raise DockerRefusal(importer_left_sentence(left, "the import was not re-run"))
     start_database(
@@ -2697,7 +2697,7 @@ def repair_import(
         )
 
     logger.warning(f"repair_import(): `compose up --no-deps {service}` in {server_dir}")
-    run = run_one_shot(service, server_dir, wsl_distro=wsl_distro, sink=output)
+    run = run_one_shot(service, server_dir, wsl_distro=wsl_distro, sink=output, record_ended=True)
     verify_import(probe, service, server_dir, run)
     # T658: a verified import; an earlier ended one no longer describes these databases.
     one_shot_ended_marker(server_dir, service).unlink(missing_ok=True)
@@ -2969,8 +2969,11 @@ def run_one_shot(
     wsl_distro: str | None = None,
     sink: OutputSink | None = None,
     cancel: threading.Event | None = None,
+    record_ended: bool = False,
 ) -> AttachedRun:
     """Run one compose one-shot service attached, and return what it left behind.
+
+    `record_ended` is handed to the `end_one_shot()` a cancel runs (T658).
 
     Byte-identical argv to the version live-gated against a real AzerothCore
     import on yulon-ubuntu (2026-08-23) — `--no-deps` is what makes an attached
@@ -3027,7 +3030,9 @@ def run_one_shot(
         cancel=cancel,
         # T539: the container goes with a Stop at once, `up` and `run` alike. See
         # `end_one_shot()`; the caller asks it again before it reports the Stop.
-        on_cancel=lambda: end_one_shot(service, server_dir, wsl_distro=wsl_distro),
+        on_cancel=lambda: end_one_shot(
+            service, server_dir, wsl_distro=wsl_distro, record_ended=record_ended
+        ),
     )
     if run.returncode != 0:
         # Not raised here. See above — the probe is the only thing that can
@@ -3357,9 +3362,13 @@ def _mark_one_shot_ended(server_dir: Path, service: str) -> None:
 
 
 def end_one_shot(
-    service: str, server_dir: Path, *, wsl_distro: str | None = None
+    service: str, server_dir: Path, *, wsl_distro: str | None = None, record_ended: bool = False
 ) -> OneShotLeft | None:
     """End every running container of this install's one-shot `service`; None once none runs.
+
+    `record_ended` (T658): a kill also writes `one_shot_ended_marker()`. Only the
+    database import's callers pass it; nothing reads a record for the
+    server-data download, which re-checks its own volume on every run.
 
     T539. The install's import is `compose up --no-deps <importer>`, attached, and a
     Stop ends the CLI. Whether the importer goes with it is not this app's to
@@ -3434,7 +3443,8 @@ def end_one_shot(
             logger.warning(f"end_one_shot(): {', '.join(fresh)} still running; killing")
             # T658: recorded BEFORE the kill, so a Yu'lon that dies right after it still
             # leaves the next press knowing what the one-shot left is unfinished.
-            _mark_one_shot_ended(server_dir, service)
+            if record_ended:
+                _mark_one_shot_ended(server_dir, service)
             killed = (*killed, *fresh)
             _docker(["kill", *fresh], timeout=_ONE_SHOT_ASK_TIMEOUT, wsl_distro=wsl_distro)
         if time.monotonic() >= deadline:

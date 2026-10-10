@@ -942,19 +942,28 @@ class Recorder:
             return self.build_result
 
         def one_shot(
-            service: str, server_dir: Path, *, sink: object = None, cancel: object = None
+            service: str,
+            server_dir: Path,
+            *,
+            sink: object = None,
+            cancel: object = None,
+            record_ended: bool = False,
         ) -> docker.AttachedRun:
             self.calls.append(f"one-shot:{service}")
             if callable(sink):
                 sink(f"{service} said something")
             return self.one_shot_result
 
-        def end_one_shot(service: str, server_dir: Path) -> docker.OneShotLeft | None:
+        def end_one_shot(
+            service: str, server_dir: Path, *, record_ended: bool = False
+        ) -> docker.OneShotLeft | None:
             self.ended_one_shots.append(service)
             if service in self.one_shots_running:
-                # What the real one does when it has to kill one (T658).
+                # What the real one does when it has to kill one (T658): a record only when
+                # the caller asked for one, which is the import's callers.
                 self.one_shots_running.remove(service)
-                docker.one_shot_ended_marker(server_dir, service).write_text("ended\n")
+                if record_ended:
+                    docker.one_shot_ended_marker(server_dir, service).write_text("ended\n")
             return self.one_shot_left
 
         def verify(

@@ -13772,7 +13772,7 @@ class StagedInstaller:
             # an earlier run -- a Stop whose importer outlived it, or a Yu'lon that
             # closed mid-import. One that can be ended is ended first, and BEFORE the
             # probe (cold review): a live importer changes what the probe would read.
-            left = self._seams.end_one_shot(service, ctx.server_dir)
+            left = self._seams.end_one_shot(service, ctx.server_dir, record_ended=True)
             if left is not None:
                 raise OneShotLeftRunning(_one_shot_left_sentence(left, earlier=True))
         before = gate.probe()
@@ -13874,7 +13874,7 @@ class StagedInstaller:
         yield f"Importing the databases ({service}). This takes several minutes."
         run = yield from self._pump(
             lambda sink: self._seams.one_shot(
-                service, ctx.server_dir, sink=sink, cancel=ctx.cancel
+                service, ctx.server_dir, sink=sink, cancel=ctx.cancel, record_ended=True
             ),
             cancel=ctx.cancel,
             stage="import",
@@ -13882,7 +13882,7 @@ class StagedInstaller:
         if run.returncode == docker.CANCELLED_RETURNCODE:
             # T539: the note promises the half-written databases are cleared before the
             # import runs again, which is true only once nothing is still writing them.
-            left = self._seams.end_one_shot(service, ctx.server_dir)
+            left = self._seams.end_one_shot(service, ctx.server_dir, record_ended=True)
             if left is not None:
                 raise OneShotLeftRunning(_one_shot_left_sentence(left, earlier=False))
             raise InstallStopped(_cancelled_message("the database import", IMPORT_CANCEL_NOTE))

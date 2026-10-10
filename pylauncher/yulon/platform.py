@@ -1730,6 +1730,43 @@ class ComposeUpdateError(RuntimeError):
     """`update_compose()` could not put a working Compose in place; nothing was replaced."""
 
 
+COMPOSE_DOWNLOAD_CAP_BYTES = 200 * 1024 * 1024
+"""The most `update_compose()` reads: the 5.5.1 binary is 31 MB; anything past this is not it."""
+
+
+def _download_capped(
+    url: str,
+    dest: Path,
+    *,
+    cap: int = COMPOSE_DOWNLOAD_CAP_BYTES,
+    open_url: UrlOpener | None = None,
+) -> Path:
+    """Stream `url` into `dest` over a verified HTTPS connection, stopping past `cap` bytes (T658).
+
+    No resume: a partial file is deleted by the caller, never continued. A
+    redirect off HTTPS, a body longer than `cap` (said or sent) and a body
+    shorter than the server said are each a `DownloadError`.
+    """
+    request = urllib.request.Request(url, headers={"User-Agent": "yulon"})
+    with closing((open_url if open_url is not None else _open_url)(request)) as resp:
+        final = resp.geturl()
+        if not final.startswith("https://"):
+            raise DownloadError(f"{url} redirected to {final}, which is not HTTPS")
+        expected = _expected_total(resp)
+        if expected is not None and expected > cap:
+            raise DownloadError(f"{url} is {expected} bytes, more than the {cap} allowed")
+        written = 0
+        with dest.open("wb") as out:
+            while chunk := resp.read(_DOWNLOAD_CHUNK_BYTES):
+                written += len(chunk)
+                if written > cap:
+                    raise DownloadError(f"{url} sent more than the {cap} bytes allowed")
+                out.write(chunk)
+    if expected is not None and written != expected:
+        raise DownloadError(f"{url}: transfer ended at {written} of {expected} bytes")
+    return dest
+
+
 def update_compose(
     *,
     dest: Path | None = None,
@@ -1739,10 +1776,12 @@ def update_compose(
 ) -> Iterator[str]:
     """Put Docker's static Compose `COMPOSE_DOWNLOAD_VERSION` at the user's plugin path (T658).
 
-    Downloaded beside the destination, checked against the pinned sha256, made
-    executable and moved over the old file in one rename, so a failure at any
-    step leaves the old plugin exactly as it was. Then `docker compose version`
-    is asked, and anything but a version Yu'lon can run is a failure.
+    Downloaded beside the destination (at most `COMPOSE_DOWNLOAD_CAP_BYTES`),
+    checked against the pinned sha256, made executable, and renamed over the old
+    plugin, which is first renamed aside. If `docker compose version` then does
+    not answer a version Yu'lon can run, the old plugin is put back. Every
+    failure -- the network, the checksum, a folder that refuses a write -- is a
+    `ComposeUpdateError` with a plain sentence, and leaves the old plugin as it was.
     """
     arch = machine if machine is not None else _machine()
     if arch not in COMPOSE_DOWNLOADS:
@@ -1752,16 +1791,30 @@ def update_compose(
         )
     url, sha256 = COMPOSE_DOWNLOADS[arch]
     target = dest if dest is not None else users_compose_plugin_path()
-    target.parent.mkdir(parents=True, exist_ok=True)
     fresh = target.with_name(".docker-compose.yulon-download")
-    fresh.unlink(missing_ok=True)
-    fresh.with_name(fresh.name + ".part").unlink(missing_ok=True)
+    aside = target.with_name(".docker-compose.yulon-old")
+    folder = target.parent
+
+    def unwritable(exc: OSError) -> ComposeUpdateError:
+        return ComposeUpdateError(
+            f"Yu'lon could not write Docker Compose into {folder} ({exc.strerror or exc}), so "
+            "nothing was replaced. That folder needs to be writable by you."
+        )
+
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        fresh.unlink(missing_ok=True)
+    except OSError as exc:
+        raise unwritable(exc) from exc
     yield f"Downloading Docker Compose {COMPOSE_DOWNLOAD_VERSION} from {url}"
     try:
-        (download if download is not None else download_verified)(url, fresh)
+        (download if download is not None else _download_capped)(url, fresh)
+        got = hashlib.sha256(fresh.read_bytes()).hexdigest()
     except OSError as exc:
-        raise ComposeUpdateError(f"Docker Compose could not be downloaded: {exc}") from exc
-    got = hashlib.sha256(fresh.read_bytes()).hexdigest()
+        fresh.unlink(missing_ok=True)
+        raise ComposeUpdateError(
+            f"Docker Compose could not be downloaded, so nothing was replaced: {exc}"
+        ) from exc
     if got != sha256:
         fresh.unlink(missing_ok=True)
         raise ComposeUpdateError(
@@ -1769,17 +1822,40 @@ def update_compose(
             "deleted and nothing was replaced."
         )
     yield "It matches its published checksum."
-    fresh.chmod(0o755)
-    os.replace(fresh, target)
+    had_one = target.exists()
+    try:
+        fresh.chmod(0o755)
+        if had_one:
+            os.replace(target, aside)
+        os.replace(fresh, target)
+    except OSError as exc:
+        fresh.unlink(missing_ok=True)
+        _put_back(aside, target, had_one)
+        raise unwritable(exc) from exc
     yield f"Put it at {target}."
     now = (version if version is not None else compose_version)()
     if now is None or compose_too_old(now):
         said = ".".join(str(part) for part in now) if now else "nothing Yu'lon can read"
+        _put_back(aside, target, had_one)
         raise ComposeUpdateError(
-            f"Docker Compose still answers {said}, so Docker is not using {target}. Its "
-            "DOCKER_CONFIG may point somewhere else."
+            f"Docker Compose still answered {said} with the new one in place, so Docker is not "
+            f"using {target} (its DOCKER_CONFIG may point somewhere else). The old one was put "
+            "back."
         )
+    if had_one:
+        aside.unlink(missing_ok=True)
     yield f"Docker Compose now answers {'.'.join(str(part) for part in now)}."
+
+
+def _put_back(aside: Path, target: Path, had_one: bool) -> None:
+    """Undo `update_compose()`'s rename: the old plugin back, or no plugin where there was none."""
+    try:
+        if had_one and aside.exists():
+            os.replace(aside, target)
+        elif not had_one:
+            target.unlink(missing_ok=True)
+    except OSError as exc:
+        logger.warning(f"could not put the old Docker Compose back at {target}: {exc}")
 
 
 def compose_too_old_sentence(

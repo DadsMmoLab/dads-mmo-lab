@@ -223,15 +223,129 @@ def test_an_update_docker_does_not_use_is_a_failure(
 ) -> None:
     """A `DOCKER_CONFIG` elsewhere would leave the old Compose answering: said, not hidden."""
     _pinned(monkeypatch)
-    with pytest.raises(platform.ComposeUpdateError, match="still answers 2.6.1"):
+    dest = tmp_path / "docker-compose"
+    dest.write_bytes(b"old compose")
+    with pytest.raises(platform.ComposeUpdateError, match="still answered 2.6.1"):
         list(
             platform.update_compose(
-                dest=tmp_path / "docker-compose",
+                dest=dest,
                 machine="x86_64",
                 download=_download(BINARY, []),
                 version=lambda: (2, 6, 1),
             )
         )
+    assert dest.read_bytes() == b"old compose", "the old one is put back"
+    assert not list(tmp_path.glob(".docker-compose.yulon-*"))
+
+
+def test_a_failed_check_with_no_old_plugin_leaves_none(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _pinned(monkeypatch)
+    dest = tmp_path / "docker-compose"
+    with pytest.raises(platform.ComposeUpdateError):
+        list(
+            platform.update_compose(
+                dest=dest, machine="x86_64", download=_download(BINARY, []), version=lambda: None
+            )
+        )
+    assert not dest.exists()
+
+
+def test_an_update_over_an_old_plugin_keeps_no_copy_once_it_works(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _pinned(monkeypatch)
+    dest = tmp_path / "docker-compose"
+    dest.write_bytes(b"old compose")
+    list(
+        platform.update_compose(
+            dest=dest, machine="x86_64", download=_download(BINARY, []), version=lambda: (5, 5, 1)
+        )
+    )
+    assert dest.read_bytes() == BINARY
+    assert not list(tmp_path.glob(".docker-compose.yulon-*"))
+
+
+def test_a_folder_that_cannot_be_made_is_a_sentence_not_a_traceback(tmp_path: Path) -> None:
+    """A read-only or blocked DOCKER_CONFIG got past `except ComposeUpdateError` as an OSError."""
+    blocker = tmp_path / "cfg"
+    blocker.write_text("a file where the folder should be")
+    with pytest.raises(platform.ComposeUpdateError, match="could not write Docker Compose"):
+        list(
+            platform.update_compose(
+                dest=blocker / "cli-plugins" / "docker-compose", machine="x86_64", download=None
+            )
+        )
+
+
+def test_a_rename_the_folder_refuses_is_a_sentence_and_changes_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _pinned(monkeypatch)
+    dest = tmp_path / "docker-compose"
+    dest.write_bytes(b"old compose")
+    real = platform.os.replace
+
+    def refuse(src: object, dst: object) -> None:
+        if Path(str(src)).name == ".docker-compose.yulon-download":
+            raise PermissionError(13, "Permission denied")
+        real(src, dst)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(platform.os, "replace", refuse)
+    with pytest.raises(platform.ComposeUpdateError, match="could not write Docker Compose"):
+        list(
+            platform.update_compose(
+                dest=dest, machine="x86_64", download=_download(BINARY, []), version=None
+            )
+        )
+    assert dest.read_bytes() == b"old compose"
+    assert not list(tmp_path.glob(".docker-compose.yulon-*"))
+
+
+class _Response:
+    def __init__(self, body: bytes, *, length: int | None, url: str = "https://x/compose") -> None:
+        self.body, self.length, self.url = body, length, url
+
+    def geturl(self) -> str:
+        return self.url
+
+    def getheader(self, name: str) -> str | None:
+        if name == "Content-Length" and self.length is not None:
+            return str(self.length)
+        return None
+
+    def read(self, size: int) -> bytes:
+        chunk, self.body = self.body[:size], self.body[size:]
+        return chunk
+
+    def close(self) -> None:
+        pass
+
+
+@pytest.mark.parametrize(
+    ("body", "length", "url", "ok"),
+    [
+        (b"x" * 100, 100, "https://x/compose", True),
+        (b"x" * 100, 5000, "https://x/compose", False),  # said bigger than the cap
+        (b"x" * 300, None, "https://x/compose", False),  # sent bigger, saying nothing
+        (b"x" * 100, 100, "http://x/compose", False),  # redirected off HTTPS
+    ],
+)
+def test_the_download_streams_under_a_cap_over_https_only(
+    tmp_path: Path, body: bytes, length: int | None, url: str, ok: bool
+) -> None:
+    dest = tmp_path / "compose"
+
+    def opener(_request: object) -> _Response:
+        return _Response(body, length=length, url=url)
+
+    if ok:
+        platform._download_capped("https://x/compose", dest, cap=200, open_url=opener)  # type: ignore[arg-type]
+        assert dest.read_bytes() == body
+    else:
+        with pytest.raises(platform.DownloadError):
+            platform._download_capped("https://x/compose", dest, cap=200, open_url=opener)  # type: ignore[arg-type]
 
 
 def test_a_download_that_fails_replaces_nothing(tmp_path: Path) -> None:
@@ -582,3 +696,21 @@ def test_the_server_tab_offers_the_update_beside_the_refusal_and_runs_it_when_pr
     wait_for_panel(view.rebuild_log)
     assert ran == ["update"]
     assert not view.update_compose_button.isVisibleTo(view)
+
+
+def test_a_download_said_to_be_too_big_is_not_read_at_all(tmp_path: Path) -> None:
+    """Refused on the server's own word, before one byte lands on the disk."""
+    response = _Response(b"x" * 5000, length=5000)
+    reads: list[int] = []
+    real_read = response.read
+
+    def counted(size: int) -> bytes:
+        reads.append(size)
+        return real_read(size)
+
+    response.read = counted  # type: ignore[method-assign]
+    with pytest.raises(platform.DownloadError, match="more than the 200 allowed"):
+        platform._download_capped(
+            "https://x/compose", tmp_path / "compose", cap=200, open_url=lambda _r: response  # type: ignore[arg-type,return-value]
+        )
+    assert reads == []
