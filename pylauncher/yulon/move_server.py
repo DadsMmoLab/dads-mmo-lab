@@ -31,7 +31,7 @@ import tempfile
 import threading
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path, PurePath, PurePosixPath
+from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from typing import Any, Literal, Protocol
 
 from yulon import apply, module_answers, module_source, move, reset_defaults
@@ -267,20 +267,8 @@ def _folder_module_members(manifest: Manifest, folder: Path) -> list[PackFile]:
     return members
 
 
-def _shown(rel: str) -> str:
-    """A file name for a sentence: as it is, unless it holds a character that cannot be shown."""
-    return rel if rel.isprintable() and "\\" not in rel else ascii(rel)
-
-
-def _case_clash(paths: Iterable[str]) -> tuple[str, str] | None:
-    """The first two paths that are one path on a case-insensitive disk, sorted, or None."""
-    seen: dict[str, str] = {}
-    for path in sorted(paths):
-        key = path.casefold()
-        if key in seen:
-            return seen[key], path
-        seen[key] = path
-    return None
+_shown = move.shown
+_case_clash = move.case_clash
 
 
 def lands_inside(root: PurePath, target: str) -> bool:
@@ -409,9 +397,19 @@ def gather_server_facts(
         logger.info(f"a server file cannot be a package member: {exc}")
         raise MoveError(
             "A file in the server has a name or place a package cannot carry (a colon, a "
-            "backslash, a device name such as CON, a name ending in a dot or space, or a "
-            f"control character). Rename or remove it, then pack again. {_NOT_PACKED}"
+            'backslash, one of ? * < > | ", a device name such as CON, a name ending in a dot or '
+            f"space, or a control character). Rename or remove it, then pack again. {_NOT_PACKED}"
         ) from exc
+    settings = [f for f in files if f.kind in ("conf", "lua")]
+    if (
+        len(settings) > move.SETTINGS_MAX_FILES
+        or sum(len(f.data) for f in settings) > move.SETTINGS_MAX_BYTES
+    ):
+        raise MoveError(
+            "The server's settings and Lua files are more than Yu'lon packs (the limit is "
+            f"{move.SETTINGS_MAX_BYTES // 1024**2} MB and {move.SETTINGS_MAX_FILES} files). Take "
+            f"out Lua scripts the server does not need, then pack again. {_NOT_PACKED}"
+        )
     if secret_password:
         needle = secret_password.encode("utf-8")
         for packed in files:
@@ -1470,18 +1468,53 @@ def _lay_answers(package: move.Package, server_dir: Path) -> Iterator[str]:
 def _lay_files(
     package: move.Package, server_dir: Path, entry: CatalogEntry, password: str | None
 ) -> Iterator[str]:
-    """Every packed conf over the one the install wrote, then the player's Lua scripts."""
-    for member in package.files("conf"):
-        target = _inside(server_dir, member.target)
+    """Every packed conf over the one the install wrote, then the player's Lua scripts.
+
+    The reader refused a package whose targets are not where the pack reads confs and Lua from;
+    this checks each target again, and the bound, BEFORE the first file is read or written, so a
+    package that got past one check still lays nothing.
+    """
+    confs = package.files("conf")
+    scripts = package.files("lua")
+    said = move.settings_problem((*confs, *scripts))
+    if said:
+        raise MoveError(said)
+    paths = {member.file: _laid_path(server_dir, member) for member in (*confs, *scripts)}
+    for member in confs:
+        target = paths[member.file]
         installed = target.read_bytes() if target.is_file() else None
         data = lay_conf(
             package.file_bytes(member), installed, machine_keys(entry, member.target), password
         )
         _write_bytes(target, data)
         yield f"Laid {member.target}"
-    for member in package.files("lua"):
-        _write_bytes(_inside(server_dir, member.target), package.file_bytes(member))
+    for member in scripts:
+        _write_bytes(paths[member.file], package.file_bytes(member))
         yield f"Laid {member.target}"
+
+
+def _laid_path(server_dir: Path, member: move.FileMember) -> Path:
+    """Where a conf or Lua member goes, or a `MoveError`: inside its own folder, on every system.
+
+    `move.laid_root` says which folder the target belongs in (the pack's own) and refuses a git or
+    record part; the joined path must then land inside that folder as Windows and as POSIX join
+    it, and no folder on the way may be a link (`_inside`).
+    """
+    refused = MoveError(
+        f"{move.shown(member.target)} is not a place a move package puts files, so Yu'lon wrote no "
+        "settings or Lua file. Nothing more was changed."
+    )
+    try:
+        folder, rest = move.laid_root(member.kind, member.target)
+    except move.TargetRefused as exc:
+        raise refused from exc
+    for root in (PureWindowsPath("C:/server", folder), PurePosixPath("/server", folder)):
+        if not lands_inside(root, rest):
+            raise refused
+    base = server_dir.joinpath(*PurePosixPath(folder).parts)
+    if not lands_inside(base, rest):
+        raise refused
+    return _inside(server_dir, member.target)
 
 
 def load_the_data(

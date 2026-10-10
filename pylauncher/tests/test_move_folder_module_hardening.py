@@ -56,8 +56,8 @@ def craft(
             if n != move.MANIFEST_NAME and n not in {e["file"] for e in files}
         }
     for target, data in (add or {}).items():
-        folder = move.FILE_FOLDERS["module" if target.startswith(MINE) else "lua"]
-        files.append({"file": folder + target, "kind": "module", "target": target})
+        kind = "module" if target.startswith(MINE) else "lua"
+        files.append({"file": move.FILE_FOLDERS[kind] + target, "kind": kind, "target": target})
         contents[target] = data
     new_files = []
     for entry in files:

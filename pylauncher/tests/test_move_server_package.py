@@ -84,7 +84,11 @@ def server_pack(tmp_path: Path, files: tuple[PackFile, ...] | None = None) -> Pa
                 PackFile(
                     kind="answers", target=".yulon-module-answers.json", data=b'{"modules": {}}'
                 ),
-                PackFile(kind="lua", target="lua_scripts/mine.lua", data=b"print('hi')\n"),
+                PackFile(
+                    kind="lua",
+                    target="env/dist/etc/modules/lua_scripts/mine.lua",
+                    data=b"print('hi')\n",
+                ),
                 PackFile(kind="manifest", target="module/mod-mine", data=b'{"id": "mod-mine"}'),
             )
         ),
@@ -102,7 +106,7 @@ def test_a_server_package_survives_write_then_read(tmp_path: Path) -> None:
     assert [(f.kind, f.target) for f in m.server.files] == [
         ("conf", "env/dist/etc/worldserver.conf"),
         ("answers", ".yulon-module-answers.json"),
-        ("lua", "lua_scripts/mine.lua"),
+        ("lua", "env/dist/etc/modules/lua_scripts/mine.lua"),
         ("manifest", "module/mod-mine"),
     ]
     assert [d.role for d in m.databases] == ["auth", "characters", "world"]
@@ -202,23 +206,27 @@ def test_a_conf_must_be_a_conf_file(tmp_path: Path) -> None:
 
 def test_a_hand_edited_manifest_naming_a_record_is_not_a_package(tmp_path: Path) -> None:
     good = server_pack(
-        tmp_path, files=(PackFile(kind="lua", target="lua_scripts/a.lua", data=b"x"),)
+        tmp_path,
+        files=(PackFile(kind="lua", target="env/dist/etc/modules/lua_scripts/a.lua", data=b"x"),),
     )
     raw = manifest_of(good)
     raw["server"]["files"][0]["target"] = ".yulon-install.json"
     raw["server"]["files"][0]["file"] = "lua/.yulon-install.json"
     with zipfile.ZipFile(good) as z:
-        body = z.read("lua/lua_scripts/a.lua")
+        body = z.read("lua/env/dist/etc/modules/lua_scripts/a.lua")
     bad = rewrite(
         good,
         tmp_path / "bad.zip",
-        drop=("lua/lua_scripts/a.lua",),
+        drop=("lua/env/dist/etc/modules/lua_scripts/a.lua",),
         add={"lua/.yulon-install.json": body},
         manifest=raw,
     )
     with pytest.raises(MovePackageError) as raised:
         read_package(bad)
-    assert str(raised.value) == move.NOT_A_PACKAGE
+    assert str(raised.value) == (
+        "bad.zip holds a file meant for .yulon-install.json, which is not a place a move package "
+        "puts files, so Yu'lon will not open it. Nothing was brought in."
+    )
 
 
 def test_a_commit_that_is_not_a_full_sha_is_refused() -> None:
@@ -242,8 +250,8 @@ def test_a_server_package_name_says_server() -> None:
 
 def test_two_file_members_on_one_target_are_refused_by_the_writer(tmp_path: Path) -> None:
     files = (
-        PackFile(kind="lua", target="lua_scripts/a.lua", data=b"x"),
-        PackFile(kind="lua", target="lua_scripts/a.lua", data=b"y"),
+        PackFile(kind="lua", target="env/dist/etc/modules/lua_scripts/a.lua", data=b"x"),
+        PackFile(kind="lua", target="env/dist/etc/modules/lua_scripts/a.lua", data=b"y"),
     )
     with pytest.raises(MovePackageError):
         server_pack(tmp_path, files=files)
@@ -257,7 +265,9 @@ def test_files_on_a_characters_package_are_refused_by_the_writer(tmp_path: Path)
             tmp_path / "c.zip",
             header(),
             [dump(tmp_path, "acore_auth")],
-            files=(PackFile(kind="lua", target="lua_scripts/a.lua", data=b"x"),),
+            files=(
+                PackFile(kind="lua", target="env/dist/etc/modules/lua_scripts/a.lua", data=b"x"),
+            ),
         )
 
 
@@ -283,7 +293,8 @@ def test_the_written_manifest_is_valid_json_with_the_server_section(tmp_path: Pa
 
 def test_a_manifest_listing_one_file_twice_is_not_a_package(tmp_path: Path) -> None:
     good = server_pack(
-        tmp_path, files=(PackFile(kind="lua", target="lua_scripts/a.lua", data=b"x"),)
+        tmp_path,
+        files=(PackFile(kind="lua", target="env/dist/etc/modules/lua_scripts/a.lua", data=b"x"),),
     )
     raw = manifest_of(good)
     raw["server"]["files"] = raw["server"]["files"] * 2

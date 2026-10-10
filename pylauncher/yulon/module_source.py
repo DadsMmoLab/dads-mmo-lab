@@ -421,6 +421,15 @@ def beyond_derived_shape(manifest: Manifest) -> str | None:
             call_default_factory=True
         ):
             return name
+    source = manifest.source
+    if source is not None and (source.branch, source.sparse_path, source.depth) != (
+        None,
+        None,
+        Source.model_fields["depth"].default,
+    ):
+        # A link derives `Source(repo=...)` and nothing more. A carried branch would reach
+        # `git clone --branch`, a sparse path the checkout and a depth the clone, so none is taken.
+        return "source"
     for step in manifest.conf:
         template = step.template or ""
         stem = template[len("conf/") : -len(_CONF_DIST_SUFFIX)]
