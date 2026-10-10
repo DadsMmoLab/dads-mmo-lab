@@ -285,6 +285,8 @@ UPDATE spell_template SET AttributesEx=AttributesEx|0x00000800 WHERE Id IN( -- S
 -- Single Spells
 6562, -- Heroic Presence (Racial Passive)
 9612, -- Ink Spray
+13589, -- Haste Aura
+20218, -- Sanctity Aura
 23060, -- Battle Squawk
 34123, -- Tree of Life (Passive)
 34410, -- Hellscream's Warsong
