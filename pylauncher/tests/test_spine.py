@@ -2935,6 +2935,12 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "only to word the reader's dependency notes ('needs X, which Yu'lon did not find'); "
         "decides no write and no refusal"
     ),
+    ("client_addons.py", "pack_addon_names"): (
+        "T613 PR-3. Lists the folders of a checkout-folder client pack's source in the server's "
+        "own checkout (Unbound's add-ons) only to name them as shipped, so the add-on box "
+        "refuses an outside add-on of the same name; it decides a refusal and no write, and a "
+        "folder that cannot be listed adds nothing"
+    ),
     ("addon_archive.py", "sweep_stale"): (
         "T613 PR-2. Lists Yu'lon's own `<cache>/addons/staging/` and `/downloads/` once at "
         "start for the folders a stopped run left, and removes each one older than "

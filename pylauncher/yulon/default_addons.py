@@ -146,16 +146,22 @@ class Outcome:
     failed: dict[str, str] = field(default_factory=dict)
     restart_recommended: bool = False
     rebuild_required: bool = False
+    names: dict[str, str] = field(default_factory=dict)
+    """Display names, for an add-on the player brought (the two defaults have `_NAMES`)."""
+
+    def _name(self, item: str) -> str:
+        return _NAMES.get(item, self.names.get(item, item))
 
     def notes(self) -> tuple[str, ...]:
         """Plain sentences for the Play log; empty when nothing happened."""
-        out = [f"Put {_NAMES.get(item, item)} into your game client." for item in self.installed]
+        name = self._name
+        out = [f"Put {name(item)} into your game client." for item in self.installed]
         out += [
-            f"Put the missing files of {_NAMES.get(item, item)} back into your game client."
+            f"Put the missing files of {name(item)} back into your game client."
             for item in self.restored
         ]
         out += [
-            f"Could not set up {_NAMES.get(item, item)} in your game client ({why}). "
+            f"Could not set up {name(item)} in your game client ({why}). "
             "Play goes on without it."
             for item, why in self.failed.items()
         ]
@@ -169,6 +175,7 @@ def put_in(
     ids: Sequence[str],
     *,
     clone: bool,
+    what: str = "default add-on",
     say: Callable[[str], None] = lambda _line: None,
     now: Callable[[], float] = time.time,
 ) -> Outcome:
@@ -176,18 +183,20 @@ def put_in(
 
     `clone=False` is Play: files only, from a clone already on disk, no git. `clone=True`
     also installs an add-on that has no clone, unless it failed within the last
-    `FAILED_BACKOFF_SECONDS`.
+    `FAILED_BACKOFF_SECONDS`. `what` names the kind in the log ("outside add-on" for the ones
+    the player brought).
 
     Never raises for one add-on: a failure is in `Outcome.failed` and the next add-on goes on,
     because a game that cannot reach GitHub must still start. Nothing is done without a client
     folder to put the files in, or a clone would read as installed with no files.
     """
-    out = Outcome()
+    manifests = list(manifests)
+    out = Outcome(names={m.id: m.name for m in manifests})
     if applier.client_dir is None:
         return out
     read = _read(server_dir)
     if read is None:
-        logger.warning(f"{server_dir / DECLINED_FILE} cannot be read; no default add-on is put in")
+        logger.warning(f"{server_dir / DECLINED_FILE} cannot be read; no {what} is put in")
         return out
     removed, failed_at = read
     by_id = {m.id: m for m in manifests if m.type == "mod"}
@@ -217,7 +226,7 @@ def put_in(
             if item in failed_at:
                 _change(server_dir, failed_drop=item)
         except Exception as exc:  # boundary: one add-on's failure must not stop the others or Play
-            logger.warning(f"default add-on {item}: {exc}")
+            logger.warning(f"{what} {item}: {exc}")
             out.failed[item] = str(exc)
             if item in installed:
                 installed.remove(item)

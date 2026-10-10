@@ -30649,3 +30649,146 @@ def test_a_removal_is_refused_while_accounts_are_being_packed_or_brought_in(
     assert view._move_panel is not None
     view._move_panel.running = True
     assert view.forget_refusal() == forgetting.MOVE_RUNNING
+
+
+# ---------------------------------------------------- T613 PR-3: outside add-ons at Play
+
+
+class _OutsideRoute:
+    """The slice of `ClientAddons` Play asks: the recorded outside add-ons, and the applier."""
+
+    def __init__(self, applier: _AddonApplier, ids: tuple[str, ...]) -> None:
+        self.applier = applier
+        self.ids = ids
+
+    def installed(self) -> list[Manifest]:
+        return [
+            parse_manifest(
+                {
+                    "id": item,
+                    "name": item.upper(),
+                    "type": "mod",
+                    "game": "wow-tortoise",
+                    "description": "Client add-on.",
+                    "origin": {
+                        "kind": "folder",
+                        "path": "/x",
+                        "added": "2026-10-09",
+                        "addon": True,
+                    },
+                    "build": {"rebuild": False, "restart": False},
+                    "client": [{"src": ".", "dest": "addons", "name": item}],
+                }
+            )
+            for item in self.ids
+        ]
+
+
+def _outside_view(
+    ps: _Ps, tmp_path: Path, ids: tuple[str, ...]
+) -> tuple[ControllerView, _AddonApplier, Path]:
+    original = _game_client(tmp_path / "clients" / "WoW")
+    play = _built_for_tortoise(original, tmp_path)
+    view, applier, server = _addon_view(ps, tmp_path, play=play, original=original)
+    object.__setattr__(view.services, "default_addons", ())
+    object.__setattr__(view.services, "client_addons", _OutsideRoute(applier, ids))
+    return view, applier, server
+
+
+def test_play_puts_back_the_outside_add_ons_a_made_again_client_lacks(
+    qapp: object, ps: _Ps, tmp_path: Path, launched: list[object]
+) -> None:
+    view, applier, server = _outside_view(ps, tmp_path, ("pfui",))
+    _cloned(server, "pfui")
+    applier.lacking = {"pfui"}
+    ps.names = WORLD_UP
+    view.play()
+    assert applier.put_back == ["pfui"]
+    assert applier.installed == [] and applier.removed == []
+    assert len(launched) == 1
+
+
+def test_play_says_which_outside_add_on_it_put_back(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    view, applier, server = _outside_view(ps, tmp_path, ("pfui",))
+    _cloned(server, "pfui")
+    applier.lacking = {"pfui"}
+    lines: list[str] = []
+    notes = view._outside_addons_work(lines.append)
+    assert notes == ("Put the missing files of PFUI back into your game client.",)
+    assert lines == ["Putting the missing files of PFUI back…"]
+
+
+def test_play_leaves_an_outside_add_on_whose_files_are_all_there_alone(
+    qapp: object, ps: _Ps, tmp_path: Path, launched: list[object]
+) -> None:
+    view, applier, server = _outside_view(ps, tmp_path, ("pfui",))
+    _cloned(server, "pfui")
+    ps.names = WORLD_UP
+    view.play()
+    assert applier.put_back == [] and len(launched) == 1
+
+
+def test_play_never_clones_an_outside_add_on_whose_copy_is_gone(
+    qapp: object, ps: _Ps, tmp_path: Path, launched: list[object]
+) -> None:
+    view, applier, _server = _outside_view(ps, tmp_path, ("pfui",))
+    applier.lacking = {"pfui"}
+    ps.names = WORLD_UP
+    view.play()
+    assert applier.put_back == [] and applier.installed == [] and len(launched) == 1
+
+
+def test_an_outside_add_on_that_cannot_be_put_back_does_not_stop_play(
+    qapp: object, ps: _Ps, tmp_path: Path, launched: list[object]
+) -> None:
+    view, applier, server = _outside_view(ps, tmp_path, ("pfui", "other"))
+    _cloned(server, "pfui", "other")
+    applier.lacking = {"pfui", "other"}
+
+    def broken(manifest: object, *a: object, **k: object) -> tuple[Path, ...]:
+        if manifest.id == "pfui":  # type: ignore[attr-defined]
+            raise OSError("disk full")
+        applier.put_back.append(manifest.id)  # type: ignore[attr-defined]
+        return ()
+
+    applier.put_back_client_files = broken  # type: ignore[method-assign]
+    ps.names = WORLD_UP
+    view.play()
+    assert applier.put_back == ["other"] and len(launched) == 1
+
+
+def test_a_route_that_cannot_list_its_add_ons_does_not_stop_play(
+    qapp: object, ps: _Ps, tmp_path: Path, launched: list[object]
+) -> None:
+    view, applier, server = _outside_view(ps, tmp_path, ("pfui",))
+
+    def broken() -> list[Manifest]:
+        raise OSError("unreadable")
+
+    view.services.client_addons.installed = broken  # type: ignore[union-attr,method-assign]
+    ps.names = WORLD_UP
+    view.play()
+    assert len(launched) == 1
+
+
+def test_a_broken_route_gives_a_note_for_the_play_log_and_no_outside_add_ons(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    view, _applier, _server = _outside_view(ps, tmp_path, ("pfui",))
+
+    def broken() -> list[Manifest]:
+        raise OSError("unreadable")
+
+    view.services.client_addons.installed = broken  # type: ignore[union-attr,method-assign]
+    notes = view._outside_addons_work(lambda _line: None)
+    assert len(notes) == 1 and "unreadable" in notes[0] and "Play goes on" in notes[0]
+    assert view._has_outside_addons() is False
+
+
+def test_a_game_with_no_route_has_no_outside_add_ons_and_no_note(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    view, _applier, _server = _outside_view(ps, tmp_path, ("pfui",))
+    object.__setattr__(view.services, "client_addons", None)
+    assert view._outside_addons_work(lambda _line: None) == ()
+    assert view._has_outside_addons() is False

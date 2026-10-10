@@ -14,6 +14,8 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ## Unreleased
 
 ### New
+- Every game's Modules tab adds a game add-on from a link, a folder or a zip with **Game add-ons you bring**.
+- **Play** puts the game add-ons you brought back into a ready-to-play client that was made again.
 - The support file now says how big your computer is: processor, memory, and how much of it Docker gets.
 - **Auction House Bot** asks you to pick its character from your server's list; the Characters tab shows each GUID.
 - A module you add from a link or a folder gets a settings card on the Tuning tab, made from its own settings file.
