@@ -524,6 +524,9 @@ class Recorder:
     lines_unreadable: bool = False
     """T630: `file_lines()` answers None (git could not read the files)."""
 
+    ancestors: set[tuple[Path, str, str]] = field(default_factory=set)
+    """T632: `(checkout, old, new)` triples `is_ancestor()` answers True for (a forward move)."""
+
     db_was_up: bool | None = True
     """What `db_running()` answers for the database container (T630): up, by default."""
 
@@ -616,6 +619,10 @@ class Recorder:
             for path in said
             if any(path == spec or path.startswith(f"{spec.rstrip('/')}/") for spec in paths)
         )
+
+    def is_ancestor(self, dest: Path, old: str, new: str) -> bool:
+        self.calls.append(f"is-ancestor:{dest.name}:{old[:7]}:{new[:7]}")
+        return (dest, old, new) in self.ancestors
 
     def tree_bytes(self, dest: Path, rev: str, path: str) -> dict[str, bytes] | None:
         self.calls.append(f"tree-bytes:{dest.name}:{rev[:7]}:{path}")
@@ -974,6 +981,7 @@ class Recorder:
             tree_files=self.tree_files,
             file_lines=self.file_lines,
             tree_bytes=self.tree_bytes,
+            is_ancestor=self.is_ancestor,
             db_running=self.db_running,
             stop_db=self.stop_db,
             changed_lines=self.changed_lines,

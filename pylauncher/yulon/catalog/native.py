@@ -4875,6 +4875,11 @@ def _git_tree_files(dest: Path, rev: str, paths: Sequence[str]) -> tuple[str, ..
     return git.ContainerGit().tree_files(dest, rev, paths)
 
 
+def _git_is_ancestor(dest: Path, old: str, new: str) -> bool:
+    """Is `old` in `new`'s history in this checkout, containerised (T632)."""
+    return git.ContainerGit().is_ancestor(dest, old, new)
+
+
 def _git_tree_bytes(dest: Path, rev: str, path: str) -> dict[str, bytes] | None:
     """`{repository path: bytes}` of the files under `path` at `rev`, containerised (T632)."""
     return git.ContainerGit().tree_bytes(dest, rev, path)
@@ -6219,6 +6224,12 @@ class Seams:
     the ones it adds beside it, to tell an update upstream re-filed (AzerothCore's
     pending squash) from one the target does not have.
     """
+    is_ancestor: Callable[[Path, str, str], bool] = _git_is_ancestor
+    """T632: is the first commit in the second's history (a move from it goes forward)?
+
+    False when git cannot show it, as in a shallow clone: a Return that cannot prove it
+    moves forward counts every migration the target lacks.
+    """
     tree_bytes: Callable[[Path, str, str], dict[str, bytes] | None] = _git_tree_bytes
     """T632: `{repository path: bytes}` of the files under a path (file or folder) at a commit.
 
@@ -6636,6 +6647,7 @@ class Seams:
             tree_files=repo.tree_files,
             file_lines=repo.file_lines,
             tree_bytes=repo.tree_bytes,
+            is_ancestor=repo.is_ancestor,
             images_built=on(docker.images_built, wsl_distro=distro),
             build_cache_bytes=on(docker.build_cache_bytes, wsl_distro=distro),
             image_id=on(docker.image_id, wsl_distro=distro),

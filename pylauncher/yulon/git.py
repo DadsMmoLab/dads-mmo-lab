@@ -1695,6 +1695,22 @@ class RunnerGit:
             return None
         return parse_file_lines(proc.stdout, rev, paths)
 
+    def is_ancestor(self, dest: Path, old: str, new: str) -> bool:
+        """Is `old` in `new`'s history, so a move from it to `new` goes FORWARD? (T632)
+
+        `git merge-base --is-ancestor`. False is also what a checkout that cannot
+        show the connection answers (a shallow clone; git that cannot run): a move
+        whose direction is not proved is never treated as forward.
+        """
+        if not (dest / ".git").is_dir():
+            return False
+        try:
+            _run_git(["git", "merge-base", "--is-ancestor", old, new], cwd=dest)
+        except (GitError, OSError) as exc:
+            logger.debug(f"could not tell whether {old} is behind {new} in {dest}: {exc}")
+            return False
+        return True
+
     def tree_files(self, dest: Path, rev: str, paths: Sequence[str]) -> tuple[str, ...] | None:
         """The files commit `rev` tracks under `paths`, from its tree. None = cannot ask (T630).
 
@@ -2654,6 +2670,17 @@ class ContainerGit:
             logger.debug(f"could not read the files {rev} has in {dest}: {exc}")
             return None
         return parse_file_lines(proc.stdout, rev, paths)
+
+    def is_ancestor(self, dest: Path, old: str, new: str) -> bool:
+        """`RunnerGit.is_ancestor()`, containerised; `writes=False`, nothing is fetched (T632)."""
+        if not (dest / ".git").is_dir():
+            return False
+        try:
+            self._capture(dest, ["merge-base", "--is-ancestor", old, new], writes=False)
+        except GitError as exc:
+            logger.debug(f"could not tell whether {old} is behind {new} in {dest}: {exc}")
+            return False
+        return True
 
     def tree_files(self, dest: Path, rev: str, paths: Sequence[str]) -> tuple[str, ...] | None:
         """`RunnerGit.tree_files()`, containerised; `writes=False`, nothing is fetched (T630)."""
