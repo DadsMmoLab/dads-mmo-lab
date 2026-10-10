@@ -23965,9 +23965,16 @@ def _rewritten_route(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> tuple[ControllerView, Any, Path, str]:
     """A WotLK tab whose bots follow releases, the newest on a history upstream rewrote."""
-    from tests.test_follow_releases import REWRITTEN, _diverged, _engine, _route
+    from tests.test_follow_releases import (
+        REWRITTEN,
+        _clock_stands_still,
+        _diverged,
+        _engine,
+        _route,
+    )
     from yulon.catalog.installer import InstallOptions
 
+    _clock_stands_still(monkeypatch)  # T647: the day's count is read back on a clock that held
     rec, server_dir = _diverged(tmp_path)
     _engine(rec).upstream_news(InstallOptions(server_dir=server_dir))
     route = _route(rec, server_dir, monkeypatch)

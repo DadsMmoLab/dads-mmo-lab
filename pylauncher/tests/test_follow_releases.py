@@ -782,6 +782,19 @@ def test_a_diverged_branch_source_is_said_as_rewritten_too(tmp_path: Path) -> No
     assert "server upstream rewrote its history (300 new commits)" in upstream.line(news)
 
 
+def _clock_stands_still(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The cache's clock is `T0` for the whole test (T647).
+
+    The day's count is written at one reading of `upstream.now_unix()` and the question reads
+    it back at another, and a cached row is served only while `0 <= age < limit`. On the wall
+    clock a step backwards between the two (WSL's clock resyncs after a sleep, and a long
+    suite on a loaded laptop spans one) made the row "from the future", the question carried
+    no rewritten line, and the press refused: `test_a_rewritten_history_moves_after_yes_...`
+    failed in a 1503-test run and passed alone.
+    """
+    monkeypatch.setattr(upstream, "now_unix", lambda: T0)
+
+
 def _route(rec: Recorder, server_dir: Path, monkeypatch: pytest.MonkeyPatch) -> native.LatestRoute:
     from yulon import install_wiring
 
@@ -794,6 +807,7 @@ def _route(rec: Recorder, server_dir: Path, monkeypatch: pytest.MonkeyPatch) -> 
 def test_the_question_carries_the_line_from_the_days_count_and_yes_moves(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    _clock_stands_still(monkeypatch)
     rec, server_dir = _diverged(tmp_path)
     _engine(rec).upstream_news(InstallOptions(server_dir=server_dir))
     route = _route(rec, server_dir, monkeypatch)
