@@ -539,10 +539,10 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         {
             "azerothcore": supported(),
             "cmangos": not_applicable(
-                "cmangos/playerbots and TortoiseBots kept the AiPlayerbot. names; no mod-playerbots"
+                "its bot modules kept the AiPlayerbot. names; there is no mod-playerbots checkout"
             ),
             "trinitycore": not_applicable(
-                "Centurion's bot module reads Playerbot.* keys of its own; no mod-playerbots"
+                "its bot module reads Playerbot.* keys of its own; no mod-playerbots checkout"
             ),
         },
         hits=("'azerothcore'",),
