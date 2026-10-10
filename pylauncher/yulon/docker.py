@@ -2432,7 +2432,7 @@ class ImportState:
         return self.state in ("absent", "partial")
 
 
-ResetUnfinished = Callable[[], tuple[str, ...]]
+ResetUnfinished = Callable[..., tuple[str, ...]]
 """Drops the schemas an interrupted import left half-written; returns their names.
 
 A second seam rather than a wider `ImportProbe`, for the same reason the probe
@@ -3305,6 +3305,30 @@ def importer_left_sentence(left: OneShotLeft, nothing_done: str) -> str:
     return f"{said} To end it, run this in a terminal:\ndocker rm -f {' '.join(left.names)}"
 
 
+def one_shot_ended_marker(server_dir: Path, service: str) -> Path:
+    """The file that says a run of `service` in this folder was ended before it finished (T658).
+
+    Written by `end_one_shot()` when it has to kill one, and left until a later
+    run of that one-shot is seen to finish. For the database import that is the
+    only reliable record: AzerothCore's importer creates every schema's
+    `updates` tables before it applies the updates, so one killed while it
+    applies them leaves schemas the probe reads as `imported` (measured on
+    m910q, 2026-10-10: a player's hand-started import, ended by the next press,
+    then read "imported" and the server came up with an empty realm list).
+    """
+    return Path(server_dir) / f".yulon-{service}-ended"
+
+
+def _mark_one_shot_ended(server_dir: Path, service: str) -> None:
+    """Write `one_shot_ended_marker()`; a folder that will not take it is logged, not raised."""
+    try:
+        one_shot_ended_marker(server_dir, service).write_text(
+            f"{service} was ended before it finished\n", encoding="utf-8"
+        )
+    except OSError as exc:
+        logger.warning(f"could not record that {service} was ended in {server_dir}: {exc}")
+
+
 def end_one_shot(
     service: str, server_dir: Path, *, wsl_distro: str | None = None
 ) -> OneShotLeft | None:
@@ -3381,6 +3405,9 @@ def end_one_shot(
             # Each container is killed once; one that appears later (a create the
             # daemon finished late) is killed when it is first seen.
             logger.warning(f"end_one_shot(): {', '.join(fresh)} still running; killing")
+            # T658: recorded BEFORE the kill, so a Yu'lon that dies right after it still
+            # leaves the next press knowing what the one-shot left is unfinished.
+            _mark_one_shot_ended(server_dir, service)
             killed = (*killed, *fresh)
             _docker(["kill", *fresh], timeout=_ONE_SHOT_ASK_TIMEOUT, wsl_distro=wsl_distro)
         if time.monotonic() >= deadline:

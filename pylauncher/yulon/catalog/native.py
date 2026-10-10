@@ -4831,7 +4831,7 @@ class ImportGate(Protocol):
 
     def probe(self) -> docker.ImportState: ...
 
-    def reset(self) -> tuple[str, ...]: ...
+    def reset(self, *, everything: bool = False) -> tuple[str, ...]: ...
 
     def adoption_gaps(self) -> tuple[str, ...]: ...
 
@@ -4871,13 +4871,18 @@ class CallableGate:
             return ("these databases cannot be checked table by table by this install's probe",)
         return self.gaps_fn()
 
-    def reset(self) -> tuple[str, ...]:
+    def reset(self, *, everything: bool = False) -> tuple[str, ...]:
+        """Drop the half-written schemas; with `everything`, every one there (T658).
+
+        `everything` is for schemas an ended import left, which may read as
+        finished: see `docker.one_shot_ended_marker()`.
+        """
         if self.reset_fn is None:
             raise InstallerError(
                 "This install's databases were left half-written and this installer has no way "
                 "to clear them, so nothing was run."
             )
-        return self.reset_fn()
+        return self.reset_fn(everything=True) if everything else self.reset_fn()
 
 
 def _git_file_unmodified(dest: Path, relative_path: str) -> bool | None:
@@ -13731,7 +13736,17 @@ class StagedInstaller:
                 raise OneShotLeftRunning(_one_shot_left_sentence(left, earlier=True))
         before = gate.probe()
         yield f"The databases read as {before.state}: {before.detail}"
-        if before.state == "imported" or (before.state == "populated" and before.complete):
+        # T658: an import ended before it finished -- by a Stop, a closed Yu'lon, or the
+        # end of a leftover importer just above -- leaves schemas that can read as
+        # `imported`. Never trusted then: they are cleared and imported again. Player data
+        # still refuses (`populated`, and `reset_unfinished()` asks again).
+        ended = (
+            service is not None and docker.one_shot_ended_marker(ctx.server_dir, service).is_file()
+        )
+        forced = ended and before.state in ("imported", "partial")
+        if not forced and (
+            before.state == "imported" or (before.state == "populated" and before.complete)
+        ):
             yield "They are already imported; leaving them alone."
             return
         if before.state == "unreadable":
@@ -13745,8 +13760,14 @@ class StagedInstaller:
                 "Importing over them would overwrite it, so nothing was run. Use an empty "
                 "folder for a new install."
             )
-        if before.state == "partial":
+        if forced:
+            yield (
+                "An earlier import was ended before it finished, so these databases are "
+                "unfinished whatever their tables say. Clearing them first."
+            )
+        elif before.state == "partial":
             yield f"Clearing the half-written databases first ({before.detail})."
+        if forced or before.state == "partial":
             # `reset()` INSIDE a `try`. It was called bare until 2026-09-02, and
             # the seam behind it on the AzerothCore path,
             # `controller_wow_wotlk.repair.reset_unfinished()`, names three
@@ -13774,7 +13795,7 @@ class StagedInstaller:
             # engine built with no reset seam at all -- and re-wrapping it would
             # bury that sentence inside this one.
             try:
-                dropped = gate.reset()
+                dropped = gate.reset(everything=True) if forced else gate.reset()
             except InstallerError:
                 raise
             except Exception as exc:
@@ -13815,6 +13836,9 @@ class StagedInstaller:
             after = self._seams.verify_import(gate.probe, service, ctx.server_dir, run)
         except docker.DockerCommandError as exc:
             raise carry_detail(exc, InstallerError(str(exc))) from exc
+        # T658: this run finished and was verified, so an earlier ended one no longer
+        # describes these databases.
+        docker.one_shot_ended_marker(ctx.server_dir, service).unlink(missing_ok=True)
         yield f"The databases now read as {after.state}."
 
     def _forget_old_database_records(self, ctx: StageContext) -> Iterator[str]:

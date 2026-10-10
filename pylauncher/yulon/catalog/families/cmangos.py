@@ -4245,8 +4245,8 @@ class _Remembering:
         self.last = self.inner.probe()
         return self.last
 
-    def reset(self) -> tuple[str, ...]:
-        return self.inner.reset()
+    def reset(self, *, everything: bool = False) -> tuple[str, ...]:
+        return self.inner.reset(everything=everything)
 
     def adoption_gaps(self) -> tuple[str, ...]:
         """Straight through: there is nothing to remember, and it is not a state.

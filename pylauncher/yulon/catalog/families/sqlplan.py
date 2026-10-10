@@ -2480,8 +2480,11 @@ class MarkerGate:
         assumed = {name: digest for name, digest in release.items() if name not in recorded}
         return PhaseLedger(marker=marker, recorded=recorded, assumed=assumed)
 
-    def reset(self) -> tuple[str, ...]:
+    def reset(self, *, everything: bool = False) -> tuple[str, ...]:
         """Drop the plan's schemas that exist — only from `partial`, only the plan's own.
+
+        `everything` (T658) is asked only after a compose importer was ended, and a
+        plan has no compose importer, so it is refused rather than given a meaning.
 
         Returns the schemas dropped (`()` from `absent`). Refuses every other
         state by name: `populated` is somebody's server, `imported` needs no
@@ -2495,6 +2498,11 @@ class MarkerGate:
         stage whose every other failure the installer shows as an
         `InstallerError` would reach the user as a bare `RuntimeError`.
         """
+        if everything:
+            raise InstallerError(
+                "These databases were not imported by a separate importer, so there is no "
+                "ended import to clear. Nothing was dropped."
+            )
         state = self.probe()
         if state.state == "absent":
             return ()
