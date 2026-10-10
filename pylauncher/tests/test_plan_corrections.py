@@ -394,13 +394,16 @@ def test_the_release_table_covers_every_plan_a_public_release_marked_an_install_
 
 
 EXPECTED_FOR_RELEASED_INSTALLS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
-    "wow-tbc": ((), ("instance updates",)),
-    "wow-vanilla": ((), ("instance updates",)),
+    "wow-tbc": ((), ("instance updates", "cmangos custom")),
+    "wow-vanilla": ((), ("instance updates", "cmangos custom")),
     "wow-tortoise": (("character_inventory_copy table",), ()),
 }
 """(offered, withheld) for an install any public release made, against the plan shipped now.
 
-TBC and Vanilla offer nothing and withhold one step ADDED since (T141): the
+TBC and Vanilla offer nothing and withhold two steps ADDED since. `cmangos custom` (T659) is
+the DB repository's data-corrections file: an update applies it to an existing server through
+the file ledger, so the correction offer has nothing to add and it reads as withheld. The
+other (T141) is the
 DB repository's instance files, whose first file deletes every dungeon and raid
 spawn over MyISAM tables that no transaction can put back. The owner's decision
 of 2026-09-29 is new installs only, so those servers read `held` -- logged, no
@@ -786,7 +789,11 @@ def test_an_install_from_a_released_plan_is_offered_nothing_today(tmp_path: Path
         seams=rec.seams(platform_id=lambda: "linux", exec_stdin=db.exec_stdin, sql_query=db.query),
     )
     check = engine.correction_check(folder(tmp_path))
-    assert (check.state, check.offered, check.withheld) == ("held", (), ("instance updates",))
+    assert (check.state, check.offered, check.withheld) == (
+        "held",
+        (),
+        ("instance updates", "cmangos custom"),
+    )
 
 
 def test_an_install_from_a_plan_nobody_released_is_offered_nothing(tmp_path: Path) -> None:

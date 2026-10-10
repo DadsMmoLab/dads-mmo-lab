@@ -1897,10 +1897,54 @@ def whole_table_problem(path: Path) -> str | None:
     Measured 2026-10-07 at playerbots 45bed519: every sql/world, world/tbc and
     world/classic file passes.
     """
+    return _repeat_problem(path, keyed=False)
+
+
+def repeat_problem(path: Path) -> str | None:
+    """Why running this file again could leave something one run would not; None if it cannot.
+
+    `whole_table_problem()`'s rule, widened for a file of keyed corrections (T659: a db
+    repo's `utilities/cmangos_custom.sql`): a single-table `UPDATE … SET` is also repeatable
+    when each assignment sets a constant or ORs/ANDs a constant into its own column, and an
+    `INSERT` is when `DELETE FROM t WHERE …` came before it. `a = a + 1`, a column copied
+    from another column and any subquery are not.
+    """
+    return _repeat_problem(path, keyed=True)
+
+
+_ASSIGNMENT = re.compile(r"(?i)^`?(\w+)`?\s*=\s*(.*)$", re.S)
+_HEX = re.compile(r"(?i)0x[0-9a-f]+")
+
+
+def _unsafe_assignments(sets: str) -> str | None:
+    """Why this `SET` list is not safe to apply twice (T659); None if every assignment is."""
+    if "(" in sets or ")" in sets:
+        return "it calls a function or a subquery in a SET"
+    for part in sets.split(","):
+        found = _ASSIGNMENT.match(part.strip())
+        if found is None:
+            return "it has an assignment this scan cannot read"
+        column, rhs = found.group(1), found.group(2).replace("`", "").strip()
+        rest = _HEX.sub("0", rhs)
+        words = re.findall(r"[A-Za-z_]\w*", rest)
+        if not words:
+            continue  # constants and arithmetic on constants
+        own = re.fullmatch(rf"(?i){column}\s*[|&]\s*~?\s*[0-9]+(?:\s*\*\s*[0-9]+)?", rest.strip())
+        if own is None and rest.strip().upper() != "NULL" and not _is_keyword_only(words):
+            return f"it sets {column} from {rhs[:30]}"
+    return None
+
+
+def _is_keyword_only(words: Sequence[str]) -> bool:
+    return all(word.upper() in {"NULL", "TRUE", "FALSE"} for word in words)
+
+
+def _repeat_problem(path: Path, *, keyed: bool) -> str | None:
     if only_creates_indexes(path):
         return None  # run one index at a time by the reload, each made fresh
     emptied: set[str] = set()
     dropped: set[str] = set()
+    deleted_where: set[str] = set()
     for raw in _statements(path.read_text(encoding="utf-8", errors="replace")):
         if not raw:
             continue
@@ -1938,6 +1982,7 @@ def whole_table_problem(path: Path) -> str | None:
                 emptied.add(match.group(1).lower())
                 continue
             if rest.startswith("WHERE ") and not re.search(r"\b(LIMIT|ORDER BY)\b", rest):
+                deleted_where.add(match.group(1).lower())
                 continue  # deletes the same rows however often it runs
             return f"it runs a statement that is not safe to repeat ({sql[:40]}…)"
         # REPLACE and INSERT IGNORE add a row wherever no key collides, so they need
@@ -1946,8 +1991,19 @@ def whole_table_problem(path: Path) -> str | None:
             # A join, a list or an alias can write a table other than the first one
             # named (Codex, T534): only the single-table form is read.
             return f"it runs an UPDATE of more than one table ({sql[:40]}…)"
+        if keyed and (keyed_update := re.match(rf"(?i)UPDATE {_TABLE} SET (.*)$", sql)):
+            sets = re.split(r"(?i)\s+WHERE\s+", keyed_update.group(2), maxsplit=1)[0]
+            if re.search(r"(?i)\bSELECT\b", sql):
+                return f"it runs a statement that is not safe to repeat ({sql[:40]}…)"
+            why = _unsafe_assignments(sets)
+            if why is not None:
+                return f"it runs a statement that is not safe to repeat ({sql[:40]}…): {why}"
+            continue
         match = re.match(rf"(?i)(?:INSERT(?: IGNORE)? INTO|REPLACE INTO|UPDATE) {_TABLE}", sql)
         if match:
+            table = match.group(1).lower()
+            if keyed and table in deleted_where and sql.upper().startswith("INSERT INTO"):
+                continue
             if match.group(1).lower() not in emptied:
                 return f"it writes {match.group(1)} without emptying it first"
             continue

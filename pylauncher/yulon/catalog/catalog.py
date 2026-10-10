@@ -785,7 +785,9 @@ class SqlPhase(_Strict):
         ),
     )
 
-    on_update: Literal["leave", "apply_new", "report", "replace_changed", "refuse_new"] = Field(
+    on_update: Literal[
+        "leave", "apply_new", "report", "replace_changed", "reapply_changed", "refuse_new"
+    ] = Field(
         default="leave",
         description=(
             "What the server update route (to the newest code, and back to the tested pin) "
@@ -804,8 +806,12 @@ class SqlPhase(_Strict):
             "so a re-run leaves what a fresh install leaves; a file of any other shape is named "
             "and not run. `refuse_new` (T533): a move that adds or changes a file under its globs "
             "refuses the whole press before the compile -- for a chain the route cannot apply "
-            "safely to an existing server. Not in `digest()`: it does not change what an import "
-            "applies."
+            "safely to an existing server. `reapply_changed` (T659): each file whose bytes the "
+            "ledger does not hold (never seen, or edited upstream since) is run again, in the "
+            "same window -- for a file of keyed corrections that is safe to repeat "
+            "(`sqlplan.repeat_problem`); a file of any other shape is named and not run, and "
+            "nothing is seeded, so a server installed before the phase existed gets it once. "
+            "Not in `digest()`: it does not change what an import applies."
         ),
     )
 

@@ -935,7 +935,7 @@ class CmangosInstaller(StagedInstaller):
                     "already has of it cannot be known"
                 )
             elif (
-                phase.on_update in ("apply_new", "replace_changed")
+                phase.on_update in ("apply_new", "replace_changed", "reapply_changed")
                 and phase.into != self.entry.databases.world
             ):
                 why = f"it writes {phase.into}, and only the world database is updated this way"
@@ -1000,7 +1000,7 @@ class CmangosInstaller(StagedInstaller):
         this work clears nothing that refuses a start.
         """
         if not isinstance(changes, _WorldCatchUp) or not (
-            changes.applying() or changes.replacing()
+            changes.applying() or changes.replacing() or changes.reapplying()
         ):
             return None
         catch_up = changes
@@ -1100,6 +1100,8 @@ class CmangosInstaller(StagedInstaller):
             yield from self._bring_new_world_files(ctx, catch_up, ledger, applied)
         if catch_up.replacing():
             yield from self._replace_changed_files(ctx, catch_up, ledger, applied)
+        if catch_up.reapplying():
+            yield from self._reapply_changed_files(ctx, catch_up, ledger, applied)
 
     def _bring_new_world_files(
         self,
@@ -1405,6 +1407,79 @@ class CmangosInstaller(StagedInstaller):
                     "The next update loads it again; a fresh install loads it too."
                 )
         yield f"{loaded} of {len(due)} bot table file(s) loaded."
+
+    def _reapply_changed_files(
+        self,
+        ctx: StageContext,
+        catch_up: _WorldCatchUp,
+        ledger: dict[tuple[str, str], sqlplan.FileRow],
+        applied: list[int],
+    ) -> Iterator[str]:
+        """Each `reapply_changed` file whose bytes the ledger lacks, run again (T659).
+
+        The db repo's `utilities/cmangos_custom.sql`: upstream's InstallFullDB.sh runs it last
+        on every full install, so it is data corrections to apply on top of everything else.
+        Every statement is a keyed UPDATE, or a DELETE ... WHERE before the INSERT that puts
+        the row back, so running it again changes nothing the first run did not
+        (`sqlplan.repeat_problem()`); a file of another shape, or one that names another
+        schema, is named and not run. Nothing was seeded: the import writes no ledger row for
+        it, so the first update applies it once to every server, and a later one only when
+        upstream edited the file. A failed or half-run row is simply owed again.
+        """
+        world = self.entry.databases.world
+        plan = self._data().sql
+        db = self._native().db
+        container = self.entry.container_spec().db
+        password = ctx.secrets.db_password
+        sub = plan.model_copy(update={"phases": catch_up.reapplying()})
+        others = self._other_schemas()
+        for run in self._expand(sub, ctx.server_dir, {}):
+            if run.path is None:
+                continue
+            self._check_cancel(ctx.cancel)
+            sha = sqlplan.file_digest(run.path)
+            row = ledger.get((run.phase.name, run.rel))
+            if row is not None and row.sha256 == sha and row.state == sqlplan.FILE_APPLIED:
+                continue
+            why = sqlplan.repeat_problem(run.path)
+            reaches = sqlplan.foreign_schemas(run.path, others, executable_comments_ok=True)
+            if why or reaches:
+                said = why or f"it reaches outside {world} ({', '.join(reaches)})"
+                yield (
+                    f"{run.rel} was not applied: {said}, so running it on a server that has "
+                    "data could leave something a fresh install would not. A fresh install of "
+                    "the server applies it."
+                )
+                continue
+            yield (
+                f"Applying {run.rel} ({run.phase.name}) to {world}: data corrections, safe to "
+                "repeat."
+            )
+            self._record_world_files(
+                ctx, (sqlplan.FileRow(run.phase.name, run.rel, sha, sqlplan.FILE_STARTED),)
+            )
+            refused: list[sqlplan.PhaseRun] = []
+            yield from self._stream(
+                _apply_one(
+                    run,
+                    container=container,
+                    client=db.client,
+                    password=password,
+                    exec_stdin=self._seams.exec_stdin,
+                    refused=refused,
+                ),
+                cancel=None,
+                stage="world-updates",
+            )
+            state = sqlplan.FILE_FAILED if refused else sqlplan.FILE_APPLIED
+            if not refused:
+                applied[0] += 1
+            self._record_world_files(ctx, (sqlplan.FileRow(run.phase.name, run.rel, sha, state),))
+            if refused:
+                yield (
+                    f"The database refused {run.rel}, so some of it may be in and some not. "
+                    "It is safe to repeat: the next update applies it again."
+                )
 
     def _other_schemas(self) -> set[str]:
         """Every schema of this server that is not its world: what an update may never name."""
@@ -4147,6 +4222,10 @@ class _WorldCatchUp:
     def replacing(self) -> tuple[SqlPhase, ...]:
         """The `replace_changed` phases, in plan order (T534)."""
         return tuple(phase for phase, _owner in self.phases if phase.on_update == "replace_changed")
+
+    def reapplying(self) -> tuple[SqlPhase, ...]:
+        """The `reapply_changed` phases, in plan order (T659)."""
+        return tuple(phase for phase, _owner in self.phases if phase.on_update == "reapply_changed")
 
     def refusing(self, source: EmulatorSource) -> tuple[SqlPhase, ...]:
         """The `refuse_new` phases whose files live in `source`'s checkout (T533)."""
