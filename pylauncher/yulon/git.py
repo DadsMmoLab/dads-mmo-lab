@@ -942,7 +942,7 @@ ANCESTRY_WALK_ARGS = ["rev-list", "--parents", "--missing=allow-any", "-n", "200
 
 
 def ancestry(
-    dest: Path, old: str, merge_base: Callable[[], int | None], walk: Callable[[], str | None]
+    dest: Path, old: str, merge_base: Callable[[], int | None], history: Callable[[], str | None]
 ) -> bool | None:
     """Is `old` an ancestor of a commit? True / False / None (cannot tell). Read-only (T632).
 
@@ -950,7 +950,7 @@ def ancestry(
     but AzerothCore's core is a depth-1 clone: the tip and the pin are grafts in
     `.git/shallow` and later fetches connect new commits back only to what is held, so the
     command answers 1 for a REAL forward move through a graft. The parent ids written in
-    the commit objects survive grafting, so the walk reads them with the grafts switched
+    the commit objects survive grafting, so the history is read with the grafts switched
     off (`GIT_SHALLOW_FILE=/dev/null`, `--missing=allow-any`) and looks for `old` among
     every id it names, held or not. Not found there is no proof of anything: None, and
     the caller asks GitHub. Never `fetch --unshallow` or `--deepen` (see `_pin()`).
@@ -960,7 +960,7 @@ def ancestry(
         return True
     if said == 1 and not (dest / ".git" / "shallow").is_file():
         return False
-    listing = walk()
+    listing = history()
     if listing is not None and any(old in line.split() for line in listing.splitlines()):
         return True
     return None
@@ -1744,7 +1744,7 @@ class RunnerGit:
             except OSError:
                 return None
 
-        def walk() -> str | None:
+        def history() -> str | None:
             try:
                 proc = runner.run(
                     ["git", *ANCESTRY_WALK_ARGS, new],
@@ -1755,7 +1755,7 @@ class RunnerGit:
                 return None
             return proc.stdout if proc.returncode == 0 else None
 
-        return ancestry(dest, old, merge_base, walk)
+        return ancestry(dest, old, merge_base, history)
 
     def tree_files(self, dest: Path, rev: str, paths: Sequence[str]) -> tuple[str, ...] | None:
         """The files commit `rev` tracks under `paths`, from its tree. None = cannot ask (T630).
@@ -2730,7 +2730,7 @@ class ContainerGit:
                 return 1 if " exited 1:" in str(exc) else None
             return 0
 
-        def walk() -> str | None:
+        def history() -> str | None:
             try:
                 proc = self._capture(
                     dest,
@@ -2742,7 +2742,7 @@ class ContainerGit:
                 return None
             return proc.stdout
 
-        return ancestry(dest, old, merge_base, walk)
+        return ancestry(dest, old, merge_base, history)
 
     def tree_files(self, dest: Path, rev: str, paths: Sequence[str]) -> tuple[str, ...] | None:
         """`RunnerGit.tree_files()`, containerised; `writes=False`, nothing is fetched (T630)."""
