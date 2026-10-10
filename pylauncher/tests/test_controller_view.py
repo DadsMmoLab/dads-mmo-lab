@@ -949,6 +949,31 @@ def test_a_character_question_is_handed_the_roster_read_and_the_jobs_runner(
     assert asked == [WOTLK]
 
 
+def test_cancelling_after_the_picker_started_the_database_says_it_is_still_running(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T637 cold review: the picker's read may start the database; a cancel must say so."""
+    from yulon.character_pick import Roster
+
+    def asker(parent: object, manifest: object, prompts: object, **kw: object) -> None:
+        kw["characters"]()  # type: ignore[operator]
+        return None
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, prompt_asker=asker)
+    _select_module(view, "mod-ah-bot")
+    applier = view.services.applier
+    assert isinstance(applier, _FakeApplier)
+    applier.character_roster = lambda entry: Roster(database_started=True)  # type: ignore[method-assign]
+    view._module_action("install")
+    text = view.module_report.toPlainText()
+    assert "cancelled" in text and "still running" in text, text
+
+    # Where it was already up, nothing is added.
+    applier.character_roster = lambda entry: Roster()  # type: ignore[method-assign]
+    view._module_action("install")
+    assert "still running" not in view.module_report.toPlainText()
+
+
 def test_a_manifest_with_no_character_question_is_not_handed_a_roster_read(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:

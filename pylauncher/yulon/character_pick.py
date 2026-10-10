@@ -89,6 +89,8 @@ class Roster:
     characters: tuple[Pickable, ...] = ()
     problem: str = ""
     bots_left_out: int = 0
+    database_started: bool = False
+    """This read had to start the database (it was down), and nothing here stopped it again."""
 
 
 def describe(character: Pickable) -> str:
@@ -111,12 +113,14 @@ def read_roster(
     """This server's characters, bots left out. Never raises."""
     if sql is None or not isinstance(sql, dbreads.SqlReader):
         return Roster(problem="this install has no way to read the server's database")
+    started = False
     if start_database is not None:
         try:
-            start_database()
+            started = bool(start_database())
         except Exception as exc:  # noqa: BLE001 - any failure to start is one answer here
             logger.warning(f"could not start the database to list characters: {exc}")
             return Roster(problem=f"the database could not be started: {exc}")
+        # `started` rides on every answer below, so a caller that cancels can say so.
     schemas = entry.schema_map()
     ops = entry.observability
     table = ops.characters.table if ops is not None else "characters"
@@ -126,7 +130,10 @@ def read_roster(
     if ops is not None:
         marker = dbreads.resolve_marker(entry, server_dir)
         if marker.marker is None:
-            return Roster(problem=f"could not tell which characters are bots: {marker.problem}")
+            return Roster(
+                problem=f"could not tell which characters are bots: {marker.problem}",
+                database_started=started,
+            )
         bot = f"({dbreads.bot_clause(entry, marker.marker)})"
     statement = (
         f"SELECT c.guid, c.name, c.{account}, "
@@ -138,7 +145,9 @@ def read_roster(
         rows = sql.query("characters", statement)
     except Exception as exc:  # noqa: BLE001 - every seam failure is one answer here
         logger.warning(f"could not list this server's characters: {exc}")
-        return Roster(problem=f"could not read this server's characters: {exc}")
+        return Roster(
+            problem=f"could not read this server's characters: {exc}", database_started=started
+        )
     people: list[Pickable] = []
     bots = 0
     for line in rows.splitlines():
@@ -165,4 +174,4 @@ def read_roster(
                 on.strip() == "1",
             )
         )
-    return Roster(characters=tuple(people), bots_left_out=bots)
+    return Roster(characters=tuple(people), bots_left_out=bots, database_started=started)

@@ -481,3 +481,107 @@ def test_an_answer_stored_by_an_older_build_as_an_int_still_loads(old: str) -> N
     assert apply_module.stored_answer(single, old) == "5"
     assert check_answer(single, apply_module.stored_answer(single, old)) == ""
     assert apply_module.stored_answer(_prompt(multi=True), old) == "5"
+
+
+# ---- round 2: the database this read starts, and the hold it takes (cold review)
+
+
+def test_the_roster_says_when_it_had_to_start_the_database(tmp_path: Path) -> None:
+    assert _roster(_Sql(ROWS), tmp_path=tmp_path, start_database=lambda: True).database_started
+    assert not _roster(_Sql(ROWS), tmp_path=tmp_path, start_database=lambda: False).database_started
+    assert not _roster(_Sql(ROWS), tmp_path=tmp_path).database_started
+
+
+def test_the_roster_read_and_the_database_start_run_inside_the_servers_hold(
+    tmp_path: Path,
+) -> None:
+    from contextlib import contextmanager
+
+    order: list[str] = []
+
+    @contextmanager
+    def hold(press: str) -> Any:
+        order.append(f"enter {press}")
+        yield None
+        order.append("exit")
+
+    sql = _Sql(ROWS)
+    inner = sql.query
+    sql.query = lambda db, st: (order.append("read"), inner(db, st))[1]  # type: ignore[method-assign]
+    applier = Applier(
+        tmp_path,
+        sql=sql,  # type: ignore[arg-type]
+        start_database=lambda: order.append("start") or True,
+        hold_server=hold,
+    )
+    roster = applier.character_roster(WOTLK)
+    assert order[0].startswith("enter") and order[1:] == ["start", "read", "exit"], order
+    assert roster.database_started
+
+
+def test_a_server_held_by_another_yulon_is_a_problem_and_nothing_is_started(
+    tmp_path: Path,
+) -> None:
+    from contextlib import contextmanager
+
+    from yulon.said import SaidByYulon
+
+    @contextmanager
+    def busy(press: str) -> Any:
+        raise SaidByYulon("Another Yu'lon is working on this server.")
+        yield
+
+    started: list[bool] = []
+    applier = Applier(
+        tmp_path,
+        sql=_Sql(ROWS),  # type: ignore[arg-type]
+        start_database=lambda: started.append(True) or True,
+        hold_server=busy,
+    )
+    roster = applier.character_roster(WOTLK)
+    assert "Another Yu'lon is working" in roster.problem
+    assert started == []
+
+
+def test_a_saved_earlier_row_restores_its_own_account_not_the_last_picks(qapp: object) -> None:
+    dialog = _dialog(remembered={"bot_guid": "99", "bot_account": "8"})
+    combo = _picker(dialog)
+    assert dialog.answers() == {"bot_guid": "99", "bot_account": "8"}
+    combo.setCurrentIndex(combo.findData(5))
+    assert dialog.answers() == {"bot_guid": "5", "bot_account": "3"}
+    combo.setCurrentIndex(combo.findData(99))
+    assert dialog.answers() == {"bot_guid": "99", "bot_account": "8"}
+
+
+def test_a_saved_earlier_row_with_no_saved_account_clears_the_account(qapp: object) -> None:
+    dialog = _dialog(remembered={"bot_guid": "99"})
+    combo = _picker(dialog)
+    combo.setCurrentIndex(combo.findData(5))
+    combo.setCurrentIndex(combo.findData(99))
+    assert dialog.answers()["bot_account"] == ""
+    assert dialog.problem() != ""
+
+
+def test_a_follower_asked_without_its_picker_is_a_typed_box(qapp: object) -> None:
+    manifest = _shipped("mod-ah-bot")
+    only = [p for p in manifest.prompts if p.key == "bot_account"]
+    dialog = ManifestPromptDialog(None, manifest, only)
+    assert "bot_account" not in dialog._follower_rows  # noqa: SLF001
+    assert not dialog._controls["bot_account"].isHidden()  # noqa: SLF001
+    assert dialog.questions() == (only[0].question,)
+    dialog.set_answer("bot_account", "7")
+    assert dialog.problem() == ""
+
+
+def test_choosing_nothing_clears_the_account_even_when_one_was_saved(qapp: object) -> None:
+    dialog = _dialog(remembered={"bot_guid": "99", "bot_account": "8"})
+    combo = _picker(dialog)
+    combo.setCurrentIndex(0)
+    assert dialog.answers() == {"bot_guid": "", "bot_account": ""}
+
+
+def test_a_lone_follower_is_named_in_the_no_record_note(qapp: object) -> None:
+    manifest = _shipped("mod-ah-bot")
+    only = [p for p in manifest.prompts if p.key == "bot_account"]
+    dialog = ManifestPromptDialog(None, manifest, only, again=True)
+    assert only[0].question in dialog.notes()

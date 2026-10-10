@@ -168,8 +168,9 @@ class ManifestPromptDialog(QDialog):
         self._pickers: dict[str, CharacterPicker] = {}
         self._followers: dict[str, list[Prompt]] = {}
         self._follower_rows: dict[str, tuple[QLabel, QWidget]] = {}
+        asked = self._asked_keys = {p.key for p in self._prompts}
         for prompt in self._prompts:
-            if prompt.follows is not None:
+            if prompt.follows is not None and prompt.follows in asked:
                 self._followers.setdefault(prompt.follows, []).append(prompt)
         self.setWindowTitle(f"{manifest.name} needs an answer")
         self.setModal(True)
@@ -193,7 +194,7 @@ class ManifestPromptDialog(QDialog):
                 from_record.append(prompt)
             elif prompt.default is not None:
                 prefill[prompt.key] = prompt.default
-        missing = [p for p in self._prompts if p not in from_record and p.follows is None]
+        missing = [p for p in self._prompts if p not in from_record and not self._follows_here(p)]
         if removing:
             # A Remove asks only what it has no record of (`apply.must_ask`), so
             # this dialog opening IS the no-record case, whatever pre-fills it.
@@ -238,7 +239,8 @@ class ManifestPromptDialog(QDialog):
             label.setWordWrap(True)
             control = self._control_for(prompt, rows)
             self._controls[prompt.key] = control
-            if prompt.follows is None:
+            if prompt.follows is None or prompt.follows not in asked:
+                # A follower whose picker is not in this ask is a plain typed box.
                 self._questions.append(prompt.question)
             else:
                 # Hidden unless the picker it follows has to be typed into instead.
@@ -274,6 +276,7 @@ class ManifestPromptDialog(QDialog):
         self._buttons.rejected.connect(self.reject)
         box.addWidget(self._buttons)
 
+        self._saved = dict(prefill)
         for key, value in prefill.items():
             self.set_answer(key, value)
         self._recheck()
@@ -281,7 +284,11 @@ class ManifestPromptDialog(QDialog):
         self._start_reading(characters, run_job)
 
     def _shown_prompts(self) -> list[Prompt]:
-        return [p for p in self._prompts if p.follows is None]
+        return [p for p in self._prompts if not self._follows_here(p)]
+
+    def _follows_here(self, prompt: Prompt) -> bool:
+        """A prompt that takes its answer from a picker which is among the ones asked."""
+        return prompt.follows is not None and prompt.follows in self._asked_keys
 
     def _start_reading(
         self, characters: Callable[[], Roster] | None, run_job: JobRunner | None
@@ -330,9 +337,12 @@ class ManifestPromptDialog(QDialog):
         if account is not None:
             for follower in self._followers.get(key, ()):
                 self._put(follower.key, str(account))
-        elif not picker.typing and not value:
+        elif not picker.typing:
+            # No account known for this row: nothing picked, or a GUID saved earlier that this
+            # server no longer lists. Its own saved account, else none; never the last pick's.
+            saved_here = bool(value) and self._saved.get(key) == value
             for follower in self._followers.get(key, ()):
-                self._put(follower.key, "")
+                self._put(follower.key, self._saved.get(follower.key, "") if saved_here else "")
         self._recheck()
 
     def _put(self, key: str, value: str) -> None:

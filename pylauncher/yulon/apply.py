@@ -5341,11 +5341,17 @@ class Applier:
         """This server's characters for a `character` question, read through this applier's seams.
 
         Starts the database alone first where this applier can (T396's seam), as the
-        does-it-exist check does. Run on a worker: it is a docker exec.
+        does-it-exist check does, under the server's cross-process hold as an install is
+        (T568). It is not stopped again: `Roster.database_started` lets the caller say it is
+        still running (`DATABASE_LEFT_UP`, as T476 does). Run on a worker: it is a docker exec.
         """
-        return character_pick.read_roster(
-            self.sql, entry, self.server_dir, start_database=self._start_database
-        )
+        try:
+            with self._held(f"List the characters of {entry.name}"):
+                return character_pick.read_roster(
+                    self.sql, entry, self.server_dir, start_database=self._start_database
+                )
+        except ApplyError as exc:
+            return character_pick.Roster(problem=str(exc))
 
     # -- the guard ---------------------------------------------------------
 
