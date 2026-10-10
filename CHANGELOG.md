@@ -10,7 +10,6 @@ New: Set a server's time zone on the Tuning tab with **Server time zone**.
 Fixed: Sending gold to a character no longer crashes the app.
 Changed: Opening Yu'lon while it is already running brings the open window to the front.
 -->
-- Two Yu'lons pressing on one new server folder at once no longer give one a false "folder will not take an id file".
 
 ## Unreleased
 
@@ -53,6 +52,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Saving settings no longer freezes the window.
 - Network **Apply**, uninstall and the time zone refuse while another Yu'lon works on the server, and name who holds it.
 - Starting and stopping the pathfinding data refuse while another Yu'lon works on the server; finishing waits for it.
+- Two Yu'lons pressing on one new server folder at once no longer give one a false "folder will not take an id file".
 
 ### Changed
 - WoW Unbound is built on the same newer server core as WotLK; **Return to the tested pin…** moves an existing one there.
