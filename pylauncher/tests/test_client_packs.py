@@ -18,6 +18,7 @@ import io
 import json
 import os
 import shutil
+import time
 import types
 import urllib.error
 import urllib.request
@@ -60,7 +61,7 @@ def _zip(members: Mapping[str, bytes] | None = None) -> bytes:
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_STORED) as archive:
         for name, data in (members or {"patch-F.MPQ": b"MPQ\x1a" + bytes(range(256)) * 40}).items():
-            archive.writestr(name, data)
+            archive.writestr(zipfile.ZipInfo(name, date_time=(2020, 1, 1, 0, 0, 0)), data)
     return buffer.getvalue()
 
 
@@ -1099,6 +1100,18 @@ def test_a_named_member_is_installed_under_its_new_name_and_recorded_with_its_ha
         "files": {"Data/patch-X.MPQ": _sha(NEW_Y)},
     }
     rig.untouched()
+
+
+def test_the_fake_zip_is_the_same_bytes_whenever_it_is_made(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T648: zipfile stamps entries with the clock (2 s steps), so the same members made across a
+    tick hashed differently and the test above compared two different zips."""
+    monkeypatch.setattr(time, "time", lambda: 1_700_000_000.0)
+    first = _zip({"a": b"1"})
+    monkeypatch.setattr(time, "time", lambda: 1_700_000_010.0)
+
+    assert _zip({"a": b"1"}) == first
 
 
 def test_a_star_member_unpacks_the_whole_zip_under_its_folder(rig: _Rig) -> None:
