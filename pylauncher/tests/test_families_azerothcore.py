@@ -868,9 +868,47 @@ def test_a_container_owned_by_another_yulon_install_names_its_folder(tmp_path: P
         "A container called ac-database already exists and belongs to another "
         f"install this app made, brought up from {other} when it was created (if "
         "that folder has moved since, its own tab still knows it). Two servers "
-        "cannot share that name. Open that install's tab and stop and remove its "
-        "containers, then try again."
+        "cannot share that name. If that install is on this app's Catalog, open its tab and "
+        "stop and remove its containers; if it is not, remove those containers yourself or "
+        'use that folder with "Use existing…" instead, then try again.'
     )
+
+
+def test_preflight_alone_refuses_names_held_by_a_folder_this_app_does_not_know(
+    tmp_path: Path,
+) -> None:
+    """T649: the bring-in and the install ask `preflight()`, which must refuse BEFORE any clone.
+
+    A stopped `ac-database` of an install this Yu'lon has no record of (a script's, DML's, a
+    reset config) is found by the compose labels, and the sentence names the folder and what to
+    do. Mutation this catches: `_refuse_foreign_containers` left to `run()`'s guard only.
+    """
+    other = str(tmp_path / "wowserver")
+    rec = Recorder(
+        containers={"ac-database": "yulon-wow-wotlk-243c46e3"},
+        working_dirs={"ac-database": other},
+    )
+    with pytest.raises(InstallerError) as excinfo:
+        engine(rec).preflight(InstallOptions(server_dir=tmp_path / "wow"))
+    assert str(excinfo.value) == (
+        "A container called ac-database already exists and belongs to another "
+        f"install this app made, brought up from {other} when it was created (if "
+        "that folder has moved since, its own tab still knows it). Two servers "
+        "cannot share that name. If that install is on this app's Catalog, open its tab and "
+        "stop and remove its containers; if it is not, remove those containers yourself or "
+        'use that folder with "Use existing…" instead, then try again.'
+    )
+    assert "clone" not in " ".join(rec.calls)
+    assert not (tmp_path / "wow" / native.STATE_FILE).exists()
+
+
+def test_preflight_lets_the_folders_own_containers_through(tmp_path: Path) -> None:
+    server_dir = tmp_path / "wow"
+    ours = composegen.project_name(
+        ENTRY.id, server_dir, platform_id=lambda: "macos", install_id=None
+    )
+    rec = Recorder(containers={"ac-database": ours, "ac-worldserver": ours})
+    engine(rec).preflight(InstallOptions(server_dir=server_dir))
 
 
 def test_a_foreign_yulon_install_with_no_readable_working_dir_still_names_the_project(

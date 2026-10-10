@@ -30,6 +30,9 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - **Pack the whole server…** now carries a module added from a folder; **Bring from another computer…** installs it.
 
 ### Fixed
+- An install stops before building, naming the folder, when another install already holds its container names.
+- Moving a server says "1 account and 0 characters of players, plus 100 bot accounts with 1000 bot characters".
+- Bringing a whole server in holds it for the whole job, so another Yu'lon stays refused and no warning shows.
 - On Tortoise, a failed update puts the world database back too, and the copy it takes is one a return can use.
 - On Windows, opening the LAN ports asks for administrator rights itself, and the commands it shows now work when pasted.
 - The Lua engine builds again with the newest Playerbots, which renamed settings the engine still asked for.

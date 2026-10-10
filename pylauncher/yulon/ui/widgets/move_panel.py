@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from yulon.move import counts_phrase
 from yulon.move_flows import ExportPlan, ExportResult, ImportPlan, ImportResult, MoveServices
 from yulon.ui import folder_picker
 from yulon.ui.answers import said_yes
@@ -109,8 +110,7 @@ def bring_in_question(plan: ImportPlan) -> str:
     assert manifest is not None  # an allowed plan has read its package
     counts = manifest.counts
     lines = [
-        f"Bring in {counts.accounts} accounts and {counts.characters} characters "
-        f"(and {counts.bot_accounts} bot accounts) from {plan.path.name}?",
+        f"Bring in {counts_phrase(counts)} from {plan.path.name}?",
         f"Packed on {manifest.made_by.made[:16].replace('T', ' ')} ({manifest.game.name}).",
         "",
         "Their logins and passwords come with them, and so do GM levels and the bots. "

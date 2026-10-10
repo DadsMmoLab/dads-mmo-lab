@@ -533,3 +533,22 @@ def test_a_full_disk_while_writing_the_package_says_so_too(
     with pytest.raises(MovePackageError, match="not enough free space where the file goes"):
         write_package(dest, header(), [src])
     assert not dest.exists() and not list(tmp_path.glob("*.partial"))
+
+
+def test_counts_phrase_says_what_travels_in_plain_words() -> None:
+    """T650: players and bots counted apart, singular right, old packages name bot accounts only."""
+    from yulon.move import counts_phrase
+
+    one = Counts(accounts=1, characters=0, bot_accounts=100, bot_characters=1000)
+    assert counts_phrase(one) == (
+        "1 account and 0 characters of players, plus 100 bot accounts with 1000 bot characters"
+    )
+    assert counts_phrase(Counts(accounts=2, characters=1, bot_accounts=1, bot_characters=1)) == (
+        "2 accounts and 1 character of players, plus 1 bot account with 1 bot character"
+    )
+    assert counts_phrase(Counts(accounts=0, characters=0, bot_accounts=0, bot_characters=0)) == (
+        "0 accounts and 0 characters of players"
+    )
+    assert counts_phrase(Counts(accounts=2, characters=3, bot_accounts=500)) == (
+        "2 accounts and 3 characters of players, plus 500 bot accounts"
+    )
