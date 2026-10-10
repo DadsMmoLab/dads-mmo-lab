@@ -191,7 +191,7 @@
           {
             "repo": "cmangos/tbc-db",
             "dest": "src/tbc-db",
-            "rev": "866723612d93791e442fb1b18d642118fa682edd"
+            "rev": "ebe51a83b0fde5397f0ecd82a36cb6c40f667d36"
           }
         ]
       },
@@ -1513,7 +1513,7 @@
             "repo": "thomasjteachey/TrinityCore112",
             "branch": "CENTURION",
             "dest": "src/centurion",
-            "rev": "4948d1a9290cb1046eede1dbf289789200ea050e"
+            "rev": "25d3e6efbee97c3cb38830003e2460d98e235f46"
           }
         ]
       },
