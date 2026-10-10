@@ -524,7 +524,7 @@ class LogsView(QWidget):
             return bundle.save(dest, sources, seams=seams, progress=relay.emit_line)
 
         self._set_saving(dest)
-        self.status.setText("Saving the support file… this takes under a minute.")
+        self.status.setText("Saving the support file…")
         self._jobs(work, self._saved, self._save_failed)
         return True
 
@@ -579,6 +579,6 @@ class LogsView(QWidget):
         if self._saving_to is None:
             return None
         return (
-            "Yu'lon is still saving the support file. It finishes on its own within a "
-            "minute; close the window again then."
+            "Yu'lon is still saving the support file. It finishes on its own; "
+            "close the window again then."
         )

@@ -25,10 +25,11 @@ the cap). Every drop and cut is a
 manifest line. Only when every file is at its floor is a zip written over the
 cap, and then the manifest and the tab say so.
 **It is made quickly** (T638): the cleaner reads each text twice and costs ~1.7 s per MiB, so
-`_trim()` bounds what it reads BEFORE it starts -- an old run, snapshot or app log rotation keeps
-its last `OLD_TAIL`, the old ones share `OLD_BUDGET` (the oldest beyond it are left out), and the
-rest share `RECENT_BUDGET` by the order of the size cuts below -- and the manifest names every cut
-and every log left out. `progress` is told what is happening, in words with no file name.
+`_trim()` bounds what it reads BEFORE it starts for the OLD logs only -- an old run, snapshot or
+app log rotation keeps its last `OLD_TAIL`, and the old ones share `OLD_BUDGET` (the oldest beyond
+it are left out). The newest runs, the app log, containers and confs are left to the size cap.
+The manifest names every cut and every log left out. `progress` is told what is happening, in
+words with no file name.
 **A very short password is named, never promised away**: one under the
 redactor's `TOKEN_FLOOR` is masked only where a password is written, so the
 manifest says where one is set and asks the user to look before sharing.
@@ -68,13 +69,11 @@ OLD_TAIL = 128 * 1024
 """Bytes. An old run, a snapshot or an app log rotation keeps only its last this much (T638)."""
 
 OLD_BUDGET = 1024 * 1024
-"""Bytes of old logs, together, that are cleaned; the oldest beyond it are left out (T638)."""
+"""Bytes of old logs, together, that are cleaned; the oldest beyond it are left out (T638).
 
-RECENT_BUDGET = 3 * 1024 * 1024
-"""Bytes of everything else (newest runs, app log, containers, confs), together, that are
-cleaned; the cuts of `_fit()` order shorten them to it (T638). The cleaner reads each text twice
-at ~1.7 s per MiB on a fast machine and several times that on a slow one, so what it is handed
-is bounded here, before it starts, and not after the zip is known to be too big."""
+The newest runs, the app log, the container logs and the confs are NOT shortened for speed: the
+start of a failed install is the diagnosis, and only the size cap (`_fit`) may cut them.
+"""
 
 _ENTRY_OVERHEAD = 128
 """Local header + central directory record per member, rounded up, for the size estimate."""
@@ -376,12 +375,20 @@ def build(
 
     def manifest(fit: _Fit, over: bool) -> _Member:
         text = _manifest_text(
-            stamp, fit, collector.skipped, gaps, short, cap_bytes, quick=quick, over=over
+            stamp,
+            fit,
+            collector.skipped,
+            gaps,
+            short,
+            cap_bytes,
+            quick=_final(quick, fit),
+            over=over,
         )
         return _Member("MANIFEST.txt", redactor.redact(text).encode("utf-8"), "manifest")
 
     say("Packing the zip…")
     fit, data = _fit(members, cap_bytes, manifest, redactor.checked, newest_runs)
+    quick = _final(quick, fit)
     say("Writing the file…")
     _write_atomically(dest, data)
     logger.info(f"support file written: {len(fit.kept)} files, {len(data)} bytes")
@@ -409,6 +416,12 @@ def short_password_warning(where: Sequence[str]) -> str:
         "from ordinary log lines, where it would take out everyday words too: look for it "
         "before you share anything from here, and consider a longer password."
     )
+
+
+def _cut_line(name: str, size: int) -> str:
+    if size == 0:
+        return f"  {name}  nothing of it kept (its final line alone was over the limit)"
+    return f"  {name}  last {size} bytes kept"
 
 
 def _manifest_text(
@@ -463,7 +476,7 @@ def _manifest_text(
             "",
             "Cut shorter to keep saving this file quick (the END of each is kept):",
         ]
-        lines += [f"  {name}  last {size} bytes kept" for name, size in sorted(quick.cuts.items())]
+        lines += [_cut_line(name, size) for name, size in sorted(quick.cuts.items())]
     if fit.unvouched:
         lines += ["", "Left out because the cleaner could not vouch for the shorter text:"]
         lines += [f"  {m.name}" for m in fit.unvouched]
@@ -472,7 +485,7 @@ def _manifest_text(
             "",
             f"Cut shorter to keep the file under {megabytes} MB (the END of each is kept):",
         ]
-        lines += [f"  {name}  last {size} bytes kept" for name, size in sorted(fit.cuts.items())]
+        lines += [_cut_line(name, size) for name, size in sorted(fit.cuts.items())]
     if over:
         lines += [
             "",
@@ -534,10 +547,23 @@ class _Quick:
     dropped: list[_Member]
 
 
-def _tail(member: _Member, limit: int) -> _Member:
-    """`member` keeping its last `limit` bytes of RAW text, on a line boundary (T638).
+def _only_the_notice(raw: str) -> bool:
+    """`raw` is a cut's notice and nothing after it: no whole line fitted (T638)."""
+    return raw.startswith("[earlier lines dropped") and raw.count("\n") == 1
 
-    Cut BEFORE cleaning, like `_shorter()`, so a secret is never split by the cut.
+
+def _kept_bytes(member: _Member) -> int:
+    """The bytes of its text a cut left, or 0 when nothing but the notice is left of it."""
+    assert member.raw is not None
+    return 0 if _only_the_notice(member.raw) else _raw_size(member)
+
+
+def _tail(member: _Member, limit: int) -> _Member:
+    """`member` keeping whole lines from the END of its RAW text, within `limit` bytes (T638).
+
+    Cut BEFORE cleaning, like `_shorter()`, so a secret is never split by the cut: the first
+    line of the kept tail is dropped unless it starts the text, and a tail with no newline in
+    it (the last line alone is over the limit) keeps nothing but the notice.
     """
     assert member.raw is not None
     notice = (
@@ -557,11 +583,11 @@ def _is_old(member: _Member, newest_runs: frozenset[str]) -> bool:
 
 
 def _trim(members: list[_Member], newest_runs: frozenset[str]) -> _Quick:
-    """Bound what the cleaner reads (T638): old logs to their tail and a shared budget, the
-    rest to a shared budget by `_next_cut`'s order, never below `MIN_TAIL` and never dropped.
+    """Bound what the cleaner reads (T638): old logs to their tail and a shared budget.
 
     The cleaner reads every kept text twice and its cost is linear in the size, so this is
     what makes the press quick. Every cut and every log left out is named in the manifest.
+    The newest runs, the app log, containers and confs are not touched here.
     """
     quick = _Quick(kept=list(members), cuts={}, dropped=[])
     old: list[_Member] = []
@@ -570,7 +596,7 @@ def _trim(members: list[_Member], newest_runs: frozenset[str]) -> _Quick:
             if _raw_size(member) > OLD_TAIL:
                 member = _tail(member, OLD_TAIL)
                 quick.kept[index] = member
-                quick.cuts[member.name] = _raw_size(member)
+                quick.cuts[member.name] = _kept_bytes(member)
             old.append(member)
     old.sort(key=lambda m: m.mtime)
     # Oldest first out, until the old logs together fit their share.
@@ -579,20 +605,15 @@ def _trim(members: list[_Member], newest_runs: frozenset[str]) -> _Quick:
         quick.kept.remove(victim)
         quick.dropped.append(victim)
         quick.cuts.pop(victim.name, None)
-    old_names = {m.name for m in old}
-    while True:
-        recent = [m for m in quick.kept if m.name not in old_names]
-        if sum(_raw_size(m) for m in recent) <= RECENT_BUDGET:
-            return quick
-        weight = {m.name: _raw_size(m) for m in recent}
-        found = _next_cut(recent, weight, newest_runs)
-        if found is None:
-            return quick
-        member = recent[found]
-        index = quick.kept.index(member)
-        member = _tail(member, max(_raw_size(member) // 2, MIN_TAIL))
-        quick.kept[index] = member
-        quick.cuts[member.name] = _raw_size(member)
+    return quick
+
+
+def _final(quick: _Quick, fit: _Fit) -> _Quick:
+    """`quick` as the zip ends up: a cut file the cleaner refused or the size cap left out is not
+    listed as cut, and one the size cap cut further is listed with its final size (T638)."""
+    kept = {member.name for member in fit.kept}
+    cuts = {name: fit.cuts.get(name, size) for name, size in quick.cuts.items() if name in kept}
+    return _Quick(kept=quick.kept, cuts=cuts, dropped=quick.dropped)
 
 
 def _clean(
@@ -755,7 +776,7 @@ def _fit(
             return True
         fit.kept[index] = shorter
         weight[shorter.name] = _estimate(shorter)
-        fit.cuts[shorter.name] = _raw_size(shorter)
+        fit.cuts[shorter.name] = _kept_bytes(shorter)
         return True
 
     def estimated() -> int:

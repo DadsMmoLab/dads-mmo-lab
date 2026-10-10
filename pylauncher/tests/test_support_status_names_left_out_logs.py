@@ -23,7 +23,7 @@ from yulon.support.sources import Sources
 def _size_cap_tests_run_without_the_quick_trim(monkeypatch: pytest.MonkeyPatch) -> None:
     """These tests are about the zip's SIZE cap; the cleaner's read budget (T638, its own tests
     are `test_support_bundle_quick.py`) would shorten their logs before the cap is reached."""
-    for name in ("OLD_TAIL", "OLD_BUDGET", "RECENT_BUDGET"):
+    for name in ("OLD_TAIL", "OLD_BUDGET"):
         monkeypatch.setattr(bundle, name, 1 << 40)
 
 

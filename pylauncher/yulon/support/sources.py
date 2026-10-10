@@ -486,11 +486,14 @@ def _cut(data: bytes, notice: str = _TRUNCATION_NOTICE) -> str:
 
     `errors="ignore"` because a byte cut can land inside a multi-byte
     character; the partial line it produces is then dropped with `partition`
-    (`logsnap._trim`'s reasoning).
+    (`logsnap._trim`'s reasoning). A tail with no newline in it is ONE partial line
+    (a progress bar redrawn with `\\r`, a last line written without its newline):
+    nothing of it is kept, because it starts mid-line and may have cut a key's name
+    off the front of its value (T638).
     """
     tail = data.decode("utf-8", errors="ignore")
-    _, newline, whole = tail.partition("\n")
-    return notice + (whole if newline else tail)
+    _, _newline, whole = tail.partition("\n")
+    return notice + whole
 
 
 def read_tail(path: Path, limit: int = FILE_CAP) -> str:

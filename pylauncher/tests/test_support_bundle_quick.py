@@ -19,6 +19,7 @@ import pytest
 from tests.test_support_bundle import _seams
 from yulon import platform
 from yulon.support import bundle, runlog
+from yulon.support import sources as src
 from yulon.support.redact import Redactor
 from yulon.support.sources import Sources
 
@@ -129,23 +130,11 @@ def test_what_the_cleaner_reads_stays_inside_the_budget(
     config = platform.config_dir()
     for day in range(1, 13):
         _write_run(config, f"202609{day:02d}T100000Z", 30_000, 1_000 + day)
+    _write_run(config, "20260920T100000Z", 100, 5_000)  # the newest: not an old log
     seen = _count_cleaned(monkeypatch)
     _build(tmp_path)
     # Each text is checked once; a few small extras (names, manifest) are not logs.
-    assert sum(seen) <= bundle.OLD_BUDGET + bundle.RECENT_BUDGET + 64 * 1024, sum(seen)
-
-
-def test_the_recent_logs_share_a_budget_and_none_is_left_out(tmp_path: Path) -> None:
-    """The newest runs are cut to share the budget, never left out (T249)."""
-    config = platform.config_dir()
-    for day in (1, 2, 3, 4):
-        _write_run(config, f"202609{day:02d}T100000Z", 20_000, 1_000 + day, tag=f"r{day} ")
-    report, members = _build(tmp_path)
-    runs = [name for name in members if name.startswith("runs/")]
-    assert len(runs) >= 1
-    assert all(members[name].splitlines()[-1].endswith("END OF LOG") for name in runs)
-    newest = "runs/install-wow-tbc-20260904T100000Z.log"
-    assert newest in members and newest not in report.quick_dropped
+    assert sum(seen) <= bundle.OLD_BUDGET + 64 * 1024, sum(seen)
 
 
 @pytest.mark.parametrize("filler", range(0, 97, 7))
@@ -233,28 +222,147 @@ def test_the_press_counts_the_logs_left_out_to_keep_saving_quick(
     assert "MANIFEST.txt names them." in text, text
 
 
-def test_the_recent_logs_over_their_budget_are_cut_in_the_order_of_cuts_and_named(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Mutation: lift the recent budget and the app log and newest run both go whole to the
-    cleaner. The app log is cut before the newest run, as when the zip is over its cap."""
+def test_the_newest_runs_and_the_app_log_are_never_cut_to_save_time(tmp_path: Path) -> None:
+    """The start of a failed install is the diagnosis: only the size cap may shorten these.
+
+    Mutation: give the newest tier a budget again and the app log or the run is cut here.
+    """
     config = platform.config_dir()
     run = _write_run(config, "20260902T100000Z", 30_000, 2_000)  # ~1.8 MB
     app_log = tmp_path / "yulon.log"
-    app_log.write_text("".join(f"app {n:07d} " + "y" * 40 + "\n" for n in range(40_000)), "utf-8")
-    seen = _count_cleaned(monkeypatch)
+    app_log.write_text("".join(f"app {n:07d} " + "y" * 40 + "\n" for n in range(30_000)), "utf-8")
     dest = tmp_path / "s.zip"
-    report = bundle.build(
-        dest,
-        Sources(config, app_log, ()),
-        Redactor.build([]),
-        seams=_seams(),
-    )
+    report = bundle.build(dest, Sources(config, app_log, ()), Redactor.build([]), seams=_seams())
     members = _members(dest)
-    assert sum(seen) <= bundle.OLD_BUDGET + bundle.RECENT_BUDGET + 64 * 1024, sum(seen)
-    assert "app/yulon.log" in report.cut and run not in report.cut
-    assert members["app/yulon.log"].splitlines()[-1].startswith("app 0039999 ")
-    assert members["app/yulon.log"].startswith("[earlier lines dropped")
-    assert (
-        "  app/yulon.log  last " in members["MANIFEST.txt"].split("Cut shorter to keep saving")[1]
+    assert not report.cut and not report.quick_dropped
+    assert "line 0000001 " in members[run] and "app 0000001 " in members["app/yulon.log"]
+
+
+def _long_last_line(config: Path, secret_line: str, pad: int) -> str:
+    """An old run of short lines, then ONE long line (a `\\r` progress bar's shape) that starts
+    with the secret and is `pad` bytes of filler long."""
+    path = _runs(config) / "install-wow-tbc-20260901T100000Z.log"
+    path.write_text(
+        "short line\n" * 2000 + secret_line + "z" * pad, encoding="utf-8"
+    )  # no final newline
+    os.utime(path, (1_000, 1_000))
+    _write_run(config, "20260902T100000Z", 10, 2_000)
+    return f"runs/{path.name}"
+
+
+@pytest.mark.parametrize("shift", range(0, 240, 8))
+@pytest.mark.parametrize(
+    "secret_line, piece",
+    [
+        (f"world: sessionkey = {SESSION} ", SESSION),
+        ("MYSQL_ROOT_PASSWORD=Sup3rS3cretPw ", "Sup3rS3cretPw"),
+    ],
+    ids=["session-key", "password"],
+)
+def test_a_cut_never_keeps_the_end_of_a_line_whose_key_it_cut_off(
+    tmp_path: Path, shift: int, secret_line: str, piece: str
+) -> None:
+    """Mutation: let `_cut` keep a tail that has no newline and 40 hex of the key survive."""
+    config = platform.config_dir()
+    _long_last_line(config, secret_line, bundle.OLD_TAIL - 150 + shift)
+    _, members = _build(tmp_path)
+    text = "\n".join(members.values())
+    for start in range(0, len(piece) - 8):
+        assert piece[start : start + 9] not in text, (shift, start)
+
+
+def test_a_last_line_longer_than_the_limit_says_nothing_of_it_was_kept(tmp_path: Path) -> None:
+    """Mutation: report the notice's bytes as 'last N bytes kept' and this fails."""
+    config = platform.config_dir()
+    name = _long_last_line(config, "progress ", bundle.OLD_TAIL * 2)
+    report, members = _build(tmp_path)
+    assert members[name].startswith("[earlier lines dropped")
+    assert "zzzz" not in members[name] and "short line" not in members[name]
+    section = members["MANIFEST.txt"].split("Cut shorter to keep saving this file quick", 1)[1]
+    line = next(line for line in section.splitlines() if name in line)
+    assert "nothing of it kept" in line and "last " not in line, line
+    assert name in report.cut
+
+
+def test_a_file_the_cleaner_refuses_is_not_listed_as_cut(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mutation: leave the refused name in the quick cuts and the manifest lists it as cut."""
+    config = platform.config_dir()
+    path = _runs(config) / "install-wow-tbc-20260901T100000Z.log"
+    path.write_text("POISON\n" + "x" * 60 + "\n" * 1 + ("a line\n" * 40_000), encoding="utf-8")
+    path.write_text(("a line\n" * 40_000) + "POISON\n", encoding="utf-8")
+    os.utime(path, (1_000, 1_000))
+    _write_run(config, "20260902T100000Z", 10, 2_000)
+    real = Redactor.checked
+
+    def checked(self: Redactor, text: str) -> str:
+        if "POISON" in text:
+            raise bundle.Unredactable("test")
+        return real(self, text)
+
+    monkeypatch.setattr(Redactor, "checked", checked)
+    report, members = _build(tmp_path)
+    name = f"runs/{path.name}"
+    assert name not in members and name not in report.cut
+    assert (name, bundle.LEFT_OUT) in report.skipped
+    assert f"  {name}  last " not in members["MANIFEST.txt"]
+
+
+def test_a_cut_file_the_size_cap_leaves_out_is_not_listed_as_cut(tmp_path: Path) -> None:
+    """Mutation: do not reconcile the quick cuts with the final members."""
+    import secrets as _secrets
+
+    config = platform.config_dir()
+    names = []
+    for n in range(3):
+        path = _runs(config) / f"install-wow-tbc-2026090{n + 1}T100000Z.log"
+        path.write_text("\n".join(_secrets.token_urlsafe(60) for _ in range(5000)), "utf-8")
+        os.utime(path, (1_000 + n, 1_000 + n))
+        names.append(f"runs/{path.name}")
+    report, members = _build(tmp_path, cap_bytes=150_000)
+    assert report.dropped, "the cap must have left something out"
+    for name in report.dropped:
+        assert name not in report.cut
+        assert f"  {name}  last " not in members["MANIFEST.txt"]
+
+
+def test_a_rotation_cut_twice_is_listed_with_its_final_size(tmp_path: Path) -> None:
+    """Quick-cut to 128 KiB, then halved by the size cap: both lines carry the final count."""
+    import secrets as _secrets
+
+    config = platform.config_dir()
+    app_log = tmp_path / "yulon.log"
+    app_log.write_text("x\n", encoding="utf-8")
+    rotation = tmp_path / "yulon.log.1"
+    rotation.write_text("\n".join(_secrets.token_urlsafe(60) for _ in range(6000)), "utf-8")
+    report, members = _build_with(tmp_path, config, app_log, cap_bytes=100_000)
+    manifest = members["MANIFEST.txt"]
+    sizes = re.findall(r"  app/yulon\.log\.1  last (\d+) bytes kept", manifest)
+    assert len(sizes) == 2 and sizes[0] == sizes[1], sizes
+    assert len(members["app/yulon.log.1"].encode()) == int(sizes[0])
+
+
+def _build_with(
+    tmp_path: Path, config: Path, app_log: Path, **kwargs: object
+) -> tuple[bundle.BundleReport, dict[str, str]]:
+    dest = tmp_path / "s2.zip"
+    report = bundle.build(
+        dest, Sources(config, app_log, ()), Redactor.build([]), seams=_seams(), **kwargs  # type: ignore[arg-type]
     )
+    return report, _members(dest)
+
+
+def test_the_cut_of_a_text_without_a_newline_keeps_nothing_but_the_notice(tmp_path: Path) -> None:
+    """`read_tail` of a file whose last line alone is over the limit: no half line (T638)."""
+    path = tmp_path / "one-line.log"
+    path.write_text("a" * 300 + "SECRET" + "b" * 300, encoding="utf-8")
+    text = src.read_tail(path, 400)
+    assert text == src._TRUNCATION_NOTICE
+
+
+def test_the_press_promises_no_duration(qapp: object, tmp_path: Path) -> None:
+    """A slow box with a stuck docker can exceed any promise; the progress line is enough."""
+    view, _held = _held_view(tmp_path / "s.zip")
+    assert "minute" not in view.status.text()  # type: ignore[attr-defined]
+    assert "minute" not in (view.busy_reason() or "")  # type: ignore[attr-defined]
