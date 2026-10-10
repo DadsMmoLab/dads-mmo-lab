@@ -72,7 +72,9 @@ NEW_DIST = _DIST_BODY.format(p="Playerbots.")
 OLD_CONF = (
     "# my notes: ünïcode kept\n"
     "AiPlayerbot.Enabled = 1\n"
+    "AiPlayerbot.RandomBotAutologin = 1\n"
     "  AiPlayerbot.MinRandomBots = 50\r\n"
+    "AiPlayerbot.MaxRandomBots = 50\n"
     "#AiPlayerbot.CommandServerPort = 8888\n"
     'AiPlayerbot.RandomBotAccountPrefix = "mybot"\n'
     "AiPlayerbot.MaxAddedBots = 12\n"
@@ -800,3 +802,90 @@ def test_a_rebuild_that_uses_the_kept_build_records_the_prefix_it_was_made_from(
 
     assert "build" not in rec.calls, "the kept build was used, nothing was compiled"
     assert playerbots_rename.read_built(server_dir) == playerbots_keys.NEW
+
+
+# -- keys the newer module has and the old conf lacks (T662) --------------------------
+
+NEWER_DIST = (
+    NEW_DIST + "\n#\n#    Playerbots.ReactStrategies\n#    Strategies bots react with\n"
+    '#    Default: ""\n#\nPlayerbots.ReactStrategies = ""\n'
+    '\n# Random bots\' own\nPlayerbots.RandomBotReactStrategies = "x,y"\n'
+    "#Playerbots.ACommentedOne = 3\n"
+)
+MARKER = "Added by Yu'lon from the new module"
+
+
+def _forward_server(server_dir: Path) -> None:
+    _installed(server_dir, OLD_DIST, OLD_CONF)
+    lay_module(server_dir, NEWER_DIST)
+
+
+def test_a_conf_moved_forward_gets_the_keys_the_new_module_has(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _forward_server(tmp_path)
+
+    controller, _started = _start(monkeypatch, tmp_path)
+
+    text = (tmp_path / CONF).read_bytes().decode("utf-8")
+    assert text.startswith(NEW_CONF), "the renamed conf is untouched above the addition"
+    tail = text[len(NEW_CONF) :]
+    assert MARKER in tail
+    assert "#    Strategies bots react with" in tail, "its comment block comes with it"
+    assert 'Playerbots.ReactStrategies = ""' in tail
+    assert 'Playerbots.RandomBotReactStrategies = "x,y"' in tail
+    assert "ACommentedOne" not in tail, "a key the dist only comments out is not added"
+    assert "Playerbots.Enabled" not in tail, "a key the conf has is not added again"
+    said = controller.bot_settings_renamed
+    assert said is not None and "added 2" in said
+
+
+def test_adding_the_new_keys_is_done_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _forward_server(tmp_path)
+    _start(monkeypatch, tmp_path)
+    first = (tmp_path / CONF).read_bytes()
+    again, _started = _start(monkeypatch, tmp_path)
+    assert (tmp_path / CONF).read_bytes() == first
+    assert again.bot_settings_renamed is None
+    assert (tmp_path / CONF).read_bytes().count(MARKER.encode()) == 1
+
+
+def test_the_backward_rename_keeps_the_added_keys_under_the_old_prefix(tmp_path: Path) -> None:
+    _forward_server(tmp_path)
+    playerbots_rename.settle(WOTLK, tmp_path)
+    lay_module(tmp_path, OLD_DIST)
+    playerbots_rename.settle(WOTLK, tmp_path)
+    text = (tmp_path / CONF).read_bytes().decode("utf-8")
+    assert 'AiPlayerbot.ReactStrategies = ""' in text, "unread by the old module: harmless"
+    assert "\nPlayerbots.ReactStrategies" not in text
+    assert text.count(MARKER) == 1
+
+
+def test_the_backward_rename_adds_nothing_from_the_old_dist(tmp_path: Path) -> None:
+    _forward_server(tmp_path)
+    playerbots_rename.settle(WOTLK, tmp_path)
+    lay_module(tmp_path, OLD_DIST + "AiPlayerbot.OnlyOld = 1\n")
+    playerbots_rename.settle(WOTLK, tmp_path)
+    assert "OnlyOld" not in (tmp_path / CONF).read_bytes().decode("utf-8")
+
+
+def test_the_marker_is_written_once_however_many_times_keys_are_added() -> None:
+    first, _ = playerbots_rename.add_missing_keys(NEW_CONF, NEWER_DIST)
+    more = NEWER_DIST + "Playerbots.AnotherNew = 1\n"
+    second, added = playerbots_rename.add_missing_keys(first, more)
+    assert added == 1 and second.count(MARKER) == 1 and "Playerbots.AnotherNew = 1" in second
+
+
+def test_a_conf_already_on_the_new_names_is_not_added_to(tmp_path: Path) -> None:
+    _installed(tmp_path, NEWER_DIST, NEW_CONF)
+    assert playerbots_rename.settle(WOTLK, tmp_path) is None
+    assert (tmp_path / CONF).read_bytes().decode("utf-8") == NEW_CONF
+
+
+def test_a_crlf_conf_gets_crlf_lines(tmp_path: Path) -> None:
+    _installed(tmp_path, OLD_DIST, OLD_CONF.replace("\r\n", "\n").replace("\n", "\r\n"))
+    lay_module(tmp_path, NEWER_DIST)
+    playerbots_rename.settle(WOTLK, tmp_path)
+    raw = (tmp_path / CONF).read_bytes()
+    assert b"\n" not in raw.replace(b"\r\n", b""), "no bare line feed was written"
+    assert b'Playerbots.ReactStrategies = ""' in raw

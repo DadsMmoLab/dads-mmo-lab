@@ -13,6 +13,12 @@ and the player wrote to match, in the three files that hold such names:
 * the command channel's copy of the override from before its press
   (`<override>.before-channel`), which its rollback puts back.
 
+**Keys the new module added (T662).** A conf moved forward also gets the keys the module's
+`playerbots.conf.dist` assigns and the conf lacks, appended with their comment block under
+`ADDED_MARKER`, so the world does not log them as "Missing property". Keys the module dropped
+stay. Moving back renames the added keys with the rest and leaves them: the old module never
+reads them, and the next forward move finds them there and adds nothing.
+
 **When.** Right before every start of the world: the Server tab's Start, Restart and
 recreate (`Controller.start()`, also the Bots tab's Apply… recreate), the install's
 `up` and a rebuild's recreate (Rebuild, "Update the server to latest…", "Return to the
@@ -84,6 +90,12 @@ OLDER_BUILD = (
     "that stopped before its compile finished leaves this). Yu'lon did not rename your settings "
     "and did not start the server, because the build that would run ignores {now}* settings. "
     "Press {rebuild} to build what the folder holds."
+)
+
+ADDED_MARKER = "# --- Added by Yu'lon from the new module's playerbots.conf.dist ---"
+ADDED_NOTE = (
+    " It also added {added} setting{s} the new module has and this file lacked (under a "
+    "marker at the end of playerbots.conf), so the world does not log them as missing."
 )
 
 
@@ -175,6 +187,46 @@ def rename_conf_text(text: str, prefix: str) -> tuple[str, int]:
     return "\n".join(lines), count
 
 
+def _dist_entries(dist: str) -> list[tuple[str, list[str]]]:
+    """`(key, lines)` for every ACTIVE assignment in `dist`, with the comment block above it."""
+    lines = dist.replace("\r\n", "\n").split("\n")
+    found: list[tuple[str, list[str]]] = []
+    for index, line in enumerate(lines):
+        match = _CONF_LINE.match(line)
+        if match is None or match.group("hash"):
+            continue
+        start = index
+        while start > 0 and lines[start - 1].lstrip().startswith("#"):
+            start -= 1
+        found.append((match.group("key"), lines[start : index + 1]))
+    return found
+
+
+def add_missing_keys(text: str, dist: str) -> tuple[str, int]:
+    """`text` with the keys `dist` assigns and `text` lacks added at its end, and how many.
+
+    For a conf already on the dist's prefix. Each comes with the comment block above it in
+    the dist, under `ADDED_MARKER` (written once). A key is there when the conf has it
+    active or commented out. Keys the module dropped are left where they are.
+    """
+    have = {
+        match.group("key")
+        for line in text.replace("\r\n", "\n").split("\n")
+        if (match := _CONF_LINE.match(line.removeprefix(BOM))) is not None
+    }
+    missing = [lines for key, lines in _dist_entries(dist) if key not in have]
+    if not missing:
+        return text, 0
+    ending = "\r\n" if "\r\n" in text else "\n"
+    block: list[str] = []
+    if ADDED_MARKER not in text:
+        block += ["", ADDED_MARKER]
+    for lines in missing:
+        block += ["", *lines]
+    lead = "" if text.endswith("\n") or not text else ending
+    return text + lead + ending.join(block) + ending, len(missing)
+
+
 def rename_env_text(text: str, service: str, prefix: str) -> tuple[str, int]:
     """`text` with `service`'s environment names under `prefix`, and how many lines changed."""
     lines = text.split("\n")
@@ -202,6 +254,7 @@ class _Change:
     text: str
     count: int
     backed_up: bool
+    added: int = 0
 
 
 def _read(path: Path) -> str:
@@ -214,8 +267,12 @@ def _changes(entry: CatalogEntry, server_dir: Path, prefix: str) -> list[_Change
     conf_path = server_dir / playerbots_keys.CONF
     if conf_path.is_file() and not conf_path.is_symlink():
         text, count = rename_conf_text(_read(conf_path), prefix)
+        added = 0
+        dist = playerbots_keys.read_dist(server_dir)
+        if prefix == playerbots_keys.NEW and dist is not None:
+            text, added = add_missing_keys(text, dist)
         if count:
-            found.append(_Change(conf_path, text, count, backed_up=True))
+            found.append(_Change(conf_path, text, count, backed_up=True, added=added))
     base = server_dir / composegen.BASE_FILE
     if not (base.is_file() and composegen.is_ours(base)):
         return found
@@ -268,4 +325,8 @@ def settle(entry: CatalogEntry, server_dir: Path) -> str | None:
         return None
     count = sum(change.count for change in said)
     files = ", ".join(change.path.name for change in said)
-    return SAID.format(new=prefix, old=old, count=count, s="" if count == 1 else "s", files=files)
+    line = SAID.format(new=prefix, old=old, count=count, s="" if count == 1 else "s", files=files)
+    added = sum(change.added for change in said)
+    if added:
+        line += ADDED_NOTE.format(added=added, s="" if added == 1 else "s")
+    return line
