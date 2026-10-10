@@ -640,6 +640,26 @@ class MmapPlan(_Strict):
         return value
 
 
+class ConfDefaultsFollow(_Strict):
+    """Where a live conf's template lives in a source, so a press that moves it can follow it.
+
+    T656: TortoiseBots changed a default (cb90e735, `PoolBudgetWhenTickOverMs` 150 -> 0) that
+    an installed server's conf, made once at install, would otherwise keep for ever. The
+    update route reads this file at the commit it leaves and at the one it lands on.
+    """
+
+    repo: str = Field(min_length=1, description="The emulator source's `repo` holding the file.")
+    path: str = Field(min_length=1, description="The template, relative to that checkout.")
+
+    @field_validator("path")
+    @classmethod
+    def _relative(cls, value: str) -> str:
+        path = PurePosixPath(value)
+        if "\\" in value or path.is_absolute() or ".." in path.parts:
+            raise ValueError(f"path must be a relative POSIX path in the checkout, got {value!r}")
+        return value
+
+
 class ConfPatch(_Strict):
     """One conf file's `Key = value` table; values take the `{{TOKEN}}` grammar."""
 
@@ -666,6 +686,15 @@ class ConfPatch(_Strict):
             "`tortoise_bots.conf`. Both were an InstallerError before this field, and a "
             "changed DEFAULT would have made the other three games' images answer a question "
             "nobody had asked them."
+        ),
+    )
+    defaults_follow: ConfDefaultsFollow | None = Field(
+        default=None,
+        description=(
+            "The source file this conf's defaults come from (T656). When an update or a "
+            "return moves that source, a live value still equal to the old commit's default "
+            "is set to the new one; a value the player changed, and every key of `keys`, is "
+            "kept. None: the live file is never touched by a move."
         ),
     )
 

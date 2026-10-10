@@ -75,7 +75,7 @@ from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import ClassVar, cast
 
-from yulon import core_modules, dbsecret, docker, git, platform, server_build_presses
+from yulon import core_modules, dbsecret, docker, git, platform, server_build_presses, tuning
 from yulon.catalog import bot_count, bot_dashboard, composegen, snapshot
 from yulon.catalog.catalog import (
     CmangosData,
@@ -574,7 +574,131 @@ class CmangosInstaller(StagedInstaller):
                     reports, source, dest, old, self._seams.head_sha(dest)
                 )
         yield from self._refuse_newer_migrations(server_dir, moved, to_pin=to_pin)
-        return catch_up
+        return _MovedChanges(catch_up=catch_up, confs=self._conf_defaults_moved(moved))
+
+    # -- a moved module's changed conf defaults, carried into the live conf (T656) ----
+
+    def _conf_defaults_moved(
+        self, moved: Sequence[tuple[EmulatorSource, Path, str]]
+    ) -> tuple[_ConfDefaults, ...]:
+        """Per conf that follows a moved source's template, the defaults that changed.
+
+        Read from git at the commit the checkout left and the one it stands on now
+        (`Seams.tree_bytes`), never from disk or from memory: TortoiseBots cb90e735 moved
+        `AiPlayerbot.PoolBudgetWhenTickOverMs` 150 -> 0 and the four pool keys the install
+        writes anyway. A key of the conf table's own `keys` is Yu'lon's and is left out;
+        so is a value cmake fills in (`@VAR@`), whose built value the template does not say.
+        Nothing is written here: the press still may refuse, and the file is changed with
+        the servers down (`servers_down_work()`).
+        """
+        by_repo = {source.repo: (dest, old) for source, dest, old in moved}
+        found: list[_ConfDefaults] = []
+        for name, table in self._data().conf.files.items():
+            follow = table.defaults_follow
+            if follow is None or follow.repo not in by_repo:
+                continue
+            dest, old = by_repo[follow.repo]
+            new = self._seams.head_sha(dest)
+            if new is None or new == old:
+                continue
+            before = self._template_defaults(dest, old, follow.path)
+            after = self._template_defaults(dest, new, follow.path)
+            if before is None or after is None:
+                found.append(_ConfDefaults(name, follow.repo, old, new, None))
+                continue
+            changed = tuple(
+                (key, before[key], after[key])
+                for key in sorted(before)
+                if key in after
+                and before[key] != after[key]
+                and key not in table.keys
+                and "@" not in before[key] + after[key]
+            )
+            if changed:
+                found.append(_ConfDefaults(name, follow.repo, old, new, changed))
+        return tuple(found)
+
+    def _template_defaults(self, dest: Path, rev: str, path: str) -> dict[str, str] | None:
+        """Each key the template at `rev` sets exactly once, with its value; None = unread."""
+        files = self._seams.tree_bytes(dest, rev, path)
+        data = None if files is None else files.get(path)
+        if data is None:
+            return None
+        text = data.decode("utf-8", "replace")
+        values: dict[str, str] = {}
+        for key, count in _assignments(text).items():
+            value = tuning.conf_value(text, key) if count == 1 else None
+            if value is not None:
+                values[key] = value
+        return values
+
+    def _carry_defaults(
+        self, server_dir: Path, item: _ConfDefaults, written: list[tuple[Path, Path]]
+    ) -> Iterator[str]:
+        """Set each live value still equal to the old default to the new one, after a backup.
+
+        A key set more than once is left alone: which copy the server reads is its
+        parser's business (ACE's INI import here, AzerothCore's first-wins elsewhere),
+        and a guess would move the copy it ignores. A key the file does not set is the
+        code's default, which moved with the template.
+        """
+        path = server_dir / ETC_DIR / item.name
+        if item.moved is None:
+            yield (
+                f"Yu'lon could not read {item.repo}'s template for {item.name} at both "
+                f"commits, so {item.name} is kept as it is."
+            )
+            return
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            yield f"{item.name} could not be read ({exc}), so it is kept as it is."
+            return
+        counts = _assignments(text)
+        edits = {
+            key: new
+            for key, old, new in item.moved
+            if counts.get(key) == 1 and tuning.conf_value(text, key) == old
+        }
+        if not edits:
+            return
+        try:
+            made = tuning.write(path, edits, root=server_dir)
+        except (OSError, tuning.TuningError) as exc:
+            yield f"{item.name} could not be changed ({exc}), so it is kept as it is."
+            return
+        written.append((path, made))
+        said = ", ".join(f"{key} {old} -> {new}" for key, old, new in item.moved if key in edits)
+        yield (
+            f"{item.name}: {said}, the new default of {item.repo} at {item.new[:7]}; a value "
+            f"you had changed is kept, and the file as it was is {made.name}."
+        )
+
+    def _conf_defaults_work(
+        self, server_dir: Path, confs: tuple[_ConfDefaults, ...]
+    ) -> ServersDownWork | None:
+        """`_carry_defaults()` with the servers down; a rollback puts each file back."""
+        if not confs:
+            return None
+        written: list[tuple[Path, Path]] = []
+
+        def forward(ctx: StageContext) -> Iterator[str]:
+            for item in confs:
+                yield from self._carry_defaults(server_dir, item, written)
+
+        def back(ctx: StageContext) -> Iterator[str]:
+            while written:
+                path, made = written.pop()
+                try:
+                    tuning.restore(made, path)
+                except OSError as exc:
+                    yield f"{path.name} could not be put back from {made.name}: {exc}"
+                    continue
+                yield f"{path.name} is back as it was before this press ({made.name})."
+
+        return ServersDownWork(
+            prepare=lambda: iter(()), forward=forward, back=back, finishes_start_refusal=False
+        )
 
     # -- going back over migrations a newer build already applied (T632) ----
 
@@ -998,12 +1122,35 @@ class CmangosInstaller(StagedInstaller):
         copies nothing; owner, 2026-10-04), so what went in stays with its ledger rows, and
         the next press applies only what is still missing. `finishes_start_refusal` is False:
         this work clears nothing that refuses a start.
+
+        T656: and the defaults a moved module changed, carried into the live confs that
+        follow its template (`_conf_defaults_work()`), after the world's work and put back
+        before it on a rollback.
         """
-        if not isinstance(changes, _WorldCatchUp) or not (
-            changes.applying() or changes.replacing() or changes.reapplying()
-        ):
+        if not isinstance(changes, _MovedChanges):
             return None
-        catch_up = changes
+        world = self._world_catch_up_work(changes.catch_up)
+        confs = self._conf_defaults_work(server_dir, changes.confs)
+        if world is None or confs is None:
+            return world or confs
+        first, then = world, confs
+
+        def forward(ctx: StageContext) -> Iterator[str]:
+            yield from first.forward(ctx)
+            yield from then.forward(ctx)
+
+        def back(ctx: StageContext) -> Iterator[str]:
+            yield from then.back(ctx)
+            yield from first.back(ctx)
+
+        return ServersDownWork(
+            prepare=lambda: iter(()), forward=forward, back=back, finishes_start_refusal=False
+        )
+
+    def _world_catch_up_work(self, catch_up: _WorldCatchUp) -> ServersDownWork | None:
+        """T531's work: the `apply_new` files a `*-db` pin adds, or None when there are none."""
+        if not (catch_up.applying() or catch_up.replacing() or catch_up.reapplying()):
+            return None
         applied: list[int] = [0, 0]
         """World updates applied, bot table files loaded: what a rollback leaves in place."""
 
@@ -4290,6 +4437,32 @@ class CmangosInstaller(StagedInstaller):
 
 
 @dataclass(frozen=True)
+class _ConfDefaults:
+    """One live conf whose template's defaults changed between two commits of a source (T656)."""
+
+    name: str
+    """The conf table's file name, under the server's `etc`."""
+    repo: str
+    old: str
+    new: str
+    moved: tuple[tuple[str, str, str], ...] | None
+    """`(key, old default, new default)` per changed key; None when git could not say."""
+
+
+def _assignments(text: str) -> dict[str, int]:
+    """How many active `Key = value` lines set each key (a `#`, `;` or `[` line sets none)."""
+    counts: dict[str, int] = {}
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped[0] in "#;[" or "=" not in stripped:
+            continue
+        key = stripped.split("=", 1)[0].strip()
+        if key:
+            counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+@dataclass(frozen=True)
 class _WorldCatchUp:
     """The plan's `on_update` phases, each with the source whose checkout holds its files (T531)."""
 
@@ -4381,6 +4554,14 @@ def _glob_names(glob: str, path: str) -> bool:
     folder, pattern = posixpath.split(glob)
     where, name = posixpath.split(path)
     return where == folder and fnmatch.fnmatchcase(name, pattern)
+
+
+@dataclass(frozen=True)
+class _MovedChanges:
+    """What `check_moved_sources()` found, for `servers_down_work()` (T531, T656)."""
+
+    catch_up: _WorldCatchUp
+    confs: tuple[_ConfDefaults, ...]
 
 
 @dataclass

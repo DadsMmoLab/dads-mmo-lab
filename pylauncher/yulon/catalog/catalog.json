@@ -1115,13 +1115,13 @@
             "repo": "tortoise-wow/tortoise-wow",
             "branch": "1181dev",
             "dest": "src/tortoise-wow",
-            "rev": "187af788177aa2f9f0e61eb8c5b9653d8f4f7199"
+            "rev": "6131a26f91d60e64f6d58c7f0a9b6333f2d9f25a"
           },
           {
             "repo": "Sagiroth/TortoiseBots",
             "branch": "main",
             "dest": "src/tortoise-wow/modules/TortoiseBots",
-            "rev": "83d88fdc034b224d88a2ecade975e26f8d1d513c",
+            "rev": "fb0b2eb54634db93d855011342e01750478d1702",
             "follow": "releases"
           }
         ]
@@ -1244,6 +1244,10 @@
               "files": {
                 "aiplayerbot.conf": {
                   "template": "aiplayerbot.conf",
+                  "defaults_follow": {
+                    "repo": "Sagiroth/TortoiseBots",
+                    "path": "ai/playerbot/aiplayerbot.conf.dist.in"
+                  },
                   "keys": {
                     "AiPlayerbot.Enabled": "1",
                     "AiPlayerbot.RandomBotAutoCreate": "1",
@@ -1255,6 +1259,10 @@
                 },
                 "modules/tortoise_bots.conf": {
                   "template": "modules/tortoise_bots.conf.dist",
+                  "defaults_follow": {
+                    "repo": "Sagiroth/TortoiseBots",
+                    "path": "conf/tortoise_bots.conf.dist"
+                  },
                   "keys": {
                     "TortoiseBots.AutoTest": "0",
                     "TortoiseBots.PacketBridgeTest": "0",
@@ -1407,7 +1415,7 @@
                 "file": "wow-tortoise/patches/updater-no-wait-for-enter.patch",
                 "source": "src/tortoise-wow",
                 "obsolete_when_absent": "std::getline(std::cin",
-                "reason": "tortoise-wow's DB auto-updater ends a failed migration with std::getline(std::cin) (src/shared/Database/AutoUpdater.cpp:236-239 at 187af788); the world container keeps stdin open for the Console tab, so the read never returns and a failed update hangs the world with no signal handler, no SOAP and no error line. The patch drops the read so the world reports the failure and exits, as Shyalya's fork did in b405b10adb"
+                "reason": "tortoise-wow's DB auto-updater ends a failed migration with std::getline(std::cin) (src/shared/Database/AutoUpdater.cpp:236-239 at 187af788, the same bytes at 6131a26f); the world container keeps stdin open for the Console tab, so the read never returns and a failed update hangs the world with no signal handler, no SOAP and no error line. The patch drops the read so the world reports the failure and exits, as Shyalya's fork did in b405b10adb"
               }
             ]
           }

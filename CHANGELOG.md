@@ -76,6 +76,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ### Changed
 - Centurion and TBC servers move to newer builds of their sources; there is nothing new for players to notice.
 - WotLK and WoW Unbound are tested on the newest AzerothCore Playerbot core and mod-playerbots, with mod-ale to match.
+- Tortoise installs the TortoiseBots of 10 October; updating moves bot settings you never changed to its new defaults.
 - WoW Unbound is built on the same newer server core as WotLK; **Return to the tested pin…** moves an existing one there.
 - NPC Teleporter follows its author's new menu numbers; installing over an older install keeps the base game's menus.
 - The Tortoise bot dashboard switches on in seconds from TortoiseBots' ready-made program when one fits your server.
