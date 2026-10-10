@@ -529,8 +529,8 @@ def test_the_install_rule_is_read_at_each_commit(tmp_path: Path) -> None:
     bots = server_dir / BOTS.dest
     rec.byte_trees[(bots, OLD, BOTS_CHAR)] = {CHAR_NAME: CHAR}
     rec.migrations["tw_char"] = f"TortoiseBots:{_hash(CHAR)}\n"
-    # The target ships the same bytes, but its rules install nothing from `char`.
-    rec.byte_trees[(bots, BOTS_PIN, BOTS_CHAR)] = {CHAR_NAME: CHAR}
+    # The target's rules install nothing from `char`, and its `char` folder is empty.
+    rec.byte_trees[(bots, BOTS_PIN, BOTS_CHAR)] = {}
     rec.blobs[(bots, BOTS_PIN, BOTS_CMAKE)] = CMAKE.split(
         b'if(EXISTS "${TORTOISEBOTS_ROOT}/data/sql/char")'
     )[0]
@@ -637,11 +637,49 @@ def test_a_migration_upstream_deleted_is_older_than_the_target_not_newer(tmp_pat
         "20261101000000_world.sql": b"x",
     }
     rec.migrations["tw_world"] = f":{_hash(gone)}\n:{_hash(OLDER)}\n"
+    rec.ancestors.add((dest, OLD, CORE_PIN))
 
     said, raised = _return(made, server_dir)
 
     assert raised is None, raised
     assert not _asked(rec), "an old migration upstream deleted was asked about as if it were newer"
+
+
+def test_a_back_dated_migration_added_since_the_target_is_newer_on_a_backward_return(
+    tmp_path: Path,
+) -> None:
+    """Tortoise names a migration by when it was written, not merged (TortoiseBots 5a25df37
+    added `world/20260824090004_world.sql` three weeks late): the name sorts before the
+    target's newest, and the database holds it all the same."""
+    rec, server_dir, made = _ready(tmp_path)
+    dest = server_dir / CORE.dest
+    late = b"-- written in August, merged in September\n"
+    rec.byte_trees[(dest, OLD, CORE_WORLD)] = {OLDER_NAME: OLDER, "20260824090004_world.sql": late}
+    rec.byte_trees[(dest, CORE_PIN, CORE_WORLD)] = {
+        OLDER_NAME: OLDER,
+        "20260901000000_world.sql": b"x",
+    }
+    rec.migrations["tw_world"] = f":{_hash(late)}\n"
+
+    _said, raised = _return(made, server_dir)
+
+    assert raised is not None, "an applied back-dated migration was skipped by its name"
+    assert "20260824090004_world.sql" in str(raised)
+    _refused_clean(rec, server_dir, made._snapshot)  # type: ignore[attr-defined]
+
+
+def test_a_move_not_proved_forward_counts_a_file_the_target_lacks(tmp_path: Path) -> None:
+    """A shallow clone cannot show the connection: no ancestry, so nothing is skipped."""
+    rec, server_dir, made = _ready(tmp_path)
+    dest = server_dir / CORE.dest
+    gone = b"-- deleted upstream\n"
+    rec.byte_trees[(dest, OLD, CORE_WORLD)] = {OLDER_NAME: OLDER, "20260601000000_world.sql": gone}
+    rec.byte_trees[(dest, CORE_PIN, CORE_WORLD)] = {OLDER_NAME: OLDER}
+    rec.migrations["tw_world"] = f":{_hash(gone)}\n"
+
+    _said, raised = _return(made, server_dir)
+
+    assert raised is not None and "20260601000000_world.sql" in str(raised)
 
 
 def test_a_deleted_migration_that_sorts_after_the_target_is_still_newer(tmp_path: Path) -> None:
@@ -685,6 +723,60 @@ def test_the_world_file_the_image_rewrites_is_asked_by_its_rewritten_hash(tmp_pa
         "tw_world has 1 migration the tested commit does not have (20260903063722_world.sql)"
         in (str(raised))
     )
+
+
+def test_only_the_one_world_file_the_image_seds_is_asked_by_its_rewritten_hash(
+    tmp_path: Path,
+) -> None:
+    """Another core file with `INSERT INTO` is never rewritten, so that spelling is not asked."""
+    rec, server_dir, made = _ready(tmp_path)
+    dest = server_dir / CORE.dest
+    original = b"INSERT INTO `t` VALUES (7);\n"
+    rewritten = b"INSERT IGNORE INTO `t` VALUES (7);\n"
+    rec.byte_trees[(dest, OLD, CORE_WORLD)] = {"20260101000000_world.sql": original}
+    rec.byte_trees[(dest, CORE_PIN, CORE_WORLD)] = {}
+    rec.migrations["tw_world"] = f":{_hash(rewritten)}\n"
+
+    _said, raised = _return(made, server_dir)
+
+    assert raised is None, raised
+    assert _hash(rewritten) not in " ".join(_asked(rec))
+
+
+def _only_the_char_rule_parses(rec: Recorder, server_dir: Path, rev: str) -> None:
+    bots = server_dir / BOTS.dest
+    rec.blobs[(bots, rev, BOTS_CMAKE)] = (
+        b'install(DIRECTORY "${TORTOISEBOTS_ROOT}/data/sql/char/"\n'
+        b'  DESTINATION "${CMAKE_INSTALL_PREFIX}/modules/TortoiseBots/data/sql/character")\n'
+        b"install(DIRECTORY ${TORTOISEBOTS_ROOT}/data/sql/world/ FILES_MATCHING PATTERN *.sql\n"
+        b'  DESTINATION "${CMAKE_INSTALL_PREFIX}/modules/TortoiseBots/data/sql/world")\n'
+    )
+    rec.byte_trees[(bots, rev, BOTS_WORLD)] = {NEWER_BOTS_NAME: NEWER_BOTS}
+
+
+@pytest.mark.parametrize("rev", ["old", "target"])
+def test_a_sql_folder_no_parsed_install_rule_covers_refuses(tmp_path: Path, rev: str) -> None:
+    rec, server_dir, made = _ready(tmp_path)
+    _only_the_char_rule_parses(rec, server_dir, OLD if rev == "old" else BOTS_PIN)
+
+    _said, raised = _return(made, server_dir)
+
+    assert raised is not None and "data/sql/world" in str(raised), raised
+    assert "does not say where" in str(raised)
+    _refused_clean(rec, server_dir, made._snapshot)  # type: ignore[attr-defined]
+
+
+def test_an_install_destination_that_is_not_a_conf_folder_refuses(tmp_path: Path) -> None:
+    rec, server_dir, made = _ready(tmp_path)
+    bots = server_dir / BOTS.dest
+    rec.blobs[(bots, OLD, BOTS_CMAKE)] = CMAKE.replace(
+        b"data/sql/character", b"data/sql/characters"
+    )
+
+    _said, raised = _return(made, server_dir)
+
+    assert raised is not None and "data/sql/characters" in str(raised), raised
+    _refused_clean(rec, server_dir, made._snapshot)  # type: ignore[attr-defined]
 
 
 # -- when it is not asked -------------------------------------------------------------------

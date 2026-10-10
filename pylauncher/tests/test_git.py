@@ -719,9 +719,12 @@ def test_the_production_container_gits_are_bare_and_there_are_no_others(
     ran = len(seen)
     native._git_tree_bytes(dest, "a" * 40, "sql/database_updates/world")
     assert len(seen) == ran + 1, "the tree-bytes route reached a container"
+    ran = len(seen)
+    native._git_is_ancestor(dest, "a" * 40, "b" * 40)
+    assert len(seen) == ran + 1, "the is-ancestor route reached a container"
     native.Seams()
 
-    assert made == [{}] * 14, "a production ContainerGit that carries a seam is not bare"
+    assert made == [{}] * 15, "a production ContainerGit that carries a seam is not bare"
 
     tree = ast.parse(Path(native.__file__).read_text(encoding="utf-8"))
     calls = [

@@ -139,6 +139,10 @@ def _listed(items: Sequence[str]) -> str:
     return items[0] if len(items) == 1 else f"{', '.join(items[:-1])} and {items[-1]}"
 
 
+SEDDED_FILE = "20260903063722_world.sql"
+"""The one core file the image's build rewrites (`Dockerfile.tmpl`'s `sed` on `world/<this>`)."""
+
+
 def _hashes_of(data: bytes, *, edited: bool) -> tuple[str, ...]:
     """Upper-case SHA-1 of a migration file's bytes, and of the image's rewritten copy (T632)."""
     spellings = [data]
@@ -214,9 +218,6 @@ MODULE_INSTALL_RULE = re.compile(
 The folder the AutoUpdater reads inside the image is the DESTINATION's; the module's repository
 holds it under the source's name (TortoiseBots keeps `data/sql/char` and installs it as
 `data/sql/character`), so the files to hash are the source's (T632)."""
-
-DATED_MIGRATION = re.compile(r"^\d{14}_")
-"""A migration named for the second it was made, `20260903063722_world.sql`: names sort by date."""
 
 INSERT_IGNORE = re.compile(rb"^([ \t]*)INSERT INTO", re.MULTILINE)
 """What the image's build rewrites in one core world file (`Dockerfile.tmpl`, the `sed` before
@@ -685,14 +686,29 @@ class CmangosInstaller(StagedInstaller):
                 m["dst"]: m["src"]
                 for m in MODULE_INSTALL_RULE.finditer(text.decode("utf-8", "replace"))
             }
-            if not rules:
-                every = self._tree(dest, rev, "data/sql", what=what)
-                if any(path.endswith(".sql") for path in every):
+            every = self._tree(dest, rev, "data/sql", what=what)
+            folders = {
+                posixpath.dirname(path)
+                for path in every
+                if path.endswith(".sql") and posixpath.dirname(path).startswith("data/sql")
+            }
+            parsed = {f"data/sql/{src}" for src in rules.values()}
+            for folder in sorted(folders):
+                if not any(folder == one or folder.startswith(f"{one}/") for one in parsed):
                     raise InstallerError(
                         updates_unread_sentence(
                             f"going back takes away in {what}",
-                            f"{module}.cmake at {rev[:7]} does not say where its migrations "
-                            "are installed",
+                            f"{module}.cmake at {rev[:7]} does not say where {folder} is "
+                            "installed",
+                        )
+                    )
+            for dst in sorted(rules):
+                if dst not in names.values():
+                    raise InstallerError(
+                        updates_unread_sentence(
+                            f"going back takes away in {what}",
+                            f"{module}.cmake at {rev[:7]} installs data/sql/{dst}, which is "
+                            "not one of the migration folders this server reads",
                         )
                     )
             where = {
@@ -703,7 +719,9 @@ class CmangosInstaller(StagedInstaller):
         for role, folder in where.items():
             files = self._tree(dest, rev, folder, what=what) if folder else {}
             found[role] = {
-                posixpath.basename(path): _hashes_of(data, edited=core)
+                posixpath.basename(path): _hashes_of(
+                    data, edited=core and role == "world" and path.endswith(f"/{SEDDED_FILE}")
+                )
                 for path, data in files.items()
                 if posixpath.dirname(path) == folder and path.endswith(".sql")
             }
@@ -719,9 +737,10 @@ class CmangosInstaller(StagedInstaller):
         `<module>:<SHA-1>`, so the same bytes under the same module and database count as
         shipped by the target whatever the file is now called; the same bytes in another
         module's or database's folder do not. Only a file present at the running commit
-        counts, and a dated one that upstream deleted (the target does not carry its name)
-        and that sorts before the newest dated name the target ships is older than the
-        target, not newer (a Return that moves forward over a squash).
+        counts, and when the target is ahead of it in history (`Seams.is_ancestor`) a file
+        the target's name list lacks was deleted upstream: older, not newer (a Return that
+        moves forward over a squash). Never by name order: going back, a migration written
+        before the target's newest but merged after it is newer.
         """
         sources = self.entry.emulator.sources
         lacked: dict[Db, dict[str, tuple[str, ...]]] = {}
@@ -741,19 +760,18 @@ class CmangosInstaller(StagedInstaller):
                 if other is not source
             )
             module = "" if core else posixpath.basename(source.dest.rstrip("/"))
+            # Only a move FORWARD in history can have a deleted file: going back, every file
+            # the running commit added since is one the target lacks, however its name is dated
+            # (Tortoise dates a migration by when it was written, not merged).
+            forward = self._seams.is_ancestor(dest, old, new)
             before = self._migrations_at(source, dest, old, core=core)
             after = self._migrations_at(source, dest, new, core=core)
             for role, files in before.items():
                 shipped = {h for hashes in after[role].values() for h in hashes}
-                dated = [n for n in after[role] if DATED_MIGRATION.match(n)]
-                newest = max(dated, default="")
                 for name, hashes in files.items():
                     if shipped.intersection(hashes):
                         continue
-                    older = (
-                        name not in after[role] and DATED_MIGRATION.match(name) and name < newest
-                    )
-                    if older:
+                    if forward and name not in after[role]:
                         continue
                     label = f"{module}/{name}" if module else name
                     lacked.setdefault(role, {})[label] = tuple(f"{module}:{h}" for h in hashes)
