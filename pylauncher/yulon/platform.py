@@ -7,6 +7,7 @@ here while keeping the rest of the app 100% shared. See pyplan/README.md §3
 
 from __future__ import annotations
 
+import base64
 import errno
 import functools
 import importlib
@@ -19,6 +20,7 @@ import socket
 import ssl
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.request
@@ -525,27 +527,73 @@ def windows_is_admin() -> bool:
         return False
 
 
-def elevated_argv(
-    backend: FirewallBackend, argv: list[str], *, is_admin: bool | None = None
-) -> list[str]:
-    """`argv` wrapped so Windows asks for administrator rights once, when it needs them (T644).
+UAC_DECLINED = 1223
+"""Windows' ERROR_CANCELLED: what the elevated batch exits with when the player says No to UAC."""
 
-    An unelevated `netsh advfirewall ...` answers "The requested operation requires elevation"
-    and Apply used to stop there, telling the player to do it by hand. `Start-Process -Verb
-    RunAs` raises the UAC prompt; `-PassThru` hands back netsh's own exit code. netsh gets ONE
-    command line built with `list2cmdline`, so a name with a space reaches it quoted. Only the
-    `netsh` backend on Windows is wrapped, and only when this process is not already admin.
+UAC_DECLINED_TEXT = (
+    "You said No to the Windows administrator prompt, so the firewall rules were not added. "
+    "Press Apply again and choose Yes."
+)
+
+
+def elevated_batch(
+    backend: FirewallBackend, cmds: Iterable[Iterable[str]], *, is_admin: bool | None = None
+) -> tuple[list[str], Path] | None:
+    """One argv that runs every netsh command in `cmds` behind a single UAC prompt (T644).
+
+    An unelevated `netsh advfirewall ...` answers "The requested operation requires elevation".
+    The returned PowerShell starts ONE elevated PowerShell (`-Verb RunAs`, one prompt) that runs
+    each `& netsh ...` in order and writes `[{"rc": n, "out": "..."}]` for them to the returned
+    path, which `read_batch_results()` reads back so each command keeps its own verdict and
+    netsh's own words. If the player says No, `Start-Process` throws; under
+    `$ErrorActionPreference = 'Stop'` the `catch` exits `UAC_DECLINED` with the reason on
+    stderr instead of falling through to `exit $null` (= 0, "done"). None when nothing needs
+    wrapping: not the `netsh` backend, not Windows, already admin, or no commands.
     """
-    if backend != "netsh" or not argv or argv[0] != "netsh":
-        return list(argv)
+    commands = [list(c) for c in cmds]
+    if backend != "netsh" or not commands or any(c[:1] != ["netsh"] for c in commands):
+        return None
     if (windows_is_admin() if is_admin is None else is_admin) or detect() != "windows":
-        return list(argv)
-    script = (
-        f"$p = Start-Process -FilePath {_ps_quote(argv[0])} -Verb RunAs -Wait -PassThru "
-        f"-WindowStyle Hidden -ArgumentList {_ps_quote(subprocess.list2cmdline(argv[1:]))}; "
-        "exit $p.ExitCode"
+        return None
+    handle, name = tempfile.mkstemp(prefix="yulon-netsh-", suffix=".json")
+    os.close(handle)
+    results = Path(name)
+    lines = ["$ErrorActionPreference = 'Continue'", "$r = @()"]
+    for cmd in commands:
+        args = ",".join(_ps_quote(a) for a in cmd[1:])
+        lines += [
+            f"$o = (& netsh @({args}) 2>&1 | Out-String).Trim()",
+            "$r += [pscustomobject]@{ rc = $LASTEXITCODE; out = $o }",
+        ]
+    lines.append(
+        f"[IO.File]::WriteAllText({_ps_quote(results)}, (ConvertTo-Json -InputObject @($r)), "
+        "(New-Object Text.UTF8Encoding $false))"
     )
-    return ["powershell.exe", "-NoProfile", "-Command", script]
+    encoded = base64.b64encode("\n".join(lines).encode("utf-16-le")).decode("ascii")
+    outer = (
+        "$ErrorActionPreference = 'Stop'; "
+        "try { "
+        "$p = Start-Process -FilePath 'powershell.exe' -Verb RunAs -Wait -PassThru "
+        "-WindowStyle Hidden -ArgumentList '-NoProfile','-EncodedCommand',"
+        f"{_ps_quote(encoded)}; exit $p.ExitCode "
+        "} catch { [Console]::Error.WriteLine($_.Exception.Message); "
+        f"exit {UAC_DECLINED} }}"
+    )
+    return ["powershell.exe", "-NoProfile", "-Command", outer], results
+
+
+def read_batch_results(path: Path, count: int) -> list[tuple[int, str]] | None:
+    """What `elevated_batch()` wrote: one `(returncode, output)` per command, or None.
+
+    None when the file is missing, unreadable, not JSON, or holds a different number of
+    results than commands: a batch that did not say how each command went is not "done".
+    """
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+        found = [(int(item["rc"]), str(item["out"])) for item in data]
+    except (OSError, ValueError, TypeError, KeyError):
+        return None
+    return found if len(found) == count else None
 
 
 def portproxy_commands(listen_address: str, ports: Iterable[int]) -> list[list[str]]:
