@@ -2686,6 +2686,12 @@ class CmangosInstaller(StagedInstaller):
         # T129: a `warn` phase with a refused step is not recorded as applied,
         # so a later correction of it is still offered -- the press's own rule.
         refused: set[str] = set()
+        refused_runs: list[sqlplan.PhaseRun] = []
+
+        def carried_on_past(run: sqlplan.PhaseRun) -> None:
+            refused.add(run.phase.name)
+            refused_runs.append(run)
+
         yield from self._stream(
             lambda sink: sqlplan.apply(
                 runs,
@@ -2695,7 +2701,7 @@ class CmangosInstaller(StagedInstaller):
                 exec_stdin=self._seams.exec_stdin,
                 sink=sink,
                 cancel=ctx.cancel,
-                on_refused=lambda run: refused.add(run.phase.name),
+                on_refused=carried_on_past,
             ),
             cancel=ctx.cancel,
             stage="import",
@@ -2769,6 +2775,69 @@ class CmangosInstaller(StagedInstaller):
                 f"({type(exc).__name__}: {exc})."
             ) from exc
         yield "The databases are imported and marked complete."
+        yield from self._remember_refused_corrections(ctx, refused_runs)
+
+    def _remember_refused_corrections(
+        self, ctx: StageContext, refused: Sequence[sqlplan.PhaseRun]
+    ) -> Iterator[str]:
+        """Write a `failed` row for each `reapply_changed` file the import carried on past (T661).
+
+        The import is `warn` on that file, so a refusal was one log line and the install went on.
+        The row is what the Server tab's banner reads (`_stuck_world_updates()`), the next update
+        applies the file again from it, and `after_ready()` says so in the install's closing
+        lines -- from the ledger, so a resumed install says it as well as the run that met it.
+        """
+        if not refused:
+            return
+        reapplying = {phase.name for phase in self._world_catch_up_plan().reapplying()}
+        rows = tuple(
+            sqlplan.FileRow(
+                run.phase.name, run.rel, sqlplan.file_digest(run.path), sqlplan.FILE_FAILED
+            )
+            for run in refused
+            if run.phase.name in reapplying and run.path is not None
+        )
+        if not rows:
+            return
+        try:
+            self._record_world_files(ctx, rows)
+        except InstallerError as exc:
+            logger.warning(f"could not record the refused corrections file: {exc}")
+            return
+        yield (
+            f"{', '.join(row.file for row in rows)}: refused by the database. It is recorded, "
+            "and the install goes on."
+        )
+
+    def after_ready(self, server_dir: Path) -> Iterator[str]:
+        """Say, in the install's closing lines, which data-corrections file never went in (T661).
+
+        Reads the file ledger for a `reapply_changed` file left `failed` or `started`. Never
+        raises: the server is up, and a database that cannot be asked is not an install failure.
+        """
+        try:
+            ctx_secrets = self.resolve_secrets(server_dir)
+            db = self._native().db
+            plan = self._data().sql
+            ledger = sqlplan.read_file_ledger(
+                self._query_seam(),
+                container=self.entry.container_spec().db,
+                client=db.client,
+                password=ctx_secrets.db_password,
+                marker_db=plan.marker_db,
+            )
+            reapplying = {phase.name for phase in self._world_catch_up_plan().reapplying()}
+        except (RuntimeError, OSError, ValueError, docker.DockerCommandError) as exc:
+            logger.warning(f"could not read which corrections files are unfinished: {exc}")
+            return
+        for row in ledger.values():
+            if row.phase in reapplying and row.state in (sqlplan.FILE_FAILED, sqlplan.FILE_STARTED):
+                yield (
+                    f"warning: {row.file} did not finish going in: the database refused it. It "
+                    f"holds data corrections this server may run without for now. Press "
+                    f'"{CORRECTIONS_BUTTON_LABEL}" on the Server tab to run it again; the next '
+                    "update does too."
+                )
 
     def _stop_a_world_the_failed_run_left(self, ctx: StageContext) -> Iterator[str]:
         """Stop this install's own world container when its previous run failed (T206).
@@ -3164,7 +3233,11 @@ class CmangosInstaller(StagedInstaller):
         return CorrectionCheck("current")
 
     def _stuck_world_updates(self, ctx: StageContext) -> tuple[StuckWorldUpdate, ...]:
-        """The `started`/`failed` world updates of `apply_new` phases, in the order they run (T545).
+        """The `started`/`failed` world updates of `apply_new` and `reapply_changed` phases (T545).
+
+        In the order they run. A `reapply_changed` file (T659's `cmangos custom`) is listed
+        too (T661): the next update would apply it again by itself, but the player is told
+        now what failed, and `repeatable` is that phase's own check (`sqlplan.repeat_problem`).
 
         Bot (`replace_changed`) rows are left out: the next update loads such a file again on
         its own, since a whole-table file is safe to repeat (T534). A row whose file is gone
@@ -3173,7 +3246,9 @@ class CmangosInstaller(StagedInstaller):
         holds its exact bytes under a new name: that is listed as the new file with
         `renamed_from`, and the press moves the record there (`sqlplan.renamed_stuck()`).
         """
-        applying = {phase.name for phase in self._world_catch_up_plan().applying()}
+        catch_up = self._world_catch_up_plan()
+        reapplying = {phase.name for phase in catch_up.reapplying()}
+        applying = {phase.name for phase in catch_up.applying()} | reapplying
         if not applying:
             return ()
         plan = self._data().sql
@@ -3237,7 +3312,14 @@ class CmangosInstaller(StagedInstaller):
                     phase=row.phase,
                     file=file,
                     state=row.state,
-                    repeatable=there and sqlplan.whole_table_problem(path) is None,
+                    repeatable=there
+                    and (
+                        sqlplan.repeat_problem(path)
+                        if row.phase in reapplying
+                        else sqlplan.whole_table_problem(path)
+                    )
+                    is None,
+                    reapply=row.phase in reapplying,
                     behind=behind,
                     sha256=sqlplan.file_digest(path) if there else row.sha256,
                     changed=there and sqlplan.file_digest(path) != row.sha256,
@@ -3316,7 +3398,13 @@ class CmangosInstaller(StagedInstaller):
                     f"{self.entry.databases.world} stays as it is; Yu'lon does not undo it."
                 )
                 continue
-            reaches = sqlplan.foreign_schemas(path, others)
+            if one.reapply and (why := sqlplan.repeat_problem(path)):
+                yield (
+                    f"{one.file} was not run: {why}, so running it on a server that has data "
+                    "could leave something a fresh install would not. Nothing after it was run."
+                )
+                return
+            reaches = sqlplan.foreign_schemas(path, others, executable_comments_ok=one.reapply)
             if reaches:
                 yield (
                     f"{one.file} reaches outside {self.entry.databases.world} "

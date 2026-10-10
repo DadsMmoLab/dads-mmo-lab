@@ -827,6 +827,10 @@ class StuckWorldUpdate:
     missing: bool = False
     """Its file is gone from the checkout and no other file holds its exact bytes (T566): it
     cannot be run again, and the dialog offers to skip it."""
+    reapply: bool = False
+    """It belongs to a `reapply_changed` phase (T661): data corrections written to be safe to
+    repeat, which the next update would apply again by itself; `repeatable` is then the repeat
+    guard's answer, not the whole-table one."""
     renamed_from: str = ""
     """Upstream renamed this file (T566): the ledger row is under this old name, and `file` is
     the one file now holding its exact bytes. The press moves the record to `file` and retries
@@ -1886,7 +1890,11 @@ def stuck_world_updates_text(stuck: Sequence[StuckWorldUpdate]) -> str:
             )
             continue
         safe = (
-            "It empties every table it writes first, so running it again is safe."
+            (
+                "It is data corrections written to be safe to repeat, so running it again is safe."
+                if one.reapply
+                else "It empties every table it writes first, so running it again is safe."
+            )
             if one.repeatable
             else "Yu'lon cannot show that running it again is safe: it may have run part way, "
             "and running it again could put rows in twice. Check what it does before you say yes."

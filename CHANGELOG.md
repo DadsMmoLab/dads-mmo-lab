@@ -31,6 +31,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 
 ### Fixed
 - WotLK and Unbound bot settings work again on the newest bots module: Yu'lon renames them for it, and back.
+- A custom SQL fix the database refused now shows on the Server tab, and a fresh install says so at the end.
 - TBC and Vanilla servers now get the database's own data corrections, new installs and updates alike.
 - A small step back of your computer's clock no longer hides the "history was rewritten" line in the update question.
 - An install stops before building, naming the folder, when another install already holds its container names.
