@@ -1434,6 +1434,37 @@ def run(
     return proc
 
 
+def run_bytes(
+    command: list[str],
+    cwd: Path | None = None,
+    env: Mapping[str, str] | None = None,
+    timeout: float | None = None,
+) -> subprocess.CompletedProcess[bytes]:
+    """`run()` for an answer that is bytes: stdout is not decoded or newline-translated (T632).
+
+    A file's hash is over its exact bytes; `run()`'s text mode turns CRLF into LF and
+    replaces what is not UTF-8, so the hash of what it returns is not the file's.
+    Does not raise on a non-zero exit; a timeout is reported as `run()` reports it.
+    """
+    logger.debug(f"run_bytes() called: command={command} cwd={cwd}")
+    try:
+        return subprocess.run(
+            command,
+            cwd=_cwd_arg(cwd),
+            env=child_env(env),
+            capture_output=True,
+            check=False,
+            timeout=timeout,
+            creationflags=creationflags(),
+            stdin=subprocess.DEVNULL,
+        )
+    except subprocess.TimeoutExpired:
+        _note_unanswered(command, timeout)
+        return subprocess.CompletedProcess(
+            command, TIMED_OUT_RETURNCODE, b"", f"{_TIMED_OUT} {timeout}s".encode()
+        )
+
+
 CANCELLED_RETURNCODE = 130
 """The `returncode` `run_cancellable()` reports when its `cancel` was set (SIGINT's 128 + 2)."""
 

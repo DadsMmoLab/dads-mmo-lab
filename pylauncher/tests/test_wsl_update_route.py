@@ -267,6 +267,8 @@ _GIT_FIELDS = {
     "tree_files",
     "is_ancestor",
     "file_lines",
+    # T632: Tortoise's Return reads the migration files of both commits, as bytes.
+    "tree_bytes",
 }
 """The seams that are git questions: bound to a `ContainerGit` that names the distro."""
 

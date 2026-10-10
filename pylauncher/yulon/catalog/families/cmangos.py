@@ -64,6 +64,7 @@ rot; the mutation run above is how they were re-checked rather than re-copied.
 from __future__ import annotations
 
 import fnmatch
+import hashlib
 import os
 import posixpath
 import queue
@@ -74,8 +75,8 @@ from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import ClassVar, cast
 
-from yulon import core_modules, dbsecret, docker, git, platform
-from yulon.catalog import bot_count, bot_dashboard, composegen
+from yulon import core_modules, dbsecret, docker, git, platform, server_build_presses
+from yulon.catalog import bot_count, bot_dashboard, composegen, snapshot
 from yulon.catalog.catalog import (
     CmangosData,
     ConfPatchTable,
@@ -86,6 +87,7 @@ from yulon.catalog.catalog import (
     SqlPlan,
 )
 from yulon.catalog.families import conf, dockerfile, extract, patch, sqlplan
+from yulon.catalog.families.direction import moves_forward
 from yulon.catalog.installer import InstallerError, InstallStopped, UpdateRefused
 from yulon.catalog.native import (
     CORRECTIONS_BUTTON_LABEL,
@@ -101,6 +103,7 @@ from yulon.catalog.native import (
     CorrectionCheck,
     ImportGate,
     MarkerRow,
+    Seams,
     Secrets,
     ServersDownWork,
     Stage,
@@ -121,6 +124,133 @@ from yulon.log import get_logger
 from yulon.manifest import Db
 
 logger = get_logger(__name__)
+
+IMAGE_TREE = re.compile(r"^/opt/[^/]+/(?P<inside>.+)$")
+"""`Database.AutoUpdate.Path` is `/opt/<the core's name>/<folder inside its tree>` (T632)."""
+
+MIGRATIONS_TABLE_QUESTION = "SHOW TABLES LIKE 'migrations'"
+MIGRATIONS_QUESTION = (
+    "SELECT CONCAT(`Module`, ':', UPPER(`Hash`)) FROM `migrations` WHERE UPPER(`Hash`) IN "
+)
+"""Which hashes a database's `migrations` ledger holds, as the `<module>:<hash>` key (T632)."""
+
+NOTHING_DONE = "Nothing was built, stopped or changed: your server stays on the code it runs."
+
+
+def _listed(items: Sequence[str]) -> str:
+    return items[0] if len(items) == 1 else f"{', '.join(items[:-1])} and {items[-1]}"
+
+
+SEDDED_FILE = "20260903063722_world.sql"
+"""The one core file the image's build rewrites (`Dockerfile.tmpl`'s `sed` on `world/<this>`)."""
+
+
+def _hashes_of(data: bytes, *, edited: bool) -> tuple[str, ...]:
+    """Upper-case SHA-1 of a migration file's bytes, and of the image's rewritten copy (T632)."""
+    spellings = [data]
+    if edited:
+        spellings.append(INSERT_IGNORE.sub(rb"\1INSERT IGNORE INTO", data))
+    return tuple(dict.fromkeys(hashlib.sha1(one).hexdigest().upper() for one in spellings))
+
+
+@dataclass
+class _Direction:
+    """Whether a move goes forward, asked at most once and only when a file needs it (T632)."""
+
+    seams: Seams
+    repo: str
+    dest: Path
+    old: str
+    new: str
+    _said: bool | None = None
+
+    def known(self) -> bool:
+        """True when forward; refuses (fail closed) when neither git nor GitHub can say."""
+        if self._said is None:
+            said, why = moves_forward(self.seams, self.repo, self.dest, self.old, self.new)
+            if said is None:
+                raise InstallerError(
+                    updates_unread_sentence(
+                        f"going back takes away in {self.repo}",
+                        f"{why}, so the direction of the move is unknown",
+                    )
+                )
+            self._said = said
+        return self._said
+
+
+def updates_unread_sentence(source: str, why: str) -> str:
+    """The fail-closed refusal: git or the database could not say (T632, T630's shape)."""
+    return (
+        f"Yu'lon could not read which database migrations {source}, so it could not tell "
+        f"whether the older server can start on your databases ({why}). {NOTHING_DONE}"
+    )
+
+
+def newer_migrations_refusal(
+    applied: Mapping[str, Mapping[str, Sequence[str]]],
+    copies: Mapping[str, Path | None],
+) -> str:
+    """Why "Return to the tested pin…" stopped on Tortoise: the databases are ahead (T632).
+
+    `applied` is, per database, the files whose migration its `migrations` table holds that
+    the tested commit does not ship (file label -> the held hashes); `copies` is the dump
+    `snapshot.copy_from_before_migrations()` found per database, or None.
+    """
+    each = []
+    for schema, files in applied.items():
+        names = list(files)
+        shown = ", ".join(names[:3]) + (f" and {len(names) - 3} more" if len(names) > 3 else "")
+        each.append(
+            f"{schema} has {len(names)} migration{'' if len(names) == 1 else 's'} the tested "
+            f"commit does not have ({shown})"
+        )
+    databases = list(applied)
+    total = sum(len(files) for files in applied.values())
+    those = "that migration" if total == 1 else "those migrations"
+    head = (
+        "Going back to the commit this app was tested against would start the older server "
+        f"on databases a newer build has already migrated: {'; '.join(each)}. Database "
+        f"migrations only go forward, so the older server would meet {_listed(databases)} as "
+        f"{those} left {'it' if len(databases) == 1 else 'them'}, which it was not built for "
+        f"and may not start on. {NOTHING_DONE}"
+    )
+    missing = [schema for schema in databases if copies.get(schema) is None]
+    if missing:
+        latest = server_build_presses.under_server_build(server_build_presses.UPDATE_TO_LATEST)
+        return (
+            f"{head} Yu'lon found no copy of {_listed(missing)} from before {those} in the "
+            "server's backups folder, so this server cannot go back to the tested commit: keep "
+            f"the build you have ({latest} keeps it current)."
+        )
+    dumps = _listed([f"{path.parent.name}/{path.name}" for path in copies.values() if path])
+    back = server_build_presses.under_server_build(server_build_presses.RETURN_TO_PIN)
+    one = len(databases) == 1
+    return (
+        f"{head} To go back, first put {_listed(databases)} back as "
+        f"{'it was' if one else 'they were'} before {those}: press Stop on the Server tab, "
+        f"restore {dumps} on Maintenance (it works with the server stopped), then press "
+        f"{back} again without starting the server in between, since a start would apply "
+        f"{those} again. Restoring loses whatever changed in {_listed(databases)} since that "
+        "copy was taken."
+    )
+
+
+MODULE_INSTALL_RULE = re.compile(
+    r"install\(\s*DIRECTORY\s+\"[^\"]*/data/sql/(?P<src>[\w.-]+)/?\"\s+"
+    r"DESTINATION\s+\"[^\"]*/data/sql/(?P<dst>[\w.-]+)\"\s*\)",
+    re.IGNORECASE,
+)
+"""A module's `install(DIRECTORY .../data/sql/<repo folder>/ DESTINATION .../data/sql/<image>)`.
+
+The folder the AutoUpdater reads inside the image is the DESTINATION's; the module's repository
+holds it under the source's name (TortoiseBots keeps `data/sql/char` and installs it as
+`data/sql/character`), so the files to hash are the source's (T632)."""
+
+INSERT_IGNORE = re.compile(rb"^([ \t]*)INSERT INTO", re.MULTILINE)
+"""What the image's build rewrites in one core world file (`Dockerfile.tmpl`, the `sed` before
+the runtime stage): its database hash is the rewritten copy's, so both spellings are asked."""
+
 
 CATALOG_ERROR_TAIL = "That is a catalog error in the app, not something to fix on this machine."
 """The one sentence every refusal here about a malformed catalog entry ends in.
@@ -443,7 +573,285 @@ class CmangosInstaller(StagedInstaller):
                 yield from self._name_what_moved(
                     reports, source, dest, old, self._seams.head_sha(dest)
                 )
+        yield from self._refuse_newer_migrations(server_dir, moved, to_pin=to_pin)
         return catch_up
+
+    # -- going back over migrations a newer build already applied (T632) ----
+
+    def _refuse_newer_migrations(
+        self,
+        server_dir: Path,
+        moved: Sequence[tuple[EmulatorSource, Path, str]],
+        *,
+        to_pin: bool,
+    ) -> Generator[str, None, None]:
+        """Refuse "Return to the tested pin…" onto databases a newer build already migrated.
+
+        Tortoise's worldserver applies its core's and TortoiseBots' migration files at
+        start (`Database.AutoUpdate.Enabled`), records each in the database's
+        `migrations` table as `Module` + `Hash` (key `<module>:<SHA-1 of the file>`,
+        `AutoUpdater.cpp` `GetMigrationKey()`) and never takes one back; the older
+        core then starts on a schema it does not know. T630 refused this for
+        AzerothCore by file name; here the ledger has no names, so the files the move
+        takes away are read from git at both commits and hashed
+        (`_migrations_the_target_lacks()`), and only then are the databases asked.
+        Before anything is built, stopped or copied; a refusal puts every source back.
+        Only a Return, and only for a tree whose conf switches that updater on.
+        """
+        yield from ()
+        if not to_pin or not self._updates_at_start():
+            return
+        lacked = self._migrations_the_target_lacks(moved)
+        if not lacked:
+            return
+        count = sum(len(files) for files in lacked.values())
+        yield (
+            f"The tested commit does not ship {count} database migration"
+            f"{'' if count == 1 else 's'} the code you run has; asking the databases whether "
+            f"they already hold {'it' if count == 1 else 'them'}."
+        )
+        container = self.entry.container_spec().db
+        try:
+            was_up: bool | None = self._seams.ask_db_running(container)
+        except Exception as exc:  # noqa: BLE001 - any seam failure is one answer here
+            logger.warning(f"could not tell whether {container} is running: {exc}")
+            was_up = None
+        try:
+            applied = self._migrations_applied(server_dir, lacked)
+            if applied:
+                backups = server_dir / snapshot.BACKUPS_FOLDER
+                copies = {
+                    schema: snapshot.copy_from_before_migrations(
+                        backups,
+                        schema,
+                        [h for hashes in found.values() for h in hashes],
+                        game=self.entry.id,
+                    )
+                    for schema, found in applied.items()
+                }
+                raise InstallerError(newer_migrations_refusal(applied, copies))
+        except BaseException:
+            # What this press started it puts back, as the adopt press does.
+            if was_up is False:
+                logger.info(self._stop_the_database_again(container))
+            raise
+        # The check passed: the same, so a press that goes on finds the database as it was.
+        if was_up is False:
+            logger.info(self._stop_the_database_again(container))
+        yield "None of them was applied, so the older server can start on your databases."
+
+    def _conf_value(self, key: str) -> str | None:
+        """The entry's conf table's value for `key`, unquoted, or None."""
+        for table in self._data().conf.files.values():
+            value = table.keys.get(key)
+            if value is not None:
+                return value.strip().strip('"')
+        return None
+
+    def _tree(self, dest: Path, rev: str, path: str, *, what: str) -> dict[str, bytes]:
+        """Git's files under `path` at `rev`, or the fail-closed refusal when git cannot say."""
+        found = self._seams.tree_bytes(dest, rev, path)
+        if found is None:
+            raise InstallerError(
+                updates_unread_sentence(
+                    f"going back takes away in {what}",
+                    f"git could not list {path} at {rev[:7]}",
+                )
+            )
+        return found
+
+    def _folder_names(self) -> dict[Db, str]:
+        """The three folder names the updater reads, from the conf; a catalog error if absent."""
+        names: dict[Db, str] = {}
+        for role, key in (
+            ("auth", "Database.AutoUpdate.AuthUpdateName"),
+            ("characters", "Database.AutoUpdate.CharUpdateName"),
+            ("world", "Database.AutoUpdate.WorldUpdateName"),
+        ):
+            value = self._conf_value(key)
+            if value is None:
+                raise InstallerError(
+                    updates_unread_sentence(
+                        "going back takes away",
+                        "the catalog does not name this server's migration folders",
+                    )
+                )
+            names[role] = value  # type: ignore[index]
+        return names
+
+    def _migrations_at(
+        self, source: EmulatorSource, dest: Path, rev: str, *, core: bool
+    ) -> dict[Db, dict[str, tuple[str, ...]]]:
+        """Per database, `{file name: the hashes the database may hold for it}` at `rev`.
+
+        The core's files are `Database.AutoUpdate.Path`'s folders inside its own tree. A
+        module's are wherever ITS install rules put them (`MODULE_INSTALL_RULE`, read from
+        `<module>.cmake` at that same commit): TortoiseBots keeps `data/sql/char` and the
+        image gets it as `data/sql/character`, so reading the configured name from the
+        repository finds nothing. A module with files under `data/sql` and no install rule
+        that says where they go is not read, so it refuses.
+        """
+        what = source.repo
+        names = self._folder_names()
+        base = self._conf_value("Database.AutoUpdate.Path")
+        where: dict[Db, str | None] = {}
+        if core:
+            inside = IMAGE_TREE.match(base) if base is not None else None
+            if inside is None:
+                raise InstallerError(
+                    updates_unread_sentence(
+                        "going back takes away",
+                        "the catalog does not say where this server's migrations are",
+                    )
+                )
+            root = inside["inside"].strip("/")
+            where = {role: f"{root}/{name}" for role, name in names.items()}
+        else:
+            module = posixpath.basename(source.dest.rstrip("/"))
+            text = self._tree(dest, rev, f"{module}.cmake", what=what).get(f"{module}.cmake", b"")
+            rules = {
+                m["dst"]: m["src"]
+                for m in MODULE_INSTALL_RULE.finditer(text.decode("utf-8", "replace"))
+            }
+            every = self._tree(dest, rev, "data/sql", what=what)
+            folders = {
+                posixpath.dirname(path)
+                for path in every
+                if path.endswith(".sql") and posixpath.dirname(path).startswith("data/sql")
+            }
+            parsed = {f"data/sql/{src}" for src in rules.values()}
+            for uncovered in sorted(folders):
+                if not any(uncovered == one or uncovered.startswith(f"{one}/") for one in parsed):
+                    raise InstallerError(
+                        updates_unread_sentence(
+                            f"going back takes away in {what}",
+                            f"{module}.cmake at {rev[:7]} does not say where {uncovered} is "
+                            "installed",
+                        )
+                    )
+            for dst in sorted(rules):
+                if dst not in names.values():
+                    raise InstallerError(
+                        updates_unread_sentence(
+                            f"going back takes away in {what}",
+                            f"{module}.cmake at {rev[:7]} installs data/sql/{dst}, which is "
+                            "not one of the migration folders this server reads",
+                        )
+                    )
+            where = {
+                role: (f"data/sql/{rules[name]}" if name in rules else None)
+                for role, name in names.items()
+            }
+        found: dict[Db, dict[str, tuple[str, ...]]] = {}
+        for role, folder in where.items():
+            files = self._tree(dest, rev, folder, what=what) if folder else {}
+            found[role] = {
+                posixpath.basename(path): _hashes_of(
+                    data, edited=core and role == "world" and path.endswith(f"/{SEDDED_FILE}")
+                )
+                for path, data in files.items()
+                if posixpath.dirname(path) == folder and path.endswith(".sql")
+            }
+        return found
+
+    def _migrations_the_target_lacks(
+        self, moved: Sequence[tuple[EmulatorSource, Path, str]]
+    ) -> dict[Db, dict[str, tuple[str, ...]]]:
+        """Per database, `{file label: its keys}` the running commit has and the target lacks.
+
+        Both lists come from git's tree at each commit (never from disk, where an untracked
+        or edited copy hides a removal), per source and per database folder. A key is
+        `<module>:<SHA-1>`, so the same bytes under the same module and database count as
+        shipped by the target whatever the file is now called; the same bytes in another
+        module's or database's folder do not. Only a file present at the running commit
+        counts, and when the target is ahead of it in history (`Seams.is_ancestor`) a file
+        the target's name list lacks was deleted upstream: older, not newer (a Return that
+        moves forward over a squash). Never by name order: going back, a migration written
+        before the target's newest but merged after it is newer.
+        """
+        sources = self.entry.emulator.sources
+        lacked: dict[Db, dict[str, tuple[str, ...]]] = {}
+        for source, dest, old in moved:
+            new = self._seams.head_sha(dest)
+            if new is None:
+                raise InstallerError(
+                    updates_unread_sentence(
+                        f"going back takes away in {source.repo}", "git did not say its commit"
+                    )
+                )
+            if new == old:
+                continue
+            core = not any(
+                source.dest.startswith(f"{other.dest.rstrip('/')}/modules/")
+                for other in sources
+                if other is not source
+            )
+            module = "" if core else posixpath.basename(source.dest.rstrip("/"))
+            # Only a move FORWARD in history can have a deleted file: going back, every file
+            # the running commit added since is one the target lacks, however its name is dated
+            # (Tortoise dates a migration by when it was written, not merged).
+            forward = _Direction(self._seams, source.repo, dest, old, new)
+            before = self._migrations_at(source, dest, old, core=core)
+            after = self._migrations_at(source, dest, new, core=core)
+            for role, files in before.items():
+                shipped = {h for hashes in after[role].values() for h in hashes}
+                for name, hashes in files.items():
+                    if shipped.intersection(hashes):
+                        continue
+                    if name not in after[role] and forward.known():
+                        continue
+                    label = f"{module}/{name}" if module else name
+                    lacked.setdefault(role, {})[label] = tuple(f"{module}:{h}" for h in hashes)
+        return lacked
+
+    def _migrations_applied(
+        self, server_dir: Path, lacked: Mapping[Db, Mapping[str, tuple[str, ...]]]
+    ) -> dict[str, dict[str, tuple[str, ...]]]:
+        """Per schema, which lacked files its `migrations` table holds (label -> held hashes).
+
+        The database is brought up alone (a stopped server has it down), never the world:
+        a start would run the updater. A table that does not exist holds none; a database
+        that cannot answer refuses.
+        """
+        spec = self.entry.container_spec()
+        try:
+            self._seams.start_db(spec, server_dir, because="nothing was built or changed")
+        except docker.DockerCommandError as exc:
+            raise InstallerError(
+                updates_unread_sentence(
+                    "your databases already have",
+                    f"Yu'lon could not start the database to ask it: {exc}",
+                )
+            ) from exc
+        password = self.resolve_secrets(server_dir).db_password
+        client = self._native().db.client
+        schemas = self.entry.schema_map()
+        ask = self._query_seam()
+        applied: dict[str, dict[str, tuple[str, ...]]] = {}
+        for role, files in lacked.items():
+            schema = schemas[role]
+            digests = sorted({key.partition(":")[2] for keys in files.values() for key in keys})
+            quoted = ", ".join(f"'{digest}'" for digest in digests)
+            try:
+                if not ask(spec.db, client, password, schema, MIGRATIONS_TABLE_QUESTION).strip():
+                    continue
+                rows = ask(spec.db, client, password, schema, f"{MIGRATIONS_QUESTION}({quoted})")
+            except (docker.DockerCommandError, RuntimeError, OSError) as exc:
+                raise InstallerError(
+                    updates_unread_sentence(
+                        "your databases already have",
+                        f"Yu'lon could not ask {schema} which of them it already has: {exc}",
+                    )
+                ) from exc
+            held = {line.strip().upper() for line in rows.splitlines() if line.strip()}
+            found = {
+                label: tuple(key.partition(":")[2] for key in keys if key.upper() in held)
+                for label, keys in files.items()
+            }
+            found = {label: hashes for label, hashes in found.items() if hashes}
+            if found:
+                applied[schema] = found
+        return applied
 
     def _refuse_new_chain_files(
         self,

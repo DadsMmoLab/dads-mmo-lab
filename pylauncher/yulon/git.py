@@ -29,12 +29,14 @@ Two traps are baked in here rather than left for each caller to remember:
 from __future__ import annotations
 
 import enum
+import io
 import os
 import posixpath
 import re
 import shutil
 import subprocess
 import sys
+import tarfile
 import threading
 import uuid
 from collections import deque
@@ -975,6 +977,37 @@ def ancestry(
     return None
 
 
+def tree_bytes_args(rev: str, path: str) -> list[str]:
+    """`git archive --format=tar <rev> -- <path>`: a file or folder at a commit, as bytes (T632)."""
+    return ["archive", "--format=tar", rev, "--", path]
+
+
+def parse_tree_bytes(raw: bytes) -> dict[str, bytes] | None:
+    """`{repository path: exact bytes}` of every regular file in a `git archive` tar, or None.
+
+    Bytes and not text: Tortoise's AutoUpdater hashes each migration file's exact bytes,
+    and a text read would turn CRLF into LF. A tar that does not read is "could not ask".
+    """
+    found: dict[str, bytes] = {}
+    try:
+        with tarfile.open(fileobj=io.BytesIO(raw), mode="r:") as archive:
+            for member in archive:
+                if not member.isreg():
+                    continue
+                handle = archive.extractfile(member)
+                if handle is None:
+                    return None
+                found[member.name] = handle.read()
+    except (tarfile.TarError, OSError, EOFError):
+        return None
+    return found
+
+
+def folder_is_absent(listing: str) -> bool:
+    """`git ls-tree -z --name-only` printed nothing: the path is not in that commit."""
+    return not listing.strip("\0")
+
+
 _LOGGED_ARGV_CHARS = 1000
 """How much of a containerized git command line one log line shows (T630 re-review)."""
 
@@ -1749,6 +1782,27 @@ class RunnerGit:
             logger.debug(f"could not list the files {rev} tracks in {dest}: {exc}")
             return None
         return parse_tree_files(proc.stdout)
+
+    def tree_bytes(self, dest: Path, rev: str, path: str) -> dict[str, bytes] | None:
+        """`{repository path: bytes}` of the files under `path` (a file or folder) at `rev` (T632).
+
+        From the commit's own tree, never from the working tree: an untracked or edited
+        copy on disk is not what that commit ships. A path the commit does not have is
+        a real answer, `{}`; git that cannot say is None.
+        """
+        if not (dest / ".git").is_dir():
+            return None
+        try:
+            proc = runner.run_bytes(
+                ["git", *tree_bytes_args(rev, path)], cwd=dest, env=_no_prompt_env()
+            )
+            if proc.returncode == 0:
+                return parse_tree_bytes(proc.stdout)
+            tree = _run_git(["git", "ls-tree", "-z", "--name-only", rev, "--", path], cwd=dest)
+        except (GitError, OSError) as exc:
+            logger.debug(f"could not read {path} at {rev} in {dest}: {exc}")
+            return None
+        return {} if folder_is_absent(tree.stdout) else None
 
     def changed_lines(self, dest: Path, old: str, new: str, path: str) -> tuple[str, ...] | None:
         """One file's added (`+`) and removed (`-`) lines between two commits. None = cannot ask."""
@@ -2711,6 +2765,23 @@ class ContainerGit:
             logger.debug(f"could not list the files {rev} tracks in {dest}: {exc}")
             return None
         return parse_tree_files(proc.stdout)
+
+    def tree_bytes(self, dest: Path, rev: str, path: str) -> dict[str, bytes] | None:
+        """`RunnerGit.tree_bytes()`, containerised: the read-only container, no network (T632)."""
+        if not (dest / ".git").is_dir():
+            return None
+        try:
+            argv = self._argv(self._launcher(), dest, tree_bytes_args(rev, path), writes=False)
+            proc = runner.run_bytes(argv, env=_no_prompt_env())
+            if proc.returncode == 0:
+                return parse_tree_bytes(proc.stdout)
+            tree = self._capture(
+                dest, ["ls-tree", "-z", "--name-only", rev, "--", path], writes=False
+            )
+        except (GitError, OSError) as exc:
+            logger.debug(f"could not read {path} at {rev} in {dest}: {exc}")
+            return None
+        return {} if folder_is_absent(tree.stdout) else None
 
     def changed_lines(self, dest: Path, old: str, new: str, path: str) -> tuple[str, ...] | None:
         """`RunnerGit.changed_lines()`, containerised; `writes=False`, nothing is fetched."""

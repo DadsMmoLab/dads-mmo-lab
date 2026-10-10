@@ -395,6 +395,21 @@ class Recorder:
     route ask about the files it found and not the whole ledger.
     """
 
+    byte_trees: dict[tuple[Path, str, str], dict[str, bytes] | None] = field(default_factory=dict)
+    """T632: git's tree per `(checkout, commit, folder)`: `{name: bytes}`; None = git cannot say.
+
+    The route's `tree_bytes()` seam answers from these (and `blobs`), as `git archive` would.
+    A folder not named is a folder that commit does not have.
+    """
+
+    blobs: dict[tuple[Path, str, str], bytes] = field(default_factory=dict)
+    """T632: a single file at `(checkout, commit, path)` for `tree_bytes()`: its bytes."""
+
+    migrations: dict[str, str] = field(default_factory=dict)
+    """T632: a Tortoise schema's `migrations` ledger, `<module>:<HASH>` per line, answered verbatim.
+
+    A schema not named has no `migrations` table (the table question answers nothing)."""
+
     updates_error: str = ""
     """T630: non-empty and every `updates` question fails with it (a database that cannot say)."""
 
@@ -510,10 +525,10 @@ class Recorder:
     """T630: `file_lines()` answers None (git could not read the files)."""
 
     ancestors: set[tuple[Path, str, str]] = field(default_factory=set)
-    """`(checkout, old, new)` triples `is_ancestor()` answers True for (a forward move)."""
+    """T632: `(checkout, old, new)` triples `is_ancestor()` answers True for (a forward move)."""
 
     ancestry_undecided: bool = False
-    """`is_ancestor()` answers None, as a depth-1 clone's grafts leave git unable to."""
+    """T632: `is_ancestor()` answers None, as a depth-1 clone's grafts leave git unable to."""
 
     db_was_up: bool | None = True
     """What `db_running()` answers for the database container (T630): up, by default."""
@@ -613,6 +628,28 @@ class Recorder:
             for path in said
             if any(path == spec or path.startswith(f"{spec.rstrip('/')}/") for spec in paths)
         )
+
+    def tree_bytes(self, dest: Path, rev: str, path: str) -> dict[str, bytes] | None:
+        self.calls.append(f"tree-bytes:{dest.name}:{rev[:7]}:{path}")
+        found: dict[str, bytes] = {}
+        for (where, at, folder), files in {**self.byte_trees, **self.blobs}.items():
+            if where != dest or at != rev:
+                continue
+            inside = (
+                folder == path or folder.startswith(f"{path}/") or path.startswith(f"{folder}/")
+            )
+            if folder == path and files is None:
+                return None
+            if not inside or files is None:
+                continue
+            if isinstance(files, bytes):
+                found[folder] = files
+                continue
+            for name, data in files.items():
+                full = f"{folder}/{name}"
+                if full == path or full.startswith(f"{path}/"):
+                    found[full] = data
+        return found
 
     def file_lines(
         self, dest: Path, rev: str, paths: Sequence[str]
@@ -831,6 +868,17 @@ class Recorder:
             return self.realm_row
         if "yulon_install_file" in statement:
             return self.file_ledger
+        if statement == "SHOW TABLES LIKE 'migrations'":
+            return "migrations\n" if schema in self.migrations else ""
+        if "FROM `migrations` WHERE" in statement:
+            if self.updates_error:
+                raise docker.DockerCommandError(self.updates_error)
+            asked = set(re.findall(r"'([0-9A-F]+)'", statement))
+            return "".join(
+                f"{line}\n"
+                for line in self.migrations.get(schema or "", "").splitlines()
+                if line.partition(":")[2] in asked
+            )
         if "FROM updates WHERE name IN" in statement:
             if self.updates_error:
                 raise docker.DockerCommandError(self.updates_error)
@@ -938,6 +986,7 @@ class Recorder:
             tree_files=self.tree_files,
             is_ancestor=self.is_ancestor,
             file_lines=self.file_lines,
+            tree_bytes=self.tree_bytes,
             db_running=self.db_running,
             stop_db=self.stop_db,
             changed_lines=self.changed_lines,

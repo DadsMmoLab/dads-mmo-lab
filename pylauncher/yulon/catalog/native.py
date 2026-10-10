@@ -4963,6 +4963,11 @@ def _git_tree_files(dest: Path, rev: str, paths: Sequence[str]) -> tuple[str, ..
     return git.ContainerGit().tree_files(dest, rev, paths)
 
 
+def _git_tree_bytes(dest: Path, rev: str, path: str) -> dict[str, bytes] | None:
+    """`{repository path: bytes}` of the files under `path` at `rev`, containerised (T632)."""
+    return git.ContainerGit().tree_bytes(dest, rev, path)
+
+
 def _git_file_lines(
     dest: Path, rev: str, paths: Sequence[str]
 ) -> dict[str, tuple[str, ...]] | None:
@@ -6308,6 +6313,14 @@ class Seams:
     the ones it adds beside it, to tell an update upstream re-filed (AzerothCore's
     pending squash) from one the target does not have.
     """
+    tree_bytes: Callable[[Path, str, str], dict[str, bytes] | None] = _git_tree_bytes
+    """T632: `{repository path: bytes}` of the files under a path (file or folder) at a commit.
+
+    Read from git's tree at that commit, never from disk; `{}` is a path the commit does not
+    have, `None` is git that could not say. What Tortoise's Return asks about both commits
+    to hash the migration files its databases' `migrations` table keys by hash, and to
+    read the module's own install rules for where they go.
+    """
     images_built: Callable[[Sequence[str]], bool | None] = docker.images_built
     build_cache_bytes: Callable[[], int | None] = docker.build_cache_bytes
     """How much build cache Docker holds; preflight counts it for a resumed build (T203)."""
@@ -6717,6 +6730,7 @@ class Seams:
             tree_files=repo.tree_files,
             is_ancestor=repo.is_ancestor,
             file_lines=repo.file_lines,
+            tree_bytes=repo.tree_bytes,
             images_built=on(docker.images_built, wsl_distro=distro),
             build_cache_bytes=on(docker.build_cache_bytes, wsl_distro=distro),
             image_id=on(docker.image_id, wsl_distro=distro),

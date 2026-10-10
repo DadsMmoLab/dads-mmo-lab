@@ -39,6 +39,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - **Rebuild the server…** on a server from the retired playerbots fork says so at once, not after half an hour.
 - **Return to the tested pin…** no longer builds onto databases a newer build updated; it names the backup to restore.
 - A failed, stopped or rolled-back update keeps every earlier database copy; only a successful one clears them.
+- On Tortoise, **Return to the tested pin…** no longer builds onto databases a newer build migrated; it names the backup.
 - A module update that breaks the build is still put back when you pressed Stop just as the build failed.
 - A new Tortoise login server no longer logs every database statement; older ones get this with **Reset to default**.
 - A database password typed inside escaped or joined quotes no longer slips into a support zip.

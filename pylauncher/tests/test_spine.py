@@ -2433,6 +2433,13 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "write and reads no content: only names and sizes. An OSError listing it counts "
         "nothing, and the sentence then says nothing about size"
     ),
+    ("catalog/snapshot.py", "copy_from_before_migrations"): (
+        "T632. `copy_from_before()` for Tortoise: lists this server's own "
+        "`sql_scripts/backups/` to NAME the newest complete dump of a database whose "
+        "`migrations` table holds none of the hashes the tested commit lacks, and that "
+        "Restore would take as this game's. It decides no write: the files are only read. An "
+        "OSError listing it names none, and the sentence then says no copy was found"
+    ),
     ("catalog/snapshot.py", "copy_from_before"): (
         "T630. Lists this server's own `sql_scripts/backups/` to NAME, in the sentence "
         '"Return to the tested pin…" refuses with, the newest dump of a database that holds '
