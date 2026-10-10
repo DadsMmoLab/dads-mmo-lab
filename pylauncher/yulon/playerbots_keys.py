@@ -72,6 +72,9 @@ NEVER_RENAMED_ENV = frozenset(
 
 _DIST_KEY = re.compile(r"^[ \t]*#?[ \t]*((?:AiPlayerbot|Playerbots)\.[A-Za-z0-9_.]+)[ \t]*=", re.M)
 _SOURCE_KEY = re.compile(r"\"((?:AiPlayerbot|Playerbots)\.[A-Za-z0-9_.%]*)")
+_NOT_CODE = re.compile(r"//[^\n]*|/\*.*?\*/|^[ \t]*#[^\n]*", re.DOTALL | re.M)
+"""Comments and preprocessor lines: `#include "Playerbots.h"` (line 14 at 037c0141 and at
+79bd4281) is a file name, not a key, and read as one it made every old source look mixed."""
 
 
 def prefix_in(keys: Iterable[str]) -> str | None:
@@ -103,7 +106,7 @@ def module_prefix(server_dir: Path) -> str | None:
             return found
     source = _read(server_dir / SOURCE)
     if source is not None:
-        return prefix_in(_SOURCE_KEY.findall(source))
+        return prefix_in(_SOURCE_KEY.findall(_NOT_CODE.sub(" ", source)))
     return None
 
 

@@ -8706,6 +8706,11 @@ class ControllerView(QWidget):
         # exists to prevent (review, 2026-08-22).
         self.problem_label = _SaidLine("", tab)
         self.problem_label.setVisible(False)
+        # T657: what a Start did on its own that is not a problem (the bot settings renamed
+        # for the module's prefix), said as a plain note under the realm, never as a failure.
+        self.notice_label = QLabel("", tab)
+        self.notice_label.setWordWrap(True)
+        self.notice_label.setVisible(False)
         # T214, T211: what broke behind a line that says so in words. Any new
         # line takes the last Details down; the writer that has some sets it after.
         self.problem_details = Details(tab)
@@ -8946,6 +8951,7 @@ class ControllerView(QWidget):
         realm_column.addWidget(self.server_reasons)
         # The refusal, then the offers it makes: read in that order.
         realm_column.addWidget(self.problem_label)
+        realm_column.addWidget(self.notice_label)
         realm_column.addWidget(self.problem_details)
         realm_column.addWidget(
             _bar(
@@ -10862,13 +10868,14 @@ class ControllerView(QWidget):
             )
             if isinstance(problem, str) and problem
         ]
-        # T657: the one line a Start says when it renamed the bot settings for the module.
+        # T657: the one line a Start says when it renamed the bot settings for the module, as
+        # a note and not a problem; the next Start that renames nothing takes it away.
         renamed = getattr(self.services.controller, "bot_settings_renamed", None)
-        lines = [renamed] if isinstance(renamed, str) and renamed else []
+        renamed = renamed if isinstance(renamed, str) and renamed else ""
+        self.notice_label.setText(renamed)
+        self.notice_label.setVisible(bool(renamed))
         if said:
-            lines.append("The server started, but " + " Also, ".join(said))
-        if lines:
-            text = " ".join(lines)
+            text = "The server started, but " + " Also, ".join(said)
             self.problem_label.setText(text)
             return text
         return None
