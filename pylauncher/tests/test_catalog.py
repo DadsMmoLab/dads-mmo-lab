@@ -978,13 +978,14 @@ def test_tbc_carries_the_script_values_verbatim() -> None:
     assert cm.ready.regex is False, "a literal marker; the spine re.escapes it (A5)"
 
 
-UPSTREAM_AFTER_INSTANCES = ("core updates", "dbc data", "ACID")
+UPSTREAM_AFTER_INSTANCES = ("core updates", "dbc data", "ACID", "cmangos custom")
 """What upstream's `InstallFullDB.sh` applies AFTER `Updates/Instances/`, as Yu'lon names it.
 
 Read at the tbc-db and classic-db pins (T141): `apply_content_db` runs the
 Full_DB dump, `Updates/[0-9]*.sql`, then `Updates/Instances/[0-9]*.sql`, and
 `apply_full_content_db` goes on to the world core updates, the dbc data and
-ACID. `dbc data` is TBC's alone; Vanilla's plan has no such phase.
+ACID, and last `utilities/cmangos_custom.sql` (T659). `dbc data` is TBC's alone;
+Vanilla's plan has no such phase.
 """
 
 

@@ -447,6 +447,19 @@
                   "on_error": "warn"
                 },
                 {
+                  "name": "cmangos custom",
+                  "on_update": "reapply_changed",
+                  "into": "mangos",
+                  "files": [
+                    "src/tbc-db/utilities/cmangos_custom.sql"
+                  ],
+                  "on_error": "warn",
+                  "notes": [
+                    "tbc-db's InstallFullDB.sh runs utilities/cmangos_custom.sql last of its database steps, after the world core updates, the dbc data and ACID, on every full install with no option to leave it out, and stops on an error (T659). This phase sits after the core updates and the other database steps for the same reason: it updates columns that those add. It is `warn` here, not `fail`: a failure would drop and re-import the whole database for a set of data corrections.",
+                    "Every statement in the file is a keyed UPDATE, or a DELETE ... WHERE before the INSERT that puts the row back, so it is safe to repeat; `sqlplan.repeat_problem` checks that again on the file before an update runs it, and a file of another shape is named and not run. An update applies it once to a server that has no record of it and again when upstream edits it."
+                  ]
+                },
+                {
                   "name": "spell_template hotfix",
                   "into": "mangos",
                   "statements": [
@@ -900,6 +913,19 @@
                   },
                   "sort": "natural",
                   "on_error": "warn"
+                },
+                {
+                  "name": "cmangos custom",
+                  "on_update": "reapply_changed",
+                  "into": "mangos",
+                  "files": [
+                    "src/classic-db/utilities/cmangos_custom.sql"
+                  ],
+                  "on_error": "warn",
+                  "notes": [
+                    "classic-db's InstallFullDB.sh runs utilities/cmangos_custom.sql last of its database steps, after the world core updates, the dbc data and ACID, on every full install with no option to leave it out, and stops on an error (T659). This phase sits after the core updates and the other database steps for the same reason: it updates columns that those add. It is `warn` here, not `fail`: a failure would drop and re-import the whole database for a set of data corrections.",
+                    "Every statement in the file is a keyed UPDATE, or a DELETE ... WHERE before the INSERT that puts the row back, so it is safe to repeat; `sqlplan.repeat_problem` checks that again on the file before an update runs it, and a file of another shape is named and not run. An update applies it once to a server that has no record of it and again when upstream edits it."
+                  ]
                 },
                 {
                   "name": "spell_template hotfix",

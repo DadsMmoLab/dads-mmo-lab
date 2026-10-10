@@ -1385,14 +1385,19 @@ def phase_drift(plan: SqlPlan, known: Mapping[str, str]) -> PhaseDrift:
     """Compare the plan's phases with an install's `PhaseLedger.known`, in plan order. Pure.
 
     A phase is stale when the install has no version of it (added since) or a
-    different one (corrected since). `rerun_on_marked` phases are left out:
+    different one (corrected since). `rerun_on_marked` phases are left out, and so are
+    `reapply_changed` ones (T659: the update route applies them through the file ledger):
     T11's route applies them on every press already. A phase the install has
     and the plan no longer does asks for nothing -- there is nothing to apply.
     """
     offered: list[str] = []
     withheld: list[str] = []
     for phase in plan.phases:
-        if phase.rerun_on_marked or known.get(phase.name) == phase.digest():
+        if (
+            phase.rerun_on_marked
+            or phase.on_update == "reapply_changed"
+            or known.get(phase.name) == phase.digest()
+        ):
             continue
         (offered if phase.reapply_when_changed else withheld).append(phase.name)
     return PhaseDrift(offered=tuple(offered), withheld=tuple(withheld))
@@ -1897,14 +1902,106 @@ def whole_table_problem(path: Path) -> str | None:
     Measured 2026-10-07 at playerbots 45bed519: every sql/world, world/tbc and
     world/classic file passes.
     """
+    return _repeat_problem(path, keyed=False)
+
+
+def repeat_problem(path: Path) -> str | None:
+    """Why running this file again could leave something one run would not; None if it cannot.
+
+    `whole_table_problem()`'s rule, widened for a file of keyed corrections (T659: a db
+    repo's `utilities/cmangos_custom.sql`): a single-table `UPDATE … SET` is also repeatable
+    when each assignment sets a constant or ORs/ANDs a constant into its own column, and an
+    `INSERT` is when `DELETE FROM t WHERE …` came before it. `a = a + 1`, a column copied
+    from another column and any subquery are not.
+    """
+    return _repeat_problem(path, keyed=True)
+
+
+_ASSIGNMENT = re.compile(r"(?i)^`?(\w+)`?\s*=\s*(.*)$", re.S)
+_HEX = re.compile(r"(?i)0x[0-9a-f]+")
+
+
+def _unsafe_assignments(sets: str) -> str | None:
+    """Why this `SET` list is not safe to apply twice (T659); None if every assignment is."""
+    if "(" in sets or ")" in sets:
+        return "it calls a function or a subquery in a SET"
+    for part in sets.split(","):
+        found = _ASSIGNMENT.match(part.strip())
+        if found is None:
+            return "it has an assignment this scan cannot read"
+        column, rhs = found.group(1), found.group(2).replace("`", "").strip()
+        rest = _HEX.sub("0", rhs)
+        words = re.findall(r"[A-Za-z_]\w*", rest)
+        if not words:
+            continue  # constants and arithmetic on constants
+        own = re.fullmatch(rf"(?i){column}\s*[|&]\s*~?\s*[0-9]+(?:\s*\*\s*[0-9]+)?", rest.strip())
+        if own is None and rest.strip().upper() != "NULL" and not _is_keyword_only(words):
+            return f"it sets {column} from {rhs[:30]}"
+    return None
+
+
+def _is_keyword_only(words: Sequence[str]) -> bool:
+    return all(word.upper() in {"NULL", "TRUE", "FALSE"} for word in words)
+
+
+_KEYWORDS = {"AND", "OR", "IN", "NOT", "BETWEEN", "NULL", "IS", "LIKE", "TRUE", "FALSE"}
+
+
+def _columns_read(where: str) -> set[str]:
+    """The lower-cased column names a WHERE clause mentions (strings are already blanked)."""
+    rest = _HEX.sub("0", where.replace("`", ""))
+    return {w.lower() for w in re.findall(r"[A-Za-z_]\w*", rest) if w.upper() not in _KEYWORDS}
+
+
+def _keyed_delete(table: str, rest: str) -> tuple[str, str, frozenset[str]] | None:
+    """`(table, key column, key values)` of `DELETE FROM t WHERE col = N` / `col IN (N, …)`."""
+    found = re.fullmatch(
+        r"(?i)WHERE\s+`?(\w+)`?\s*(?:=\s*(\d+)|IN\s*\(\s*(\d+(?:\s*,\s*\d+)*)\s*\))", rest
+    )
+    if found is None:
+        return None
+    values = found.group(2) or found.group(3)
+    return table, found.group(1).lower(), frozenset(v.strip() for v in values.split(","))
+
+
+def _insert_covered(
+    sql: str, table: str, deleted: tuple[str, str, frozenset[str]] | None
+) -> str | None:
+    """Why this INSERT is not undone by the DELETE just before it; None if every row is."""
+    unsafe = f"it runs a statement that is not safe to repeat ({sql[:40]}…)"
+    if re.search(r"(?i)\b(SELECT|ON\s+DUPLICATE)\b", sql):
+        return unsafe
+    if deleted is None or deleted[0] != table:
+        return f"it writes {table} without emptying it first"
+    found = re.match(rf"(?i)INSERT INTO {_TABLE}\s*\(([^)]*)\)\s*VALUES\s*(.*)$", sql)
+    if found is None:
+        return unsafe
+    columns = [c.strip().strip("`").lower() for c in found.group(2).split(",")]
+    if deleted[1] not in columns:
+        return unsafe
+    at = columns.index(deleted[1])
+    rows = re.findall(r"\(([^()]*)\)", found.group(3))
+    if not rows:
+        return unsafe
+    for row in rows:
+        cells = [c.strip() for c in row.split(",")]
+        if len(cells) != len(columns) or cells[at] not in deleted[2]:
+            return f"it inserts into {table} a row the DELETE before it does not remove"
+    return None
+
+
+def _repeat_problem(path: Path, *, keyed: bool) -> str | None:
     if only_creates_indexes(path):
         return None  # run one index at a time by the reload, each made fresh
     emptied: set[str] = set()
     dropped: set[str] = set()
+    prev_delete: tuple[str, str, frozenset[str]] | None = None
+    set_columns: dict[str, set[str]] = {}
     for raw in _statements(path.read_text(encoding="utf-8", errors="replace")):
         if not raw:
             continue
         sql = " ".join(raw.split())
+        just_deleted, prev_delete = prev_delete, None
         head = sql.upper()
         if head.startswith(("SET ", "SELECT ", "LOCK TABLES", "UNLOCK TABLES")):
             continue
@@ -1938,6 +2035,7 @@ def whole_table_problem(path: Path) -> str | None:
                 emptied.add(match.group(1).lower())
                 continue
             if rest.startswith("WHERE ") and not re.search(r"\b(LIMIT|ORDER BY)\b", rest):
+                prev_delete = _keyed_delete(match.group(1).lower(), match.group(2).strip())
                 continue  # deletes the same rows however often it runs
             return f"it runs a statement that is not safe to repeat ({sql[:40]}…)"
         # REPLACE and INSERT IGNORE add a row wherever no key collides, so they need
@@ -1946,8 +2044,36 @@ def whole_table_problem(path: Path) -> str | None:
             # A join, a list or an alias can write a table other than the first one
             # named (Codex, T534): only the single-table form is read.
             return f"it runs an UPDATE of more than one table ({sql[:40]}…)"
+        if keyed and (keyed_update := re.match(rf"(?i)UPDATE {_TABLE} SET (.*)$", sql)):
+            sets = re.split(r"(?i)\s+WHERE\s+", keyed_update.group(2), maxsplit=1)[0]
+            if re.search(r"(?i)\b(SELECT|LIMIT|ORDER\s+BY)\b", sql):
+                return f"it runs a statement that is not safe to repeat ({sql[:40]}…)"
+            why = _unsafe_assignments(sets)
+            if why is not None:
+                return f"it runs a statement that is not safe to repeat ({sql[:40]}…): {why}"
+            table = keyed_update.group(1).lower()
+            earlier = set_columns.setdefault(table, set())
+            where = re.split(r"(?i)\s+WHERE\s+", keyed_update.group(2), maxsplit=1)[1:]
+            read = _columns_read(where[0]) if where else set()
+            if read & earlier:
+                return (
+                    f"it runs an UPDATE whose WHERE reads {sorted(read & earlier)[0]}, which an "
+                    f"earlier UPDATE of {table} in the file set ({sql[:40]}…)"
+                )
+            earlier.update(
+                found.group(1).lower()
+                for part in sets.split(",")
+                if (found := _ASSIGNMENT.match(part.strip()))
+            )
+            continue
         match = re.match(rf"(?i)(?:INSERT(?: IGNORE)? INTO|REPLACE INTO|UPDATE) {_TABLE}", sql)
         if match:
+            table = match.group(1).lower()
+            if keyed and table not in emptied and sql.upper().startswith("INSERT INTO"):
+                why = _insert_covered(sql, table, just_deleted)
+                if why is not None:
+                    return why
+                continue
             if match.group(1).lower() not in emptied:
                 return f"it writes {match.group(1)} without emptying it first"
             continue

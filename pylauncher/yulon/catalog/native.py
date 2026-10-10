@@ -1251,6 +1251,12 @@ def world_updates_note(entry: CatalogEntry) -> str:
             "those whose files changed, which replaces what the bots generated in them (travel "
             "routes, zone levels, named places)."
         )
+    if "reapply_changed" in modes:
+        # T659: the db repo's data corrections, safe to repeat, so applied again when edited.
+        said += (
+            " It also applies the database repository's data corrections file, which is safe to "
+            "repeat: once, and again whenever the tested version of it changes."
+        )
     return said
 
 
