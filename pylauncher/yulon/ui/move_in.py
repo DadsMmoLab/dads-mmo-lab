@@ -12,7 +12,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from yulon import module_source, move_server, platform
+from yulon import apply, module_source, move_server, platform
 from yulon.catalog import native, upstream
 from yulon.catalog.catalog import Catalog, CatalogEntry
 from yulon.log import get_logger
@@ -98,12 +98,21 @@ def _server_for(entry: CatalogEntry) -> Callable[[Path, Path | None], move_serve
                 store.user_root, manifest, shipped_ids=store.load_index(manifest.type).items
             )
 
+        custom = services.module_install_custom
+
+        def install_folder(manifest: Manifest, folder: Path) -> apply.ApplyReport:
+            # The Modules tab's own "Install from folder": it copies the folder in, completes
+            # the description from what landed, and keeps it in this computer's user layer.
+            assert custom is not None
+            return custom(manifest, folder)
+
         return move_server.MovedInServer(
             world=services.move.world,
             applier=services.applier,
             rebuild=services.rebuild,
             db_password=entry.install.db_password(server_dir),
             persist_manifest=persist,
+            install_folder=install_folder if custom is not None else None,
         )
 
     return build

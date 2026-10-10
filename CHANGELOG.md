@@ -25,6 +25,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - **Delete…** and **Clean up…** on the Maintenance tab remove old backups, always keeping the newest good copy of each.
 - Addon and module update chips now fill in by themselves once a day, without pressing **Check for updates**.
 - **Pack the whole server…** and **Bring from another computer…** rebuild a server, world and modules, on another PC.
+- **Pack the whole server…** now carries a module added from a folder; **Bring from another computer…** installs it.
 
 ### Fixed
 - On Tortoise, a failed update puts the world database back too, and the copy it takes is one a return can use.
