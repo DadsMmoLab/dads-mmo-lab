@@ -263,6 +263,9 @@ _GIT_FIELDS = {
     # T179 Task 6: the TrinityCore update route's two diff questions.
     "changed_files",
     "changed_lines",
+    # T630: the files the commit a Return moved to tracks (`git ls-tree`).
+    "tree_files",
+    "file_lines",
 }
 """The seams that are git questions: bound to a `ContainerGit` that names the distro."""
 

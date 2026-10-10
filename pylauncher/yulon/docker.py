@@ -948,6 +948,41 @@ def compose_project_name(server_dir: Path, *, wsl_distro: str | None = None) -> 
     return name if isinstance(name, str) and name else None
 
 
+def compose_service_images(
+    server_dir: Path, services: Sequence[str], *, wsl_distro: str | None = None
+) -> dict[str, str] | None:
+    """The image each of `services` runs, as compose reads this folder; None if it cannot say.
+
+    Asked of `compose config`, which layers the override over the base as `up` will, so
+    it is what compose would start. A folder moved since it was made still names its images
+    after the id it was made with, whatever its new path hashes to (T627).
+    """
+    proc = _docker(
+        ["compose", "config", "--format", "json"],
+        cwd=server_dir,
+        timeout=_COMPOSE_CONFIG_TIMEOUT_SECONDS,
+        wsl_distro=wsl_distro,
+    )
+    if proc.returncode != 0:
+        logger.debug(f"compose config failed in {server_dir}: {proc.stderr.strip()}")
+        return None
+    try:
+        parsed = json.loads(proc.stdout)
+    except ValueError:
+        logger.debug("compose config did not return JSON")
+        return None
+    named = parsed.get("services") if isinstance(parsed, dict) else None
+    if not isinstance(named, dict):
+        return None
+    found: dict[str, str] = {}
+    for service in services:
+        entry = named.get(service)
+        image = entry.get("image") if isinstance(entry, dict) else None
+        if isinstance(image, str) and image:
+            found[service] = image
+    return found
+
+
 def pin_project_name(server_dir: Path, *, wsl_distro: str | None = None) -> str | None:
     """Freeze this install's compose project name into its own `.env`.
 
@@ -2045,6 +2080,21 @@ def server_version(*, wsl_distro: str | None = None, timeout: float = 20.0) -> s
     if proc.returncode != 0:
         return None
     return proc.stdout.strip() or None
+
+
+def engine_size(*, wsl_distro: str | None = None, timeout: float = 10.0) -> tuple[int, int] | None:
+    """The daemon's own CPU count and memory in bytes (T636), or `None` when it does not say.
+
+    On Docker Desktop this is the WSL2 VM's limit, not the PC's. A read, bounded,
+    never raising, like `server_version`.
+    """
+    proc = _docker(
+        ["info", "--format", "{{.NCPU}} {{.MemTotal}}"], wsl_distro=wsl_distro, timeout=timeout
+    )
+    parts = proc.stdout.split()
+    if proc.returncode != 0 or len(parts) != 2 or not all(p.isdigit() for p in parts):
+        return None
+    return int(parts[0]), int(parts[1])
 
 
 @_a_lifecycle_command

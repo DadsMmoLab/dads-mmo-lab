@@ -387,6 +387,17 @@ class Recorder:
     row is a ledger nobody can read, and the update route then refuses every press.
     """
 
+    applied_updates: dict[str, str] = field(default_factory=dict)
+    """T630: what a schema's `updates` table answers to "which of these names do you hold".
+
+    Keyed by schema, VERBATIM like `query_answer`; a schema not named holds none of
+    them. Filtered by the names asked, as the `IN (...)` filters, so a test sees the
+    route ask about the files it found and not the whole ledger.
+    """
+
+    updates_error: str = ""
+    """T630: non-empty and every `updates` question fails with it (a database that cannot say)."""
+
     column_answer: str | None = None
     """What an `information_schema.columns` question answers; None falls through to `query_answer`.
 
@@ -484,6 +495,23 @@ class Recorder:
     about the folders it reads and not the whole tree.
     """
 
+    trees: dict[tuple[Path, str], tuple[str, ...] | None] = field(default_factory=dict)
+    """T630: `tree_files()`'s answer per `(checkout, commit)`: the paths that commit tracks.
+
+    Absent is a commit tracking nothing under the asked folders; `None` is git that
+    could not say. Filtered by the pathspecs asked, as `git ls-tree` filters. Read
+    from here and never from the disk, as the real seam reads the commit's tree.
+    """
+
+    lines: dict[tuple[Path, str, str], tuple[str, ...]] = field(default_factory=dict)
+    """T630: `file_lines()`'s answer per `(checkout, commit, path)`; absent is a file with none."""
+
+    lines_unreadable: bool = False
+    """T630: `file_lines()` answers None (git could not read the files)."""
+
+    db_was_up: bool | None = True
+    """What `db_running()` answers for the database container (T630): up, by default."""
+
     diff_lines: dict[tuple[Path, str, str, str], tuple[str, ...] | None] = field(
         default_factory=dict
     )
@@ -562,6 +590,34 @@ class Recorder:
             for status, path in said
             if any(path == spec or path.startswith(f"{spec.rstrip('/')}/") for spec in paths)
         )
+
+    def tree_files(self, dest: Path, rev: str, paths: Sequence[str]) -> tuple[str, ...] | None:
+        self.calls.append(f"tree-files:{dest.name}:{rev[:7]}")
+        said = self.trees.get((dest, rev), ())
+        if said is None:
+            return None
+        return tuple(
+            path
+            for path in said
+            if any(path == spec or path.startswith(f"{spec.rstrip('/')}/") for spec in paths)
+        )
+
+    def file_lines(
+        self, dest: Path, rev: str, paths: Sequence[str]
+    ) -> dict[str, tuple[str, ...]] | None:
+        self.calls.append(f"file-lines:{dest.name}:{rev[:7]}:{len(paths)}")
+        if self.lines_unreadable:
+            return None
+        return {
+            path: self.lines[(dest, rev, path)] for path in paths if (dest, rev, path) in self.lines
+        }
+
+    def db_running(self, container: str) -> bool | None:
+        self.calls.append(f"db-running?:{container}")
+        return self.db_was_up
+
+    def stop_db(self, containers: list[str]) -> None:
+        self.calls.append(f"stop-db:{','.join(containers)}")
 
     def changed_lines(self, dest: Path, old: str, new: str, path: str) -> tuple[str, ...] | None:
         self.calls.append(f"changed-lines:{dest.name}:{path}")
@@ -763,6 +819,15 @@ class Recorder:
             return self.realm_row
         if "yulon_install_file" in statement:
             return self.file_ledger
+        if "FROM updates WHERE name IN" in statement:
+            if self.updates_error:
+                raise docker.DockerCommandError(self.updates_error)
+            asked = set(re.findall(r"'([^']*)'", statement))
+            return "".join(
+                f"{line}\n"
+                for line in self.applied_updates.get(schema or "", "").splitlines()
+                if line in asked
+            )
         if self.column_answer is not None and "information_schema.columns" in statement:
             return self.column_answer
         if statement.startswith(scriptdeploy.TABLES_QUESTION):
@@ -858,6 +923,10 @@ class Recorder:
             commits_since=self.commits_since,
             restore_rev=self.restore_rev,
             changed_files=self.changed_files,
+            tree_files=self.tree_files,
+            file_lines=self.file_lines,
+            db_running=self.db_running,
+            stop_db=self.stop_db,
             changed_lines=self.changed_lines,
             upstream_get=self.upstream_get,
             images_built=self.images_built,
@@ -1104,8 +1173,9 @@ class FakeSnapshot:
         return snapshot.PutBack(restored=copy.databases, safety=safety)
 
     def prune(self, server_dir: Path, copy: snapshot.Snapshot) -> tuple[Path, ...]:
+        """The real forgetting (`snapshot.prune_older()`), on the files a test laid (T633)."""
         self.rec.calls.append("prune")
-        return ()
+        return snapshot.prune_older(copy.directory, copy.files)
 
 
 def _never_provisions(**_kwargs: object) -> platform.ProvisionReport:

@@ -22,6 +22,7 @@ from yulon.catalog import composegen
 from yulon.catalog.catalog import Catalog, CatalogEntry
 from yulon.state import KnownInstall
 from yulon.support import runlog
+from yulon.support.machine import gib, machine_lines
 from yulon.support.redact import TOKEN_FLOOR, database_info_passwords, home_of
 
 FILE_CAP = 2 * 1024 * 1024
@@ -485,11 +486,14 @@ def _cut(data: bytes, notice: str = _TRUNCATION_NOTICE) -> str:
 
     `errors="ignore"` because a byte cut can land inside a multi-byte
     character; the partial line it produces is then dropped with `partition`
-    (`logsnap._trim`'s reasoning).
+    (`logsnap._trim`'s reasoning). A tail with no newline in it is ONE partial line
+    (a progress bar redrawn with `\\r`, a last line written without its newline):
+    nothing of it is kept, because it starts mid-line and may have cut a key's name
+    off the front of its value (T638).
     """
     tail = data.decode("utf-8", errors="ignore")
-    _, newline, whole = tail.partition("\n")
-    return notice + (whole if newline else tail)
+    _, _newline, whole = tail.partition("\n")
+    return notice + whole
 
 
 def read_tail(path: Path, limit: int = FILE_CAP) -> str:
@@ -593,6 +597,27 @@ def docker_version(wsl_distro: str | None) -> str | None:
     return docker.server_version(wsl_distro=wsl_distro, timeout=LIVE_TIMEOUT_S)
 
 
+def docker_size(wsl_distro: str | None) -> tuple[int, int] | None:
+    """The daemon's CPU count and memory on this machine or inside `wsl_distro`, or None."""
+    return docker.engine_size(wsl_distro=wsl_distro, timeout=LIVE_TIMEOUT_S)
+
+
+def _ask_size(
+    ask: Callable[[str | None], tuple[int, int] | None],
+    distro: str | None,
+    silent: Collection[str | None],
+) -> str:
+    if distro in silent:
+        return SKIPPED
+    try:
+        answer = ask(distro)
+    except Exception:  # boundary: system-info.txt is always written
+        answer = None
+    if answer is None:
+        return "could not read"
+    return f"{answer[0]} CPUs, {gib(answer[1])} memory"
+
+
 def _ask_version(
     ask: Callable[[str | None], str | None],
     distro: str | None,
@@ -612,6 +637,8 @@ def system_info(
     docker_version: Callable[[str | None], str | None],
     *,
     silent_targets: Collection[str | None] = frozenset(),
+    machine: Callable[[], list[str]] | None = None,
+    engine: Callable[[str | None], tuple[int, int] | None] | None = None,
 ) -> str:
     """`system-info.txt`: versions, Docker, and every install in place of `state.json`.
 
@@ -619,18 +646,36 @@ def system_info(
     bundle read its containers (`collect_live_logs`) -- is not asked again: its
     line says `SKIPPED` instead of costing another `LIVE_TIMEOUT_S`.
     """
+    machine = machine or machine_lines
+    engine = engine or docker_size
+    try:
+        machine_part = machine()
+    except Exception:  # boundary: system-info.txt is always written
+        machine_part = ["Machine size: could not read"]
+    silent = set(silent_targets)
+
+    def ask(distro: str | None) -> tuple[str, str]:
+        """The version line and the size line; a docker that did not answer is asked once."""
+        version = _ask_version(docker_version, distro, silent)
+        if version == SKIPPED or version.startswith("not reachable"):
+            silent.add(distro)
+        return version, _ask_size(engine, distro, silent)
+
+    here, here_size = ask(None)
     lines = [
         f"Yu'lon {__version__}",
         f"Operating system: {host_platform.platform()}",
         f"Python: {sys.version.split()[0]}",
         f"Qt: {sources.qt_version or 'not reported'}",
-        f"Docker on this machine: {_ask_version(docker_version, None, silent_targets)}",
+        *machine_part,
+        f"Docker on this machine: {here}",
+        f"Docker on this machine sees: {here_size}",
     ]
     distros = sorted({distro for install in sources.installs if (distro := install.wsl_distro)})
-    lines += [
-        f"Docker in WSL distro {distro}: {_ask_version(docker_version, distro, silent_targets)}"
-        for distro in distros
-    ]
+    for distro in distros:
+        version, size = ask(distro)
+        lines.append(f"Docker in WSL distro {distro}: {version}")
+        lines.append(f"Docker in WSL distro {distro} sees: {size}")
     lines += ["", f"Servers Yu'lon knows about: {len(sources.installs)}"]
     for install in sources.installs:
         where = f", WSL distro {install.wsl_distro}" if install.wsl_distro else ""

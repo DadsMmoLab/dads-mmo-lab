@@ -59,11 +59,13 @@ def test_every_unbound_patch_is_shipped_byte_exact(name: str, digest: str) -> No
 UNBOUND_ID = "wow-unbound"
 UNBOUND_REPO = "DadsMmoLab/dads-mmo-lab"
 UNBOUND_BRANCH = "mod-unbound"
-UNBOUND_REV = "49b334be72d4f1837c712d4f9ec7bcca05742155"
+UNBOUND_REV = "e52e7d0472039050b352141a0756e0660825abde"
 """The `mod-unbound` head that carries U1-U7 (the AzerothCore module layout, T556's fixes, the
 mana-regen patch) and M1 (the Mentor spawns), as DadsMmoLab/dads-mmo-lab says it. The five patch
 files here equal that head's `core-patch/` files byte for byte (checked when this was set)."""
-MOD_ALE_REV = "1cb86c9600260c3731c96dc3c98d25b4fc3f2153"
+MOD_ALE_REV = "cead0cb2e58ec0f73676ba578eff26cddb79fc01"
+"""azerothcore/mod-ale master on 2026-10-09: one commit past #408 (54720135), which made its
+`Player:IsBot()` call `WorldSession::IsHeadless()`. Pinned, not tracked: it moves with the core."""
 DK_SENTENCE = "Death Knight can be your first class, not an added one."
 
 
@@ -124,10 +126,35 @@ def test_its_database_password_plan_is_the_fixed_one_the_import_gate_reads() -> 
     assert probe is not None and reset is not None
 
 
-CORE_REV = "7f12e89ee5f467a50e62eba1d525eac7dc953d03"
-PLAYERBOTS_REV = "7bae1b5c58c76a0aa20381155edc08096d1485b2"
-"""Unbound's own core and bots pins. WotLK moved to f19a1879 / 037c0141 (T389); Unbound stays here
-by the owner's decision until T580, so these are literals and not wow-wotlk's."""
+CORE_REV = "f19a18799a35f7c24bdcdc9ea399c601f166259b"
+PLAYERBOTS_REV = "037c01418b5d01506917a3db9b44fd56ac5f965c"
+"""Unbound's own core and bots pins. Unbound shipped on 7f12e89e / 7bae1b5c; T580 (2026-10-09)
+moved it to the pair T389 proved for wow-wotlk. They are literals, not read from wow-wotlk, and no
+test asserts the two entries agree: they move separately on purpose. A move of Unbound's core or
+mod-ale re-checks its five core patches and the module's Lua against the new revisions (T580 found
+mod-ale #391 changed what the Mentor's `SetSkill` call grants), so a WotLK bump must not drag
+Unbound along, and a test tying them would push the next WotLK lane to bump Unbound untested."""
+
+BOT_SESSION_CALL: dict[tuple[str, str], str] = {
+    # mod-playerbots/azerothcore-wotlk src/server/game/Server/WorldSession.h
+    ("mod-playerbots/azerothcore-wotlk", "7f12e89ee5f467a50e62eba1d525eac7dc953d03"): "IsBot",
+    ("mod-playerbots/azerothcore-wotlk", "f19a18799a35f7c24bdcdc9ea399c601f166259b"): "IsHeadless",
+    # mod-playerbots src/Script/Playerbots.cpp
+    ("mod-playerbots/mod-playerbots", "7bae1b5c58c76a0aa20381155edc08096d1485b2"): "IsBot",
+    ("mod-playerbots/mod-playerbots", "037c01418b5d01506917a3db9b44fd56ac5f965c"): "IsHeadless",
+    # mod-ale src/LuaEngine/methods/PlayerMethods.h
+    ("azerothcore/mod-ale", "1cb86c9600260c3731c96dc3c98d25b4fc3f2153"): "IsBot",
+    ("azerothcore/mod-ale", "cead0cb2e58ec0f73676ba578eff26cddb79fc01"): "IsHeadless",
+}
+"""The name of the core's "is this session a bot" call, as each source has it at a revision.
+
+Read with `git grep` on m910q 2026-10-09 (T580): the core declares `IsBot()` at 7f12e89e
+(WorldSession.h:1231) and `IsHeadless()` with no `IsBot()` at f19a1879 (WorldSession.h:1234,
+AzerothCore #27533); mod-playerbots calls `GetSession()->IsBot()` at 7bae1b5c (Playerbots.cpp:138)
+and `IsHeadless()` at 037c0141 (Playerbots.cpp:147); mod-ale calls `IsBot()` at 1cb86c96
+(PlayerMethods.h:5145) and `IsHeadless()` at cead0cb (PlayerMethods.h:5205, its #408). A core and
+a module that name it differently do not compile together (T389's user report). mod-unbound asks
+whichever the core has (its 456ce5b6), so it is not listed."""
 
 
 def test_it_builds_the_core_modules_ale_and_the_unbound_branch_at_pinned_commits() -> None:
@@ -142,6 +169,93 @@ def test_it_builds_the_core_modules_ale_and_the_unbound_branch_at_pinned_commits
     mine = sources["modules/mod-unbound"]
     assert (mine.repo, mine.branch, mine.rev) == (UNBOUND_REPO, UNBOUND_BRANCH, UNBOUND_REV)
     assert set(sources) == set(wotlk) | {"modules/mod-ale", "modules/mod-unbound"}
+
+
+ALE_SET_SKILL_SLOTS: dict[str, tuple[int, int, int]] = {
+    # src/LuaEngine/methods/PlayerMethods.h, `int SetSkill(lua_State* L, Player* player)`, line 1877
+    "1cb86c9600260c3731c96dc3c98d25b4fc3f2153": (2, 3, 1),
+    "cead0cb2e58ec0f73676ba578eff26cddb79fc01": (1, 2, 3),
+}
+"""Which argument of a Lua `player:SetSkill(skill, a1, a2, a3)` reaches the core's
+`Player::SetSkill(id, step, newVal, maxVal)` as (step, value, max), per mod-ale revision.
+
+Read on GitHub at both revisions 2026-10-09 (T580): the binding reads its Lua arguments into
+`step, currVal, maxVal` at both, then calls `player->SetSkill(id, currVal, maxVal, step)` at
+1cb86c96 (so a3 became the value and a1 the max) and `player->SetSkill(id, step, currVal, maxVal)`
+at cead0cb, the order mod-ale #391 (9e5b8c66) corrected. The core's signature is
+`SetSkill(uint16 id, uint16 step, uint16 currVal, uint16 maxVal)` at 7f12e89e and f19a1879."""
+
+MENTOR_LUA = (
+    Path(__file__).parent / "fixtures" / "mod-unbound" / "lua_scripts" / "unbound_mentor.lua"
+)
+"""The pinned module's Mentor script, byte for byte (pinned by test_unbound_world_sql)."""
+
+
+def _set_skill_calls(text: str) -> list[list[str]]:
+    """The argument list (after the skill) of every `:SetSkill(` call in a Lua text."""
+    calls = []
+    for line in text.splitlines():
+        code = line.split("--", 1)[0]
+        start = code.find(":SetSkill(")
+        if start < 0:
+            continue
+        inner = code[start + len(":SetSkill(") : code.rindex(")")]
+        calls.append([a.strip() for a in inner.split(",")][1:])
+    return calls
+
+
+def test_every_mentor_skill_grant_gives_value_equal_to_max_on_the_pinned_mod_ale() -> None:
+    """T580: the Mentor grants weapon, armour and class skills at their full value.
+
+    mod-ale #391 swapped what `Player:SetSkill`'s arguments mean to the core, and the Mentor's
+    old call then granted 1 of the maximum. Read under the PINNED mod-ale's order, every call
+    must hand the core the same expression as value and as max; an unread mod-ale revision fails
+    by name, so the next binding change is measured before the pin moves."""
+    sources = {s.repo: s.rev for s in unbound().emulator.sources}
+    ale = sources["azerothcore/mod-ale"]
+    assert ale in ALE_SET_SKILL_SLOTS, (
+        f"mod-ale is pinned at {ale}, whose SetSkill binding was not read: read "
+        "PlayerMethods.h's SetSkill at that revision and add its order to ALE_SET_SKILL_SLOTS"
+    )
+    step, value, maximum = ALE_SET_SKILL_SLOTS[ale]
+    calls = _set_skill_calls(MENTOR_LUA.read_text(encoding="utf-8"))
+    assert calls, "the Mentor script makes no SetSkill call: the read found nothing to check"
+    for args in calls:
+        assert len(args) == 3, f"SetSkill with {len(args)} arguments after the skill: {args}"
+        assert args[value - 1] == args[maximum - 1], (
+            f"SetSkill({', '.join(['skill', *args])}) grants value {args[value - 1]} of "
+            f"max {args[maximum - 1]} on mod-ale {ale[:8]}"
+        )
+
+
+def test_the_set_skill_reader_sees_the_old_call_as_one_of_max_on_the_new_binding() -> None:
+    """The live defect: `SetSkill(id, 1, 1, maxSkill)` under cead0cb's order is 1 of maxSkill."""
+    (args,) = _set_skill_calls("    player:SetSkill(skillId, 1, 1, maxSkill) -- x")
+    _step, value, maximum = ALE_SET_SKILL_SLOTS["cead0cb2e58ec0f73676ba578eff26cddb79fc01"]
+    assert (args[value - 1], args[maximum - 1]) == ("1", "maxSkill")
+    assert _set_skill_calls("-- player:SetSkill(a, 1, 1, 2)") == []
+
+
+def test_the_core_and_the_two_modules_that_call_it_agree_on_the_bot_call() -> None:
+    """T580: the three sources Unbound pins together name the bot call the same way.
+
+    A pin moved without reading the new revision fails here by name; so does a move of one of
+    the three alone onto a revision that spells the call the other way."""
+    sources = {s.repo: s.rev for s in unbound().emulator.sources}
+    said = {}
+    for repo in (
+        "mod-playerbots/azerothcore-wotlk",
+        "mod-playerbots/mod-playerbots",
+        "azerothcore/mod-ale",
+    ):
+        rev = sources[repo]
+        assert rev is not None, f"{repo} is not pinned"
+        assert (repo, rev) in BOT_SESSION_CALL, (
+            f"{repo} is pinned at {rev}, which was not read: git grep its bot call "
+            "(IsBot/IsHeadless) at that revision and add it to BOT_SESSION_CALL"
+        )
+        said[repo] = BOT_SESSION_CALL[(repo, rev)]
+    assert len(set(said.values())) == 1, f"the pins disagree on the bot call: {said}"
 
 
 def test_the_five_core_patches_are_applied_in_order_to_the_core() -> None:
@@ -287,9 +401,9 @@ def test_the_server_rates_card_reads_the_same_world_conf_and_keys_as_wotlk_at_it
     tmp_path: Path,
 ) -> None:
     entry = unbound()
-    wotlk_repo, wotlk_rev = server_rates.read_at(wotlk())  # type: ignore[misc]
+    wotlk_repo, _wotlk_rev = server_rates.read_at(wotlk())  # type: ignore[misc]
+    # Unbound's own pin, whatever wow-wotlk's is (CORE_REV says why the two are not tied).
     assert server_rates.read_at(entry) == (wotlk_repo, CORE_REV)
-    assert wotlk_rev != CORE_REV, "wow-wotlk moved on; Unbound keeps its own pin until T580"
     assert server_rates.card_file(entry) == "env/dist/etc/worldserver.conf"
     assert list(server_rates.conf_keys(entry)) == list(server_rates.conf_keys(wotlk()))
     assert len(server_rates.conf_keys(entry)) == 11

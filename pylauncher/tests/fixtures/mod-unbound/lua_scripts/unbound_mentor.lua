@@ -253,6 +253,16 @@ end
 -- Skill grants
 -- ============================================================
 
+-- Gives the player a skill at value = max = maxSkill.
+-- ALE's Player:SetSkill takes (skill, step, value, max). Since mod-ale #391 (9e5b8c66,
+-- "corrected SetSkill argument order") it hands them to Player::SetSkill in that order;
+-- before it, it passed (value, max, step), so the old call SetSkill(id, 1, 1, maxSkill)
+-- granted value maxSkill and the newer mod-ale grants value 1 of maxSkill. Value and
+-- max are the same number here, so the value granted is maxSkill with either order.
+local function GrantSkillAtMax(player, skillId, maxSkill)
+    player:SetSkill(skillId, 1, maxSkill, maxSkill)
+end
+
 -- Class-specific skill tabs (Arms/Fury/Protection for warrior, etc.)
 -- so the WotLK spellbook renders the correct ability tabs.
 local function ApplyUnboundSkills(player, classId)
@@ -264,7 +274,7 @@ local function ApplyUnboundSkills(player, classId)
     repeat
         local skillId = Q:GetUInt32(0)
         if player:GetSkillValue(skillId) == 0 then
-            player:SetSkill(skillId, 1, 1, maxSkill)
+            GrantSkillAtMax(player, skillId, maxSkill)
         end
     until not Q:NextRow()
 end
@@ -293,12 +303,12 @@ local function ApplyUnboundWeaponArmorSkills(player)
     local maxSkill = math.max(1, player:GetLevel() * 5)
     for _, skillId in ipairs(WEAPON_SKILLS) do
         if player:GetSkillValue(skillId) == 0 then
-            player:SetSkill(skillId, 1, 1, maxSkill)
+            GrantSkillAtMax(player, skillId, maxSkill)
         end
     end
     for _, skillId in ipairs(ARMOR_SKILLS) do
         if player:GetSkillValue(skillId) == 0 then
-            player:SetSkill(skillId, 1, 1, maxSkill)
+            GrantSkillAtMax(player, skillId, maxSkill)
         end
     end
     -- Dual Wield off-hand spell

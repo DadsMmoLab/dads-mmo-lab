@@ -2426,6 +2426,13 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "never the copy just taken, so a backup the player took is never named as one. An "
         "OSError listing it names none, and the sentence then says nothing about older copies"
     ),
+    ("catalog/snapshot.py", "copy_from_before"): (
+        "T630. Lists this server's own `sql_scripts/backups/` to NAME, in the sentence "
+        '"Return to the tested pin…" refuses with, the newest dump of a database that holds '
+        "none of the updates the tested commit lacks. It decides no write: the files are only "
+        "read, and only their names and contents choose which one the sentence names. An "
+        "OSError listing it names none, and the sentence then says no copy was found"
+    ),
     ("backup_shelf.py", "_rows_in"): (
         "T604. Lists this server's own `sql_scripts/backups/` to show the Maintenance tab's "
         "Backups rows and to plan a Delete or a Clean up. It decides a DELETE, bounded five "

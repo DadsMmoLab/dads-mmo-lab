@@ -90,6 +90,7 @@ from yulon import (
     realm_flag,
     resources,
     runner,
+    server_build_gone,
     server_build_presses,
     serverlock,
     update_failure,
@@ -4718,13 +4719,6 @@ class ServersDownWork:
     this says what went back, or that nothing was changed because the new build
     never started.
     """
-    came_back: Callable[[], None] = lambda: None
-    """Once the old build the rollback started has REPORTED READY (T217 live proof, item 5).
-
-    The update route forgets its older copies here and nowhere earlier in a
-    rollback: until the old build is up, an older copy may be the only one that
-    can bring it back. Must not raise.
-    """
     did_not_come_back: Callable[[], Callable[[str | None], str] | None] = lambda: None
     """When the old build the rollback started did not report ready (T217 live proof, item 5).
 
@@ -4875,6 +4869,18 @@ def _git_changed_files(
 ) -> tuple[tuple[str, str], ...] | None:
     """Which files under `paths` differ between two commits of this checkout, containerised."""
     return git.ContainerGit().changed_files(dest, old, new, paths)
+
+
+def _git_tree_files(dest: Path, rev: str, paths: Sequence[str]) -> tuple[str, ...] | None:
+    """The files one commit of this checkout tracks under `paths`, containerised (T630)."""
+    return git.ContainerGit().tree_files(dest, rev, paths)
+
+
+def _git_file_lines(
+    dest: Path, rev: str, paths: Sequence[str]
+) -> dict[str, tuple[str, ...]] | None:
+    """Each file's lines at one commit of this checkout, one containerised run (T630)."""
+    return git.ContainerGit().file_lines(dest, rev, paths)
 
 
 def _git_changed_lines(dest: Path, old: str, new: str, path: str) -> tuple[str, ...] | None:
@@ -6194,6 +6200,21 @@ class Seams:
     """
     changed_lines: Callable[[Path, str, str, str], tuple[str, ...] | None] = _git_changed_lines
     """T179: one file's `+`/`-` lines between two commits; `None` when git could not say."""
+    tree_files: Callable[[Path, str, Sequence[str]], tuple[str, ...] | None] = _git_tree_files
+    """T630: the files a commit tracks under some paths (`git ls-tree`); None = could not say.
+
+    What "Return to the tested pin…" asks of the commit it moved to: which update
+    files it ships, read from the commit and not from the disk.
+    """
+    file_lines: Callable[[Path, str, Sequence[str]], dict[str, tuple[str, ...]] | None] = (
+        _git_file_lines
+    )
+    """T630: each named file's lines at one commit, in ONE git run; None = could not say.
+
+    What "Return to the tested pin…" reads of an update file the move removes and of
+    the ones it adds beside it, to tell an update upstream re-filed (AzerothCore's
+    pending squash) from one the target does not have.
+    """
     images_built: Callable[[Sequence[str]], bool | None] = docker.images_built
     build_cache_bytes: Callable[[], int | None] = docker.build_cache_bytes
     """How much build cache Docker holds; preflight counts it for a resumed build (T203)."""
@@ -6600,6 +6621,8 @@ class Seams:
             restore_rev=repo.restore_rev,
             changed_files=repo.changed_files,
             changed_lines=repo.changed_lines,
+            tree_files=repo.tree_files,
+            file_lines=repo.file_lines,
             images_built=on(docker.images_built, wsl_distro=distro),
             build_cache_bytes=on(docker.build_cache_bytes, wsl_distro=distro),
             image_id=on(docker.image_id, wsl_distro=distro),
@@ -8750,6 +8773,11 @@ class StagedInstaller:
         opts = options or InstallOptions()
         server_dir = self.server_dir(opts)
         state = self._refuse_unless_rebuildable(server_dir)
+        if servers_down is None:
+            # T628: before the first stage, so the recipe is not rewritten and no compile starts.
+            retired = server_build_gone.rebuild_refusal(self.entry, server_dir)
+            if retired is not None:
+                raise InstallerError(retired)
         if servers_down is None or not servers_down.finishes_start_refusal:
             # T179: a rebuild ends in a start, and this press does not finish what
             # refuses one (the update route's `servers_down` does, when it says so).
@@ -9479,7 +9507,9 @@ class StagedInstaller:
            ahead of the image, which is the state this whole method is arranged
            to prevent.
         3. The moves, one source at a time, each remembered as it happens, then
-           the family's reading of what they brought (`check_moved_sources()`,
+           what this app owns written back over what they brought (T630: a
+           family's check may start the database, which needs Yu'lon's compose),
+           then the family's reading of what they brought (`check_moved_sources()`,
            T179), which can refuse.
         4. The carried patches: resolved dry (which can refuse), then written;
            then the family's background work stopped (`before_rebuild()`).
@@ -9598,9 +9628,13 @@ class StagedInstaller:
                 # T179: the family reads what the move brought (TrinityCore's SQL
                 # snapshot) and may refuse it, while every source can still go back
                 # and nothing has been built, written or stopped.
+                # T630 (live, m910q): Yu'lon's own compose goes back over the one the move
+                # brought BEFORE the family reads the move, because AzerothCore's check may
+                # have to start a stopped database, and `compose up` refuses the target's
+                # file. A refusal below puts the sources back and writes it again.
+                yield from self._rewrite_what_we_own(server_dir, opts, state)
                 changes = yield from self.check_moved_sources(server_dir, moved, to_pin=to_pin)
                 yield from self.check_carried_patches(server_dir)
-                yield from self._rewrite_what_we_own(server_dir, opts, state)
                 yield from self.apply_carried_patches(server_dir)
                 # After every refusal -- the source checks above included -- and
                 # before the compile: `rebuild()`'s reason, one step earlier. Not
@@ -9688,7 +9722,6 @@ class StagedInstaller:
                 keep=family.keep if family is not None else lambda: iter(()),
                 done=family.done if family is not None else lambda: iter(()),
                 database=lambda: self._copy_database_sentence(copy),
-                came_back=lambda: self._forget_older_copies(server_dir, copy),
                 did_not_come_back=lambda: self._old_build_down(copy),
                 finishes_start_refusal=family is not None and family.finishes_start_refusal,
             )
@@ -9704,6 +9737,8 @@ class StagedInstaller:
                     landed=lambda: self._record_source_revs(server_dir, state, moved, releases),
                 )
                 yield from work.done()
+                # T633: the one place older copies go -- the new build is up, its world
+                # reported ready, and the press ended well.
                 self._forget_older_copies(server_dir, copy)
             except WorldStoppedAfterReadyError as exc:
                 # T71: the rebuild KEPT the new build -- it came up, then stopped
@@ -9713,7 +9748,8 @@ class StagedInstaller:
                 # invariant broken by its own recovery.
                 yield from work.done()
                 # T217: the database stays with the build that runs, as the sources do.
-                self._forget_older_copies(server_dir, copy)
+                # T633 (owner, 2026-10-09: "Delete only after success"): this press did
+                # not succeed, so no older copy is forgotten.
                 self._record_source_revs(
                     server_dir,
                     state,
@@ -10282,7 +10318,7 @@ class StagedInstaller:
         yield copy_put_back_line(copy.put)
         # NOT forgotten here: the old build has not started yet, and until it reports
         # ready an older copy may be the only one that brings it back (live proof
-        # 2026-10-05, item 5). `came_back` forgets them.
+        # 2026-10-05, item 5), and since T633 a rolled-back press forgets none at all.
 
     @staticmethod
     def _copy_kept(copy: _UpdateCopy) -> str:
@@ -10314,7 +10350,14 @@ class StagedInstaller:
         return say
 
     def _forget_older_copies(self, server_dir: Path, copy: _UpdateCopy) -> None:
-        """Keep only this press's copy (owner, 2026-10-04), once it is not the only good one."""
+        """Keep only this press's copy (owner, 2026-10-04), once the press has SUCCEEDED (T633).
+
+        Called from one place: after `rebuild()` returned and the family's work was done,
+        i.e. the new build is up and its world reported ready. Never on a failure, a Stop,
+        a refusal, a kept build (T71) or a rollback, even one whose old build came back:
+        the owner's word of 2026-10-09 ("Delete only after success"), after T630's A-press,
+        where a failed Return's rollback forgot the only copy from before the earlier update.
+        """
         if copy.taken is None or self._snapshot is None:
             return
         try:
@@ -10893,8 +10936,6 @@ class StagedInstaller:
                 f"report ready either: {second}{said}{database}{self._left_running(spec)}"
             )
         yield from self._release(letting_go)
-        if servers_down is not None:
-            servers_down.came_back()
         ending = (
             f"{failure} The build from before this rebuild was put back and is running "
             f"again.{said}{database}"
@@ -11611,6 +11652,9 @@ class StagedInstaller:
         (`Seams.head_sha`). Where git cannot answer the press goes on, and so
         does this: None. No record or no recorded build is None too.
         """
+        retired = server_build_gone.rebuild_refusal(self.entry, server_dir)
+        if retired is not None:
+            return retired
         clash = self._modules_that_take_the_cores_names(server_dir)
         if clash is not None:
             return clash

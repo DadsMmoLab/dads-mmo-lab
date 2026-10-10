@@ -118,7 +118,7 @@ def _remove_text() -> str:
 def _remove_statements() -> list[str]:
     return [
         s.strip().rstrip(";")
-        for s in re.split(r";\s*(?=(?:DELETE|REPLACE|SET|START|COMMIT)\b)", _remove_text())
+        for s in re.split(r";\s*(?=(?:DELETE|REPLACE|INSERT|SET|START|COMMIT)\b)", _remove_text())
         if s.strip().rstrip(";") and not re.match(r"(SET|START|COMMIT)\b", s.strip(), re.I)
     ]
 
@@ -204,7 +204,7 @@ def test_the_dist_blocks_are_what_the_test_thinks_they_are() -> None:
 
 def _row_values(statement: str, table: str) -> list[str]:
     """The tuples a `REPLACE INTO <table> VALUES …` statement lists, as written."""
-    head = re.match(rf"REPLACE\s+INTO\s+{table}\s+VALUES\s*", statement, re.I)
+    head = re.match(rf"(?:REPLACE|INSERT\s+IGNORE)\s+INTO\s+{table}\s+VALUES\s*", statement, re.I)
     assert head, statement[:60]
     body = statement[head.end() :]
     rows: list[str] = []
@@ -235,7 +235,7 @@ def test_remove_puts_back_the_base_game_rows_the_install_deleted() -> None:
     replaces = {
         m.group(1): s
         for s in _remove_statements()
-        if (m := re.match(r"REPLACE\s+INTO\s+(\w+)", s, re.I))
+        if (m := re.match(r"(?:REPLACE|INSERT\s+IGNORE)\s+INTO\s+(\w+)", s, re.I))
     }
     assert set(replaces) == set(_BASE_ROWS)
     for table, expected in _BASE_ROWS.items():
@@ -246,7 +246,9 @@ def test_remove_puts_back_the_base_game_rows_the_install_deleted() -> None:
 def test_the_restored_rows_come_after_the_deletes_that_would_remove_them() -> None:
     statements = _remove_statements()
     last_delete = max(i for i, s in enumerate(statements) if s.upper().startswith("DELETE"))
-    first_replace = min(i for i, s in enumerate(statements) if s.upper().startswith("REPLACE"))
+    first_replace = min(
+        i for i, s in enumerate(statements) if s.upper().startswith(("REPLACE", "INSERT IGNORE"))
+    )
     assert first_replace > last_delete
 
 

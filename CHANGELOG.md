@@ -16,6 +16,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ### New
 - Every game's Modules tab adds a game add-on from a link, a folder or a zip with **Game add-ons you bring**.
 - **Play** puts the game add-ons you brought back into a ready-to-play client that was made again.
+- The support file now says how big your computer is: processor, memory, and how much of it Docker gets.
 - A module you add from a link or a folder gets a settings card on the Tuning tab, made from its own settings file.
 - A Tortoise server puts its TortoiseBots and GM Manager addons into your game client by itself, until you remove them.
 - On Tortoise, **Install from link…** and **Install from folder…** take a client add-on or a set of database changes.
@@ -27,6 +28,12 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - **Pack the whole server…** and **Bring from another computer…** rebuild a server, world and modules, on another PC.
 
 ### Fixed
+- Making the support file no longer takes minutes on big old logs: it keeps their newest lines and says what it cut.
+- While the world keeps crashing and restarting, the Server tab says so instead of "The server is already running."
+- **Start** on a server whose build is gone says so and names **Rebuild the server…** before starting anything.
+- **Rebuild the server…** on a server from the retired playerbots fork says so at once, not after half an hour.
+- **Return to the tested pin…** no longer builds onto databases a newer build updated; it names the backup to restore.
+- A failed, stopped or rolled-back update keeps every earlier database copy; only a successful one clears them.
 - A module update that breaks the build is still put back when you pressed Stop just as the build failed.
 - A new Tortoise login server no longer logs every database statement; older ones get this with **Reset to default**.
 - A database password typed inside escaped or joined quotes no longer slips into a support zip.
@@ -50,6 +57,8 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Starting and stopping the pathfinding data refuse while another Yu'lon works on the server; finishing waits for it.
 
 ### Changed
+- WoW Unbound is built on the same newer server core as WotLK; **Return to the tested pin…** moves an existing one there.
+- NPC Teleporter follows its author's new menu numbers; installing over an older install keeps the base game's menus.
 
 ## v0.9.15-Public — 2026-10-09
 

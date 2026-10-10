@@ -618,6 +618,47 @@ def test_the_real_hold_refuses_the_sql_while_another_yulon_holds_the_server(
         theirs.kill()
 
 
+def test_the_real_hold_refuses_the_ledger_path_sql_while_another_yulon_holds_the_server(
+    fake_docker: Path, server: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T599's owed test: an outside package's ledgered SQL (T596 PR-A) is under the same hold.
+
+    The second Yu'lon presses Install on the same server's same package while the first holds
+    it: the ledger is never read, nothing is sent, and the refusal names the holder.
+    """
+    from tests.test_apply_migrations import CHAR_FILE, ROWS_ONLY, _Ledger, _manifest, _server
+
+    theirs = _another_yulon_holds(fake_docker, _name(server))
+    ledger = _Ledger()
+    read: list[str] = []
+    real = Applier._already_in_the_ledger
+
+    def watched(self: Applier, *args: Any, **kwargs: Any) -> Any:
+        read.append("ledger")
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Applier, "_already_in_the_ledger", watched)
+
+    def hold(press: str) -> Any:
+        return docker.server_claim(server, press=press, images=[IMAGE], label="WoW")
+
+    try:
+        applier = Applier(
+            _server(tmp_path / "mods", {CHAR_FILE: ROWS_ONLY}),
+            sql=ledger,
+            world_running=lambda: False,
+            hold_server=hold,
+        )
+        with pytest.raises(ApplyRefusal) as refused:
+            applier.install(_manifest(("characters", CHAR_FILE)))
+        assert HOLDER_PRESS in str(refused.value) and "THEIR-PC" in str(refused.value)
+        assert read == [] and ledger.queries == [], "the ledger was read outside the hold"
+        assert ledger.sent == []
+        assert _name(server) in fake_containers(fake_docker), "their reservation was removed"
+    finally:
+        theirs.kill()
+
+
 # ------------------------------------------------------------------ install, and the classification
 
 

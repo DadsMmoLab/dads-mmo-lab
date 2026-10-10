@@ -36,8 +36,9 @@ The four ways, each with its own sentence in `preconditions()`:
 2. **`ALE.Enabled` is off.** Its compiled default is not what the source spells:
    `ALE src/LuaEngine/ALEConfig.cpp:20` passes the STRING `"false"` as the default
    of `SetConfigValue<bool>`, and a string literal converts to `true`, so a key
-   nobody set runs the engine (read at mod-ale 1cb86c96 on 2026-10-08; it was
-   believed `false` here until then). This module does not rely on that accident:
+   nobody set runs the engine (read at mod-ale 1cb86c96 on 2026-10-08, and the same
+   line at cead0cb, Unbound's pin since T580, on 2026-10-09; it was believed `false`
+   here until then). This module does not rely on that accident:
    a missing or unreadable `ALE.Enabled` is reported as unknown and My Party is not
    offered, which errs on the safe side.
 3. **`ALE.ScriptPath` points elsewhere.** It ships as `"lua_scripts"`, relative,
