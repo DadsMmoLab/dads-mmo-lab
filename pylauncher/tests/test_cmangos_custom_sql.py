@@ -97,6 +97,30 @@ def test_reapply_changed_needs_files_into_one_schema() -> None:
         ("UPDATE t, u SET t.a=1 WHERE t.id=u.id;", "more than one table"),
         ("ALTER TABLE t ADD COLUMN x INT;", "not safe to repeat"),
         ("DELETE FROM t WHERE id=1 LIMIT 1;", "not safe to repeat"),
+        ("UPDATE t SET a=1 WHERE b=2 LIMIT 1;", "not safe to repeat"),
+        # A DELETE that does not cover the INSERT's key: run two meets a duplicate key.
+        ("DELETE FROM t WHERE id=1; INSERT INTO t (id, a) VALUES (2, 5);", "does not remove"),
+        (
+            "DELETE FROM t WHERE id=1; INSERT INTO t (id, a) VALUES (1, 5), (2, 5);",
+            "does not remove",
+        ),
+        ("DELETE FROM t WHERE id=1; INSERT INTO t VALUES (1, 5);", "not safe to repeat"),
+        ("DELETE FROM t WHERE id=1; SELECT 1; INSERT INTO t (id) VALUES (1);", "without emptying"),
+        ("DELETE FROM t WHERE id=1; INSERT INTO t (id) SELECT id FROM u;", "not safe to repeat"),
+        (
+            "DELETE FROM t WHERE id=1; INSERT INTO t (id, c) VALUES (1, 0) "
+            "ON DUPLICATE KEY UPDATE c=c+1;",
+            "not safe to repeat",
+        ),
+        (
+            "DELETE FROM t WHERE id=1; INSERT INTO t (id) VALUES (1); "
+            "INSERT INTO t (id) VALUES (1);",
+            "without emptying",
+        ),
+        ("DELETE FROM t WHERE id IN (1, 2); INSERT INTO t (id) VALUES (1), (2);", None),
+        ("UPDATE t SET a=0 WHERE a=1; UPDATE t SET a=1 WHERE a=2;", "reads a"),
+        ("UPDATE t SET a=0 WHERE id=1; UPDATE t SET b=1 WHERE a=0;", "reads a"),
+        ("UPDATE t SET a=0 WHERE id=1; UPDATE u SET b=1 WHERE a=0;", None),
     ],
 )
 def test_the_repeat_guard(tmp_path: Path, text: str, problem: str | None) -> None:
@@ -208,3 +232,10 @@ def test_both_confirmations_say_the_data_corrections_file_is_applied(game: str, 
         native.return_to_pin_confirmation(entry, Path("/srv"), "x/y"),
     ):
         assert ("data corrections file" in text) is says, (game, text)
+
+
+def test_a_reapply_changed_phase_is_never_called_withheld() -> None:
+    """The update applies it through the file ledger, so "only a new install gets it" is false."""
+    plan = load_catalog().get("wow-tbc").install.native.cmangos.sql  # type: ignore[union-attr]
+    drift = sqlplan.phase_drift(plan, {})
+    assert PHASE not in drift.withheld and PHASE not in drift.offered
