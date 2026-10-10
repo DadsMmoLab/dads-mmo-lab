@@ -280,6 +280,8 @@ _NOT_ADDRESSED_TO_THE_DISTRO = {
     "gather": "install-only preflight",
     "folder_bytes": "install-only preflight: sizes the folder for a resumed install's credit",
     "upstream_get": "plain HTTPS from the app to GitHub; no daemon is involved",
+    "update_compose": "T658: offered only off WSL (`platform.compose_update_offered`), and it "
+    "writes this computer's own plugin folder; no daemon is involved",
     "monotonic": "a clock",
     "sleep": "a clock",
     "keep_awake": "it is Windows that must not sleep while the distro compiles",
