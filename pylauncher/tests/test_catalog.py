@@ -255,7 +255,10 @@ Read out of the gate boxes' own checkouts (`git rev-parse HEAD` in each source's
 * `wow-wotlk`: T655 (2026-10-10), core `2a2211cd` and module `79bd4281`, the two `test-staging`
   merges of 2026-10-09 (core #264, module #2903, ten minutes apart). The module reads its
   settings as `Playerbots.*` since ed54b459 (#2854), which T657 taught Yu'lon to follow, and
-  declares the config members mod-ale master reads since its #409 (84b85cc). Before that,
+  declares the config members mod-ale master reads since its #409 (84b85cc). Gate: T655's
+  "Return to the tested pin…" on `yulon-fedora` 2026-10-10, which moved T657's install from
+  `f19a1879`/`037c0141` to these two and read them back out of its checkouts (world
+  `AzerothCore rev. 2a2211cd8f3d+`; WoW Unbound on the same pair the same day). Before that,
   T389's fresh install on `yulon-fedora-gate` 2026-10-08, core `f19a1879`
   and module `037c0141`, the two `test-staging` merges of 2026-10-02 (core #258, module
   #2873). That core has `WorldSession::IsHeadless()` where `7f12e89e` had `IsBot()`
