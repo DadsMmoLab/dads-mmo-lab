@@ -869,7 +869,7 @@ def test_an_id_file_that_appears_between_the_read_and_the_look_is_read_not_refus
     theirs = "e" * 32
     target = tmp_path / docker.FOLDER_ID_FILE
     real_read = docker._read_folder_id
-    reads = []
+    reads: list[Path] = []
 
     def read_then_they_publish(path: Path) -> str | None:
         answer = real_read(path)
