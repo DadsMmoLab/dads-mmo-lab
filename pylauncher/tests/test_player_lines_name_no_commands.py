@@ -159,6 +159,10 @@ EXCEPTIONS: dict[tuple[str, str], tuple[str, frozenset[str]]] = {
         )
         for owner in ("_compose_check", "_compose_remedy")
     },
+    ("yulon/platform.py", "compose_too_old_sentence"): (
+        f"updating a Docker Compose too old to run the import or a Start (T658): {_TYPED}",
+        _COMPOSE,
+    ),
     **{
         ("yulon/catalog/preflight.py", owner): (
             f"restarting WSL after resizing it: {_TYPED}",

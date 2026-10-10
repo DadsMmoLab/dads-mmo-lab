@@ -929,6 +929,26 @@ def start(server_dir: Path, *, wsl_distro: str | None = None) -> None:
     _run(["compose", "up", "-d"], cwd=server_dir, wsl_distro=wsl_distro)
 
 
+def compose_refusal(*, wsl_distro: str | None = None) -> str | None:
+    """The sentence a Start must refuse with when this Compose is too old, or None (T658).
+
+    Compose 2.5.0-2.9.0 stop `compose up -d --no-deps <db> <auth> <world>` with
+    "no such service: <the import>", so every Start fails on them, after the
+    realm row and the database were already touched. Asked once per press, where
+    the server's own commands run (the WSL distro, for a server inside one). A
+    version that cannot be read refuses nothing: the start then says what it says.
+    """
+    asked = _docker(["compose", "version"], timeout=_ONE_SHOT_ASK_TIMEOUT, wsl_distro=wsl_distro)
+    if asked.returncode != 0:
+        return None
+    version = platform.parse_compose_version(asked.stdout or "")
+    if version is None or not platform.compose_too_old(version):
+        return None
+    linux = wsl_distro is not None or sys.platform.startswith("linux")
+    plugin = platform.users_compose_plugin() if wsl_distro is None and linux else None
+    return platform.compose_too_old_sentence(version, linux=linux, plugin=plugin)
+
+
 PROJECT_NAME_VAR = "COMPOSE_PROJECT_NAME"
 
 

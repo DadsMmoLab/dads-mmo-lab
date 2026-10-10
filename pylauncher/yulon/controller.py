@@ -343,6 +343,7 @@ class Controller:
             wsl_distro=self.wsl_distro,
         ):
             self.refuse_start()
+            self.refuse_an_old_compose()
             conflicts = self.port_conflicts()
             if conflicts:
                 logger.warning(f"start() refused: ports {self.spec.ports} bound by {conflicts}")
@@ -364,6 +365,20 @@ class Controller:
                 # would otherwise stop 15-25 s after this app's last call into it,
                 # killing the server it just started (T132, `wsl.hold()`).
                 self._hold = wsl.hold(self.wsl_distro, self.spec.world)
+
+    def refuse_an_old_compose(self) -> None:
+        """Raise `StartRefused` when this machine's Compose is one that stops every Start (T658).
+
+        Compose 2.5.0-2.9.0 refuse `compose up -d --no-deps <db> <auth> <world>`
+        with "no such service: <the import>" (measured, `platform.COMPOSE_OLDEST_WORKING`).
+        Asked with one `docker compose version` before anything is changed, so the
+        player reads what to update instead of Compose's own words after the realm
+        row and the database were touched. A version that cannot be read refuses nothing.
+        """
+        reason = docker.compose_refusal(wsl_distro=self.wsl_distro)
+        if reason:
+            logger.warning(f"start() refused: {reason}")
+            raise StartRefused(reason)
 
     def refuse_a_missing_image(self) -> None:
         """Raise `StartRefused` when Docker no longer has this server's built image (T627).
@@ -629,6 +644,7 @@ class Controller:
         the database again, after the stop: a second look, never a different rule.
         """
         self.refuse_start()
+        self.refuse_an_old_compose()
         self.refuse_a_missing_image()
         self.refuse_a_missing_database()
         self._ask_before_the_servers()
@@ -658,6 +674,7 @@ class Controller:
             wsl_distro=self.wsl_distro,
         ):
             self.refuse_start()
+            self.refuse_an_old_compose()
             self.refuse_a_missing_image()
             self.refuse_a_missing_database()
             asked = not self.port_conflicts()

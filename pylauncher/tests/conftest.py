@@ -545,6 +545,20 @@ def _docker_cli_is_the_plain_name(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _compose_is_new_enough(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every Start asks `docker compose version` first (T658); a unit test's Compose is new enough.
+
+    Without this, every test that drives `Controller.start()` through seam-level fakes
+    (`docker.start_staged`, `port_conflicts`) would reach the real Docker CLI for that one
+    question, and the guard below fails it. `tests/test_compose_too_old.py` puts the real
+    `docker.compose_refusal` back and drives it through a runner double.
+    """
+    from yulon import docker
+
+    monkeypatch.setattr(docker, "compose_refusal", lambda *, wsl_distro=None: None)
+
+
+@pytest.fixture(autouse=True)
 def _each_test_starts_with_no_unread_container_on_file(monkeypatch: pytest.MonkeyPatch) -> None:
     """`docker` logs a failed state read once per change, and remembers it to know (PR 291).
 

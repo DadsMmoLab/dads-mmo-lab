@@ -1596,6 +1596,118 @@ def docker_ready(run: RunCmd | None = None, *, timeout: float = _DOCKER_PROBE_SE
     return False
 
 
+COMPOSE_OLDEST_WORKING: tuple[int, int, int] = (2, 10, 0)
+"""The oldest Docker Compose Yu'lon runs (T658).
+
+Measured on m910q, 2026-10-10, with the official release binaries against a copy of
+a generated WoW WotLK compose file: Compose 2.5.0 through 2.9.0 refuse
+`compose up --no-deps <service>` whenever that service has a `depends_on` outside the
+selection, with `no such service: <the dependency>`. That is the database import
+(`up --no-deps ac-db-import` -> `no such service: ac-database`, a Steam Deck player's
+exact words) AND every Start (`up -d --no-deps <db> <auth> <world>` -> `no such service:
+ac-db-import`), so nothing Yu'lon does past the build can work on them. 2.10.0 and every
+later release measured (to 5.6.0) run both. 2.0-2.2 reject the generated files'
+top-level `name:` outright; 2.3 and 2.4 ran the import but are older than the broken
+range and were not measured for the rest, so the floor is the first release after it.
+"""
+
+_COMPOSE_VERSION = re.compile(r"(\d+)\.(\d+)\.(\d+)")
+
+
+def parse_compose_version(said: str) -> tuple[int, int, int] | None:
+    """The version in `docker compose version`'s answer, or None if it names none.
+
+    Spelled `Docker Compose version v2.6.1` by Docker's own builds and
+    `Docker Compose version 5.5.0` by Arch's (no `v`); a Desktop build adds a
+    suffix (`v2.39.1-desktop.1`). Only the first three numbers are read.
+    """
+    found = _COMPOSE_VERSION.search(said or "")
+    if found is None:
+        return None
+    major, minor, patch = (int(part) for part in found.groups())
+    return (major, minor, patch)
+
+
+def compose_too_old(version: tuple[int, int, int] | None) -> bool:
+    """True for a Compose known to be older than `COMPOSE_OLDEST_WORKING`; unknown is not."""
+    return version is not None and version < COMPOSE_OLDEST_WORKING
+
+
+def compose_version(
+    run: RunCmd | None = None, *, timeout: float = _DOCKER_PROBE_SECONDS
+) -> tuple[int, int, int] | None:
+    """The version `docker compose version` reports, or None if it cannot be read (T658).
+
+    Asked the way `compose_ready()` asks, through the same candidate list and one
+    shared, bounded budget. None is "not established", never "too old": a Compose
+    whose answer this cannot read is left to say for itself what is wrong.
+    """
+    do = run if run is not None else _DefaultRunner()
+    deadline = time.monotonic() + timeout
+    for program in docker_programs():
+        left = deadline - time.monotonic()
+        if left <= 0.0:
+            return None
+        try:
+            done = _bounded(do, left)([program, "compose", "version"])
+        except OSError as exc:
+            logger.debug(f"could not start {program}: {exc}")
+            continue
+        if done.returncode == 0:
+            return parse_compose_version(done.stdout or "")
+    return None
+
+
+def users_compose_plugin(
+    home: Path | None = None, env: Mapping[str, str] | None = None
+) -> Path | None:
+    """The `docker-compose` plugin in this user's own Docker folder, if there is one (T658).
+
+    The Docker CLI looks for a plugin in `$DOCKER_CONFIG/cli-plugins` (default
+    `~/.docker/cli-plugins`) BEFORE the system's folders, so a copy put there by
+    hand from an old guide -- and on a Steam Deck that is where one survives a
+    SteamOS update -- keeps answering after the package manager installed a new
+    one. Only that folder is looked in: it is the one a package update cannot fix.
+    """
+    environ = os.environ if env is None else env
+    config = environ.get("DOCKER_CONFIG") or ""
+    base = Path(config) if config else (home if home is not None else Path.home()) / ".docker"
+    plugin = base / "cli-plugins" / "docker-compose"
+    return plugin if plugin.is_file() else None
+
+
+def compose_too_old_sentence(
+    version: tuple[int, int, int], *, linux: bool, plugin: Path | None = None
+) -> str:
+    """What a player reads when this machine's Compose is older than Yu'lon can run (T658).
+
+    One sentence for the preflight row and for the Start refusal, so the two say
+    the same thing. On Linux it names the package and, when there is one, the
+    copy in the user's own Docker folder that a package update leaves in front.
+    """
+    have = ".".join(str(part) for part in version)
+    need = ".".join(str(part) for part in COMPOSE_OLDEST_WORKING)
+    said = (
+        f"This computer's Docker Compose is {have}, and Yu'lon needs {need} or newer: older "
+        "ones stop with “no such service” when one part of a server is started on its "
+        "own, so neither the database import nor Start can work. Nothing was started. "
+    )
+    if not linux:
+        return said + "Update Docker Desktop, which brings a current Docker Compose, and try again."
+    said += (
+        "Update Docker Compose. On a Steam Deck or Arch:\nsudo pacman -S docker-compose\n"
+        "On Debian or Ubuntu:\nsudo apt install docker-compose-v2\n"
+    )
+    if plugin is not None:
+        said += (
+            f"This computer also has its own copy at {plugin}, which Docker uses before the "
+            f"system's, so remove it too:\nrm {plugin}\n"
+        )
+    return (
+        said + f"Then check it, and try again; it must say {need} or newer:\ndocker compose version"
+    )
+
+
 def compose_ready(run: RunCmd | None = None, *, timeout: float = _DOCKER_PROBE_SECONDS) -> bool:
     """True if `docker compose version` succeeds — the PLUGIN, not the daemon.
 
