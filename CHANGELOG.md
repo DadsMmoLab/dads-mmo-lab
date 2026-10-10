@@ -4,7 +4,6 @@ Every release of Yu'lon, newest first.
 
 <!--
 How to add a line: under "## Unreleased" use only the headings "### New", "### Fixed" and "### Changed".
-- A custom SQL fix the database refused now shows on the Server tab, and a fresh install says so at the end.
 One plain line per change, at most about 120 characters, saying what the player gets. Bold button names are fine;
 ticket ids, proof, test notes, numbers as evidence, backticks and commands are not: they go in the pull request.
 New: Set a server's time zone on the Tuning tab with **Server time zone**.
@@ -31,6 +30,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - **Pack the whole server…** now carries a module added from a folder; **Bring from another computer…** installs it.
 
 ### Fixed
+- A custom SQL fix the database refused now shows on the Server tab, and a fresh install says so at the end.
 - TBC and Vanilla servers now get the database's own data corrections, new installs and updates alike.
 - A small step back of your computer's clock no longer hides the "history was rewritten" line in the update question.
 - An install stops before building, naming the folder, when another install already holds its container names.
