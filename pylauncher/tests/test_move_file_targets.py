@@ -195,9 +195,9 @@ def test_a_lua_file_named_so_windows_cannot_hold_it_refuses_the_pack_in_a_senten
         facts(server)
     assert str(raised.value) == (
         "A file in the server has a name or place a package cannot carry (a colon, a "
-        'backslash, one of ? * < > | ", a device name such as CON, a name ending in a dot or '
-        "space, or a control character). Rename or remove it, then pack again. Nothing was "
-        "packed."
+        'backslash, one of ? * < > | ", a device name such as CON, a Windows short name such as '
+        "GIT~1, a name ending in a dot or space, or a control character). Rename or remove it, "
+        "then pack again. Nothing was packed."
     )
 
 
@@ -366,3 +366,224 @@ def test_a_link_description_as_a_link_derives_it_plans(tmp_path: Path) -> None:
     (planned,) = plan.modules
     assert planned.manifest.source is not None
     assert planned.manifest.source.rev == "d" * 40
+
+
+# ----------------------------------------------------------- round 3 re-review: no raw crash
+
+
+@pytest.mark.parametrize(
+    "part", ["git~2", "GIT~13", "YULON-~1.JSO", "YU1A2B~1.JSO", ".GIT~1", "yulon-~2"]
+)
+def test_a_windows_short_name_of_any_number_is_refused(tmp_path: Path, part: str) -> None:
+    target = f"{LUA_SCRIPTS_DIR}/a/{part}/x.lua"
+    bad = craft(whole_package(tmp_path), tmp_path / "bad.zip", rename={LUA: target})
+    assert plan_for(bad, tmp_path / "new").refusals == (refused_sentence("bad.zip", target),)
+    with pytest.raises(ValueError):
+        PackFile(kind="module", target=f"{MINE}src/{part}/a.cpp", data=b"x")
+
+
+def test_a_short_name_in_the_server_refuses_the_pack_in_a_sentence(tmp_path: Path) -> None:
+    server = wotlk_server(tmp_path)
+    scripts = server.joinpath(*LUA_SCRIPTS_DIR.split("/"))
+    scripts.mkdir(parents=True)
+    (scripts / "BACKUP~1.LUA").write_bytes(b"-- x\n")
+    with pytest.raises(MoveError, match="a Windows short name such as GIT~1"):
+        facts(server)
+
+
+@pytest.mark.parametrize(
+    ("file", "inside"),
+    [("a", "a/b.lua"), ("A", "a/x.lua"), ("sub/A.d", "SUB/a.d/deep/x.lua")],
+)
+def test_a_target_that_is_a_file_and_a_folder_of_another_is_refused_by_the_plan(
+    tmp_path: Path, file: str, inside: str
+) -> None:
+    first, second = f"{LUA_SCRIPTS_DIR}/{file}", f"{LUA_SCRIPTS_DIR}/{inside}"
+    bad = craft(whole_package(tmp_path), tmp_path / "bad.zip", add={first: b"x", second: b"y"})
+    assert plan_for(bad, tmp_path / "new").refusals == (
+        f"The package holds {first} as a file and as a folder ({second}), which no disk can "
+        "keep, so nothing was brought in. Pack again on the old computer.",
+    )
+
+
+def test_the_run_refuses_a_file_and_folder_clash_before_it_lays_anything(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bad = craft(
+        whole_package(tmp_path),
+        tmp_path / "bad.zip",
+        add={f"{LUA_SCRIPTS_DIR}/a": b"x", f"{LUA_SCRIPTS_DIR}/a/b.lua": b"y"},
+    )
+    monkeypatch.setattr(move, "settings_problem", lambda members: None)
+    package = move.read_package(bad)  # the reader's check taken away
+    monkeypatch.undo()
+    server = tmp_path / "new"
+    server.mkdir()
+    with pytest.raises(MoveError, match="as a file and as a folder"):
+        list(move_server._lay_files(package, server, WOTLK, "password"))
+    assert list(server.iterdir()) == []
+
+
+def test_a_folder_where_a_file_goes_is_said_up_front_and_a_second_press_carries_on(
+    tmp_path: Path,
+) -> None:
+    mv = Move(tmp_path)
+    real_run = mv.engine.run
+    blocker = mv.target.server_dir.joinpath(*LUA.split("/"))
+
+    def run_then_block(options, **kw):  # type: ignore[no-untyped-def]
+        yield from real_run(options, **kw)
+        blocker.mkdir(parents=True, exist_ok=True)
+
+    mv.engine.run = run_then_block  # type: ignore[method-assign]
+    with pytest.raises(MoveError) as raised:
+        mv.run()
+    assert str(raised.value) == (
+        f"{LUA} is a folder in the new server, where the package puts a file, so Yu'lon wrote "
+        "no settings or Lua file. Move that folder away, then press Bring from another "
+        "computer… again with the same file and folder to carry on."
+    )
+    server = mv.target.server_dir
+    assert b"Rate.XP.Kill = 1" in (server / CONF).read_bytes()  # the conf was not laid either
+    blocker.rmdir()
+    mv.engine.run = real_run  # type: ignore[method-assign]
+    mv.run()
+    assert (server / CONF).read_bytes() == (
+        b'LoginDatabaseInfo = "ac-database;3306;root;password;acore_auth"\r\n'
+        b"Rate.XP.Kill = 3\r\n"
+    )
+    assert blocker.read_bytes() == b"-- mine\n"
+
+
+def test_a_file_where_a_folder_goes_is_said_up_front(tmp_path: Path) -> None:
+    package = move.read_package(
+        craft(
+            whole_package(tmp_path),
+            tmp_path / "deep.zip",
+            rename={LUA: f"{LUA_SCRIPTS_DIR}/sub/mine.lua"},
+        )
+    )
+    server = tmp_path / "new"
+    scripts = server.joinpath(*LUA_SCRIPTS_DIR.split("/"))
+    scripts.mkdir(parents=True)
+    (scripts / "sub").write_bytes(b"in the way")
+    with pytest.raises(MoveError) as raised:
+        list(move_server._lay_files(package, server, WOTLK, "password"))
+    assert str(raised.value) == (
+        f"{LUA_SCRIPTS_DIR}/sub is a file in the new server, where the package needs a folder "
+        f"for {LUA_SCRIPTS_DIR}/sub/mine.lua, so Yu'lon wrote no settings or Lua file. Move "
+        "that file away, then press Bring from another computer… again with the same file and "
+        "folder to carry on."
+    )
+    assert not (server / CONF).exists()
+
+
+def test_a_target_that_is_a_link_is_refused_before_the_first_file_is_laid(tmp_path: Path) -> None:
+    package = move.read_package(whole_package(tmp_path))
+    server = tmp_path / "new"
+    scripts = server.joinpath(*LUA_SCRIPTS_DIR.split("/"))
+    scripts.mkdir(parents=True)
+    outside = tmp_path / "outside.lua"
+    outside.write_bytes(b"theirs")
+    (scripts / "mine.lua").symlink_to(outside)
+    with pytest.raises(MoveError, match="is a link, so Yu'lon will not write through it"):
+        list(move_server._lay_files(package, server, WOTLK, "password"))
+    assert not (server / CONF).exists()  # the conf, laid first, was not written either
+    assert outside.read_bytes() == b"theirs"
+
+
+def test_a_conf_link_is_never_read_through(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    package = move.read_package(whole_package(tmp_path))
+    server = tmp_path / "new"
+    etc = server / "env" / "dist" / "etc"
+    etc.mkdir(parents=True)
+    outside = tmp_path / "outside.conf"
+    outside.write_bytes(b"Secret = 1\n")
+    (etc / "worldserver.conf").symlink_to(outside)
+    read: list[Path] = []
+    real = Path.read_bytes
+    monkeypatch.setattr(Path, "read_bytes", lambda self: read.append(self) or real(self))
+    with pytest.raises(MoveError, match="is a link"):
+        list(move_server._lay_files(package, server, WOTLK, "password"))
+    assert etc / "worldserver.conf" not in read
+
+
+def test_a_write_that_fails_part_way_is_a_sentence_not_a_crash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    package = move.read_package(whole_package(tmp_path))
+    server = tmp_path / "new"
+    server.mkdir()
+
+    def full(target: Path, data: bytes) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(move_server, "_write_bytes", full)
+    with pytest.raises(MoveError) as raised:
+        list(move_server._lay_files(package, server, WOTLK, "password"))
+    assert str(raised.value) == (
+        f"Yu'lon could not lay {CONF}: No space left on device. Fix that, then press Bring from "
+        "another computer… again with the same file and folder to carry on."
+    )
+
+
+def test_the_plan_says_the_scripts_and_settings_run_like_code(tmp_path: Path) -> None:
+    plan = plan_for(whole_package(tmp_path), tmp_path / "new")
+    assert plan.allowed, plan.refusals
+    assert (
+        "The Lua scripts and settings files in this package run on this server like code, so "
+        "bring in only a package you made yourself or got from someone you trust."
+    ) in plan.text().splitlines()
+
+
+def test_a_folder_module_with_a_file_and_a_folder_of_one_name_is_refused(tmp_path: Path) -> None:
+    files = {"src/A": b"x", "src/a/x.cpp": b"y"}
+    bad = craft(
+        whole_package(tmp_path, facts=folder_facts()),
+        tmp_path / "bad.zip",
+        add={f"{MINE}{rel}": data for rel, data in files.items()},
+    )
+    assert _plan_with(bad, tmp_path / "new", FINE).refusals == (
+        "mod-mine holds src/A as a file and as a folder (src/a/x.cpp), which no disk can keep, "
+        "so nothing was brought in. Pack again on the old computer.",
+    )
+
+
+def test_the_pack_refuses_a_folder_module_with_a_file_and_folder_in_other_capitals(
+    tmp_path: Path,
+) -> None:
+    from tests.test_move_server import folder_module, pack_folder
+
+    server = wotlk_server(tmp_path)
+    mine = folder_module(server, {"src/A": b"x", "src/a/x.cpp": b"y"})
+    with pytest.raises(MoveError) as raised:
+        pack_folder(server, mine)
+    assert str(raised.value) == (
+        "My Module holds src/A as a file and, in other capitals, as a folder (src/a/x.cpp), which "
+        "one Windows folder cannot keep apart. Rename one, then pack again. Nothing was packed."
+    )
+
+
+def test_the_pack_refuses_lua_files_one_windows_folder_cannot_keep_apart(tmp_path: Path) -> None:
+    server = wotlk_server(tmp_path)
+    scripts = server.joinpath(*LUA_SCRIPTS_DIR.split("/"))
+    (scripts / "a").mkdir(parents=True)
+    (scripts / "A").write_bytes(b"-- x\n")
+    (scripts / "a" / "x.lua").write_bytes(b"-- y\n")
+    with pytest.raises(MoveError) as raised:
+        facts(server)
+    assert str(raised.value) == (
+        "The server has two settings or Lua files that one Windows folder cannot keep apart "
+        f"({LUA_SCRIPTS_DIR}/A and {LUA_SCRIPTS_DIR}/a/x.lua). Rename one, then pack again. "
+        "Nothing was packed."
+    )
+
+
+def test_the_pack_refuses_lua_files_that_differ_only_in_case(tmp_path: Path) -> None:
+    server = wotlk_server(tmp_path)
+    scripts = server.joinpath(*LUA_SCRIPTS_DIR.split("/"))
+    scripts.mkdir(parents=True)
+    (scripts / "Mine.lua").write_bytes(b"-- x\n")
+    (scripts / "mine.lua").write_bytes(b"-- y\n")
+    with pytest.raises(MoveError, match=f"\\({LUA_SCRIPTS_DIR}/Mine.lua and "):
+        facts(server)

@@ -90,9 +90,11 @@ _WINDOWS_INVALID = frozenset('?*<>|"')
 SETTINGS_MAX_BYTES = 50 * 1024**2
 SETTINGS_MAX_FILES = 5000
 """What the conf and Lua members of one package may weigh together, packed and brought in."""
-_FORBIDDEN_PART = re.compile(r"\.git|git~1|\.yulon-.*", re.IGNORECASE)
-"""A path part no file member may have, in any case: a git folder (also by its Windows short
-name), where a hook is code that runs, and a Yu'lon record."""
+_FORBIDDEN_PART = re.compile(r"\.git|\.yulon-.*|\.?[^.]*~[0-9]+(?:\.[^.]{0,3})?", re.IGNORECASE)
+"""A path part no file member may have, in any case: a git folder, where a hook is code that
+runs, a Yu'lon record, and any name shaped like a Windows short name (`GIT~1`, `YULON-~1.JSO`,
+or a hashed `YU1A2B~1.JSO`): on a disk that keeps short names, one of those IS a git folder or a
+record, and which number or hash it got cannot be told from the name."""
 
 
 class MovePackageError(MaintenanceError):
@@ -695,6 +697,23 @@ def case_clash(paths: Iterable[str]) -> tuple[str, str] | None:
     return None
 
 
+def file_and_folder(paths: Iterable[str]) -> tuple[str, str] | None:
+    """A path that is also a folder on the way to another, casefolded, with that other, or None.
+
+    `a` and `a/b.lua` cannot both be laid: the second needs `a` to be a folder. Casefolded, as
+    Windows reads it, so a pack made on Linux with `A` and `a/x.lua` is refused too.
+    """
+    listed = sorted(paths)
+    files = {path.casefold(): path for path in listed}
+    for path in listed:
+        parts = path.casefold().split("/")
+        for depth in range(1, len(parts)):
+            above = "/".join(parts[:depth])
+            if above in files:
+                return files[above], path
+    return None
+
+
 def settings_problem(members: Sequence[FileMember]) -> str | None:
     """A sentence when the conf and Lua members are past the bound or collide; reads nothing.
 
@@ -707,6 +726,12 @@ def settings_problem(members: Sequence[FileMember]) -> str | None:
             "The package holds more settings and Lua files than Yu'lon brings in (the limit is "
             f"{SETTINGS_MAX_BYTES // 1024**2} MB and {SETTINGS_MAX_FILES} files), so nothing was "
             "brought in. Pack it again on the old computer with less in it."
+        )
+    nested = file_and_folder(m.target for m in members)
+    if nested:
+        return (
+            f"The package holds {shown(nested[0])} as a file and as a folder ({shown(nested[1])}), "
+            "which no disk can keep, so nothing was brought in. Pack again on the old computer."
         )
     clash = case_clash(m.target for m in members)
     if clash:

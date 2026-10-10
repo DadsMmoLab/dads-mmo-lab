@@ -257,11 +257,19 @@ def _folder_module_members(manifest: Manifest, folder: Path) -> list[PackFile]:
             f"{manifest.name} has no files in its folder, so there is nothing to pack. Remove it "
             f"or add it again on the Modules tab, then pack again. {_NOT_PACKED}"
         )
-    clash = _case_clash([m.target[len(f"{manifest.type}/{manifest.id}/") :] for m in members])
+    inside = [m.target[len(f"{manifest.type}/{manifest.id}/") :] for m in members]
+    clash = _case_clash(inside)
     if clash:
         raise MoveError(
             f"{manifest.name} holds two files whose names differ only in capital letters "
             f"({clash[0]} and {clash[1]}), which one Windows folder cannot keep apart. Rename "
+            f"one, then pack again. {_NOT_PACKED}"
+        )
+    nested = move.file_and_folder(inside)
+    if nested:
+        raise MoveError(
+            f"{manifest.name} holds {_shown(nested[0])} as a file and, in other capitals, as a "
+            f"folder ({_shown(nested[1])}), which one Windows folder cannot keep apart. Rename "
             f"one, then pack again. {_NOT_PACKED}"
         )
     return members
@@ -397,10 +405,20 @@ def gather_server_facts(
         logger.info(f"a server file cannot be a package member: {exc}")
         raise MoveError(
             "A file in the server has a name or place a package cannot carry (a colon, a "
-            'backslash, one of ? * < > | ", a device name such as CON, a name ending in a dot or '
-            f"space, or a control character). Rename or remove it, then pack again. {_NOT_PACKED}"
+            'backslash, one of ? * < > | ", a device name such as CON, a Windows short name such '
+            "as GIT~1, a name ending in a dot or space, or a control character). Rename or remove "
+            f"it, then pack again. {_NOT_PACKED}"
         ) from exc
     settings = [f for f in files if f.kind in ("conf", "lua")]
+    apart = move.file_and_folder(f.target for f in settings) or move.case_clash(
+        f.target for f in settings
+    )
+    if apart:
+        raise MoveError(
+            f"The server has two settings or Lua files that one Windows folder cannot keep apart "
+            f"({_shown(apart[0])} and {_shown(apart[1])}). Rename one, then pack again. "
+            f"{_NOT_PACKED}"
+        )
     if (
         len(settings) > move.SETTINGS_MAX_FILES
         or sum(len(f.data) for f in settings) > move.SETTINGS_MAX_BYTES
@@ -700,6 +718,8 @@ class ServerImportPlan:
                 if self.modules
                 else []
             ),
+            "The Lua scripts and settings files in this package run on this server like code, so "
+            "bring in only a package you made yourself or got from someone you trust.",
             "Not brought: the game client, Steam entries, the network setting (this computer's "
             "own is used) and Yu'lon's command-channel account, which Repair makes again after "
             "the first Start.",
@@ -744,6 +764,12 @@ def folder_module_problem(name: str, members: Sequence[move.FileMember], prefix:
             f"{name} holds more than Yu'lon brings in from a folder module (the limit is "
             f"{FOLDER_MODULE_MAX_BYTES // 1024**2} MB and {FOLDER_MODULE_MAX_FILES} files), so "
             "nothing was brought in. Pack it again on the old computer with less in it."
+        )
+    nested = move.file_and_folder(m.target[len(prefix) :] for m in members)
+    if nested:
+        return (
+            f"{name} holds {_shown(nested[0])} as a file and as a folder ({_shown(nested[1])}), "
+            "which no disk can keep, so nothing was brought in. Pack again on the old computer."
         )
     clash = _case_clash(m.target[len(prefix) :] for m in members)
     if clash:
@@ -1471,8 +1497,11 @@ def _lay_files(
     """Every packed conf over the one the install wrote, then the player's Lua scripts.
 
     The reader refused a package whose targets are not where the pack reads confs and Lua from;
-    this checks each target again, and the bound, BEFORE the first file is read or written, so a
-    package that got past one check still lays nothing.
+    this checks each target again, the bound, and what the new server already has on the way
+    (a link, a folder where a file goes, a file where a folder goes) BEFORE the first file is
+    read or written, so a package that got past one check still lays nothing. Laying a file
+    again gives the same bytes (a conf takes this machine's values from the one already laid),
+    so a press that stopped part-way carries on by laying them all again.
     """
     confs = package.files("conf")
     scripts = package.files("lua")
@@ -1480,17 +1509,30 @@ def _lay_files(
     if said:
         raise MoveError(said)
     paths = {member.file: _laid_path(server_dir, member) for member in (*confs, *scripts)}
-    for member in confs:
+    for member in (*confs, *scripts):
         target = paths[member.file]
-        installed = target.read_bytes() if target.is_file() else None
-        data = lay_conf(
-            package.file_bytes(member), installed, machine_keys(entry, member.target), password
-        )
-        _write_bytes(target, data)
+        try:
+            if member.kind == "conf":
+                installed = target.read_bytes() if target.is_file() else None
+                data = lay_conf(
+                    package.file_bytes(member),
+                    installed,
+                    machine_keys(entry, member.target),
+                    password,
+                )
+            else:
+                data = package.file_bytes(member)
+            _write_bytes(target, data)
+        except OSError as exc:
+            raise MoveError(
+                f"Yu'lon could not lay {move.shown(member.target)}: {exc.strerror or exc}. Fix "
+                f"that, then {_CARRY_ON}"
+            ) from exc
         yield f"Laid {member.target}"
-    for member in scripts:
-        _write_bytes(paths[member.file], package.file_bytes(member))
-        yield f"Laid {member.target}"
+
+
+_CARRY_ON = "press Bring from another computer… again with the same file and folder to carry on."
+_NONE_LAID = "so Yu'lon wrote no settings or Lua file"
 
 
 def _laid_path(server_dir: Path, member: move.FileMember) -> Path:
@@ -1514,7 +1556,28 @@ def _laid_path(server_dir: Path, member: move.FileMember) -> Path:
     base = server_dir.joinpath(*PurePosixPath(folder).parts)
     if not lands_inside(base, rest):
         raise refused
-    return _inside(server_dir, member.target)
+    path = _inside(server_dir, member.target)
+    shown = move.shown(member.target)
+    for parent in reversed(path.parents):
+        if parent == server_dir or not parent.is_relative_to(server_dir):
+            continue
+        if os.path.lexists(parent) and not parent.is_dir():
+            raise MoveError(
+                f"{move.shown(_relative(parent, server_dir))} is a file in the new server, where "
+                f"the package needs a folder for {shown}, {_NONE_LAID}. Move that file away, "
+                f"then {_CARRY_ON}"
+            )
+    if path.is_symlink():
+        raise MoveError(
+            f"{path} is a link, so Yu'lon will not write through it and wrote no settings or Lua "
+            "file. Nothing more was changed."
+        )
+    if path.is_dir():
+        raise MoveError(
+            f"{shown} is a folder in the new server, where the package puts a file, {_NONE_LAID}. "
+            f"Move that folder away, then {_CARRY_ON}"
+        )
+    return path
 
 
 def load_the_data(
