@@ -509,6 +509,12 @@ class Recorder:
     lines_unreadable: bool = False
     """T630: `file_lines()` answers None (git could not read the files)."""
 
+    ancestors: set[tuple[Path, str, str]] = field(default_factory=set)
+    """`(checkout, old, new)` triples `is_ancestor()` answers True for (a forward move)."""
+
+    ancestry_undecided: bool = False
+    """`is_ancestor()` answers None, as a depth-1 clone's grafts leave git unable to."""
+
     db_was_up: bool | None = True
     """What `db_running()` answers for the database container (T630): up, by default."""
 
@@ -590,6 +596,12 @@ class Recorder:
             for status, path in said
             if any(path == spec or path.startswith(f"{spec.rstrip('/')}/") for spec in paths)
         )
+
+    def is_ancestor(self, dest: Path, old: str, new: str) -> bool | None:
+        self.calls.append(f"is-ancestor:{dest.name}:{old[:7]}:{new[:7]}")
+        if self.ancestry_undecided:
+            return None
+        return (dest, old, new) in self.ancestors
 
     def tree_files(self, dest: Path, rev: str, paths: Sequence[str]) -> tuple[str, ...] | None:
         self.calls.append(f"tree-files:{dest.name}:{rev[:7]}")
@@ -924,6 +936,7 @@ class Recorder:
             restore_rev=self.restore_rev,
             changed_files=self.changed_files,
             tree_files=self.tree_files,
+            is_ancestor=self.is_ancestor,
             file_lines=self.file_lines,
             db_running=self.db_running,
             stop_db=self.stop_db,

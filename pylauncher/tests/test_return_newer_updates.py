@@ -271,11 +271,91 @@ def test_an_older_update_the_target_squashed_away_is_not_newer(tmp_path: Path) -
     rec.diffs[(server_dir / BOTS.dest, OLD, BOTS_PIN)] = (("D", f"{BOTS_UPDATES}/{old_one}"),)
     _target_ships(rec, server_dir, BOTS_UPDATES, TARGET_NEWEST)
     rec.applied_updates["acore_playerbots"] = f"{old_one}\n"
+    rec.ancestors.add((server_dir / BOTS.dest, OLD, BOTS_PIN))
 
     _said, raised, _fake = _return(rec, server_dir)
 
     assert raised is None, raised
     assert _asked_updates(rec) == []
+
+
+def _squash_in_a_shallow_clone(rec: Recorder, server_dir: Path) -> str:
+    """A move git cannot give a direction to (depth-1 grafts): the removed file is dated old."""
+    old_one = "2026_01_02_00_ai_playerbot_texts.sql"
+    rec.diffs[(server_dir / BOTS.dest, OLD, BOTS_PIN)] = (("D", f"{BOTS_UPDATES}/{old_one}"),)
+    _target_ships(rec, server_dir, BOTS_UPDATES, TARGET_NEWEST)
+    rec.applied_updates["acore_playerbots"] = f"{old_one}\n"
+    rec.ancestry_undecided = True
+    return old_one
+
+
+def test_a_shallow_checkout_asks_github_and_a_forward_answer_skips_the_squashed_file(
+    tmp_path: Path,
+) -> None:
+    rec, server_dir = _ready(tmp_path)
+    _squash_in_a_shallow_clone(rec, server_dir)
+    rec.github[BOTS.repo] = 7
+
+    _said, raised, _fake = _return(rec, server_dir)
+
+    assert raised is None, raised
+    assert any("/compare/" in url for url in rec.gets), rec.gets
+
+
+def test_a_shallow_checkout_asks_github_and_a_backward_answer_counts_the_file(
+    tmp_path: Path,
+) -> None:
+    rec, server_dir = _ready(tmp_path)
+    old_one = _squash_in_a_shallow_clone(rec, server_dir)
+    rec.github[BOTS.repo] = 0
+    rec.github_behind[BOTS.repo] = 7
+
+    _said, raised, _fake = _return(rec, server_dir)
+
+    assert raised is not None and old_one in str(raised)
+
+
+def test_a_direction_neither_git_nor_github_can_tell_refuses_and_says_so(tmp_path: Path) -> None:
+    rec, server_dir = _ready(tmp_path)
+    _squash_in_a_shallow_clone(rec, server_dir)
+
+    _said, raised, _fake = _return(rec, server_dir)
+
+    assert raised is not None
+    assert (
+        "could not show whether" in str(raised)
+        and "GitHub did not answer" in str(raised)
+        and "try again later" in str(raised)
+    )
+
+
+def test_a_move_that_removes_nothing_never_asks_the_direction(tmp_path: Path) -> None:
+    rec, server_dir = _ready(tmp_path)
+    rec.ancestry_undecided = True
+
+    _said, raised, _fake = _return(rec, server_dir)
+
+    assert raised is None, raised
+    assert not any(call.startswith("is-ancestor") for call in rec.calls)
+    assert rec.gets == []
+
+
+def test_a_back_dated_update_added_since_the_target_is_newer_on_a_backward_return(
+    tmp_path: Path,
+) -> None:
+    """mod-playerbots names an update by the day it was written, not merged: the one the
+    running commit added since the target can sort before the target's newest, and the
+    database holds it all the same. Going back, no name order may skip it."""
+    rec, server_dir = _ready(tmp_path)
+    late = "2026_07_01_00_ai_playerbot_written_in_july.sql"
+    rec.diffs[(server_dir / BOTS.dest, OLD, BOTS_PIN)] = (("D", f"{BOTS_UPDATES}/{late}"),)
+    _target_ships(rec, server_dir, BOTS_UPDATES, TARGET_NEWEST)
+    rec.applied_updates["acore_playerbots"] = f"{late}\n"
+
+    _said, raised, _fake = _return(rec, server_dir)
+
+    assert raised is not None, "an applied back-dated update was skipped by its name"
+    assert late in str(raised)
 
 
 def test_update_to_latest_asks_nothing_of_the_kind(tmp_path: Path) -> None:
