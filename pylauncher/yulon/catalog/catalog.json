@@ -1095,7 +1095,7 @@
             "repo": "Sagiroth/TortoiseBots",
             "branch": "main",
             "dest": "src/tortoise-wow/modules/TortoiseBots",
-            "rev": "1fbee39275259ee5f44902f057dc8d88fbf2c83c",
+            "rev": "fb0b2eb54634db93d855011342e01750478d1702",
             "follow": "releases"
           }
         ]
@@ -1218,6 +1218,10 @@
               "files": {
                 "aiplayerbot.conf": {
                   "template": "aiplayerbot.conf",
+                  "defaults_follow": {
+                    "repo": "Sagiroth/TortoiseBots",
+                    "path": "ai/playerbot/aiplayerbot.conf.dist.in"
+                  },
                   "keys": {
                     "AiPlayerbot.Enabled": "1",
                     "AiPlayerbot.RandomBotAutoCreate": "1",
@@ -1229,6 +1233,10 @@
                 },
                 "modules/tortoise_bots.conf": {
                   "template": "modules/tortoise_bots.conf.dist",
+                  "defaults_follow": {
+                    "repo": "Sagiroth/TortoiseBots",
+                    "path": "conf/tortoise_bots.conf.dist"
+                  },
                   "keys": {
                     "TortoiseBots.AutoTest": "0",
                     "TortoiseBots.PacketBridgeTest": "0",

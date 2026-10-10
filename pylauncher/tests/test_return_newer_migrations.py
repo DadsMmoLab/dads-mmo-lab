@@ -849,7 +849,10 @@ def test_an_update_to_latest_is_not_asked(tmp_path: Path) -> None:
     _said, raised = _return(made, server_dir, to_pin=False)
 
     assert raised is None, raised
-    assert not any(call.startswith("tree-bytes:") for call in rec.calls)
+    # No migration folder or install rule is read. T656 reads the bots' conf templates
+    # on every move (their changed defaults), which is not this check.
+    read = [call for call in rec.calls if call.startswith("tree-bytes:")]
+    assert all(call.endswith((".conf.dist.in", ".conf.dist")) for call in read), read
     assert not _asked(rec)
 
 

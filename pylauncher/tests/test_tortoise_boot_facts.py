@@ -367,7 +367,7 @@ def test_every_tortoise_source_is_pinned_to_a_commit_not_a_moving_branch() -> No
         "Moving it again means taking them again"
     )
     module = next(s for s in sources if s.repo == "Sagiroth/TortoiseBots")
-    assert module.rev == "1fbee39275259ee5f44902f057dc8d88fbf2c83c", (
+    assert module.rev == "fb0b2eb54634db93d855011342e01750478d1702", (
         f"the bots module is pinned to {module.rev!r}. Its own pin is as load-bearing as the "
         "core's: the module is what decides the folder names its SQL is installed under, "
         "which conf keys exist, and what the world prints when it loads. It was fd7ec9ec "
@@ -406,9 +406,11 @@ def test_every_tortoise_source_is_pinned_to_a_commit_not_a_moving_branch() -> No
         "had pinned the world thread at 100% with a few hundred bots) and #521 (travel "
         "destinations looked up by hash and filtered by distance before the costly checks, "
         "cross-map distances without a heap allocation): 4 commits, no conf key, SQL or "
-        "build change; and since T656 it is 1fbee392, the commit release v2026-10-10 names "
-        "at build v2 (T597 had measured a504a625, v2026-10-08 build v7, on the way): 81 "
-        "commits, one idempotent character migration (a `tortoise_bots_claimed` ledger, "
+        "build change; and since T656 it is fb0b2eb5, the commit release v2026-10-10 names "
+        "at build v5 (T597 had measured a504a625, v2026-10-08 build v7, on the way; the "
+        "lane began on 1fbee392, build v2, and moved with the release): 87 commits, "
+        "cb90e735 among them (#663, the fix of #642's world stalls), one idempotent "
+        "character migration (a `tortoise_bots_claimed` ledger, "
         "CREATE TABLE IF NOT EXISTS), the character migrations' source folder renamed "
         "`char` -> `character` with the installed folder and every file name unchanged, the "
         "two confs installed as `.dist` templates with the live file made only when missing "
