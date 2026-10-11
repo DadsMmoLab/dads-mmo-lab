@@ -88,13 +88,17 @@ tests need neither a daemon nor a database.
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import dataclasses
 import hashlib
 import json
 import os
 import re
+import socket
 import subprocess
-from collections.abc import Callable, Mapping, Sequence
+import time
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from functools import lru_cache
@@ -351,7 +355,9 @@ class DockerMysql:
         # `CREATE DATABASE`/`USE`, so the file decides where it lands and there
         # is no second place for that answer to be wrong.
         proc = self._exec(
-            [mysql_client(self.db_container, client=self.client), "-uroot"], stdin=source
+            [mysql_client(self.db_container, client=self.client), "-uroot"],
+            stdin=source,
+            report_pid=True,
         )
         if proc.returncode != 0:
             raise MaintenanceError("The database did not load the backup.", detail=_stderr(proc))
@@ -474,8 +480,12 @@ class DockerMysql:
         input_text: str | None = None,
         stdin: IO[bytes] | None = None,
         stdout: IO[bytes] | None = None,
+        report_pid: bool = False,
     ) -> subprocess.CompletedProcess[bytes]:
         """One `docker exec`, with the missing-CLI guards in one place.
+
+        `report_pid` (the restore's load only): the child is started with `Popen` so its
+        pid reaches `recording_load_pid()`'s sink while it runs (T690).
 
         Raises:
             MaintenanceError: there is no docker CLI to run — either never
@@ -500,7 +510,16 @@ class DockerMysql:
             self.db_container,
             *command,
         ]
+        sink = _LOAD_PID_SINK.get() if report_pid else None
         try:
+            if sink is not None:
+                return _run_reporting_pid(
+                    argv,
+                    sink,
+                    stdin=stdin,
+                    stdout=stdout,
+                    env=runner.child_env(mysql_env(self.root_password, self.wsl_distro)),
+                )
             return subprocess.run(
                 argv,
                 input=input_text.encode("utf-8") if input_text is not None else None,
@@ -514,6 +533,59 @@ class DockerMysql:
         except OSError as exc:
             logger.warning(f"{argv[0]} could not be started: {exc}")
             raise MaintenanceError(platform.DOCKER_CLI_MISSING_HELP) from exc
+
+
+_LOAD_PID_SINK: contextvars.ContextVar[Callable[[int], None] | None] = contextvars.ContextVar(
+    "yulon_restore_load_pid_sink", default=None
+)
+
+
+@contextlib.contextmanager
+def recording_load_pid(sink: Callable[[int], None]) -> Iterator[None]:
+    """While active, the restore's load reports its child's pid to `sink` as it starts (T690).
+
+    A context variable and not a new `load_from()` argument: the seam `MysqlDocker` has many
+    implementations, and the load runs in the same thread that enters this.
+    """
+    token = _LOAD_PID_SINK.set(sink)
+    try:
+        yield
+    finally:
+        _LOAD_PID_SINK.reset(token)
+
+
+def _run_reporting_pid(
+    argv: list[str],
+    sink: Callable[[int], None],
+    *,
+    stdin: IO[bytes] | None,
+    stdout: IO[bytes] | None,
+    env: Mapping[str, str] | None,
+) -> subprocess.CompletedProcess[bytes]:
+    """`subprocess.run(argv)` that tells `sink` the child's pid once it exists.
+
+    A sink that fails is logged and ignored: the load has begun, and failing now would
+    report a restore that is writing as one that never started.
+    """
+    proc = subprocess.Popen(  # noqa: S603 - argv is built by the caller, never a shell string
+        argv,
+        stdin=stdin,
+        stdout=stdout if stdout is not None else subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=dict(env) if env is not None else None,
+        creationflags=runner.creationflags(),
+    )
+    try:
+        sink(proc.pid)
+    except Exception as exc:  # noqa: BLE001 - see the docstring
+        logger.warning(f"could not record the restore's process id {proc.pid}: {exc}")
+    try:
+        out, err = proc.communicate()
+    except BaseException:
+        proc.kill()
+        proc.wait()
+        raise
+    return subprocess.CompletedProcess(argv, proc.returncode, out, err)
 
 
 def _stderr(proc: subprocess.CompletedProcess[bytes]) -> str:
@@ -962,6 +1034,20 @@ UNLABELED_BACKUP = (
 # ----------------------------------------------------------------- restore
 
 
+LOAD_TRUSTED_FOR_SECONDS = 12 * 3600
+"""How long a recorded load pid is believed (`InterruptedRestore.load_running`)."""
+
+RESTORE_STILL_RUNNING = (
+    "A restore from the last session is still running in Docker. Wait for it to finish, then "
+    "look at this tab again: restoring now would put a second writer on the same databases."
+)
+
+
+def this_host() -> str:
+    """This computer's name, written beside a recorded pid."""
+    return socket.gethostname()
+
+
 @dataclass(frozen=True)
 class InterruptedRestore:
     """The marker a restore leaves behind while it is in flight.
@@ -978,6 +1064,38 @@ class InterruptedRestore:
     safety_backup: tuple[Path, ...]
     started_at: str
 
+    load_pid: int = 0
+    """The process id of the `docker exec ... mysql` child that is loading the dump (T690).
+
+    "Quit anyway" ends Yu'lon with `os._exit`, and nothing kills that child: it carries on
+    writing the databases. A marker naming it lets the next start tell "a restore that died
+    half-way" from "a restore that is still writing", which must not get a second writer.
+    0: not recorded (the load had not begun, or an older marker).
+    """
+    load_host: str = ""
+    """`this_host()` where `load_pid` was recorded: a pid means nothing on another computer."""
+
+    @property
+    def load_running(self) -> bool:
+        """The recorded load is, as far as can be told, still running on this computer.
+
+        Not trusted when the pid is from another computer (a server folder on a share), or
+        when the marker is older than `LOAD_TRUSTED_FOR_SECONDS` (a system gives a dead pid
+        to something else in time, and a restore that long is not a restore). A probe that
+        cannot answer is "not running": the old behaviour, never a stuck block.
+        """
+        if self.load_pid <= 0 or self.load_host != this_host():
+            return False
+        try:
+            age = time.time() - self.marker.stat().st_mtime
+        except OSError:
+            return False
+        if age > LOAD_TRUSTED_FOR_SECONDS:
+            return False
+        from yulon.selfupdate.layout import pid_liveness
+
+        return pid_liveness(self.load_pid) is True
+
     readable: bool = True
     """False when the marker was there but could not be parsed.
 
@@ -988,15 +1106,16 @@ class InterruptedRestore:
     """
 
     def as_json(self) -> str:
-        return json.dumps(
-            {
-                "backup": str(self.backup),
-                "databases": list(self.databases),
-                "safety_backup": [str(p) for p in self.safety_backup],
-                "started_at": self.started_at,
-            },
-            indent=2,
-        )
+        fields: dict[str, object] = {
+            "backup": str(self.backup),
+            "databases": list(self.databases),
+            "safety_backup": [str(p) for p in self.safety_backup],
+            "started_at": self.started_at,
+        }
+        if self.load_pid > 0:
+            fields["load_pid"] = self.load_pid
+            fields["load_host"] = self.load_host
+        return json.dumps(fields, indent=2)
 
 
 @dataclass(frozen=True)
@@ -1127,12 +1246,15 @@ def interrupted_restore(server_dir: Path) -> InterruptedRestore | None:
             f"restore marker at {marker} has fields of the wrong shape; it names nothing"
         )
         return InterruptedRestore(marker, Path(), (), (), "", readable=False)
+    pid = raw.get("load_pid", 0)
     return InterruptedRestore(
         marker=marker,
         backup=Path(str(raw.get("backup", ""))),
         databases=tuple(str(name) for name in databases),
         safety_backup=tuple(Path(str(p)) for p in safety),
         started_at=str(raw.get("started_at", "")),
+        load_pid=pid if isinstance(pid, int) and not isinstance(pid, bool) else 0,
+        load_host=str(raw.get("load_host", "")),
     )
 
 
@@ -1151,6 +1273,9 @@ def forget_interrupted_restore(server_dir: Path) -> bool:
     marker is that you have already used one of them and know where it went.
     """
     marker = marker_path(server_dir)
+    running = interrupted_restore(server_dir)
+    if running is not None and running.load_running:
+        raise MaintenanceError(RESTORE_STILL_RUNNING)
     try:
         marker.unlink()
     except FileNotFoundError:
@@ -1209,6 +1334,10 @@ def plan_restore(
       `game_unproven` for the player to answer.
     """
     refusals: list[str] = []
+    earlier_run = interrupted_restore(server_dir)
+    if earlier_run is not None and earlier_run.load_running:
+        # T690: the last session quit ("Quit anyway") over a restore whose load still writes.
+        refusals.append(RESTORE_STILL_RUNNING)
     databases: tuple[str, ...] = ()
     size = 0
     starts_database = False
@@ -1463,7 +1592,15 @@ def _restore_from(
         if before_load is not None:
             before_load()
         source.seek(0)
-        mysql.load_from(source)
+
+        def note_the_load(pid: int) -> None:
+            _write_marker(
+                dataclasses.replace(record, load_pid=pid, load_host=this_host()),
+                consequence="The restore is running, but its process could not be recorded.",
+            )
+
+        with recording_load_pid(note_the_load):
+            mysql.load_from(source)
     except (MaintenanceError, OSError) as exc:
         # A sentence of ours reads in place; a program's words go to `detail` (T194 R1).
         said = f" {exc}" if isinstance(exc, MaintenanceError) else ""

@@ -1505,7 +1505,27 @@ def _docker_exec_failing(monkeypatch: pytest.MonkeyPatch, *, fail: str) -> None:
             sink.write(good_dump(argv[-1]))  # type: ignore[union-attr]
         return subprocess.CompletedProcess(argv, 0, b"acore_world\n", b"")
 
+    class FakePopen:
+        """The restore's load starts with `Popen` so its pid can be recorded (T690)."""
+
+        pid = 2**22 + 1  # above any pid a test box hands out
+
+        def __init__(self, argv: list[str], **kw: object) -> None:
+            self.argv, self.kw = argv, kw
+            self.returncode = 0
+
+        def communicate(self) -> tuple[bytes, bytes]:
+            done = fake_run(self.argv, **self.kw)
+            self.returncode = done.returncode
+            return done.stdout, done.stderr
+
+        def kill(self) -> None: ...
+
+        def wait(self) -> int:
+            return self.returncode
+
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", FakePopen)
 
 
 @pytest.mark.parametrize("fail", ["list", "dump", "load"])

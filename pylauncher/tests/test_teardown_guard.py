@@ -40,7 +40,10 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 def _rebuild_running(view: ControllerView) -> None:
-    view.rebuild_log = SimpleNamespace(running=True)  # type: ignore[assignment]
+    # Something that is running, and that `shutdown()` can still stop and join afterwards.
+    view.rebuild_log = SimpleNamespace(  # type: ignore[assignment]
+        running=True, stop=lambda: None, wait=lambda _ms=0: True
+    )
 
 
 Case = tuple[str, Callable[[ControllerView], None], str, str]
@@ -111,7 +114,20 @@ def _view(
     )
     rebuilds: list[tuple[Any, ...]] = []
     view.client_dir_changed.connect(lambda *a: rebuilds.append(a))
+    _MADE.append(view)
     return view, fake, rebuilds
+
+
+_MADE: list[ControllerView] = []
+
+
+@pytest.fixture(autouse=True)
+def _join_the_views_made() -> Any:
+    """A view's job threads are joined before the process ends: a QThread destroyed while
+    running aborts it (exit 134)."""
+    yield
+    while _MADE:
+        _MADE.pop().shutdown()
 
 
 @pytest.fixture
@@ -280,7 +296,7 @@ def test_the_docker_group_restart_waits_for_work_that_cannot_be_cut_off(
     )
     monkeypatch.setattr(catalog_view, "show_information", lambda *a, **k: told.append(a))
 
-    catalog_view.offer_a_docker_group_restart(
+    handled = catalog_view.offer_a_docker_group_restart(
         _parent_with(refusal), "Docker is set up.", failed_title="Install failed"
     )
 
@@ -289,3 +305,20 @@ def test_the_docker_group_restart_waits_for_work_that_cannot_be_cut_off(
     assert bool(told) == busy
     if busy:
         assert "restore" in str(told[0])
+        # Deferred is NOT handled: the Catalog still shows its "Install failed" warning.
+        assert handled is False
+        said = str(told[0])
+        assert "Quit tray" in said and "same button" not in said, said
+    else:
+        assert handled is True
+
+
+def test_a_refusal_carries_the_kind_of_work_it_names(qapp: object, tmp_path: Path) -> None:
+    view, _fake, _ = _view(tmp_path)
+    view._restore_running = True
+    refusal = view.teardown_refusal()
+    assert refusal is not None and getattr(refusal, "kind", None) == teardown.RESTORE
+    view._restore_running = False
+    view._reset_running = True  # one of `busy_reason()`'s: no kind, so the cautious wording
+    plain = view.teardown_refusal()
+    assert plain is not None and getattr(plain, "kind", None) is None

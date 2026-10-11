@@ -338,7 +338,7 @@ def close_refusal(window: object, *, strict: bool = False) -> str | None:
     the ones opened afterwards.
     """
     reasons = _busy_reasons(window, strict=strict)
-    return str(reasons[0]) if reasons else None
+    return reasons[0] if reasons else None
 
 
 def announce_previous_update(
@@ -678,6 +678,7 @@ def build_window() -> object:
         # T690: why the player chose "Quit anyway" (empty until then). `main()` leaves through
         # the forced exit, without joining the jobs it cuts off, when this is set.
         yulon_forced_quit: str
+        yulon_removal_pending: Callable[[], bool]
         yulon_open_settings: Callable[[], None]
 
         def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qt's own name
@@ -2373,6 +2374,8 @@ def build_window() -> object:
     window.yulon_logs_view = logs_view
     window.yulon_catalog_view = catalog_view
     window.yulon_close_refusal = lambda strict=False: close_refusal(window, strict=strict)
+    # T690: a removal waiting for its Stop; quitting drops it, and the tray's box says so.
+    window.yulon_removal_pending = lambda: bool(removal_pending)
     assert isinstance(window, QWidget)
     return window
 
@@ -2681,36 +2684,62 @@ def main() -> int:
         code = int(app.exec())
         return code
     finally:
-        # The window is closed and nothing will pump the socket again; the lock
-        # is kept until the jobs are joined, so a relaunch waits for them (T152).
-        instance.stop_answering()
-        forced = str(getattr(window, "yulon_forced_quit", "") or "")
-        stuck = _stop_for_forced_quit(window) if forced else _stop_background_threads(window)
-        # Before the forced exit as well: `os._exit` would leave the file to the
-        # dead-pid check, which works, but a clean release costs nothing.
-        instance.release()
-        if stuck:
-            # A job is still running and nothing can stop it (T113). Returning
-            # from here hands its QThread to interpreter teardown, and Qt aborts
-            # there: exit 134, a crash report on Windows and macOS. The window is
-            # already closed and nothing is saved at close (state.json is written
-            # at each action), so leaving now loses nothing a return would keep.
-            failure = sys.exc_info()[1]
-            if failure is not None:
-                logger.error("the launcher ended on an exception", exc_info=failure)
-                code = 1
-            _leave_with_jobs_still_running(code, stuck)
+        _leave_after_the_loop(window, instance, code)
 
 
-def _stop_for_forced_quit(window: object) -> list[str]:
-    """The exit after "Quit anyway" (T690): stop what stops at once, wait for nothing.
+def _leave_after_the_loop(window: object, instance: Any, code: int) -> None:
+    """`main()`'s exit, once the event loop has ended: join the jobs, or leave without them.
+
+    A function of its own so a test drives the choice below with a real window and a real
+    tab. Two kinds of exit do not join (T690): "Quit anyway", which cuts the work off on the
+    player's word, and a quit over a Stop, which the tray promises "carries on" -- both skip
+    `ControllerView.shutdown()`'s wait of up to `STOP_GRACE_SECONDS + 30` seconds per tab,
+    which is what kept the process alive, headless, for minutes after the window was gone.
+    """
+    # The window is closed and nothing will pump the socket again; the lock
+    # is kept until the jobs are joined, so a relaunch waits for them (T152).
+    instance.stop_answering()
+    quick = _quick_exit_reason(window)
+    stuck = _stop_without_joining(window, quick) if quick else _stop_background_threads(window)
+    # Before the forced exit as well: `os._exit` would leave the file to the
+    # dead-pid check, which works, but a clean release costs nothing.
+    instance.release()
+    if stuck:
+        # A job is still running and nothing can stop it (T113). Returning
+        # from here hands its QThread to interpreter teardown, and Qt aborts
+        # there: exit 134, a crash report on Windows and macOS. The window is
+        # already closed and nothing is saved at close (state.json is written
+        # at each action), so leaving now loses nothing a return would keep.
+        failure = sys.exc_info()[1]
+        if failure is not None:
+            logger.error("the launcher ended on an exception", exc_info=failure)
+            code = 1
+        _leave_with_jobs_still_running(code, stuck)
+
+
+def _quick_exit_reason(window: object) -> str:
+    """Why this exit must not join the jobs, or "" for an ordinary one (T690)."""
+    from yulon import teardown
+
+    forced = str(getattr(window, "yulon_forced_quit", "") or "")
+    if forced:
+        return f"work Quit anyway cut off: {forced}"
+    for view in getattr(window, "yulon_controllers", []):
+        doing = getattr(view, "action_in_progress", lambda: None)()
+        if doing == teardown.STOP_JOB:
+            return "a Stop left running in Docker (the quit does not wait for it)"
+    return ""
+
+
+def _stop_without_joining(window: object, label: str) -> list[str]:
+    """The exit that waits for nothing: stop what stops at once, and name what is left (T690).
 
     `_stop_background_threads()` joins each tab for up to `STOP_GRACE_SECONDS + 30` seconds
-    (`ControllerView.shutdown()`), and that join is what held a quit past the closed window
-    for minutes (measured). The player chose to cut that work off, so nothing is joined: the
-    launchers and panels are told to stop, the input sources stop, and the answer names what
-    was cut off, which sends `main()` through `_leave_with_jobs_still_running()` (the forced
-    exit that skips Qt's teardown, which would abort on a running thread).
+    (`ControllerView.shutdown()`). Here the launchers and panels are told to stop, the input
+    sources stop, and the answer is `label`, which sends `_leave_after_the_loop()` through
+    `_leave_with_jobs_still_running()` (the forced exit that skips Qt's teardown, which would
+    abort on a running thread). The jobs' own children, a restore's `docker exec` or a Stop's
+    `docker compose stop`, are not signalled: they carry on.
     """
     close_launchers(window)
     for panel in getattr(window, "yulon_log_panels", []):
@@ -2719,8 +2748,7 @@ def _stop_for_forced_quit(window: object) -> list[str]:
         source = getattr(window, name, None)
         if source is not None:
             source.stop()
-    reason = str(getattr(window, "yulon_forced_quit", "") or "running work")
-    return [f"work Quit anyway cut off: {reason}"]
+    return [label]
 
 
 def _bring_to_front(window: Any, token: str = "") -> None:

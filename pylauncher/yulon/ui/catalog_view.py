@@ -1373,9 +1373,11 @@ def offer_a_docker_group_restart(parent: QWidget, message: str, *, failed_title:
             parent,
             "Yu'lon is still working",
             f"{reason}\n\nYu'lon needs to restart to finish setting up Docker. Do that when "
-            "this is finished: restart Yu'lon by hand, or press the same button again.",
+            "this is finished: choose Quit tray… from the tray icon's menu, then open Yu'lon "
+            "again.",
         )
-        return True
+        # Not handled: the caller still shows its own failure (the Catalog's "Install failed").
+        return False
     if said_yes(
         QMessageBox.question(
             parent,

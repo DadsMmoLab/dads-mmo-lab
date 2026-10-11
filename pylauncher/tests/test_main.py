@@ -21,6 +21,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -1669,28 +1670,106 @@ def test_quit_anyway_lets_the_close_through_and_marks_it_as_forced(
         view._restore_running = False
 
 
-def test_a_forced_quit_does_not_join_the_jobs_it_is_cutting_off(window: Any) -> None:
-    """`ControllerView.shutdown()` waits 330 s per tab: the window was gone, the process not."""
+class _Left(Exception):
+    """Stands in for `os._exit`: raised by the recorded `_leave_with_jobs_still_running`."""
 
-    class _Tab:
-        def shutdown(self) -> None:
-            raise AssertionError("a forced quit waited on a tab's jobs")
 
-    class _Panel:
-        stopped = 0
+class _Instance:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
 
-        def stop(self) -> None:
-            self.stopped += 1
+    def stop_answering(self) -> None:
+        self.calls.append("stop_answering")
 
-    panel = _Panel()
-    fake = SimpleNamespace(
-        yulon_controllers=[_Tab()],
-        yulon_log_panels=[panel],
+    def release(self) -> None:
+        self.calls.append("release")
+
+
+def _exit_recorder(monkeypatch: pytest.MonkeyPatch) -> tuple[list[list[str]], list[int]]:
+    """Record the forced exit and the joins, replacing both with something that cannot hang."""
+    left: list[list[str]] = []
+    joined: list[int] = []
+
+    def leave(code: int, stuck: list[str]) -> None:
+        left.append(stuck)
+        raise _Left
+
+    def join(window: Any) -> list[str]:
+        joined.append(1)
+        return []
+
+    monkeypatch.setattr(main, "_leave_with_jobs_still_running", leave)
+    monkeypatch.setattr(main, "_stop_background_threads", join)
+    return left, joined
+
+
+def test_the_exit_after_quit_anyway_joins_nothing_and_leaves_by_the_forced_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`main()`'s `finally` chooses between the joins and the forced exit; this drives it.
+
+    Mutation: make `_leave_after_the_loop()` take `_stop_background_threads` whatever
+    `yulon_forced_quit` says.
+    """
+    left, joined = _exit_recorder(monkeypatch)
+    window = SimpleNamespace(
+        yulon_controllers=[],
+        yulon_log_panels=[],
         yulon_launchers={},
         yulon_forced_quit="A restore is writing",
     )
-    stuck = main._stop_for_forced_quit(fake)
-    assert stuck == ["work Quit anyway cut off: A restore is writing"] and panel.stopped == 1
+    instance = _Instance()
+
+    with pytest.raises(_Left):
+        main._leave_after_the_loop(window, instance, 0)
+
+    assert joined == [], "Quit anyway waited on the jobs it was cutting off"
+    assert left == [["work Quit anyway cut off: A restore is writing"]]
+    assert instance.calls == ["stop_answering", "release"]
+
+
+def test_an_ordinary_exit_still_joins_and_returns(monkeypatch: pytest.MonkeyPatch) -> None:
+    left, joined = _exit_recorder(monkeypatch)
+    window = SimpleNamespace(
+        yulon_controllers=[], yulon_log_panels=[], yulon_launchers={}, yulon_forced_quit=""
+    )
+    instance = _Instance()
+
+    main._leave_after_the_loop(window, instance, 0)
+
+    assert joined == [1] and left == []
+    assert instance.calls == ["stop_answering", "release"]
+
+
+def test_quitting_over_a_stop_does_not_wait_for_the_stop(
+    window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ticket's U-5 symptom for the quit the tray promises is allowed: "Quit now" over a Stop.
+
+    The Stop's `docker compose stop` carries on; the process must not stay headless for the
+    58-91 s it takes (`ControllerView.shutdown()` waits up to 330 s). A real tab, a real Stop
+    on the real job runner, held until the end of the test.
+    """
+    server_dir = tmp_path / "t690-stop-exit"
+    _catalog_view(window).installed.emit("wow-wotlk", server_dir, None)
+    view = _tab_for(window, server_dir)
+    gate = threading.Event()
+    view.services.controller.stop = lambda: gate.wait(60) or True
+    view.stop_server()
+    left, joined = _exit_recorder(monkeypatch)
+    quitting = SimpleNamespace(
+        yulon_controllers=[view], yulon_log_panels=[], yulon_launchers={}, yulon_forced_quit=""
+    )
+    started = time.monotonic()
+    try:
+        with pytest.raises(_Left):
+            main._leave_after_the_loop(quitting, _Instance(), 0)
+        assert time.monotonic() - started < 5, "the exit waited for the Stop"
+        assert joined == [], "the exit joined the jobs with a Stop in flight"
+        assert left and "Stop" in left[0][0], left
+    finally:
+        gate.set()
+        view.shutdown()
 
 
 def test_a_real_tray_quit_now_while_stopping_goes_through(

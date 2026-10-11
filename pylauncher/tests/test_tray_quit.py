@@ -96,6 +96,26 @@ def test_quit_anyway_from_the_tray_quits_and_marks_the_exit_as_forced(
     assert window.yulon_forced_quit == "A restore is running."  # type: ignore[attr-defined]
 
 
+def test_quit_over_a_removal_in_progress_says_the_server_will_still_be_listed(
+    tray: YulonTray, window: FakeWindow
+) -> None:
+    """Quitting during the stop a removal asked for drops the removal (kept on purpose).
+
+    Mutation: drop the note from `quit_box()` / `_removal_note()`.
+    """
+    _add(window, FakeView("WotLK", "/srv/a", "running"))
+    window.yulon_removal_pending = lambda: True  # type: ignore[attr-defined]
+    for build in (tray_module.quit_box, tray_module.while_stopping_box):
+        box, _buttons = build(1, tray._removal_note())
+        try:
+            assert "still be listed" in box.text(), box.text()
+            assert "remove it again" in box.text(), box.text()
+        finally:
+            box.deleteLater()
+    window.yulon_removal_pending = lambda: False  # type: ignore[attr-defined]
+    assert tray._removal_note() == ""
+
+
 def test_quit_leaving_the_servers_running(
     tray: YulonTray, window: FakeWindow, quits: list[int]
 ) -> None:

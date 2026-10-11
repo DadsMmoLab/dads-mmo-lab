@@ -16792,6 +16792,17 @@ class ControllerView(QWidget):
             self.interrupted_label.setVisible(False)
             self.forget_button.setVisible(False)
             return
+        if record.load_running:
+            # The last session quit over this restore and its load carries on in Docker (T690):
+            # not an interrupted restore, and nothing here is offered until it ends.
+            named = ", ".join(record.databases) or "the databases"
+            self.interrupted_label.setText(
+                f"A restore of {named} from the last session is still running in Docker. "
+                "Wait for it to finish, then look at this tab again."
+            )
+            self.interrupted_label.setVisible(True)
+            self.forget_button.setVisible(False)
+            return
         if record.readable:
             named = ", ".join(record.databases) or "an unknown database"
             text = (

@@ -56,6 +56,31 @@ KINDS: tuple[str, ...] = (
 )
 """Every kind `ControllerView.teardown_work()` can answer, in the order it checks them."""
 
+
+class Refusal(str):
+    """A refusal's sentence that also knows which kind of work it names (T690).
+
+    A `str`, so every caller that shows or compares it is unchanged; "Quit anyway" reads
+    `kind` to say what quitting leaves behind (`CARRIES_ON`). A sentence that carries no
+    kind (`busy_reason()`'s, the Catalog's) is the cautious "cut off" one.
+    """
+
+    kind: str | None
+
+    def __new__(cls, text: str, kind: str | None = None) -> Refusal:
+        made = super().__new__(cls, text)
+        made.kind = kind
+        return made
+
+
+CARRIES_ON: frozenset[str] = frozenset({RESTORE, UPDATE_BACKUP, MOVE})
+"""Work whose `docker exec` child outlives Yu'lon: Quit anyway does not stop it.
+
+The restore's load is recorded in the restore marker (`load_pid`), so the next start
+knows it still runs; the others are named in the box ("do not start Yu'lon again until
+it has finished"). Everything else is cut off by the exit.
+"""
+
 _WAIT = "Wait for it to finish, then try again."
 
 _SENTENCES: dict[str, str] = {
@@ -91,7 +116,7 @@ _SENTENCES: dict[str, str] = {
 }
 
 
-def sentence(kind: str, *, module_job: str = "", server_job: str = "") -> str:
+def sentence(kind: str, *, module_job: str = "", server_job: str = "") -> Refusal:
     """The plain-words reason for `kind`, naming what is running where it can.
 
     `module_job` is the Modules tab's own name for its job ("install mod-ah-bot");
@@ -99,17 +124,19 @@ def sentence(kind: str, *, module_job: str = "", server_job: str = "") -> str:
     """
     if kind == MODULE:
         what = module_job or "a Modules tab action"
-        return (
+        return Refusal(
             f'"{what}" is running on this server\'s Modules tab. Stopping it now '
-            f"could leave the module half-installed. {_WAIT}"
+            f"could leave the module half-installed. {_WAIT}",
+            kind,
         )
     if kind == ACTION:
         what = server_job or "Another action"
-        return (
+        return Refusal(
             f"{what} is running on this server's Server tab. Stopping it now would cut "
-            f"it off half-way. {_WAIT}"
+            f"it off half-way. {_WAIT}",
+            kind,
         )
-    return _SENTENCES[kind]
+    return Refusal(_SENTENCES[kind], kind)
 
 
 CATALOG_INSTALL = (
