@@ -826,7 +826,7 @@ def test_a_rebuild_without_the_press_s_consent_still_refuses_and_names_rebuild(
     with pytest.raises(InstallerError) as refused:
         list(tbc_engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
     said = str(refused.value)
-    assert "not all on the daemon" in said and f"Press {REBUILD} first" in said, said
+    assert "not all in Docker" in said and f"Press {REBUILD} first" in said, said
     assert "Remove from Yu'lon" not in said
     assert "build" not in rec.calls and not [c for c in rec.calls if c.startswith("tag:")]
 

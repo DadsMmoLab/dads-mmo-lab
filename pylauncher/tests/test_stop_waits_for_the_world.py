@@ -276,7 +276,7 @@ def test_a_loading_world_is_waited_for_until_it_catches_sigterm(
     assert controller.stop() is True
     assert fake.events == ["look 1", "look 2", "look 3", "stop"]
     assert said == [docker.WORLD_STILL_LOADING, docker.WORLD_FINISHED_LOADING]
-    assert said[0].startswith("The world is finishing its load before it can stop.")
+    assert said[0].startswith("The world server is finishing its load before it can stop.")
 
 
 def test_tortoises_ready_banner_is_not_taken_for_a_world_that_can_hear_the_stop(
@@ -351,7 +351,7 @@ def test_a_world_that_cannot_be_asked_is_not_stopped_it_says_so_and_keeps_asking
         docker.WORLD_STILL_LOADING,
         docker.WORLD_FINISHED_LOADING,
     ]
-    assert said[0].startswith("Yu'lon can't check whether the world has finished loading")
+    assert said[0].startswith("Yu'lon can't check whether the world server has finished loading")
 
 
 def test_a_world_docker_will_not_describe_is_not_taken_for_a_stopped_one(

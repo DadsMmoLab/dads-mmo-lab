@@ -1471,7 +1471,7 @@ def test_a_client_docker_cannot_see_is_refused_and_an_unprobed_one_is_unchecked(
     )
     assert verdict(refused, "sharing the client with Docker") == "refuse"
     assert not refused.ok()
-    assert "archives would be invisible" in refused.message()
+    assert "cannot read the client archives" in refused.message()
     unprobed = preflight.evaluate(
         CLIENT_ENTRY, SERVER_DIR, facts(client_checks=ok, client_bind=None)
     )
@@ -1728,7 +1728,7 @@ def test_the_compose_row_stays_quiet_when_docker_itself_never_answered() -> None
     facts = preflight.Facts(platform_id="linux", docker_ready=False)
     check = preflight._compose_check(facts)
     assert check.verdict == "unchecked"
-    assert "no Docker daemon" in check.detail
+    assert "Docker did not answer" in check.detail
 
 
 def test_the_compose_remedy_names_docker_desktop_off_linux() -> None:

@@ -187,15 +187,16 @@ move-in record, written before the install of a server brought from another comp
 """
 
 OPENING_NOTE = (
-    "You can stop this at any time. What an install writes outside the folder below is named "
-    "here rather than denied: the images this build produces and the volumes holding the "
-    "database and the server data, which live in Docker's own storage — that is why the checks "
-    "below look at the space on Docker's disk too; Docker itself, when no daemon answers yet "
-    "(on Linux: system packages, a service, and the group you are asked about first); and this "
-    "app's own settings and log, in its config folder. Starting the install again continues "
-    "from where it stopped: source this app has finished cloning is never fetched, reset or "
-    "moved, and the build is not run a second time once Docker confirms its images are there. "
-    "Everything cheap runs again on every attempt — the compose files this app writes are put "
+    "You can stop this at any time.\n"
+    "Outside the folder below, the install writes: the images it builds and the volumes holding "
+    "the database and the server data, which live in Docker's own storage (so the checks below "
+    "look at the space on Docker's disk too); Docker itself, if it is not running yet (on "
+    "Linux: system packages, a service, and the docker group, which you are asked about "
+    "first); and this app's own settings and log, in its config folder.\n"
+    "Starting the install again continues where it stopped. Source this app has finished "
+    "cloning is never fetched, reset or moved, and the build is skipped once Docker has its "
+    "images.\n"
+    "The quick steps run again on every attempt: the compose files this app writes are put "
     "back the way the catalog says, the server-data download resumes and re-checks itself, and "
     "the database and server are started and waited for."
 )
@@ -338,7 +339,7 @@ def no_rollback_confirmation(entry: CatalogEntry) -> str:
 
 
 NO_ROLLBACK_KEPT = (
-    "This install's images are not all on the daemon under their tags, and no container of this "
+    "This install's images are not all in Docker under their tags, and no container of this "
     "install still holds a whole build, so there is no build to keep as a rollback: this rebuild "
     "compiles without one, as its confirmation said. If the compile fails or is stopped, or "
     "Docker will not replace the containers, they stay as they are now. If the new build "
@@ -354,7 +355,7 @@ moment it applies, in the panel the rest of the press is read in, and it says
 what each failure leaves -- the three sentences below are those failures'."""
 
 NO_ROLLBACK_NOT_BUILT = (
-    "No build was kept as a rollback, because this install's images were not all on the daemon. "
+    "No build was kept as a rollback, because this install's images were not all in Docker. "
     "The containers were not replaced, so they are as they were before this rebuild, and its "
     "images are still not all there. Once the reason is fixed, press "
     f"{server_build_presses.under_server_build(server_build_presses.REBUILD)} again."
@@ -362,8 +363,8 @@ NO_ROLLBACK_NOT_BUILT = (
 """T170: a compile with no rollback that failed, or was stopped, before it finished."""
 
 NO_ROLLBACK_UNTOUCHED = (
-    "No build was kept as a rollback, because this install's images were not all on the daemon. "
-    "The compile finished and its images are on the daemon under this install's tags, but the "
+    "No build was kept as a rollback, because this install's images were not all in Docker. "
+    "The compile finished and its images are in Docker under this install's tags, but the "
     "containers were not replaced, so they are as they were before this rebuild. Once the "
     "reason is fixed, press "
     f"{server_build_presses.under_server_build(server_build_presses.REBUILD)} again."
@@ -379,7 +380,7 @@ Not `_cancelled_message("the install")`, which `_check_cancel()` raises and whic
 names the wrong press; what follows it is the restore's account of the tags."""
 
 NO_ROLLBACK_BUILT = (
-    "No build was kept as a rollback, because this install's images were not all on the daemon, "
+    "No build was kept as a rollback, because this install's images were not all in Docker, "
     "so there was none to put back: the containers now run the new build, and the server is "
     "down until it comes up. The log above says what stopped it."
 )
@@ -2830,7 +2831,7 @@ refused by it."""
 
 
 NO_ROLLBACK_SCRIPTS_MIXED = (
-    "No build was kept as a rollback, because this install's images were not all on the daemon. "
+    "No build was kept as a rollback, because this install's images were not all in Docker. "
     "The servers were stopped to lay the Lua scripts and no container was replaced, so nothing "
     "runs now and the scripts are a mix of the old and the new. Start is refused until this "
     "server is rebuilt: press "
@@ -8094,10 +8095,10 @@ class StagedInstaller:
             # (cold review of T14, round 1).
             raise InstallerError(
                 f"Yu'lon could not tell whether {self.entry.name}'s world server is running "
-                f"({why or 'the daemon gave no answer'}), and a running one holds these "
+                f"({why or 'Docker gave no answer'}), and a running one holds these "
                 f"databases in memory and writes back over whatever it finds in them. Nothing "
                 f"was applied. Docker itself may be the thing that is not answering — it reads "
-                f"a stopped container and a daemon that is down the same way — so check that "
+                f"a stopped container and Docker being down the same way — so check that "
                 f"Docker is running, then press Stop on the Server tab if the server is up, and "
                 f'press "{button}" again.'
             )
@@ -9593,7 +9594,7 @@ class StagedInstaller:
                     )
                     logger.error(
                         f"rebuild of {self.entry.id} was abandoned mid-compile; the build from "
-                        f"before it stays on the daemon as {', '.join(kept)}.{note}"
+                        f"before it stays in Docker as {', '.join(kept)}.{note}"
                     )
                 else:
                     self._let_go(kept)
@@ -9605,7 +9606,7 @@ class StagedInstaller:
                 # (a consumer that stopped reading at "The build finished.").
                 logger.error(
                     f"rebuild of {self.entry.id} ended unexpectedly after the compile; the "
-                    f"build from before it is still on the daemon as {', '.join(kept)}"
+                    f"build from before it is still in Docker as {', '.join(kept)}"
                 )
                 # Cold review (lead's decision): nothing here can put the tags back,
                 # since that would yield, so no Start may run the untested build they
@@ -11047,7 +11048,7 @@ class StagedInstaller:
             raise InstallerError(
                 "Docker would not say whether this install's images exist, so the build you "
                 "have now could not be kept as a rollback and nothing was compiled over it. "
-                "Nothing was started. Check the docker daemon is up, then press the same entry "
+                "Nothing was started. Check that Docker is running, then press the same entry "
                 # T155: `stage_recreate()`'s reason -- all three entries reach this.
                 f"under \u201c{server_build_presses.SERVER_BUILD}\u201d on the Modules tab "
                 "again."
@@ -11062,7 +11063,7 @@ class StagedInstaller:
             return ()
         if sources is None:
             raise InstallerError(
-                "This install's images are not all on the daemon under their tags, and no "
+                "This install's images are not all in Docker under their tags, and no "
                 "container of this install still holds a whole build, so there is no build to "
                 "keep as a rollback, and this press does not compile without one. Nothing was "
                 "compiled. "
@@ -11259,7 +11260,7 @@ class StagedInstaller:
                     f"not possible either: Docker did not answer for another "
                     f"{_spell_elapsed(waited)}. No container was replaced, so the server is "
                     f"still running the build it had if it is up, but the image tags name the "
-                    f"new build, which has never started; the old images are on the daemon "
+                    f"new build, which has never started; the old images are in Docker "
                     f"under their {ROLLBACK_TAG_SUFFIX} tags.",
                     touched=False,
                     untested=True,
@@ -11523,7 +11524,7 @@ class StagedInstaller:
                 f"Yu'lon could not ask Docker whether the old images are still under their "
                 f"{ROLLBACK_TAG_SUFFIX} tags."
             )
-        return f"The old images are on the daemon under their {ROLLBACK_TAG_SUFFIX} tags."
+        return f"The old images are in Docker under their {ROLLBACK_TAG_SUFFIX} tags."
 
     def _use_or_clear_the_kept_build(
         self,
@@ -11911,7 +11912,7 @@ class StagedInstaller:
                 f"docker image rm -f {' '.join(left)}"
             )
             yield (
-                f"Docker would not take {len(left)} transient name(s) off the daemon: "
+                f"Docker would not remove {len(left)} temporary image name(s): "
                 f"{', '.join(left)}. They are this rebuild's own bookkeeping and nothing "
                 f"needs them; the log says what docker objected to, and how to remove them once "
                 f"this server is stopped."
@@ -13787,7 +13788,7 @@ class StagedInstaller:
                         f"Docker would not say which containers were brought up from {server_dir}, "
                         "so Yu'lon cannot tell whether this server's characters are under its own "
                         f"compose project, and does not write {path}. Nothing was written. Check "
-                        "the docker daemon is up, then press Refresh.",
+                        "Docker is running, then press Refresh.",
                     ),
                     None,
                     text,
@@ -14800,7 +14801,7 @@ class StagedInstaller:
                     f"for the last {_spell_seconds(blind_for)} neither its state nor its log "
                     f"could be read, so nothing here knows whether the server is still "
                     f"loading, finished, or gone. The install itself got as far as starting "
-                    f"the containers. Check the docker daemon is up, then read {logs}.",
+                    f"the containers. Check that Docker is running, then read {logs}.",
                     detail=read_it,
                 )
             before = now

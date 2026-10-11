@@ -2254,7 +2254,7 @@ def test_a_rollback_that_stops_early_before_any_container_moved_leaves_the_new_s
     assert str(raised.value) == (
         f"{GIVEN_UP} Putting the build from before this rebuild back was not attempted, "
         f"because the new build could not be given a name to undo onto ({REFUSED}); the tags "
-        "still name the new build, all of them. The old images are on the daemon under their "
+        "still name the new build, all of them. The old images are in Docker under their "
         "-rollback tags. The source folders were left on the new commits, because the image "
         "tags name the new build made from them. None of your server's containers was "
         "replaced, so it is still running the build from before this update if it is up, and "
@@ -2308,7 +2308,7 @@ def test_a_rollback_that_leaves_the_tags_mixed_says_a_rebuild_is_needed_and_reco
         f"{GIVEN_UP} Putting the build from before this rebuild back failed part-way "
         f"({REFUSED}) and undoing it failed too, so the tags are MIXED: {refs[0]} name the old "
         "build and the rest name the new one. Do not start this server until they agree. The "
-        "old images are on the daemon under their -rollback tags. The source folders were put "
+        "old images are in Docker under their -rollback tags. The source folders were put "
         "back on the "
         "commits they were on before this update. None of your server's containers was "
         "replaced, so it is still running the build from before this update if it is up. Its "

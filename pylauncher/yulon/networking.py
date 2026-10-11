@@ -2383,10 +2383,10 @@ def _can_lock_out(command: Iterable[str]) -> bool:
 
 
 UFW_ENABLE_WITHHELD = (
-    "Yu'lon opened the game ports in ufw's rule list but did NOT turn ufw on: turning a "
+    "This plan opens the game ports in ufw's rule list but does NOT turn ufw on: turning a "
     "firewall on can only take reachability away, it is no part of making a server reachable, "
-    "and on a machine you reach over SSH it takes away your own way in. ufw is left as you "
-    "had it. To turn it on yourself, allow your SSH port FIRST with this:\n"
+    "and on a machine you reach over SSH it takes away your own way in. ufw stays as it "
+    "is now. To turn it on yourself, allow your SSH port FIRST with this:\n"
     "sudo ufw allow <your ssh port>/tcp\n"
     "Then turn it on:\n"
     "sudo ufw enable"
