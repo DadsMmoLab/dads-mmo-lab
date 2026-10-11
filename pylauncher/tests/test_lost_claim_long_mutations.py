@@ -336,6 +336,25 @@ def test_remove_tree_refuses_a_junction_given_as_the_root_and_its_target_survive
     assert (target / "keep.map").read_bytes() == b"MAPS"
 
 
+def test_remove_tree_last_refuses_a_junction_root_before_it_deletes_anything(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T713: `remove_tree_last` asked `Path.is_symlink()`, which calls a junction a folder.
+
+    It then emptied the junction's target, the install record included, and only then
+    let `remove_tree` refuse the root with "nothing was changed".
+    """
+    target = tmp_path / "shared"
+    (target / "src").mkdir(parents=True)
+    (target / "src" / "f.txt").write_bytes(b"CODE")
+    (target / ".yulon-install.json").write_bytes(b"{}")
+    _junction(monkeypatch, target)
+    with pytest.raises(rmtree.TreeRemovalError, match="junction"):
+        rmtree.remove_tree_last(target, (".yulon-install.json",))
+    assert (target / "src" / "f.txt").read_bytes() == b"CODE"
+    assert (target / ".yulon-install.json").read_bytes() == b"{}"
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX modes stand for the read-only flag here")
 def test_the_retry_never_clears_a_flag_through_a_junction_inside_the_tree(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

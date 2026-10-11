@@ -185,7 +185,9 @@ def remove_tree_last(path: Path, last: Sequence[str]) -> None:
     Raises:
         TreeRemovalError: as `remove_tree()`.
     """
-    if path.is_symlink() or not path.is_dir():
+    # `links`, not `Path.is_symlink()`: that calls a junction a folder (T713), and the walk
+    # below would empty the junction's target before `remove_tree` refused the root.
+    if _is_link(os.fspath(path)) or not path.is_dir():
         remove_tree(path)
         return
     try:
