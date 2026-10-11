@@ -36,11 +36,11 @@ PANEL = "panel"
 ACTION = "action"
 
 STOP_JOB = "Stop"
-"""The Server tab's label for a Stop, the one action a quit may leave running behind it.
+"""The Server tab's label for a Stop, the one action a quit may be made over.
 
-A Stop carries on in Docker after Yu'lon quits (the tray's own "Quit now" box says so),
-and T158's `_stop_abandon` ends a stop waiting for a world to load. Start, Restart and
-the rest are cut off by a quit, so they refuse it.
+A quit does not wait out a Stop's refusal: it joins the Stop, so the window closes at once
+and the process ends when the Stop has (a minute or two, T158's `_stop_abandon` ends a stop
+waiting for a world to load). Start, Restart and the rest would be cut off, so they refuse.
 """
 
 KINDS: tuple[str, ...] = (

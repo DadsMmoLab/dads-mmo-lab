@@ -27,6 +27,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+import shiboken6
 
 from tests.test_controller_view import WOTLK, _client_dir_view
 from yulon import teardown
@@ -127,7 +128,9 @@ def _join_the_views_made() -> Any:
     running aborts it (exit 134)."""
     yield
     while _MADE:
-        _MADE.pop().shutdown()
+        made = _MADE.pop()
+        if shiboken6.isValid(made):  # another module's test may have shut it down already
+            made.shutdown()
 
 
 @pytest.fixture

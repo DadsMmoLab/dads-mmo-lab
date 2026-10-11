@@ -1506,18 +1506,24 @@ def _docker_exec_failing(monkeypatch: pytest.MonkeyPatch, *, fail: str) -> None:
         return subprocess.CompletedProcess(argv, 0, b"acore_world\n", b"")
 
     class FakePopen:
-        """The restore's load starts with `Popen` so its pid can be recorded (T690)."""
+        """The restore's load starts with `Popen` so its pid can be recorded (T690).
+
+        Like a child, it "runs" at once and writes to the files it was given.
+        """
 
         pid = 2**22 + 1  # above any pid a test box hands out
 
         def __init__(self, argv: list[str], **kw: object) -> None:
-            self.argv, self.kw = argv, kw
-            self.returncode = 0
+            done = fake_run(argv, **kw)
+            self.returncode = done.returncode
+            self._out, self._err = done.stdout, done.stderr
+            for stream, data in ((kw.get("stdout"), self._out), (kw.get("stderr"), self._err)):
+                if hasattr(stream, "write") and data:
+                    stream.write(data)  # type: ignore[union-attr]
+                    stream.flush()  # type: ignore[union-attr]
 
         def communicate(self) -> tuple[bytes, bytes]:
-            done = fake_run(self.argv, **self.kw)
-            self.returncode = done.returncode
-            return done.stdout, done.stderr
+            return self._out, self._err
 
         def kill(self) -> None: ...
 

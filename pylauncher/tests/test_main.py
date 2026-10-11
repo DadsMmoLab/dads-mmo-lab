@@ -1741,35 +1741,41 @@ def test_an_ordinary_exit_still_joins_and_returns(monkeypatch: pytest.MonkeyPatc
     assert instance.calls == ["stop_answering", "release"]
 
 
-def test_quitting_over_a_stop_does_not_wait_for_the_stop(
-    window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+def test_quitting_over_a_stop_still_joins_it_so_the_stop_finishes(
+    window: Any, tmp_path: Any
 ) -> None:
-    """The ticket's U-5 symptom for the quit the tray promises is allowed: "Quit now" over a Stop.
+    """A Stop is Python-driven (wait for the load, save, `compose stop`, stop by name).
 
-    The Stop's `docker compose stop` carries on; the process must not stay headless for the
-    58-91 s it takes (`ControllerView.shutdown()` waits up to 330 s). A real tab, a real Stop
-    on the real job runner, held until the end of the test.
+    Leaving before it ends kills the sequence part-way, and the pipes of its captured
+    `compose stop` then break. So the exit joins it, as before this ticket: the window stays
+    hidden for the minute or two it takes, and the stop COMPLETES. A real tab, a real Stop on
+    the real job runner, released by a timer after the exit has begun waiting.
+    Mutation: re-add the Stop branch to `_quick_exit_reason()`.
     """
     server_dir = tmp_path / "t690-stop-exit"
     _catalog_view(window).installed.emit("wow-wotlk", server_dir, None)
     view = _tab_for(window, server_dir)
     gate = threading.Event()
-    view.services.controller.stop = lambda: gate.wait(60) or True
+    finished: list[float] = []
+
+    def slow_stop() -> bool:
+        gate.wait(60)
+        finished.append(time.monotonic())
+        return True
+
+    view.services.controller.stop = slow_stop
     view.stop_server()
-    left, joined = _exit_recorder(monkeypatch)
     quitting = SimpleNamespace(
         yulon_controllers=[view], yulon_log_panels=[], yulon_launchers={}, yulon_forced_quit=""
     )
+    assert main._quick_exit_reason(quitting) == "", "a Stop must be joined, not left behind"
+    threading.Timer(1.5, gate.set).start()
     started = time.monotonic()
-    try:
-        with pytest.raises(_Left):
-            main._leave_after_the_loop(quitting, _Instance(), 0)
-        assert time.monotonic() - started < 5, "the exit waited for the Stop"
-        assert joined == [], "the exit joined the jobs with a Stop in flight"
-        assert left and "Stop" in left[0][0], left
-    finally:
-        gate.set()
-        view.shutdown()
+
+    main._leave_after_the_loop(quitting, _Instance(), 0)  # the REAL joins; returns, no forced exit
+
+    assert finished, "the exit left before the Stop had finished"
+    assert time.monotonic() - started >= 1.0, "the exit did not wait for the Stop"
 
 
 def test_a_real_tray_quit_now_while_stopping_goes_through(

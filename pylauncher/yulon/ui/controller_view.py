@@ -10169,10 +10169,10 @@ class ControllerView(QWidget):
         tab's panel, last any Server action, including the stop a removal is
         already waiting for.
 
-        `quitting` is the one door that may leave a Stop running behind it: a Stop
-        carries on in Docker (`teardown.STOP_JOB`), and the tray's "Quit now" while it
-        stops servers promises exactly that. Nothing else is exempt, and a Stop beside a
-        restore is still refused for the restore.
+        `quitting` is the one door a Stop does not refuse (`teardown.STOP_JOB`): the quit
+        joins the Stop, so the window closes at once and the process ends when the Stop
+        has, which is what the tray's "Quit now" box says. Nothing else is exempt, and a
+        Stop beside a restore is still refused for the restore.
         """
         if self._backup_before_update:
             return teardown.UPDATE_BACKUP

@@ -2691,10 +2691,10 @@ def _leave_after_the_loop(window: object, instance: Any, code: int) -> None:
     """`main()`'s exit, once the event loop has ended: join the jobs, or leave without them.
 
     A function of its own so a test drives the choice below with a real window and a real
-    tab. Two kinds of exit do not join (T690): "Quit anyway", which cuts the work off on the
-    player's word, and a quit over a Stop, which the tray promises "carries on" -- both skip
-    `ControllerView.shutdown()`'s wait of up to `STOP_GRACE_SECONDS + 30` seconds per tab,
-    which is what kept the process alive, headless, for minutes after the window was gone.
+    tab. "Quit anyway" (T690) cuts the work off on the player's word and skips
+    `ControllerView.shutdown()`'s wait of up to `STOP_GRACE_SECONDS + 30` seconds per tab.
+    Every other exit joins, a quit over a Stop included: the window is already gone and the
+    process stays for the minute or two the Stop takes, so that the Stop completes.
     """
     # The window is closed and nothing will pump the socket again; the lock
     # is kept until the jobs are joined, so a relaunch waits for them (T152).
@@ -2718,16 +2718,15 @@ def _leave_after_the_loop(window: object, instance: Any, code: int) -> None:
 
 
 def _quick_exit_reason(window: object) -> str:
-    """Why this exit must not join the jobs, or "" for an ordinary one (T690)."""
-    from yulon import teardown
+    """Why this exit must not join the jobs, or "" for an ordinary one (T690).
 
+    Only "Quit anyway". A Stop in flight is JOINED: it is Python-driven (wait for the world
+    to load, save, `compose stop`, stop by name) and its `compose stop` writes to captured
+    pipes, so leaving before it ends cuts the sequence short.
+    """
     forced = str(getattr(window, "yulon_forced_quit", "") or "")
     if forced:
         return f"work Quit anyway cut off: {forced}"
-    for view in getattr(window, "yulon_controllers", []):
-        doing = getattr(view, "action_in_progress", lambda: None)()
-        if doing == teardown.STOP_JOB:
-            return "a Stop left running in Docker (the quit does not wait for it)"
     return ""
 
 

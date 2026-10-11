@@ -210,6 +210,16 @@ def _polarity(test: ast.expr, guards: set[str], bound: set[str]) -> str | None:
     return "body" if _is_answer(test, guards, bound) else None
 
 
+def _same_function(node: ast.AST) -> list[ast.AST]:
+    """`node` and what is under it, without entering a function, lambda or class defined there."""
+    found: list[ast.AST] = [node]
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+        return found
+    for child in ast.iter_child_nodes(node):
+        found.extend(_same_function(child))
+    return found
+
+
 def _obeys(
     function: ast.AST, guards: set[str], before: int, *, also_calls: set[str] | None = None
 ) -> bool:
@@ -243,7 +253,7 @@ def _obeys(
                 branch: list[ast.stmt] = stmt.body
             else:
                 branch = stmt.orelse or block[index + 1 :]
-            nodes = [n for part in branch for n in ast.walk(part)]
+            nodes = [n for part in branch for n in _same_function(part)]
             leaves = any(isinstance(n, (ast.Return, ast.Raise)) for n in nodes)
             tears = any(isinstance(n, ast.Call) and n.lineno >= before for n in nodes)
             extra = also_calls is None or any(
@@ -495,3 +505,16 @@ def test_an_early_return_on_none_is_not_enough_for_the_close_filter() -> None:
 def test_a_door_hidden_in_a_lambda_is_seen() -> None:
     door = _function("def schedule(key):\n    QTimer.singleShot(0, lambda: drop_controller(key))\n")
     assert "drop_controller" in _tears_down(door)
+
+
+def test_a_return_inside_a_nested_function_is_not_the_door_leaving() -> None:
+    guards = {"refused"}
+    nested = _function(
+        "def door(key):\n    if refused(key):\n        def later():\n            return 1\n"
+        "        log(later)\n    drop_controller(key)\n"
+    )
+    real = _function(
+        "def door(key):\n    if refused(key):\n        return\n    drop_controller(key)\n"
+    )
+    assert not _obeys(nested, guards, 6), "a `return` inside a nested def was taken for leaving"
+    assert _obeys(real, guards, 4)

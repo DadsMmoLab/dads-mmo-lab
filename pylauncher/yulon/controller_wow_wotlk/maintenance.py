@@ -97,6 +97,7 @@ import os
 import re
 import socket
 import subprocess
+import sys
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -510,12 +511,12 @@ class DockerMysql:
             self.db_container,
             *command,
         ]
-        sink = _LOAD_PID_SINK.get() if report_pid else None
+        watch = _LOAD_PID_SINK.get() if report_pid else None
         try:
-            if sink is not None:
+            if watch is not None:
                 return _run_reporting_pid(
                     argv,
-                    sink,
+                    watch,
                     stdin=stdin,
                     stdout=stdout,
                     env=runner.child_env(mysql_env(self.root_password, self.wsl_distro)),
@@ -535,57 +536,113 @@ class DockerMysql:
             raise MaintenanceError(platform.DOCKER_CLI_MISSING_HELP) from exc
 
 
-_LOAD_PID_SINK: contextvars.ContextVar[Callable[[int], None] | None] = contextvars.ContextVar(
+@dataclass(frozen=True)
+class _LoadWatch:
+    sink: Callable[[int], None]
+    output_dir: Path | None
+
+
+_LOAD_PID_SINK: contextvars.ContextVar[_LoadWatch | None] = contextvars.ContextVar(
     "yulon_restore_load_pid_sink", default=None
 )
 
 
 @contextlib.contextmanager
-def recording_load_pid(sink: Callable[[int], None]) -> Iterator[None]:
+def recording_load_pid(
+    sink: Callable[[int], None], *, output_dir: Path | None = None
+) -> Iterator[None]:
     """While active, the restore's load reports its child's pid to `sink` as it starts (T690).
 
     A context variable and not a new `load_from()` argument: the seam `MysqlDocker` has many
-    implementations, and the load runs in the same thread that enters this.
+    implementations, and the load runs in the same thread that enters this. `output_dir` is
+    where the load's stdout and stderr go as FILES: a quit anyway ends Yu'lon while the load
+    carries on, and a pipe whose reader is gone would break under it (SIGPIPE on Linux) the
+    next time mysql prints a warning.
     """
-    token = _LOAD_PID_SINK.set(sink)
+    token = _LOAD_PID_SINK.set(_LoadWatch(sink, output_dir))
     try:
         yield
     finally:
         _LOAD_PID_SINK.reset(token)
 
 
+_LOAD_OUTPUT_KEPT = 65536
+"""The last bytes of the load's stderr that are read back into the error."""
+
+
 def _run_reporting_pid(
     argv: list[str],
-    sink: Callable[[int], None],
+    watch: _LoadWatch,
     *,
     stdin: IO[bytes] | None,
     stdout: IO[bytes] | None,
     env: Mapping[str, str] | None,
 ) -> subprocess.CompletedProcess[bytes]:
-    """`subprocess.run(argv)` that tells `sink` the child's pid once it exists.
+    """`subprocess.run(argv)` that tells `watch.sink` the child's pid once it exists.
+
+    With an `output_dir` the child's stdout and stderr are files there, read back when it
+    ends (the tail of stderr is what the error carries), so nothing it prints needs this
+    process to be alive. Without one, or if the files cannot be made, they are pipes.
 
     A sink that fails is logged and ignored: the load has begun, and failing now would
     report a restore that is writing as one that never started.
     """
-    proc = subprocess.Popen(  # noqa: S603 - argv is built by the caller, never a shell string
-        argv,
-        stdin=stdin,
-        stdout=stdout if stdout is not None else subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        env=dict(env) if env is not None else None,
-        creationflags=runner.creationflags(),
-    )
+    out_path = err_path = None
+    out_file = err_file = None
+    if watch.output_dir is not None and stdout is None:
+        try:
+            out_path = watch.output_dir / "restore-load.out"
+            err_path = watch.output_dir / "restore-load.err"
+            out_file = out_path.open("wb")
+            err_file = err_path.open("wb")
+        except OSError as exc:
+            logger.warning(f"the restore's output cannot go to files, using pipes: {exc}")
+            for opened in (out_file, err_file):
+                if opened is not None:
+                    opened.close()
+            out_path = err_path = out_file = err_file = None
     try:
-        sink(proc.pid)
+        proc = subprocess.Popen(  # noqa: S603 - argv is built by the caller, never a shell string
+            argv,
+            stdin=stdin,
+            stdout=out_file or stdout or subprocess.PIPE,
+            stderr=err_file or subprocess.PIPE,
+            env=dict(env) if env is not None else None,
+            creationflags=runner.creationflags(),
+        )
+    finally:
+        for opened in (out_file, err_file):
+            if opened is not None:
+                opened.close()  # the child holds its own copies
+    try:
+        watch.sink(proc.pid)
     except Exception as exc:  # noqa: BLE001 - see the docstring
         logger.warning(f"could not record the restore's process id {proc.pid}: {exc}")
     try:
-        out, err = proc.communicate()
+        if err_path is None or out_path is None:
+            out, err = proc.communicate()
+        else:
+            proc.wait()
+            out = b""
+            err = _tail(err_path)
+            for leftover in (out_path, err_path):
+                leftover.unlink(missing_ok=True)
     except BaseException:
         proc.kill()
         proc.wait()
         raise
     return subprocess.CompletedProcess(argv, proc.returncode, out, err)
+
+
+def _tail(path: Path) -> bytes:
+    """The last `_LOAD_OUTPUT_KEPT` bytes of a file, b"" if it cannot be read."""
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            handle.seek(max(0, handle.tell() - _LOAD_OUTPUT_KEPT))
+            return handle.read()
+    except OSError:
+        return b""
 
 
 def _stderr(proc: subprocess.CompletedProcess[bytes]) -> str:
@@ -1048,6 +1105,73 @@ def this_host() -> str:
     return socket.gethostname()
 
 
+def _load_process_alive(pid: int) -> bool:
+    """Is there a process with this id that could be our docker client?
+
+    A process another user owns (`kill(pid, 0)` answers PermissionError) is NOT: the load was
+    started by this user, so a pid that answers "not yours" is a reused number. A probe that
+    cannot answer is "not running", never a stuck block.
+    """
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        from yulon.selfupdate.layout import pid_liveness
+
+        return pid_liveness(pid) is True and bool(process_identity(pid)[0])
+    try:
+        os.kill(pid, 0)
+    except OSError:  # ProcessLookupError (gone), PermissionError (someone else's), the rest
+        return False
+    return True
+
+
+def process_identity(pid: int) -> tuple[str, str]:
+    """(start-time token, process name) of `pid`; "" for whatever the OS will not say cheaply.
+
+    The token is compared for equality only, never parsed, so each platform may spell it as
+    it likes: Linux reads `/proc/<pid>/stat` field 22 (ticks since boot) and `comm`; macOS
+    asks `ps` for the start time; Windows asks `GetProcessTimes`.
+    """
+    try:
+        if sys.platform.startswith("linux"):
+            stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace")
+            after = stat[stat.rindex(")") + 2 :].split()
+            name = Path(f"/proc/{pid}/comm").read_text(encoding="utf-8").strip()
+            return f"proc:{after[19]}", name
+        if sys.platform == "win32":  # pragma: no cover - Windows only
+            return _windows_start_token(pid), ""
+        done = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "lstart=,comm="],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        line = done.stdout.strip()
+        return (f"ps:{line[:24]}", line[24:].strip()) if line else ("", "")
+    except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+        return "", ""
+
+
+def _windows_start_token(pid: int) -> str:  # pragma: no cover - Windows only
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return ""
+    try:
+        times = [wintypes.FILETIME() for _ in range(4)]
+        if not kernel32.GetProcessTimes(handle, *(ctypes.byref(t) for t in times)):
+            return ""
+        created = times[0]
+        return f"win:{created.dwHighDateTime}.{created.dwLowDateTime}"
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 @dataclass(frozen=True)
 class InterruptedRestore:
     """The marker a restore leaves behind while it is in flight.
@@ -1074,6 +1198,14 @@ class InterruptedRestore:
     """
     load_host: str = ""
     """`this_host()` where `load_pid` was recorded: a pid means nothing on another computer."""
+    load_token: str = ""
+    """The load process's start time as the OS tells it (`process_identity()`), "" if it could not.
+
+    A pid is reused: a restore that failed, or a machine that rebooted, leaves a number that
+    some other process now holds. The pid counts only with the start time it was recorded with.
+    """
+    load_name: str = ""
+    """The load process's name where the OS gives it cheaply (the docker client), else ""."""
 
     @property
     def load_running(self) -> bool:
@@ -1092,9 +1224,14 @@ class InterruptedRestore:
             return False
         if age > LOAD_TRUSTED_FOR_SECONDS:
             return False
-        from yulon.selfupdate.layout import pid_liveness
-
-        return pid_liveness(self.load_pid) is True
+        if not _load_process_alive(self.load_pid):
+            return False
+        token, name = process_identity(self.load_pid)
+        if self.load_token and token != self.load_token:
+            return False  # a live process, but not the one that was started for the load
+        if self.load_name and name and name != self.load_name:
+            return False
+        return True
 
     readable: bool = True
     """False when the marker was there but could not be parsed.
@@ -1115,6 +1252,8 @@ class InterruptedRestore:
         if self.load_pid > 0:
             fields["load_pid"] = self.load_pid
             fields["load_host"] = self.load_host
+            fields["load_token"] = self.load_token
+            fields["load_name"] = self.load_name
         return json.dumps(fields, indent=2)
 
 
@@ -1255,6 +1394,8 @@ def interrupted_restore(server_dir: Path) -> InterruptedRestore | None:
         started_at=str(raw.get("started_at", "")),
         load_pid=pid if isinstance(pid, int) and not isinstance(pid, bool) else 0,
         load_host=str(raw.get("load_host", "")),
+        load_token=str(raw.get("load_token", "")),
+        load_name=str(raw.get("load_name", "")),
     )
 
 
@@ -1594,14 +1735,24 @@ def _restore_from(
         source.seek(0)
 
         def note_the_load(pid: int) -> None:
+            token, name = process_identity(pid)
             _write_marker(
-                dataclasses.replace(record, load_pid=pid, load_host=this_host()),
+                dataclasses.replace(
+                    record, load_pid=pid, load_host=this_host(), load_token=token, load_name=name
+                ),
                 consequence="The restore is running, but its process could not be recorded.",
             )
 
-        with recording_load_pid(note_the_load):
+        with recording_load_pid(note_the_load, output_dir=marker.parent):
             mysql.load_from(source)
     except (MaintenanceError, OSError) as exc:
+        # The load is over, so the process it was is not "the restore still running": the
+        # marker stays (the databases are in an unknown state) but names no process, or a
+        # later reuse of that number would block every restore after this one.
+        try:
+            _write_marker(record, consequence="")
+        except (MaintenanceError, OSError) as rewrite:
+            logger.warning(f"could not clear the dead load's process id from {marker}: {rewrite}")
         # A sentence of ours reads in place; a program's words go to `detail` (T194 R1).
         said = f" {exc}" if isinstance(exc, MaintenanceError) else ""
         raise MaintenanceError(

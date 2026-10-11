@@ -116,6 +116,20 @@ def test_quit_over_a_removal_in_progress_says_the_server_will_still_be_listed(
     assert tray._removal_note() == ""
 
 
+def test_quit_now_while_stopping_says_yulon_closes_once_the_stop_has_finished(qapp: Any) -> None:
+    """The box promised the stop "carries on"; it is Yu'lon that waits for it and then closes.
+
+    Mutation: put the old sentence back in `while_stopping_box()`.
+    """
+    box, buttons = tray_module.while_stopping_box(1)
+    try:
+        text = box.text()
+        assert "closes once" in text and "stop" in text and "minute" in text, text
+        assert "carries on" not in text, text
+    finally:
+        box.deleteLater()
+
+
 def test_quit_leaving_the_servers_running(
     tray: YulonTray, window: FakeWindow, quits: list[int]
 ) -> None:

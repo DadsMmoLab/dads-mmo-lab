@@ -44,13 +44,19 @@ from yulon.controller_wow_wotlk.maintenance import (
 # Stands in for the `docker` client: reads the dump from stdin, says who it is, and keeps
 # "loading" until it is told to stop.
 STUB = """
-import os, sys, time
+import os, stat, sys, time
 sys.stdin.buffer.read()
 here = os.path.dirname(os.path.abspath(__file__))
+kinds = "".join("f" if stat.S_ISREG(os.fstat(fd).st_mode) else "p" for fd in (1, 2))
 with open(os.path.join(here, "load.pid"), "w") as f:
-    f.write(str(os.getpid()))
+    f.write(str(os.getpid()) + " " + kinds)
+if os.path.exists(os.path.join(here, "noise")):
+    # more than any pipe buffer holds, on both streams, with nobody reading yet
+    sys.stdout.write("o" * 300000)
+    sys.stderr.write("mysql said: " + "e" * 300000 + " THE END")
 while not os.path.exists(os.path.join(here, "release")):
     time.sleep(0.05)
+sys.exit(1 if os.path.exists(os.path.join(here, "fail")) else 0)
 """
 
 
@@ -104,7 +110,7 @@ def test_the_running_load_is_named_in_the_marker_while_it_runs(tmp_path: Path, s
     worker.start()
     try:
         _wait_for(stub / "load.pid")
-        child = int((stub / "load.pid").read_text())
+        child = int((stub / "load.pid").read_text().split()[0])
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
             marker = interrupted_restore(server)
@@ -125,7 +131,16 @@ def test_the_running_load_is_named_in_the_marker_while_it_runs(tmp_path: Path, s
     assert interrupted_restore(server) is None, "a finished restore leaves no marker"
 
 
-def _marker_with(server: Path, pid: int, *, host: str | None = None) -> None:
+def _marker_with(
+    server: Path,
+    pid: int,
+    *,
+    host: str | None = None,
+    token: str | None = None,
+    name: str | None = None,
+) -> None:
+    """A marker naming `pid`; its start token/name are the live process's own unless given."""
+    here_token, here_name = maintenance.process_identity(pid)
     folder = maintenance.backups_dir(server)
     folder.mkdir(parents=True, exist_ok=True)
     record = maintenance.InterruptedRestore(
@@ -136,6 +151,8 @@ def _marker_with(server: Path, pid: int, *, host: str | None = None) -> None:
         started_at="2026-10-11T04:00:00",
         load_pid=pid,
         load_host=host if host is not None else maintenance.this_host(),
+        load_token=here_token if token is None else token,
+        load_name=here_name if name is None else name,
     )
     record.marker.write_text(record.as_json(), encoding="utf-8")
 
@@ -200,3 +217,98 @@ def test_the_tab_says_wait_and_offers_nothing_while_the_load_runs(
     assert "still running" in text and "wait" in text.lower(), text
     assert "Restoring again" not in text, "the escape was offered over a live load"
     assert view.forget_button.isHidden(), "Forget was offered over a live load"
+
+
+# ---- round 4: a dead or foreign pid must never block the next restore
+
+
+def test_a_reused_pid_is_not_the_load(tmp_path: Path, live_child: Any) -> None:
+    """The pid names a live process, but not the one that was started for the load.
+
+    Mutation: drop the token comparison from `InterruptedRestore.load_running`.
+    """
+    _marker_with(tmp_path, live_child.pid)
+    assert interrupted_restore(tmp_path).load_running  # type: ignore[union-attr]
+    token, _name = maintenance.process_identity(live_child.pid)
+    assert token, "this platform gives no start time, and the test cannot stand in for one"
+    _marker_with(tmp_path, live_child.pid, token="not-this-process")
+    assert not interrupted_restore(tmp_path).load_running  # type: ignore[union-attr]
+    _marker_with(tmp_path, live_child.pid, name="not-the-docker-client")
+    if maintenance.process_identity(live_child.pid)[1]:
+        assert not interrupted_restore(tmp_path).load_running  # type: ignore[union-attr]
+
+
+def test_a_process_owned_by_someone_else_is_not_our_docker_client(
+    tmp_path: Path, live_child: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`kill(pid, 0)` answering PermissionError used to count as alive.
+
+    Mutation: make `_load_process_alive()` return True for PermissionError.
+    """
+    _marker_with(tmp_path, live_child.pid)
+
+    def refused(pid: int, sig: int) -> None:
+        raise PermissionError
+
+    # Undone before the `live_child` fixture kills its process with the real `os.kill`.
+    with monkeypatch.context() as patched:
+        patched.setattr(maintenance.os, "kill", refused)
+        assert not interrupted_restore(tmp_path).load_running  # type: ignore[union-attr]
+
+
+def test_a_failed_load_does_not_leave_its_dead_pid_in_the_marker(
+    tmp_path: Path, stub: Path
+) -> None:
+    """The marker stays (the databases are in an unknown state) but names no process.
+
+    Mutation: drop the marker rewrite from `_restore_from()`'s except branch.
+    """
+    (stub / "fail").write_text("x")
+    (stub / "release").write_text("go")
+    server = tmp_path / "server"
+    server.mkdir()
+    mysql = _LoadingMysql(DB, "pw")
+    plan = plan_restore(a_backup_of(tmp_path, "acore_world"), server, running=running(DB))
+
+    with pytest.raises(MaintenanceError, match="failed part-way"):
+        restore(plan, mysql, confirm=plan.token, running=running(DB), now=AT)
+
+    marker = interrupted_restore(server)
+    assert marker is not None, "the evidence of the half-applied load must stay"
+    assert marker.load_pid == 0 and not marker.load_running
+    assert forget_interrupted_restore(server) is True
+
+
+def test_the_load_writes_to_files_not_pipes_and_a_flood_of_output_does_not_deadlock(
+    tmp_path: Path, stub: Path
+) -> None:
+    """A mysql warning after Yu'lon quit must not meet a closed pipe (SIGPIPE on Linux).
+
+    The child is a stub that checks what its stdout/stderr ARE, then writes 300 KB to each
+    (far past a pipe buffer) while the parent is still waiting. Mutation: send the load's
+    output to pipes again in `_run_reporting_pid()`.
+    """
+    (stub / "noise").write_text("x")
+    (stub / "fail").write_text("x")
+    mysql = _LoadingMysql(DB, "pw")
+    out = tmp_path / "out"
+    out.mkdir()
+    problems: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            with maintenance.recording_load_pid(lambda pid: None, output_dir=out):
+                mysql.load_from(a_backup_of(tmp_path, "acore_world").open("rb"))
+        except MaintenanceError as exc:
+            problems.append(exc)
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    try:
+        _wait_for(stub / "load.pid")
+        assert (stub / "load.pid").read_text().split()[1] == "ff", "stdout/stderr must be files"
+    finally:
+        (stub / "release").write_text("go")
+        worker.join(30)
+    assert not worker.is_alive(), "the load deadlocked on its own output"
+    assert problems and "THE END" in problems[0].detail, "stderr must still reach the error"

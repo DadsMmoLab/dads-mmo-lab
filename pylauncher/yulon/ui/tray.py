@@ -1336,8 +1336,8 @@ def while_stopping_box(
     noun = "server" if count == 1 else "servers"
     box = FittedMessageBox(QMessageBox.Icon.Question, "Yu'lon is stopping servers", "")
     said = (
-        f"Yu'lon is stopping {count} {noun} and will quit when they are down. A stop that is "
-        "already running carries on if Yu'lon quits now."
+        f"Yu'lon is stopping {count} {noun} and will quit when they are down. If you quit now, "
+        "Yu'lon closes once the stop in progress has finished (about a minute or two)."
     )
     box.setText(f"{said}\n\n{note}" if note else said)
     box.setProperty(OWN_DIALOG, True)
