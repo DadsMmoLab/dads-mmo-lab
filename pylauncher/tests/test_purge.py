@@ -1748,3 +1748,62 @@ def test_a_copied_install_record_does_not_prove_ownership(
     )
     plan = uninstaller.plan()
     assert "cannot read" in plan.refusal or "cannot prove" in plan.refusal, plan.refusal
+
+
+# -- T717: a junction server folder is refused before any Docker step -------
+
+
+def _a_junction(monkeypatch: pytest.MonkeyPatch, path: Path) -> None:
+    """`links.is_link` says yes for `path`, as Windows answers for an NTFS junction."""
+    from yulon import links
+
+    real = links._lstat
+
+    class _Junction:
+        st_mode = stat.S_IFDIR | 0o755
+        st_file_attributes = links.FILE_ATTRIBUTE_REPARSE_POINT | 0x10
+        st_reparse_tag = links.IO_REPARSE_TAG_MOUNT_POINT
+
+    monkeypatch.setattr(
+        links,
+        "_lstat",
+        lambda p, *a, **k: _Junction() if os.fspath(p) == os.fspath(path) else real(p, *a, **k),
+    )
+
+
+def test_a_junction_server_folder_is_refused_by_the_plan_and_the_press_before_docker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T717: the folder step used to be the first to notice, after containers, volumes and
+    images were already gone, and then said "still there afterwards"."""
+    rec = _recorder(tmp_path)
+    _a_junction(monkeypatch, rec.server_dir)
+    uninstaller = rec.uninstaller(remove_folder=None)
+
+    plan = uninstaller.plan()
+    assert "junction" in plan.refusal
+    assert "nothing was changed" in plan.refusal.lower()
+    with pytest.raises(purge.PurgeRefusal, match="junction"):
+        uninstaller.run(keep_characters=False)
+
+    docker_calls = [c for c in rec.order if c.split(":")[0].startswith(("remove_", "snapshot"))]
+    assert docker_calls == []
+    assert rec.forgotten == 0
+
+
+def test_a_folder_that_became_a_junction_after_the_plan_is_not_called_still_there(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The folder step's own refusal for a link must name the link, not "still there"."""
+    rec = _recorder(tmp_path)
+    (rec.server_dir / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+
+    def become_a_junction() -> str:
+        _a_junction(monkeypatch, rec.server_dir)
+        return ""
+
+    uninstaller = rec.uninstaller(remove_folder=None, remove_image=lambda ref: become_a_junction())
+    with pytest.raises(purge.PurgeRefusal) as caught:
+        uninstaller.run(keep_characters=False)
+    assert "still there afterwards" not in str(caught.value)
+    assert "junction" in str(caught.value)

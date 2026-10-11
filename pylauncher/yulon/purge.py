@@ -822,6 +822,8 @@ class Uninstaller:
         because the census is scoped to it. The census before the listings,
         because a running server is a refusal and not a thing to enumerate.
         """
+        if (linked := _junction_refusal(self.server_dir)) is not None:
+            return None, linked
         ownership = self._claim(self.server_dir)
         refusal = refusal_for(
             ownership,
@@ -1277,13 +1279,39 @@ is Yu'lon's (`_default_claim`). Before T682 they went in listing order, usually 
 """
 
 
+def _junction_refusal(server_dir: Path) -> str | None:
+    """T717: the sentence for a server folder that is a link or junction, else None.
+
+    Asked first by `_resolve()`, so `plan()` and `run()` both refuse before any container,
+    volume or image is touched: the folder step would refuse a link too, but it runs last.
+    """
+    try:
+        if not links.is_link(server_dir):
+            return None
+    except OSError:
+        return None  # not a link we can prove; the ownership check says what it can see
+    try:
+        where = f" to {os.readlink(server_dir)}"
+    except OSError:
+        where = ""  # a junction Python cannot read the target of: still a link
+    return (
+        f"{server_dir} is a link (a junction or symbolic link){where}, not the install's "
+        f"real folder, and Yu'lon will not delete through a link. Nothing was changed. "
+        f"Remove the link yourself, or point Yu'lon at the real folder, then uninstall again."
+    )
+
+
 def _cause(exc: rmtree.TreeRemovalError) -> object:
     """What the leaf was given, so `_undeletable()` reads as it always did.
 
     The leaf has already wrapped the original in a sentence of its own; the
     purge sentence wants the bare cause, not that sentence nested inside it.
     """
-    return exc.__cause__ if exc.__cause__ is not None else "it is still there afterwards"
+    if exc.__cause__ is not None:
+        return exc.__cause__
+    if "symbolic link or junction" in str(exc):  # T717: the leaf's own refusal of a link
+        return "it is a junction or link, which Yu'lon does not delete through"
+    return "it is still there afterwards"
 
 
 def _undeletable(path: Path, problem: object) -> str:
