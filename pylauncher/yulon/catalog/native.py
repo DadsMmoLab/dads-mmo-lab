@@ -14223,7 +14223,7 @@ class StagedInstaller:
             service is not None and docker.one_shot_ended_marker(ctx.server_dir, service).is_file()
         )
         forced = ended and before.state in ("imported", "partial")
-        if not forced and (
+        if not ended and (
             before.state == "imported" or (before.state == "populated" and before.complete)
         ):
             yield "They are already imported; leaving them alone."
@@ -14232,6 +14232,16 @@ class StagedInstaller:
             raise InstallerError(
                 f"The databases could not be asked what state they are in ({before.detail}), so "
                 "nothing was imported. Nothing can be established about them either way."
+            )
+        if ended and before.state == "populated":
+            # T678: rows in databases whose import did not finish. A module's own updates
+            # seed accounts (City Bots: 400) before the world schema is done, and they read
+            # as player data, which is never cleared; nor are they ever finished.
+            raise InstallerError(
+                f"An earlier import of these databases did not finish, and they already hold "
+                f"data ({before.detail}). Clearing them could lose a player's characters and "
+                "importing over them would overwrite it, so nothing was run. If nobody has "
+                "played on this server, install it again into an empty folder."
             )
         if before.state == "populated":
             raise InstallerError(
@@ -14310,6 +14320,10 @@ class StagedInstaller:
         if service is None:
             return
         yield f"Importing the databases ({service}). This takes several minutes."
+        # T678: recorded before it runs and removed only once verified, so an import cut
+        # off with nothing of Yu'lon left to record it (power, Docker or WSL gone) is not
+        # trusted by the next press, by Start or by Repair either.
+        docker.mark_import_under_way(ctx.server_dir, service)
         run = yield from self._pump(
             lambda sink: self._seams.one_shot(
                 service, ctx.server_dir, sink=sink, cancel=ctx.cancel, record_ended=True
@@ -14317,13 +14331,20 @@ class StagedInstaller:
             cancel=ctx.cancel,
             stage="import",
         )
-        if run.returncode == docker.CANCELLED_RETURNCODE:
+        if run.returncode == docker.CANCELLED_RETURNCODE or (
+            ctx.cancel is not None and ctx.cancel.is_set() and _a_stops_exit(run)
+        ):
             # T539: the note promises the half-written databases are cleared before the
             # import runs again, which is true only once nothing is still writing them.
             left = self._seams.end_one_shot(service, ctx.server_dir, record_ended=True)
             if left is not None:
                 raise OneShotLeftRunning(_one_shot_left_sentence(left, earlier=False))
             raise InstallStopped(_cancelled_message("the database import", IMPORT_CANCEL_NOTE))
+        if run.returncode != 0:
+            # T678: a failure whatever the probe reads now. An importer that died part-way
+            # leaves schemas that read `imported` (T658); the record above stays.
+            failed = docker.import_failed(service, ctx.server_dir, run)
+            raise carry_detail(failed, InstallerError(str(failed))) from failed
         try:
             after = self._seams.verify_import(gate.probe, service, ctx.server_dir, run)
         except docker.DockerCommandError as exc:
