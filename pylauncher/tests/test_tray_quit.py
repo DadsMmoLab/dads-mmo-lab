@@ -271,7 +271,7 @@ def test_the_note_box_has_its_three_answers(qapp: Any) -> None:
     try:
         assert {b.text() for b in buttons.values()} == {
             "Got it",
-            "Quit Yu'lon instead",
+            "Quit Yu'lon…",
             "Don't show again",
         }
         assert box.defaultButton() is buttons["got_it"]

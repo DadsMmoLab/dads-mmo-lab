@@ -152,9 +152,10 @@ def test_the_flyout_is_driven_by_the_pad(tray: YulonTray, window: FakeWindow) ->
     assert navigator.navigate(Direction.DOWN)
     assert QApplication.focusWidget() is _card(flyout, "Vanilla").action
     navigator.perform(Action.CONFIRM)
-    assert window.yulon_controllers[1].starts == 1
-    assert navigator.perform(Action.BACK)
-    assert not flyout.isVisible()
+    # T697: a stopped server's first button is Play (it starts the server, then plays).
+    assert window.yulon_controllers[1].played == 1
+    # B closing it is `test_tray_panel.py`'s pad test; Play has closed it here already.
+    assert not flyout.isVisible(), "Play leaves the flyout, like the online row's Play"
     navigator.deleteLater()
 
 

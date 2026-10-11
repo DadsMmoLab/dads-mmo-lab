@@ -311,7 +311,7 @@ def test_the_docker_group_restart_waits_for_work_that_cannot_be_cut_off(
         # Deferred is NOT handled: the Catalog still shows its "Install failed" warning.
         assert handled is False
         said = str(told[0])
-        assert "Quit tray" in said and "same button" not in said, said
+        assert "Quit Yu'lon…" in said and "same button" not in said, said
     else:
         assert handled is True
 

@@ -443,7 +443,7 @@ def test_the_menu_lists_the_servers_and_plays_an_online_or_a_stopped_one(
     assert texts[0] == "Yu'lon — 1 of 3 servers online"
     assert "Open Yu'lon" in texts
     assert "Logs" in texts
-    assert "Quit tray…" in texts
+    assert "Quit Yu'lon…" in texts
     open_action = next(a for a in menu.actions() if a.text() == "Open Yu'lon")
     assert open_action.font().bold()
     assert menu.defaultAction() is open_action
