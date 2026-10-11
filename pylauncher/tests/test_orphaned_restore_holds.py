@@ -157,3 +157,33 @@ def test_a_move_ins_stop_step_asks_it_before_stopping(
     with pytest.raises(move_flows.MoveError, match=SAYS):
         list(move_server._stop_if_running(world))  # type: ignore[arg-type]
     assert world.stopped == 0
+
+
+def test_a_record_with_no_start_time_holds_nothing_new(tmp_path: Path, live_child: Any) -> None:
+    """A reused pid cannot be told from the load, and Forget refuses while it reads as running."""
+    _marker_with(tmp_path, live_child.pid, token="")
+    record = maintenance.interrupted_restore(tmp_path)
+    assert record is not None and record.load_running  # the old effect stays
+    assert docker.held_reason(tmp_path) is None
+    docker.start(tmp_path)
+    with docker.maintenance_lease(tmp_path, "A backup"):
+        pass
+
+
+@pytest.mark.parametrize("stop_allowed", [True])
+def test_an_import_that_would_stop_the_server_is_refused_before_any_stop_or_write(
+    tmp_path: Path, live_child: Any, stop_allowed: bool
+) -> None:
+    """Mutation: replace `refuse_over_a_running_load` in `run_import` with `pass`."""
+    from tests.test_move_flows import ready
+    from yulon import move_flows
+
+    box, _package, plan = ready(
+        tmp_path, running_now=("ac-database", "ac-authserver", "ac-worldserver")
+    )
+    _marker_with(box.server_dir, live_child.pid)
+    with pytest.raises(move_flows.MoveError, match=SAYS):
+        move_flows.run_import(
+            box.world, plan, confirm=None, use_old_realm_name=False, stop_allowed=stop_allowed
+        )
+    assert box.events == [], "nothing was stopped, dumped or loaded"

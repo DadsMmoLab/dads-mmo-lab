@@ -3978,6 +3978,11 @@ def orphaned_load_sentence(server_dir: Path | str) -> str | None:
         return None
     if record is None or not record.readable or not record.load_running:
         return None
+    if not record.load_token:
+        # No start time was recorded, so a reused pid cannot be told from the load, and a hold
+        # on every press would have no way out (Forget refuses while `load_running`). Such a
+        # record keeps its old effect: Start, Stop and Restore refuse as before T730.
+        return None
     return _loading_sentence(Path(server_dir))
 
 
