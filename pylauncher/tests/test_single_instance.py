@@ -101,6 +101,7 @@ def restart_under_the_docker_group(window):
 
 
 def build_window():
+    print("T152 build_window called", flush=True)
     if role == "slow":
         # A cold start: the lock is taken and the socket is listening, but the
         # event loop that answers it does not run until this returns.
@@ -393,6 +394,33 @@ def test_a_second_launch_during_the_first_ones_slow_start_waits_for_it_and_raise
     assert "T152 box" not in second.stdout, second.stdout
     assert "T152 ready" not in second.stdout, f"the second launch opened a window:\n{second.stdout}"
     assert second.returncode == 0, second.stdout
+    assert first.wait(timeout=HANG_BOUND) == 0, _said(first_out)
+    assert "T152 brought" in _said(first_out), _said(first_out)
+
+
+def test_the_self_update_smoke_run_builds_the_window_while_the_old_copy_holds_the_lock(
+    tmp_path: Path, launches: list[subprocess.Popen[bytes]]
+) -> None:
+    """T676: the staged build is proved while the Yu'lon doing the update is still open.
+
+    `selfupdate.stage.smoke_test()` starts it with the player's own environment, so
+    the same config dir and the same lock. The claim used to answer first: the
+    smoke run asked the old copy to come forward and returned 0 without ever
+    building the window, so a release with a broken window passed. It must build
+    the window, raise nothing, show no box, and leave the old copy's lock as it was.
+    """
+    first, first_out = _start(tmp_path, launches, "first", "window")
+    _wait_for(first_out, first, "T152 ready")
+
+    smoke = _run(tmp_path, "window", YULON_SMOKE_TEST="1")
+
+    assert "T152 build_window called" in smoke.stdout, f"no window was built:\n{smoke.stdout}"
+    assert "T152 box" not in smoke.stdout, smoke.stdout
+    assert smoke.returncode == 0, smoke.stdout
+    assert "T152 brought" not in _said(first_out), "the smoke run raised the old window"
+    # The old copy still holds the lock: the next ordinary launch reaches IT.
+    second = _run(tmp_path, "window", YULON_T152_LIFETIME_MS=SECOND_WINDOW_LIFETIME_MS)
+    assert "T152 build_window called" not in second.stdout, second.stdout
     assert first.wait(timeout=HANG_BOUND) == 0, _said(first_out)
     assert "T152 brought" in _said(first_out), _said(first_out)
 

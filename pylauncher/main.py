@@ -2501,9 +2501,21 @@ def main() -> int:
     # reads state.json and starts the update check, and a second copy doing
     # either beside the first is the race this exists to stop. After the theme,
     # so the one box a second launch can show looks like the app.
-    instance = InstanceGuard(platform.config_dir())
+    #
+    # T676: NOT under the smoke run. `selfupdate.stage.smoke_test()` starts the
+    # staged build while the Yu'lon doing the update is open and holds this lock,
+    # with the same config dir, so the claim answered "raised" and the run left
+    # before `build_window()`: the check passed a build whose window was never
+    # made. The smoke run writes nothing (`in_smoke_test()`) and runs no event
+    # loop, so it is not the second copy this guard exists to stop; it neither
+    # takes the lock nor asks the open copy anything.
+    instance = None if in_smoke_test() else InstanceGuard(platform.config_dir())
     # T540: a `--tray` (sign-in) start only asks whether Yu'lon is there.
-    claim = instance.claim(verb="present" if "--tray" in sys.argv[1:] else "raise")
+    claim = (
+        None
+        if instance is None
+        else instance.claim(verb="present" if "--tray" in sys.argv[1:] else "raise")
+    )
     if claim == "raised":
         return 0
     # T540: the sign-in entry (`autostart`) starts Yu'lon with `--tray`: hidden
@@ -2527,14 +2539,17 @@ def main() -> int:
     platform.declare_gui_thread()
     window = build_window()
     assert isinstance(window, QMainWindow)
-    # Looked up at each call, not bound here, so a test can wrap it.
-    instance.raise_requested.connect(lambda token: _bring_to_front(window, token))
+    if instance is not None:
+        # Looked up at each call, not bound here, so a test can wrap it.
+        instance.raise_requested.connect(lambda token: _bring_to_front(window, token))
     # What `main()` returns, kept outside the `try` for the forced exit below,
     # which has to leave with the same answer the return would have given.
     code = 0
     try:
-        if os.environ.get("YULON_SMOKE_TEST"):
-            # CI / packaging check: prove the frozen app can build its window, then leave.
+        if instance is None:
+            # CI / packaging check, and the self-update's proof run (T676: with no
+            # instance claim, so it gets here even while the old copy is open):
+            # prove the frozen app can build its window, then leave.
             logger.info("YULON_SMOKE_TEST set: window built, exiting 0")
             return 0
 
@@ -2602,11 +2617,13 @@ def main() -> int:
     finally:
         # The window is closed and nothing will pump the socket again; the lock
         # is kept until the jobs are joined, so a relaunch waits for them (T152).
-        instance.stop_answering()
+        if instance is not None:
+            instance.stop_answering()
         stuck = _stop_background_threads(window)
         # Before the forced exit as well: `os._exit` would leave the file to the
         # dead-pid check, which works, but a clean release costs nothing.
-        instance.release()
+        if instance is not None:
+            instance.release()
         if stuck:
             # A job is still running and nothing can stop it (T113). Returning
             # from here hands its QThread to interpreter teardown, and Qt aborts

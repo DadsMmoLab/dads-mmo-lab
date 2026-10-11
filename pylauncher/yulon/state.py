@@ -22,9 +22,15 @@ STATE_FILE_NAME = "state.json"
 
 
 class KnownInstall(BaseModel):
-    """One server install the app manages."""
+    """One server install the app manages.
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    `extra="allow"`, not `"forbid"` (T670): a field this build does not know was
+    written by a NEWER Yu'lon. Refusing it moved the whole file aside and opened
+    with no servers, and every build up to v0.9.16 still does that to a file a
+    newer one wrote. Allowed, it is read, carried, and written back as it was.
+    """
+
+    model_config = ConfigDict(extra="allow", frozen=True)
 
     game: str = Field(min_length=1)
     server_dir: Path
@@ -47,9 +53,9 @@ class KnownInstall(BaseModel):
 
 
 class AppState(BaseModel):
-    """Everything `state.json` holds."""
+    """Everything `state.json` holds. Unknown top-level keys are kept too (T670)."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="allow")
 
     schema_version: int = 1
     installs: list[KnownInstall] = Field(default_factory=list)
@@ -101,20 +107,69 @@ def state_path(config_dir: Path | None = None) -> Path:
 def load_state(path: Path | None = None, *, repair: bool = True) -> AppState:
     """Read the state file; a missing file is an empty state.
 
-    A broken file (bad JSON, or schema drift - `extra="forbid"` makes every
-    future field fatal) must never stop the app from opening a window: it is
-    moved aside as `state.json.broken` and an empty state is returned
-    (review finding, 2026-08-21).
+    A broken file (bad JSON, or a known field this build cannot read) must never
+    stop the app from opening a window: it is moved aside as `state.json.broken`
+    and an empty state is returned (review finding, 2026-08-21). A field this
+    build does not know is not damage, and is kept (T670).
 
-    `repair=False` does everything except move the file aside, and exists for
-    exactly one caller: the run that PROVES a staged update opens
-    (`YULON_SMOKE_TEST`). That run is a build which is not installed yet,
-    started while the old one still is, with the player's real config directory
-    in reach — so the one write on this path has to be off for it. Reading is
-    unchanged; only the repair is skipped, and it is logged either way (T90
-    plan 3, cold review 1).
+    A `state.json.broken` this build CAN read is put back (T670): it is what an
+    older Yu'lon left after refusing a newer one's file (every build up to v0.9.16
+    refused an unknown field). Its servers are added to those in `state.json`,
+    where the file there already names one that wins, the result is saved, and
+    the `.broken` file is renamed `.restored`, so it is put back once and a
+    server forgotten afterwards stays forgotten.
+
+    `repair=False` does everything except write, and exists for exactly one
+    caller: the run that PROVES a staged update opens (`YULON_SMOKE_TEST`). That
+    run is a build which is not installed yet, started while the old one still
+    is, with the player's real config directory in reach, so neither the move
+    aside nor the put-back runs for it. It is logged either way (T90 plan 3,
+    cold review 1).
     """
     target = path if path is not None else state_path()
+    if not repair:
+        return _read_state(target, repair=False)
+    broken = target.with_name(target.name + ".broken")
+    rescued = _readable(broken)
+    was_there = target.is_file()
+    state = _read_state(target, repair=True)
+    if rescued is None:
+        return state
+    moved_aside = was_there and not target.is_file()  # `broken` now holds THAT file
+    known = {(i.game, i.server_dir) for i in state.installs}
+    back = [i for i in rescued.installs if (i.game, i.server_dir) not in known]
+    if back:
+        state.installs = [*state.installs, *back]
+        try:
+            save_state(state, target)
+        except OSError as exc:
+            logger.error(f"could not save the servers put back from {broken}: {exc}")
+            return state
+        logger.warning(
+            f"put back {len(back)} server(s) an older Yu'lon had set aside in {broken}: "
+            + ", ".join(f"{i.game} at {i.server_dir}" for i in back)
+        )
+    if not moved_aside:
+        try:
+            broken.replace(target.with_name(target.name + ".restored"))
+        except OSError as exc:
+            logger.error(f"could not retire {broken} after reading it back: {exc}")
+    return state
+
+
+def _readable(path: Path) -> AppState | None:
+    """`path` as a state this build reads, or None if it is missing or unreadable."""
+    if not path.is_file():
+        return None
+    try:
+        with path.open(encoding="utf-8-sig") as fh:
+            return AppState.model_validate(json.load(fh))
+    except (OSError, ValueError, ValidationError) as exc:
+        logger.info(f"{path} is unreadable to this build too; left as it is: {exc}")
+        return None
+
+
+def _read_state(target: Path, *, repair: bool) -> AppState:
     if not target.is_file():
         return AppState()
     try:
@@ -145,7 +200,11 @@ def save_state(state: AppState, path: Path | None = None) -> Path:
     target = path if path is not None else state_path()
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp = target.with_name(target.name + ".tmp")
-    tmp.write_text(state.model_dump_json(indent=2) + "\n", encoding="utf-8")
+    # Defaults are left out (T670): a build older than a field reads a record that
+    # does not mention it, and refuses one that does (up to v0.9.16 every field was
+    # `extra="forbid"`). So an install that uses no newer feature stays readable to
+    # every older Yu'lon. Unknown fields a newer one wrote are always written back.
+    tmp.write_text(state.model_dump_json(indent=2, exclude_defaults=True) + "\n", encoding="utf-8")
     tmp.replace(target)
     logger.debug(f"state saved: {target} ({len(state.installs)} install(s))")
     return target

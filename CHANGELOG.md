@@ -16,6 +16,8 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ### New
 
 ### Fixed
+- A server list that an older copy of Yu'lon emptied comes back the next time you open this version.
+- **Update now** checks that the new version's window really opens before it installs it, as it was meant to.
 
 ### Changed
 
