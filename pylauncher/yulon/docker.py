@@ -36,7 +36,7 @@ import uuid
 from collections import deque
 from collections.abc import Callable, Collection, Generator, Iterator, Mapping, Sequence
 from contextlib import closing, contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import IO, Any, BinaryIO, Literal, NamedTuple, ParamSpec, Protocol, TypeVar
@@ -3081,11 +3081,40 @@ def run_one_shot(
             service, server_dir, wsl_distro=wsl_distro, record_ended=record_ended
         ),
     )
+    if allowed_modules is None:
+        run = replace(run, tail=_without_compose_epilogue(run.tail))
     if run.returncode != 0:
         # Not raised here (see above); this only makes sure the reason is in the log.
         words = " / ".join(importer_last_words(run.tail))
         logger.warning(f"{service} exited {run.returncode}: {words}")
     return run
+
+
+_COMPOSE_PREFIX = re.compile(r"^[\w.-]+\s+\|\s?")
+"""What attached `compose up` puts before each line a service prints: `ac-db-import  | `."""
+
+_COMPOSE_EPILOGUE = re.compile(
+    r"^(?:Aborting on container exit\.\.\.|Container \S+\s+(?:Stopping|Stopped))$"
+)
+"""What `compose up --exit-code-from` prints after the one-shot exits (yulon-ubuntu, 2026-10-11)."""
+
+
+def unprefixed(line: str) -> str:
+    """A line as the one-shot printed it, without compose's `<service>  | ` in front."""
+    return _COMPOSE_PREFIX.sub("", line.strip(), count=1)
+
+
+def _without_compose_epilogue(tail: tuple[str, ...]) -> tuple[str, ...]:
+    """`tail` without compose's own closing lines, so the one-shot's last words end it (T678).
+
+    Live on yulon-ubuntu (2026-10-11): with `--exit-code-from` the importer's last
+    lines were followed by "Aborting on container exit..." and the container's
+    Stopping/Stopped, which a five-line window then showed instead of its error.
+    """
+    kept = list(tail)
+    while kept and (not kept[-1].strip() or _COMPOSE_EPILOGUE.match(kept[-1].strip())):
+        kept.pop()
+    return tuple(kept)
 
 
 IMPORT_REST_UNDER_DETAILS = (
@@ -3101,9 +3130,6 @@ failure through `said.with_details()`.
 _FAILED_UPDATE = re.compile(r"Applying of file '([^']+\.sql)' to database '([^']*)' failed")
 """The importer's own failure line (`apply._FAILED_UPDATE`'s pattern, which the Modules
 tab's report reads), with the database it names."""
-
-_MYSQL_ERROR = re.compile(r"^ERROR \d+ \(\w+\)")
-"""mysql's own error line, printed by the importer just before its failure line."""
 
 
 def importer_failure(run: AttachedRun, what: str, *, first_import: bool = False) -> str:
@@ -3123,7 +3149,7 @@ def importer_failure(run: AttachedRun, what: str, *, first_import: bool = False)
     found: tuple[str, str, str] | None = None
     error = ""
     for line in run.tail:
-        plain = line.strip()
+        plain = unprefixed(line)
         if _MYSQL_ERROR.match(plain):
             error = plain
             continue
@@ -3618,7 +3644,7 @@ def importer_last_words(tail: Sequence[str]) -> list[str]:
     it that say what the importer made of it. Without one, the last five lines.
     Every line is kept whole; colour codes are already gone (`run_attached()`).
     """
-    said = [line.strip() for line in tail if line.strip()]
+    said = [unprefixed(line) for line in tail if line.strip()]
     errors = [i for i, line in enumerate(said) if _MYSQL_ERROR.match(line)]
     if not errors:
         return said[-_LAST_WORDS_LINES:] or ["it printed nothing at all"]

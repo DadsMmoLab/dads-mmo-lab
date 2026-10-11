@@ -259,3 +259,40 @@ def test_the_import_one_shot_asks_compose_for_its_own_exit_status(
     run = docker.run_one_shot(IMPORTER, tmp_path)
     assert run.returncode == 1
     assert seen[0][-5:] == ["up", "--no-deps", "--exit-code-from", IMPORTER, IMPORTER], seen
+
+
+# The end of a real `compose up --exit-code-from ac-db-import` run with a failing update
+# (yulon-ubuntu, 2026-10-11): every importer line carries compose's prefix, and compose's
+# own closing lines come after them.
+COMPOSE_UP_SAID = (
+    "Attaching to ac-db-import",
+    "ac-db-import  | >> Applying update \"zz_t678_broken.sql\" '5B1F6C2'...",
+    "ac-db-import  | ERROR 1146 (42S02) at line 1: Table 'acore_world.t678_no_such_table' "
+    "doesn't exist",
+    f"ac-db-import  | Applying of file '{BROKEN_FILE}' to database 'acore_world' failed!",
+    "ac-db-import  | Could not update the World database, see log for details.",
+    "ac-db-import  |",
+    "Aborting on container exit...",
+    "Container ac-db-import  Stopping",
+    "Container ac-db-import  Stopped",
+)
+
+
+def test_the_importers_words_are_read_through_composes_prefix_and_closing_lines(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Details and the sentence show mysql's error, not "Container ac-db-import Stopped"."""
+
+    def stream(argv: list[str], **_kw: object) -> Iterator[str]:
+        yield from COMPOSE_UP_SAID
+        raise subprocess.CalledProcessError(1, argv)
+
+    monkeypatch.setattr(docker.runner, "stream", stream)
+    run = docker.run_one_shot(IMPORTER, tmp_path)
+    assert run.returncode == 1
+    assert "Stopped" not in run.tail[-1] and "Could not update" in run.tail[-2], run.tail
+    words = docker.importer_last_words(run.tail)
+    assert any(line.startswith("ERROR 1146") for line in words), words
+    rebuild = docker.importer_failure(run, "Applying the database updates")
+    assert "(ERROR 1146 (42S02)" in rebuild, rebuild
+    assert "zz_t678_broken.sql" in docker.import_failed(IMPORTER, tmp_path, run).detail
