@@ -39,6 +39,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from yulon import account_rules
 from yulon.apply import DockerSql
 from yulon.controller_wow_tbc import docker_ctl
 from yulon.controller_wow_wotlk import accounts as writer
@@ -56,9 +57,6 @@ from yulon.controller_wow_wotlk.accounts import (
     MAX_PASSWORD as MAX_PASSWORD,
 )
 from yulon.controller_wow_wotlk.accounts import (
-    MAX_USERNAME as MAX_USERNAME,
-)
-from yulon.controller_wow_wotlk.accounts import (
     NO_GM as NO_GM,
 )
 from yulon.controller_wow_wotlk.accounts import (
@@ -74,6 +72,9 @@ from yulon.controller_wow_wotlk.accounts import (
     create_account as _create_account,
 )
 from yulon.log import get_logger
+
+MAX_USERNAME = account_rules.NAME_MAX["mangos_srp6"]
+"""This core's own `MAX_ACCOUNT_STR` (16), not AzerothCore's 17 (T673, `account_rules`)."""
 
 SCHEME = docker_ctl.ENTRY.accounts.scheme
 """How this core stores an account, from the entry: `mangos_srp6` for TBC.

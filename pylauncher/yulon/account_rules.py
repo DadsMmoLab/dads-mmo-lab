@@ -2,9 +2,10 @@
 
 Every place that makes an account or checks one reads it here: the shared writer
 (`controller_wow_wotlk.accounts.create_account()`, which every family's Create and
-the command channel go through), the Accounts tab's Create, the launcher's Create
-(T696, through `create_problem()`), and the account commands Delete, Set password
-and Set GM level (`commands.valid_account_name()` / `valid_account_password()`).
+the command channel go through), the Accounts tab's Create, and the account commands
+Delete, Set password and Set GM level (`commands.valid_account_name()` /
+`valid_account_password()`). The launcher's Create an account… (T696, not built yet)
+is to call `create_problem()`, the same pre-check the Accounts tab runs.
 Before T673 Create took any 1-17 character name without a space and any 1-16
 character password, and the commands refused most of them, so an account could be
 made that the same tab then could not manage.

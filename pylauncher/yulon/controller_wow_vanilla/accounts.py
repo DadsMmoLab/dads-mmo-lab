@@ -45,14 +45,14 @@ them as measured:
 2. **The length ceilings** -- read since (T673, 2026-10-11): mangos-classic
    8ec338a1 takes names of up to 16 characters, one fewer than AzerothCore's
    17, and passwords of up to 16. The shared writer applies this core's own
-   through `account_rules`; `MAX_USERNAME` re-exported below is still
-   AzerothCore's 17.
+   through `account_rules`, and `MAX_USERNAME` below is this core's 16.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
+from yulon import account_rules
 from yulon.apply import DockerSql
 from yulon.controller_wow_vanilla import docker_ctl, entry
 
@@ -64,9 +64,6 @@ from yulon.controller_wow_wotlk.accounts import (
 )
 from yulon.controller_wow_wotlk.accounts import (
     MAX_PASSWORD as MAX_PASSWORD,
-)
-from yulon.controller_wow_wotlk.accounts import (
-    MAX_USERNAME as MAX_USERNAME,
 )
 from yulon.controller_wow_wotlk.accounts import (
     NO_GM as NO_GM,
@@ -86,6 +83,9 @@ from yulon.controller_wow_wotlk.accounts import (
 from yulon.controller_wow_wotlk.accounts import (
     mangos_srp6_credentials as mangos_srp6_credentials,
 )
+
+MAX_USERNAME = account_rules.NAME_MAX["mangos_srp6"]
+"""This core's own `MAX_ACCOUNT_STR` (16), not AzerothCore's 17 (T673, `account_rules`)."""
 
 
 def scheme() -> writer.Scheme:
