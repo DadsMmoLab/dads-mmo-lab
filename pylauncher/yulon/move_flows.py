@@ -271,6 +271,17 @@ def _refuse_if_unsafe(world: MoveWorld) -> None:
         raise MoveError(_UNFINISHED_RESTORE)
 
 
+def refuse_over_a_running_load(world: MoveWorld) -> None:
+    """Refuse (T730) when a restore load another Yu'lon left running still writes here.
+
+    Asked just before a move stops this server: `docker.held_reason()`'s answer from the
+    restore record, so the stop cannot cut the load off. Never raises anything else.
+    """
+    said = docker.orphaned_restore_reason(world.server_dir)
+    if said is not None:
+        raise MoveError(f"{said} Nothing was stopped.")
+
+
 def _present_roles(world: MoveWorld, wanted: Sequence[Role] = ROLES) -> dict[Role, str]:
     """Role -> schema, for the roles this game has AND this server's database holds now."""
     schemas = world.entry.schema_map()
@@ -577,6 +588,7 @@ def export_package(
     stopped = False
     try:
         if _server_is_up(world):
+            refuse_over_a_running_load(world)
             stopped = True  # set first: a stop that fails half-way still leaves it to start again
             world.stop_server()
         result = _export_locked(world, folder, facts)
@@ -1064,6 +1076,7 @@ def run_import(
     if running and not stop_allowed:
         raise MoveError(RUNNING_NEEDS_A_YES_IMPORT)
     if running:
+        refuse_over_a_running_load(world)
         world.stop_server()
     with _database_session(
         world,
