@@ -1614,7 +1614,7 @@ def build_window() -> object:
                 client_dir=cd,
                 wsl_distro=known.wsl_distro if known else None,
                 play_client_dir=play,
-            )
+            ).keeping_unknown_fields_of(known)
         )
         _warn_unless_remembered(state, window)
         add_controller(game, sd, cd, known.wsl_distro if known else None, play)
@@ -1653,7 +1653,7 @@ def build_window() -> object:
         state.remember(
             KnownInstall(
                 game=game, server_dir=sd, client_dir=cd, wsl_distro=distro, play_client_dir=play
-            )
+            ).keeping_unknown_fields_of(known)
         )
         _warn_unless_remembered(state, window)
         add_controller(game, sd, cd, distro, play)

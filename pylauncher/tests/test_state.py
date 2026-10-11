@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import json
+import os
+import time
 from pathlib import Path
 
+import pytest
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from yulon import state as state_module
 from yulon.state import AppState, KnownInstall, load_state, save_state, state_path
 
 
@@ -254,6 +258,32 @@ def test_a_state_file_from_a_newer_yulon_keeps_its_installs_and_its_new_fields(
     assert "from_the_future" not in written["installs"][1]
 
 
+def _save_as_v0916(state: AppState, path: Path) -> None:
+    """How v0.9.13 to v0.9.16 saved: every field written, defaults and all."""
+    path.write_text(state.model_dump_json(indent=2) + "\n", encoding="utf-8")
+
+
+def _v0890_save(path: Path, installs: list[dict[str, object]]) -> None:
+    """How v0.8.90 saved: its own schema, every field written."""
+    saved = _V0890State.model_validate({"installs": installs})
+    path.write_text(saved.model_dump_json(indent=2) + "\n", encoding="utf-8")
+
+
+def _downgrade(tmp_path: Path) -> Path:
+    """v0.9.16 saved three servers; v0.8.90 then started, refused the file, set it aside.
+
+    The set-aside file keeps the mtime of v0.9.16's save (a rename does not touch it),
+    and it is made an hour older here, so every later save by the old build is newer:
+    a rule that read "`.broken` newer than state.json" would refuse every one of these.
+    """
+    path = tmp_path / "state.json"
+    _save_as_v0916(_three_installs(tmp_path), path)
+    assert _v0890_load_state(path) == []  # v0.8.90 has never heard of play_client_dir
+    hour_ago = time.time() - 3600
+    os.utime(tmp_path / "state.json.broken", (hour_ago, hour_ago))
+    return path
+
+
 def test_going_forward_after_an_older_yulon_wiped_the_list_brings_the_servers_back(
     tmp_path: Path,
 ) -> None:
@@ -263,53 +293,98 @@ def test_going_forward_after_an_older_yulon_wiped_the_list_brings_the_servers_ba
     installs back. The `.broken` file is then retired, so the servers come back once:
     one forgotten afterwards stays forgotten.
     """
-    path = tmp_path / "state.json"
-    save_state(_three_installs(tmp_path), path)
-    assert _v0890_load_state(path) == []  # the old build: the vanilla play client is new to it
-    path.write_text('{"schema_version": 1, "installs": []}\n', encoding="utf-8")  # it saves
+    path = _downgrade(tmp_path)
+    _v0890_save(path, [])
 
     back = load_state(path)
 
     assert back == _three_installs(tmp_path)
     assert load_state(path) == back, "the restore was written to state.json"
     assert not (tmp_path / "state.json.broken").exists(), "the restored file was not retired"
+    assert (tmp_path / "state.json.restored").is_file()
     back.forget("wow-tbc", tmp_path / "tbc")
     save_state(back, path)
     assert [i.game for i in load_state(path).installs] == ["wow-wotlk", "wow-vanilla"]
 
 
-def test_a_server_the_older_yulon_added_is_kept_beside_the_restored_ones(tmp_path: Path) -> None:
-    """What the older build saved is newer than `.broken`: it wins, and nothing doubles."""
-    path = tmp_path / "state.json"
-    save_state(_three_installs(tmp_path), path)
-    _v0890_load_state(path)
-    path.write_text(
-        json.dumps(
-            {
-                "installs": [
-                    {"game": "wow-tbc", "server_dir": str(tmp_path / "tbc")},
-                    {"game": "wow-tbc", "server_dir": str(tmp_path / "tbc2")},
-                ]
-            }
-        ),
-        encoding="utf-8",
+def test_a_server_the_older_yulon_re_attached_keeps_what_only_the_newer_one_knew(
+    tmp_path: Path,
+) -> None:
+    """Review round 2: a server in both files is the `.broken` record with the older
+    build's SET fields laid on top. The older build cannot write a ready-to-play
+    client, so its record alone would lose it, and `.broken` is then retired."""
+    path = _downgrade(tmp_path)
+    _v0890_save(
+        path,
+        [
+            # re-attached with "Use existing..." and no client folder given
+            {"game": "wow-vanilla", "server_dir": str(tmp_path / "vanilla")},
+            # re-attached and pointed at a new client folder: that choice is newer
+            {"game": "wow-tbc", "server_dir": str(tmp_path / "tbc"), "client_dir": "C:/NewWoW"},
+            # a server only the older build knows
+            {"game": "wow-tbc", "server_dir": str(tmp_path / "tbc2")},
+        ],
     )
 
     back = load_state(path)
 
-    assert [(i.game, i.server_dir.name, i.client_dir) for i in back.installs] == [
-        ("wow-tbc", "tbc", None),
-        ("wow-tbc", "tbc2", None),
-        ("wow-wotlk", "wotlk", None),
-        ("wow-vanilla", "vanilla", tmp_path / "WoW1"),
+    assert [(i.game, i.server_dir.name) for i in back.installs] == [
+        ("wow-vanilla", "vanilla"),
+        ("wow-tbc", "tbc"),
+        ("wow-tbc", "tbc2"),
+        ("wow-wotlk", "wotlk"),
     ]
+    vanilla = back.find("wow-vanilla", tmp_path / "vanilla")
+    assert vanilla is not None
+    assert vanilla.play_client_dir == tmp_path / "WoW1 (Yu'lon)", "the play client was lost"
+    assert vanilla.client_dir == tmp_path / "WoW1", "the client folder was lost"
+    tbc = back.find("wow-tbc", tmp_path / "tbc")
+    assert tbc is not None and tbc.client_dir == Path("C:/NewWoW")
+    assert load_state(path) == back
+
+
+def test_an_old_broken_file_with_nothing_an_older_yulon_refused_is_left_alone(
+    tmp_path: Path,
+) -> None:
+    """A `.broken` from before 2026-08-22 (a byte-order mark the reader then refused)
+    holds only fields every build reads: it is not what a downgrade sets aside, and the
+    servers in it may be ones the player has removed since."""
+    path = tmp_path / "state.json"
+    broken = tmp_path / "state.json.broken"
+    body = '{"schema_version": 1, "installs": [{"game": "wow-wotlk", "server_dir": "C:/gone"}]}'
+    broken.write_bytes(b"\xef\xbb\xbf" + body.encode("utf-8"))
+    # Beside it, the list an older build saved after the player removed every server:
+    # nothing else here would refuse the `.broken`, so this rule alone has to.
+    _v0890_save(path, [])
+
+    assert load_state(path).installs == []
+    assert broken.read_bytes() == b"\xef\xbb\xbf" + body.encode("utf-8"), "it was touched"
+    assert not (tmp_path / "state.json.restored").exists()
+
+
+@pytest.mark.parametrize("since", ["v0.9.16", "this build", "this build, every server removed"])
+def test_a_broken_file_a_newer_build_has_saved_over_since_is_left_alone(
+    tmp_path: Path, since: str
+) -> None:
+    """After the downgrade, a build that READS `.broken` has saved state.json: the player
+    rebuilt the list there, and what `.broken` holds would bring back servers removed since."""
+    path = _downgrade(tmp_path)
+    rebuilt = AppState(installs=[KnownInstall(game="wow-wotlk", server_dir=tmp_path / "wotlk")])
+    if since.endswith("removed"):
+        rebuilt = AppState()
+    if since == "v0.9.16":
+        _save_as_v0916(rebuilt, path)
+    else:
+        save_state(rebuilt, path)
+
+    assert load_state(path) == rebuilt
+    assert (tmp_path / "state.json.broken").is_file(), "it was renamed"
+    assert not (tmp_path / "state.json.restored").exists()
 
 
 def test_a_missing_state_file_beside_a_readable_broken_one_is_restored(tmp_path: Path) -> None:
     """The older build never saved after moving the file aside."""
-    path = tmp_path / "state.json"
-    save_state(_three_installs(tmp_path), path)
-    _v0890_load_state(path)
+    path = _downgrade(tmp_path)
     assert not path.exists()
 
     assert load_state(path) == _three_installs(tmp_path)
@@ -327,24 +402,45 @@ def test_a_broken_file_this_build_cannot_read_either_is_left_alone(tmp_path: Pat
 
 def test_the_smoke_run_restores_nothing_and_writes_nothing(tmp_path: Path) -> None:
     """`repair=False` is the staged build's proof run: it must not touch the player's files."""
-    path = tmp_path / "state.json"
-    save_state(_three_installs(tmp_path), path)
-    _v0890_load_state(path)
-    path.write_text('{"installs": []}', encoding="utf-8")
+    path = _downgrade(tmp_path)
+    _v0890_save(path, [])
+    before = path.read_text(encoding="utf-8")
 
     assert load_state(path, repair=False).installs == []
-    assert path.read_text(encoding="utf-8") == '{"installs": []}'
+    assert path.read_text(encoding="utf-8") == before
     assert (tmp_path / "state.json.broken").is_file()
 
 
-def test_a_damaged_state_file_beside_a_readable_broken_one_keeps_both(tmp_path: Path) -> None:
-    """state.json itself unreadable: it takes the `.broken` name, and the old one's servers
-    come back from memory. The damaged file is not renamed `.restored` as if it were read."""
-    path = tmp_path / "state.json"
-    save_state(_three_installs(tmp_path), path)
-    _v0890_load_state(path)
+def test_a_damaged_state_file_does_not_take_the_name_of_the_broken_one_being_restored(
+    tmp_path: Path,
+) -> None:
+    """Review round 2: state.json itself unreadable. It goes to `.damaged`, never over the
+    `.broken` the servers are about to come back from."""
+    path = _downgrade(tmp_path)
     path.write_text("{half a file", encoding="utf-8")
 
     assert load_state(path) == _three_installs(tmp_path)
-    assert (tmp_path / "state.json.broken").read_text(encoding="utf-8") == "{half a file"
+    assert (tmp_path / "state.json.damaged").read_text(encoding="utf-8") == "{half a file"
+    assert "play_client_dir" in (tmp_path / "state.json.restored").read_text(encoding="utf-8")
+
+
+def test_a_restore_that_cannot_be_saved_keeps_the_broken_file_for_the_next_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`.broken` is retired only after the merged state is on disk; otherwise it is the
+    one copy of those servers left. The damaged state.json is the harshest case."""
+    path = _downgrade(tmp_path)
+    path.write_text("{half a file", encoding="utf-8")
+    real_save = state_module.save_state
+
+    def full_disk(state: AppState, path: Path | None = None) -> Path:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(state_module, "save_state", full_disk)
+    assert load_state(path) == _three_installs(tmp_path), "this session still sees them"
+    assert "play_client_dir" in (tmp_path / "state.json.broken").read_text(encoding="utf-8")
     assert not (tmp_path / "state.json.restored").exists()
+
+    monkeypatch.setattr(state_module, "save_state", real_save)
+    assert load_state(path) == _three_installs(tmp_path), "the next start restores them"
+    assert (tmp_path / "state.json.restored").is_file()

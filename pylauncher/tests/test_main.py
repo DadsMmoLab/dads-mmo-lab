@@ -1359,6 +1359,33 @@ def test_use_existing_on_a_wsl_server_does_not_demote_its_tab_to_the_local_daemo
     ), "the distro was erased from what would be saved"
 
 
+@pytest.mark.parametrize("signal", ["installed", "adopted"])
+def test_pointing_at_a_known_server_again_keeps_the_fields_a_newer_yulon_wrote(
+    window: Any, tmp_path: Any, signal: str
+) -> None:
+    """T670 review round 2: `remember()` REPLACES the record, so a record rebuilt from the
+    signal's arguments alone drops what a newer Yu'lon wrote into it, and the next save
+    writes it without. The record is rebuilt keeping those fields."""
+    server_dir = tmp_path / f"keep-newer-{signal}"
+    catalog = _catalog_view(window)
+    catalog.installed.emit("wow-wotlk", server_dir, None)
+    live = window.saved_states[-1]
+    live.remember(
+        state.KnownInstall.model_validate(
+            {"game": "wow-wotlk", "server_dir": server_dir, "from_a_newer_yulon": {"x": 1}}
+        )
+    )
+
+    if signal == "installed":
+        catalog.installed.emit("wow-wotlk", server_dir, None)
+    else:
+        catalog.adopted.emit("wow-wotlk", server_dir, None, "Ubuntu-24.04")
+
+    remembered = window.saved_states[-1].find("wow-wotlk", server_dir)
+    assert remembered is not None
+    assert (remembered.model_extra or {}).get("from_a_newer_yulon") == {"x": 1}, remembered
+
+
 def test_a_tab_that_is_mid_import_is_not_torn_down_to_change_its_distro(
     window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:

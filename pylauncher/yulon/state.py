@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -50,6 +51,18 @@ class KnownInstall(BaseModel):
     module client files go into it and never into `client_dir`. Optional with a
     default, so every `state.json` written before it existed still loads.
     """
+
+    def keeping_unknown_fields_of(self, known: KnownInstall | None) -> KnownInstall:
+        """This record, plus the fields `known` carries that this build does not know.
+
+        For a caller that rebuilds a remembered install from its own arguments:
+        `remember()` replaces the record, so without this a field a newer Yu'lon
+        wrote would be dropped at the next save (T670 review round 2).
+        """
+        extra = (known.model_extra if known is not None else None) or {}
+        if not extra:
+            return self
+        return KnownInstall.model_validate({**extra, **self.model_dump()})
 
 
 class AppState(BaseModel):
@@ -104,6 +117,11 @@ def state_path(config_dir: Path | None = None) -> Path:
     return (config_dir if config_dir is not None else platform.config_dir()) / STATE_FILE_NAME
 
 
+_OLDER_READERS_KNOW = frozenset({"game", "server_dir", "client_dir", "wsl_distro"})
+"""Every install field v0.6.59 to v0.9.12 read. Each refused any other (`extra="forbid"`),
+so a file carrying one more is exactly what such a build set aside (T670)."""
+
+
 def load_state(path: Path | None = None, *, repair: bool = True) -> AppState:
     """Read the state file; a missing file is an empty state.
 
@@ -112,12 +130,16 @@ def load_state(path: Path | None = None, *, repair: bool = True) -> AppState:
     and an empty state is returned (review finding, 2026-08-21). A field this
     build does not know is not damage, and is kept (T670).
 
-    A `state.json.broken` this build CAN read is put back (T670): it is what an
-    older Yu'lon left after refusing a newer one's file (every build up to v0.9.16
-    refused an unknown field). Its servers are added to those in `state.json`,
-    where the file there already names one that wins, the result is saved, and
-    the `.broken` file is renamed `.restored`, so it is put back once and a
-    server forgotten afterwards stays forgotten.
+    A `state.json.broken` that an OLDER Yu'lon set aside is put back (T670; see
+    `_set_aside_by_an_older_build` for how it is told from any other). A server
+    in both files is the `.broken` record with state.json's set fields laid on
+    top: the older build may have re-attached it, but it cannot write a field
+    it does not know (a ready-to-play client). Servers only one file names are
+    kept. The merged state is saved first, and only then is `.broken` renamed
+    `.restored`, so the servers come back once, a server forgotten afterwards
+    stays forgotten, and a failed save leaves `.broken` for the next start. A
+    state.json that is itself unreadable then goes to `.damaged`, never over the
+    `.broken` being restored.
 
     `repair=False` does everything except write, and exists for exactly one
     caller: the run that PROVES a staged update opens (`YULON_SMOKE_TEST`). That
@@ -128,48 +150,104 @@ def load_state(path: Path | None = None, *, repair: bool = True) -> AppState:
     """
     target = path if path is not None else state_path()
     if not repair:
-        return _read_state(target, repair=False)
+        return _read_state(target, aside=None)
     broken = target.with_name(target.name + ".broken")
-    rescued = _readable(broken)
-    was_there = target.is_file()
-    state = _read_state(target, repair=True)
+    rescued = _set_aside_by_an_older_build(broken, target)
     if rescued is None:
+        return _read_state(target, aside=broken)
+    state = _merged(_read_state(target, aside=target.with_name(target.name + ".damaged")), rescued)
+    try:
+        save_state(state, target)
+    except OSError as exc:
+        logger.error(f"could not save the servers put back from {broken}; kept it: {exc}")
         return state
-    moved_aside = was_there and not target.is_file()  # `broken` now holds THAT file
-    known = {(i.game, i.server_dir) for i in state.installs}
-    back = [i for i in rescued.installs if (i.game, i.server_dir) not in known]
-    if back:
-        state.installs = [*state.installs, *back]
-        try:
-            save_state(state, target)
-        except OSError as exc:
-            logger.error(f"could not save the servers put back from {broken}: {exc}")
-            return state
-        logger.warning(
-            f"put back {len(back)} server(s) an older Yu'lon had set aside in {broken}: "
-            + ", ".join(f"{i.game} at {i.server_dir}" for i in back)
-        )
-    if not moved_aside:
-        try:
-            broken.replace(target.with_name(target.name + ".restored"))
-        except OSError as exc:
-            logger.error(f"could not retire {broken} after reading it back: {exc}")
+    logger.warning(
+        f"put back the servers an older Yu'lon had set aside in {broken}: "
+        + ", ".join(f"{i.game} at {i.server_dir}" for i in rescued.installs)
+    )
+    try:
+        broken.replace(target.with_name(target.name + ".restored"))
+    except OSError as exc:
+        logger.error(f"could not retire {broken} after putting it back: {exc}")
     return state
 
 
-def _readable(path: Path) -> AppState | None:
-    """`path` as a state this build reads, or None if it is missing or unreadable."""
-    if not path.is_file():
+def _merged(state: AppState, rescued: AppState) -> AppState:
+    """state.json's servers, each laid over its `.broken` record; then `.broken`'s others."""
+    others = {(i.game, i.server_dir): i for i in rescued.installs}
+    installs = []
+    for current in state.installs:
+        older = others.pop((current.game, current.server_dir), None)
+        installs.append(
+            current
+            if older is None
+            else KnownInstall.model_validate(
+                {**older.model_dump(), **current.model_dump(exclude_defaults=True)}
+            )
+        )
+    return state.model_copy(update={"installs": [*installs, *others.values()]})
+
+
+def _set_aside_by_an_older_build(broken: Path, target: Path) -> AppState | None:
+    """`broken` as a state to put back, or None to leave it as it is.
+
+    Put back only what a downgrade left (review round 2): a file that carries a
+    field v0.6.59 to v0.9.12 refused, beside a state.json that no build able to
+    read it has saved since. Anything else may name servers the player removed
+    long ago (a `.broken` from before 2026-08-22 is a byte-order mark this build
+    reads now), so it is left alone.
+
+    "Saved since" is read off state.json's contents, not its time: a rename keeps
+    the file's own mtime, so `.broken` carries the time the NEWER build saved it,
+    and the older build's own save after the downgrade is always later. Every
+    build up to v0.9.16 writes every field it knows on every install plus
+    `schema_version`; this one leaves defaults out, `schema_version` too. So a
+    state.json without `schema_version` is this build's or a later one's (it had
+    this same chance and did not restore), and one whose installs carry every
+    newer field `.broken` does was written by a build that could read it.
+    """
+    raw = _raw_json(broken)
+    if raw is None:
         return None
     try:
-        with path.open(encoding="utf-8-sig") as fh:
-            return AppState.model_validate(json.load(fh))
-    except (OSError, ValueError, ValidationError) as exc:
-        logger.info(f"{path} is unreadable to this build too; left as it is: {exc}")
+        rescued = AppState.model_validate(raw)
+    except ValidationError as exc:
+        logger.info(f"{broken} is unreadable to this build too; left as it is: {exc}")
         return None
+    newer = _install_keys(raw) - _OLDER_READERS_KNOW
+    if not newer:
+        logger.info(f"{broken} holds nothing an older Yu'lon refused; left as it is")
+        return None
+    current = _raw_json(target)
+    if current is None:  # missing (the older build never saved) or unreadable
+        return rescued
+    if "schema_version" in current and (
+        not current.get("installs") or not newer <= _install_keys(current)
+    ):
+        return rescued  # an older build's save: an empty list, or none of `newer` on it
+    logger.info(f"{broken} is older than a list a newer Yu'lon saved since; left as it is")
+    return None
 
 
-def _read_state(target: Path, *, repair: bool) -> AppState:
+def _raw_json(path: Path) -> dict[str, Any] | None:
+    """`path`'s JSON object, or None if it is missing or not one."""
+    try:
+        with path.open(encoding="utf-8-sig") as fh:
+            raw = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    return raw if isinstance(raw, dict) else None
+
+
+def _install_keys(raw: dict[str, Any]) -> set[str]:
+    installs = raw.get("installs")
+    if not isinstance(installs, list):
+        return set()
+    return {key for install in installs if isinstance(install, dict) for key in install}
+
+
+def _read_state(target: Path, *, aside: Path | None) -> AppState:
+    """state.json, or an empty state; an unreadable one is moved to `aside` (None: left)."""
     if not target.is_file():
         return AppState()
     try:
@@ -183,13 +261,12 @@ def _read_state(target: Path, *, repair: bool) -> AppState:
         with target.open(encoding="utf-8-sig") as fh:
             return AppState.model_validate(json.load(fh))
     except (OSError, ValueError, ValidationError) as exc:
-        if not repair:
+        if aside is None:
             logger.error(f"unreadable state file left at {target} (no repair asked for): {exc}")
             return AppState()
-        backup = target.with_name(target.name + ".broken")
         try:
-            target.replace(backup)
-            logger.error(f"unreadable state file moved to {backup}: {exc}")
+            target.replace(aside)
+            logger.error(f"unreadable state file moved to {aside}: {exc}")
         except OSError:
             logger.error(f"unreadable state file left at {target}: {exc}")
         return AppState()
@@ -204,6 +281,10 @@ def save_state(state: AppState, path: Path | None = None) -> Path:
     # does not mention it, and refuses one that does (up to v0.9.16 every field was
     # `extra="forbid"`). So an install that uses no newer feature stays readable to
     # every older Yu'lon. Unknown fields a newer one wrote are always written back.
+    # THE RULE THIS SETS: a field's default must never change meaning, because a
+    # saved file that omits the field means "the default", read by every build
+    # since; a new meaning needs a new field. (`schema_version`'s absence is also
+    # how `_set_aside_by_an_older_build` knows a file is this build's.)
     tmp.write_text(state.model_dump_json(indent=2, exclude_defaults=True) + "\n", encoding="utf-8")
     tmp.replace(target)
     logger.debug(f"state saved: {target} ({len(state.installs)} install(s))")
