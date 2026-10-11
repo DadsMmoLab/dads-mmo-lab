@@ -36,7 +36,16 @@ from typing import Any, Protocol
 
 import shiboken6
 from PySide6.QtCore import QEvent, QObject, QPointF, QRect, QSize, Qt, QTimer, Signal, Slot
-from PySide6.QtGui import QBrush, QColor, QFont, QIcon, QPainter, QPen, QPixmap
+from PySide6.QtGui import (
+    QBrush,
+    QColor,
+    QFont,
+    QGuiApplication,
+    QIcon,
+    QPainter,
+    QPen,
+    QPixmap,
+)
 from PySide6.QtWidgets import (
     QAbstractButton,
     QApplication,
@@ -358,6 +367,8 @@ class YulonTray(QObject):
         self._ended = False
         """This copy has to go (the lost-lock exit): a refused quit is not forgotten."""
         self._watching_app = False
+        self._app_active = False
+        """The app was last said to be active (T691): counted while the window is hidden."""
         self._flyout_hidden_at = 0.0
 
     # ---------------------------------------------------------------- set up
@@ -1263,6 +1274,12 @@ class YulonTray(QObject):
         kind = event.type()
         if self._watching_app and not self.window.isHidden():
             self._watch_app(False)  # the window is back: nothing to watch for
+        if kind is QEvent.Type.ApplicationActivate:
+            self._app_activated()
+            return False
+        if kind is QEvent.Type.ApplicationDeactivate:
+            self._app_active = False
+            return False
         if watched is self.window and kind is QEvent.Type.Close:
             if self._must_quit:
                 # Accepted or refused is decided after this filter (the busy
@@ -1336,10 +1353,36 @@ class YulonTray(QObject):
         if not isinstance(app, QApplication):
             return
         if on:
+            # Where the count of activations starts (T691): a window closed with
+            # Yu'lon in front is hidden in an app that is already active.
+            self._app_active = (
+                QGuiApplication.applicationState() == Qt.ApplicationState.ApplicationActive
+            )
             app.installEventFilter(self)
         else:
             app.removeEventFilter(self)
         self._watching_app = on
+
+    def _app_activated(self) -> None:
+        """T691: a click on the Dock icon brings the window back from the tray, on a Mac.
+
+        Qt has no event of its own for the Dock: Cocoa's `applicationShouldHandleReopen`
+        is answered by Qt's delegate with the app's state set to active with
+        `forcePropagate` (qtbase `qcocoaapplicationdelegate.mm`), so
+        `QEvent.ApplicationActivate` reaches the app even when it already was active
+        (`QGuiApplicationPrivate::setApplicationState`). Every other activation is a
+        change from inactive: Cmd+Tab, the launch (a `--tray` start included), the
+        tray's own flyout raising itself. So only "active, again" is the Dock, as LyX
+        reads it; any activation would pull the window out under the flyout.
+
+        Only for a window in the tray: the app is watched only while the window is
+        hidden, and the window's own Show lets go of it (`eventFilter`).
+        """
+        again = self._app_active
+        self._app_active = True
+        if again and sys.platform == "darwin":
+            logger.info("tray: Yu'lon was opened again from the Dock; showing the window")
+            self.open_window()
 
     def hide_window(self) -> None:
         """Into the tray. The window's jobs, pollers and launchers carry on."""
