@@ -115,13 +115,17 @@ A job still running after it is left running, and the process leaves through
 
 
 def _hard_exit(code: int) -> NoReturn:
-    """`os._exit`, behind a name a test can replace (T113).
+    """`process_end.end_now`, behind a name a test can replace (T113).
 
+    That is `os._exit`, except on Windows, where `os._exit` ran every DLL's exit
+    code and kept the process alive up to ~40 s after "Quit anyway" (T709).
     `conftest.py` replaces it for every in-process test: reached for real, it
     would end pytest itself. The one test that needs the real thing runs the
     app in a child process, where no conftest applies.
     """
-    os._exit(code)
+    from yulon import process_end
+
+    process_end.end_now(code)
 
 
 def _short(url: str) -> str:

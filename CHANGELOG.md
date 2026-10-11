@@ -31,6 +31,10 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Closing, updating or changing the client folder waits for a running restore, backup or install; Quit asks first.
 - **Play** at another computer's address skips the local server; your own public address counts as another computer.
 - **Play** after starting the server now waits for the realm to come up before it starts the game.
+- Closing, quitting, updating or changing the client folder is refused while a restore, backup or install is running.
+- On Windows, **Quit anyway** now ends Yu'lon at once instead of leaving it running unseen for up to a minute.
+- **PLAY** at another computer's address skips the local server; your own public address counts as another computer.
+- **PLAY** after starting the server now waits for the realm to come up before it starts the game.
 - Install now asks before it starts or installs Docker Engine as root, and never installs a second engine over yours.
 - A full drive is now said right after you pick the server folder, and a wrong move file before any folder is asked.
 - The Accounts tab only creates names and passwords that Delete, Set password and GM level can use afterwards.
