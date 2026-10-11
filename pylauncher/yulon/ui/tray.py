@@ -680,6 +680,18 @@ class YulonTray(QObject):
                 f"Press {verb} again when it has finished.",
             )
             return True
+        if verb in (STOP, RESTART):
+            # T711: a Stop or Restart takes the database from under the tab's work (a restore
+            # left half-written, a backup lost). The tab's own door guard decides, as it does
+            # for the quit and the client-folder doors (T690); its Server-tab action was said
+            # just above. Start is no teardown and keeps the tab's own rule.
+            refusal = getattr(live, "teardown_refusal", lambda: None)()
+            if refusal:
+                self.tell(
+                    f"Yu'lon cannot {verb.lower()} that server yet",
+                    f"{self._title_of(live)}: {refusal}",
+                )
+                return True
         if press is not None and not press.isEnabled():
             why = reason_of(press) or press.toolTip() or "its Server tab cannot do that now."
             self.tell(

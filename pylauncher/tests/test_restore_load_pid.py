@@ -312,3 +312,90 @@ def test_the_load_writes_to_files_not_pipes_and_a_flood_of_output_does_not_deadl
         worker.join(30)
     assert not worker.is_alive(), "the load deadlocked on its own output"
     assert problems and "THE END" in problems[0].detail, "stderr must still reach the error"
+
+
+# ---- T711: a Stop over a load that outlived Yu'lon asks first
+
+
+def _stop_view(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, answer: str | None) -> Any:
+    """A real tab over `tmp_path`'s restore record; the questions it asks and the jobs it ran."""
+    from tests.test_teardown_guard import _view
+    from yulon.ui import controller_view as controller_view_module
+
+    view, _fake, _ = _view(tmp_path)
+    view.services.interrupted_restore = lambda: interrupted_restore(tmp_path)  # type: ignore[method-assign,assignment]
+    asked: list[str] = []
+
+    def ask(_parent: object, title: str, text: str, yes: str, save: object = None) -> Any:
+        asked.append(f"{title}|{text}|{yes}")
+        return answer
+
+    monkeypatch.setattr(controller_view_module, "_ask_with", ask)
+    jobs: list[Any] = []
+    view._run = lambda *args, **_kw: jobs.append(args)  # type: ignore[method-assign]
+    return view, asked, jobs
+
+
+def test_a_stop_over_a_load_that_outlived_yulon_asks_and_keeps_it_on_no(
+    qapp: object, tmp_path: Path, live_child: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T711: the server hold ended with the quitting Yu'lon, so nothing asked before a Stop
+    stopped the database under the orphaned load (its Restart is refused by the record).
+
+    Mutation: drop the `_stop_over_a_running_load_agreed()` ask from `stop_server()`.
+    """
+    _marker_with(tmp_path, live_child.pid)
+    view, asked, jobs = _stop_view(tmp_path, monkeypatch, answer=None)
+
+    view.stop_server()
+    view.shutdown()
+
+    assert len(asked) == 1 and "half-written" in asked[0] and "Stop anyway" in asked[0], asked
+    assert jobs == [], "the Stop ran over a load the player chose to keep"
+    assert not view._busy
+
+
+def test_a_stop_over_a_running_load_stops_when_told_to(
+    qapp: object, tmp_path: Path, live_child: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ "Stop always stops" (owner, 2026-10-09): asked once, then it stops."""
+    _marker_with(tmp_path, live_child.pid)
+    view, asked, jobs = _stop_view(tmp_path, monkeypatch, answer="yes")
+
+    view.stop_server()
+    view.shutdown()
+
+    assert len(asked) == 1 and len(jobs) == 1
+
+
+def test_a_stop_with_no_running_load_asks_nothing(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dead load (an interrupted restore) or no record at all: Stop as always."""
+    gone = subprocess.Popen([sys.executable, "-c", "pass"])
+    gone.wait()
+    _marker_with(tmp_path, gone.pid)
+    view, asked, jobs = _stop_view(tmp_path, monkeypatch, answer=None)
+
+    view.stop_server()
+    view.shutdown()
+
+    assert asked == [] and len(jobs) == 1
+
+
+def test_a_stop_during_this_sessions_own_restore_asks_nothing_new(
+    qapp: object, tmp_path: Path, live_child: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The record names THIS session's live load: the restore's own hold refuses the Stop in
+    its words, and "from the last session" would be untrue.
+
+    Mutation: drop the `_restore_running` clause from `_stop_over_a_running_load_agreed()`.
+    """
+    _marker_with(tmp_path, live_child.pid)
+    view, asked, jobs = _stop_view(tmp_path, monkeypatch, answer=None)
+    view._restore_running = True
+
+    view.stop_server()
+    view.shutdown()
+
+    assert asked == [] and len(jobs) == 1

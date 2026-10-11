@@ -68,6 +68,8 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - The Bots tab name filter no longer fails on a name typed with a backslash.
 - **Start** on a WotLK or Unbound server whose build is gone from Docker now says so before anything starts.
 - A WotLK or Unbound database import that fails part-way no longer counts as finished; **Repair** clears and redoes it.
+- A restore that carried on in Docker after Quit anyway no longer reads as unfinished once it ended cleanly.
+- The tray's Stop and Restart are refused during a restore or backup; Stop asks first over a restore still loading.
 
 ### Changed
 - The Server tab's **Play** now starts the game; **Launcher…** opens the launcher. The tray's **Play** offers to start a stopped server.

@@ -95,9 +95,11 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import socket
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -511,6 +513,13 @@ class DockerMysql:
         # `-i` only when something is being written to the child: a mysqldump
         # reads nothing, and an idle open stdin is one more thing to get wrong.
         interactive = ["-i"] if (input_text is not None or stdin is not None) else []
+        watch = _LOAD_PID_SINK.get() if report_pid else None
+        if watch is not None and watch.proof and self.wsl_distro is None:
+            # T710: mysql runs under `sh`, which prints how it ended into the load's output
+            # file. Not for a server in a WSL distro: `wsl -- docker ...` hands the line to the
+            # distro's shell, which would expand the script's `$1` for itself; there the load
+            # stays as it was and an orphaned one stays "cannot tell".
+            command = ["sh", "-c", _LOAD_PROOF_SCRIPT, "sh", watch.proof, *command]
         argv = [
             *prefix,
             "exec",
@@ -520,7 +529,6 @@ class DockerMysql:
             self.db_container,
             *command,
         ]
-        watch = _LOAD_PID_SINK.get() if report_pid else None
         try:
             if watch is not None:
                 return _run_reporting_pid(
@@ -549,6 +557,28 @@ class DockerMysql:
 class _LoadWatch:
     sink: Callable[[int], None]
     output_dir: Path | None
+    proof: str = ""
+
+
+LOAD_OUT = "restore-load.out"
+LOAD_ERR = "restore-load.err"
+"""The restore load's stdout and stderr, in the backups folder beside the marker (T690)."""
+
+LOAD_ENDED = "yulon-load-ended"
+"""The first word of the line the wrapped load prints when mysql returns (T710)."""
+
+_LOAD_PROOF_SCRIPT = f"n=$1; shift; $@; s=$?; printf '\\n{LOAD_ENDED} %s %s\\n' $n $s; exit $s"
+"""What runs inside the database container around the restore's mysql (T710).
+
+`sh -c <this> sh <proof> mysql -uroot`: mysql gets the dump on stdin as before, its exit
+status passes through, and the line "yulon-load-ended <proof> <status>" goes to the load's
+stdout, which is `LOAD_OUT`. That file is written by the docker client, so the line lands
+only if the client was alive to the end, which a load Yu'lon quit over is: it is the one
+record of how such a load ended. An empty `LOAD_ERR` proves nothing (a killed load leaves
+one too). No `"` and no backslash before a quote, so Windows' `list2cmdline` only wraps it
+in quotes and docker.exe hands `sh` this exact text; `$@` unquoted is safe because its
+words are the client's name and `-uroot`.
+"""
 
 
 _LOAD_PID_SINK: contextvars.ContextVar[_LoadWatch | None] = contextvars.ContextVar(
@@ -558,7 +588,7 @@ _LOAD_PID_SINK: contextvars.ContextVar[_LoadWatch | None] = contextvars.ContextV
 
 @contextlib.contextmanager
 def recording_load_pid(
-    sink: Callable[[int], None], *, output_dir: Path | None = None
+    sink: Callable[[int], None], *, output_dir: Path | None = None, proof: str = ""
 ) -> Iterator[None]:
     """While active, the restore's load reports its child's pid to `sink` as it starts (T690).
 
@@ -566,9 +596,11 @@ def recording_load_pid(
     implementations, and the load runs in the same thread that enters this. `output_dir` is
     where the load's stdout and stderr go as FILES: a quit anyway ends Yu'lon while the load
     carries on, and a pipe whose reader is gone would break under it (SIGPIPE on Linux) the
-    next time mysql prints a warning.
+    next time mysql prints a warning. `proof` (T710) makes the load print its ending into
+    that stdout file with this word (`_LOAD_PROOF_SCRIPT`), so a load that outlived Yu'lon
+    can be proven to have finished.
     """
-    token = _LOAD_PID_SINK.set(_LoadWatch(sink, output_dir))
+    token = _LOAD_PID_SINK.set(_LoadWatch(sink, output_dir, proof))
     try:
         yield
     finally:
@@ -600,8 +632,8 @@ def _run_reporting_pid(
     out_file = err_file = None
     if watch.output_dir is not None and stdout is None:
         try:
-            out_path = watch.output_dir / "restore-load.out"
-            err_path = watch.output_dir / "restore-load.err"
+            out_path = watch.output_dir / LOAD_OUT
+            err_path = watch.output_dir / LOAD_ERR
             out_file = out_path.open("wb")
             err_file = err_path.open("wb")
         except OSError as exc:
@@ -1308,6 +1340,19 @@ class InterruptedRestore:
     """
     load_name: str = ""
     """The load process's name where the OS gives it cheaply (the docker client), else ""."""
+    load_proof: str = ""
+    """The word the load prints in its ending line (`_LOAD_PROOF_SCRIPT`, T710), "" if none.
+
+    Random per load, so a line some earlier load left in `LOAD_OUT` proves nothing here.
+    """
+    load_after: InterruptedRestore | None = None
+    """The record to leave once this load has finished, None for no record (T710).
+
+    What `restore()` writes on success: what an earlier unfinished restore still owes that
+    this one does not cover. Read only when the load is proven to have finished cleanly.
+    """
+    load_import_service: str = ""
+    """The import service whose unfinished-import record a finished restore removes (T678)."""
 
     @property
     def load_running(self) -> bool:
@@ -1345,6 +1390,9 @@ class InterruptedRestore:
     """
 
     def as_json(self) -> str:
+        return json.dumps(self._fields(), indent=2)
+
+    def _fields(self) -> dict[str, object]:
         fields: dict[str, object] = {
             "backup": str(self.backup),
             "databases": list(self.databases),
@@ -1356,7 +1404,12 @@ class InterruptedRestore:
             fields["load_host"] = self.load_host
             fields["load_token"] = self.load_token
             fields["load_name"] = self.load_name
-        return json.dumps(fields, indent=2)
+            if self.load_proof:
+                fields["load_proof"] = self.load_proof
+                after = self.load_after
+                fields["load_after"] = None if after is None else after._fields()
+                fields["load_import_service"] = self.load_import_service
+        return fields
 
 
 @dataclass(frozen=True)
@@ -1460,7 +1513,26 @@ def interrupted_restore(server_dir: Path) -> InterruptedRestore | None:
 
     Worth asking on start-up: a database left half-overwritten looks like a
     working server until somebody logs in.
+
+    T710: a load that outlived Yu'lon ("Quit anyway") and is proven to have finished
+    (`_finished_cleanly()`) is put down here, as `restore()` would have put it down had
+    Yu'lon still been there: the record shrinks to what an earlier restore still owes, or
+    goes. Here, so that every reader -- the tab, Start, a new restore, the backups list --
+    meets the same answer.
     """
+    record = _read_record(server_dir)
+    if (
+        record is not None
+        and record.load_proof
+        and not record.load_running
+        and _finished_cleanly(record)
+    ):
+        return _settle_a_finished_load(server_dir, record)
+    return record
+
+
+def _read_record(server_dir: Path) -> InterruptedRestore | None:
+    """The restore marker as it is on disk, read and nothing else."""
     marker = marker_path(server_dir)
     try:
         raw = json.loads(marker.read_text(encoding="utf-8"))
@@ -1488,6 +1560,11 @@ def interrupted_restore(server_dir: Path) -> InterruptedRestore | None:
         )
         return InterruptedRestore(marker, Path(), (), (), "", readable=False)
     pid = raw.get("load_pid", 0)
+    proof = str(raw.get("load_proof", ""))
+    after_raw = raw.get("load_after")
+    after = _after_record(marker, after_raw)
+    if after_raw is not None and after is None:
+        proof = ""  # what this load leaves behind cannot be read: never put the record down
     return InterruptedRestore(
         marker=marker,
         backup=Path(str(raw.get("backup", ""))),
@@ -1498,7 +1575,84 @@ def interrupted_restore(server_dir: Path) -> InterruptedRestore | None:
         load_host=str(raw.get("load_host", "")),
         load_token=str(raw.get("load_token", "")),
         load_name=str(raw.get("load_name", "")),
+        load_proof=proof,
+        load_after=after,
+        load_import_service=str(raw.get("load_import_service", "")),
     )
+
+
+def _after_record(marker: Path, raw: object) -> InterruptedRestore | None:
+    """`load_after` as a record, None for none or for one of the wrong shape (T710)."""
+    if not isinstance(raw, dict):
+        return None
+    databases = raw.get("databases", [])
+    safety = raw.get("safety_backup", [])
+    if not isinstance(databases, list) or not isinstance(safety, list) or not databases:
+        return None
+    return InterruptedRestore(
+        marker=marker,
+        backup=Path(str(raw.get("backup", ""))),
+        databases=tuple(str(name) for name in databases),
+        safety_backup=tuple(Path(str(p)) for p in safety),
+        started_at=str(raw.get("started_at", "")),
+    )
+
+
+def _finished_cleanly(record: InterruptedRestore) -> bool:
+    """The recorded load printed its ending line with its own proof word and exit 0 (T710).
+
+    The line is in `LOAD_OUT` only if the docker client lived until mysql returned. Nothing
+    else counts: not an empty `LOAD_ERR`, not the process being gone, not a line with
+    another load's word.
+    """
+    tail = _tail(record.marker.parent / LOAD_OUT).decode("utf-8", "replace")
+    for line in reversed(tail.splitlines()):
+        words = line.split()
+        if len(words) == 3 and words[0] == LOAD_ENDED and words[1] == record.load_proof:
+            return words[2] == "0"
+    return False
+
+
+_MARKER_LOCK = threading.RLock()
+"""Held while the marker is written, so a settle cannot write over a new restore's marker."""
+
+
+def _settle_a_finished_load(
+    server_dir: Path, record: InterruptedRestore
+) -> InterruptedRestore | None:
+    """What `restore()` does after its load, for a load that finished after Yu'lon quit (T710).
+
+    The record becomes `load_after` (or goes), the load's output files go, and the
+    unfinished-import record goes as a finished restore removes it. Only if the marker is
+    still the one that was judged; if anything here cannot be done the record stays as it
+    was, which is the cautious answer.
+    """
+    with _MARKER_LOCK:
+        if _read_record(server_dir) != record:
+            return _read_record(server_dir)  # another writer came first; it is the answer
+        try:
+            if record.load_after is None:
+                record.marker.unlink(missing_ok=True)
+            else:
+                _write_marker(
+                    record.load_after,
+                    consequence="The restore that carried on after Yu'lon closed did finish.",
+                )
+        except (MaintenanceError, OSError) as exc:
+            logger.warning(f"a restore finished after Yu'lon closed, but {record.marker}: {exc}")
+            return record
+        for name in (LOAD_OUT, LOAD_ERR):
+            try:
+                (record.marker.parent / name).unlink(missing_ok=True)
+            except OSError as exc:
+                logger.warning(f"could not remove the finished load's {name}: {exc}")
+        if record.load_import_service:
+            _forget_the_import_record(server_dir, record.load_import_service)
+    logger.warning(
+        f"the restore of {', '.join(record.databases)} that carried on after Yu'lon closed "
+        "finished cleanly (mysql exit 0); its record is put down"
+    )
+    return record.load_after
 
 
 def forget_interrupted_restore(server_dir: Path) -> bool:
@@ -1517,7 +1671,9 @@ def forget_interrupted_restore(server_dir: Path) -> bool:
     """
     marker = marker_path(server_dir)
     running = interrupted_restore(server_dir)
-    if running is not None and running.load_running:
+    if running is None:
+        return False  # none, or a finished load just put down
+    if running.load_running:
         raise MaintenanceError(RESTORE_STILL_RUNNING)
     try:
         marker.unlink()
@@ -1841,17 +1997,26 @@ def _restore_from(
         if before_load is not None:
             before_load()
         source.seek(0)
+        proof = secrets.token_hex(8)
 
         def note_the_load(pid: int) -> None:
             token, name = process_identity(pid)
             _write_marker(
                 dataclasses.replace(
-                    record, load_pid=pid, load_host=this_host(), load_token=token, load_name=name
+                    record,
+                    load_pid=pid,
+                    load_host=this_host(),
+                    load_token=token,
+                    load_name=name,
+                    # T710: what to leave if this load finishes after Yu'lon has gone.
+                    load_proof=proof,
+                    load_after=unresolved,
+                    load_import_service=spec.import_service,
                 ),
                 consequence="The restore is running, but its process could not be recorded.",
             )
 
-        with recording_load_pid(note_the_load, output_dir=marker.parent):
+        with recording_load_pid(note_the_load, output_dir=marker.parent, proof=proof):
             mysql.load_from(source)
     except (MaintenanceError, OSError) as exc:
         # The load is over, so the process it was is not "the restore still running": the
@@ -1899,20 +2064,22 @@ def _restore_from(
                 f"that this one does not put right; {marker} still records them"
             )
     logger.info(f"restored {', '.join(plan.databases)} from {plan.backup}")
-    _forget_the_import_record(plan.server_dir, spec)
+    _forget_the_import_record(plan.server_dir, spec.import_service)
     return RestoreReport(backup=plan.backup, databases=plan.databases, safety_backup=safety)
 
 
-def _forget_the_import_record(server_dir: Path, spec: docker.ContainerSpec) -> None:
+def _forget_the_import_record(server_dir: Path, import_service: str) -> None:
     """A finished restore removes the record of an unfinished import (T678 review round 3).
 
     The restore replaced the databases with a backup's, so that record no longer
     describes them. Left standing, Start refused the restored server and Repair read
-    its players as rows the unfinished import wrote, and cleared them.
+    its players as rows the unfinished import wrote, and cleared them. `import_service`
+    is the game's (`ContainerSpec.import_service`); from a marker (T710) it is read off a
+    file, so only a plain service name is taken.
     """
-    if not spec.import_service:
+    if not import_service or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", import_service):
         return
-    record = docker.one_shot_ended_marker(server_dir, spec.import_service)
+    record = docker.one_shot_ended_marker(server_dir, import_service)
     try:
         record.unlink(missing_ok=True)
     except OSError as exc:
@@ -2100,8 +2267,9 @@ def _write_marker(record: InterruptedRestore, *, consequence: str) -> None:
     """
     tmp = record.marker.with_name(record.marker.name + ".tmp")
     try:
-        tmp.write_text(record.as_json() + "\n", encoding="utf-8")
-        os.replace(tmp, record.marker)
+        with _MARKER_LOCK:
+            tmp.write_text(record.as_json() + "\n", encoding="utf-8")
+            os.replace(tmp, record.marker)
     except OSError as exc:
         try:
             tmp.unlink(missing_ok=True)
