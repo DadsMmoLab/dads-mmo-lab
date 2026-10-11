@@ -11256,6 +11256,8 @@ class ControllerView(QWidget):
     def _seeded_done(self, result: object) -> None:
         self._seeded_pending = False
         if isinstance(result, _DockerSilent):
+            if isinstance(result.exc, docker.ServerHeldError):
+                self._seeded_asked = False  # T716: a job holds the server; the next poll asks
             return  # Docker away: the poll says so; the next time the database is up asks again
         self._show_the_notice()
 

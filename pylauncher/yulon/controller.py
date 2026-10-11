@@ -599,15 +599,41 @@ class Controller:
         the status poll makes, a stopped WSL distro included) and does nothing while the
         database is down; starts nothing. A note said earlier stays on `seeded_accounts_locked`
         until the next Start. Nothing for a core that does not seed the accounts.
+
+        Raises:
+            docker.ServerHeldError: a job or another Yu'lon holds the server (T716); nothing
+            was written and the poll asks again.
         """
         entry = self.entry or _entry_for(self.spec)
         if entry is None or entry.accounts.scheme != seeded_accounts.SCHEME:
             return None
         if not self.status().db:
             return None
-        said = seeded_accounts.settle(
-            entry, self.spec, self.server_dir, wsl_distro=self.wsl_distro, start_database=False
-        )
+        # T716: a write to the auth database is a press on the server like the Accounts tab's.
+        # A job of this process holding it is asked first, so the poll's expected refusal is
+        # not logged as a warning every five seconds.
+        held = docker.held_reason(self.server_dir)
+        if held is not None:
+            raise docker.ServerHeldError(held)
+        try:
+            with docker.server_hold(
+                self.server_dir,
+                "Locking the built-in accounts",
+                spec=self.spec,
+                wsl_distro=self.wsl_distro,
+            ):
+                said = seeded_accounts.settle(
+                    entry,
+                    self.spec,
+                    self.server_dir,
+                    wsl_distro=self.wsl_distro,
+                    start_database=False,
+                )
+        except docker.ServerReservationUnavailable as exc:
+            # No reservation could be made: not a wait, so the player is told as before.
+            logger.warning(f"{entry.id}: the seeded accounts were not locked: {exc}")
+            first = str(exc).strip().splitlines()
+            said = seeded_accounts.NOT_LOCKED.format(why=first[0] if first else "no reservation")
         if said is not None:
             self.seeded_accounts_locked = said
         return said

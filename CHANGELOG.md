@@ -21,6 +21,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A module install into a folder Yu'lon cannot write now names the folder and says what to do.
 - On Windows, Uninstall of a server folder that is a junction is refused before it empties the folder it points to.
 - Uninstall of a server folder that is a link now says so before it removes anything, instead of after the Docker side is gone.
+- The built-in account lock no longer writes to a TBC or Vanilla database while a restore is loading it.
 - On a Mac, clicking Yu'lon in the Dock brings its window back when it was closed into the menu bar.
 - On Windows, deleting a folder no longer clears read-only flags or removes folders behind a junction inside it.
 - The update check no longer offers an older build as the newest once a version has a tenth patch release.
