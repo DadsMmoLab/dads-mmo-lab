@@ -370,6 +370,7 @@ def installer_for_app(
     """
     probe, reset = import_gate_for(entry, wsl_distro=wsl_distro)
     copy = database_snapshot_for(entry, wsl_distro=wsl_distro)
+    modules = importer_modules_for(entry)
     if wsl_distro is None:
         return installer_for(
             entry,
@@ -378,6 +379,7 @@ def installer_for_app(
             import_probe=probe,
             reset_unfinished=reset,
             database_snapshot=copy,
+            importer_modules=modules,
         )
     return installer_for(
         entry,
@@ -386,7 +388,27 @@ def installer_for_app(
         reset_unfinished=reset,
         seams=Seams.in_wsl(wsl_distro),
         database_snapshot=copy,
+        importer_modules=modules,
     )
+
+
+def importer_modules_for(entry: CatalogEntry) -> Callable[[Path], str] | None:
+    """Which modules a Rebuild's importer may update, for `entry` (T706); None = no importer.
+
+    The Modules tab's own split (`controller_wow_wotlk.modules.importer_modules()`),
+    read off the folder when the Rebuild runs, under the game's own manifests
+    (`user_game` is the entry, as the Modules tab binds it). Imported inside the
+    function for `import_gate_for()`'s reason.
+    """
+    if not entry.container_spec().import_service:
+        return None
+
+    def allowed(server_dir: Path) -> str:
+        from yulon.controller_wow_wotlk import modules as wotlk_modules
+
+        return wotlk_modules.importer_modules(server_dir, user_game=entry.id)
+
+    return allowed
 
 
 def _refuse_unless_in_the_distro(server_dir: Path, wsl_distro: str) -> None:

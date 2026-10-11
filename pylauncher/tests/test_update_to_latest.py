@@ -2189,6 +2189,8 @@ def test_a_rollback_that_stops_early_leaves_the_sources_with_the_new_build(
     assert raised.value.sources_kept is True, "the outcome the tab reads, typed"
     assert raised.value.touched is True and raised.value.mixed is False
     assert native.owed_start_refusal(server_dir) is None, "one build on the tags: Start may run"
+    # T680: the sources stay with the build the tags name, so no folder is off its build.
+    assert native.sources_still_off(server_dir) == (), "the sources went with the new build"
 
 
 @pytest.mark.parametrize("entry", SPINE_GAMES, ids=lambda entry: entry.id)

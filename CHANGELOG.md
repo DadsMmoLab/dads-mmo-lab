@@ -27,6 +27,10 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A full drive is now said right after you pick the server folder, and a wrong move file before any folder is asked.
 - The Accounts tab only creates names and passwords that Delete, Set password and GM level can use afterwards.
 - Start finds a port taken by another server's database or by a program before anything starts, and names it.
+- **Rebuild** now applies the database updates of a module you just installed, such as City Bots, so the world starts.
+- After an update or rebuild that stopped part-way, **Start** is refused or allowed for a reason that is still true.
+- **Update the server to latest** no longer runs the SQL of a module Yu'lon applies itself, such as ARAC, a second time.
+- A **Rebuild** whose database updates fail puts your databases back as they were and names the update that failed.
 
 ### Changed
 - The Server tab's **Play** now starts the game; **Launcher…** opens the launcher. The tray's **Play** starts a stopped server.

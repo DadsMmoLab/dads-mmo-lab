@@ -119,6 +119,7 @@ from yulon.catalog.git_head import read_head_file
 from yulon.catalog.installer import (
     MEASURED_BUILD_TIMES,
     DockerUnavailableError,
+    ImportWindowStopped,
     InstallerError,
     InstallOptions,
     InstallStopped,
@@ -471,7 +472,13 @@ minute later.
 """
 
 
-def rebuild_opening_note(*, renders_dockerfile: bool, parked: bool = False) -> str:
+def rebuild_opening_note(
+    *,
+    renders_dockerfile: bool,
+    parked: bool = False,
+    imports: bool = False,
+    copies: bool = False,
+) -> str:
     """What a rebuild costs and what it leaves alone, said before the first stage.
 
     `OPENING_NOTE`'s counterpart, and a separate sentence rather than a reuse
@@ -517,6 +524,10 @@ def rebuild_opening_note(*, renders_dockerfile: bool, parked: bool = False) -> s
 
     `parked` (T224): a kept build is recorded, and the compile clause says it may
     be used instead -- one clause still, so the count stays what it was.
+
+    `imports` (T706): the family runs its database importer with the servers stopped
+    before the new build starts (`imports_with_the_servers_down()`), which is one more
+    thing it does, and "does not touch your database" was false of it from then on.
     """
     compiles = (
         "compiles the server again from the source and modules in the folder below, or, if the "
@@ -531,18 +542,40 @@ def rebuild_opening_note(*, renders_dockerfile: bool, parked: bool = False) -> s
         if renders_dockerfile
         else ""
     )
+    sql = (
+        "it stops the servers"
+        + (", copies your databases" if copies else "")
+        + " and applies the database updates the server and its modules carry that are not "
+        "applied yet, "
+        if imports
+        else ""
+    )
+    count = ("three", "four", "five")[bool(recipe) + bool(sql)]
+    database = (
+        "It does not rewrite your settings, and your database is changed only by those "
+        "updates: AzerothCore's own importer applies each one once, and again only if its file "
+        "has changed since."
+        + (
+            " If the new build does not come up, or you stop this before it does, the copy is "
+            "put back before the build you have starts again."
+            if copies
+            else ""
+        )
+        if imports
+        else "It does not rewrite your settings, and does not touch your database — your "
+        "characters, accounts and the module SQL already applied are not read or written by "
+        "this."
+    )
     return (
         "You can stop this at any time; stopping before the containers are replaced leaves the "
-        f"server you have now exactly as it is. This does {'four' if recipe else 'three'} things "
+        f"server you have now exactly as it is. This does {count} things "
         f"and nothing else: {recipe}it "
-        f"{compiles}, it replaces "
+        f"{compiles}, {sql}it replaces "
         "the running containers so the new build is what starts, and it waits for the server to "
         "come back up. It fetches no new source code, though Docker may go online while it "
         "builds: to ask Docker Hub about the base image the build starts from, and to download "
-        "system packages its cache no longer holds. It does not rewrite your settings, and does "
-        "not touch your database — your characters, accounts and the module SQL already applied "
-        "are not read or written by this. The server is DOWN from the moment the containers are "
-        "replaced until it reports ready."
+        f"system packages its cache no longer holds. {database} The server is DOWN from the "
+        "moment the containers are replaced until it reports ready."
     )
 
 
@@ -2134,6 +2167,17 @@ installed" would be repeating, one layer up, the mistake this whole feature
 exists to fix — telling a user something took effect when nobody checked.
 """
 
+REBUILD_CLOSING_NOTE_IMPORTED = (
+    "The server is running the build that was just made, with every module in this folder "
+    "compiled into it, and the database updates the server and its modules carry were applied "
+    "before it started. If a module you added still does not seem to be there in-game, check "
+    "the worldserver log for its own startup line."
+)
+"""`REBUILD_CLOSING_NOTE` for a family that imports before the new build starts (T706).
+
+Said only after the importer exited 0 and the world reported ready, so "were applied"
+is what the importer said of its own run, not a guess about the database."""
+
 CORRECTIONS_WAIT_HINT = (
     'Stop ends this here and applies nothing: the world keeps running. "Stop now anyway" '
     "stops the world regardless and goes on with the corrections; it may then be force-stopped "
@@ -3111,8 +3155,13 @@ def copy_opening_line(names: Sequence[str]) -> str:
     )
 
 
-def copy_taking_line(names: Sequence[str]) -> str:
+def copy_taking_line(names: Sequence[str], *, rebuild: bool = False) -> str:
     """Said before the update copies the databases its new build can change (T217)."""
+    if rebuild:
+        return (
+            f"Copying {_listed(names)} with your servers stopped, before the database updates "
+            "run, so it can be put back if the new build does not come up."
+        )
     return (
         f"Copying {_listed(names)} with your servers stopped, right before the new build first "
         "starts, so it can be put back if that build does not come up."
@@ -3135,14 +3184,41 @@ def copy_not_taken(names: Sequence[str], reason: str) -> str:
     )
 
 
+REBUILD_NOTHING_CHANGED = (
+    "Nothing in your databases was changed by this rebuild: no database update ran and the "
+    "new build never started."
+)
+"""A Rebuild's rollback sentence when it never reached its database updates (T706 round 2)."""
+
+REBUILD_UPDATES_NOT_PUT_BACK = (
+    "What the database updates wrote before the new build was to start, if anything, is NOT "
+    "put back by this (no copy of the databases could be taken), so the old build runs on the "
+    "database as they left it. The new build never started."
+)
+"""A Rebuild with no copy whose updates ran and whose new build never started (T706 round 2)."""
+
+REBUILD_UPDATES_AND_START_NOT_PUT_BACK = (
+    "What the database updates wrote before the new build started, and what the new build "
+    "wrote on its first start, if anything, is NOT put back by this (no copy of the databases "
+    "could be taken), so the old build runs on the database as they left it."
+)
+"""The same, once the new build had started (T706 round 2)."""
+
 COPY_NOT_TAKEN_DATABASE = (
     "Nothing in your databases was changed by the update: the new build never started."
 )
 """The rollback's database sentence when the copy failed, so the new build never ran (T217)."""
 
 
-def copy_putting_back_line(copy: snapshot.Snapshot) -> str:
+def copy_putting_back_line(copy: snapshot.Snapshot, *, rebuild: bool = False) -> str:
     """Said as the copy goes back: a replacement, which is what the put-back does (cold review)."""
+    if rebuild:
+        return (
+            f"Putting {_listed(copy.databases)} back {_as_it_was(copy.databases)} before the "
+            "database updates ran: the copy is checked, the tables added since are dropped, and "
+            "the copy is loaded over the rest, before the build from before this rebuild starts "
+            f"again. {restore_duration(copy.size_bytes)}"
+        )
     return (
         f"Putting {_listed(copy.databases)} back {_as_it_was(copy.databases)} just before the "
         "new build started: the copy is checked, the tables the new build added are dropped, "
@@ -3172,7 +3248,9 @@ def copy_put_back_line(put: snapshot.PutBack) -> str:
     return f"Put {_listed(put.restored)} back{kept}."
 
 
-def copy_put_back_database(put: snapshot.PutBack, *, not_copied: Sequence[str] = ()) -> str:
+def copy_put_back_database(
+    put: snapshot.PutBack, *, not_copied: Sequence[str] = (), rebuild: bool = False
+) -> str:
     """The rollback's database sentence once the copy went back (T217).
 
     Replaces "What the new build wrote into the database ... is NOT put back". The
@@ -3190,8 +3268,13 @@ def copy_put_back_database(put: snapshot.PutBack, *, not_copied: Sequence[str] =
         else ""
     )
     said = (
-        f"Its source folders were put back first, then {_listed(names)} were replaced with the "
-        "copy taken just before the new build started: the tables the new build added were "
+        f"{_listed(names)} were replaced with the copy taken before the database updates ran: "
+        "the tables added since were dropped and the copy was loaded over the rest, so the old "
+        "build starts on the databases it knows. The new build never reported ready, so nobody "
+        f"played on it{kept}."
+        if rebuild
+        else f"Its source folders were put back first, then {_listed(names)} were replaced with "
+        "the copy taken just before the new build started: the tables the new build added were "
         "dropped and the copy was loaded over the rest, so the old build starts on the "
         f"databases it knows. The new build never reported ready, so nobody played on it{kept}."
     )
@@ -3214,9 +3297,16 @@ def copy_back_with_the_sources(put: snapshot.PutBack) -> str:
     )
 
 
-def copy_not_put_back(copy: snapshot.Snapshot, reason: str) -> str:
+def copy_not_put_back(copy: snapshot.Snapshot, reason: str, *, rebuild: bool = False) -> str:
     """Why the old build was left stopped: its database copy would not go back (T217)."""
     names = copy.databases
+    if rebuild:
+        return (
+            f"{_listed(names)} could not be put back {_as_it_was(names)} before the database "
+            f"updates ran ({reason}), so the old build was not started on the databases they "
+            f"changed. Open Maintenance, choose {_in_backups(copy.files)} and press Restore (it "
+            "works with the server stopped), then press Start."
+        )
     return (
         f"{_listed(names)} could not be put back {_as_it_was(names)} just before the new build "
         f"started ({reason}), so the old build was not started on the database the new one "
@@ -3225,9 +3315,19 @@ def copy_not_put_back(copy: snapshot.Snapshot, reason: str) -> str:
     )
 
 
-def copy_not_usable(copy: snapshot.Snapshot, reason: str) -> str:
+def copy_not_usable(copy: snapshot.Snapshot, reason: str, *, rebuild: bool = False) -> str:
     """The old build was left stopped: the copy failed its check, and nothing was touched."""
     names = copy.databases
+    if rebuild:
+        return (
+            f"{_listed(names)} could not be put back {_as_it_was(names)} before the database "
+            f"updates ran: {reason}. So the old build was not started, and "
+            f"{'that database is' if len(names) == 1 else 'those databases are'} as the "
+            f"rebuild left {'it' if len(names) == 1 else 'them'}. The copy "
+            f"({_in_backups(copy.files)}) cannot be restored either. If you have a backup of "
+            "your own from before this rebuild, restore it on Maintenance (it works with the "
+            "server stopped), then press Start."
+        )
     return (
         f"{_listed(names)} could not be put back {_as_it_was(names)} just before the new build "
         f"started: {reason}. So the old build was not started, and "
@@ -3244,6 +3344,7 @@ def copy_old_build_down(
     *,
     older: Sequence[Path] = (),
     not_stopped: str | None = None,
+    rebuild: bool = False,
 ) -> str:
     """The old build did not come up on the databases put back (T217 live proof, item 5).
 
@@ -3264,12 +3365,16 @@ def copy_old_build_down(
         else ""
     )
     head = (
-        f"Its source folders and {_listed(names)} were put back, and the build from before "
-        "this update still did not come up"
+        f"{_listed(names)} were put back, and the build from before this rebuild still did "
+        "not come up"
+        if rebuild
+        else f"Its source folders and {_listed(names)} were put back, and the build from "
+        "before this update still did not come up"
     )
+    when = "before the database updates ran" if rebuild else "just before the new build started"
     kept = (
-        f"Every copy is kept: {_listed(copy.databases)} as they were just before the new build "
-        f"started are in {_in_backups(copy.files)}{left}.{earlier}"
+        f"Every copy is kept: {_listed(copy.databases)} as they were {when} are in "
+        f"{_in_backups(copy.files)}{left}.{earlier}"
     )
     if not_stopped is not None:
         return (
@@ -3364,6 +3469,40 @@ def remember_sources_off(server_dir: Path, rows: Sequence[tuple[str, Path, str]]
             logger.warning(f"could not remove {staged}: {also}")
         return f"warning: {path} could not be written ({exc}), so Start will not warn about it."
     return ""
+
+
+def rewrite_sources_off(
+    server_dir: Path, settled: Mapping[Path, str], rows: Sequence[tuple[str, Path, str]]
+) -> str:
+    """Drop the rows `settled` makes untrue, add `rows` (T680). "" once done, else why not.
+
+    `settled` is each folder put back, and the commit it was put back on: a row naming
+    that commit is true no longer (the folder is on it) and goes; a row naming another
+    commit -- a folder an earlier press left off its build, put back where it stood --
+    stays, as do the rows for every other folder. With no row left the record goes.
+    """
+    path = server_dir / SOURCES_OFF_FILE
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raw = {}
+    except (OSError, ValueError) as exc:
+        logger.warning(f"{path} could not be read ({exc}); writing it again from this press")
+        raw = {}
+    old = raw.get("sources") if isinstance(raw, dict) else None
+    on = {Path(dest): commit for dest, commit in settled.items()}
+    kept = [
+        (str(row.get("repo", "")), Path(str(row.get("dest", ""))), str(row.get("commit", "")))
+        for row in (old if isinstance(old, list) else [])
+        if isinstance(row, dict)
+        and on.get(Path(str(row.get("dest", "")))) != str(row.get("commit", ""))
+    ]
+    replaced = {dest for _repo, dest, _commit in rows}
+    kept = [row for row in kept if row[1] not in replaced]
+    if not kept and not rows:
+        forget_sources_off(server_dir)
+        return ""
+    return remember_sources_off(server_dir, [*kept, *rows])
 
 
 def forget_sources_off(server_dir: Path) -> None:
@@ -3907,6 +4046,12 @@ class _UpdateCopy:
     take_failed: bool = False
     put_failed: bool = False
     old_build_down: bool = False
+    rebuild: bool = False
+    """T706 round 2: a Rebuild's copy, taken before its database updates; said so."""
+    imported: bool = False
+    """The Rebuild's importer was started (T706 round 2): the database may have changed."""
+    started: bool = False
+    """The Rebuild's window was done, so the new build was started next (T706 round 2)."""
 
 
 REPAIR_FILES_LABEL = "Repair server files…"
@@ -4827,6 +4972,12 @@ class ServersDownWork:
     `database()`'s. None keeps the rollback's own sentence, with the servers as
     they are. Must not raise.
     """
+    lays_quietly: bool = False
+    """The Lua lay in this window says only what changed, as a plain Rebuild's does (T706)."""
+    whole: Callable[[], bool] = lambda: True
+    """Whether `database()`'s sentence leaves nothing of the press in the databases (T706
+    round 2): False for a Rebuild whose updates ran and had no copy to put back, so a Stop
+    is not read as a clean put-back."""
     finishes_start_refusal: bool = True
     """This work finishes what refuses a start, so `rebuild()` need not ask first (T217).
 
@@ -5774,6 +5925,12 @@ deliberately not a per-fork string: MySQL's own wording is what every core
 passes through, while `[1146]` is AzerothCore's prefix and Tortoise's `fatal`
 already spells it its own way.
 """
+
+MODULE_SQL_PRESS = "Apply module SQL"
+"""The Modules tab's button that runs the importer for the modules on disk, by its label.
+
+`controller_view.MODULE_SQL_BUTTON_LABEL` is the view's spelling of the same label;
+`test_rebuild_applies_module_sql` holds the two equal (T706)."""
 
 MODULE_SQL_HINT = (
     " That table is created by a module's db-world SQL, which has not been applied to this "
@@ -7030,6 +7187,7 @@ class StagedInstaller:
         reset_unfinished: docker.ResetUnfinished | None = None,
         seams: Seams | None = None,
         database_snapshot: snapshot.DatabaseSnapshot | None = None,
+        importer_modules: Callable[[Path], str] | None = None,
     ) -> None:
         self.entry = entry
         self.installers_root = (
@@ -7041,6 +7199,10 @@ class StagedInstaller:
         # T217: the update route's copy of the databases its new build can change,
         # supplied by the caller for `import_probe`'s reason (`install_wiring`).
         self._snapshot = database_snapshot
+        # T706: which modules a Rebuild's importer may update (the Modules tab's T78
+        # split), supplied by the caller for the same reason; None leaves it to the
+        # compose file.
+        self._importer_modules = importer_modules
         self._check_stage_tuple()
 
     # -- the family's contract -------------------------------------------
@@ -7112,6 +7274,25 @@ class StagedInstaller:
 
         Called by `stage_recreate()` after the stop and before the start, and by the
         update route's put-back with the old sources back. Nothing on the spine.
+        """
+        return iter(())
+
+    def imports_with_the_servers_down(self) -> bool:
+        """Does a plain Rebuild run this family's database importer before the new build (T706)?
+
+        False on the spine. The AzerothCore family's modules bring SQL only its importer
+        one-shot applies, and the world server never runs that one-shot itself, so a
+        Rebuild stops the servers in a call of its own and imports in that window.
+        """
+        return False
+
+    def import_with_the_servers_down(self, ctx: StageContext) -> Iterator[str]:
+        """Run what `imports_with_the_servers_down()` says, the servers stopped (T706).
+
+        Called by `stage_recreate()` on a plain Rebuild only, after the stop and before
+        the new build starts; never on a rollback, and never on the update route, whose
+        own `ServersDownWork.forward()` imports. A raise rolls the rebuild back.
+        Nothing on the spine.
         """
         return iter(())
 
@@ -7719,10 +7900,20 @@ class StagedInstaller:
         opts = options or InstallOptions()
         server_dir = self.server_dir(opts)
         if not update_phases(self.entry):
+            # T706: on a game whose modules' SQL an importer one-shot applies, the press
+            # that does apply it is named, so the refusal is not a dead end.
+            instead = (
+                f" Its modules' database updates are applied by “{MODULE_SQL_PRESS}” on the "
+                f"Modules tab with the server stopped, and by "
+                f"{server_build_presses.under_server_build(server_build_presses.REBUILD)} "
+                f"before the new build starts."
+                if self.entry.containers.db_import
+                else ""
+            )
             raise InstallerError(
                 f"{self.entry.name}'s install plan carries no phase meant to be re-applied to a "
                 f"server that already exists, so there is nothing for this to apply. Nothing was "
-                f"started. That is a fact about this game's plan, not about your install."
+                f"started. That is a fact about this game's plan, not about your install.{instead}"
             )
         yield f"Applying pending database updates for {self.entry.name} in {server_dir}"
         yield UPDATES_OPENING_NOTE
@@ -8711,6 +8902,8 @@ class StagedInstaller:
         # `before_replace` is its `before_signal`: past it, something may have
         # been touched; a Cancel before it leaves nothing touched.
         control = _stop_control(ctx, rollback=rollback)
+        # T706: a plain Rebuild of a family that imports hands its own window in
+        # (`_rebuild_import_work()`), so it takes the two calls too.
         stop_first = servers_down is not None or self.lays_scripts_with_the_servers_down(
             ctx.server_dir
         )
@@ -8752,7 +8945,9 @@ class StagedInstaller:
                 ) from exc
             # T562: the scripts the world reads at its start, laid now that nothing runs.
             # A `ScriptsPartlyLaid` from here is `rebuild()`'s to answer (T602).
-            yield from self.lay_scripts(ctx.server_dir, quiet=servers_down is None)
+            yield from self.lay_scripts(
+                ctx.server_dir, quiet=servers_down is None or servers_down.lays_quietly
+            )
             if servers_down is not None:
                 yield from servers_down.forward(ctx)
 
@@ -8857,9 +9052,23 @@ class StagedInstaller:
         is very probably what "i used the this thing to rebuild the server but
         nothing changes when i log back in" (2026-09-07) is a report of.
 
-        **What it deliberately does not do: SQL.** One press does the compile
-        and the restart, and touches no database. Three reasons, in the order
-        they decided it:
+        **SQL: the importer, and nothing else (T706).** A family that imports
+        through a one-shot (`imports_with_the_servers_down()`, AzerothCore) runs
+        it with the servers stopped, after the compile and before the new build
+        starts. Live on 2026-10-11 (v0.9.16, WotLK and Unbound) reason 3 below
+        was refuted: Install City Bots, then Rebuild, and the new world aborted
+        on `Table 'acore_world.city_bot_poi' doesn't exist`, because its world
+        server runs with `Updates.EnableDatabases` 0 and nothing else applies a
+        module's `db-world` files. The importer applies only what its own
+        `updates` table does not hold, the confirmation says so before the press
+        (`installer.rebuild_confirmation()`), and every other family still runs
+        no SQL. What follows is the decision as it stood until then, kept for
+        reasons 1 and 2, which still hold for every write other than the
+        importer's.
+
+        **What it deliberately did not do until T706: SQL.** One press did the
+        compile and the restart, and touched no database. Three reasons, in the
+        order they decided it:
 
         1. a database write behind a confirmation whose entire subject is a
            compile is a write nobody agreed to, and it would leave no way to ask
@@ -8974,8 +9183,27 @@ class StagedInstaller:
         # next build would compile something the user never confirmed.
         ground = self._recipe_ground(server_dir) if renders else {}
         yield f"Rebuilding {self.entry.name} in {server_dir}"
+        imports = servers_down is None and self.imports_with_the_servers_down()
+        # T706 round 2 (owner, 2026-10-11): a Rebuild that imports copies the databases
+        # first, with its servers down, and a rollback puts that copy back before the old
+        # build starts -- the update route's T217 pair. Its own window, handed only to the
+        # recreate and the rollback: every other `servers_down` question below is about
+        # the update route and is still asked of the parameter.
+        own_copy = (
+            _UpdateCopy(
+                names=self.snapshot_databases() if self._snapshot is not None else (),
+                not_copied=self.snapshot_left_out(),
+                rebuild=True,
+            )
+            if imports
+            else None
+        )
+        window = servers_down if own_copy is None else self._rebuild_import_work(own_copy)
         yield rebuild_opening_note(
-            renders_dockerfile=renders, parked=read_parked_build(server_dir) is not None
+            renders_dockerfile=renders,
+            parked=read_parked_build(server_dir) is not None,
+            imports=imports,
+            copies=bool(own_copy is not None and own_copy.names),
         )
         yield from unchecked
         self._check_cancel(cancel)
@@ -9069,7 +9297,7 @@ class StagedInstaller:
             # command where a failure read as a partial replacement.
             try:
                 yield from self.stage_recreate(
-                    stage_ctx, before_replace=mark_touched, servers_down=servers_down
+                    stage_ctx, before_replace=mark_touched, servers_down=window
                 )
             except ScriptsPartlyLaid:
                 # T602: the lay changed some scripts and then failed, so the folder holds a
@@ -9201,6 +9429,18 @@ class StagedInstaller:
                 remember_built_from(server_dir, compiled_from)
                 # The new build started: as a success, the stopped build's record goes.
                 also = self._forget_the_stopped_build(server_dir)
+                # T680 (L11): and so do the two start records, as on a success. Every tag
+                # names this build, it started, and it was made from the folders as they
+                # are: a refusal written for mixed tags, an untested build or old scripts,
+                # or a folder off an earlier build, is no longer true, and Start refused
+                # on it with a reason the player could not act on.
+                left = forget_owed_start(server_dir)
+                if left:
+                    also = f"{also} {left}"
+                forget_sources_off(server_dir)
+                if own_copy is not None:
+                    # T706 round 2: the new build stays, so its copy was not needed.
+                    also += self._copy_kept(own_copy)
                 kept_build = (
                     f"{exc} The build from this rebuild was KEPT and is what the containers "
                     f"are running: the compile finished and the server it made did start, so "
@@ -9233,7 +9473,7 @@ class StagedInstaller:
                 kept,
                 touched,
                 failure,
-                servers_down=servers_down,
+                servers_down=window,
                 press=press,
                 parking=parking,
                 # A touched press's build started, so an earlier stop's record no longer
@@ -9282,7 +9522,11 @@ class StagedInstaller:
                         mixed=message.mixed,
                     ),
                 ) from exc
-            if touched and isinstance(message, _PutBackWhole) and isinstance(exc, ReadyWaitStopped):
+            if (
+                touched
+                and isinstance(message, _PutBackWhole)
+                and isinstance(exc, ReadyWaitStopped | ImportWindowStopped)
+            ):
                 # The lead's ruling: Stop during the load, and a clean rollback.
                 raise StoppedAndPutBack(str(message), up=True) from exc
             if touched:
@@ -9367,8 +9611,11 @@ class StagedInstaller:
         remember_built_from(server_dir, compiled_from)
         if landed is not None:
             landed()
+        if own_copy is not None:
+            # T633's rule, on the Rebuild's own copy: older copies go only after a success.
+            self._forget_older_copies(server_dir, own_copy)
         yield from self.after_ready(server_dir)
-        yield REBUILD_CLOSING_NOTE
+        yield REBUILD_CLOSING_NOTE_IMPORTED if imports else REBUILD_CLOSING_NOTE
         yield f"{self.entry.name} was rebuilt and is running in {server_dir}"
 
     @_reserving_call(REMOVE_KEPT_BUILD_LABEL)
@@ -9775,6 +10022,8 @@ class StagedInstaller:
         route = "the return to the tested commit" if to_pin else "the update to the newest code"
         try:
             moved: list[tuple[EmulatorSource, Path, str]] = []
+            # T680 (L12): what an earlier press left off its build keeps its own row.
+            earlier = {row.dest: row for row in sources_still_off(server_dir)}
             try:
                 for source, dest, old in plan:
                     self._check_cancel(cancel)
@@ -9791,17 +10040,37 @@ class StagedInstaller:
                     # fail half way through, after the reset has already landed, and
                     # a source that is not in `moved` is a source nothing puts back.
                     moved.append((source, dest, old))
-                    yield from self._clone_lines(
-                        git.CloneSpec(
-                            url=source.url,
-                            dest=dest,
-                            branch=source.branch,
-                            sparse_path=source.sparse_path,
-                            depth=source.depth,
-                            rev=source.rev if to_pin else self._latest_rev(source, targets),
-                        ),
-                        UPDATE_SOURCES_STAGE,
-                    )
+                    try:
+                        yield from self._clone_lines(
+                            git.CloneSpec(
+                                url=source.url,
+                                dest=dest,
+                                branch=source.branch,
+                                sparse_path=source.sparse_path,
+                                depth=source.depth,
+                                rev=source.rev if to_pin else self._latest_rev(source, targets),
+                            ),
+                            UPDATE_SOURCES_STAGE,
+                        )
+                    finally:
+                        # T680 (L12, round 2): written however the fetch ended -- returned,
+                        # raised anything, or closed by a reader that went away -- since it
+                        # may have moved the folder before it ended. Not yielded here (a
+                        # closed generator may not yield); said below on the way on. The
+                        # one exit it cannot cover is the process killed inside the fetch.
+                        # A row for a folder still on its commit is true too: it refuses
+                        # nothing, and the next reading forgets it.
+                        warned = remember_sources_off(
+                            server_dir,
+                            [
+                                *((row.repo, row.dest, row.built) for row in earlier.values()),
+                                *((src.repo, d, o) for src, d, o in moved if d not in earlier),
+                            ],
+                        )
+                        if warned:
+                            logger.warning(warned)
+                    if warned:
+                        yield warned
                     yield self._moved_line(source, dest, old)
                 self._check_cancel(cancel)
                 # T179: the family reads what the move brought (TrinityCore's SQL
@@ -10002,6 +10271,8 @@ class StagedInstaller:
                     left_over = forget_owed_start(server_dir)
                     if left_over:
                         also += f" {left_over}"
+                # T680 (L12): the sources stay with the build the tags name, so none is off.
+                forget_sources_off(server_dir)
                 # T217: the database stays with the new build too; its copy is kept, and
                 # so are the older ones -- no build reported ready (live proof, item 5).
                 also += self._copy_kept(copy)
@@ -10332,12 +10603,16 @@ class StagedInstaller:
         `SOURCES_OFF_FILE` so every start is refused until they are back.
         """
         failed = yield from self._put_sources_back(moved)
-        if failed:
-            warned = remember_sources_off(
-                server_dir, [(source.repo, dest, old) for source, dest, old, _why in failed]
-            )
-            if warned:
-                yield warned
+        # T680 (L12): the rows the move wrote for these folders give way to what is true
+        # now -- a row for each folder that would not go back, none for one that did --
+        # and a row an earlier press left for another folder stays.
+        warned = rewrite_sources_off(
+            server_dir,
+            {dest: old for _source, dest, old in moved},
+            [(source.repo, dest, old) for source, dest, old, _why in failed],
+        )
+        if warned:
+            yield warned
         if not moved:
             return failed
 
@@ -10460,6 +10735,38 @@ class StagedInstaller:
             yield f"{source.repo} was put back on {old[:7]}."
         return failed
 
+    def _rebuild_import_work(self, copy: _UpdateCopy) -> ServersDownWork:
+        """A plain Rebuild's window when its family imports (T706, round 2 the owner's copy).
+
+        `forward()`: the copy of the databases the new build can change, then the importer
+        (`import_with_the_servers_down()`), servers down, before the new build starts.
+        `back()`: the copy put back before the old build starts again, so a failed import,
+        a world that never reports ready, or a Stop in this window leaves the old build on
+        the databases it knows. A copy that will not go back leaves the old build stopped
+        (`LeaveStopped`), the update route's rule (the owner's, 2026-10-04).
+        """
+
+        def forward(ctx: StageContext) -> Iterator[str]:
+            if copy.names:
+                yield from self._take_copy(ctx.server_dir, copy)
+            copy.imported = True
+            yield from self.import_with_the_servers_down(ctx)
+            copy.started = True
+
+        def back(ctx: StageContext) -> Iterator[str]:
+            yield from self._put_copy_back(ctx.server_dir, copy)
+
+        return ServersDownWork(
+            prepare=lambda: iter(()),
+            forward=forward,
+            back=back,
+            database=lambda: self._copy_database_sentence(copy),
+            did_not_come_back=lambda: self._old_build_down(copy),
+            finishes_start_refusal=False,
+            lays_quietly=True,
+            whole=lambda: copy.put is not None or not copy.imported,
+        )
+
     def _take_copy(self, server_dir: Path, copy: _UpdateCopy) -> Iterator[str]:
         """Copy the databases the new build can change; servers down, before it starts (T217).
 
@@ -10469,7 +10776,7 @@ class StagedInstaller:
         """
         if self._snapshot is None:
             return
-        yield copy_taking_line(copy.names)
+        yield copy_taking_line(copy.names, rebuild=copy.rebuild)
         try:
             copy.taken = self._snapshot.take(server_dir, copy.names)
         except (InstallerError, OSError) as exc:
@@ -10485,15 +10792,17 @@ class StagedInstaller:
         """
         if copy.taken is None or self._snapshot is None:
             return
-        yield copy_putting_back_line(copy.taken)
+        yield copy_putting_back_line(copy.taken, rebuild=copy.rebuild)
         try:
             copy.put = self._snapshot.put_back(server_dir, copy.taken)
         except snapshot.CopyNotUsable as exc:
             copy.put_failed = True
-            raise LeaveStopped(copy_not_usable(copy.taken, str(exc))) from exc
+            raise LeaveStopped(copy_not_usable(copy.taken, str(exc), rebuild=copy.rebuild)) from exc
         except (InstallerError, OSError) as exc:
             copy.put_failed = True
-            raise LeaveStopped(copy_not_put_back(copy.taken, str(exc))) from exc
+            raise LeaveStopped(
+                copy_not_put_back(copy.taken, str(exc), rebuild=copy.rebuild)
+            ) from exc
         yield copy_put_back_line(copy.put)
         # NOT forgotten here: the old build has not started yet, and until it reports
         # ready an older copy may be the only one that brings it back (live proof
@@ -10505,13 +10814,26 @@ class StagedInstaller:
         return f" {copy_kept_note(copy.taken)}" if copy.taken is not None else ""
 
     def _copy_database_sentence(self, copy: _UpdateCopy) -> str | None:
-        """What the rollback says about the database, or None for its own sentence (T217)."""
-        if not copy.names:
-            return None
+        """What the rollback says about the database, or None for its own sentence (T217).
+
+        A Rebuild's copy (T706 round 2) always answers: its new build may never have
+        started, and the rollback's own sentence is about what a new build wrote on its
+        first start.
+        """
+        if copy.rebuild and not copy.imported:
+            return REBUILD_NOTHING_CHANGED
         if copy.take_failed:
-            return COPY_NOT_TAKEN_DATABASE
+            return REBUILD_NOTHING_CHANGED if copy.rebuild else COPY_NOT_TAKEN_DATABASE
         if copy.put is not None:
-            return copy_put_back_database(copy.put, not_copied=copy.not_copied)
+            return copy_put_back_database(
+                copy.put, not_copied=copy.not_copied, rebuild=copy.rebuild
+            )
+        if copy.rebuild:
+            return (
+                REBUILD_UPDATES_AND_START_NOT_PUT_BACK
+                if copy.started
+                else (REBUILD_UPDATES_NOT_PUT_BACK)
+            )
         return None
 
     @staticmethod
@@ -10524,7 +10846,9 @@ class StagedInstaller:
         older = snapshot.older_copies(taken.directory, taken.files)
 
         def say(not_stopped: str | None) -> str:
-            return copy_old_build_down(taken, put, older=older, not_stopped=not_stopped)
+            return copy_old_build_down(
+                taken, put, older=older, not_stopped=not_stopped, rebuild=copy.rebuild
+            )
 
         return say
 
@@ -11025,7 +11349,7 @@ class StagedInstaller:
                 # new build), so the sentence says that instead of "NOT put back".
                 database = f"\n{put_back}"
                 stopped_database = database
-                whole = not back_failed
+                whole = not back_failed and servers_down.whole()
             database = f"{database}{back_failed}"
         # Asked on every rollback, not only the update route's (T197 fix round 8): a
         # Rebuild pressed to repair MIXED tags (`START_REFUSED_FILE`) keeps those mixed

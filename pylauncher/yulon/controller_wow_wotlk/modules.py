@@ -576,6 +576,20 @@ def apply_module_sql(
     return run
 
 
+def importer_modules(server_dir: Path, *, user_game: str = GAME) -> str:
+    """Which modules a Rebuild's importer may update (T706): this press's own split (T78).
+
+    `apply_module_sql()` hands the importer `module_sql_plan().allowed`, and a Rebuild
+    runs the same importer before its new build first starts, so it is handed the same
+    list: a module whose own SQL this app applied with its own client stays withheld
+    there too, rather than failing the import (and the rebuild) over a file the
+    updater has no ledger row for.
+    """
+    return module_sql_plan(
+        server_dir, _module_manifests(user_game), docker.module_dir_names(server_dir)
+    ).allowed
+
+
 def _module_manifests(user_game: str = GAME) -> tuple[Manifest, ...]:
     """Every module manifest this app knows, or none if the tree cannot be read.
 

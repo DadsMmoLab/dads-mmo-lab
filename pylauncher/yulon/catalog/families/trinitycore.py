@@ -354,6 +354,7 @@ class TrinityCoreInstaller(CmangosInstaller):
         seams: Seams | None = None,
         mmaps_runner: mmaps.Runner | None = None,
         database_snapshot: DatabaseSnapshot | None = None,
+        importer_modules: Callable[[Path], str] | None = None,
     ) -> None:
         """The spine's constructor, plus the Docker seam of the movement-map job (Task 4).
 
@@ -369,6 +370,7 @@ class TrinityCoreInstaller(CmangosInstaller):
             reset_unfinished=reset_unfinished,
             seams=seams,
             database_snapshot=database_snapshot,
+            importer_modules=importer_modules,
         )
         self._mmaps_runner = (
             mmaps_runner
