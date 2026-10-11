@@ -511,6 +511,9 @@ def _port_refusal(stderr: str) -> str | None:
         if match is None:
             continue
         why = match.group("why").lower()
+        if why == "port is already allocated":
+            # Linux Engine's word for a port another CONTAINER publishes (T671 cold review).
+            return another_server_sentence(int(match.group(1)))
         windows = "forbidden by its access permissions" in why
         kind: Literal["reserved", "in_use"] = (
             "reserved" if windows or "permission denied" in why else "in_use"
@@ -5728,6 +5731,18 @@ def blocked_port_sentence(
     return (
         f"This computer will not let a program use {named} (permission denied), so the "
         "server cannot start. Free the port or change what reserves it, then try again."
+    )
+
+
+def another_server_sentence(port: int) -> str:
+    """Plain words for a port another server's container publishes, Docker's own refusal (T671).
+
+    Start's check before anything starts names that server and offers to stop it; this
+    is the same collision met by compose itself (a server started in between).
+    """
+    return (
+        f"Another server on this computer already uses port {port}, so this server cannot "
+        "start. Stop that server first, or press Start again to be offered to stop it."
     )
 
 

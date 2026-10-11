@@ -278,9 +278,7 @@ _LINUX_CONTAINER_HOLDS_IT = (
 )
 
 
-@pytest.mark.parametrize(
-    ("stderr", "port"), [(_LINUX_PROGRAM_HOLDS_IT, 3724), (_LINUX_CONTAINER_HOLDS_IT, 3399)]
-)
+@pytest.mark.parametrize(("stderr", "port"), [(_LINUX_PROGRAM_HOLDS_IT, 3724)])
 def test_linux_engines_port_wording_is_said_in_plain_words(
     stderr: str, port: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -295,3 +293,81 @@ def test_linux_engines_port_wording_is_said_in_plain_words(
 
 def _fail(stderr: str) -> subprocess.CompletedProcess[str]:
     return subprocess.CompletedProcess([], 1, "", stderr)
+
+
+def test_a_port_another_container_holds_is_said_as_another_server_not_a_program(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Engine's "port is already allocated" is a container's: stop that server, not a program."""
+    monkeypatch.setattr(
+        docker,
+        "_docker",
+        lambda argv, cwd=None, timeout=None, **_kw: _fail(_LINUX_CONTAINER_HOLDS_IT),
+    )
+    with pytest.raises(docker.DockerRefusal) as caught:
+        docker._run(["compose", "up", "-d"], cwd=Path("."))
+    said = str(caught.value)
+    assert said == docker.another_server_sentence(3399)
+    assert "3399" in said and "server" in said and "program" not in said
+    assert caught.value.detail == _LINUX_CONTAINER_HOLDS_IT.strip()
+
+
+# --- a server inside a WSL distro: its loopback ports are the distro's, not this host's -------
+
+
+def _probe(
+    monkeypatch: pytest.MonkeyPatch, taken: set[int], *, publishers: object = None
+) -> list[int]:
+    asked: list[int] = []
+
+    def bind(host: str, port: int) -> platform.PortBind:
+        asked.append(port)
+        return platform.PortBind(host, port, "in_use" if port in taken else "free", "test")
+
+    def published(ports: object, **_kw: object) -> dict[int, tuple[str, ...]]:
+        if isinstance(publishers, Exception):
+            raise publishers
+        return {}
+
+    monkeypatch.setattr(controller_module, "bind_host_port", bind)
+    monkeypatch.setattr(controller_module, "_REBIND_PAUSE", 0.0)
+    monkeypatch.setattr(docker, "port_publishers", published)
+    monkeypatch.setattr(platform, "listening_program", lambda port, **_kw: "mysqld.exe")
+    return asked
+
+
+def test_a_wsl_servers_database_port_is_not_probed_on_the_windows_side(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A native Windows MySQL on 3306 never stopped a WSL server, whose db is distro loopback."""
+    asked = _probe(monkeypatch, {3306, 7878})
+    Controller(WOTLK.container_spec(), tmp_path, wsl_distro="Ubuntu").refuse_a_taken_port()
+    assert 3306 not in asked and 7878 not in asked
+    assert 3724 in asked and 8085 in asked, "the game ports are still this host's to check"
+
+
+def test_a_wsl_servers_game_port_taken_on_the_windows_side_still_refuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _probe(monkeypatch, {3724})
+    with pytest.raises(PortTaken) as caught:
+        Controller(WOTLK.container_spec(), tmp_path, wsl_distro="Ubuntu").refuse_a_taken_port()
+    assert "3724" in str(caught.value)
+
+
+def test_a_local_servers_database_port_is_probed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without a distro the database is published on this host's own loopback."""
+    _probe(monkeypatch, {3306})
+    with pytest.raises(PortTaken) as caught:
+        Controller(WOTLK.container_spec(), tmp_path).refuse_a_taken_port()
+    assert "3306" in str(caught.value) and "mysqld.exe" in str(caught.value)
+
+
+def test_a_docker_that_cannot_say_who_publishes_a_port_does_not_fail_the_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cannot tell is not a refusal, and not a Docker error on the Start line either."""
+    _probe(monkeypatch, {3724}, publishers=docker.DockerCommandError("docker ps exited 1"))
+    Controller(WOTLK.container_spec(), tmp_path).refuse_a_taken_port()

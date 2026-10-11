@@ -432,18 +432,31 @@ class Controller:
         alone (a foreign container was refused by name already). A refused port is
         bound once more after `_REBIND_PAUSE`. The sentence names the port, what it
         is for and, where the OS says, the program holding it.
+
+        A server inside a WSL distro publishes inside that distro: a loopback port
+        there (the database, SOAP, the channel) is the distro's own and is not this
+        host's to bind, so a Windows program on 3306 never stopped such a server and
+        is not asked about. Its auth and world ports, on every interface, still are
+        (cold review of T671). A Docker that cannot say who publishes a refused port
+        is "cannot tell": that port refuses nothing here, and compose says the rest.
         """
         windows = platform.detect() == "windows"
         published: dict[int, tuple[str, ...]] | None = None
         targets = self.host_ports()
+        if self.wsl_distro is not None:
+            targets = [t for t in targets if t[0] != preflight.LOOPBACK]
         for host, port, what in targets:
             got = bind_host_port(host, port)
             if got.status not in ("in_use", "reserved"):
                 continue
             if published is None:
-                published = docker.port_publishers(
-                    [p for _h, p, _w in targets], wsl_distro=self.wsl_distro
-                )
+                try:
+                    published = docker.port_publishers(
+                        [p for _h, p, _w in targets], wsl_distro=self.wsl_distro
+                    )
+                except docker.DockerCommandError as exc:
+                    logger.info(f"port check: cannot tell who holds {port}: {exc}")
+                    return
             if port in published:
                 continue
             time.sleep(_REBIND_PAUSE)
