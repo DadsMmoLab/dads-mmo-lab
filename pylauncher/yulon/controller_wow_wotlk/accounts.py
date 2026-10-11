@@ -68,11 +68,11 @@ password.
 from __future__ import annotations
 
 import hashlib
-import re
 import secrets
 from dataclasses import dataclass
 from typing import Literal, Protocol, get_args
 
+from yulon import account_rules
 from yulon.apply import ApplyError, DockerSql
 from yulon.controller_wow_wotlk import docker_ctl
 from yulon.log import get_logger
@@ -90,8 +90,8 @@ VERIFIER_LENGTH = 32  # SRP6.h VERIFIER_LENGTH
 
 # AccountMgr.h. Both are ceilings, not targets: AzerothCore refuses anything
 # LONGER, so a "stronger" 32-character password is rejected outright.
-MAX_USERNAME = 17  # MAX_ACCOUNT_STR
-MAX_PASSWORD = 16  # MAX_PASS_STR
+MAX_USERNAME = account_rules.NAME_MAX["azerothcore"]  # MAX_ACCOUNT_STR
+MAX_PASSWORD = account_rules.PASSWORD_MAX  # MAX_PASS_STR
 
 # AccountMgr.cpp passes sWorld's CONFIG_EXPANSION; 2 is WotLK, and is what the
 # server wrote in both observed rows. Written explicitly rather than left to the
@@ -109,13 +109,6 @@ NO_GM = 0
 MAX_GM_LEVEL = 3
 
 _ACCOUNTS_DB: Db = "auth"
-
-# AzerothCore itself only length-checks the name, but the client sends the
-# username in the logon packet and the realmlist/auth path treats it as a plain
-# token. Control characters and whitespace cannot be typed at a login box and
-# would produce an account nobody can sign in to, so they are refused here with
-# a sentence rather than written and discovered later.
-_USERNAME_OK = re.compile(r"\A[^\s\x00-\x1f\x7f]+\Z")
 
 
 class AccountError(RuntimeError):
@@ -451,7 +444,7 @@ def create_account(
             out of every statement but the first (review, 2026-08-23). Never
             contains the password.
     """
-    name = _checked_username(username)
+    name = _checked_username(username, scheme)
     if name.isdigit() and not names_are_names:
         raise AccountError(
             f"{name} is made only of digits, and this server's account commands read digits as "
@@ -867,33 +860,36 @@ def _query_rows(sql: SqlSeam, statement: str, what: str) -> list[str]:
     return [line.strip() for line in output.splitlines() if line.strip()]
 
 
-def _checked_username(username: str) -> str:
-    """The folded username, or `AccountError` explaining why it cannot be used."""
+def _checked_username(username: str, scheme: str | None = None) -> str:
+    """The folded username, or `AccountError` explaining why it cannot be used.
+
+    `account_rules.name_problem()` is the rule (T673): the characters the account
+    commands can carry, and `scheme`'s core's own longest name, so every account this
+    writes is one Delete, Set password and Set GM level can name afterwards. With no
+    `scheme` (a lookup, not a write) the longest any core takes.
+    """
     name = fold(username.strip())
     if not name:
         raise AccountError("the account name cannot be empty")
-    if len(name) > MAX_USERNAME:
-        raise AccountError(
-            f"the account name can be at most {MAX_USERNAME} characters, got {len(name)}"
-        )
-    if not _USERNAME_OK.match(name):
-        raise AccountError("the account name cannot contain spaces or control characters")
+    problem = account_rules.name_problem(name, scheme=scheme)
+    if problem:
+        raise AccountError(problem)
     return name
 
 
 def _check_password(password: str) -> None:
-    """Refuse a password AzerothCore would refuse — without naming it in the error.
+    """Refuse a password Set password could not set again — without naming it in the error.
 
-    The length is the only thing checked, because it is the only thing
-    `AccountMgr::CreateAccount()` checks. Note `MAX_PASS_STR` is a ceiling: a
-    longer password is rejected by the server, not truncated, so silently
-    letting one through here would write a verifier for a password the user can
-    never enter.
+    `account_rules.password_problem()` (T673): `MAX_PASS_STR` is a ceiling every core
+    shares (a longer password is rejected by the server, not truncated, so letting one
+    through would write a verifier for a password the user can never enter), and the
+    characters are the ones `account set password` can carry on its one line.
     """
     if not password:
         raise AccountError("the password cannot be empty")
-    if len(password) > MAX_PASSWORD:
-        raise AccountError(f"the password can be at most {MAX_PASSWORD} characters")
+    problem = account_rules.password_problem(password)
+    if problem:
+        raise AccountError(problem)
 
 
 def sql_for(db_root_password: str, container: str = docker_ctl.SPEC.db) -> SqlSeam:

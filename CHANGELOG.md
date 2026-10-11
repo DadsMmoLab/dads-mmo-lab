@@ -25,6 +25,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - **PLAY** after starting the server now waits for the realm to come up before it starts the game.
 - Install now asks before it starts or installs Docker Engine as root, and never installs a second engine over yours.
 - A full drive is now said right after you pick the server folder, and a wrong move file before any folder is asked.
+- The Accounts tab only creates names and passwords that Delete, Set password and GM level can use afterwards.
 
 ### Changed
 - The Server tab's **Play** now starts the game; **Launcher…** opens the launcher. The tray's **Play** starts a stopped server.

@@ -388,7 +388,7 @@ def test_the_accounts_tab_says_the_holders_sentence_alone_when_a_create_is_refus
     object.__setattr__(services, "create_account", refused)
     view = controller_view_module.ControllerView(CATALOG_WOTLK, services, status_poll_ms=0)
     view.account_name.setText("Pakka")
-    view.account_password.setText("pw")
+    view.account_password.setText("pw12")
     view.create_account()
     assert view.account_report.text() == HELD
     assert view.create_account_button.isEnabled()

@@ -24,7 +24,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from yulon import commands, passwordcheck
+from yulon import account_rules, commands, passwordcheck
 from yulon.actions import Outcome, ServerHold, holding, outcome_of
 from yulon.actions import send as _send
 from yulon.catalog.catalog import CatalogEntry
@@ -56,7 +56,7 @@ class Listing:
     problem: str = ""
 
 
-APP_PREFIX = "YULON_"
+APP_PREFIX = account_rules.RESERVED_PREFIX
 """The prefix every account this app makes for itself carries.
 
 The guard reads THIS and not one install's own name, because two installs can

@@ -302,14 +302,14 @@ def test_the_cap_is_the_callers_scale_when_the_tree_has_more_ranks() -> None:
     with a wider scale says so, and the writer writes the rank it asked for."""
     sql = _FakeSql()
     result = accounts.create_account(
-        sql, "gm", "hunter2", gm_level=4, scheme="mangos_sha", max_gm_level=4
+        sql, "gmo", "hunter2", gm_level=4, scheme="mangos_sha", max_gm_level=4
     )
     assert result.gm_level == 4
     grant = _one_statement(sql, "UPDATE account SET `rank`")
     assert "`rank` = 4" in grant
     with pytest.raises(accounts.AccountError, match="GM level"):
         accounts.create_account(
-            sql, "gm2", "hunter2", gm_level=5, scheme="mangos_sha", max_gm_level=4
+            sql, "gmo2", "hunter2", gm_level=5, scheme="mangos_sha", max_gm_level=4
         )
 
 
@@ -537,14 +537,14 @@ def test_an_empty_username_or_password_is_refused() -> None:
 
 def test_a_username_longer_than_the_server_accepts_is_refused() -> None:
     sql = _FakeSql()
-    with pytest.raises(accounts.AccountError, match="at most 17"):
+    with pytest.raises(accounts.AccountError, match="3 to 17 characters"):
         accounts.create_account(sql, "N" * (accounts.MAX_USERNAME + 1), PASSWORD)
 
 
 def test_a_username_with_whitespace_or_control_characters_is_refused() -> None:
     sql = _FakeSql()
     for bad in ["two words", "tab\there", "null\x00byte"]:
-        with pytest.raises(accounts.AccountError, match="spaces or control characters"):
+        with pytest.raises(accounts.AccountError, match="only letters A-Z, digits and _"):
             accounts.create_account(sql, bad, PASSWORD)
     assert sql.statements == []
 
@@ -554,13 +554,17 @@ def test_a_username_full_of_sql_cannot_break_out_of_the_statement() -> None:
 
     A quote-escaping scheme would be the thing that breaks here — and would also
     break under `NO_BACKSLASH_ESCAPES`, where a backslash stops being an escape.
+    Since T673 such a name is refused before any statement (`account_rules`); the
+    literal is still the hex one, for the names that pass.
     """
     sql = _FakeSql()
     injection = "x','',''),(1"
-    accounts.create_account(sql, injection, PASSWORD)
-    insert = _one_statement(sql, "INSERT INTO account (")
-    assert injection.upper() not in insert
-    assert f"X'{accounts.fold(injection).encode().hex().upper()}'" in insert
+    with pytest.raises(accounts.AccountError):
+        accounts.create_account(sql, injection, PASSWORD)
+    assert sql.statements == [] and sql.queries == []
+    literal = accounts._text_literal(accounts.fold(injection))
+    assert injection.upper() not in literal
+    assert f"X'{accounts.fold(injection).encode().hex().upper()}'" in literal
 
 
 def test_values_go_in_as_hex_literals_so_no_sql_mode_can_change_their_meaning() -> None:
@@ -693,13 +697,13 @@ def test_a_mangos_account_is_written_the_way_that_core_writes_it() -> None:
 def test_a_mangos_account_takes_its_gm_level_from_the_rank_column() -> None:
     """CMaNGOS-family cores have no `account_access`; the level is a column."""
     sql = _FakeSql()
-    result = accounts.create_account(sql, "gm", "hunter2", gm_level=3, scheme="mangos_sha")
+    result = accounts.create_account(sql, "gmo", "hunter2", gm_level=3, scheme="mangos_sha")
     assert result.gm_level == 3
     grant = _one_statement(sql, "UPDATE account SET `rank`")
     assert "`rank` = 3" in grant and f"WHERE id = {result.account_id}" in grant
 
     # `gm_level` is a floor on this scheme too: asking for less writes nothing.
-    again = accounts.create_account(sql, "gm", "hunter2", gm_level=1, scheme="mangos_sha")
+    again = accounts.create_account(sql, "gmo", "hunter2", gm_level=1, scheme="mangos_sha")
     assert again.created is False and again.gm_level == 3
     assert len([s for _, s in sql.statements if s.startswith("UPDATE account SET `rank`")]) == 1
 

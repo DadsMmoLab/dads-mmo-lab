@@ -27,7 +27,7 @@ The scheme is READ from `entry().accounts.scheme` rather than spelled here.
 The catalog field's own description says why that matters: getting it wrong
 does not fail loudly, it inserts a row that looks correct and can never log in.
 
-Two things this package has NOT verified for this core
+Two things this package had NOT verified for this core (the second since read)
 ------------------------------------------------------
 Neither is invented here — both are AzerothCore facts the shared writer
 applies to every scheme — and both are named so the next person does not read
@@ -42,11 +42,11 @@ them as measured:
    account exists and its GM level was never applied. That is a hole that
    announces itself rather than a silently wrong row, which is why it is
    documented instead of guarded by a guess.
-2. **The length ceilings.** `MAX_USERNAME` (17) and `MAX_PASSWORD` (16) are
-   AzerothCore's `MAX_ACCOUNT_STR`/`MAX_PASS_STR`, applied here to a core
-   whose own limits nobody in this repo has read. They are ceilings, so the
-   direction of a wrong value is: this app refuses a name or password the
-   server would have accepted. Never the reverse.
+2. **The length ceilings** -- read since (T673, 2026-10-11): mangos-classic
+   8ec338a1 takes names of up to 16 characters, one fewer than AzerothCore's
+   17, and passwords of up to 16. The shared writer applies this core's own
+   through `account_rules`; `MAX_USERNAME` re-exported below is still
+   AzerothCore's 17.
 """
 
 from __future__ import annotations
