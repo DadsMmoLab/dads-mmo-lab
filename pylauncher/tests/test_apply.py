@@ -8204,12 +8204,12 @@ def test_the_withheld_sentence_names_the_file_for_a_module_with_only_one_step(
 
 
 def test_every_shipped_db_import_step_names_a_directory_the_updater_actually_walks() -> None:
-    """A `db-import` step outside `IMPORTER_DB_DIRS` would be a promise nobody keeps.
+    """A `db-import` step outside the updater's folders would be a promise nobody keeps.
 
     The catalog's own data, not a fixture. `applied_by: "db-import"` means "this
-    app runs none of it, the core updater will" -- and the core updater walks
-    `data/sql/db-auth`, `data/sql/db-characters` and `data/sql/db-world` and
-    nothing else. A shipped manifest naming, say, `data/sql/playerbots/` as
+    app runs none of it, the core updater will" -- and the core updater walks the
+    folders under `data/sql/` whose name holds `auth`, `characters` or `world`
+    (`updater_walks()`) and nothing else. A shipped manifest naming, say, `data/sql/playerbots/` as
     db-import would leave that file applied by no route at all, which is exactly
     the trap City Bots' manifest avoids by declaring its roster `direct`.
     """
@@ -8219,8 +8219,8 @@ def test_every_shipped_db_import_step_names_a_directory_the_updater_actually_wal
         for step in manifest.sql:
             if step.applied_by != "db-import" or step.path is None:
                 continue
-            assert step.path.startswith(
-                apply_module.IMPORTER_SQL_DIRS
+            assert apply_module.updater_walks(
+                step.path
             ), f"{manifest.id} leaves {step.path} to the updater, which never walks it"
             checked += 1
     assert checked, "no shipped db-import step was examined, so this asserted nothing"

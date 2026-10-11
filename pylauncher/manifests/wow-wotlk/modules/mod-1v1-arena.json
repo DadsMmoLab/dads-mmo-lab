@@ -13,8 +13,8 @@
   },
   "sql": [
     {
-      "db": "characters",
-      "path": "data/sql/db-characters/*.sql",
+      "db": "world",
+      "path": "data/sql/db-world/base/*.sql",
       "applied_by": "db-import"
     }
   ],

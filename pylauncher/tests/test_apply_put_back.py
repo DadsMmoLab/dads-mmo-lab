@@ -727,7 +727,7 @@ def test_an_error_naming_only_a_module_that_was_not_updated_lists_the_waiting_up
 
     said = rig.applier.after_failed_build(("mod-never-updated",), lambda _id: other)
 
-    assert "mod-never-updated was not updated since your last build that worked" in said
+    assert "Yu'lon has no update of mod-never-updated to put back" in said
     assert f"updated since your last build that worked: {ITEM}." in said
     assert "choose Put back the last update" in said
     assert "does not say which module" not in said

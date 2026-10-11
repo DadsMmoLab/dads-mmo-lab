@@ -239,6 +239,7 @@ descriptions are written by hand.
 | `apply.py::_copy_unshared::os.replace` | **new (T181, Task 4)** `<name>.yulon-new` renamed over a hard-linked destination, which replaces the name in THIS folder and leaves the other folder's file (the user's own client) untouched | yes |
 | `apply.py::_copy_unshared::unlink` | **new (T181, Task 4)** that same `<name>.yulon-new` after a failed copy or rename; only the temporary name this call made | yes |
 | `apply.py::_conf::shutil.copy2` | a module's conf template into the server's etc | yes |
+| `apply.py::_set_an_earlier_conf_aside::os.replace` | **new (T689)** a module conf a FIRST install finds already there (an earlier install's), moved aside to `<name>.yulon-earlier` so the module's own template is activated | yes — the world reads module confs at its next start |
 | `apply.py::_comment_unreadable_lines::open(w)` | **new (T204)** the module conf `_conf` just activated, rewritten once in place with each line the server's reader refuses (not blank, not a `#` comment, no `=`, or an unclosed `[`) prefixed `# `, every other byte kept; written only when such a line exists, and only right after the `shutil.copy2` above created the file | yes — the file is new and the world reads it at its next start |
 | `apply.py::_deploy::replace` | a deployed file renamed onto its final name | yes |
 | `apply.py::_deploy::shutil.copy2` | one deployed module file into the server dir | yes |

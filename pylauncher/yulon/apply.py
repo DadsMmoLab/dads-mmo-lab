@@ -990,6 +990,10 @@ class ClientCopy:
         return out
 
 
+EARLIER_CONF_SUFFIX = ".yulon-earlier"
+"""Appended to a module `.conf` a FIRST install found already there (T689): AzerothCore loads
+module confs by their exact names, so the world never reads it, and its settings stay readable."""
+
 ASIDE_SUFFIX = ".yulon-module-old"
 """Appended to the name of a player's file a module's client file takes the place of.
 
@@ -4036,7 +4040,7 @@ class Applier:
                 # D5: a put-back runs no SQL, and its report says these were kept.
                 module_moves.mark_sql(self.server_dir, module_moves.key(manifest.type, manifest.id))
         self._check_hold()
-        self._conf(manifest, clone, vals, log)
+        self._conf(manifest, clone, vals, log, first=first)
         # Then the configure-time steps, as this item's first configure
         # (`_whens`): a value the person answered is written now, not left for
         # a `configure()` nothing calls. After `_conf()`, because a configure
@@ -4575,10 +4579,15 @@ class Applier:
             manifest = load(item_id)
             last = self.last_update(manifest) if manifest is not None else None
             if manifest is None or last is None:
+                # Not "was not updated since your last build that worked": a module
+                # installed since that build was never built at all (T689, City Bots).
+                # What is true either way: there is no update of it to put back, and
+                # Remove is the press that builds without it.
                 other.append(
-                    f"The build stopped on an error in {item_id}. {item_id} was not updated since "
-                    f"your last build that worked, so Yu'lon did not change it. Your server is "
-                    f"still running the build it had."
+                    f"The build stopped on an error in {item_id}. Yu'lon has no update of "
+                    f"{item_id} to put back, so it did not change it. Your server is still "
+                    f"running the build it had. To build without {item_id}, press Remove on its "
+                    f"row, then press {_REBUILD}."
                 )
                 continue
             if last.source != "ledger":
@@ -5974,14 +5983,22 @@ class Applier:
             files = sorted(base.glob(patch.file)) if _is_glob(patch.file) else [base / patch.file]
             spelled = _lua_spelling(manifest, vals) if patch.file.endswith(".lua") else vals
             replacement = _render(patch.replace, spelled, f"patch {patch.file}")
+            matched = False
             for path in files:
                 if patch.in_clone:
                     _look_again(clone, path.relative_to(clone).as_posix())
                 if not path.is_file():
                     raise ApplyError(f"patch target missing: {path}")
-                changed = _apply_patch(path, patch, replacement)
-                log.done.append(
-                    f"patch {_rel(base, path)} ({'changed' if changed else 'already applied'})"
+                outcome = _apply_patch(path, patch, replacement)
+                if outcome != "did not match":
+                    matched = True
+                    log.done.append(f"patch {_rel(base, path)} ({outcome})")
+            if not matched:
+                # T689: said, not logged as "already applied". A glob is one patch, so
+                # it is reported once, when no file it names held what it looks for.
+                log.skipped.append(
+                    f"patch {patch.file}: did not match, so this change of {manifest.name}'s "
+                    "was not made (the file may have changed upstream)"
                 )
 
     def _sql(
@@ -6777,11 +6794,25 @@ class Applier:
                 f"replaces its own rows, so a repeat repairs rather than duplicates."
             )
 
-    def _conf(self, manifest: Manifest, clone: Path, vals: Mapping[str, str], log: _Log) -> None:
+    def _conf(
+        self,
+        manifest: Manifest,
+        clone: Path,
+        vals: Mapping[str, str],
+        log: _Log,
+        *,
+        first: bool = False,
+    ) -> None:
         for conf in manifest.conf:
             if _is_glob(conf.file) or not conf.file.endswith(_CONF_KEY_WRITE_SUFFIXES):
                 continue  # Lua/DB-table "conf" is patched or prompted, not key-written
             target = self.server_dir / conf.file
+            if first and conf.template is not None and target.is_file():
+                _look_again(clone, conf.template)
+                template = clone / conf.template
+                # The template's own bytes are no earlier install's settings: kept.
+                if not (template.is_file() and template.read_bytes() == target.read_bytes()):
+                    self._set_an_earlier_conf_aside(manifest, conf.file, target, log)
             if conf.template is not None and not target.exists():
                 _look_again(clone, conf.template)
                 template = clone / conf.template
@@ -6828,6 +6859,38 @@ class Applier:
                 f"{conf.file} at its next start"
             )
             log.conf_restart = True
+
+    def _set_an_earlier_conf_aside(
+        self, manifest: Manifest, rel: str, target: Path, log: _Log
+    ) -> None:
+        """Move a conf a FIRST install finds in its place aside, so its own template is used (T689).
+
+        `_conf()` copies a template only where no file is, and Remove leaves the
+        activated conf (a world built with the module still reads it until the
+        Rebuild, T596). So the file a first install meets was an earlier install's:
+        AH Bot, Remove, AH Bot Plus ran Plus on AH Bot's 69-key `mod_ahbot.conf`,
+        without 443 of its 447 keys. Moved aside, never deleted: what the player
+        tuned stays readable beside it under a name the world does not load. Only a
+        first install (no checkout before this press): an Update or a reinstall over
+        the checkout keeps the conf it has, as it always did.
+        """
+        aside = target.with_name(target.name + EARLIER_CONF_SUFFIX)
+        number = 1
+        while os.path.lexists(aside):
+            aside = target.with_name(f"{target.name}{EARLIER_CONF_SUFFIX}.{number}")
+            number += 1
+        try:
+            os.replace(target, aside)
+        except OSError as exc:
+            log.skipped.append(
+                f"conf {rel}: an earlier install's file is there and could not be set aside "
+                f"({exc}), so {manifest.name} runs on it instead of its own"
+            )
+            return
+        log.done.append(
+            f"set aside {rel} as {aside.name}: an earlier install left it, so "
+            f"{manifest.name} starts from its own; your settings in it are kept there"
+        )
 
     def _client(self, manifest: Manifest, clone: Path, log: _Log) -> None:
         """Copy this manifest's `client` steps into the game client's own folders.
@@ -8557,16 +8620,22 @@ def _step_name(step: SqlStep) -> str:
     return f"sql {step.path or 'inline'} → {step.db}"
 
 
-def _apply_patch(path: Path, patch: Patch, replacement: str) -> bool:
+def _apply_patch(path: Path, patch: Patch, replacement: str) -> str:
+    """Apply one patch: "changed", "already applied" (it matched, nothing differs), or
+    "did not match" -- never the second for the third, which hid a patch that had stopped
+    matching upstream (T689: ActiveChat's `pcall(require, "data.context")`)."""
     text = path.read_text(encoding="utf-8")
     if patch.regex:
-        new = re.sub(patch.find, replacement, text, flags=re.MULTILINE)
+        new, count = re.subn(patch.find, replacement, text, flags=re.MULTILINE)
     else:
+        count = text.count(patch.find)
         new = text.replace(patch.find, replacement)
+    if not count:
+        return "did not match"
     if new == text:
-        return False
+        return "already applied"
     path.write_text(new, encoding="utf-8", newline="\n")
-    return True
+    return "changed"
 
 
 _KeyMode = Literal["replace", "append", "unchanged"]
@@ -8612,7 +8681,9 @@ def _set_conf_key(path: Path, key: str, value: str) -> _KeyMode:
     """
     text = path.read_text(encoding="utf-8")
     pattern = re.compile(rf"^[ \t]*{re.escape(key)}[ \t]*=.*$", re.MULTILINE)
-    new, count = pattern.subn(f"{key} = {value}", text, count=1)
+    # A function, not a template: the typed answer is text, and `re` reads a template's
+    # backslashes (`Welcome \o/` raised, a typed `\n` became a second line; T689).
+    new, count = pattern.subn(lambda _match: f"{key} = {value}", text, count=1)
     if count:
         if new == text:
             return "unchanged"
@@ -9533,17 +9604,21 @@ IMPORTER_SQL_ROOT = "data/sql/"
 `UpdateFetcher.cpp:159-186` joins every allowed module name onto
 `<source>/modules/<name>/data/sql/` and skips the ones that are not directories
 -- the reading recorded on `docker.ALL_MODULES`, measured live 2026-09-07. It is
-the ROOT and not the answer: what the updater opens under it is `IMPORTER_DB_DIRS`
-and nothing else.
+the ROOT and not the answer: what the updater opens under it is the folders
+`updater_walks()` names, and nothing else.
 """
 
-IMPORTER_DB_DIRS = ("db-auth", "db-characters", "db-world")
-"""The directories under `IMPORTER_SQL_ROOT` the core updater actually walks.
+IMPORTER_DB_NAMES = ("auth", "characters", "world")
+"""What the core updater looks for in the name of each folder under `IMPORTER_SQL_ROOT`.
 
-**One per database it loads, and that is the whole set.** `DBUpdater` runs once
-for each of the three `DatabaseLoader` pools and walks
-`<module>/data/sql/<that pool's directory>/` recursively -- `base/` and
-`updates/` alike, which is why this is a directory prefix and not a file list.
+**A folder whose name CONTAINS one is walked, recursively; no other is.** `DBUpdater`
+runs once for each of the three `DatabaseLoader` pools, and `UpdateFetcher.cpp:159-186`
+(read at 2a2211cd) keeps a folder under `<module>/data/sql/` when
+`dirName.find(_dbModuleName)` finds that pool's name: `db-world`, but also `world`
+(mod-individual-progression) and `db_world` (mod-mount-scaling). Until T689 this was
+the three exact names `db-auth`/`db-characters`/`db-world`, narrower than the rule, so
+a direct file under `data/sql/world/` would not have withheld its module. See
+`updater_walks()`.
 Evidence in this tree, none of it inferred:
 
 * `catalog/installers/wow-wotlk/native/base.yml.tmpl:163-164` mounts `./modules`
@@ -9570,8 +9645,16 @@ doesn't exist`, and the app's own remedy ("Press Apply module SQL") could not be
 followed by pressing the button it named.
 """
 
-IMPORTER_SQL_DIRS = tuple(f"{IMPORTER_SQL_ROOT}{name}/" for name in IMPORTER_DB_DIRS)
-"""`IMPORTER_DB_DIRS` as clone-relative prefixes, in manifest spelling (POSIX)."""
+
+def updater_walks(path: str) -> bool:
+    """Is clone-relative `path` in a folder the core updater walks (`IMPORTER_DB_NAMES`)?"""
+    parts = PurePosixPath(path).parts
+    return (
+        len(parts) >= 4
+        and "/".join(parts[:2]) + "/" == IMPORTER_SQL_ROOT
+        and any(name in parts[2] for name in IMPORTER_DB_NAMES)
+    )
+
 
 _APPLIED_UPDATE = re.compile(r"Applying update\s+[\"']?(\S+\.sql)")
 """The importer's own evidence that it applied a file.
@@ -9673,7 +9756,7 @@ def module_sql_plan(
     'acore_world.city_bot_poi' doesn't exist`, the app printed its own correct
     remedy ("Press Apply module SQL on the Modules tab, then Start"), and that
     button withheld `mod-city-bots`; the world restarted 18 times. A direct file
-    outside `IMPORTER_DB_DIRS` is now no reason to withhold anything, and a
+    outside `IMPORTER_DB_NAMES`' folders is now no reason to withhold anything, and a
     direct file inside one still withholds its module -- that is the only lever
     `AC_UPDATES_ALLOWED_MODULES` offers for a file the updater can see, and the
     module's db-import work is the price. `module_sql_report()` then says which
@@ -9754,13 +9837,13 @@ def _the_updater_would_find_it(path: str) -> bool:
     "direct"`): a db-import file under the same prefix is the updater's job and
     is no reason to withhold anything.
 
-    `IMPORTER_SQL_DIRS`, not `IMPORTER_SQL_ROOT`, and the difference is T78 round
+    `updater_walks()`, not `IMPORTER_SQL_ROOT`, and the difference is T78 round
     3. `data/sql/` is where the updater is POINTED; the three directories under
     it are what it walks. A direct file anywhere else under `data/sql/` --
     City Bots' `data/sql/playerbots/updates/2026_07_15_00_citizen_roster.sql` is
     the shipped one -- is as invisible to it as Battle Pass's `sql/`, so
     withholding a module over it takes that module's REAL db-import work down
-    with it and leaves the world unable to start. See `IMPORTER_DB_DIRS`.
+    with it and leaves the world unable to start. See `IMPORTER_DB_NAMES`.
 
     `.sql`, because the updater applies nothing else: `npc-teleporter` keeps two
     `data/sql/db-world/*.dist` files, which sit inside a walked directory and
@@ -9771,7 +9854,7 @@ def _the_updater_would_find_it(path: str) -> bool:
     updater on an install that still wants the module is a worse outcome than a
     skipped update.
     """
-    return path.endswith(".sql") and path.startswith(IMPORTER_SQL_DIRS)
+    return path.endswith(".sql") and updater_walks(path)
 
 
 def _blocking_files(plan: ModuleSqlPlan, module: str) -> tuple[str, ...]:
