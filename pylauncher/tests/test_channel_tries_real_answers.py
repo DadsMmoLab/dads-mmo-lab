@@ -93,6 +93,44 @@ def _reset_listener(port: int) -> Iterator[None]:
 
 
 @contextlib.contextmanager
+def _accepting_listener(port: int, *, reply: bool) -> Iterator[None]:
+    """Accepts and reads the request. `reply=False` never answers; True hangs up politely."""
+    server = socket.socket()
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(("127.0.0.1", port))
+    server.listen(8)
+    stop = threading.Event()
+    held: list[socket.socket] = []
+
+    def run() -> None:
+        server.settimeout(0.1)
+        while not stop.is_set():
+            try:
+                conn, _ = server.accept()
+            except OSError:
+                continue
+            conn.settimeout(0.1)
+            with contextlib.suppress(OSError):
+                while conn.recv(65536):  # the whole request, or the close would reset
+                    pass
+            if reply:
+                conn.close()  # a clean FIN with no HTTP: CMaNGOS's refusal
+            else:
+                held.append(conn)
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join()
+        for conn in held:
+            conn.close()
+        server.close()
+
+
+@contextlib.contextmanager
 def _http_world(port: int, auth: _Auth, *, accept: bool, blank: bool = False) -> Iterator[None]:
     """A SOAP listener: 401 for a wrong pair (or always, `accept=False`), else 200 under urn:AC.
 
@@ -148,7 +186,7 @@ def _launch(tmp_path: Path, auth: _Auth, port: int) -> setup.InstallChannel:
         channel_for=lambda endpoint: channel_module.SoapChannel(
             endpoint=dataclasses.replace(endpoint, port=port),
             state_of=lambda: docker.ContainerState(status="running"),
-            send=lambda ep, cmd, *, timeout: soap.execute(ep, cmd, timeout=2.0),
+            send=lambda ep, cmd, *, timeout: soap.execute(ep, cmd, timeout=0.3),
         ),
         config_dir=tmp_path / "config",
     )
@@ -216,3 +254,21 @@ def test_install_off_then_turn_on_then_a_late_start_is_verified(tmp_path: Path) 
         state = channel.settle()
     assert isinstance(state, setup.Verified), state
     assert auth.creates == [ACCOUNT]
+
+
+def test_a_listener_that_accepts_and_never_replies_gives_up_after_three(tmp_path: Path) -> None:
+    port = _free_port()
+    channel = _launch(tmp_path, _Auth(), port)
+    with _accepting_listener(port, reply=False):
+        assert _tries(channel.settle()) == 1
+        assert _tries(channel.settle()) == 2
+        assert isinstance(channel.settle(), setup.GaveUp)
+
+
+def test_a_cmangos_style_silent_hang_up_gives_up_after_three(tmp_path: Path) -> None:
+    port = _free_port()
+    channel = _launch(tmp_path, _Auth(), port)
+    with _accepting_listener(port, reply=True):
+        assert _tries(channel.settle()) == 1
+        assert _tries(channel.settle()) == 2
+        assert isinstance(channel.settle(), setup.GaveUp)

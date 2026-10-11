@@ -75,12 +75,12 @@ class Answer:
     """
 
     reached: bool = True
-    """False when the request never got an HTTP reply from the world (T723).
+    """False only when nothing was listening: the connect was refused or reset (T723).
 
-    Refused, reset, timed out and "took it and hung up" all leave this False: the
-    world has said nothing, so the setup must not count the ask as one of its
-    proving tries. Every answer with a status line, whatever the status, is True,
-    as is every answer from a transport that has no such distinction.
+    Such an ask never reached the world, so the setup does not count it as one
+    of its proving tries. A timeout and a "took it and hung up" DO reach it (a
+    listener accepted; on CMaNGOS the second is what a refusal looks like), so
+    they stay counted and a channel that never answers still gives up.
     """
 
     @property
@@ -241,7 +241,6 @@ class SoapChannel:
                     "command may have run."
                 ),
                 indeterminate=True,
-                reached=False,
             )
         if reply.outcome == "unreadable":
             # A whole HTTP reply came back, so something IS listening, and the
@@ -262,7 +261,7 @@ class SoapChannel:
             reply.text,
             reason=self._why(reply.outcome),
             indeterminate=reply.outcome == "timeout",
-            reached=False,
+            reached=reply.outcome != "unreachable",
         )
 
     def _why(self, outcome: str) -> str:
