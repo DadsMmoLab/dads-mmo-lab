@@ -316,6 +316,8 @@ class _MaintenanceSnapshot:
                         wsl_distro=self.wsl_distro,
                         safety_label=ROLLBACK_SAFETY_LABEL,
                         before_load=partial(_drop_what_the_copy_lacks, mysql, tables),
+                        # T712 round 3: "no import record" is applied by the last file only.
+                        last_of_a_copy=path == snapshot.files[-1],
                     )
                     restored.extend(report.databases)
                     safety.extend(report.safety_backup)

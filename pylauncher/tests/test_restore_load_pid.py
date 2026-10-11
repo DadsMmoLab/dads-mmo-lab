@@ -495,3 +495,48 @@ def test_stop_then_quit_asks_every_question_before_any_stop_begins(
     else:
         assert len(a_jobs) == 1 and len(b_jobs) == 1 and told == []
         assert stopping == [a_view, b_view]
+
+
+def test_stop_then_quit_looks_again_after_the_questions(
+    qapp: object, tmp_path: Path, live_child: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 3 N4: the questions run their own event loops; a job that began on A meanwhile
+    greys its Stop. Nothing is stopped and the tray says why. Mutation: no second look."""
+    from tests.test_teardown_guard import _view
+    from tests.test_tray import FakeTrayIcon, FakeWindow
+    from yulon.ui import controller_view as controller_view_module
+    from yulon.ui.tray import YulonTray
+
+    a_view, _f, _ = _view(tmp_path, "a")
+    b_dir = tmp_path / "b-record"
+    _marker_with(b_dir, live_child.pid)
+    b_view, _f2, _ = _view(tmp_path, "b")
+    a_view.services.interrupted_restore = lambda: None  # type: ignore[method-assign,assignment]
+    b_view.services.interrupted_restore = lambda: interrupted_restore(b_dir)  # type: ignore[method-assign,assignment]
+    jobs: list[Any] = []
+    a_view._run = lambda *args, **_kw: jobs.append(args)  # type: ignore[method-assign]
+    b_view._run = lambda *args, **_kw: jobs.append(args)  # type: ignore[method-assign]
+    for view in (a_view, b_view):
+        view.stop_button.setEnabled(True)
+
+    def ask(*_a: Any, **_kw: Any) -> Any:
+        a_view.stop_button.setEnabled(False)  # something began on A under the question
+        return "yes"
+
+    monkeypatch.setattr(controller_view_module, "_ask_with", ask)
+    window = FakeWindow()
+    window.yulon_controllers.extend([a_view, b_view])
+    tray = YulonTray(window, icon_factory=FakeTrayIcon, available=lambda: True)
+    told: list[tuple[str, str]] = []
+    tray.tell = lambda title, text: told.append((title, text))  # type: ignore[method-assign]
+    tray.quit = lambda: True  # type: ignore[method-assign]
+
+    tray.stop_then_quit([a_view, b_view])
+    stopping = list(tray._stopping)
+    tray._stop_waiting_to_quit()
+    a_view.shutdown()
+    b_view.shutdown()
+    window.deleteLater()
+
+    assert jobs == [] and stopping == []
+    assert len(told) == 1 and "cannot be stopped right now" in told[0][1], told

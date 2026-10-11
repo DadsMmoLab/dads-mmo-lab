@@ -945,16 +945,7 @@ class YulonTray(QObject):
         the tab's own reason, rather than quitting with it still up.
         """
         titles = dict(zip(self.views(), server_titles(self.views()), strict=True))
-        blocked = [view for view in running if not view.stop_button.isEnabled()]
-        if blocked:
-            view = blocked[0]
-            why = view.stop_button.toolTip() or "it is busy"
-            self.tell(
-                "Yu'lon cannot stop that server yet",
-                f"{titles.get(view, view.entry.name)} cannot be stopped right now: {why}\n\n"
-                "Yu'lon has not quit. Try again when it has finished.",
-            )
-            self.open_window()
+        if self._a_stop_is_greyed(running, titles):
             return
         # T711 review round 2: every tab's own question first (a restore still loading
         # there), before any Stop begins or any wait is wired: a modal question runs its own
@@ -971,6 +962,8 @@ class YulonTray(QObject):
                 "stopped and Yu'lon stays open. Quit Yu'lon… asks again.",
             )
             return
+        if self._a_stop_is_greyed(running, titles):
+            return  # round 3 N4: the questions' event loops may have let a job begin
         self.open_window()
         self._stopping = list(running)
         for view in running:
@@ -989,6 +982,21 @@ class YulonTray(QObject):
             self._stop_deadline.timeout.connect(self._stop_wait_expired)
         self._stop_deadline.start()
         self._a_stop_moved("")
+
+    def _a_stop_is_greyed(self, running: Sequence[Any], titles: dict[Any, str]) -> bool:
+        """Say so and True when a server's Stop is greyed (another job of its tab runs)."""
+        blocked = [view for view in running if not view.stop_button.isEnabled()]
+        if not blocked:
+            return False
+        view = blocked[0]
+        why = view.stop_button.toolTip() or "it is busy"
+        self.tell(
+            "Yu'lon cannot stop that server yet",
+            f"{titles.get(view, view.entry.name)} cannot be stopped right now: {why}\n\n"
+            "Yu'lon has not quit. Try again when it has finished.",
+        )
+        self.open_window()
+        return True
 
     @Slot(str)
     def _a_stop_moved(self, _status: str) -> None:
