@@ -6,11 +6,13 @@ import json
 from fnmatch import fnmatchcase
 from pathlib import Path, PurePosixPath
 
+import pytest
+
 from tests.test_apply import AHBOT_DIST, LUA, _FakeGit, _FakeReader, _have_requirements, _shipped
 from tests.test_apply_put_back import _manifest
 from tests.test_tbc_modules import _RecordingSql, _server_dir_with_conf
 from yulon import apply as apply_module
-from yulon.apply import Applier
+from yulon.apply import Applier, ApplyError, ApplyRefusal, _set_conf_key
 from yulon.controller_wow_tbc import modules as tbc_modules
 from yulon.controller_wow_wotlk import modules as wotlk_modules
 from yulon.manifest import parse_manifest
@@ -226,3 +228,65 @@ def test_a_direct_file_in_a_world_folder_withholds_its_module(tmp_path: Path) ->
     plan = apply_module.module_sql_plan(tmp_path, [m], ["mod-w"])
 
     assert plan.withheld == ("mod-w",)
+
+
+# ---------------------------------------------------------------- review round 2
+
+
+def test_a_failed_build_in_a_folder_no_manifest_describes_says_what_to_do(
+    tmp_path: Path,
+) -> None:
+    """A module folder put in by hand has no row on the Modules tab to press Remove on."""
+    said = Applier(tmp_path).after_failed_build(("mod-by-hand",), lambda _id: None)
+
+    assert "press Remove" not in said
+    assert "move the folder modules/mod-by-hand out of your server folder" in said
+
+
+def test_a_real_line_break_in_a_typed_answer_is_refused_and_writes_nothing(
+    tmp_path: Path,
+) -> None:
+    server_dir = _server_dir_with_conf(tmp_path)
+    before = (server_dir / "etc" / "mangosd.conf").read_text(encoding="utf-8")
+    manifest = tbc_modules.store().load("mod", "motd")
+
+    with pytest.raises(ApplyError):
+        Applier(server_dir, sql=_RecordingSql()).install(
+            manifest, {"motd": "Hi\nRate.XP.Kill = 50"}
+        )
+
+    assert (server_dir / "etc" / "mangosd.conf").read_text(encoding="utf-8") == before
+
+
+def test_the_conf_writer_itself_refuses_a_line_break(tmp_path: Path) -> None:
+    """Belt for a value no question checked (a catalog default, a rendered template)."""
+    conf = tmp_path / "x.conf"
+    conf.write_text('Motd = "x"\n', encoding="utf-8")
+
+    with pytest.raises(ApplyRefusal):
+        _set_conf_key(conf, "Motd", '"Hi\nRate.XP.Kill = 50"')
+
+    assert conf.read_text(encoding="utf-8") == 'Motd = "x"\n'
+
+
+def test_remove_and_install_of_the_same_module_keeps_the_players_tuned_conf(
+    tmp_path: Path,
+) -> None:
+    git = _FakeGit({"conf/mod_ahbot.conf.dist": AHBOT_DIST})
+    applier = Applier(tmp_path, git=git, sql=_FakeReader(rows="Ahbot\n"))
+    answers = {"bot_guid": "42", "bot_account": "7"}
+    applier.install(_shipped("mod-ah-bot"), answers)
+    conf = tmp_path / "env/dist/etc/modules/mod_ahbot.conf"
+    conf.write_text(conf.read_text(encoding="utf-8") + "# tuned by hand\n", encoding="utf-8")
+    applier.remove(_shipped("mod-ah-bot"))
+
+    applier.install(_shipped("mod-ah-bot"), answers)
+
+    assert "# tuned by hand" in conf.read_text(encoding="utf-8")
+    assert not conf.with_name(conf.name + apply_module.EARLIER_CONF_SUFFIX).exists()
+
+
+def test_a_question_s_check_refuses_a_line_break_before_anything_runs() -> None:
+    """The dialog's own check (and the applier's `_check_values`) says it under the box."""
+    prompt = tbc_modules.store().load("mod", "motd").prompts[0]
+    assert apply_module.check_answer(prompt, "Hi\nRate.XP.Kill = 50") != ""

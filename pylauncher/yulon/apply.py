@@ -3337,6 +3337,8 @@ def check_answer(prompt: Prompt, value: str) -> str:
     text = value.strip()
     if not text:
         return "this cannot be left empty"
+    if "\n" in value or "\r" in value:
+        return "this must be typed on one line"
     if prompt.kind == "character":
         # T637: a GUID (or an account id) is a uint32, and a list is those joined by commas,
         # typed as the server reads them. Every piece is held to the `int` rule.
@@ -4610,7 +4612,17 @@ class Applier:
         for item_id in named:
             manifest = load(item_id)
             last = self.last_update(manifest) if manifest is not None else None
-            if manifest is None or last is None:
+            if manifest is None:
+                # No manifest: a folder put into modules/ by hand, with no Modules-tab
+                # row to press Remove on (review round 2).
+                other.append(
+                    f"The build stopped on an error in {item_id}. Yu'lon did not install "
+                    f"{item_id}, so it did not change it. Your server is still running the "
+                    f"build it had. To build without it, move the folder modules/{item_id} out "
+                    f"of your server folder, then press {_REBUILD}."
+                )
+                continue
+            if last is None:
                 # Not "was not updated since your last build that worked": a module
                 # installed since that build was never built at all (T689, City Bots).
                 # What is true either way: there is no update of it to put back, and
@@ -7205,8 +7217,11 @@ class Applier:
             if first and conf.template is not None and target.is_file():
                 _look_again(clone, conf.template)
                 template = clone / conf.template
-                # The template's own bytes are no earlier install's settings: kept.
-                if not (template.is_file() and template.read_bytes() == target.read_bytes()):
+                # A conf written for this module -- every key its own template sets is
+                # there, as after a Remove and Install of the same module -- keeps the
+                # player's settings in effect (review round 2). Another module's (AH Bot's
+                # under AH Bot Plus) goes aside.
+                if not (template.is_file() and _conf_written_from(target, template)):
                     self._set_an_earlier_conf_aside(manifest, conf.file, target, log)
             if conf.template is not None and not target.exists():
                 _look_again(clone, conf.template)
@@ -9064,6 +9079,22 @@ def _comment_unreadable_lines(path: Path) -> None:
     )
 
 
+_CONF_KEY = re.compile(r"^[ \t]*([A-Za-z0-9_.\-]+)[ \t]*=", re.MULTILINE)
+
+
+def _conf_written_from(conf: Path, template: Path) -> bool:
+    """Does `conf` set every key `template` sets? Then an install of this module wrote it.
+
+    Unreadable either way reads as "no": the conf then goes aside, never deleted.
+    """
+    try:
+        have = set(_CONF_KEY.findall(conf.read_text(encoding="utf-8")))
+        want = set(_CONF_KEY.findall(template.read_text(encoding="utf-8")))
+    except (OSError, UnicodeDecodeError):
+        return False
+    return want <= have
+
+
 def _set_conf_key(path: Path, key: str, value: str) -> _KeyMode:
     """Set `key = value` in a worldserver-style conf: replace the line, append it, or —
 
@@ -9074,6 +9105,12 @@ def _set_conf_key(path: Path, key: str, value: str) -> _KeyMode:
     text` is that no-op, caught before the write rather than after: nothing on disk
     changes, and the caller sees `"unchanged"` rather than `"replace"`.
     """
+    if "\n" in value or "\r" in value:
+        # One key, one line: a line break would write a second key (review round 2).
+        raise ApplyRefusal(
+            f"The value for {key} has a line break in it, and a setting is one line. "
+            "Type it on one line, then try again. Nothing was written."
+        )
     text = path.read_text(encoding="utf-8")
     pattern = re.compile(rf"^[ \t]*{re.escape(key)}[ \t]*=.*$", re.MULTILINE)
     # A function, not a template: the typed answer is text, and `re` reads a template's
