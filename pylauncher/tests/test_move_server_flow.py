@@ -1333,6 +1333,25 @@ def test_a_server_with_the_ah_bot_is_moved_in_although_its_characters_load_last(
     assert "AuctionHouseBot.GUID = 42\n" in conf.read_text(encoding="utf-8")
 
 
+def test_the_move_in_says_the_skipped_check_is_never_made_and_what_to_check_after(
+    tmp_path: Path,
+) -> None:
+    """The skipped line must not promise a later check nothing makes (T679 review).
+
+    The move never asks the question again once the characters are in, so "not checked
+    yet" was a promise with nothing behind it. The line says it is not checked, that
+    nothing checks it later, and what the player looks at after the move.
+    """
+    mv, _ = ahbot_move(tmp_path)
+    lines = mv.run()
+    shown = [line for line in lines if line.startswith("  skipped: bot_guid=42: ")]
+    assert len(shown) == 1, lines
+    said = shown[0].removeprefix("  skipped: bot_guid=42: ")
+    assert " yet" not in said, said
+    assert "nothing checks it later" in said, said
+    assert "Characters tab" in said, said
+
+
 def test_the_same_server_is_refused_when_the_check_is_not_deferred(tmp_path: Path) -> None:
     """The fixture is honest: ask the question in this order and it does refuse, by name."""
     mv, real = ahbot_move(tmp_path)

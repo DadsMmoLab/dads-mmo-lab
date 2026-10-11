@@ -699,10 +699,15 @@ class ApplyRefusal(ApplyError, SaidByYulon):
 
 
 DEFERRED_EXISTS_NOTE = (
-    "not checked against the database yet: on a move to this computer the characters are put "
-    "in after the modules, and this answer is the one the old server already used"
+    "not checked against the database, and nothing checks it later: on a move to this "
+    "computer the modules go in before the old server's characters. It is the answer the old "
+    "server used; after the move, make sure the character it names is on the Characters tab, "
+    "or the module will do nothing"
 )
-"""What a move-in's module install says in place of the does-it-exist check (T679)."""
+"""What a move-in's module install says in place of the does-it-exist check (T679).
+
+No step re-asks the question once the data is in, so the note promises no later check:
+it says what was skipped and what the player looks at after the move."""
 
 _STARTED_DB_LINE = "started the database alone; the world server was left stopped"
 
