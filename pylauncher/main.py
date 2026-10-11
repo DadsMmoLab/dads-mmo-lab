@@ -2362,9 +2362,9 @@ def provision_headless() -> int:
       2  not ready, and what remains needs a human
 
     On Linux, 2 is the *expected* outcome rather than a fault: there is nobody
-    here to ask about joining the docker group, and the app never makes a
-    root-equivalent change with nobody asked, so the engine is installed and
-    the one step only the user may take is printed for them to run.
+    here to ask, and the app never runs anything as root with nobody asked (T700),
+    so nothing is installed or started and the commands are printed for the user
+    to run.
     """
     # The same defect's other half: the human-readable lines below put that same
     # step text through `logging`, and a cp1252 stream cannot encode it either.

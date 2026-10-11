@@ -6976,7 +6976,9 @@ def early_refusal(entry: CatalogEntry, server_dir: Path) -> str | None:
     already carries an install record is left to the full preflight: a resume owes less
     than a fresh install (`_spent()`), and refusing it here would be refusing it wrongly.
     """
-    if (server_dir / STATE_FILE).exists():
+    if (server_dir / STATE_FILE).exists() or (server_dir / MOVE_IN_FILE).exists():
+        # A move in progress is told "A move that did not finish" by the view, which is the
+        # more useful sentence for that folder.
         return None
     here = platform.detect()
     return preflight.early_space_refusal(

@@ -1954,8 +1954,8 @@ DOCKER_GROUP_QUESTION = (
     "\n"
     "If you say yes: you'll need to log out and back in once before it takes effect, "
     "then click Install again.\n"
-    "If you say no: Yu'lon still installs Docker Engine, but it runs docker directly "
-    "(never through sudo), so it cannot install or manage a server here until you join "
+    "If you say no: Docker Engine is still set up as you agreed, but Yu'lon runs docker "
+    "directly (never through sudo), so it cannot install or manage a server here until you join "
     "the group yourself: sudo usermod -aG docker {user}, then log out and back in.\n"
     "\n"
     "Yu'lon never creates passwordless sudo rules and never changes the docker socket's "
@@ -1986,15 +1986,14 @@ DOCKER_START_QUESTION = (
 )
 """Asked before the first root command, on passwordless sudo too (T700)."""
 
-DOCKER_DESKTOP_START_QUESTION = (
-    "Docker Desktop is installed on this computer but is not running, and your servers need "
-    "it.\n"
+DOCKER_USER_START_QUESTION = (
+    "{label} is installed on this computer but is not running, and your servers need it.\n"
     "\n"
     "Yu'lon can start it now with this command, which runs as you and installs nothing:\n"
     "\n"
     "{commands}\n"
     "\n"
-    "Start Docker Desktop now? (y/n): "
+    "Start {label} now? (y/n): "
 )
 
 DOCKER_INSTALL_QUESTION = (
@@ -2453,15 +2452,16 @@ def docker_engine_commands(pm: PackageManager, *, steamos: bool) -> list[list[st
     return [*install, ["systemctl", "enable", "--now", "docker"]]
 
 
-DockerOnBoard = Literal["service", "desktop", "other", "none"]
+DockerOnBoard = Literal["service", "snap", "rootless", "desktop", "other", "none"]
 """Which Docker, if any, is already on this Linux machine (T700).
 
 `service` is an engine with a systemd unit (docker-ce, docker.io, moby): starting it
-is a root `systemctl start`. `desktop` is Docker Desktop for Linux, a per-user
-service. `other` is a `docker` or `dockerd` program with no unit that Yu'lon knows how
-to start (snap, a static install, a bare client). `none` is nothing at all, and is the
-ONLY answer on which a package install may be offered: a second engine on top of an
-installed one is how `apt-get install docker.io` came to be tried over docker-ce.
+is a root `systemctl start`. `snap` is the snap package (root `snap start docker`).
+`rootless` is a per-user engine and `desktop` is Docker Desktop for Linux: both start
+as the user, with no root. `other` is a `docker` or `dockerd` program that Yu'lon does
+not know how to start (a static install, a bare client). `none` is nothing at all, and
+is the ONLY answer on which a package install may be offered: a second engine on top of
+an installed one is how `apt-get install docker.io` came to be tried over docker-ce.
 """
 
 _SYSTEMD_UNIT_DIRS = (
@@ -2471,6 +2471,7 @@ _SYSTEMD_UNIT_DIRS = (
     "/lib/systemd/system",
 )
 _DOCKER_UNITS = ("docker.service", "docker.socket")
+_SNAP_UNIT = "snap.docker.dockerd.service"
 
 
 def _docker_service_installed() -> bool:
@@ -2482,6 +2483,19 @@ def _docker_service_installed() -> bool:
     return any(Path(d, unit).exists() for d in _SYSTEMD_UNIT_DIRS for unit in _DOCKER_UNITS)
 
 
+def _docker_snap_paths() -> tuple[Path, ...]:
+    """What the snap package of Docker leaves: its program and its system unit."""
+    return (Path("/snap/bin/docker"), *(Path(d, _SNAP_UNIT) for d in _SYSTEMD_UNIT_DIRS))
+
+
+def _docker_rootless_paths() -> tuple[Path, ...]:
+    """A per-user Docker engine's unit (`dockerd-rootless-setuptool.sh install` writes it)."""
+    return (
+        Path.home() / ".config" / "systemd" / "user" / "docker.service",
+        Path("/usr/lib/systemd/user/docker.service"),
+    )
+
+
 def _docker_desktop_paths() -> tuple[Path, ...]:
     """Where Docker Desktop for Linux's package leaves its program and its per-user unit."""
     return (
@@ -2491,17 +2505,38 @@ def _docker_desktop_paths() -> tuple[Path, ...]:
     )
 
 
+def _docker_cli_context() -> str | None:
+    """The docker CLI's current context (`desktop-linux` once Docker Desktop is the engine)."""
+    try:
+        text = (Path.home() / ".docker" / "config.json").read_text(encoding="utf-8")
+        found = json.loads(text).get("currentContext")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return found if isinstance(found, str) else None
+
+
 def _docker_desktop_installed(find: Callable[[str], str | None]) -> bool:
     """Is Docker Desktop for Linux installed?"""
     return bool(find("docker-desktop")) or any(p.exists() for p in _docker_desktop_paths())
 
 
 def linux_docker_on_board(which: Callable[[str], str | None] | None = None) -> DockerOnBoard:
-    """What Docker is already installed here, whether or not it is running (T700)."""
+    """What Docker is already installed here, whether or not it is running (T700).
+
+    Docker Desktop beside a system engine: the CLI's current context says which one the
+    user means, and `desktop-linux` means Desktop, so that is the one offered to start.
+    """
     find = which if which is not None else _which
+    desktop = _docker_desktop_installed(find)
+    if desktop and _docker_cli_context() == "desktop-linux":
+        return "desktop"
     if _docker_service_installed():
         return "service"
-    if _docker_desktop_installed(find):
+    if any(p.exists() for p in _docker_snap_paths()):
+        return "snap"
+    if any(p.exists() for p in _docker_rootless_paths()):
+        return "rootless"
+    if desktop:
         return "desktop"
     if find("dockerd") or find("docker"):
         return "other"
@@ -2511,7 +2546,9 @@ def linux_docker_on_board(which: Callable[[str], str | None] | None = None) -> D
 DOCKER_START_COMMANDS: list[list[str]] = [["systemctl", "start", "docker"]]
 """Starting an installed engine: only the service, no install, no `enable`."""
 
+DOCKER_SNAP_START_COMMANDS: list[list[str]] = [["snap", "start", "docker"]]
 DOCKER_DESKTOP_START_COMMAND = ["systemctl", "--user", "start", "docker-desktop"]
+DOCKER_ROOTLESS_START_COMMAND = ["systemctl", "--user", "start", "docker"]
 
 
 def _packages_in(commands: list[list[str]]) -> list[str]:
@@ -3743,12 +3780,25 @@ def _ensure_docker_linux(
         # `docker.io` came to be tried over docker-ce (T700), so nothing is offered.
         return ProvisionReport("linux", manual_steps=(DOCKER_OTHER_ENGINE_STEP,))
     if on_board == "desktop":
-        return _start_docker_desktop(do, dry_run, wait_seconds, cancel, ask)
+        return _start_user_service(
+            do, DOCKER_DESKTOP_START_COMMAND, "Docker Desktop", dry_run, wait_seconds, cancel, ask
+        )
+    if on_board == "rootless":
+        return _start_user_service(
+            do,
+            DOCKER_ROOTLESS_START_COMMAND,
+            "Docker Engine (rootless)",
+            dry_run,
+            wait_seconds,
+            cancel,
+            ask,
+        )
 
     steamos = is_steamos()
     pm = linux_package_manager(which)
-    if on_board == "service":
-        commands = [list(argv) for argv in DOCKER_START_COMMANDS]
+    if on_board in ("service", "snap"):
+        starts = DOCKER_START_COMMANDS if on_board == "service" else DOCKER_SNAP_START_COMMANDS
+        commands = [list(argv) for argv in starts]
         question = DOCKER_START_QUESTION
     elif pm is None:
         return ProvisionReport(
@@ -3766,7 +3816,12 @@ def _ensure_docker_linux(
     # about to run is named, and a sudo that needs no password does not stand in
     # for the answer (T700). Nobody to ask, a no, a dismissed dialog and a
     # cancelled run all run nothing.
-    if not dry_run:
+    if on_board == "service" and not dry_run and _docker_service_active(do):
+        # The engine IS running, so starting it is not the cure and no root command is
+        # asked about: what keeps this account out is the docker group, which is the
+        # question that follows (T700 review).
+        commands = []
+    elif not dry_run:
         refusal = _root_consent(commands, question, ask, cancel)
         if refusal is not None:
             return refusal
@@ -3924,30 +3979,30 @@ def _root_consent(
     )
 
 
-def _start_docker_desktop(
+def _start_user_service(
     do: RunCmd,
+    command: list[str],
+    label: str,
     dry_run: bool,
     wait_seconds: float,
     cancel: threading.Event | None,
     ask: runner.Prompter | None,
 ) -> ProvisionReport:
-    """Start Docker Desktop for Linux's per-user service, after a yes. Installs nothing, no root."""
-    command = list(DOCKER_DESKTOP_START_COMMAND)
+    """Start a per-user Docker service (Desktop, rootless) after a yes; no root, no install."""
     shown = " ".join(command)
     if dry_run:
         return ProvisionReport("linux", skipped=(f"(dry run) {shown}",))
     if not _may_open_a_dialog(dry_run, cancel):
         return ProvisionReport("linux")
-    by_hand = f"Start Docker Desktop from your applications menu, or run:\n{shown}"
+    by_hand = f"Start {label}, or run:\n{shown}"
     if ask is None:
         return ProvisionReport("linux", manual_steps=(by_hand,))
-    if not _explicit_yes(ask(DOCKER_DESKTOP_START_QUESTION.format(commands="  " + shown))):
-        return ProvisionReport(
-            "linux", manual_steps=(f"Docker Desktop was left stopped. {by_hand}",)
-        )
-    done, skipped = _run_steps(do, [command], sudo=False, dry_run=False)
+    question = DOCKER_USER_START_QUESTION.format(label=label, commands="  " + shown)
+    if not _explicit_yes(ask(question)):
+        return ProvisionReport("linux", manual_steps=(f"{label} was left stopped. {by_hand}",))
+    done, skipped = _run_steps(do, [list(command)], sudo=False, dry_run=False)
     ready = _wait_docker_ready(do, min(wait_seconds, 30.0), 2.0, cancel)
-    manual = () if ready else (f"Docker Desktop did not answer yet. {by_hand}",)
+    manual = () if ready else (f"{label} did not answer yet. {by_hand}",)
     return ProvisionReport("linux", tuple(done), tuple(skipped), manual, False, ready)
 
 

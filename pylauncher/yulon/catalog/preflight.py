@@ -805,13 +805,14 @@ def cheap_data_root(platform_id: str) -> Path | None:
     """Where Docker keeps its images, told without asking Docker. None = unknown.
 
     The early check runs on the window's thread, before any folder is picked, so it must not
-    wait on a daemon. Windows and macOS name theirs in Docker Desktop's settings file; a Linux
-    engine's default is `/var/lib/docker`, taken only where that directory is really there.
+    wait on a daemon. Windows and macOS name theirs in Docker Desktop's settings file. On
+    Linux nothing cheap is true: `/var/lib/docker` can be a leftover beside Docker Desktop,
+    a rootless engine, or a data-root moved by `daemon.json`, so it is unknown there and the
+    full preflight, which asks the daemon, keeps the one-drive sum.
     """
     if platform_id in ("windows", "macos"):
         return platform.docker_desktop_data_root()
-    default = Path("/var/lib/docker")
-    return default if default.is_dir() else None
+    return None
 
 
 def early_space_refusal(

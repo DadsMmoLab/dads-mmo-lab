@@ -21,16 +21,23 @@ from yulon import platform
 class _Box:
     """Passwordless sudo: records argv, answers `docker info` with 1, everything else with 0."""
 
-    def __init__(self, docker_rc: int = 1) -> None:
+    def __init__(
+        self, docker_rc: int = 1, groups: str = "pk docker", service_active: bool = False
+    ) -> None:
         self.calls: list[list[str]] = []
         self.docker_rc = docker_rc
+        self.groups = groups
+        self.service_active = service_active
 
     def __call__(self, argv: list[str]) -> subprocess.CompletedProcess[str]:
         self.calls.append(argv)
         if argv[:2] == ["docker", "info"]:
             return subprocess.CompletedProcess(argv, self.docker_rc, "", "")
+        if argv[:3] == ["systemctl", "is-active", "docker"]:
+            state = "active" if self.service_active else "inactive"
+            return subprocess.CompletedProcess(argv, 0 if self.service_active else 3, state, "")
         if argv[0] == "id":
-            return subprocess.CompletedProcess(argv, 0, "pk docker", "")
+            return subprocess.CompletedProcess(argv, 0, self.groups, "")
         return subprocess.CompletedProcess(argv, 0, "", "")
 
     def privileged(self) -> list[list[str]]:
@@ -43,6 +50,9 @@ def _machine(
     *,
     unit: bool = False,
     desktop: bool = False,
+    snap: bool = False,
+    rootless: bool = False,
+    context: str | None = None,
     binaries: tuple[str, ...] = (),
     pm: str = "apt-get",
 ) -> Callable[[str], str | None]:
@@ -50,6 +60,10 @@ def _machine(
     monkeypatch.setattr(platform, "is_steamos", lambda: False)
     monkeypatch.setattr(platform, "_docker_service_installed", lambda: unit)
     monkeypatch.setattr(platform, "_docker_desktop_installed", lambda find: desktop)
+    here = Path(__file__)  # a path that exists, standing for "this file is on the box"
+    monkeypatch.setattr(platform, "_docker_snap_paths", lambda: (here,) if snap else ())
+    monkeypatch.setattr(platform, "_docker_rootless_paths", lambda: (here,) if rootless else ())
+    monkeypatch.setattr(platform, "_docker_cli_context", lambda: context)
     present = {pm, *binaries}
     return lambda name: f"/usr/bin/{name}" if name in present else None
 
@@ -252,3 +266,75 @@ def test_the_engine_probe_is_a_filesystem_check_that_needs_no_command(
     assert platform._docker_service_installed() is False
     (unit_dir / "docker.socket").write_text("[Socket]\n", encoding="utf-8")
     assert platform._docker_service_installed() is True
+
+
+# ---- review round 2
+
+
+def test_a_running_engine_is_not_offered_a_start_and_the_group_is_asked_instead(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Docker answers `active` but this account cannot reach it: starting it is not the cure."""
+    which = _machine(monkeypatch, unit=True, binaries=("docker", "dockerd"))
+    box = _Box(groups="pk sudo", service_active=True)
+    asked, ask = _asker("y")
+    report = _ensure(box, which, ask)
+    assert not [q for q in asked if "not answering" in q], asked
+    assert [q for q in asked if "docker group" in q], asked
+    assert ["sudo", "-n", "systemctl", "start", "docker"] not in box.calls
+    assert report.docker_group == "granted"
+
+
+def test_a_stopped_engine_is_still_offered_a_start(monkeypatch: pytest.MonkeyPatch) -> None:
+    which = _machine(monkeypatch, unit=True, binaries=("docker",))
+    asked, ask = _asker("n")
+    _ensure(_Box(service_active=False), which, ask)
+    assert [q for q in asked if "not answering" in q]
+
+
+def test_a_snap_docker_is_started_with_snap_and_never_installed_over(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    which = _machine(monkeypatch, snap=True, binaries=("docker",))
+    box = _Box()
+    asked, ask = _asker("y")
+    _ensure(box, which, ask)
+    assert box.privileged() == [["sudo", "-n", "snap", "start", "docker"]]
+    assert not _package_manager_ran(box) or all("snap" in c for c in _package_manager_ran(box))
+    assert not any("docker.io" in " ".join(c) for c in box.calls)
+
+
+def test_a_rootless_engine_is_started_as_the_user(monkeypatch: pytest.MonkeyPatch) -> None:
+    which = _machine(monkeypatch, rootless=True, binaries=("docker",))
+    box = _Box()
+    asked, ask = _asker("y")
+    _ensure(box, which, ask)
+    assert asked and "rootless" in asked[0]
+    assert ["systemctl", "--user", "start", "docker"] in box.calls
+    assert box.privileged() == []
+
+
+def test_a_no_to_a_rootless_start_runs_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    which = _machine(monkeypatch, rootless=True, binaries=("docker",))
+    box = _Box()
+    _asked, ask = _asker("n")
+    _ensure(box, which, ask)
+    assert not [c for c in box.calls if "start" in c]
+
+
+def test_desktop_wins_over_a_system_engine_only_when_the_cli_points_at_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    which = _machine(monkeypatch, unit=True, desktop=True, context="desktop-linux")
+    asked, ask = _asker("n")
+    _ensure(_Box(), which, ask)
+    assert "Docker Desktop" in asked[0]
+
+    which = _machine(monkeypatch, unit=True, desktop=True, context="default")
+    asked, ask = _asker("n")
+    _ensure(_Box(), which, ask)
+    assert "Docker Engine" in asked[0] and "Docker Desktop" not in asked[0]
+
+
+def test_the_group_question_does_not_promise_an_install_it_did_not_make() -> None:
+    assert "still installs" not in platform.DOCKER_GROUP_QUESTION

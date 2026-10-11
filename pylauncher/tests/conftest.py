@@ -555,6 +555,9 @@ def _no_docker_is_installed_on_this_linux_box(monkeypatch: pytest.MonkeyPatch) -
     """
     monkeypatch.setattr(platform, "_SYSTEMD_UNIT_DIRS", ())
     monkeypatch.setattr(platform, "_docker_desktop_paths", lambda: ())
+    monkeypatch.setattr(platform, "_docker_snap_paths", lambda: ())
+    monkeypatch.setattr(platform, "_docker_rootless_paths", lambda: ())
+    monkeypatch.setattr(platform, "_docker_cli_context", lambda: None)
 
 
 @pytest.fixture(autouse=True)

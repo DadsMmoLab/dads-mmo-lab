@@ -337,3 +337,125 @@ def test_the_same_drive_point_is_made_once_in_the_refusal() -> None:
     text = report.message()
     mentions = text.count("same drive") + text.count("share one drive")
     assert mentions == 1, text
+
+
+# ---- review round 2
+
+
+def test_a_linux_box_never_guesses_where_docker_keeps_its_images(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A leftover /var/lib/docker (moved data-root, rootless, Desktop) must not mean "shared"."""
+    monkeypatch.setattr(Path, "is_dir", lambda self: True)
+    assert preflight.cheap_data_root("linux") is None
+
+
+def test_the_linux_early_check_is_handed_no_data_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: dict[str, object] = {}
+
+    def spy(entry: object, server_dir: object, **kw: object) -> None:
+        seen.update(kw)
+
+    monkeypatch.setattr(preflight, "early_space_refusal", spy)
+    monkeypatch.setattr(native.platform, "detect", lambda: "linux")
+    monkeypatch.setattr(Path, "is_dir", lambda self: True)  # a /var/lib/docker is "there"
+    native.early_refusal(TBC, tmp_path / "server")
+    assert seen["data_root"] is None and seen["platform_id"] == "linux"
+
+
+def test_a_folder_holding_an_unfinished_move_is_left_to_the_move_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(preflight, "early_space_refusal", lambda *_a, **_k: "too small")
+    folder = tmp_path / "half-moved"
+    folder.mkdir()
+    (folder / native.MOVE_IN_FILE).write_text("{}", encoding="utf-8")
+    assert native.early_refusal(TBC, folder) is None
+
+
+def test_the_package_is_read_once_for_the_same_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yulon import move
+    from yulon.ui import move_in
+
+    reads: list[Path] = []
+    monkeypatch.setattr(move, "read_package", lambda path: reads.append(path) or object())
+    file = tmp_path / "w.zip"
+    file.write_bytes(b"one")
+    read = move_in._one_read()
+    first = read(file)
+    assert read(file) is first and len(reads) == 1
+    # A different file content (size) is a different file: read again.
+    file.write_bytes(b"three")
+    assert read(file) is not first and len(reads) == 2
+
+
+def test_a_failed_read_is_never_remembered(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from yulon import move
+    from yulon.ui import move_in
+
+    answers = iter([move.MovePackageError("bad"), "good"])
+
+    def flaky(_path: Path) -> object:
+        answer = next(answers)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(move, "read_package", flaky)
+    file = tmp_path / "w.zip"
+    file.write_bytes(b"x")
+    read = move_in._one_read()
+    with pytest.raises(move.MovePackageError):
+        read(file)
+    assert read(file) == "good"
+
+
+def test_check_and_plan_share_one_reader(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from yulon import move_server
+    from yulon.ui.move_in import move_in_for_app
+
+    readers: list[object] = []
+
+    def spy(path: Path, **kw: object) -> move_server.ServerImportPlan:
+        readers.append(kw["read_package"])
+        return move_server.ServerImportPlan(path=path, manifest=None, refusals=("x",))
+
+    monkeypatch.setattr(move_server, "plan_server_import", spy)
+    moved = move_in_for_app(CATALOG)
+    assert moved.check is not None
+    moved.check(tmp_path / "w.zip", TBC)
+    moved.plan(tmp_path / "w.zip", tmp_path / "s")
+    assert len(readers) == 2 and readers[0] is readers[1]
+
+
+# ---- the production wiring, not the doubles
+
+
+def test_the_real_move_in_refuses_a_package_of_another_game_before_any_folder(
+    tmp_path: Path,
+) -> None:
+    from tests.test_move_server_flow import whole_package
+    from yulon.ui.catalog_view import another_game_message
+    from yulon.ui.move_in import move_in_for_app
+
+    moved = move_in_for_app(CATALOG)
+    assert moved.check is not None
+    package = whole_package(tmp_path)  # a WotLK server
+    refused = moved.check(package, TBC)
+    assert refused == ("Another game", another_game_message(CATALOG.get("wow-wotlk").name))
+    assert moved.check(package, CATALOG.get("wow-wotlk")) is None
+
+
+def test_the_real_move_in_refuses_a_file_that_is_not_a_package(tmp_path: Path) -> None:
+    from yulon.ui.move_in import move_in_for_app
+
+    junk = tmp_path / "junk.zip"
+    junk.write_bytes(b"not a zip")
+    moved = move_in_for_app(CATALOG)
+    assert moved.check is not None
+    refused = moved.check(junk, TBC)
+    assert refused is not None and refused[0] == "This server cannot be brought in"

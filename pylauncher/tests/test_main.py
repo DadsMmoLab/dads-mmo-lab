@@ -6254,3 +6254,12 @@ def test_a_tab_from_state_json_asks_for_its_update_refresh(
     finally:
         main._stop_background_threads(window)
         QApplication.processEvents()
+
+
+def test_the_window_hands_the_catalog_its_early_checks(window: Any) -> None:
+    """T702 in production: `build_window()` wires the drive check and the package check in."""
+    from yulon.catalog import native
+
+    view = _catalog_view(window)
+    assert view._ready_check is native.early_refusal
+    assert view._move_in is not None and view._move_in.check is not None
