@@ -1471,7 +1471,7 @@ def test_a_client_docker_cannot_see_is_refused_and_an_unprobed_one_is_unchecked(
     )
     assert verdict(refused, "sharing the client with Docker") == "refuse"
     assert not refused.ok()
-    assert "archives would be invisible" in refused.message()
+    assert "cannot read the client archives" in refused.message()
     unprobed = preflight.evaluate(
         CLIENT_ENTRY, SERVER_DIR, facts(client_checks=ok, client_bind=None)
     )

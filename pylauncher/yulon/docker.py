@@ -4066,9 +4066,9 @@ def _stranger_message(
 
 
 WORLD_STILL_LOADING = (
-    "The world is finishing its load before it can stop. A world server that is still loading "
-    "ignores a stop, so Yu'lon waits until it can hear one and then stops it cleanly. That is "
-    "usually under a minute; a first start can take much longer."
+    "The world server is finishing its load before it can stop. A world server that is still "
+    "loading ignores a stop, so Yu'lon waits until it can hear one and then stops it cleanly. "
+    "That is usually under a minute; a first start can take much longer."
 )
 """Said when a stop finds the world still loading and waits (T158), and again after a spell
 of `WORLD_LOAD_UNCHECKED`.
@@ -4079,8 +4079,8 @@ the caller's "Stop now anyway".
 """
 
 WORLD_LOAD_UNCHECKED = (
-    "Yu'lon can't check whether the world has finished loading: Docker is not answering the "
-    "question. It keeps checking and will not stop the world until it can hear the stop -- "
+    "Yu'lon can't check whether the world server has finished loading: Docker is not answering the "
+    "question. It keeps checking and will not stop the world server until it can hear the stop -- "
     'press "Stop now anyway" to stop it regardless.'
 )
 """Said when a look at a running world could not be read (T158, round 3: fail closed).
@@ -4090,7 +4090,7 @@ the stop, and not for one that is gone: the wait goes on, says so, and says
 the loading sentence again once a look reads.
 """
 
-WORLD_FINISHED_LOADING = "The world has finished loading; stopping it now."
+WORLD_FINISHED_LOADING = "The world server has finished loading; stopping it now."
 """Said once the world can hear the stop, if a wait was announced first (T158)."""
 
 WORLD_STUCK_AT_UPDATE_TAIL = (
@@ -4103,8 +4103,8 @@ _UPDATE_LOG_TAIL = 20
 """How many lines of a run's log a stop reads to see whether it ends on a failed update."""
 
 WORLD_STOPPED_ANYWAY = (
-    "Stopping the world now, as asked, although it had not finished loading. It may be "
-    "force-stopped: a world still loading ignores the stop and is killed when the "
+    "Stopping the world server now, as asked, although it had not finished loading. It may be "
+    "force-stopped: a world server still loading ignores the stop and is killed when the "
     f"{STOP_GRACE_SECONDS // 60}-minute grace ends, and anything since its last save is lost."
 )
 """Said when "Stop now anyway" ends the wait of a world not seen able to hear the stop (T158)."""

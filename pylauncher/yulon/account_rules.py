@@ -80,8 +80,8 @@ def name_problem(name: str, *, scheme: str | None = None) -> str:
         )
     if not _NAME_CHARS.fullmatch(name):
         return (
-            f"An account name can have only letters A-Z, digits and _ in it, so {name!r} "
-            "cannot be one: the server's account commands could not name it."
+            f"An account name can have only letters A-Z, digits and _ in it, and {name!r} "
+            "has other characters. Choose a name without them."
         )
     return ""
 
