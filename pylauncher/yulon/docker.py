@@ -791,7 +791,12 @@ def hold_the_server(
 
 
 def held_reason(server_dir: Path | str) -> str | None:
-    """The sentence of the Maintenance job of THIS process holding the server now, or None."""
+    """The sentence of the Maintenance job of THIS process holding the server now, or None.
+
+    "Stop the other server" asks it of the server it is about to stop (T671): that can be a
+    database a restore or a backup runs alone, and this process's own reservation of that
+    folder is re-entrant, so the reservation alone would not refuse.
+    """
     with _HOLD_LOCK:
         reasons = _HELD.get(_server_key(server_dir))
         return reasons[-1] if reasons else None
@@ -800,18 +805,6 @@ def held_reason(server_dir: Path | str) -> str | None:
 def held_here(server_dir: Path | str) -> bool:
     """A Maintenance job of THIS process holds the server right now (`hold_the_server()`)."""
     return held_reason(server_dir) is not None
-
-
-def held_reason(server_dir: Path | str) -> str | None:
-    """Why a job of this process holds `server_dir` (`hold_the_server()`), or None (T671).
-
-    "Stop the other server" asks it of the server it is about to stop: since T671 that
-    can be a database a restore or a backup runs alone, and this process's own
-    reservation of that folder is re-entrant, so it would not refuse.
-    """
-    with _HOLD_LOCK:
-        held = _HELD.get(_server_key(server_dir))
-        return held[-1] if held else None
 
 
 @contextmanager
