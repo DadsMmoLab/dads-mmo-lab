@@ -773,21 +773,34 @@ def test_a_database_not_ready_on_the_first_poll_is_locked_on_a_later_one(
         view.shutdown()  # type: ignore[attr-defined]
 
 
-def test_a_lock_that_keeps_failing_is_asked_a_bounded_number_of_times(
-    qapp: object, db: AuthDb, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, inline_jobs: None
+def test_a_lock_that_keeps_failing_slows_down_but_never_gives_up(
+    qapp: object,
+    db: AuthDb,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    inline_jobs: None,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     up: list[str] = []
     monkeypatch.setattr(docker, "status", lambda **_k: list(up))
+    seeded_accounts._last_failure.clear()
     view = _view(an_install(tmp_path))
     try:
         _tick(view)
         up.append(TBC.container_spec().db)
         db.fail_with = docker.DockerCommandError("refused")
-        for _ in range(seeded_accounts.RETRY_POLLS + 10):
+        for _ in range(60):
             _tick(view)
         asked = sum(1 for s in db.statements if s.startswith("SELECT"))
-        assert asked == seeded_accounts.RETRY_POLLS + 1
+        assert seeded_accounts.RETRY_POLLS <= asked < 40, "every poll first, then every Nth"
+        warned = [r for r in caplog.records if "seeded accounts were not locked" in r.message]
+        assert len(warned) == 1, "the same reason is logged once"
         assert "could not lock" in view.notice_label.text()  # type: ignore[attr-defined]
+        db.fail_with = None  # the database finally answers
+        for _ in range(seeded_accounts.SLOW_EVERY + 1):
+            _tick(view)
+        assert len(db.updates()) == 4, "still not given up after 60 polls"
+        assert view.notice_label.text().count("could not lock") == 0  # type: ignore[attr-defined]
     finally:
         view.shutdown()  # type: ignore[attr-defined]
 

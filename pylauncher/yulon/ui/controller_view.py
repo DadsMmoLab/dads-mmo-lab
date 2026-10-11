@@ -8400,6 +8400,7 @@ class ControllerView(QWidget):
         # up, and whether that ask is out.
         self._seeded_asked = False
         self._seeded_retries = 0
+        self._seeded_wait = 0
         self._seeded_pending = False
         # What the dashboard last failed with, logged once per change (T194).
         self._verdict_said: str | None = None
@@ -10225,9 +10226,13 @@ class ControllerView(QWidget):
         if not status.db:
             self._seeded_asked = False
             self._seeded_retries = 0
+            self._seeded_wait = 0
         elif not stale and not self._seeded_asked:
-            self._seeded_asked = True
-            self.refresh_seeded_accounts()
+            if self._seeded_wait > 0:
+                self._seeded_wait -= 1
+            else:
+                self._seeded_asked = True
+                self.refresh_seeded_accounts()
         self.status_changed.emit(status)
         self._ask_again_if_superseded(superseded)
 
@@ -11314,12 +11319,18 @@ class ControllerView(QWidget):
                 self._seeded_asked = False  # T716: a job holds the server; the next poll asks
             return  # Docker away: the poll says so; the next time the database is up asks again
         if seeded_accounts.is_not_locked(result if isinstance(result, str) else None):
-            # T718: the database is up but not answering yet; ask on later polls, bounded.
-            if self._seeded_retries < seeded_accounts.RETRY_POLLS:
-                self._seeded_retries += 1
-                self._seeded_asked = False
+            # T718: the database is up but not answering yet: ask every poll for RETRY_POLLS
+            # tries, then every SLOW_EVERY-th poll, and never give up while the accounts are open.
+            self._seeded_retries += 1
+            self._seeded_asked = False
+            self._seeded_wait = (
+                0
+                if self._seeded_retries < seeded_accounts.RETRY_POLLS
+                else seeded_accounts.SLOW_EVERY - 1
+            )
         else:
             self._seeded_retries = 0
+            self._seeded_wait = 0
         self._show_the_notice()
 
     @Slot(object)
