@@ -1728,7 +1728,7 @@ def test_the_compose_row_stays_quiet_when_docker_itself_never_answered() -> None
     facts = preflight.Facts(platform_id="linux", docker_ready=False)
     check = preflight._compose_check(facts)
     assert check.verdict == "unchecked"
-    assert "no Docker daemon" in check.detail
+    assert "Docker did not answer" in check.detail
 
 
 def test_the_compose_remedy_names_docker_desktop_off_linux() -> None:

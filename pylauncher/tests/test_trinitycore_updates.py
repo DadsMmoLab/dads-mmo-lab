@@ -2440,7 +2440,7 @@ def test_a_rollback_that_stops_early_before_the_servers_stopped_leaves_the_table
         "Docker did not answer for 3 minutes after the build finished. Check that Docker is "
         "running. Putting the build from before this rebuild back was not attempted, because "
         "the new build could not be given a name to undo onto (read-only layer store); the tags "
-        "still name the new build, all of them. The old images are on the daemon under their "
+        "still name the new build, all of them. The old images are in Docker under their "
         "-rollback tags. The source folders were left on the new commits, because the image "
         "tags name the new build made from them. None of your server's containers was "
         "replaced, so it is still running the build from before this update if it is up, and "

@@ -8098,7 +8098,7 @@ class StagedInstaller:
                 f"({why or 'Docker gave no answer'}), and a running one holds these "
                 f"databases in memory and writes back over whatever it finds in them. Nothing "
                 f"was applied. Docker itself may be the thing that is not answering — it reads "
-                f"a stopped container and a Docker that is down the same way — so check that "
+                f"a stopped container and Docker being down the same way — so check that "
                 f"Docker is running, then press Stop on the Server tab if the server is up, and "
                 f'press "{button}" again.'
             )
@@ -11524,7 +11524,7 @@ class StagedInstaller:
                 f"Yu'lon could not ask Docker whether the old images are still under their "
                 f"{ROLLBACK_TAG_SUFFIX} tags."
             )
-        return f"The old images are on the daemon under their {ROLLBACK_TAG_SUFFIX} tags."
+        return f"The old images are in Docker under their {ROLLBACK_TAG_SUFFIX} tags."
 
     def _use_or_clear_the_kept_build(
         self,

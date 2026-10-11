@@ -3133,7 +3133,7 @@ class CmangosInstaller(StagedInstaller):
                 f"databases in memory and writes back over whatever it finds in them. "
                 f"Nothing was applied, nothing was imported and nothing was cleared. Docker "
                 f"itself may be the thing that is not answering — it reads a stopped container "
-                f"and a Docker that is down the same way — so check that Docker is running, "
+                f"and Docker being down the same way — so check that Docker is running, "
                 f"then press Stop on the Server tab if the server is up, and apply these "
                 f'files with "{UPDATES_BUTTON_LABEL}" on the Modules tab (or run the install '
                 f"again from the command line)."

@@ -1129,7 +1129,7 @@ def _compose_check(facts: Facts) -> Check:
         return Check(
             COMPOSE_CHECK,
             "unchecked",
-            "not asked, because no Docker daemon answered",
+            "not asked, because Docker did not answer",
         )
     if facts.compose_ready and platform.compose_too_old(facts.compose_version):
         # T658: a Compose that answers, but stops the import and every Start with "no such
