@@ -197,3 +197,10 @@ def _refused_on_the_tab(view: Any, made: Any) -> None:
     view.create_account()
     assert made.created == []
     assert "letters" in view.account_report.text()
+
+
+def test_each_family_says_its_own_cores_longest_name() -> None:
+    """A CMaNGOS package re-exporting AzerothCore's 17 told its readers the wrong ceiling."""
+    assert tbc_accounts.MAX_USERNAME == account_rules.name_max("mangos_srp6") == 16
+    assert vanilla_accounts.MAX_USERNAME == account_rules.name_max("mangos_srp6") == 16
+    assert wotlk_accounts.MAX_USERNAME == account_rules.name_max("azerothcore") == 17
