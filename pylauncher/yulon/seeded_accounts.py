@@ -78,6 +78,14 @@ NOT_LOCKED = (
     "anyone who can reach this server can use them."
 )
 
+RETRY_POLLS = 24
+"""How many status polls (five seconds apart) ask again after a lock that failed (T718)."""
+
+
+def is_not_locked(line: str | None) -> bool:
+    """Whether `line` is the `NOT_LOCKED` notice, whatever its reason (T718)."""
+    return line is not None and line.startswith(NOT_LOCKED.split("{", 1)[0])
+
 
 def _writer() -> ModuleType:
     """The shared SRP6 writer (`controller_wow_wotlk.accounts`), imported when first needed.

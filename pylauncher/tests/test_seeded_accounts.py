@@ -747,3 +747,69 @@ def test_on_a_stopped_distro_neither_reading_runs_until_it_is_up(
         assert not any(db.seeded_state(n) for n in SEEDED)
     finally:
         view.shutdown()  # type: ignore[attr-defined]
+
+
+def test_a_database_not_ready_on_the_first_poll_is_locked_on_a_later_one(
+    qapp: object, db: AuthDb, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, inline_jobs: None
+) -> None:
+    """T718: the container is up but mysqld is not answering; the next polls ask again."""
+    up: list[str] = []
+    monkeypatch.setattr(docker, "status", lambda **_k: list(up))
+    view = _view(an_install(tmp_path))
+    try:
+        controller = view.services.controller  # type: ignore[attr-defined]
+        _tick(view)
+        up.append(TBC.container_spec().db)
+        db.fail_with = docker.DockerCommandError("Can't connect to local MySQL server")
+        _tick(view)
+        assert seeded_accounts.is_not_locked(controller.seeded_accounts_locked)
+        db.fail_with = None  # the database finished loading
+        _tick(view)
+        assert len(db.updates()) == 4, "a later poll locks them"
+        assert not any(db.seeded_state(n) for n in SEEDED)
+        assert not seeded_accounts.is_not_locked(controller.seeded_accounts_locked)
+        assert "could not lock" not in view.notice_label.text()  # type: ignore[attr-defined]
+    finally:
+        view.shutdown()  # type: ignore[attr-defined]
+
+
+def test_a_lock_that_keeps_failing_is_asked_a_bounded_number_of_times(
+    qapp: object, db: AuthDb, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, inline_jobs: None
+) -> None:
+    up: list[str] = []
+    monkeypatch.setattr(docker, "status", lambda **_k: list(up))
+    view = _view(an_install(tmp_path))
+    try:
+        _tick(view)
+        up.append(TBC.container_spec().db)
+        db.fail_with = docker.DockerCommandError("refused")
+        for _ in range(seeded_accounts.RETRY_POLLS + 10):
+            _tick(view)
+        asked = sum(1 for s in db.statements if s.startswith("SELECT"))
+        assert asked == seeded_accounts.RETRY_POLLS + 1
+        assert "could not lock" in view.notice_label.text()  # type: ignore[attr-defined]
+    finally:
+        view.shutdown()  # type: ignore[attr-defined]
+
+
+def test_a_not_locked_line_is_cleared_when_a_later_poll_finds_nothing_seeded(
+    qapp: object, db: AuthDb, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, inline_jobs: None
+) -> None:
+    """T718: Refresh on the Accounts tab locked them meanwhile; the stale warning must go."""
+    up: list[str] = []
+    monkeypatch.setattr(docker, "status", lambda **_k: list(up))
+    view = _view(an_install(tmp_path))
+    try:
+        controller = view.services.controller  # type: ignore[attr-defined]
+        _tick(view)
+        up.append(TBC.container_spec().db)
+        db.fail_with = docker.DockerCommandError("not ready")
+        _tick(view)
+        assert "could not lock" in view.notice_label.text()  # type: ignore[attr-defined]
+        db.fail_with = None
+        assert settle(tmp_path) is not None  # locked by someone else
+        _tick(view)
+        assert controller.seeded_accounts_locked is None
+        assert view.notice_label.text() == ""  # type: ignore[attr-defined]
+    finally:
+        view.shutdown()  # type: ignore[attr-defined]

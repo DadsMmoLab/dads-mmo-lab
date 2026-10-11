@@ -103,6 +103,7 @@ from yulon import (
     purge,
     reset_defaults,
     resources,
+    seeded_accounts,
     server_build_gone,
     server_build_presses,
     server_rates,
@@ -8398,6 +8399,7 @@ class ControllerView(QWidget):
         # T668: whether the built-in accounts were asked about since the database last came
         # up, and whether that ask is out.
         self._seeded_asked = False
+        self._seeded_retries = 0
         self._seeded_pending = False
         # What the dashboard last failed with, logged once per change (T194).
         self._verdict_said: str | None = None
@@ -10222,6 +10224,7 @@ class ControllerView(QWidget):
         # T668: once each time the database is found running; asked again after it was down.
         if not status.db:
             self._seeded_asked = False
+            self._seeded_retries = 0
         elif not stale and not self._seeded_asked:
             self._seeded_asked = True
             self.refresh_seeded_accounts()
@@ -11310,6 +11313,13 @@ class ControllerView(QWidget):
             if isinstance(result.exc, docker.ServerHeldError):
                 self._seeded_asked = False  # T716: a job holds the server; the next poll asks
             return  # Docker away: the poll says so; the next time the database is up asks again
+        if seeded_accounts.is_not_locked(result if isinstance(result, str) else None):
+            # T718: the database is up but not answering yet; ask on later polls, bounded.
+            if self._seeded_retries < seeded_accounts.RETRY_POLLS:
+                self._seeded_retries += 1
+                self._seeded_asked = False
+        else:
+            self._seeded_retries = 0
         self._show_the_notice()
 
     @Slot(object)
