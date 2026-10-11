@@ -33,17 +33,12 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A **Rebuild** whose database updates fail puts your databases back as they were and names the update that failed.
 - A server list that an older copy of Yu'lon emptied comes back the next time you open this version.
 - **Update now** checks that the new version's window really opens before it installs it, as it was meant to.
-
-### Changed
-- The Server tab's **Play** now starts the game; **Launcher…** opens the launcher. The tray's **Play** starts a stopped server.
 - A module that breaks a rebuild before it ever built now tells you to press **Remove**, not that it was kept as it was.
 - A message of the day or XP-rate text with a backslash in it no longer stops the install, and is written as typed.
 - A typed answer with a line break in it is refused instead of writing a second setting into the server's file.
 - **Azeroth Chatter** loads its holiday, season and month words again.
 - **AH Bot Plus** installed after **AH Bot** starts from its own settings; reinstalling one module keeps yours.
 - **Apply module SQL** no longer says "nothing to apply" for ten modules whose SQL the server does apply.
-
-### Changed
 - A module change that no longer fits the module's file is reported, instead of being listed as already applied.
 - Removing **Battle Pass** no longer deletes your own Lua libraries from the lua_scripts folder.
 - A Lua script module that would replace one of your own files sets yours aside, and **Remove** puts it back.
@@ -53,6 +48,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A Lua script module that would replace another module's file is refused, naming that module.
 
 ### Changed
+- The Server tab's **Play** now starts the game; **Launcher…** opens the launcher. The tray's **Play** starts a stopped server.
 - **Battle Pass** no longer asks for its vendor's creature entry: the vendor it creates is always the one it uses.
 
 ## v0.9.16-Public — 2026-10-10
