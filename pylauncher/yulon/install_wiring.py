@@ -239,6 +239,8 @@ class _MaintenanceSnapshot:
         spec = self.entry.container_spec()
         try:
             with docker.maintenance_lease(server_dir, SNAPSHOT_LEASE_REASON):
+                # T712: read with the copy, and written into it.
+                record = maintenance.import_record_text(server_dir, spec.import_service)
                 self._database_up(server_dir)
                 report = maintenance.backup(
                     server_dir,
@@ -249,6 +251,9 @@ class _MaintenanceSnapshot:
                     spec=spec,
                     core_databases=self.entry.core_databases(),
                     wsl_distro=self.wsl_distro,
+                    # T712: carried in every file of the copy, so whoever restores it puts
+                    # the unfinished-import record back as it was (`IMPORT_RECORD_LEAD`).
+                    import_record=record,
                 )
         except (
             maintenance.MaintenanceError,

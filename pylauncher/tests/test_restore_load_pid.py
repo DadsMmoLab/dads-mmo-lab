@@ -312,3 +312,186 @@ def test_the_load_writes_to_files_not_pipes_and_a_flood_of_output_does_not_deadl
         worker.join(30)
     assert not worker.is_alive(), "the load deadlocked on its own output"
     assert problems and "THE END" in problems[0].detail, "stderr must still reach the error"
+
+
+# ---- T711: a Stop over a load that outlived Yu'lon asks first
+
+
+def _stop_view(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, answer: str | None) -> Any:
+    """A real tab over `tmp_path`'s restore record; the questions it asks and the jobs it ran."""
+    from tests.test_teardown_guard import _view
+    from yulon.ui import controller_view as controller_view_module
+
+    view, _fake, _ = _view(tmp_path)
+    view.services.interrupted_restore = lambda: interrupted_restore(tmp_path)  # type: ignore[method-assign,assignment]
+    asked: list[str] = []
+
+    def ask(_parent: object, title: str, text: str, yes: str, save: object = None) -> Any:
+        asked.append(f"{title}|{text}|{yes}")
+        return answer
+
+    monkeypatch.setattr(controller_view_module, "_ask_with", ask)
+    jobs: list[Any] = []
+    view._run = lambda *args, **_kw: jobs.append(args)  # type: ignore[method-assign]
+    return view, asked, jobs
+
+
+def test_a_stop_over_a_load_that_outlived_yulon_asks_and_keeps_it_on_no(
+    qapp: object, tmp_path: Path, live_child: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T711: the server hold ended with the quitting Yu'lon, so nothing asked before a Stop
+    stopped the database under the orphaned load (its Restart is refused by the record).
+
+    Mutation: drop the `_stop_over_a_running_load_agreed()` ask from `stop_server()`.
+    """
+    _marker_with(tmp_path, live_child.pid)
+    view, asked, jobs = _stop_view(tmp_path, monkeypatch, answer=None)
+
+    view.stop_server()
+    view.shutdown()
+
+    assert len(asked) == 1 and "half-written" in asked[0] and "Stop anyway" in asked[0], asked
+    assert jobs == [], "the Stop ran over a load the player chose to keep"
+    assert not view._busy
+
+
+def test_a_stop_over_a_running_load_stops_when_told_to(
+    qapp: object, tmp_path: Path, live_child: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ "Stop always stops" (owner, 2026-10-09): asked once, then it stops."""
+    _marker_with(tmp_path, live_child.pid)
+    view, asked, jobs = _stop_view(tmp_path, monkeypatch, answer="yes")
+
+    view.stop_server()
+    view.shutdown()
+
+    assert len(asked) == 1 and len(jobs) == 1
+
+
+def test_a_stop_with_no_running_load_asks_nothing(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dead load (an interrupted restore) or no record at all: Stop as always."""
+    gone = subprocess.Popen([sys.executable, "-c", "pass"])
+    gone.wait()
+    _marker_with(tmp_path, gone.pid)
+    view, asked, jobs = _stop_view(tmp_path, monkeypatch, answer=None)
+
+    view.stop_server()
+    view.shutdown()
+
+    assert asked == [] and len(jobs) == 1
+
+
+def test_a_stop_during_this_sessions_own_restore_asks_nothing_new(
+    qapp: object, tmp_path: Path, live_child: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The record names THIS session's live load: the restore's own hold refuses the Stop in
+    its words, and "from the last session" would be untrue.
+
+    Mutation: drop the `_restore_running` clause from `_stop_over_a_running_load_agreed()`.
+    """
+    _marker_with(tmp_path, live_child.pid)
+    view, asked, jobs = _stop_view(tmp_path, monkeypatch, answer=None)
+    view._restore_running = True
+
+    view.stop_server()
+    view.shutdown()
+
+    assert asked == [] and len(jobs) == 1
+
+
+def test_stop_then_quit_ends_its_wait_when_the_player_keeps_the_load(
+    qapp: object, tmp_path: Path, live_child: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T711 cold review: the tray's "Stop servers, then quit" asks the tab's Stop, the player
+    keeps the restore running, and no Stop job begins. The tray waited the whole
+    `STOP_WAIT_MS` and then said the server "did not report its Stop in time".
+
+    Through the real tray and the real tab. Mutation: drop the `kept` branch from
+    `YulonTray.stop_then_quit()` (or make `stop_server()` return None again).
+    """
+    from tests.test_tray import FakeTrayIcon, FakeWindow
+    from yulon.ui.tray import YulonTray
+
+    _marker_with(tmp_path, live_child.pid)
+    view, asked, jobs = _stop_view(tmp_path, monkeypatch, answer=None)
+    view.stop_button.setEnabled(True)
+    window = FakeWindow()
+    window.yulon_controllers.append(view)
+    tray = YulonTray(window, icon_factory=FakeTrayIcon, available=lambda: True)
+    told: list[tuple[str, str]] = []
+    tray.tell = lambda title, text: told.append((title, text))  # type: ignore[method-assign]
+    quits: list[int] = []
+    tray.quit = lambda: quits.append(1) or True  # type: ignore[method-assign]
+
+    tray.stop_then_quit([view])
+    view.shutdown()
+    window.deleteLater()
+
+    assert len(asked) == 1 and jobs == [], (asked, jobs)
+    assert tray._stopping == [], "the tray still waits for a Stop that never began"
+    assert tray._stop_deadline is None or not tray._stop_deadline.isActive()
+    assert quits == []
+    assert len(told) == 1 and "kept its restore" in told[0][1], told
+
+
+@pytest.mark.parametrize("answer", [None, "yes"])
+def test_stop_then_quit_asks_every_question_before_any_stop_begins(
+    qapp: object,
+    tmp_path: Path,
+    live_child: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    answer: str | None,
+) -> None:
+    """T711 review round 2: servers A and B, B's restore still loading. A's Stop began, then
+    B's modal question ran its own event loop; A's Stop ending under it was read as "B did
+    not read as stopped". Now every question is asked first; one kept load stops nothing.
+
+    Mutation: ask inside the Stop loop again (call `stop_server()` per view).
+    """
+    from tests.test_teardown_guard import _view
+    from tests.test_tray import FakeTrayIcon, FakeWindow
+    from yulon.ui import controller_view as controller_view_module
+    from yulon.ui.tray import YulonTray
+
+    a_view, _f, _ = _view(tmp_path, "a")
+    b_dir = tmp_path / "b-record"
+    _marker_with(b_dir, live_child.pid)
+    b_view, _f2, _ = _view(tmp_path, "b")
+    a_view.services.interrupted_restore = lambda: None  # type: ignore[method-assign,assignment]
+    b_view.services.interrupted_restore = lambda: interrupted_restore(b_dir)  # type: ignore[method-assign,assignment]
+    a_jobs: list[Any] = []
+    b_jobs: list[Any] = []
+    a_view._run = lambda *args, **_kw: a_jobs.append(args)  # type: ignore[method-assign]
+    b_view._run = lambda *args, **_kw: b_jobs.append(args)  # type: ignore[method-assign]
+    asked_with_a_stopping: list[int] = []
+
+    def ask(_parent: object, _title: str, _text: str, _yes: str, save: object = None) -> Any:
+        asked_with_a_stopping.append(len(a_jobs))
+        return answer
+
+    monkeypatch.setattr(controller_view_module, "_ask_with", ask)
+    for view in (a_view, b_view):
+        view.stop_button.setEnabled(True)
+    window = FakeWindow()
+    window.yulon_controllers.extend([a_view, b_view])
+    tray = YulonTray(window, icon_factory=FakeTrayIcon, available=lambda: True)
+    told: list[tuple[str, str]] = []
+    tray.tell = lambda title, text: told.append((title, text))  # type: ignore[method-assign]
+    tray.quit = lambda: True  # type: ignore[method-assign]
+
+    tray.stop_then_quit([a_view, b_view])
+    stopping = list(tray._stopping)
+    tray._stop_waiting_to_quit()
+    a_view.shutdown()
+    b_view.shutdown()
+    window.deleteLater()
+
+    assert asked_with_a_stopping == [0], "B was asked after A's Stop had begun"
+    if answer is None:
+        assert a_jobs == [] and b_jobs == [] and stopping == []
+        assert len(told) == 1 and "kept its restore" in told[0][1], told
+    else:
+        assert len(a_jobs) == 1 and len(b_jobs) == 1 and told == []
+        assert stopping == [a_view, b_view]

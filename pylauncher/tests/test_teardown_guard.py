@@ -131,6 +131,8 @@ def _join_the_views_made() -> Any:
         made = _MADE.pop()
         if shiboken6.isValid(made):  # another module's test may have shut it down already
             made.shutdown()
+    while _WINDOWS:
+        _WINDOWS.pop().deleteLater()
 
 
 @pytest.fixture
@@ -325,3 +327,63 @@ def test_a_refusal_carries_the_kind_of_work_it_names(qapp: object, tmp_path: Pat
     view._reset_running = True  # one of `busy_reason()`'s: no kind, so the cautious wording
     plain = view.teardown_refusal()
     assert plain is not None and getattr(plain, "kind", None) is None
+
+
+# ------------------------------------- the tray's Stop and Restart (T711)
+
+
+def _tray_over(view: ControllerView) -> tuple[Any, list[tuple[str, str]], list[Any]]:
+    """A real tray over a window listing `view`; (tray, what it told, the jobs the tab ran)."""
+    from tests.test_tray import FakeTrayIcon, FakeWindow
+    from yulon.ui.tray import YulonTray
+
+    window = FakeWindow()
+    window.yulon_controllers.append(view)
+    _WINDOWS.append(window)
+    tray = YulonTray(window, icon_factory=FakeTrayIcon, available=lambda: True)
+    told: list[tuple[str, str]] = []
+    tray.tell = lambda title, text: told.append((title, text))  # type: ignore[method-assign]
+    jobs: list[Any] = []
+    view._run = lambda *args, **_kw: jobs.append(args)  # type: ignore[method-assign]
+    # The database the restore started alone is up, so the status poll lit both presses.
+    view.stop_button.setEnabled(True)
+    view.restart_button.setEnabled(True)
+    return tray, told, jobs
+
+
+_WINDOWS: list[Any] = []
+
+
+@pytest.mark.parametrize("verb", ["stop", "restart"])
+def test_the_trays_stop_and_restart_are_refused_while_a_restore_runs(
+    qapp: object, tmp_path: Path, verb: str
+) -> None:
+    """T711: the tray offered Stop/Restart during a restore (seen live, not pressed).
+
+    The press reached the tab's own Stop, which began a Stop job ("Stopping...") that only
+    the docker-layer hold then refused. Now the tray asks the tab's `teardown_refusal()`, the
+    one guard T690 gave every door, and says the restore's own sentence.
+    Mutation: drop the `teardown_refusal()` ask from `YulonTray._refused()`.
+    """
+    view, _fake, _ = _view(tmp_path)
+    tray, told, jobs = _tray_over(view)
+    view._restore_running = True
+
+    getattr(tray, verb)(view)
+
+    assert jobs == [], f"the tray's {verb} started a job over a running restore"
+    assert not view._busy
+    assert len(told) == 1, told
+    assert "restore" in told[0][1] and "half-written" in told[0][1], told
+
+
+@pytest.mark.parametrize("verb", ["stop", "restart"])
+def test_the_trays_stop_and_restart_still_reach_a_quiet_tab(
+    qapp: object, tmp_path: Path, verb: str
+) -> None:
+    view, _fake, _ = _view(tmp_path)
+    tray, told, jobs = _tray_over(view)
+
+    getattr(tray, verb)(view)
+
+    assert told == [] and len(jobs) == 1, (told, jobs)

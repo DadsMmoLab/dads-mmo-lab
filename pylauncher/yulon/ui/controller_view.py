@@ -5358,6 +5358,14 @@ STOP_ANYWAY_TIP = (
 
 STOP_OVER_ANOTHER_TITLE = "Another Yu'lon is working on this server"
 STOP_OVER_ANOTHER_BUTTON = "Stop anyway"
+STOP_OVER_A_LOAD_TITLE = "A restore is still running"
+STOP_OVER_A_LOAD = (
+    "A restore from the last session is still writing into {name}'s databases in Docker. "
+    "Stopping the server now stops its database under that restore and leaves those "
+    "databases half-written. Wait for it to finish (the Maintenance tab says when), or stop "
+    "anyway."
+)
+"""T711: the question before a Stop over a restore load that outlived the last Yu'lon."""
 CLEAR_RESERVATION_LABEL = "Clear it"
 CLEAR_RESERVATION_TIP = (
     "Remove the reservation an earlier run of this Yu'lon left in Docker. Only offered "
@@ -10912,7 +10920,24 @@ class ControllerView(QWidget):
         self._run(self.services.controller.start, self._server_action_done, self._start_failed)
 
     @Slot()
-    def stop_server(self) -> None:
+    def stop_server(self) -> bool:
+        """Stop the server on the job runner. False when no Stop began (T711 review).
+
+        The one way it does not begin: the player kept a restore load from the last session
+        running (`agrees_to_stop()`). A caller that waits for several Stops (the tray's
+        stop-then-quit) asks `agrees_to_stop()` of each first and then `stop_agreed()`.
+        """
+        if not self.agrees_to_stop():
+            return False
+        self.stop_agreed()
+        return True
+
+    def agrees_to_stop(self) -> bool:
+        """The T711 question, alone: False when the player keeps a restore load running."""
+        return self._stop_over_a_running_load_agreed()
+
+    def stop_agreed(self) -> None:
+        """`stop_server()` once `agrees_to_stop()` has been answered yes (or had nothing to ask)."""
         self._disarm_actions()
         self.problem_label.setText("")
         self._stop_forced = ""
@@ -10922,6 +10947,32 @@ class ControllerView(QWidget):
         self.status_label.setText("Stopping…")
         self._hold_badge("stopping")
         self._run(self.services.controller.stop, self._stop_done, self._stop_failed)
+
+    def _stop_over_a_running_load_agreed(self) -> bool:
+        """False when a restore load from the last session still writes and the player keeps it.
+
+        T711: "Quit anyway" leaves the restore's load running in Docker (T690), and the server
+        hold that made a Stop ask first ends with the quitting Yu'lon. Restart is refused by the
+        record (`refuse_before_a_stop()`); a plain Stop stopped the database under the load and
+        left it half-written. Asked once, "Stop always stops" (owner, 2026-10-09). A restore of
+        THIS process is not asked about here: its own hold refuses the Stop in its words.
+        """
+        if self._restore_running or docker.held_here(self.services.controller.server_dir):
+            return True
+        try:
+            record = self.services.interrupted_restore()
+        except Exception as exc:  # noqa: BLE001 - a record that cannot be read asks nothing new
+            logger.warning(f"could not read the restore record before a Stop: {exc}")
+            return True
+        if record is None or not record.load_running:
+            return True
+        answer = _ask_with(
+            self,
+            STOP_OVER_A_LOAD_TITLE,
+            STOP_OVER_A_LOAD.format(name=self.entry.name),
+            STOP_OVER_ANOTHER_BUTTON,
+        )
+        return answer == "yes"
 
     def _offer_to_stop_over_another(self, exc: object) -> bool:
         """T568: another Yu'lon holds this server: ask once, then stop anyway if told to.

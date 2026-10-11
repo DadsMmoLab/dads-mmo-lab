@@ -680,6 +680,18 @@ class YulonTray(QObject):
                 f"Press {verb} again when it has finished.",
             )
             return True
+        if verb in (STOP, RESTART):
+            # T711: a Stop or Restart takes the database from under the tab's work (a restore
+            # left half-written, a backup lost). The tab's own door guard decides, as it does
+            # for the quit and the client-folder doors (T690); its Server-tab action was said
+            # just above. Start is no teardown and keeps the tab's own rule.
+            refusal = getattr(live, "teardown_refusal", lambda: None)()
+            if refusal:
+                self.tell(
+                    f"Yu'lon cannot {verb.lower()} that server yet",
+                    f"{self._title_of(live)}: {refusal}",
+                )
+                return True
         if press is not None and not press.isEnabled():
             why = reason_of(press) or press.toolTip() or "its Server tab cannot do that now."
             self.tell(
@@ -944,13 +956,28 @@ class YulonTray(QObject):
             )
             self.open_window()
             return
+        # T711 review round 2: every tab's own question first (a restore still loading
+        # there), before any Stop begins or any wait is wired: a modal question runs its own
+        # event loop, and a Stop that ended under it was read as "not stopped". One kept
+        # load calls the quit off and stops nothing.
+        kept = [view for view in running if not getattr(view, "agrees_to_stop", lambda: True)()]
+        if kept:
+            names = ", ".join(titles.get(view, view.entry.name) for view in kept)
+            logger.info(f"tray: quit called off, a Stop was declined: {names}")
+            self.show_server(kept[0])
+            self.tell(
+                "Yu'lon did not quit",
+                f"{names} was not stopped: you kept its restore running, so no server was "
+                "stopped and Yu'lon stays open. Quit Yu'lon… asks again.",
+            )
+            return
         self.open_window()
         self._stopping = list(running)
         for view in running:
             view.realm_badge.status_changed.connect(self._a_stop_moved)
             view.action_failed.connect(self._a_stop_failed)
         for view in running:
-            view.stop_server()
+            getattr(view, "stop_agreed", view.stop_server)()
         logger.info(f"tray: stopping {len(running)} server(s), then quitting")
         # A Stop's own job ends by `docker.STOP_PROCESS_DEADLINE_SECONDS`; a wait
         # past that and a margin is a Stop that will not report (adversarial

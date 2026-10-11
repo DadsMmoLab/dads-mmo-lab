@@ -824,6 +824,8 @@ class Uninstaller:
         """
         if (linked := _junction_refusal(self.server_dir)) is not None:
             return None, linked
+        if (restoring := _restore_refusal(self.server_dir)) is not None:
+            return None, restoring
         ownership = self._claim(self.server_dir)
         refusal = refusal_for(
             ownership,
@@ -1300,6 +1302,39 @@ def _junction_refusal(server_dir: Path) -> str | None:
         f"{server_dir} is a link (a junction or symbolic link){where}, not the install's "
         f"real folder, and Yu'lon will not delete through a link. Nothing was changed. "
         f"Remove the link yourself, or point Yu'lon at the real folder, then uninstall again."
+    )
+
+
+def _restore_refusal(server_dir: Path) -> str | None:
+    """T715: the sentence while this server has a restore record, running or unfinished, else None.
+
+    Asked by `_resolve()`, so `plan()` and `run()` both refuse before anything is touched. A
+    load still writing would be cut off by the container removal. An unfinished one marks
+    databases that may be half-written, and the record lives in the backups folder that the
+    uninstall moves aside (T677), where nothing reads it: with "Keep my characters" a
+    reinstall into this folder would start on those databases with no warning. Refused, not
+    carried over: the way out is on the Maintenance tab, and it is one press.
+    """
+    from yulon.controller_wow_wotlk import maintenance  # noqa: PLC0415 - no family at import
+
+    try:
+        record = maintenance.interrupted_restore(server_dir)
+    except OSError as exc:  # fail closed: "could not tell" must not let the removal run
+        return f"Yu'lon could not read this server's restore record ({exc}). Nothing was removed."
+    if record is None:
+        return None
+    if record.load_running:
+        return (
+            "A restore from the last session is still writing into this server's databases "
+            "in Docker. Uninstalling now would cut it off. Wait for it to finish (the "
+            "Maintenance tab says when), then uninstall again. Nothing was removed."
+        )
+    return (
+        "A restore of this server did not finish, so its databases may be half-written. The "
+        "record that says so would not come back with a reinstall, and a reinstall that kept "
+        "the characters would start on them with no warning. On the Maintenance tab, restore "
+        "a backup again, or press Forget that record if you have put the databases right or "
+        "will not keep them, then uninstall again. Nothing was removed."
     )
 
 

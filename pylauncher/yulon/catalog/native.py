@@ -3925,6 +3925,46 @@ def folder_start_refusal(
     return owed_start_refusal(server_dir) or stopped_build_refusal(server_dir, image_id)
 
 
+def restore_still_loading(server_dir: Path) -> str | None:
+    """The sentence for a restore of this folder that may still be writing, else None (T714).
+
+    A load that outlived the Yu'lon that started it ("Quit anyway", T690) is recorded in the
+    restore record with its process, and no hold of this process covers it. A press that
+    would stop that server's database asks this first. Fails CLOSED (lead, T714 round 2): a
+    record that cannot be read, or a folder whose record cannot be looked at, cannot say no
+    load runs, so it refuses too, naming Forget that record as the way out. A dead load's
+    record is not refused: stopping that database writes nothing into it.
+    """
+    from yulon.controller_wow_wotlk import maintenance  # noqa: PLC0415
+
+    try:
+        record = maintenance.interrupted_restore(server_dir)
+    except OSError as exc:
+        logger.warning(f"could not read the restore record in {server_dir}: {exc}")
+        return _record_unread(server_dir, f" ({exc})")
+    if record is None:
+        return None
+    if not record.readable:
+        return _record_unread(server_dir, "")
+    if not record.load_running:
+        return None
+    return (
+        f"A restore of the server in {server_dir} is still loading its databases in Docker "
+        "(it carried on after the Yu'lon that started it closed). Stopping that server now "
+        "would leave them half-written, so nothing was stopped. Wait for it to finish, then "
+        "try again."
+    )
+
+
+def _record_unread(server_dir: Path, why: str) -> str:
+    return (
+        f"The server in {server_dir} has a restore record Yu'lon cannot read{why}, so it cannot "
+        "tell whether a restore is still writing there, and nothing was stopped. If no restore "
+        "is running there, press Forget that record on that server's Maintenance tab, then "
+        "try again."
+    )
+
+
 def unfinished_restore_refusal(server_dir: Path) -> str | None:
     """The restore record's refusal of a start (T681, lifecycle L8/L19), or None. Never raises.
 
