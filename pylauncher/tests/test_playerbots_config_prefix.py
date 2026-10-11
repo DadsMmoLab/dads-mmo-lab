@@ -20,6 +20,7 @@ import pytest
 from tests.support_native import Recorder, engine, install
 from tests.test_rebuild import _daemon_for, _seams_of, a_finished_install
 from tests.test_rebuild_parks_a_finished_build import _parked_once
+from tests.test_rebuild_start_records import heads_follow_the_recorder, ready_to_update
 from tests.test_rebuild_waits_for_docker import SILENT_FOR_THE_WAIT, _Clock, _Probe
 from yulon import (
     bot_population,
@@ -686,6 +687,48 @@ def test_a_server_with_no_build_record_is_judged_by_its_checkout(
     assert not (tmp_path / BUILT_PREFIX_FILE).exists()
     _start(monkeypatch, tmp_path)
     assert (tmp_path / CONF).read_bytes().decode("utf-8") == NEW_CONF
+
+
+def test_a_pre_0916_build_whose_update_stopped_mid_compile_is_not_started_on_new_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T708: no build record, and THIS Yu'lon's update crossed the rename, then stopped.
+
+    A folder built by 0.9.15 carries neither `.yulon-built-prefix.json` nor
+    `.yulon-built-from.json`. Its update moves mod-playerbots past the rename and the
+    process dies in the compile. `settle()` alone would judge by the checkout and rename
+    the conf forward under the old image; the update's sources-off record (T680, written
+    as each source moves) must refuse the Start before the rename runs.
+    """
+    rec, server_dir = ready_to_update(tmp_path)
+    for record in (BUILT_PREFIX_FILE, native.BUILT_FROM_FILE):
+        (server_dir / record).unlink(missing_ok=True)
+    lay_module(server_dir, OLD_DIST)
+    (server_dir / CONF).parent.mkdir(parents=True, exist_ok=True)
+    (server_dir / CONF).write_bytes(OLD_CONF.encode("utf-8"))
+    module = server_dir / playerbots_keys.MODULE
+
+    def fetched(dest: Path) -> None:
+        if dest == module:
+            lay_module(server_dir, NEW_DIST)  # upstream crossed the rename
+
+    rec.on_clone = fetched
+    heads_follow_the_recorder(rec)
+    press = engine(rec).update_to_latest(InstallOptions(server_dir=server_dir))
+    for line in press:
+        if line == "--- build":
+            break  # and never resumed: Yu'lon is gone
+    else:
+        pytest.fail("the update never reached its compile")
+    assert playerbots_keys.module_prefix(server_dir) == playerbots_keys.NEW, "premise: crossed"
+    assert playerbots_rename.read_built(server_dir) is None, "premise: no build record"
+
+    with pytest.raises(StartRefused) as refused:
+        _start(monkeypatch, server_dir)
+
+    assert str(module) in str(refused.value)
+    assert (server_dir / CONF).read_bytes() == OLD_CONF.encode("utf-8"), "nothing renamed"
+    assert not tuning.backups_of(server_dir / CONF)
 
 
 def test_a_record_that_cannot_be_read_is_no_record(tmp_path: Path) -> None:

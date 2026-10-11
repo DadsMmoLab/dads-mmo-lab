@@ -500,7 +500,9 @@ def _a_server_that_redirects_to(target_path: str) -> Iterator[str]:
     assert "/mirror/x.zip" not in served, "the redirect off https was followed"
 
 
-def test_the_self_updater_never_follows_a_redirect_off_https() -> None:
+def test_the_self_updater_never_follows_a_redirect_off_https(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Mutation this catches (S4): the `scheme != "https"` refusal removed from the redirect rule.
 
     The real opener `download()` uses (`fetch._open`), and a real server whose 302 names a
@@ -508,6 +510,11 @@ def test_the_self_updater_never_follows_a_redirect_off_https() -> None:
     address is plain http too, only because a loopback server has no certificate the
     verified context would take; the rule judges the redirect's target alone.
     """
+    # The loopback server must be asked directly: a proxy in the environment (urllib's
+    # `getproxies()`, `http_proxy` with no `no_proxy`) would answer instead of it.
+    for name in ("http_proxy", "https_proxy", "all_proxy", "no_proxy"):
+        monkeypatch.delenv(name, raising=False)
+        monkeypatch.delenv(name.upper(), raising=False)
     with _a_server_that_redirects_to("/mirror/x.zip") as url:
         with pytest.raises(fetch.UpdateError, match="off https"):
             fetch._open(url, _Deadline(10.0))
