@@ -648,9 +648,7 @@ def _a_cut_off_import(controller: Controller) -> list[str]:
     return asked
 
 
-def test_start_refuses_a_cut_off_import_and_starts_no_server(
-    db: _DbDocker, tmp_path: Path
-) -> None:
+def test_start_refuses_a_cut_off_import_and_starts_no_server(db: _DbDocker, tmp_path: Path) -> None:
     from yulon.controller import IMPORT_ENDED, ImportEnded
 
     controller = Controller(SPEC, tmp_path)
