@@ -37,6 +37,13 @@ class TreeRemovalError(OSError):
     """
 
 
+class LinkRootRefused(TreeRemovalError):
+    """The root given to `remove_tree` is a symbolic link or junction (T721).
+
+    A subclass so a caller tells this refusal by type, never by its wording.
+    """
+
+
 class StoppedPartWay(Exception):
     """A removal or a move its `stop` ended between two files (T549); every file left is whole."""
 
@@ -151,7 +158,7 @@ def remove_tree(path: Path) -> None:
         # calls one a folder, so this asks `links`. The retry's own walks no longer
         # enter a link either; the root is still refused here, by the function that
         # knows it is about to walk, rather than in each caller.
-        raise TreeRemovalError(
+        raise LinkRootRefused(
             f"{path} is a symbolic link or junction, not a directory this app may delete "
             f"through. Remove the link itself if that is what was meant; nothing was changed."
         )

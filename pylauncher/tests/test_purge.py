@@ -1872,3 +1872,28 @@ def test_a_late_junction_sentence_does_not_blame_a_read_only_file(
     assert "junction or link" in text
     assert "read-only" not in text
     assert "partly deleted" not in text
+
+
+def test_the_link_sentence_follows_the_refusal_type_not_its_wording(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T721: rmtree's message may be reworded freely; purge tells a link root by type."""
+    from yulon import rmtree
+
+    def reworded(path: Path, last: object) -> None:
+        raise rmtree.LinkRootRefused("a wholly different wording, nothing was changed.")
+
+    monkeypatch.setattr(rmtree, "remove_tree_last", reworded)
+    with pytest.raises(purge.PurgeRefusal) as caught:
+        purge.remove_tree(tmp_path / "x")
+    text = str(caught.value)
+    assert "junction or link" in text
+    assert "read-only" not in text
+
+    def old_phrase_only(path: Path, last: object) -> None:
+        raise rmtree.TreeRemovalError("is a symbolic link or junction, said by a plain error")
+
+    monkeypatch.setattr(rmtree, "remove_tree_last", old_phrase_only)
+    with pytest.raises(purge.PurgeRefusal) as caught2:
+        purge.remove_tree(tmp_path / "x")
+    assert "junction or link" not in str(caught2.value)

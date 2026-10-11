@@ -1351,10 +1351,13 @@ def _cause(exc: rmtree.TreeRemovalError) -> object:
     The leaf has already wrapped the original in a sentence of its own; the
     purge sentence wants the bare cause, not that sentence nested inside it.
     """
+    link: BaseException | None = exc
+    while link is not None:  # T721: the leaf's refusal of a link root is a type, not a phrase
+        if isinstance(link, rmtree.LinkRootRefused):
+            return _LINK_CAUSE
+        link = link.__cause__
     if exc.__cause__ is not None:
         return exc.__cause__
-    if "symbolic link or junction" in str(exc):  # T717: the leaf's own refusal of a link
-        return _LINK_CAUSE
     return "it is still there afterwards"
 
 
