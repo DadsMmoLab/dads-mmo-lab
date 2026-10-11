@@ -8,11 +8,12 @@ will get (the module applier, the rebuild, the Maintenance engine).
 
 from __future__ import annotations
 
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from yulon import apply, module_source, move_server, platform
+from yulon import apply, module_source, move, move_server, platform
 from yulon.catalog import native, upstream
 from yulon.catalog.catalog import Catalog, CatalogEntry
 from yulon.log import get_logger
@@ -30,6 +31,12 @@ class MoveIn:
     plan: Callable[[Path, Path], move_server.ServerImportPlan]
     """`(package, server_dir) -> plan`; reads the file and asks GitHub, writes nothing."""
     installer: Callable[[move_server.ServerImportPlan], move_server.MovedInInstall]
+    check: Callable[[Path, CatalogEntry], tuple[str, str] | None] | None = None
+    """`(package, tile's entry) -> (title, sentence)` when the FILE cannot be brought in, else None.
+
+    T702: judged before any folder is asked for. It reads the file and nothing else: no
+    folder, no GitHub.
+    """
 
 
 def _commit_known(repo: str, sha: str) -> bool | None:
@@ -118,8 +125,33 @@ def _server_for(entry: CatalogEntry) -> Callable[[Path, Path | None], move_serve
     return build
 
 
+def _one_read() -> Callable[[Path], move.Package]:
+    """`move.read_package`, remembering the last file it opened (T702).
+
+    The Catalog reads a package twice on the window's thread: once to judge the file before any
+    folder is asked for, once to plan with the chosen folder. Reading it end to end checks
+    every member's hash, so the second read is skipped while the file is the same one (same
+    path, size and modification time). A failed read is never remembered.
+    """
+    last: list[tuple[Path, int, int, move.Package]] = []
+
+    def read(path: Path) -> move.Package:
+        try:
+            stat = path.stat()
+        except OSError:
+            return move.read_package(path)  # says "not a package" in its own words
+        if last and last[0][:3] == (path, stat.st_size, stat.st_mtime_ns):
+            return last[0][3]
+        package = move.read_package(path)
+        last[:] = [(path, stat.st_size, stat.st_mtime_ns, package)]
+        return package
+
+    return read
+
+
 def move_in_for_app(catalog: Catalog) -> MoveIn:
     """The real `MoveIn`, for `main.py` to hand the Catalog view."""
+    read = _one_read()
 
     def plan(path: Path, server_dir: Path) -> move_server.ServerImportPlan:
         return move_server.plan_server_import(
@@ -129,6 +161,7 @@ def move_in_for_app(catalog: Catalog) -> MoveIn:
             platform_id=platform.detect(),
             lookup_for=lambda entry: _lookup(_store_for(entry)),
             commit_known=_commit_known,
+            read_package=read,
         )
 
     def installer(chosen: move_server.ServerImportPlan) -> move_server.MovedInInstall:
@@ -155,7 +188,28 @@ def move_in_for_app(catalog: Catalog) -> MoveIn:
             distance=_distance,
         )
 
-    return MoveIn(plan=plan, installer=installer)
+    def check(path: Path, entry: CatalogEntry) -> tuple[str, str] | None:
+        # A folder that does not exist holds nothing to refuse, so what is left is the file's
+        # own refusals; a commit is never asked of GitHub here (None: cannot say).
+        nowhere = Path(tempfile.gettempdir()) / "yulon-bring-in-no-such-folder"
+        looked = move_server.plan_server_import(
+            path,
+            catalog=catalog,
+            server_dir_for=lambda _entry: nowhere,
+            platform_id=platform.detect(),
+            lookup_for=lambda chosen: _lookup(_store_for(chosen)),
+            commit_known=lambda _repo, _sha: None,
+            read_package=read,
+        )
+        if not looked.allowed:
+            return "This server cannot be brought in", looked.text()
+        if looked.entry is not None and looked.entry.id != entry.id:
+            from yulon.ui.catalog_view import another_game_message
+
+            return "Another game", another_game_message(looked.entry.name)
+        return None
+
+    return MoveIn(plan=plan, installer=installer, check=check)
 
 
 __all__ = ["MoveIn", "move_in_for_app"]

@@ -792,6 +792,67 @@ def _volume_of(path: Path, platform_id: str) -> object:
     return probe.stat().st_dev
 
 
+CANNOT_INSTALL_YET = "This machine cannot install the server yet:"
+"""The first words of the refusal preflight raises when a row refuses (T702).
+
+`CatalogView` titles a message that starts with this "Cannot install yet" rather than
+"Install failed", since nothing was started; the engine's raise and the view's test both
+use this constant, so they cannot drift apart.
+"""
+
+
+def cheap_data_root(platform_id: str) -> Path | None:
+    """Where Docker keeps its images, told without asking Docker. None = unknown.
+
+    The early check runs on the window's thread, before any folder is picked, so it must not
+    wait on a daemon. Windows and macOS name theirs in Docker Desktop's settings file. On
+    Linux nothing cheap is true: `/var/lib/docker` can be a leftover beside Docker Desktop,
+    a rootless engine, or a data-root moved by `daemon.json`, so it is unknown there and the
+    full preflight, which asks the daemon, keeps the one-drive sum.
+    """
+    if platform_id in ("windows", "macos"):
+        return platform.docker_desktop_data_root()
+    return None
+
+
+def early_space_refusal(
+    entry: CatalogEntry,
+    server_dir: Path,
+    *,
+    platform_id: str,
+    data_root: Path | None,
+    free: Callable[[Path], int | None] = free_bytes,
+) -> str | None:
+    """One plain sentence when `server_dir`'s drive cannot hold this install, else None (T702).
+
+    Asked as soon as the server folder is known, before the client folder is picked and
+    before any daemon is. It refuses on exactly the floor `evaluate()` refuses on and on
+    nothing softer, from the two numbers the answer needs: the free space where the server
+    will go and, when the images share that drive, the added need. Anything it cannot
+    measure is not a refusal; the full preflight still has the last word.
+    """
+    native = entry.install.native
+    if native is None:
+        return None
+    available = free(server_dir)
+    if available is None:
+        return None
+    shared = _same_volume(data_root, server_dir, platform_id) is True
+    if shared:
+        need = native.floors_gb(same_volume=True)[0] + world_data_gb(entry, platform_id)
+    else:
+        need = native.min_server_dir_gb
+    have = available / GIB
+    if have >= need:
+        return None
+    short, wanted = _short_of(have, need)
+    drive = "that drive, which also holds Docker's disk" if shared else "that drive"
+    return (
+        f"{short} GB is free on {drive}, and {entry.name} needs {wanted} GB. "
+        "Pick a folder on a drive with more room, or free some space there."
+    )
+
+
 def evaluate(
     entry: CatalogEntry, server_dir: Path, facts: Facts, spent: Spent = NOTHING_SPENT
 ) -> Report:
@@ -1554,10 +1615,11 @@ def _space_remedy(what: str, facts: Facts) -> str:
     if what == ONE_VOLUME_SPACE:
         # One drive holds both, so either action frees the same pool and the
         # user should be told they have the choice.
+        # The same-drive point is made once, by the line this answers (T702): its note says
+        # the folder and Docker's disk share one drive, so "it" here is that drive.
         return (
-            "The install folder and Docker's disk are on the same drive, so both needs come "
-            "out of it. Free space on it, install to a drive that has room, or move Docker's "
-            "disk off it, then try again."
+            "Free space on it, install to a drive that has room, or move Docker's disk off it, "
+            "then try again."
         )
     # A row this function has not been taught. Matched explicitly above rather
     # than falling through, because the one-volume sentence asserts that two

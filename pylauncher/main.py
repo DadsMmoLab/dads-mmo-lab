@@ -573,6 +573,7 @@ def build_window() -> object:
     )
 
     from yulon import __version__, forgetting, play_client, ui_settings
+    from yulon.catalog import native
     from yulon.catalog.catalog import load_catalog
     from yulon.install_wiring import installer_for_app
     from yulon.selfupdate.apply import (
@@ -778,6 +779,8 @@ def build_window() -> object:
         installed_games=state.installed_dirs(),
         # T601 level 2: "Bring from another computer…" on each tile.
         move_in=move_in_for_app(catalog),
+        # T702: the drive is judged as soon as the server folder is chosen.
+        ready_check=native.early_refusal,
     )
     tabs, update_bar, _splitter = build_catalog_tab(window, catalog_view, log_panel)
     # T388: where the screen is smaller than the 960x640 floor the contents
@@ -2409,9 +2412,9 @@ def provision_headless() -> int:
       2  not ready, and what remains needs a human
 
     On Linux, 2 is the *expected* outcome rather than a fault: there is nobody
-    here to ask about joining the docker group, and the app never makes a
-    root-equivalent change with nobody asked, so the engine is installed and
-    the one step only the user may take is printed for them to run.
+    here to ask, and the app never runs anything as root with nobody asked (T700),
+    so nothing is installed or started and the commands are printed for the user
+    to run.
     """
     # The same defect's other half: the human-readable lines below put that same
     # step text through `logging`, and a cp1252 stream cannot encode it either.

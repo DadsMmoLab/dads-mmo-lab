@@ -962,18 +962,20 @@ def plan_server_import(
     platform_id: str,
     lookup_for: Callable[[CatalogEntry], ModuleLookup],
     commit_known: Callable[[str, str], bool | None],
+    read_package: Callable[[Path], move.Package] = move.read_package,
 ) -> ServerImportPlan:
     """Read a whole-server package and say what building it here would do. Nothing is written.
 
     `server_dir_for` names the folder (the Catalog's default for that game, or the player's
     pick); `commit_known(repo, sha)` asks GitHub whether a packed commit still exists, None when
-    it cannot say (asked last, and only when nothing else refused).
+    it cannot say (asked last, and only when nothing else refused). `read_package` is the
+    seam a caller that reads the same file twice shares one read through (T702).
     """
     from yulon.catalog.installer import unsupported_platform_message
     from yulon.move_flows import record_refusals
 
     try:
-        package = move.read_package(path)
+        package = read_package(path)
     except move.MovePackageError as exc:
         return ServerImportPlan(path=path, manifest=None, refusals=(str(exc),))
     manifest = package.manifest

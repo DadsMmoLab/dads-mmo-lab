@@ -545,6 +545,22 @@ def _docker_cli_is_the_plain_name(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _no_docker_is_installed_on_this_linux_box(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Provisioning tests see a machine with no Docker on it, whatever this one has (T700).
+
+    `platform.linux_docker_on_board()` reads the systemd unit directories and
+    Docker Desktop's install paths, so without this the install-path tests pass or
+    fail on the developer's own docker-ce. `test_docker_consent.py` sets what a
+    test needs.
+    """
+    monkeypatch.setattr(platform, "_SYSTEMD_UNIT_DIRS", ())
+    monkeypatch.setattr(platform, "_docker_desktop_paths", lambda: ())
+    monkeypatch.setattr(platform, "_docker_snap_paths", lambda: ())
+    monkeypatch.setattr(platform, "_docker_rootless_paths", lambda: ())
+    monkeypatch.setattr(platform, "_docker_cli_context", lambda: None)
+
+
+@pytest.fixture(autouse=True)
 def _compose_is_new_enough(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every Start asks `docker compose version` first (T658); a unit test's Compose is new enough.
 

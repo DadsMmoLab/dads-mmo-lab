@@ -23,6 +23,8 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Closing, quitting, updating or changing the client folder is refused while a restore, backup or install is running.
 - **PLAY** at another computer's address skips the local server; your own public address counts as another computer.
 - **PLAY** after starting the server now waits for the realm to come up before it starts the game.
+- Install now asks before it starts or installs Docker Engine as root, and never installs a second engine over yours.
+- A full drive is now said right after you pick the server folder, and a wrong move file before any folder is asked.
 
 ### Changed
 - The Server tab's **Play** now starts the game; **Launcher…** opens the launcher. The tray's **Play** starts a stopped server.

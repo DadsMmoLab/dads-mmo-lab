@@ -1226,7 +1226,10 @@ def test_the_prompter_the_spine_forwards_is_the_one_the_sudo_dialog_asks_with(
 
     def prompter(question: str) -> str:
         asked.append(question)
-        return SUDO_CANARY if question == platform.SUDO_PASSWORD_QUESTION else "n"
+        if question == platform.SUDO_PASSWORD_QUESTION:
+            return SUDO_CANARY
+        # T700: the install is asked first and agreed to; the group is the one declined.
+        return "y" if question.startswith("Docker Engine is not installed") else "n"
 
     fed: list[tuple[list[str], str]] = []
 
@@ -1245,7 +1248,8 @@ def test_the_prompter_the_spine_forwards_is_the_one_the_sudo_dialog_asks_with(
         installer.preflight(InstallOptions(server_dir=tmp_path / "wow"), ask=prompter)
 
     assert built == [prompter], "the session was built with something other than the forwarded ask"
-    assert asked[0] == platform.DOCKER_GROUP_QUESTION.format(user="pk")
+    assert asked[0].startswith("Docker Engine is not installed")
+    assert asked[1] == platform.DOCKER_GROUP_QUESTION.format(user="pk")
     assert platform.SUDO_PASSWORD_QUESTION in asked
     assert asked.count(platform.SUDO_PASSWORD_QUESTION) == 1  # one dialog per run, still
     # The answer went to sudo, on stdin, and never as an argv element.
@@ -1303,7 +1307,10 @@ def test_every_sudo_outcome_survives_the_trip_up_to_the_sentence_the_user_reads(
 
     def message(run: _LinuxBox, run_input: platform.RunWithInput, password: str | None) -> str:
         def prompter(question: str) -> str | None:
-            return password if question == platform.SUDO_PASSWORD_QUESTION else "n"
+            if question == platform.SUDO_PASSWORD_QUESTION:
+                return password
+            # T700: yes to the install itself, no to the docker group.
+            return "y" if question.startswith("Docker Engine is not installed") else "n"
 
         rec = Recorder(images=False)
         installer = _build(

@@ -6977,6 +6977,26 @@ def _reserving_call(press: str) -> Callable[[Callable[..., Any]], Callable[..., 
     return decorate
 
 
+def early_refusal(entry: CatalogEntry, server_dir: Path) -> str | None:
+    """One sentence when the drive under `server_dir` cannot hold `entry`, else None (T702).
+
+    For the Catalog's tiles, asked the moment a server folder is chosen. A folder that
+    already carries an install record is left to the full preflight: a resume owes less
+    than a fresh install (`_spent()`), and refusing it here would be refusing it wrongly.
+    """
+    if (server_dir / STATE_FILE).exists() or (server_dir / MOVE_IN_FILE).exists():
+        # A move in progress is told "A move that did not finish" by the view, which is the
+        # more useful sentence for that folder.
+        return None
+    here = platform.detect()
+    return preflight.early_space_refusal(
+        entry,
+        server_dir,
+        platform_id=here,
+        data_root=preflight.cheap_data_root(here),
+    )
+
+
 class StagedInstaller:
     """Abstract spine: everything an install needs that is not about one emulator.
 
@@ -12176,14 +12196,20 @@ class StagedInstaller:
             # Desktop download followed by a three-minute readiness poll. The
             # first macOS tester watched an empty panel through all of it and
             # reported the install as silently dead (macOS gate, 2026-08-25).
-            yield (
-                "Docker is not answering yet. Setting it up - this can mean downloading "
-                "Docker Desktop and waiting for its engine, up to a few minutes with no "
-                "output. You can stop at any time."
-            )
-            # `ask` reaches provisioning and nothing else: the docker-group
-            # consent and the Linux sudo password are asked there, before any
-            # privileged step, and declined when there is nobody to ask.
+            if self._seams.platform_id() == "linux":
+                # T700: nothing runs yet. Provisioning says what it found and asks first,
+                # and "Docker Desktop" is not what a Linux machine is given.
+                yield "Docker is not answering. Checking what is installed."
+            else:
+                yield (
+                    "Docker is not answering yet. Setting it up - this can mean downloading "
+                    "Docker Desktop and waiting for its engine, up to a few minutes with no "
+                    "output. You can stop at any time."
+                )
+            # `ask` reaches provisioning and nothing else: the root question (start or
+            # install Docker), the docker-group consent and the Linux sudo password are
+            # asked there, before any privileged step, and declined when there is
+            # nobody to ask.
             report = self._seams.ensure_docker(cancel=cancel, ask=ask)
             # Said whatever happens next, including when nothing goes wrong.
             # Provisioning's own report was read only inside the refusals below,
@@ -12249,9 +12275,7 @@ class StagedInstaller:
         report_checks = preflight.evaluate(self.entry, server_dir, facts, spent)
         yield from preflight.lines(report_checks)
         if not report_checks.ok():
-            raise InstallerError(
-                "This machine cannot install the server yet:\n" + report_checks.message()
-            )
+            raise InstallerError(f"{preflight.CANNOT_INSTALL_YET}\n" + report_checks.message())
 
     def _offer_a_current_compose(
         self, facts: PreflightFacts, ask: runner.Prompter | None

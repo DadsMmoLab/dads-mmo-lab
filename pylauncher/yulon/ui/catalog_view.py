@@ -45,6 +45,7 @@ from yulon.catalog.installer import (
     platform_names,
     unsupported_platform_message,
 )
+from yulon.catalog.preflight import CANNOT_INSTALL_YET
 from yulon.log import get_logger
 from yulon.ui import folder_picker, single_instance
 from yulon.ui.answers import said_yes
@@ -63,6 +64,16 @@ QWIDGETSIZE_MAX = 16777215
 
 BRING_FROM_ANOTHER = "Bring from another computer…"
 """The tile press that builds a whole server from a move package (T601 level 2)."""
+
+
+def another_game_message(name: str) -> str:
+    """What a package of a different game is told, on any tile (T702: before the folders)."""
+    return f"This file holds a {name} server. Use the {name} tile's {BRING_FROM_ANOTHER}"
+
+
+CANNOT_INSTALL_TITLE = "Cannot install yet"
+"""The title of a refusal that came before anything was started (T702), not "Install failed"."""
+
 MOVE_IN_FILE = ".yulon-move-in.json"
 """`catalog.native.MOVE_IN_FILE` (pinned equal by a test): a folder a whole-server move is building.
 
@@ -471,9 +482,14 @@ class CatalogView(QWidget):
         move_in: object | None = None,
         pick_package: PackagePicker = _qt_package_picker,
         ask_yes: YesNo = ask_yes_no,
+        ready_check: Callable[[CatalogEntry, Path], str | None] | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
+        # T702: `(entry, server_dir) -> a sentence, or None`. Asked as soon as the server
+        # folder is known, so a drive that cannot hold the install is said before the client
+        # folder is asked for. None draws no early check (the full preflight still runs).
+        self._ready_check = ready_check
         # T601 level 2: `ui.move_in.MoveIn` (a plan for a file, the engine for a plan), or None
         # to draw no "Bring from another computer…" press. Typed loosely here so this view
         # does not import the move engine at module scope.
@@ -1101,6 +1117,12 @@ class CatalogView(QWidget):
             server_dir = self._pick_dir(self, f"Where should {entry.name} be installed?", suggested)
         if server_dir is None:
             return None
+        if self._ready_check is not None:
+            refusal = self._ready_check(entry, server_dir)
+            if refusal is not None:
+                logger.info(f"{entry.id} refused before the client folder: {refusal}")
+                show_information(self, CANNOT_INSTALL_TITLE, refusal)
+                return None
         client_dir: Path | None = None
         if entry.install.requires_client_dir:
             client_dir = self._pick_dir(
@@ -1134,6 +1156,14 @@ class CatalogView(QWidget):
         path = self._pick_package(self, "Choose the file packed on the other computer", self._home)
         if path is None:
             return False
+        # T702: the file itself is judged before either folder is asked for. A wrong file
+        # used to be reported only after both pickers.
+        check = getattr(self._move_in, "check", None)
+        if check is not None:
+            refused = check(path, entry)
+            if refused is not None:
+                show_information(self, refused[0], refused[1])
+                return False
         folders = self._ask_folders(entry)
         if folders is None:
             return False
@@ -1144,11 +1174,7 @@ class CatalogView(QWidget):
             return False
         if plan.entry is None or plan.entry.id != entry.id:
             name = plan.entry.name if plan.entry is not None else "another game"
-            show_information(
-                self,
-                "Another game",
-                f"This file holds a {name} server. Use the {name} tile's {BRING_FROM_ANOTHER}",
-            )
+            show_information(self, "Another game", another_game_message(name))
             return False
         if not self._ask_yes(self, "Bring this server in?", plan.text()):
             return False
@@ -1270,7 +1296,11 @@ class CatalogView(QWidget):
             )
             logger.info(f"{game_id} exited 0 with no compose file in {server_dir}; not remembered")
         if not ok and not self._offer_a_restart_instead(message):
-            show_warning(self, "Install failed", message)
+            # Nothing was started when preflight refused, so it is not a failure (T702).
+            title = (
+                CANNOT_INSTALL_TITLE if message.startswith(CANNOT_INSTALL_YET) else "Install failed"
+            )
+            show_warning(self, title, message)
         self.install_finished.emit(game_id, ok, message)
         if ok:
             _pin_compose_project(server_dir)
