@@ -4038,8 +4038,15 @@ class Applier:
                 # link to nothing was "not there", and `touch()` follows a link
                 # and made the file it points to, wherever that is (T530).
                 if not os.path.lexists(include):
-                    include.touch()
-                    log.done.append("touch include.sh")
+                    try:
+                        include.touch()
+                    except OSError as exc:
+                        log.skipped.append(
+                            f"include.sh: could not be made {_cannot_write(exc, clone)}, so the "
+                            f"server build will leave {manifest.name} out"
+                        )
+                    else:
+                        log.done.append("touch include.sh")
         if complete is not None:
             try:
                 manifest = self._completed(manifest, clone, complete)
@@ -5437,9 +5444,10 @@ class Applier:
             rows = self.sql.query(check.db, statement)
         except Exception as exc:  # noqa: BLE001 - every seam failure is one answer here
             logger.warning(f"could not check {prompt.key} against {check.db}: {exc}")
+            why = _cannot_write(exc, self.server_dir) if isinstance(exc, OSError) else f"({exc})"
             log.skipped.append(
                 f"{prompt.key}={vals[prompt.key]}: NOT checked against the database "
-                f"({exc}), so a wrong answer here will look like a module that does nothing"
+                f"{why}, so a wrong answer here will look like a module that does nothing"
             )
             return
         if not rows.strip():
@@ -6315,7 +6323,8 @@ class Applier:
                 if exc.errno in (errno.ENOTEMPTY, errno.EEXIST):
                     log.kept_folders.append(f"{rel} (kept: it holds your files)")
                 else:
-                    log.skipped.append(f"{rel}: could not be taken back ({exc})")
+                    logger.warning(f"could not take back {rel}: {exc}")
+                    log.skipped.append(f"{rel}: could not be taken back {_cannot_write(exc, path)}")
 
     def _undeploy(self, step: Deploy, clone: Path, log: _Log) -> None:
         """Delete exactly what `_deploy()` put under `dest` — never the dest dir itself.
@@ -7312,7 +7321,7 @@ class Applier:
         except OSError as exc:
             log.skipped.append(
                 f"conf {rel}: an earlier install's file is there and could not be set aside "
-                f"({exc}), so {manifest.name} runs on it instead of its own"
+                f"{_cannot_write(exc, target)}, so {manifest.name} runs on it instead of its own"
             )
             return
         log.done.append(

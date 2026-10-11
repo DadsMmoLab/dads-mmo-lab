@@ -1074,7 +1074,7 @@
           6141
         ],
         "notes": [
-          "Community repacks (realmlist.wtf at top level, no locale folder) are detected and warned about."
+          "Yu'lon checks the client's archives (the MPQ count and dbc.MPQ) before it extracts anything."
         ]
       },
       "has_manifests": true,

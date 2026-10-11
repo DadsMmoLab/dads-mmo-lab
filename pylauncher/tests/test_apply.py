@@ -423,6 +423,104 @@ def test_a_claim_in_a_folder_yulon_cannot_write_is_told_without_the_raw_errno(
     assert "write access" in said, said
 
 
+def _assert_plain(said: str, folder: Path) -> None:
+    assert "Errno" not in said and "Permission denied" not in said, said
+    assert str(folder) in said and "cannot write" in said and "write access" in said, said
+
+
+def _denied(folder: Path, name: str) -> PermissionError:
+    return PermissionError(13, "Permission denied", str(folder / name))
+
+
+def test_a_clone_folder_yulon_cannot_write_does_not_fail_the_install_with_a_raw_errno(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 2: `include.sh` is touched in the clone, and that touch was unguarded."""
+    clone = tmp_path / "modules" / "mod-ah-bot"
+    real_touch = Path.touch
+
+    def touch(self: Path, *a: Any, **k: Any) -> None:
+        if self.name == "include.sh":
+            raise _denied(clone, "include.sh")
+        real_touch(self, *a, **k)
+
+    monkeypatch.setattr(Path, "touch", touch)
+    git = _FakeGit({"conf/mod_ahbot.conf.dist": "AuctionHouseBot.GUID = 0\n"})
+    report = Applier(tmp_path, git=git, sql=_FakeSql()).install(
+        parse_manifest(MODULE), {"bot_guid": "42"}
+    )
+    _assert_plain(" ".join(report.skipped), clone)
+    assert "touch include.sh" not in report.done
+
+
+def _finished_claim_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, client_files: tuple[Any, ...]
+) -> tuple[list[str], Path]:
+    clone = tmp_path / "modules" / "mod-ah-bot"
+    clone.mkdir(parents=True)
+
+    def refused(folder: Path, **_kw: object) -> None:
+        raise _denied(folder, apply_module.CLAIM_FILE)
+
+    monkeypatch.setattr(apply_module, "write_clone_claim", refused)
+    log = apply_module._Log()
+    applier = Applier(tmp_path, git=_FakeGit({}), sql=_FakeSql())
+    applier._finish_claim(parse_manifest(MODULE), clone, "u", True, log, client_files)
+    return log.skipped, clone
+
+
+def test_the_finished_mark_in_an_unwritable_folder_is_told_plainly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    skipped, clone = _finished_claim_refused(tmp_path, monkeypatch, ())
+    mark = [line for line in skipped if "finished mark" in line]
+    assert len(mark) == 1, skipped
+    _assert_plain(mark[0], clone)
+
+
+def test_the_client_record_in_an_unwritable_folder_is_told_plainly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    copy = apply_module.ClientCopy(step="s", path=str(tmp_path / "f"), sha256="0")
+    skipped, clone = _finished_claim_refused(tmp_path, monkeypatch, (copy,))
+    record = [line for line in skipped if "went into your game client" in line]
+    assert len(record) == 1, skipped
+    _assert_plain(record[0], clone)
+
+
+def test_a_conf_that_cannot_be_set_aside_is_told_plainly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conf = tmp_path / "env" / "mod_x.conf"
+    conf.parent.mkdir(parents=True)
+    conf.write_text("x", encoding="utf-8")
+
+    def refused(*_a: object, **_k: object) -> None:
+        raise _denied(conf.parent, "mod_x.conf")
+
+    monkeypatch.setattr(apply_module.os, "replace", refused)
+    log = apply_module._Log()
+    applier = Applier(tmp_path, git=_FakeGit({}), sql=_FakeSql())
+    applier._set_an_earlier_conf_aside(parse_manifest(MODULE), "mod_x.conf", conf, log)
+    _assert_plain(" ".join(log.skipped), conf.parent)
+
+
+def test_a_folder_that_cannot_be_taken_back_is_told_plainly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "scripts" / "x").mkdir(parents=True)
+
+    def refused(self: Path) -> None:
+        raise _denied(self.parent, self.name)
+
+    monkeypatch.setattr(Path, "rmdir", refused)
+    log = apply_module._Log()
+    applier = Applier(tmp_path, git=_FakeGit({}), sql=_FakeSql())
+    manifest = parse_manifest(MODULE).model_copy(update={"folders": ("scripts/x",)})
+    applier._unfolders(manifest, log)
+    _assert_plain(" ".join(log.skipped), tmp_path / "scripts")
+
+
 def test_a_module_conf_is_activated_without_the_lines_the_server_refuses(tmp_path: Path) -> None:
     """T204: the same rule as the server's own confs, at the moment the `.dist` is copied."""
     git = _FakeGit(
