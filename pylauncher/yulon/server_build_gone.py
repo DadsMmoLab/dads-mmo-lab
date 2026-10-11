@@ -16,9 +16,10 @@ Two facts about a folder, said in plain words wherever a press meets them:
 
 The check is made BEFORE `compose up`, so a Start that cannot run leaves the
 database down and the realm row alone (T627). `docker image inspect` is one call per
-image, asked only of the games whose one image is the whole build (CMaNGOS);
-every other game meets a gone build through `names_a_gone_build()`, on compose's
-own failure text.
+image Start runs. Until T688 it was asked only of the games whose one image is the
+whole build (CMaNGOS, TrinityCore), and WotLK and Unbound met a gone build only
+through `names_a_gone_build()`, on compose's own failure text, after the database
+had started.
 
 This module imports no view and no engine, so the controller, the engine and the
 Server tab can all say the same sentence.
@@ -129,13 +130,14 @@ def refusal_before_start(
     The images asked about are the ones the folder's own compose files name for the
     `services` Start brings up and this app builds (`image_prefix`): that is what compose
     will start, whatever the folder's path is now (a moved folder, a server made inside a
-    distro). Only where there is no compose file to read are the names worked out: the id
-    the install's record carries, else the folder's hash. A compose file that cannot be
+    distro), for every game (T688). Only where there is no compose file to read, and only
+    for a one-image build, are the names worked out: the id the install's record carries,
+    else the folder's hash. A compose file that cannot be
     read or parsed, a distro folder with no usable record, a name Docker will not answer
     for, or a folder with no such image named is no refusal: the Start goes on as it did.
     """
     native_block = entry.install.native if entry is not None else None
-    if entry is None or native_block is None or not _one_image_build(entry):
+    if entry is None or native_block is None:
         return None
     refs: tuple[str, ...]
     try:
@@ -159,6 +161,11 @@ def refusal_before_start(
             )
             if not refs:
                 return None
+        elif not _one_image_build(entry):
+            # T688: a build of several images (AzerothCore's world, login, importer and
+            # data download) names images Start does not run, and with no compose file of
+            # ours nothing says which ones it does: no guess refuses a server.
+            return None
         else:
             try:
                 recorded: str | None = native.recorded_install_id(server_dir)

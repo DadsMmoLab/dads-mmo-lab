@@ -31,6 +31,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - After an update or rebuild that stopped part-way, **Start** is refused or allowed for a reason that is still true.
 - **Update the server to latest** no longer runs the SQL of a module Yu'lon applies itself, such as ARAC, a second time.
 - A **Rebuild** whose database updates fail puts your databases back as they were and names the update that failed.
+- **Start** on a WotLK or Unbound server whose build is gone from Docker now says so before anything starts.
 
 ### Changed
 - The Server tab's **Play** now starts the game; **Launcher…** opens the launcher. The tray's **Play** starts a stopped server.
