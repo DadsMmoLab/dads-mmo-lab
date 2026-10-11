@@ -90,7 +90,9 @@ def test_player_data_is_never_cleared_even_after_an_ended_import(tmp_path: Path)
     rec = Recorder(probe_answers=[ABSENT])
     _an_install_whose_import_was_ended(rec, server)
     rec.probe_answers = [POPULATED_DONE]
-    _press(rec, server)
+    # T678: refused, not read as imported: these rows sit in databases never finished.
+    with pytest.raises(InstallerError, match="did not finish"):
+        _press(rec, server)
     assert not any(call.startswith("reset") for call in rec.calls), rec.calls
     assert f"one-shot:{IMPORTER}" not in rec.calls
 
@@ -226,12 +228,12 @@ def test_the_apps_reset_seam_hands_everything_down(monkeypatch: pytest.MonkeyPat
     from yulon import install_wiring
     from yulon.catalog.catalog import load_catalog
 
-    asked: list[bool] = []
+    asked: list[tuple[bool, bool]] = []
 
     def reset_unfinished(
-        sql: object, mysql: object, *, everything: bool = False
+        sql: object, mysql: object, *, everything: bool = False, seeded: bool = False
     ) -> tuple[str, ...]:
-        asked.append(everything)
+        asked.append((everything, seeded))
         return ()
 
     monkeypatch.setattr(repair, "reset_unfinished", reset_unfinished)
@@ -239,7 +241,8 @@ def test_the_apps_reset_seam_hands_everything_down(monkeypatch: pytest.MonkeyPat
     assert reset is not None
     reset()
     reset(everything=True)
-    assert asked == [False, True]
+    reset(everything=True, seeded=True)  # T678 review round 2: Repair's clean redo
+    assert asked == [(False, False), (True, False), (True, True)]
 
 
 # ------------------------------------------------------------------- Repair
@@ -262,7 +265,15 @@ def test_repair_clears_what_an_ended_import_left_and_imports_again(
 
     assert docker.repair_import(SPEC, tmp_path, _probe(IMPORTED, IMPORTED), reset=reset) is True
     assert resets == [True]
-    assert ["docker", "compose", "up", "--no-deps", SPEC.import_service] in calls
+    assert [
+        "docker",
+        "compose",
+        "up",
+        "--no-deps",
+        "--exit-code-from",
+        SPEC.import_service,
+        SPEC.import_service,
+    ] in calls
     assert not docker.one_shot_ended_marker(tmp_path, SPEC.import_service).exists()
 
 

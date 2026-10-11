@@ -492,3 +492,71 @@ def test_a_compose_file_that_cannot_be_read_does_not_refuse(
     Controller(SPEC, tmp_path).refuse_a_missing_image()
     warned = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert any("did not check that its build is in Docker" in m for m in warned), warned
+
+
+# -- T688: the AzerothCore games, whose build is several images ------------------------------
+
+WOTLK = load_catalog().get("wow-wotlk")
+UNBOUND = load_catalog().get("wow-unbound")
+
+
+def _ac_compose(box: _ImageDocker, server: Path, entry: Any) -> dict[str, str]:
+    """The folder's compose files name a built image for each server Start brings up."""
+    spec = entry.container_spec()
+    (server / composegen.BASE_FILE).write_text("services: {}\n", encoding="utf-8")
+    prefix = entry.install.native.image_prefix
+    named = {
+        spec.db: "mysql:8.4",
+        spec.auth: f"{prefix}authserver:native-feedf00d",
+        spec.world: f"{prefix}worldserver:native-feedf00d",
+    }
+    box.config_images = named
+    return named
+
+
+@pytest.mark.parametrize("game", ["wow-wotlk", "wow-unbound"])
+@pytest.mark.parametrize("gone", ["auth", "world"])
+def test_an_azerothcore_start_with_one_of_its_images_gone_is_refused_first(
+    box: _ImageDocker, tmp_path: Path, game: str, gone: str
+) -> None:
+    """T688: the 0.9.16 changelog promised this for every game; WotLK and Unbound were skipped."""
+    entry = load_catalog().get(game)
+    spec = entry.container_spec()
+    named = _ac_compose(box, tmp_path, entry)
+    missing = named[getattr(spec, gone)]
+    box.present = {image for image in named.values() if image != missing}
+    with pytest.raises(StartRefused) as refused:
+        Controller(spec, tmp_path).refuse_a_missing_image()
+    assert "build is gone from Docker" in str(refused.value)
+    assert REBUILD in str(refused.value)
+    asked = {c[-1] for c in box.calls if "image" in c and "inspect" in c}
+    assert missing in asked, asked
+
+
+@pytest.mark.parametrize("game", ["wow-wotlk", "wow-unbound"])
+def test_an_azerothcore_start_with_every_image_there_goes_on(
+    box: _ImageDocker, tmp_path: Path, game: str
+) -> None:
+    """The images Start does not run (the importer, the data download) are not asked about."""
+    entry = load_catalog().get(game)
+    named = _ac_compose(box, tmp_path, entry)
+    box.present = set(named.values())
+    Controller(entry.container_spec(), tmp_path).refuse_a_missing_image()
+    asked = {c[-1] for c in box.calls if "image" in c and "inspect" in c}
+    prefix = entry.install.native.image_prefix
+    assert asked == {named[entry.container_spec().auth], named[entry.container_spec().world]}
+    assert not any("db-import" in ref or "client-data" in ref for ref in asked)
+    assert all(ref.startswith(prefix) for ref in asked)
+
+
+def test_an_azerothcore_folder_with_no_compose_file_of_ours_is_not_refused(
+    box: _ImageDocker, tmp_path: Path
+) -> None:
+    """No compose file Yu'lon wrote (a DML-made server, say): which images it runs is unknown.
+
+    A several-image build cannot be worked out from the folder alone the way a one-image one
+    is (`built_image_refs` names the importer and the data download too, which Start does
+    not run), so no guess refuses it.
+    """
+    Controller(WOTLK.container_spec(), tmp_path).refuse_a_missing_image()
+    assert not [c for c in box.calls if "image" in c and "inspect" in c]

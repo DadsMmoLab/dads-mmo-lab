@@ -191,6 +191,24 @@ IMPORT_ENDED = (
     "unfinished. Nothing was started. Press **Repair** to clear them and import again."
 )
 
+UNFINISHED_IMPORT_WROTE_DETAIL = (
+    "the first database import did not finish, and what it wrote before it stopped is "
+    "cleared and imported again"
+)
+"""The import state's detail when that import left rows (T678 review round 2)."""
+
+FIRST_IMPORT_UNFINISHED = (
+    "This server's first database import did not finish, so its databases are unfinished, "
+    "whatever rows it wrote before it stopped. Nothing was started. Press **Repair** to clear "
+    "what it wrote and import again."
+)
+"""Start's refusal for that case (owner decision, 2026-10-11: refuse and offer a clean redo)."""
+
+
+def unfinished_import_wrote(state: docker.ImportState) -> bool:
+    """Whether `Controller.import_state()` read rows an unfinished first import wrote (T678)."""
+    return state.detail.startswith(UNFINISHED_IMPORT_WROTE_DETAIL)
+
 
 class DatabaseMissing(StartRefused):
     """Raised by `Controller.start()` when Docker no longer has this server's database (T377).
@@ -221,8 +239,12 @@ class Controller:
         pre_stop: Callable[[], object] | None = None,
         start_guard: Callable[[], str | None] | None = None,
         before_servers: Callable[[], str | None] | None = None,
+        safety_copy: Callable[[], str] | None = None,
     ) -> None:
         self.spec = spec
+        # T678 review round 3: dumps the core databases and says where, before Repair
+        # clears what an unfinished first import wrote; that clear is refused without it.
+        self.safety_copy = safety_copy
         # A family's last word before its servers start, asked once every
         # refusal has passed -- the port check and the missing database (T377)
         # included, so it may write to the database without recreating one
@@ -628,6 +650,11 @@ class Controller:
         if state.detail == ENDED_IMPORT_DETAIL:
             logger.warning(f"start() refused: {IMPORT_ENDED}")
             raise ImportEnded(IMPORT_ENDED, state=state)
+        if unfinished_import_wrote(state):
+            # T678 review round 2: rows a first import wrote before it died (City Bots'
+            # accounts), with the world half-imported; never a player's (see Repair).
+            logger.warning(f"start() refused: {FIRST_IMPORT_UNFINISHED}")
+            raise ImportEnded(FIRST_IMPORT_UNFINISHED, state=state)
 
     def refuse_a_missing_image(self) -> None:
         """Raise `StartRefused` when Docker no longer has this server's built image (T627).
@@ -1066,6 +1093,18 @@ class Controller:
             # T658: a cut-off import can read `imported`; it is `partial`, so Repair is offered,
             # and Repair clears it whole (`docker.repair_import()` reads the same record).
             return docker.ImportState("partial", ENDED_IMPORT_DETAIL)
+        if (
+            service
+            and state.state == "populated"
+            and docker.import_record_is_from_empty(self.server_dir, service)
+        ):
+            # T678 review round 2: rows written by a first import that never finished, so
+            # Repair is offered; `docker.repair_import()` clears them under the same record.
+            return docker.ImportState(
+                "partial",
+                f"{UNFINISHED_IMPORT_WROTE_DETAIL} ({state.detail})",
+                characters=state.characters,
+            )
         return state
 
     def repair_import(self, output: docker.OutputSink | None = None) -> bool:
@@ -1096,6 +1135,7 @@ class Controller:
             self.import_probe,
             reset=self.reset_unfinished,
             output=output,
+            safety_copy=self.safety_copy,
             wsl_distro=self.wsl_distro,
         )
 

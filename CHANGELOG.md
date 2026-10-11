@@ -61,6 +61,8 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A support file now also takes out the password of a shortened or quoted account command.
 - On Linux and macOS your database backups can now be read by you alone.
 - The Bots tab name filter no longer fails on a name typed with a backslash.
+- **Start** on a WotLK or Unbound server whose build is gone from Docker now says so before anything starts.
+- A WotLK or Unbound database import that fails part-way no longer counts as finished; **Repair** clears and redoes it.
 
 ### Changed
 - The Server tab's **Play** now starts the game; **Launcher…** opens the launcher. The tray's **Play** starts a stopped server.

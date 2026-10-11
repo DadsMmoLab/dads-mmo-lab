@@ -2097,7 +2097,8 @@ def test_a_repair_whose_import_died_says_so_with_its_last_words_under_details(
     view._repair_failed(raised.value)
 
     said = view.danger_label.text()
-    assert "still read as absent" in said, said
+    # T678: an importer that exited 1 is said as that, before any probe reading.
+    assert "failed (exit 1)" in said and "unfinished" in said, said
     assert "ERROR 1698" not in said, "the import's own words are on the line"
     assert "ERROR 1698" in view.danger_details.text()
     assert failures and "ERROR 1698" in failures[0], "the log lost them"
@@ -2129,8 +2130,9 @@ def test_a_repair_that_did_not_finish_says_so_in_words_and_puts_the_command_unde
     from tests.support_player_text import command_faults
     from tests.test_docker import SPEC, UNIMPORTED, _probe, _repair_doubles
 
+    # Exit 0: the post-check's sentences (T678 fails a non-zero exit before the probe).
     _repair_doubles(
-        monkeypatch, [], running={SPEC.db}, import_exit=1, import_output=lambda: ("ERROR 1698",)
+        monkeypatch, [], running={SPEC.db}, import_exit=0, import_output=lambda: ("ERROR 1698",)
     )
     probe = _probe(UNIMPORTED) if after is None else _probe(UNIMPORTED, after)
     with pytest.raises(docker.DockerCommandError) as raised:

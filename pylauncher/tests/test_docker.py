@@ -38,6 +38,16 @@ from yulon.said import SaidByYulon
 from yulon.ui import lines
 
 SPEC = docker_ctl.SPEC
+IMPORT_UP = [
+    "docker",
+    "compose",
+    "up",
+    "--no-deps",
+    "--exit-code-from",
+    "ac-db-import",
+    "ac-db-import",
+]
+"""The import one-shot's argv: `--exit-code-from` since T678, the rest as live-gated 2026-08-23."""
 _GRACE = str(docker.STOP_GRACE_SECONDS)
 """The stop grace as it appears in argv, so an expected command reads like the real one."""
 
@@ -2675,7 +2685,7 @@ def test_repair_import_names_only_the_one_shot_service(monkeypatch: pytest.Monke
     assert docker.repair_import(SPEC, Path("/tmp/wow"), _probe(UNIMPORTED, IMPORTED)) is True
 
     ups = [c for c in calls if c[:3] == ["docker", "compose", "up"]]
-    assert ups == [["docker", "compose", "up", "--no-deps", "ac-db-import"]], ups
+    assert ups == [IMPORT_UP], ups
     for cmd in calls:
         assert SPEC.world not in cmd, cmd
         assert SPEC.auth not in cmd, cmd
@@ -2757,11 +2767,10 @@ def test_repair_import_will_not_run_against_containers_it_cannot_prove_are_its_o
 def test_repair_import_catches_an_import_that_exited_zero_having_done_nothing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The exit code is not the answer, exactly as it is not for `compose down`.
+    """An exit of 0 is not the whole answer, exactly as it is not for `compose down`.
 
-    A one-shot that died part-way and one that never touched a table look
-    identical from outside, so the database is asked again instead, and only a
-    database that now reads as imported counts as a repair.
+    The database is asked again as well, and only a database that now reads as
+    imported counts as a repair. (A non-zero exit is a failure on its own: T678.)
     """
     calls: list[list[str]] = []
     _repair_doubles(monkeypatch, calls, running={SPEC.db})
@@ -2770,7 +2779,7 @@ def test_repair_import_catches_an_import_that_exited_zero_having_done_nothing(
     # T248: which logs to read is under Details, as a command; the line says it in words.
     assert isinstance(raised.value, docker.DockerRefusal)
     assert "docker compose logs ac-db-import" in raised.value.detail, "did not say which logs"
-    assert ["docker", "compose", "up", "--no-deps", "ac-db-import"] in calls
+    assert IMPORT_UP in calls
 
 
 def test_repair_import_accepts_an_import_that_seeded_its_own_accounts(
@@ -2798,7 +2807,7 @@ def test_repair_import_accepts_an_import_that_seeded_its_own_accounts(
         complete=True,
     )
     assert docker.repair_import(SPEC, Path("/tmp/wow"), _probe(UNIMPORTED, seeded)) is True
-    assert ["docker", "compose", "up", "--no-deps", "ac-db-import"] in calls
+    assert IMPORT_UP in calls
 
 
 def test_repair_import_refuses_a_database_it_could_not_ask(
@@ -2898,7 +2907,7 @@ def test_showing_the_import_did_not_change_the_command_it_runs(
     _repair_doubles(monkeypatch, without_sink, running={SPEC.db})
     docker.repair_import(SPEC, server_dir, _probe(UNIMPORTED, IMPORTED))
 
-    expected = [["docker", "compose", "up", "--no-deps", "ac-db-import"]]
+    expected = [IMPORT_UP]
     assert _import_command(with_sink) == expected
     assert _import_command(without_sink) == expected
     assert cwds == [server_dir], "the import ran somewhere other than the install"
@@ -2935,15 +2944,15 @@ def test_the_imports_lines_reach_the_sink_as_it_prints_them(
     assert snapshots == [list(printed[:1]), list(printed[:2]), list(printed)], snapshots
 
 
-def test_an_import_that_exited_non_zero_is_logged_and_the_database_asked_anyway(
+def test_an_import_that_exited_non_zero_is_logged_and_never_called_a_repair(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Streaming must not turn the exit code into an exception.
+    """Streaming must not turn the exit code into an exception, nor into a success.
 
-    `runner.stream()` raises `CalledProcessError` on a non-zero exit, and this
-    is the one caller that must not let it: a one-shot that failed part-way and
-    one that failed having done nothing exit alike, so the post-import probe is
-    the only thing that can tell them apart and it has to run either way.
+    `runner.stream()` raises `CalledProcessError` on a non-zero exit; it comes back
+    as the run's status, logged with the importer's last words. Until T678 the probe
+    then decided, and an importer that died part-way leaves schemas it reads as
+    `imported` (T658), so this test pinned a crashed import as a finished repair.
     """
     calls: list[list[str]] = []
     _repair_doubles(
@@ -2960,8 +2969,9 @@ def test_an_import_that_exited_non_zero_is_logged_and_the_database_asked_anyway(
         return UNIMPORTED if len(asked) == 1 else IMPORTED
 
     with caplog.at_level("DEBUG", logger="yulon.docker"):
-        assert docker.repair_import(SPEC, Path("/tmp/wow"), probe) is True
-    assert len(asked) == 2, "the post-import probe never ran"
+        with pytest.raises(docker.DockerCommandError, match="failed \\(exit 1\\)"):
+            docker.repair_import(SPEC, Path("/tmp/wow"), probe)
+    assert len(asked) == 1, "a failed import was asked whether it finished"
     said = [r.getMessage() for r in caplog.records if r.levelno >= 30]
     assert any("exited 1" in m and "Access denied" in m for m in said), said
 
@@ -2990,8 +3000,7 @@ def test_the_failure_text_of_a_broken_import_reaches_the_error_on_screen(
         docker.repair_import(SPEC, Path("/tmp/wow"), _probe(UNIMPORTED))
     said = str(raised.value)
     assert "ERROR 1698" in raised.value.detail, raised.value.detail
-    assert "ERROR 1698" not in said, "the import's own words are Details', not the line's (T214)"
-    assert "still read as absent" in said, "the state it is in stopped being said"
+    assert "failed (exit 1)" in said and "unfinished" in said, said
 
 
 def test_a_thirty_minute_import_is_not_kept_in_memory(
@@ -3211,9 +3220,12 @@ def test_repair_import_refuses_an_import_that_seeded_rows_and_then_died(
     Reported as success, that hides the Repair button (the probe no longer says
     `repairable`) and leaves the user a broken server, a success message, and no
     way back. `complete` is what separates the two (review, 2026-08-23).
+
+    Exit 0 here: since T678 a non-zero exit fails before the probe is asked, so
+    this is the post-check's own half, for a run that reported nothing wrong.
     """
     calls: list[list[str]] = []
-    _repair_doubles(monkeypatch, calls, running={SPEC.db}, import_exit=1)
+    _repair_doubles(monkeypatch, calls, running={SPEC.db}, import_exit=0)
     half_done = docker.ImportState(
         "populated",
         "400 rows in acore_auth.account, but acore_world holds no tables",
@@ -3876,10 +3888,14 @@ def test_the_builder_is_read_from_the_builder_lines_not_from_its_nodes() -> None
 def test_run_one_shot_keeps_the_argv_that_was_live_gated(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`--no-deps` is what makes an attached `up` terminate. Byte-identical since the gate."""
+    """`--no-deps` is what makes an attached `up` terminate; byte-identical to the gate since.
+
+    T678 added `--exit-code-from <importer>`: without it attached `compose up` exits 0
+    whatever the one-shot exits (measured on yulon-ubuntu, Compose 2.40.3, 2026-10-11).
+    """
     seen, merged = _stream_double(monkeypatch, ["importing"])
     docker.run_one_shot("ac-db-import", Path("/tmp/wow"))
-    assert seen == [["docker", "compose", "up", "--no-deps", "ac-db-import"]]
+    assert seen == [IMPORT_UP]
     assert merged == [False]
 
 

@@ -24,6 +24,7 @@ import inspect
 import io
 import json
 import os
+import posixpath
 import re
 import socket
 import subprocess
@@ -35,7 +36,7 @@ import uuid
 from collections import deque
 from collections.abc import Callable, Collection, Generator, Iterator, Mapping, Sequence
 from contextlib import closing, contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import IO, Any, BinaryIO, Literal, NamedTuple, ParamSpec, Protocol, TypeVar
@@ -2505,6 +2506,14 @@ class ImportState:
     by omission.
     """
 
+    characters: int | None = None
+    """Rows in the characters table, when the probe counted them; None = not counted (T678).
+
+    Read by Repair before it clears what an unfinished first import wrote: that import
+    seeds accounts (City Bots) but never a character, so a character means somebody
+    played. None is never read as zero.
+    """
+
     @property
     def repairable(self) -> bool:
         """True only where re-running the import can put something right.
@@ -2574,8 +2583,13 @@ def repair_import(
     output: OutputSink | None = None,
     db_timeout: float = _DB_HEALTHY_TIMEOUT_SECONDS,
     wsl_distro: str | None = None,
+    safety_copy: Callable[[], str] | None = None,
 ) -> bool:
     """Re-run this install's one-shot database import. For a BROKEN install only.
+
+    `safety_copy` (T678 review round 3): dumps the core databases and says where, as a
+    sentence. Asked before what an unfinished first import wrote is cleared, and that
+    clear is refused without one.
 
     The installer is the only thing that runs the import on a healthy path, and
     `start_staged()` exists precisely so an ordinary Start can never reach it.
@@ -2618,9 +2632,12 @@ def repair_import(
        compose brings up, so `up` returns when it exits. Without it, `up` would
        also attach to the database and wait for a container that never stops.
 
-    The exit code of that second command is not the answer, for the same reason
-    `remove_staged()` does not believe `compose down`'s: the probe is run again
-    afterwards, and only a database that is no longer repairable counts.
+    The exit code of that second command is not the whole answer, for the same
+    reason `remove_staged()` does not believe `compose down`'s: the probe is run
+    again afterwards, and only a database that is no longer repairable counts. But
+    a non-zero one is a failure on its own (T678): an importer that died part-way
+    leaves schemas the probe can read as `imported` (T658), so this until then
+    called a crashed import a finished repair.
 
     **Live-gated on yulon-ubuntu, 2026-08-23**, against a copy of a real
     AzerothCore + playerbots + city-bots install on a brand-new empty volume,
@@ -2730,7 +2747,50 @@ def repair_import(
     # schemas that can read as `imported`. They are cleared whole and imported again, as the
     # install's import stage does; player data still refuses, below and in `reset`.
     ended = one_shot_ended_marker(server_dir, service).is_file()
-    if ended and before.state in ("imported", "partial"):
+    if before.state == "populated" and import_record_is_from_empty(server_dir, service):
+        # T678 review round 2 (owner: "refuse + offer a clean redo"): rows written by an
+        # import that began over empty databases and never finished -- a module's seeded
+        # accounts. The record is why they are not a player's; without it, the refusal below.
+        if reset is None or safety_copy is None:
+            raise DockerRefusal(
+                "an earlier import of this install did not finish, and this game has no way to "
+                "copy and clear what it wrote. Nothing was run."
+            )
+        if before.characters != 0:
+            # Review round 3: such an import seeds accounts (City Bots), never a character.
+            # A server started by hand on it, whose own updater finished the world, can have
+            # players since, and the record still stands: those are never cleared.
+            counted = "could not be counted" if before.characters is None else "were found"
+            raise DockerRefusal(
+                f"an earlier import of this install did not finish, but characters {counted} in "
+                f"its databases ({before.detail}). A first import never writes a character, so "
+                "somebody may have played on this server since, and nothing was cleared or run. "
+                "To go back, restore one of its backups on the Maintenance tab."
+            )
+        logger.warning(
+            f"repair_import(): copying, then clearing, what an unfinished first import wrote "
+            f"({before.detail})"
+        )
+        try:
+            saved = safety_copy()
+        except Exception as exc:
+            raise DockerCommandError(
+                "a safety copy of the databases could not be taken, so nothing was cleared or "
+                f"run: {exc}"
+            ) from exc
+        logger.warning(f"repair_import(): safety copy taken first: {saved}")
+        if output is not None:
+            output(saved)
+        try:
+            dropped = reset(everything=True, seeded=True)
+        except Exception as exc:
+            raise DockerCommandError(
+                "what the unfinished import wrote could not be cleared, so the import was not "
+                f"re-run and nothing else was changed: {exc}"
+            ) from exc
+        logger.warning(f"repair_import(): dropped {', '.join(dropped)}; re-running the import")
+        before = ImportState("absent", "cleared after an unfinished first import")
+    elif ended and before.state in ("imported", "partial"):
         if reset is None:
             raise DockerRefusal(
                 "an earlier import of this install was ended before it finished, and this "
@@ -2796,7 +2856,12 @@ def repair_import(
         )
 
     logger.warning(f"repair_import(): `compose up --no-deps {service}` in {server_dir}")
+    # T678: recorded before it runs, so a run that does not finish leaves the record
+    # however it ends; and a non-zero exit is a failure whatever the probe reads after.
+    mark_import_under_way(server_dir, service)
     run = run_one_shot(service, server_dir, wsl_distro=wsl_distro, sink=output, record_ended=True)
+    if run.returncode != 0:
+        raise import_failed(service, server_dir, run)
     verify_import(probe, service, server_dir, run)
     # T658: a verified import; an earlier ended one no longer describes these databases.
     one_shot_ended_marker(server_dir, service).unlink(missing_ok=True)
@@ -3103,13 +3168,25 @@ def run_one_shot(
     shows nothing. The run's output is what there is — it arrives at `sink` and
     a bounded tail comes back on the result.
 
-    The exit status is returned rather than raised for the reason
-    `repair_import()` records: a one-shot that failed part-way and one that
-    failed having done nothing exit alike, and only a probe of the result can
-    tell them apart.
+    The exit status is returned rather than raised: what a failure means is the
+    caller's to say (an install, a Repair, a Rebuild and the Modules tab each say
+    it differently), and every caller of the database import refuses a non-zero
+    one (T678).
+
+    `--exit-code-from` (T678) is what makes that status the one-shot's own.
+    Measured on yulon-ubuntu, Compose 2.40.3, 2026-10-11, with a busybox one-shot
+    that printed an `ERROR 1146` line and exited 1: plain attached
+    `compose up --no-deps <svc>` printed "exited with code 1" and itself exited
+    **0**, every time; with `--exit-code-from <svc>` it exited 1, and 0 for a
+    one-shot that exited 0. The database the one-shot writes to, started before
+    by `compose up -d --no-deps <db>`, was still running afterwards, and a
+    SIGTERM to the CLI stopped the one-shot exactly as it did without the flag.
+    `compose run` always returned the container's status (it exited 1 there).
+    Until then the install's import, Repair and the server-data download never
+    saw a one-shot fail, only what the probe read afterwards.
     """
     argv = (
-        ["compose", "up", "--no-deps", service]
+        ["compose", "up", "--no-deps", "--exit-code-from", service, service]
         if allowed_modules is None
         else [
             "compose",
@@ -3133,13 +3210,47 @@ def run_one_shot(
             service, server_dir, wsl_distro=wsl_distro, record_ended=record_ended
         ),
     )
+    if allowed_modules is None:
+        run = replace(run, tail=_without_compose_epilogue(run.tail))
     if run.returncode != 0:
-        # Not raised here. See above — the probe is the only thing that can
-        # tell the two failures apart, so this only makes sure the reason is in
-        # the log.
+        # Not raised here (see above); this only makes sure the reason is in the log.
         words = " / ".join(importer_last_words(run.tail))
         logger.warning(f"{service} exited {run.returncode}: {words}")
     return run
+
+
+_COMPOSE_PREFIX = re.compile(r"^[\w.-]+\s+\|\s?")
+"""What attached `compose up` puts before each line a service prints: `ac-db-import  | `."""
+
+_COMPOSE_EPILOGUE = re.compile(
+    r"^(?:Aborting on container exit\.\.\.|Container \S+\s+(?:Stopping|Stopped))$"
+)
+"""What `compose up --exit-code-from` prints after the one-shot exits (yulon-ubuntu, 2026-10-11)."""
+
+
+_COMPOSE_OWN_LINE = re.compile(
+    r"^(?:\S+ exited with code \d+|Attaching to .+|Aborting on container exit\.\.\."
+    r"|Container \S+\s+\w+)$"
+)
+"""A line compose prints about the one-shot rather than one the one-shot printed (T678)."""
+
+
+def unprefixed(line: str) -> str:
+    """A line as the one-shot printed it, without compose's `<service>  | ` in front."""
+    return _COMPOSE_PREFIX.sub("", line.strip(), count=1)
+
+
+def _without_compose_epilogue(tail: tuple[str, ...]) -> tuple[str, ...]:
+    """`tail` without compose's own closing lines, so the one-shot's last words end it (T678).
+
+    Live on yulon-ubuntu (2026-10-11): with `--exit-code-from` the importer's last
+    lines were followed by "Aborting on container exit..." and the container's
+    Stopping/Stopped, which a five-line window then showed instead of its error.
+    """
+    kept = list(tail)
+    while kept and (not kept[-1].strip() or _COMPOSE_EPILOGUE.match(kept[-1].strip())):
+        kept.pop()
+    return tuple(kept)
 
 
 IMPORT_REST_UNDER_DETAILS = (
@@ -3150,6 +3261,127 @@ IMPORT_REST_UNDER_DETAILS = (
 Both callers show Details: Repair under its press, and the install engine's
 failure through `said.with_details()`.
 """
+
+
+_FAILED_UPDATE = re.compile(r"Applying of file '([^']+\.sql)' to database '([^']*)' failed")
+"""The importer's own failure line (`apply._FAILED_UPDATE`'s pattern, which the Modules
+tab's report reads), with the database it names."""
+
+
+def importer_failure(run: AttachedRun, what: str, *, first_import: bool = False) -> str:
+    """Why an import one-shot failed, naming the file and the way past it.
+
+    T706 round 2, for a Rebuild's or an update's import: the pinned updater applies a
+    file again whenever its SHA1 changed since it was applied (`Updates.Redundancy` 1),
+    and tries a failed one again on every run, so one broken module file fails every
+    Rebuild and update until it applies. The sentence names that file, whose it is (the
+    module folder it is in), mysql's error, and the presses that get past it.
+
+    `first_import` (T678): the install's import or Repair's, on databases that held
+    nothing before it. Nothing was started then, and the databases are unfinished,
+    whatever the probe reads of them afterwards: the importer creates every schema's
+    `updates` tables before it applies the updates (T658).
+    """
+    found: tuple[str, str, str] | None = None
+    error = ""
+    for line in run.tail:
+        plain = unprefixed(line)
+        if _MYSQL_ERROR.match(plain):
+            error = plain
+            continue
+        match = _FAILED_UPDATE.search(plain)
+        if match:
+            found = (match.group(1), match.group(2), error)
+            error = ""
+    outcome = (
+        "the databases are unfinished and nothing was started"
+        if first_import
+        else "the new build was not started"
+    )
+    if found is None:
+        if first_import:
+            # T214's rule for these presses: the importer's own words are under Details.
+            return (
+                f"{what} failed (exit {run.returncode}), so {outcome}. Press Repair on the "
+                f"Server tab to clear what it wrote and run it again. {IMPORT_REST_UNDER_DETAILS}"
+            )
+        return (
+            f"{what} failed (exit {run.returncode}), so {outcome}. Its last words were: "
+            f"{last_words(run.tail)}"
+        )
+    path, database, mysql = found
+    parts = posixpath.normpath(path).split("/")
+    module = parts[parts.index("modules") + 1] if "modules" in parts[:-2] else ""
+    whose = f"one of {module}'s" if module else "one of the server's own"
+    why = f" ({mysql})" if mysql else ""
+    if first_import:
+        # T678 review round 2: no "or the server without it" -- City Bots' accounts are
+        # in acore_auth by then, so only Repair's clean redo gets past it.
+        first = (
+            f"update or remove {module} on the Modules tab, then press Repair"
+            if module
+            else "press Repair"
+        )
+        return (
+            f"The database update {posixpath.basename(path)}, {whose}, could not be applied "
+            f"to {database}, so {outcome}. The importer tries that file again each time it "
+            f"runs, so every import stops there until it applies: {first} on the Server tab, "
+            f"which clears what this import wrote and runs it again. {IMPORT_REST_UNDER_DETAILS}"
+        )
+    way = (
+        f"update or remove {module} on the Modules tab; “Apply module SQL” there, with the "
+        "server stopped, shows the importer's whole output."
+        if module
+        else "its whole output is under Details."
+    )
+    return (
+        f"The database update {posixpath.basename(path)}, {whose}, could not be applied to "
+        f"{database}{why}, so {outcome}. AzerothCore's importer applies "
+        "an update again whenever its file has changed since, and tries a failed one again "
+        f"each time it runs, which every rebuild and update does, so each of them stops here "
+        f"until that file applies: {way}"
+    )
+
+
+def import_failed(service: str, server_dir: Path, run: AttachedRun) -> DockerRefusal:
+    """The refusal for a first import whose one-shot exited non-zero (T678), Details attached."""
+    return DockerRefusal(
+        importer_failure(run, "The database import", first_import=True),
+        detail=_import_details(service, server_dir, run),
+    )
+
+
+IMPORT_UNDER_WAY = "was started and not yet seen to finish"
+"""The words `mark_import_under_way()` writes; `import_record_is_from_empty()` looks for them."""
+
+
+def mark_import_under_way(server_dir: Path, service: str) -> None:
+    """Write `one_shot_ended_marker()` BEFORE a first import runs; a verified one removes it (T678).
+
+    So an import that does not finish, for any reason, leaves it: an exit of its own
+    (a module's SQL, a full disk, a database that restarted), Docker or WSL going
+    away under it, or Yu'lon or the machine ending mid-run, where no code of ours
+    runs afterwards to write anything. Only `stage_import()` and `repair_import()`
+    call this, and only once the databases read empty or were cleared, so the
+    record never stands over databases an import had finished.
+    """
+    _mark_one_shot_ended(server_dir, service, IMPORT_UNDER_WAY)
+
+
+def import_record_is_from_empty(server_dir: Path, service: str) -> bool:
+    """Whether the record standing is `mark_import_under_way()`'s (T678 review round 2).
+
+    That record is written only over databases that read empty or were just cleared,
+    and removed once an import is verified, so while it stands every row in them was
+    written by the import that did not finish -- City Bots' 400 accounts, say, which
+    land in acore_auth before a failing world update stops it. `end_one_shot()`'s own
+    record (T658) is written over whatever databases there are, so it is not this.
+    """
+    try:
+        said = one_shot_ended_marker(server_dir, service).read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return IMPORT_UNDER_WAY in said
 
 
 def _import_details(service: str, server_dir: Path, run: AttachedRun) -> str:
@@ -3439,7 +3671,8 @@ def importer_left_sentence(left: OneShotLeft, nothing_done: str) -> str:
 def one_shot_ended_marker(server_dir: Path, service: str) -> Path:
     """The file that says a run of `service` in this folder was ended before it finished (T658).
 
-    Written by `end_one_shot()` when it has to kill one, and left until a later
+    Written by `end_one_shot()` when it has to kill one, and since T678 also
+    before a first import starts (`mark_import_under_way()`), and left until a later
     run of that one-shot is seen to finish. For the database import that is the
     only reliable record: AzerothCore's importer creates every schema's
     `updates` tables before it applies the updates, so one killed while it
@@ -3450,12 +3683,20 @@ def one_shot_ended_marker(server_dir: Path, service: str) -> Path:
     return Path(server_dir) / f".yulon-{service}-ended"
 
 
-def _mark_one_shot_ended(server_dir: Path, service: str) -> None:
-    """Write `one_shot_ended_marker()`; a folder that will not take it is logged, not raised."""
+def _mark_one_shot_ended(
+    server_dir: Path, service: str, what: str = "was ended before it finished"
+) -> None:
+    """Write `one_shot_ended_marker()`; a folder that will not take it is logged, not raised.
+
+    A kill's record never replaces one already there (T678 review round 2): a Stop
+    ending the import `mark_import_under_way()` recorded must leave that record, which
+    is the one that lets Repair clear the rows that import wrote.
+    """
+    marker = one_shot_ended_marker(server_dir, service)
+    if what != IMPORT_UNDER_WAY and marker.is_file():
+        return
     try:
-        one_shot_ended_marker(server_dir, service).write_text(
-            f"{service} was ended before it finished\n", encoding="utf-8"
-        )
+        marker.write_text(f"{service} {what}\n", encoding="utf-8")
     except OSError as exc:
         logger.warning(f"could not record that {service} was ended in {server_dir}: {exc}")
 
@@ -3572,7 +3813,11 @@ def importer_last_words(tail: Sequence[str]) -> list[str]:
     it that say what the importer made of it. Without one, the last five lines.
     Every line is kept whole; colour codes are already gone (`run_attached()`).
     """
-    said = [line.strip() for line in tail if line.strip()]
+    said = [
+        plain
+        for line in tail
+        if (plain := unprefixed(line)) and not _COMPOSE_OWN_LINE.match(line.strip())
+    ]
     errors = [i for i, line in enumerate(said) if _MYSQL_ERROR.match(line)]
     if not errors:
         return said[-_LAST_WORDS_LINES:] or ["it printed nothing at all"]
