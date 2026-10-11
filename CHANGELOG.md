@@ -16,6 +16,8 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ### New
 
 ### Fixed
+- **Rebuild** now applies the database updates of a module you just installed, such as City Bots, so the world starts.
+- After an update or rebuild that stopped part-way, **Start** is refused or allowed for a reason that is still true.
 
 ### Changed
 

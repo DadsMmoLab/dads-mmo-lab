@@ -615,6 +615,66 @@ class AzerothCoreInstaller(StagedInstaller):
         """
         yield from scriptdeploy.lay(server_dir, self._block().lua_scripts, quiet=quiet)
 
+    def imports_with_the_servers_down(self) -> bool:
+        """True for an entry whose databases are imported by a compose one-shot (T706)."""
+        return bool(self.entry.containers.db_import)
+
+    def import_with_the_servers_down(self, ctx: StageContext) -> Iterator[str]:
+        """The importer one-shot on the new build, before its first start: a Rebuild's (T706).
+
+        Live on yulon-ubuntu (2026-10-11, v0.9.16 WotLK and Unbound): Install City Bots,
+        then Rebuild, and the new world aborted on `Table 'acore_world.city_bot_poi'
+        doesn't exist`. A module's `data/sql/db-world` files reach the database only
+        through this one-shot -- the world server runs with `Updates.EnableDatabases` 0
+        -- and the install runs it in its `import` stage, the update route in its own
+        window (`servers_down_work()`, T220), while a Rebuild ran it nowhere. Running it
+        by hand (`docker compose up -d`) applied six files and the world came up.
+
+        The same one-shot, on the image the tags now name, with the servers stopped and
+        the database up: upstream's updater applies only what its `updates` table does
+        not hold yet, so a Rebuild with nothing new applies nothing. The modules it may
+        update are the Modules tab's own split (`importer_modules`, T78) when the caller
+        supplies one, else what the compose file says. Not cancellable part-way, for
+        T220's reason; a Stop is honoured once the updates are in, before the new build
+        starts. A failure raises, and the rebuild puts the build from before back.
+        """
+        service = self.entry.containers.db_import
+        if not service:
+            return
+        yield (
+            f"Applying the database updates of the server and its modules ({service}) with the "
+            "servers stopped, before the new build first starts. Updates already applied are "
+            "not run again."
+        )
+        try:
+            self._seams.start_db(
+                self.entry.container_spec(),
+                ctx.server_dir,
+                because="no database update was applied and the new build was not started",
+            )
+        except docker.DockerCommandError as exc:
+            raise InstallerError(
+                f"The database could not be started to apply the new build's database updates, "
+                f"so the new build was not started: {exc}"
+            ) from exc
+        allowed = (
+            self._importer_modules(ctx.server_dir) if self._importer_modules is not None else None
+        )
+        run = yield from self._pump(
+            lambda sink: self._seams.one_shot(
+                service, ctx.server_dir, sink=sink, cancel=None, allowed_modules=allowed
+            ),
+            cancel=None,
+            stage="import",
+        )
+        self._check_run(run, "Applying the database updates", None, "")
+        if ctx.cancel is not None and ctx.cancel.is_set():
+            raise InstallStopped(
+                "The rebuild was stopped once the database updates were in, before the new "
+                "build started."
+            )
+        yield "The database updates are in."
+
     def before_rebuild(
         self, server_dir: Path, route: str, press: str = server_build_presses.REBUILD
     ) -> Iterator[str]:

@@ -141,6 +141,8 @@ class Recorder:
     folder_asked: list[Path] = field(default_factory=list)
     build_result: docker.AttachedRun = docker.AttachedRun(0, ("built",))
     one_shot_result: docker.AttachedRun = docker.AttachedRun(0, ("ran",))
+    one_shot_modules: list[str | None] = field(default_factory=list)
+    """The `allowed_modules` every `one_shot` was handed, in order (T706); None = not given."""
     one_shot_left: docker.OneShotLeft | None = None
     """What `end_one_shot()` answers (T539): None, nothing of the one-shot is running."""
     one_shots_running: list[str] = field(default_factory=list)
@@ -948,8 +950,10 @@ class Recorder:
             sink: object = None,
             cancel: object = None,
             record_ended: bool = False,
+            allowed_modules: str | None = None,
         ) -> docker.AttachedRun:
             self.calls.append(f"one-shot:{service}")
+            self.one_shot_modules.append(allowed_modules)
             if callable(sink):
                 sink(f"{service} said something")
             return self.one_shot_result

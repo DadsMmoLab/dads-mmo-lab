@@ -470,7 +470,9 @@ minute later.
 """
 
 
-def rebuild_opening_note(*, renders_dockerfile: bool, parked: bool = False) -> str:
+def rebuild_opening_note(
+    *, renders_dockerfile: bool, parked: bool = False, imports: bool = False
+) -> str:
     """What a rebuild costs and what it leaves alone, said before the first stage.
 
     `OPENING_NOTE`'s counterpart, and a separate sentence rather than a reuse
@@ -516,6 +518,10 @@ def rebuild_opening_note(*, renders_dockerfile: bool, parked: bool = False) -> s
 
     `parked` (T224): a kept build is recorded, and the compile clause says it may
     be used instead -- one clause still, so the count stays what it was.
+
+    `imports` (T706): the family runs its database importer with the servers stopped
+    before the new build starts (`imports_with_the_servers_down()`), which is one more
+    thing it does, and "does not touch your database" was false of it from then on.
     """
     compiles = (
         "compiles the server again from the source and modules in the folder below, or, if the "
@@ -530,18 +536,32 @@ def rebuild_opening_note(*, renders_dockerfile: bool, parked: bool = False) -> s
         if renders_dockerfile
         else ""
     )
+    sql = (
+        "it stops the servers and applies the database updates the server and its modules "
+        "carry that are not applied yet, "
+        if imports
+        else ""
+    )
+    count = ("three", "four", "five")[bool(recipe) + bool(sql)]
+    database = (
+        "It does not rewrite your settings, and your database is changed only by those "
+        "updates: AzerothCore's own importer runs each one once, and one already applied is "
+        "not run again."
+        if imports
+        else "It does not rewrite your settings, and does not touch your database — your "
+        "characters, accounts and the module SQL already applied are not read or written by "
+        "this."
+    )
     return (
         "You can stop this at any time; stopping before the containers are replaced leaves the "
-        f"server you have now exactly as it is. This does {'four' if recipe else 'three'} things "
+        f"server you have now exactly as it is. This does {count} things "
         f"and nothing else: {recipe}it "
-        f"{compiles}, it replaces "
+        f"{compiles}, {sql}it replaces "
         "the running containers so the new build is what starts, and it waits for the server to "
         "come back up. It fetches no new source code, though Docker may go online while it "
         "builds: to ask Docker Hub about the base image the build starts from, and to download "
-        "system packages its cache no longer holds. It does not rewrite your settings, and does "
-        "not touch your database — your characters, accounts and the module SQL already applied "
-        "are not read or written by this. The server is DOWN from the moment the containers are "
-        "replaced until it reports ready."
+        f"system packages its cache no longer holds. {database} The server is DOWN from the "
+        "moment the containers are replaced until it reports ready."
     )
 
 
@@ -2133,6 +2153,17 @@ installed" would be repeating, one layer up, the mistake this whole feature
 exists to fix — telling a user something took effect when nobody checked.
 """
 
+REBUILD_CLOSING_NOTE_IMPORTED = (
+    "The server is running the build that was just made, with every module in this folder "
+    "compiled into it, and the database updates the server and its modules carry were applied "
+    "before it started. If a module you added still does not seem to be there in-game, check "
+    "the worldserver log for its own startup line."
+)
+"""`REBUILD_CLOSING_NOTE` for a family that imports before the new build starts (T706).
+
+Said only after the importer exited 0 and the world reported ready, so "were applied"
+is what the importer said of its own run, not a guess about the database."""
+
 CORRECTIONS_WAIT_HINT = (
     'Stop ends this here and applies nothing: the world keeps running. "Stop now anyway" '
     "stops the world regardless and goes on with the corrections; it may then be force-stopped "
@@ -3363,6 +3394,40 @@ def remember_sources_off(server_dir: Path, rows: Sequence[tuple[str, Path, str]]
             logger.warning(f"could not remove {staged}: {also}")
         return f"warning: {path} could not be written ({exc}), so Start will not warn about it."
     return ""
+
+
+def rewrite_sources_off(
+    server_dir: Path, settled: Mapping[Path, str], rows: Sequence[tuple[str, Path, str]]
+) -> str:
+    """Drop the rows `settled` makes untrue, add `rows` (T680). "" once done, else why not.
+
+    `settled` is each folder put back, and the commit it was put back on: a row naming
+    that commit is true no longer (the folder is on it) and goes; a row naming another
+    commit -- a folder an earlier press left off its build, put back where it stood --
+    stays, as do the rows for every other folder. With no row left the record goes.
+    """
+    path = server_dir / SOURCES_OFF_FILE
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raw = {}
+    except (OSError, ValueError) as exc:
+        logger.warning(f"{path} could not be read ({exc}); writing it again from this press")
+        raw = {}
+    old = raw.get("sources") if isinstance(raw, dict) else None
+    on = {Path(dest): commit for dest, commit in settled.items()}
+    kept = [
+        (str(row.get("repo", "")), Path(str(row.get("dest", ""))), str(row.get("commit", "")))
+        for row in (old if isinstance(old, list) else [])
+        if isinstance(row, dict)
+        and on.get(Path(str(row.get("dest", "")))) != str(row.get("commit", ""))
+    ]
+    replaced = {dest for _repo, dest, _commit in rows}
+    kept = [row for row in kept if row[1] not in replaced]
+    if not kept and not rows:
+        forget_sources_off(server_dir)
+        return ""
+    return remember_sources_off(server_dir, [*kept, *rows])
 
 
 def forget_sources_off(server_dir: Path) -> None:
@@ -5774,6 +5839,12 @@ passes through, while `[1146]` is AzerothCore's prefix and Tortoise's `fatal`
 already spells it its own way.
 """
 
+MODULE_SQL_PRESS = "Apply module SQL"
+"""The Modules tab's button that runs the importer for the modules on disk, by its label.
+
+`controller_view.MODULE_SQL_BUTTON_LABEL` is the view's spelling of the same label;
+`test_rebuild_applies_module_sql` holds the two equal (T706)."""
+
 MODULE_SQL_HINT = (
     " That table is created by a module's db-world SQL, which has not been applied to this "
     "database. Press Apply module SQL on the Modules tab, then Start."
@@ -7002,6 +7073,7 @@ class StagedInstaller:
         reset_unfinished: docker.ResetUnfinished | None = None,
         seams: Seams | None = None,
         database_snapshot: snapshot.DatabaseSnapshot | None = None,
+        importer_modules: Callable[[Path], str] | None = None,
     ) -> None:
         self.entry = entry
         self.installers_root = (
@@ -7013,6 +7085,10 @@ class StagedInstaller:
         # T217: the update route's copy of the databases its new build can change,
         # supplied by the caller for `import_probe`'s reason (`install_wiring`).
         self._snapshot = database_snapshot
+        # T706: which modules a Rebuild's importer may update (the Modules tab's T78
+        # split), supplied by the caller for the same reason; None leaves it to the
+        # compose file.
+        self._importer_modules = importer_modules
         self._check_stage_tuple()
 
     # -- the family's contract -------------------------------------------
@@ -7084,6 +7160,25 @@ class StagedInstaller:
 
         Called by `stage_recreate()` after the stop and before the start, and by the
         update route's put-back with the old sources back. Nothing on the spine.
+        """
+        return iter(())
+
+    def imports_with_the_servers_down(self) -> bool:
+        """Does a plain Rebuild run this family's database importer before the new build (T706)?
+
+        False on the spine. The AzerothCore family's modules bring SQL only its importer
+        one-shot applies, and the world server never runs that one-shot itself, so a
+        Rebuild stops the servers in a call of its own and imports in that window.
+        """
+        return False
+
+    def import_with_the_servers_down(self, ctx: StageContext) -> Iterator[str]:
+        """Run what `imports_with_the_servers_down()` says, the servers stopped (T706).
+
+        Called by `stage_recreate()` on a plain Rebuild only, after the stop and before
+        the new build starts; never on a rollback, and never on the update route, whose
+        own `ServersDownWork.forward()` imports. A raise rolls the rebuild back.
+        Nothing on the spine.
         """
         return iter(())
 
@@ -7691,10 +7786,20 @@ class StagedInstaller:
         opts = options or InstallOptions()
         server_dir = self.server_dir(opts)
         if not update_phases(self.entry):
+            # T706: on a game whose modules' SQL an importer one-shot applies, the press
+            # that does apply it is named, so the refusal is not a dead end.
+            instead = (
+                f" Its modules' database updates are applied by “{MODULE_SQL_PRESS}” on the "
+                f"Modules tab with the server stopped, and by "
+                f"{server_build_presses.under_server_build(server_build_presses.REBUILD)} "
+                f"before the new build starts."
+                if self.entry.containers.db_import
+                else ""
+            )
             raise InstallerError(
                 f"{self.entry.name}'s install plan carries no phase meant to be re-applied to a "
                 f"server that already exists, so there is nothing for this to apply. Nothing was "
-                f"started. That is a fact about this game's plan, not about your install."
+                f"started. That is a fact about this game's plan, not about your install.{instead}"
             )
         yield f"Applying pending database updates for {self.entry.name} in {server_dir}"
         yield UPDATES_OPENING_NOTE
@@ -8683,8 +8788,13 @@ class StagedInstaller:
         # `before_replace` is its `before_signal`: past it, something may have
         # been touched; a Cancel before it leaves nothing touched.
         control = _stop_control(ctx, rollback=rollback)
-        stop_first = servers_down is not None or self.lays_scripts_with_the_servers_down(
-            ctx.server_dir
+        # T706: a plain Rebuild of a family that imports with the servers down takes the
+        # two calls too, so the import has a window with nothing running.
+        imports = servers_down is None and self.imports_with_the_servers_down()
+        stop_first = (
+            servers_down is not None
+            or imports
+            or self.lays_scripts_with_the_servers_down(ctx.server_dir)
         )
         if stop_first and not rollback:
             if servers_down is not None:
@@ -8722,6 +8832,9 @@ class StagedInstaller:
                     f"The server was rebuilt, but its servers could not be stopped to start the "
                     f"new build: {exc}"
                 ) from exc
+            if imports:
+                # T706: the SQL the new build's modules bring, before it first starts.
+                yield from self.import_with_the_servers_down(ctx)
             # T562: the scripts the world reads at its start, laid now that nothing runs.
             # A `ScriptsPartlyLaid` from here is `rebuild()`'s to answer (T602).
             yield from self.lay_scripts(ctx.server_dir, quiet=servers_down is None)
@@ -8826,9 +8939,23 @@ class StagedInstaller:
         is very probably what "i used the this thing to rebuild the server but
         nothing changes when i log back in" (2026-09-07) is a report of.
 
-        **What it deliberately does not do: SQL.** One press does the compile
-        and the restart, and touches no database. Three reasons, in the order
-        they decided it:
+        **SQL: the importer, and nothing else (T706).** A family that imports
+        through a one-shot (`imports_with_the_servers_down()`, AzerothCore) runs
+        it with the servers stopped, after the compile and before the new build
+        starts. Live on 2026-10-11 (v0.9.16, WotLK and Unbound) reason 3 below
+        was refuted: Install City Bots, then Rebuild, and the new world aborted
+        on `Table 'acore_world.city_bot_poi' doesn't exist`, because its world
+        server runs with `Updates.EnableDatabases` 0 and nothing else applies a
+        module's `db-world` files. The importer applies only what its own
+        `updates` table does not hold, the confirmation says so before the press
+        (`installer.rebuild_confirmation()`), and every other family still runs
+        no SQL. What follows is the decision as it stood until then, kept for
+        reasons 1 and 2, which still hold for every write other than the
+        importer's.
+
+        **What it deliberately did not do until T706: SQL.** One press did the
+        compile and the restart, and touched no database. Three reasons, in the
+        order they decided it:
 
         1. a database write behind a confirmation whose entire subject is a
            compile is a write nobody agreed to, and it would leave no way to ask
@@ -8943,8 +9070,11 @@ class StagedInstaller:
         # next build would compile something the user never confirmed.
         ground = self._recipe_ground(server_dir) if renders else {}
         yield f"Rebuilding {self.entry.name} in {server_dir}"
+        imports = servers_down is None and self.imports_with_the_servers_down()
         yield rebuild_opening_note(
-            renders_dockerfile=renders, parked=read_parked_build(server_dir) is not None
+            renders_dockerfile=renders,
+            parked=read_parked_build(server_dir) is not None,
+            imports=imports,
         )
         yield from unchecked
         self._check_cancel(cancel)
@@ -9170,6 +9300,15 @@ class StagedInstaller:
                 remember_built_from(server_dir, compiled_from)
                 # The new build started: as a success, the stopped build's record goes.
                 also = self._forget_the_stopped_build(server_dir)
+                # T680 (L11): and so do the two start records, as on a success. Every tag
+                # names this build, it started, and it was made from the folders as they
+                # are: a refusal written for mixed tags, an untested build or old scripts,
+                # or a folder off an earlier build, is no longer true, and Start refused
+                # on it with a reason the player could not act on.
+                left = forget_owed_start(server_dir)
+                if left:
+                    also = f"{also} {left}"
+                forget_sources_off(server_dir)
                 kept_build = (
                     f"{exc} The build from this rebuild was KEPT and is what the containers "
                     f"are running: the compile finished and the server it made did start, so "
@@ -9337,7 +9476,7 @@ class StagedInstaller:
         if landed is not None:
             landed()
         yield from self.after_ready(server_dir)
-        yield REBUILD_CLOSING_NOTE
+        yield REBUILD_CLOSING_NOTE_IMPORTED if imports else REBUILD_CLOSING_NOTE
         yield f"{self.entry.name} was rebuilt and is running in {server_dir}"
 
     @_reserving_call(REMOVE_KEPT_BUILD_LABEL)
@@ -9744,6 +9883,8 @@ class StagedInstaller:
         route = "the return to the tested commit" if to_pin else "the update to the newest code"
         try:
             moved: list[tuple[EmulatorSource, Path, str]] = []
+            # T680 (L12): what an earlier press left off its build keeps its own row.
+            earlier = {row.dest: row for row in sources_still_off(server_dir)}
             try:
                 for source, dest, old in plan:
                     self._check_cancel(cancel)
@@ -9771,6 +9912,20 @@ class StagedInstaller:
                         ),
                         UPDATE_SOURCES_STAGE,
                     )
+                    # T680 (L12): from here the folder is ahead of the image every Start
+                    # runs, on every way out until a put-back or a build says otherwise --
+                    # a crash or an error no handler below wraps included. Written as each
+                    # source moves rather than before the first fetch: a record naming
+                    # folders still on their commits is forgotten by the next reading.
+                    warned = remember_sources_off(
+                        server_dir,
+                        [
+                            *((row.repo, row.dest, row.built) for row in earlier.values()),
+                            *((src.repo, d, o) for src, d, o in moved if d not in earlier),
+                        ],
+                    )
+                    if warned:
+                        yield warned
                     yield self._moved_line(source, dest, old)
                 self._check_cancel(cancel)
                 # T179: the family reads what the move brought (TrinityCore's SQL
@@ -9971,6 +10126,8 @@ class StagedInstaller:
                     left_over = forget_owed_start(server_dir)
                     if left_over:
                         also += f" {left_over}"
+                # T680 (L12): the sources stay with the build the tags name, so none is off.
+                forget_sources_off(server_dir)
                 # T217: the database stays with the new build too; its copy is kept, and
                 # so are the older ones -- no build reported ready (live proof, item 5).
                 also += self._copy_kept(copy)
@@ -10301,12 +10458,16 @@ class StagedInstaller:
         `SOURCES_OFF_FILE` so every start is refused until they are back.
         """
         failed = yield from self._put_sources_back(moved)
-        if failed:
-            warned = remember_sources_off(
-                server_dir, [(source.repo, dest, old) for source, dest, old, _why in failed]
-            )
-            if warned:
-                yield warned
+        # T680 (L12): the rows the move wrote for these folders give way to what is true
+        # now -- a row for each folder that would not go back, none for one that did --
+        # and a row an earlier press left for another folder stays.
+        warned = rewrite_sources_off(
+            server_dir,
+            {dest: old for _source, dest, old in moved},
+            [(source.repo, dest, old) for source, dest, old, _why in failed],
+        )
+        if warned:
+            yield warned
         if not moved:
             return failed
 

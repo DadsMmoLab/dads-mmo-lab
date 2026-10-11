@@ -1249,13 +1249,17 @@ def test_core_updates_that_fail_never_start_the_new_build_and_the_copy_goes_back
     assert _moving_heads(rec, server_dir, made) == {OLD}
 
 
-def test_a_plain_rebuild_and_a_tbc_update_run_no_import(tmp_path: Path) -> None:
+def test_a_plain_rebuild_imports_once_and_a_tbc_update_runs_no_import(tmp_path: Path) -> None:
+    """T706: a plain WotLK Rebuild runs the importer once, before the new build starts;
+    it ran none until a module's world SQL was seen never to reach the database."""
     rec, server_dir, make = _spine(tmp_path / "wotlk", WOTLK)
     for source in WOTLK.emulator.sources:
         assert source.rev is not None
         rec.heads[server_dir / source.dest] = source.rev
     list(make().rebuild(InstallOptions(server_dir=server_dir)))
-    assert not [call for call in rec.calls if call.startswith("one-shot:")]
+    assert [call for call in rec.calls if call.startswith("one-shot:")] == [
+        "one-shot:ac-db-import"
+    ], rec.calls
     rec, _dir, _made, _fake, _said, _raised = _press(tmp_path / "tbc", TBC)
     assert not [call for call in rec.calls if call.startswith("one-shot:")]
 

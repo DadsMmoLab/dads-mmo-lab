@@ -327,8 +327,16 @@ def _touched_exit(tmp_path: Path, how: str) -> tuple[Recorder, _Daemon, Path, In
     elif how == "refused":
         assert native.owe_start(server_dir) == ""
     elif how == "servers-would-not-stop":
+        # T706: a WotLK Rebuild now stops its servers itself, for the import, before the new
+        # build starts; it is the rollback's stop, the second, that will not go.
+        stops: list[int] = []
+        real_stop = rec.stop_servers
 
-        def stop_servers(*_a: object, **_kw: object) -> None:
+        def stop_servers(*args: object, **kwargs: object) -> None:
+            stops.append(1)
+            if len(stops) == 1:
+                real_stop(*args, **kwargs)  # type: ignore[arg-type]
+                return
             raise docker.DockerCommandError(["compose", "stop"], 1, "daemon said no")
 
         overrides["stop_servers"] = stop_servers

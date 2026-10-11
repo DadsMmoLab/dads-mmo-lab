@@ -339,7 +339,8 @@ def test_the_opening_note_mentions_the_kept_build_only_when_one_is_recorded(
     kept = "if the folder has not changed since the kept build was made, uses that build"
     assert kept in notes[0], notes[0]
     assert kept not in notes[1], notes[1]
-    assert "three things" in notes[0] and "three things" in notes[1], notes
+    # T706: WotLK's Rebuild imports with its servers stopped, the fourth thing it does.
+    assert "four things" in notes[0] and "four things" in notes[1], notes
 
 
 def test_the_next_rebuild_after_an_edit_removes_the_parked_build_before_compiling(

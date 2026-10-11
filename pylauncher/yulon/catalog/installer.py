@@ -622,6 +622,21 @@ def rebuild_confirmation(entry: CatalogEntry, server_dir: Path, *, kept_build: b
         if record is not None
         else ""
     )
+    # T706: a family whose importer is a one-shot runs it before the new build starts.
+    imports = bool(entry.containers.db_import)
+    database = (
+        "Before it starts, the database updates the server and its modules carry that are not "
+        "applied yet are applied, by AzerothCore's own importer, which never runs one twice. "
+        "Nothing else in your databases is touched."
+        if imports
+        else "Your characters, accounts and databases are not touched."
+    )
+    written = (
+        "those database updates, and anything the new build writes into the database on its "
+        "first start,"
+        if imports
+        else "anything the new build writes into the database on its first start"
+    )
     return (
         f"Rebuild {entry.name} in {server_dir}?\n\n"
         f"This compiles the server again from the source and modules in that folder. It is "
@@ -631,12 +646,10 @@ def rebuild_confirmation(entry: CatalogEntry, server_dir: Path, *, kept_build: b
         f"{kept}"
         f"{recipe}"
         f"Your server will be STOPPED and its containers replaced once the compile finishes, "
-        f"and it will be down until it reports ready. Your characters, accounts and databases "
-        f"are not touched.\n\n"
+        f"and it will be down until it reports ready. {database}\n\n"
         f"The build you have now is kept as a rollback while this runs. If the new build does "
         f"not come up, the old one is put back automatically and the server is started on it "
-        f"again. That rollback covers the server build only: anything the new build writes "
-        f"into the database on its first start is not put back.\n\n"
+        f"again. That rollback covers the server build only: {written} is not put back.\n\n"
         f"{native.no_rollback_confirmation(entry)}\n\n"
         f"Say no and nothing happens at all — the server you have now keeps running, exactly "
         f"as it is."
@@ -1161,11 +1174,14 @@ def installer_for(
     reset_unfinished: docker.ResetUnfinished | None = None,
     seams: native.Seams | None = None,
     database_snapshot: snapshot.DatabaseSnapshot | None = None,
+    importer_modules: Callable[[Path], str] | None = None,
 ) -> InstallEngine:
     """The engine that installs `entry`. The only place that decides.
 
     `database_snapshot` is the update route's copy of the databases a new build
     can change (T217), supplied by `install_wiring` for `import_probe`'s reason.
+    `importer_modules` is which modules a Rebuild's importer may update (T706),
+    supplied the same way.
 
     `seams` replaces the engine's default seams whole, `platform_id` then
     included; only `install_wiring` passes it, for a server inside a WSL
@@ -1224,4 +1240,5 @@ def installer_for(
         reset_unfinished=reset_unfinished,
         seams=seams if seams is not None else native.Seams(platform_id=platform_id),
         database_snapshot=database_snapshot,
+        importer_modules=importer_modules,
     )
