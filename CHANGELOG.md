@@ -26,6 +26,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Install now asks before it starts or installs Docker Engine as root, and never installs a second engine over yours.
 - A full drive is now said right after you pick the server folder, and a wrong move file before any folder is asked.
 - The Accounts tab only creates names and passwords that Delete, Set password and GM level can use afterwards.
+- Start finds a port taken by another server's database or by a program before anything starts, and names it.
 
 ### Changed
 - The Server tab's **Play** now starts the game; **Launcher…** opens the launcher. The tray's **Play** starts a stopped server.

@@ -3592,10 +3592,11 @@ class Catalog(_Strict):
     def _entries_that_run_together_share_no_host_port(self) -> Catalog:
         """Two entries with no auth or world port in common share no host port at all (T552).
 
-        `Controller.port_conflicts()` looks at auth and world only, so two entries
-        that share one of those are the "stop the other one first" pair (WotLK and
-        TBC share all of theirs, on purpose). Two that share neither are meant to
-        run at once, and any other overlap would then fail late, at a Docker bind
+        Two entries that share an auth or world port are the "stop the other one
+        first" pair (WotLK and TBC share all of theirs, on purpose), and
+        `Controller.port_conflicts()` sees every port either publishes (T671).
+        Two that share neither are meant to run at once, and any other overlap
+        would then fail late, at a Docker bind
         error after the first server's containers were up (Codex adversarial
         reviews). Docker binds the number whatever the entry calls it, so every
         port an entry publishes is compared with every port of the other: its

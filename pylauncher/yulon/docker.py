@@ -467,6 +467,14 @@ _PORT_NOT_AVAILABLE = re.compile(
     r"ports are not available: exposing port TCP \S*?:(\d+) -> \S+: listen tcp\d*"
     r" \S+: bind: (?P<why>[^\r\n]*)"
 )
+_PORT_REFUSALS = (
+    _PORT_NOT_AVAILABLE,
+    # Linux Docker Engine 29.7.2 / Compose 5.5.0, measured on m910q (T671; audit lifecycle L1,
+    # usertest U-6), which never prints Desktop's words: a program holds the port ...
+    re.compile(r"failed to bind host port \S*?:(\d+)/tcp: (?P<why>[^\r\n]*)"),
+    # ... or another container publishes it.
+    re.compile(r"Bind for \S*?:(\d+) failed: (?P<why>port is already allocated)"),
+)
 
 
 def _daemon_lines(stderr: str) -> str:
@@ -485,7 +493,11 @@ def _daemon_lines(stderr: str) -> str:
 
 
 def _port_refusal(stderr: str) -> str | None:
-    """The plain sentence for the daemon's `ports are not available` error, or None (T574).
+    """The plain sentence for the daemon's own "port taken" error, or None (T574, T671).
+
+    Docker Desktop says `ports are not available`; Linux Docker Engine says `failed to
+    bind host port` (a program) or `Bind for ... failed: port is already allocated` (a
+    container). All three are read.
 
     The preflight bind check covers a port blocked when the install starts; this
     covers one that became blocked afterwards (a range Windows reserved at the
@@ -495,10 +507,13 @@ def _port_refusal(stderr: str) -> str | None:
     A message without the port number in the shape Docker prints it is left alone.
     """
     for line in _daemon_lines(stderr).split(" / "):
-        match = _PORT_NOT_AVAILABLE.search(line)
+        match = next((m for m in (p.search(line) for p in _PORT_REFUSALS) if m), None)
         if match is None:
             continue
         why = match.group("why").lower()
+        if why == "port is already allocated":
+            # Linux Engine's word for a port another CONTAINER publishes (T671 cold review).
+            return another_server_sentence(int(match.group(1)))
         windows = "forbidden by its access permissions" in why
         kind: Literal["reserved", "in_use"] = (
             "reserved" if windows or "permission denied" in why else "in_use"
@@ -673,13 +688,12 @@ def hold_the_server(
     lifecycle commands and are not held.
 
     "Stop the other server and start this one" pressed on ANOTHER install is
-    not held here either, and does not need to be: its `stop_conflicting()`
-    stops only an install whose containers publish that install's auth or world
-    port (`ContainerSpec.ports`, never the database's), and a held install has
-    neither running -- the restore plan refuses while they are up, and this
-    hold refuses their start. Both Codex reviews of 2026-10-04 read the
-    sentence above as covering that cross-server press; it covers the press
-    made on the held install itself.
+    not held here. Since T671 its `stop_conflicting()` also stops an install whose
+    database alone publishes a port this one needs -- which a held install's can
+    (a restore, a backup of a stopped server) -- so it asks `held_reason()` of
+    that install's folder first and refuses with the holder's sentence. Both
+    Codex reviews of 2026-10-04 read the sentence above as covering that
+    cross-server press; it covers the press made on the held install itself.
 
     Taken only when no lifecycle command for this server is running: a Start
     waiting for the database to report healthy has a world container that
@@ -706,6 +720,18 @@ def hold_the_server(
             reasons.remove(reason)
             if not reasons:
                 del _HELD[key]
+
+
+def held_reason(server_dir: Path | str) -> str | None:
+    """Why a job of this process holds `server_dir` (`hold_the_server()`), or None (T671).
+
+    "Stop the other server" asks it of the server it is about to stop: since T671 that
+    can be a database a restore or a backup runs alone, and this process's own
+    reservation of that folder is re-entrant, so it would not refuse.
+    """
+    with _HOLD_LOCK:
+        held = _HELD.get(_server_key(server_dir))
+        return held[-1] if held else None
 
 
 @contextmanager
@@ -5607,6 +5633,36 @@ def wait_ready_for(spec: ContainerSpec, ready: ReadySpec, *, wsl_distro: str | N
     return wait_ready(spec.auth, spec.world, ready, wsl_distro=wsl_distro)
 
 
+def port_publishers(
+    ports: Sequence[int], *, wsl_distro: str | None = None
+) -> dict[int, tuple[str, ...]]:
+    """Each of `ports` that a running container publishes, with the containers publishing it.
+
+    One `docker ps`, parsed as `port_holders()` parses it, with no ownership asked:
+    `Controller.start()` reads it to name the ports another server holds (T671) and to
+    leave a port a container publishes to Docker rather than bind it itself.
+    """
+    wanted = set(ports)
+    if not wanted:
+        return {}
+    proc = _run(["ps", "--format", "{{.Names}}\t{{.Ports}}"], wsl_distro=wsl_distro)
+    found: dict[int, list[str]] = {}
+    for line in proc.stdout.splitlines():
+        if "\t" not in line:
+            continue
+        name, ports_field = line.split("\t", 1)
+        for part in ports_field.split(","):
+            if "->" not in part:
+                continue
+            _, _, port_text = part.split("->", 1)[0].rpartition(":")
+            port_text = port_text.strip()
+            if port_text.isdigit() and int(port_text) in wanted:
+                names = found.setdefault(int(port_text), [])
+                if name not in names:
+                    names.append(name)
+    return {port: tuple(names) for port, names in found.items()}
+
+
 def port_conflicts_for(spec: ContainerSpec, *, wsl_distro: str | None = None) -> list[str]:
     """`port_conflicts()` for `spec.ports` — the convenience form callers want."""
     return port_conflicts(spec.ports, wsl_distro=wsl_distro)
@@ -5641,7 +5697,12 @@ NETSH_RESERVED_RANGES = "netsh interface ipv4 show excludedportrange protocol=tc
 
 
 def blocked_port_sentence(
-    port: int, kind: Literal["reserved", "in_use"], *, windows: bool, what: str = ""
+    port: int,
+    kind: Literal["reserved", "in_use"],
+    *,
+    windows: bool,
+    what: str = "",
+    program: str = "",
 ) -> str:
     """Plain words for a host port that cannot be bound: the reason, then what to do (T574).
 
@@ -5649,11 +5710,13 @@ def blocked_port_sentence(
     probe, before the build, and the daemon's own `ports are not available`
     error from `up`, which covers a range reserved between the two (a reboot).
     `kind` is a definite fact in both; a refused or timed-out connect is not.
+    `program` is the holder's name where the OS told Start's probe (T671).
     """
     named = f"port {port} ({what})" if what else f"port {port}"
     if kind == "in_use":
+        holder = f" ({program})" if program else ""
         return (
-            f"Another program on this computer already uses {named}, so the server cannot "
+            f"Another program on this computer{holder} already uses {named}, so the server cannot "
             "start. Close that program or stop its service, then try again."
         )
     if windows:
@@ -5668,6 +5731,18 @@ def blocked_port_sentence(
     return (
         f"This computer will not let a program use {named} (permission denied), so the "
         "server cannot start. Free the port or change what reserves it, then try again."
+    )
+
+
+def another_server_sentence(port: int) -> str:
+    """Plain words for a port another server's container publishes, Docker's own refusal (T671).
+
+    Start's check before anything starts names that server and offers to stop it; this
+    is the same collision met by compose itself (a server started in between).
+    """
+    return (
+        f"Another server on this computer already uses port {port}, so this server cannot "
+        "start. Stop that server first, or press Start again to be offered to stop it."
     )
 
 

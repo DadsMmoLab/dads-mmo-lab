@@ -572,6 +572,8 @@ def _default_conflicts(
 
 
 _LOOPBACK = "127.0.0.1"
+LOOPBACK = _LOOPBACK
+"""The address `bind_targets()` gives a loopback-only publish (the database, SOAP)."""
 _ALL_INTERFACES = "0.0.0.0"
 _PORT_OVERRIDES = {
     "auth port": "DOCKER_AUTH_EXTERNAL_PORT",
