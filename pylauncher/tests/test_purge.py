@@ -1829,3 +1829,46 @@ def test_a_server_folder_that_cannot_be_looked_at_is_refused_before_docker(
     with pytest.raises(purge.PurgeRefusal, match="could not tell"):
         uninstaller.run(keep_characters=False)
     assert [c for c in rec.order if c.startswith("remove_")] == []
+
+
+def test_a_junction_press_takes_no_hold_because_the_hold_writes_through_the_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T720: the server hold writes .yulon-folder-id into the folder, which through a
+    junction is the real install behind it. The refusal must come before the hold."""
+    import contextlib
+
+    rec = _recorder(tmp_path)
+    _a_junction(monkeypatch, rec.server_dir)
+    held: list[str] = []
+
+    @contextlib.contextmanager
+    def hold(press: str):  # type: ignore[no-untyped-def]
+        held.append(press)
+        yield
+
+    uninstaller = rec.uninstaller(remove_folder=None, hold_server=hold)
+    with pytest.raises(purge.PurgeRefusal, match="junction"):
+        uninstaller.run(keep_characters=False)
+    assert held == []
+
+
+def test_a_late_junction_sentence_does_not_blame_a_read_only_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T720: live on Windows the reason was right but the rest still said "usually a
+    read-only file inside .git ... may be partly deleted", which is wrong for a link."""
+    rec = _recorder(tmp_path)
+    (rec.server_dir / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+
+    def become_a_junction() -> str:
+        _a_junction(monkeypatch, rec.server_dir)
+        return ""
+
+    uninstaller = rec.uninstaller(remove_folder=None, remove_image=lambda ref: become_a_junction())
+    with pytest.raises(purge.PurgeRefusal) as caught:
+        uninstaller.run(keep_characters=False)
+    text = str(caught.value)
+    assert "junction or link" in text
+    assert "read-only" not in text
+    assert "partly deleted" not in text

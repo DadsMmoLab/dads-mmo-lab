@@ -904,6 +904,10 @@ class Uninstaller:
         Update must not find the server half-removed between them. While another Yu'lon holds the
         server the press is refused with its sentence, and nothing is removed.
         """
+        # T720: before the hold, which writes .yulon-folder-id into the folder (through a link,
+        # into the real install behind it). `_resolve()` asks again inside `_run`.
+        if (linked := _junction_refusal(self.server_dir)) is not None:
+            raise PurgeRefusal(linked)
         if self._hold_server is None:
             return self._run(keep_characters=keep_characters)
         with ExitStack() as held:
@@ -1338,6 +1342,9 @@ def _restore_refusal(server_dir: Path) -> str | None:
     )
 
 
+_LINK_CAUSE = "it is a junction or link, which Yu'lon does not delete through"
+
+
 def _cause(exc: rmtree.TreeRemovalError) -> object:
     """What the leaf was given, so `_undeletable()` reads as it always did.
 
@@ -1347,7 +1354,7 @@ def _cause(exc: rmtree.TreeRemovalError) -> object:
     if exc.__cause__ is not None:
         return exc.__cause__
     if "symbolic link or junction" in str(exc):  # T717: the leaf's own refusal of a link
-        return "it is a junction or link, which Yu'lon does not delete through"
+        return _LINK_CAUSE
     return "it is still there afterwards"
 
 
@@ -1366,11 +1373,22 @@ def _undeletable(path: Path, problem: object) -> str:
     forgotten last, so it is still there, and a second press resumes from a
     folder that may itself be half-deleted rather than from the beginning.
     """
+    why = (
+        "Remove the link yourself, or point Yu'lon at the real folder; what it leads to was "
+        "not touched. "
+        if problem == _LINK_CAUSE
+        else "On Windows this is usually a read-only file inside .git, or a program holding "
+        "a file open in that folder. "
+    )
+    left = (
+        "Only the folder is left. "
+        if problem == _LINK_CAUSE
+        else "Only the folder is left, and it may be partly deleted. "
+    )
     return (
-        f"{path} could not be deleted ({problem}). On Windows this is usually a read-only "
-        f"file inside .git, or a program holding a file open in that folder. "
+        f"{path} could not be deleted ({problem}). {why}"
         f"EVERYTHING ELSE IN THE PLAN HAS ALREADY BEEN REMOVED — the containers, the "
-        f"volumes it named, and the images. Only the folder is left, and it may be "
-        f"partly deleted. This install is still recorded, so the uninstall can be run "
-        f"again once the folder can be removed; it will not put back what is gone."
+        f"volumes it named, and the images. {left}"
+        f"This install is still recorded, so the uninstall can be run again once "
+        f"the folder can be removed; it will not put back what is gone."
     )
