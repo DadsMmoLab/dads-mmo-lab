@@ -146,15 +146,11 @@ def files(server_dir: Path) -> dict[Path, bytes]:
 
 
 def test_a_new_mod_ale_on_an_old_core_calls_the_cores_is_bot() -> None:
-    assert ale_playerbots.session_renames_for(OLD_CORE_SESSION, ALE_NEW) == {
-        "IsHeadless": "IsBot"
-    }
+    assert ale_playerbots.session_renames_for(OLD_CORE_SESSION, ALE_NEW) == {"IsHeadless": "IsBot"}
 
 
 def test_an_old_mod_ale_on_a_new_core_calls_the_cores_is_headless() -> None:
-    assert ale_playerbots.session_renames_for(NEW_CORE_SESSION, ALE_OLD) == {
-        "IsBot": "IsHeadless"
-    }
+    assert ale_playerbots.session_renames_for(NEW_CORE_SESSION, ALE_OLD) == {"IsBot": "IsHeadless"}
 
 
 @pytest.mark.parametrize(
@@ -180,9 +176,7 @@ def test_a_core_with_neither_name_is_left_for_the_compiler() -> None:
 
 def test_a_name_only_a_comment_carries_is_not_declared() -> None:
     """`// ... bool IsBot() const` in the new header must not make `IsBot` look declared."""
-    assert ale_playerbots.session_renames_for(NEW_CORE_SESSION, ALE_OLD) == {
-        "IsBot": "IsHeadless"
-    }
+    assert ale_playerbots.session_renames_for(NEW_CORE_SESSION, ALE_OLD) == {"IsBot": "IsHeadless"}
 
 
 def test_a_header_that_is_not_the_session_class_renames_nothing() -> None:
