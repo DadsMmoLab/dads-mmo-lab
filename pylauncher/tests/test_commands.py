@@ -60,12 +60,13 @@ def test_a_command_carrying_a_newline_is_refused() -> None:
 # -- the validators ---------------------------------------------------------
 
 
-@pytest.mark.parametrize("name", ["bob", "Bob_2", "a" * 20, "YULON_AB12CD34"])
+@pytest.mark.parametrize("name", ["bob", "Bob_2", "a" * 17, "YULON_AB12CD34"])
 def test_account_names_the_server_accepts(name: str) -> None:
     assert commands.valid_account_name(name)
 
 
-@pytest.mark.parametrize("name", ["ab", "a" * 21, "bob smith", "bob;drop", "bób", ""])
+# 18: no core takes a longer name than AzerothCore's 17 (T673, `account_rules`).
+@pytest.mark.parametrize("name", ["ab", "a" * 18, "bob smith", "bob;drop", "bób", ""])
 def test_account_names_the_server_would_refuse(name: str) -> None:
     assert not commands.valid_account_name(name)
 

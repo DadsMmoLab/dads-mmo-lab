@@ -70,6 +70,7 @@ from PySide6.QtWidgets import (
 )
 
 from yulon import (
+    account_rules,
     addon_archive,
     backup_shelf,
     botlist,
@@ -15046,6 +15047,13 @@ class ControllerView(QWidget):
             # (review, 2026-08-22), so the tab says it as well.
             self.account_report.setText("Username and password are required.")
             self.action_failed.emit("username and password are required")
+            return
+        # T673: the one rule (`account_rules`), so nothing is made that Delete, Set password
+        # or Set GM level would then refuse, or that the list would hide as the app's own.
+        problem = account_rules.create_problem(self.entry, name, password)
+        if problem:
+            self.account_report.setText(problem)
+            self.action_failed.emit(problem)
             return
         gm_level = self.account_gm.value()
         self.account_report.setText(f"Creating {name}…")

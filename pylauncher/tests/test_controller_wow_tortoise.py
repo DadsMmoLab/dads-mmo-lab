@@ -180,7 +180,7 @@ class _FakeSql:
 
 def test_the_account_row_is_this_cores_shape_and_never_azerothcores() -> None:
     sql = _FakeSql()
-    result = accounts.create_account(sql, "dad", "pw")
+    result = accounts.create_account(sql, "dad", "pw12")
     written = sql.written()
     assert result.created is True
     assert "sha_pass_hash" in written
@@ -192,7 +192,7 @@ def test_the_account_row_is_this_cores_shape_and_never_azerothcores() -> None:
 
 def test_the_gm_grant_writes_this_cores_column_and_never_account_access() -> None:
     sql = _FakeSql()
-    result = accounts.create_account(sql, "dad", "pw", gm_level=3)
+    result = accounts.create_account(sql, "dad", "pw12", gm_level=3)
     written = sql.writes()
     assert result.gm_level == 3
     assert "UPDATE account SET `rank` = 3" in written
@@ -252,7 +252,7 @@ def test_an_entry_that_declares_no_scheme_refuses_instead_of_guessing(
     monkeypatch.setattr(game, "entry", lambda: unmeasured)
     sql = _FakeSql()
     with pytest.raises(NotImplementedError, match="no account scheme"):
-        accounts.create_account(sql, "dad", "pw")
+        accounts.create_account(sql, "dad", "pw12")
     assert sql.statements == []
 
 
@@ -550,8 +550,8 @@ def test_tortoise_accepts_the_rank_its_own_fork_calls_administrator() -> None:
     answered with 'below administrator'. The wrapper hands the writer this tree's scale
     from the catalog; 5 is still refused, because no row here can hold it."""
     sql = _FakeSql()
-    result = accounts.create_account(sql, "chan", "pw", gm_level=4)
+    result = accounts.create_account(sql, "chan", "pw12", gm_level=4)
     assert result.gm_level == 4
     assert any("`rank` = 4" in stmt for _, stmt in sql.statements), sql.statements
     with pytest.raises(accounts.AccountError, match="GM level"):
-        accounts.create_account(sql, "chan2", "pw", gm_level=5)
+        accounts.create_account(sql, "chan2", "pw12", gm_level=5)

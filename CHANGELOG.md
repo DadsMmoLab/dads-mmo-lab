@@ -16,6 +16,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ### New
 
 ### Fixed
+- The Accounts tab only creates names and passwords that Delete, Set password and GM level can use afterwards.
 
 ### Changed
 

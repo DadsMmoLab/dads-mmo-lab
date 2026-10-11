@@ -30,8 +30,8 @@ from __future__ import annotations
 
 import re
 
-_ACCOUNT_NAME = re.compile(r"^[A-Za-z0-9_]{3,20}$")
-_ACCOUNT_PASSWORD = re.compile(r"^[A-Za-z0-9_@#%+=!-]{4,16}$")
+from yulon import account_rules
+
 _CHARACTER_NAME = re.compile(r"^[A-Za-z0-9_]{1,12}$")
 
 
@@ -56,17 +56,19 @@ def line(text: str) -> str:
 
 
 def valid_account_name(name: str) -> bool:
-    """`^[A-Za-z0-9_]{3,20}$` — what account creation accepts.
+    """`[A-Za-z0-9_]`, 3 to 17 characters: `account_rules.name_problem()`, Create's rule too (T673).
 
-    `fullmatch`, not `match`: `$` also matches just before a final line break,
-    so `"ALICE\n"` passed (T301's cold review).
+    17 is the longest name any core here accepts (AzerothCore's `MAX_ACCOUNT_STR`);
+    each core's own Create is stricter where its core is, so every name Create
+    makes passes here. `fullmatch`: `$` would also match before a final line
+    break, so `"ALICE\n"` passed (T301's cold review).
     """
-    return bool(_ACCOUNT_NAME.fullmatch(name))
+    return not account_rules.name_problem(name)
 
 
 def valid_account_password(password: str) -> bool:
-    """`^[A-Za-z0-9_@#%+=!-]{4,16}$` — and the 16 is a ceiling, not a preference."""
-    return bool(_ACCOUNT_PASSWORD.fullmatch(password))
+    """`[A-Za-z0-9_@#%+=!-]`, 4 to 16: `account_rules.password_problem()` (T673)."""
+    return not account_rules.password_problem(password)
 
 
 def valid_character_name(name: str) -> bool:
