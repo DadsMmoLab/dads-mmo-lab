@@ -53,6 +53,55 @@ def test_a_tag_not_above_the_newest_public_one_is_refused(tag: str) -> None:
     assert "v0.9.16-Public" in problem, "the message names the tag it lost to"
 
 
+def test_the_refusal_names_every_public_tag_that_blocks_it_and_no_other() -> None:
+    """Whoever cut the tag must know which tags to look at: all the ones it loses to.
+
+    v0.9.2 sorts below .13, .14, .15 and .16 under the hybrid rule; the 0.8 tags and
+    the fixtest tag are below it or never offered, so naming them would mislead.
+    """
+    problem = cto.tag_order_problem([*HISTORY, "v0.9.2-Public"], "v0.9.2-Public")
+    assert problem is not None
+    assert problem.startswith(
+        "v0.9.2-Public sorts below the existing v0.9.16-Public, v0.9.15-Public, "
+        "v0.9.14-Public and v0.9.13-Public under the hybrid version rule"
+    ), problem
+    for innocent in ("v0.8.90-Public", "v0.8.7-Public", "v0.8.66-fixtest", "v0.8.0-Public"):
+        assert innocent not in problem, innocent
+
+
+def test_the_refusal_names_a_tag_of_the_same_version_as_equal_not_above() -> None:
+    """v0.9.016 IS v0.9.16: the message must say it is the same version, not a higher one."""
+    problem = cto.tag_order_problem([*HISTORY, "v0.9.016-Public"], "v0.9.016-Public")
+    assert problem is not None
+    assert problem.startswith(
+        "v0.9.016-Public is the same version as the existing v0.9.16-Public "
+        "under the hybrid version rule"
+    ), problem
+    assert "v0.9.15-Public" not in problem
+
+
+def test_a_tag_both_below_one_tag_and_equal_to_another_names_each_for_what_it_is() -> None:
+    """v0.9.015 is v0.9.15 (same) and below v0.9.16: neither fact may hide the other."""
+    problem = cto.tag_order_problem([*HISTORY, "v0.9.015-Public"], "v0.9.015-Public")
+    assert problem is not None
+    assert problem.startswith(
+        "v0.9.015-Public sorts below the existing v0.9.16-Public, and is the same "
+        "version as the existing v0.9.15-Public under the hybrid version rule"
+    ), problem
+
+
+def test_a_long_list_of_blocking_tags_is_cut_and_counted() -> None:
+    """A tag far below names the newest few blockers and says how many more there are."""
+    tags = [f"v0.9.{n}-Public" for n in range(10, 30)]
+    problem = cto.tag_order_problem([*tags, "v0.9.1-Public"], "v0.9.1-Public")
+    assert problem is not None
+    head = problem.split(" under the hybrid version rule")[0]
+    assert head == (
+        "v0.9.1-Public sorts below the existing v0.9.29-Public, v0.9.28-Public, "
+        "v0.9.27-Public, v0.9.26-Public, v0.9.25-Public and 15 more public tags"
+    ), head
+
+
 def test_the_tag_is_not_compared_with_itself() -> None:
     """The tag being built is in `git tag --list` already."""
     assert cto.tag_order_problem([*HISTORY, "v0.9.17-Public"], "v0.9.17-Public") is None
@@ -97,7 +146,8 @@ def test_main_exit_codes(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> 
 
     assert cto.main(["--tag", "v0.9.17-Public"], run_git=git_with("v0.9.17-Public")) == 0
     assert cto.main(["--tag", "v0.9.2-Public"], run_git=git_with("v0.9.2-Public")) == 1
-    assert "v0.9.2-Public" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "v0.9.2-Public sorts below the existing v0.9.16-Public" in err, err
 
     # a branch name, a dispatch run: nothing to check, and git is not even asked
     def never(argv: list[str]) -> str:

@@ -54,17 +54,34 @@ def tag_order_problem(tags: Iterable[str], tag: str) -> str | None:
         and PUBLIC_TAG.match(other.strip())
         and (version := version_key(other)) is not None
     ]
-    if not rivals:
+    above = sorted((r for r in rivals if r[0] > mine), reverse=True)
+    same = sorted(r for r in rivals if r[0] == mine)
+    if not above and not same:
         return None
-    version, newest = max(rivals)
-    if mine > version:
-        return None
+    if above:
+        why = f"{tag} sorts below the existing {_name_tags([t for _, t in above])}"
+        if same:
+            why += f", and is the same version as the existing {_name_tags([t for _, t in same])}"
+    else:
+        why = f"{tag} is the same version as the existing {_name_tags([t for _, t in same])}"
     return (
-        f"{tag} does not sort above {newest}, the highest public tag already released, "
-        "so the update check would not offer it as the newest release "
-        "(from 0.9 on the last number counts as a whole number: 0.9.9 < 0.9.10 < 0.9.16; "
-        "below 0.9 it is a decimal). Check the number for a typo before tagging again."
+        f"{why} under the hybrid version rule, so the update check would not offer it "
+        "as the newest release (from 0.9 on the last number counts as a whole number: "
+        "0.9.9 < 0.9.10 < 0.9.16; below 0.9 it is a decimal). "
+        "Check the number for a typo before tagging again."
     )
+
+
+_NAMED = 5
+
+
+def _name_tags(tags: list[str]) -> str:
+    """`a`, `a and b`, `a, b and c`; past five, the first five `and N more public tags`."""
+    if len(tags) > _NAMED:
+        return f"{', '.join(tags[:_NAMED])} and {len(tags) - _NAMED} more public tags"
+    if len(tags) == 1:
+        return tags[0]
+    return f"{', '.join(tags[:-1])} and {tags[-1]}"
 
 
 def _git(argv: list[str]) -> str:
