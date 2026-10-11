@@ -1157,6 +1157,15 @@ def ensure(
             ),
         )
     if getattr(answer, "outcome", "") != "yes":
+        if getattr(answer, "reached", True) is False and isinstance(current, Pending):
+            # T723: the ask never got an HTTP reply (refused or reset while the
+            # channel is off or the world still loads, or a timeout). That says
+            # nothing about the account, so it spends no try: the row stays
+            # `Pending`, which the tab shows as waiting, and the next ask proves it.
+            logger.info(
+                f"the command channel for {game} was not reached; no try spent, still pending"
+            )
+            return current
         logger.info(f"the command channel for {game} did not answer yet; not saving anything")
         return current.verify_failed()
 
@@ -1554,16 +1563,35 @@ class InstallChannel:
             return gave_up
         return self._state
 
-    def _rearm(self, why: str) -> None:
+    def _rearm(self, why: str, *, waiting_too: bool = False) -> None:
         """End a gave-up state on what the disk keeps, as a relaunch would (T427, T497).
 
         The pending record holds the row's own password, so what follows
         re-verifies that row and never makes another; with no record it is
         `Idle`, whose `create` keeps an existing row's password and says so.
+
+        `waiting_too` is the press of "Turn on the command channel" (T723): it
+        also gives a `Pending` row its tries back. A Start does not, so a world
+        that keeps replying with something that is not a proof still ends in
+        `GaveUp` within the Start's own tries.
         """
         if isinstance(self._state, GaveUp):
             self._state = self._from_disk()
             logger.info(f"{self.entry.id}: the command channel is asked again after {why}")
+        elif waiting_too and isinstance(self._state, Pending) and self._state.tries:
+            # T723: a waiting row gets its tries back too, or a press leaves the
+            # budget the asks made while the channel was off. The disk first; with
+            # no record (it could not be written) the row in hand is kept, reset.
+            kept = self._state
+            loaded = self._from_disk()
+            self._state = (
+                Pending(account=kept.account, password=kept.password)
+                if isinstance(loaded, Idle)
+                else loaded
+            )
+            logger.info(
+                f"{self.entry.id}: the waiting command channel has its tries back after {why}"
+            )
 
     def _noted(self, state: State) -> State:
         """Remember, for the tab, whether a waiting row waits on a channel that is off (T423).
@@ -1860,7 +1888,7 @@ class InstallChannel:
                 )
         except ServerHeldElsewhere as held:
             raise EnableRefused(str(held)) from held
-        self._rearm("Turn on")
+        self._rearm("Turn on", waiting_too=True)
         return done
 
     def setup_state(self) -> State:
