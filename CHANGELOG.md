@@ -16,6 +16,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ### New
 
 ### Fixed
+- On Windows, Uninstall of a server folder that is a junction is refused before it empties the folder it points to.
 - On a Mac, clicking Yu'lon in the Dock brings its window back when it was closed into the menu bar.
 - On Windows, deleting a folder no longer clears read-only flags or removes folders behind a junction inside it.
 - The update check no longer offers an older build as the newest once a version has a tenth patch release.
