@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.test_move_server_flow import Move, plan_for
+from tests.test_move_server_flow import Move
 from tests.test_purge import GAME, Recorder, _recorder
 from yulon import channel_setup, move_server, purge
 from yulon.catalog import composegen, native
@@ -252,7 +252,7 @@ def test_a_second_bring_in_of_a_finished_move_is_refused_as_a_server(tmp_path: P
 def test_the_catalog_reads_a_finished_record_as_a_server(
     tmp_path: Path, done: list[str] | None, unfinished: bool
 ) -> None:
-    """"Use existing..." and Install ask `_unfinished_move_in()`, not whether the file is there.
+    """ "Use existing..." and Install ask `_unfinished_move_in()`, not whether the file is there.
 
     Mutation: make `unfinished_move_in()` answer True for any record.
     """
@@ -312,7 +312,8 @@ def test_a_cut_off_load_is_finished_by_bring_in_without_starting_the_server(
     from tests.test_move_flows import Db
     from yulon.controller_wow_wotlk import maintenance
 
-    mv = Move(tmp_path, fresh_db=Db([], realm="10.0.0.7\t127.0.0.1", fail_load_of="acore_characters"))
+    fresh = Db([], realm="10.0.0.7\t127.0.0.1", fail_load_of="acore_characters")
+    mv = Move(tmp_path, fresh_db=fresh)
     with pytest.raises(MoveError):
         mv.run()
     record = maintenance.interrupted_restore(mv.target.server_dir)

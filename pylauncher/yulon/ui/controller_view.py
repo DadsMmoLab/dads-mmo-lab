@@ -17251,9 +17251,12 @@ class ControllerView(QWidget):
                 held.close()
                 return self.services.backup()
             backed_up = _put_back_after(self.services.backup, alone)
-            if backed_up.stop_note is None:
-                return backed_up.result
-            return _BackedUpWithNote(backed_up.result, backed_up.stop_note)
+            report = backed_up.result
+            if backed_up.stop_note is None or not isinstance(
+                report, wotlk_maintenance.BackupReport
+            ):
+                return report
+            return _BackedUpWithNote(report, backed_up.stop_note)
 
     @Slot()
     def back_up(self) -> None:

@@ -1,4 +1,4 @@
-"""T681: a Restore is the only writer of its server, and a restore that did not finish blocks starts.
+"""T681: a Restore is its server's only writer, and a restore that did not finish blocks starts.
 
 Lifecycle audit L7, L8/L19, L9 and L10, through the real Maintenance tab and the real
 `controller_wow_wotlk.maintenance` planner and restore (the harness of

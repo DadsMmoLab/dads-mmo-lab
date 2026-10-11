@@ -604,8 +604,9 @@ def _reserved_for(
     as before. A reservation that is `moot` (Docker not answering, an unwritable folder) is
     skipped: the job meets that itself. Either way the press is counted (`_press_on()`).
     """
-    with _press_on(server_dir, press), _reserved_across(
-        server_dir, press, spec, wsl_distro, label, budget, avoid_images
+    with (
+        _press_on(server_dir, press),
+        _reserved_across(server_dir, press, spec, wsl_distro, label, budget, avoid_images),
     ):
         yield
 
@@ -9028,18 +9029,21 @@ def server_claim(
         ServerReserved: another process (or an earlier run of this Yu'lon) holds it.
         ServerReservationUnavailable: no reservation could be made.
     """
-    with _press_on(server_dir, press), _server_claim(
-        server_dir,
-        press=press,
-        images=images,
-        spec=spec,
-        wsl_distro=wsl_distro,
-        cancel=cancel,
-        label=label,
-        this_press=this_press,
-        up_timeout=up_timeout,
-        avoid_images=avoid_images,
-    ) as held:
+    with (
+        _press_on(server_dir, press),
+        _server_claim(
+            server_dir,
+            press=press,
+            images=images,
+            spec=spec,
+            wsl_distro=wsl_distro,
+            cancel=cancel,
+            label=label,
+            this_press=this_press,
+            up_timeout=up_timeout,
+            avoid_images=avoid_images,
+        ) as held,
+    ):
         yield held
 
 

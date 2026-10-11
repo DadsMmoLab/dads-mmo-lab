@@ -108,6 +108,8 @@ def another_press_writes(press: str) -> str:
         f"{press} is working on this server right now, and a restore must be the only thing "
         "writing to its databases. Wait for it to finish, then try again."
     )
+
+
 MOVE_HOLDS_THE_SERVER = (
     "Accounts and characters are being packed or brought in on this server's Maintenance tab, "
     "with the database started on its own for it. Wait for that to finish, then try again. "
