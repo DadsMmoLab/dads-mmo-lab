@@ -104,7 +104,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
-from typing import IO, Protocol
+from typing import IO, NamedTuple, Protocol
 
 from yulon import docker, platform, runner
 from yulon.apply import DB_NAMES, RootPassword, mysql_client, mysql_env
@@ -185,6 +185,15 @@ _USE_AT_START = re.compile(rb"USE\s+`([^`\n]+)`")
 _EDGE_BYTES = 8192
 # Read size for the full-file scan, with an overlap longer than any pattern above
 # so a match that straddles a boundary is still found (duplicates are deduped).
+# T681 review: statements that write MySQL's own accounts without a `USE mysql` -- an
+# `--all-databases` dump's grants, a hand-made one's users. Only at the start of a line:
+# mysqldump writes a newline inside a string value as `\n`, so data never starts one.
+_ACCOUNT_LINE = re.compile(
+    rb"(?:\A|\n)[ \t]*(INSERT\s+INTO\s+`?mysql`?\s*\.|(?:CREATE|ALTER|DROP)\s+USER\b|"
+    rb"GRANT\b|SET\s+PASSWORD\b)",
+    re.IGNORECASE,
+)
+
 _SCAN_CHUNK = 1 << 20
 _SCAN_OVERLAP = 512
 
@@ -1145,6 +1154,20 @@ def unfinished_restore_sentence(record: InterruptedRestore, *, moving_in: bool =
             "if you have already put the databases right."
         )
     named = ", ".join(record.databases) or "this server's databases"
+    copy = ", ".join(str(p) for p in record.safety_backup)
+    taken = f" The copy taken just before it is {copy}." if copy else ""
+    if record.load_pid > 0 and not (
+        moving_in and record.backup.parent.name.startswith(MOVE_IN_COPY_FOLDER)
+    ):
+        # T681 review: the load was recorded and its process is gone -- Yu'lon closed during it
+        # (Quit anyway, a crash). A failed load clears the pid first (T690), so this load may
+        # well have finished in Docker after Yu'lon went; nothing here can say which.
+        return (
+            f"A restore of {named} was still loading when Yu'lon last closed, and Yu'lon cannot "
+            "tell whether it finished, so the server is not started on those databases. On "
+            "the Maintenance tab, restore a backup again to be sure, or press Forget that "
+            f"record if you know it finished.{taken}"
+        )
     if moving_in and record.backup.parent.name.startswith(MOVE_IN_COPY_FOLDER):
         return (
             f"Bringing this server from another computer stopped while it was putting {named} "
@@ -1152,8 +1175,6 @@ def unfinished_restore_sentence(record: InterruptedRestore, *, moving_in: bool =
             "Bring from another computer again with the same file and this folder: it puts "
             "every database in again."
         )
-    copy = ", ".join(str(p) for p in record.safety_backup)
-    taken = f" The copy taken just before it is {copy}." if copy else ""
     return (
         f"A restore of {named} did not finish, so those databases may be half-written and the "
         "server is not started on them. On the Maintenance tab, restore a backup again to "
@@ -1568,13 +1589,14 @@ def plan_restore(
         except MaintenanceError as exc:
             refusals.append(str(exc))
         else:
-            databases, digest = _scan_dump(backup_file)
+            databases, digest, accounts = _scan_dump(backup_file)
             if not databases:
                 refusals.append(
                     f"{backup_file.name} names no database (no USE or CREATE DATABASE), so "
                     "there is no telling what it would overwrite"
                 )
             system = [name for name in databases if name.lower() in SYSTEM_SCHEMAS]
+            system += [kind for kind in accounts if kind not in system]
             if system:
                 # T681 (lifecycle L9): `_safety_backup()` copies only `server_databases()`,
                 # which leaves these out, so nothing could put them back.
@@ -2129,7 +2151,14 @@ def _databases_named_in(path: Path) -> tuple[str, ...]:
     return _scan_dump(path)[0]
 
 
-def _scan_dump(path: Path) -> tuple[tuple[str, ...], str]:
+class _DumpScan(NamedTuple):
+    databases: tuple[str, ...]
+    digest: str
+    accounts: tuple[str, ...]
+    """The kinds of account statement found (`GRANT`, `CREATE USER`...), first seen first."""
+
+
+def _scan_dump(path: Path) -> _DumpScan:
     """`(schemas the file writes into, SHA-256 of the file)`, in one pass.
 
     The scan reads the whole file already, so the digest costs one hash per chunk
@@ -2144,6 +2173,7 @@ def _scan_dump(path: Path) -> tuple[tuple[str, ...], str]:
     """
     found: list[str] = []
     seen: set[str] = set()
+    accounts: list[str] = []
     carry = b""
     digest = hashlib.sha256()
     with path.open("rb") as fh:
@@ -2157,8 +2187,13 @@ def _scan_dump(path: Path) -> tuple[tuple[str, ...], str]:
                 if name not in seen:
                     seen.add(name)
                     found.append(name)
+            for match in _ACCOUNT_LINE.finditer(data):
+                kind = " ".join(match.group(1).decode("ascii", "replace").upper().split())
+                kind = "INSERT INTO mysql" if kind.startswith("INSERT") else kind
+                if kind not in accounts:
+                    accounts.append(kind)
             carry = data[-_SCAN_OVERLAP:]
-    return tuple(found), digest.hexdigest()
+    return _DumpScan(tuple(found), digest.hexdigest(), tuple(accounts))
 
 
 def _databases_named_in_bytes(data: bytes) -> list[str]:

@@ -35,7 +35,15 @@ from dataclasses import dataclass
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from typing import Any, Literal, Protocol
 
-from yulon import apply, docker, module_answers, module_source, move, reset_defaults
+from yulon import (
+    apply,
+    docker,
+    forgetting,
+    module_answers,
+    module_source,
+    move,
+    reset_defaults,
+)
 from yulon.catalog.catalog import (
     LUA_SCRIPTS_DIR,
     CatalogEntry,
@@ -1704,7 +1712,11 @@ def load_the_data(
     manifest = package.manifest
     undone = "Nothing was put in yet."
     with _database_session(
-        world, because="the databases are put in", undone=undone, press=PRESS_BRING_IN
+        world,
+        because="the databases are put in",
+        undone=undone,
+        press=PRESS_BRING_IN,
+        alone=forgetting.MOVE_WRITES_ALONE,
     ):
         roles = _present_roles(world, SERVER_ROLES)
         here = _read_versions(world, roles)

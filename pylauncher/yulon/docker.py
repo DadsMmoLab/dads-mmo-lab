@@ -776,10 +776,16 @@ def hold_the_server(
                 del _ALONE[key]
 
 
+def held_reason(server_dir: Path | str) -> str | None:
+    """The sentence of the Maintenance job of THIS process holding the server now, or None."""
+    with _HOLD_LOCK:
+        reasons = _HELD.get(_server_key(server_dir))
+        return reasons[-1] if reasons else None
+
+
 def held_here(server_dir: Path | str) -> bool:
     """A Maintenance job of THIS process holds the server right now (`hold_the_server()`)."""
-    with _HOLD_LOCK:
-        return bool(_HELD.get(_server_key(server_dir)))
+    return held_reason(server_dir) is not None
 
 
 @contextmanager
