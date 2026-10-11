@@ -473,6 +473,34 @@ def test_console_tab_sends_commands(qapp: object, ps: _Ps, tmp_path: Path) -> No
 @pytest.mark.parametrize(
     "typed",
     [
+        "account create dad Zq7s3cretWv",
+        ".account create dad Zq7s3cretWv",
+        "Account create dad Zq7s3cretWv",
+        "acc create dad Zq7s3cretWv",
+        "account set password dad Zq7s3cretWv Zq7s3cretWv",
+        "account set pass dad Zq7s3cretWv Zq7s3cretWv",
+        "account password old Zq7s3cretWv Zq7s3cretWv",
+    ],
+)
+def test_the_console_echo_hides_a_password_in_any_spelling_of_an_account_command(
+    qapp: object, ps: _Ps, tmp_path: Path, typed: str
+) -> None:
+    """The panel echoes each command as `> ...`, and a screenshot of it goes to
+    support. The cores take any prefix of each word, any case and a leading dot,
+    so only the exact `account create` prefix being hidden left the rest in clear
+    (T683 S4). The command itself still goes to the server unchanged."""
+    sent: list[str] = []
+    view = ControllerView(WOTLK, _services(ps, tmp_path, sent), status_poll_ms=0)
+    view.command_edit.setText(typed)
+    view.send_console_command()
+    assert sent == [typed]
+    assert "Zq7s3cretWv" not in view.console_log.text()
+    assert "> " in view.console_log.text()
+
+
+@pytest.mark.parametrize(
+    "typed",
+    [
         "server shutdown 1",
         ".server shutdown 60",
         "server exit",

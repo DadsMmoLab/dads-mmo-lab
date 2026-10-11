@@ -59,6 +59,7 @@ from yulon.manifest import (
     Slug,
     Source,
     SqlStep,
+    is_inside_path,
     parse_manifest,
 )
 from yulon.manifest_store import FAMILY_FILES
@@ -354,15 +355,25 @@ def _conf_steps(clone: Path) -> tuple[ConfFile, ...]:
     file into the server's live `etc`.
     """
     conf_dir = clone / "conf"
-    return tuple(
-        ConfFile(
-            file=f"{_MODULE_CONF_DIR}/{dist.name[: -len(_CONF_DIST_SUFFIX)]}.conf",
-            template=f"conf/{dist.name}",
-            keys=(),
+    found: list[ConfFile] = []
+    for dist in sorted(conf_dir.glob(f"*{_CONF_DIST_SUFFIX}")):
+        if not dist.is_file():
+            continue
+        if not is_inside_path(f"conf/{dist.name}"):
+            # A colon or backslash in the name: no manifest takes that path (T683 S7).
+            logger.warning(
+                f"left out conf/{dist.name}: a settings file with a colon or a backslash in "
+                "its name cannot be set up; the module installs without it"
+            )
+            continue
+        found.append(
+            ConfFile(
+                file=f"{_MODULE_CONF_DIR}/{dist.name[: -len(_CONF_DIST_SUFFIX)]}.conf",
+                template=f"conf/{dist.name}",
+                keys=(),
+            )
         )
-        for dist in sorted(conf_dir.glob(f"*{_CONF_DIST_SUFFIX}"))
-        if dist.is_file()
-    )
+    return tuple(found)
 
 
 def _sql_steps(clone: Path) -> tuple[SqlStep, ...]:

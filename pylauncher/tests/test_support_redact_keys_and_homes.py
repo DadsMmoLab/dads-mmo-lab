@@ -857,3 +857,60 @@ def test_json_nested_three_deep_still_masks_an_escaped_quote_password() -> None:
     line = f'"mysql -uroot -p{bs}"{secret}{bs}" acore"'
     out = Redactor.build([]).redact(line)
     assert secret not in out and out.endswith(' acore"'), out
+
+
+@pytest.mark.parametrize(
+    "template",
+    [
+        "acc create bob {s}",
+        ".acc cr bob {s}",
+        "ac c bob {s}",
+        "account set pass bob {s} {s}",
+        "Account Set Password bob {s} {s}",
+        "acc s p bob {s} {s}",
+        "acc pass old{s} {s} {s}",
+        'account create bob "{s} Qxy"',
+        "account create bob '{s} Qxy'",
+        "account create bob pa'{s}",
+        'account create bob pa"{s}',
+        'logged: \\"account create bob \\"{s} Qxy\\"\\"',
+        # Review round 2 (T683): Tortoise takes a bare `a` as `account` (first match)
+        "a cr bob {s}",
+        "a s p bob {s} {s}",
+        "a p old{s} {s} {s}",
+        # the mangos cores read name and password as '..', ".." or [..]
+        'account create "bob" "{s} Qxy"',
+        "account create bob [{s} Qxy]",
+        "account set password bob [{s} Qxy] [{s} Qxy]",
+        # AzerothCore splits on spaces: a quote may open a word and never close
+        "account create bob '{s}",
+        'acc create bob pa",{s}',
+        'account create bob "Qxy"{s}',
+    ],
+)
+def test_an_abbreviated_or_quoted_account_password_command_is_masked(template: str) -> None:
+    """Both cores take a command by any unique prefix of each word (`acc create`,
+    `account set pass`), and a password may hold a space in quotes or a quote inside it.
+    A player's own game password is never a known value, so these patterns are the only
+    guard between it and the support file that says passwords were taken out (T683 S3)."""
+    secret = "Zq" + secrets.token_hex(8) + "Wv"
+    out = Redactor.build([]).checked(template.format(s=secret))
+    assert secret not in out and secret[:6] not in out and secret[-6:] not in out, out
+    assert "Qxy" not in out, out
+
+
+def test_an_account_command_in_a_json_record_keeps_the_rest_of_the_record() -> None:
+    secret = "Zq" + secrets.token_hex(8) + "Wv"
+    line = f'{{"cmd": "acc create bob {secret}", "ok": true}}'
+    assert Redactor.build([]).checked(line) == f'{{"cmd": "acc create bob {MASK}", "ok": true}}'
+
+
+def test_account_words_in_prose_are_not_a_command() -> None:
+    redactor = Redactor.build([])
+    for text in (
+        "Account created for bob with level 3",
+        "account creation failed: name taken",
+        "accounts set by the player stay",
+        "accept create bob now",
+    ):
+        assert redactor.redact(text) == text

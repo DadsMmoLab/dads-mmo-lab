@@ -56,6 +56,10 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Uninstall can be pressed again after a folder that could not be fully deleted, and then finishes the job.
 - A server brought in from another computer can be used with Use existing and is not installed again.
 - Reinstalling after an uninstall that removed the characters sets up the command channel fresh, without Repair.
+- The Console tab no longer shows a typed account password, whether the command is shortened, capitalised or dotted.
+- A support file now also takes out the password of a shortened or quoted account command.
+- On Linux and macOS your database backups can now be read by you alone.
+- The Bots tab name filter no longer fails on a name typed with a backslash.
 
 ### Changed
 - The Server tab's **Play** now starts the game; **Launcher…** opens the launcher. The tray's **Play** starts a stopped server.

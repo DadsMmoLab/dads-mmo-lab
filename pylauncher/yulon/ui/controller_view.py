@@ -184,6 +184,7 @@ from yulon.manifest import ConfKey, Manifest, ManifestType, Prompt, When
 from yulon.manifest_store import FAMILY_FILES, ManifestStore
 from yulon.networking import Mode, NetworkPlan, NetworkReport
 from yulon.said import SaidByYulon, split_details
+from yulon.support.redact import hide_account_passwords
 from yulon.ui import lines, single_instance
 from yulon.ui.answers import said_yes
 from yulon.ui.catalog_view import DirPicker, _qt_dir_picker, offer_a_docker_group_restart
@@ -14424,7 +14425,7 @@ class ControllerView(QWidget):
         """
         if self._console_pending:
             return
-        shown = command if not command.startswith("account create") else "account create ****"
+        shown = hide_account_passwords(command)
         self.console_log.append(f"> {shown}")
         self._console_pending = True
         set_enabled_why(self.send_button, wait_for("the last command"))

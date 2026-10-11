@@ -17,9 +17,10 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
 from yulon import conf_dist, tuning
-from yulon.manifest import Manifest, parse_manifest
+from yulon.manifest import ConfFile, Manifest, parse_manifest
 
 MODULES = "env/dist/etc/modules"
 CONF = f"{MODULES}/mod_x.conf"
@@ -586,6 +587,12 @@ def _manifest(**over: Any) -> Manifest:
     return parse_manifest({**base, **over})
 
 
+def _unchecked_conf(*, file: str, template: str) -> Manifest:
+    """`_manifest()` with one conf the loader never saw: for the reader's own guard."""
+    conf = ConfFile.model_construct(file=file, template=template, keys=())
+    return _manifest().model_copy(update={"conf": (conf,)})
+
+
 def _put(root: Path, rel: str, text: str) -> Path:
     path = root / rel
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -664,7 +671,10 @@ def test_a_template_that_leaves_the_clone_is_not_read(tmp_path: Path, template: 
     _put(tmp_path, "modules/other/mod_x.conf.dist", "Other.Key = 1\n")
     _put(tmp_path, "modules/other.conf.dist", "Other.Key = 1\n")
     template = template.replace("{abs}", str(tmp_path / "modules/other.conf.dist"))
-    manifest = _manifest(conf=[{"file": CONF, "template": template, "keys": []}])
+    with pytest.raises(ValidationError, match="inside its folder"):  # the loader refuses it (T683)
+        _manifest(conf=[{"file": CONF, "template": template, "keys": []}])
+    # and the reader still refuses one that got past a loader some other way
+    manifest = _unchecked_conf(file=CONF, template=template)
     assert _rows(tmp_path, [manifest]) == ()
 
 
@@ -771,7 +781,7 @@ def test_only_a_conf_directly_in_the_modules_folder_can_get_a_card(
 ) -> None:
     _put(tmp_path, file, "A.B = 0\n")
     _put(tmp_path, f"{file}.dist", "A.B = 0\n")
-    manifest = _manifest(conf=[{"file": file, "template": "conf/x.conf.dist", "keys": []}])
+    manifest = _unchecked_conf(file=file, template="conf/x.conf.dist")
     assert _rows(tmp_path, [manifest]) == ()
 
 

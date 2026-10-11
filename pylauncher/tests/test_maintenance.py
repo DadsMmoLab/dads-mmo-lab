@@ -9,7 +9,11 @@ from __future__ import annotations
 
 import functools
 import io
+import os
+import stat
 import subprocess
+import sys
+from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
 from typing import IO
@@ -119,6 +123,54 @@ def a_marker(
 
 
 # ------------------------------------------------------------------ backup
+
+
+_POSIX_ONLY = pytest.mark.skipif(
+    sys.platform == "win32", reason="POSIX file modes; Windows ignores them"
+)
+
+
+@pytest.fixture
+def shared_umask() -> Iterator[None]:
+    """The umask a desktop login has (Ubuntu, Fedora): new files 0664, folders 0775."""
+    old = os.umask(0o002)
+    try:
+        yield
+    finally:
+        os.umask(old)
+
+
+@_POSIX_ONLY
+def test_a_dump_is_readable_by_its_owner_alone(tmp_path: Path, shared_umask: None) -> None:
+    """An auth dump holds every account's login verifier and the realm session keys.
+
+    `.env` and the confs are 0600 on purpose; the dumps took the umask and were
+    measured 0664 on yulon-ubuntu (T683 S5).
+    """
+    report = backup(tmp_path, FakeMysql(("acore_auth",)), running=running(DB), now=AT)
+    (dump,) = report.dumps
+    assert stat.S_IMODE(dump.path.stat().st_mode) == 0o600
+
+
+@_POSIX_ONLY
+def test_a_leftover_partial_does_not_lend_its_mode_to_the_dump(
+    tmp_path: Path, shared_umask: None
+) -> None:
+    """A crash leaves a `.partial` behind at the old mode; truncating it would keep 0664."""
+    folder = backups_dir(tmp_path)
+    folder.mkdir(parents=True)
+    leftover = folder / "20260823_143005_acore_auth.sql.partial"
+    leftover.write_bytes(b"half")
+    leftover.chmod(0o664)
+    report = backup(tmp_path, FakeMysql(("acore_auth",)), running=running(DB), now=AT)
+    (dump,) = report.dumps
+    assert stat.S_IMODE(dump.path.stat().st_mode) == 0o600
+
+
+@_POSIX_ONLY
+def test_a_new_backups_folder_is_the_owners_alone(tmp_path: Path, shared_umask: None) -> None:
+    backup(tmp_path, FakeMysql(("acore_auth",)), running=running(DB), now=AT)
+    assert stat.S_IMODE(backups_dir(tmp_path).stat().st_mode) == 0o700
 
 
 def test_backup_dumps_the_databases_this_install_actually_has(tmp_path: Path) -> None:
