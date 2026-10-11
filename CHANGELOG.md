@@ -16,6 +16,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ### New
 
 ### Fixed
+- Start finds a port taken by another server's database or by a program before anything starts, and names it.
 
 ### Changed
 

@@ -1378,6 +1378,23 @@ def _no_unit_test_holds_a_real_distro_open(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 @pytest.fixture(autouse=True)
+def _no_unit_test_binds_a_real_host_port_at_start(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every Start binds this server's host ports first (T671); a unit test's are free.
+
+    Without this, a test driving `Controller.start()` would bind 3724, 8085 and 3306 on
+    the machine running the suite, and fail wherever one is taken. The tests about the
+    probe itself (`tests/test_start_ports.py`) put the real `platform.bind_tcp` back.
+    """
+    from yulon import controller
+
+    monkeypatch.setattr(
+        controller,
+        "bind_host_port",
+        lambda host, port: platform.PortBind(host, port, "free", "not bound in a unit test"),
+    )
+
+
+@pytest.fixture(autouse=True)
 def _no_unit_test_starts_a_real_game(monkeypatch: pytest.MonkeyPatch) -> None:
     """Fail a test that would start a real WoW client through Play (T181).
 

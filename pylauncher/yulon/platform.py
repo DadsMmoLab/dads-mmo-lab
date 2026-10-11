@@ -850,6 +850,85 @@ def bind_tcp(
     return PortBind(host, port, "free", "bound and released")
 
 
+def listening_program(
+    port: int,
+    *,
+    here: str | None = None,
+    run: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = None,
+    proc_root: Path = Path("/proc"),
+) -> str | None:
+    """The name of the program listening on TCP `port` here, or None when the OS will not say.
+
+    For the sentence Start says when a port is taken (T671), so best effort and never
+    a reason to refuse. Linux reads `/proc`: a socket of another user's process (a
+    root `docker-proxy`, a system MySQL) is not readable, and is None. Windows asks
+    `netstat -ano` for the PID of the socket listening there (its foreign address is
+    `0.0.0.0:0`, whatever language the state column is in) and `tasklist` for its
+    name; macOS asks `lsof`, which sees this user's processes only.
+    """
+    where = here if here is not None else detect()
+    ask = run if run is not None else (lambda argv: runner.run(argv, timeout=5.0))
+    try:
+        if where == "linux":
+            return _proc_listener(port, proc_root)
+        if where == "windows":
+            return _netstat_listener(port, ask)
+        if where == "macos":
+            proc = ask(["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-Fc"])
+            names = [ln[1:] for ln in proc.stdout.splitlines() if ln.startswith("c") and ln[1:]]
+            return names[0] if proc.returncode == 0 and names else None
+    except (OSError, ValueError, IndexError) as exc:
+        logger.info(f"could not name the program on port {port}: {exc}")
+    return None
+
+
+def _proc_listener(port: int, proc_root: Path) -> str | None:
+    """`/proc/net/tcp{,6}`'s listening socket on `port` -> the process holding it, if readable."""
+    inodes: set[str] = set()
+    for table in ("tcp", "tcp6"):
+        path = proc_root / "net" / table
+        if not path.is_file():
+            continue
+        for row in path.read_text(encoding="ascii", errors="replace").splitlines()[1:]:
+            cols = row.split()
+            # local_address is HEXADDR:HEXPORT; state 0A is LISTEN; column 9 is the inode.
+            if len(cols) > 9 and cols[3] == "0A" and int(cols[1].rsplit(":", 1)[1], 16) == port:
+                inodes.add(cols[9])
+    if not inodes:
+        return None
+    wanted = {f"socket:[{inode}]" for inode in inodes}
+    for pid in proc_root.iterdir():
+        if not pid.name.isdigit():
+            continue
+        try:
+            for fd in (pid / "fd").iterdir():
+                if os.readlink(fd) in wanted:
+                    return (pid / "comm").read_text(encoding="utf-8").strip() or None
+        except OSError:
+            continue  # another user's process, or one that ended while it was read
+    return None
+
+
+def _netstat_listener(
+    port: int, ask: Callable[[list[str]], subprocess.CompletedProcess[str]]
+) -> str | None:
+    """`netstat -ano`'s listening socket on `port` -> `tasklist`'s name for its PID."""
+    proc = ask(["netstat", "-ano", "-p", "TCP"])
+    pid = None
+    for row in proc.stdout.splitlines():
+        cols = row.split()
+        if len(cols) >= 5 and cols[0].upper() == "TCP" and cols[2] in ("0.0.0.0:0", "[::]:0"):
+            if cols[1].rsplit(":", 1)[-1] == str(port) and cols[-1].isdigit():
+                pid = cols[-1]
+                break
+    if pid is None:
+        return None
+    found = ask(["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"])
+    first = found.stdout.strip().splitlines()[0] if found.stdout.strip() else ""
+    name = first.split('","', 1)[0].strip('"') if first.startswith('"') else ""
+    return name or None
+
+
 # --------------------------------------------------------------- provisioning
 # Roadmap 5.1 / README §3b: "the app installs everything" — Docker Engine on
 # Linux (distro package manager; SteamOS unlocks/relocks the read-only root),
