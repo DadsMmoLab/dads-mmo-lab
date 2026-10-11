@@ -800,6 +800,12 @@ class Controller:
             if held:
                 logger.warning(f"not stopping {folder}: {held}")
                 raise docker.ServerHeldError(held)
+            # T714: a restore load another Yu'lon left running ("Quit anyway") holds nothing
+            # here, and only its record says it is still writing.
+            loading = native.restore_still_loading(folder)
+            if loading:
+                logger.warning(f"not stopping {folder}: {loading}")
+                raise docker.ServerHeldError(loading)
         logger.info(f"stopping the server(s) holding {self._port_numbers()}: {to_stop}")
         self._fresh_stop()
         # T568: the OTHER server is another Yu'lon's to be working on too. Its folder is

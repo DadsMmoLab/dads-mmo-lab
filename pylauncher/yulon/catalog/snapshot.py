@@ -80,6 +80,11 @@ class Snapshot:
     files: tuple[Path, ...]
     databases: tuple[str, ...]
     size_bytes: int = 0
+    import_record: str | None = None
+    """What the unfinished-import record said when the copy was taken, None for none (T712).
+
+    The copy holds the databases as they were then, so putting it back puts this back too.
+    """
 
     def named(self) -> str:
         """The files as the player finds them: `backups/<file>`, joined."""

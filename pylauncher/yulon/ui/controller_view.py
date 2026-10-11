@@ -10920,9 +10920,15 @@ class ControllerView(QWidget):
         self._run(self.services.controller.start, self._server_action_done, self._start_failed)
 
     @Slot()
-    def stop_server(self) -> None:
+    def stop_server(self) -> bool:
+        """Stop the server on the job runner. False when no Stop began (T711 review).
+
+        The one way it does not begin: the player kept a restore load from the last session
+        running (`_stop_over_a_running_load_agreed()`). A caller waiting for the Stop, the
+        tray's stop-then-quit, reads the False instead of waiting out its deadline.
+        """
         if not self._stop_over_a_running_load_agreed():
-            return
+            return False
         self._disarm_actions()
         self.problem_label.setText("")
         self._stop_forced = ""
@@ -10932,6 +10938,7 @@ class ControllerView(QWidget):
         self.status_label.setText("Stopping…")
         self._hold_badge("stopping")
         self._run(self.services.controller.stop, self._stop_done, self._stop_failed)
+        return True
 
     def _stop_over_a_running_load_agreed(self) -> bool:
         """False when a restore load from the last session still writes and the player keeps it.

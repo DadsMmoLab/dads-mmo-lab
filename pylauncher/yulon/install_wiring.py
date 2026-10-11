@@ -239,6 +239,8 @@ class _MaintenanceSnapshot:
         spec = self.entry.container_spec()
         try:
             with docker.maintenance_lease(server_dir, SNAPSHOT_LEASE_REASON):
+                # T712: read with the copy, so the put-back can set it back as it was.
+                record = maintenance.import_record_text(server_dir, spec.import_service)
                 self._database_up(server_dir)
                 report = maintenance.backup(
                     server_dir,
@@ -262,6 +264,7 @@ class _MaintenanceSnapshot:
             files=tuple(dump.path for dump in report.dumps),
             databases=report.databases,
             size_bytes=report.total_bytes,
+            import_record=record,
         )
 
     def put_back(self, server_dir: Path, snapshot: Snapshot) -> PutBack:
@@ -311,9 +314,15 @@ class _MaintenanceSnapshot:
                         wsl_distro=self.wsl_distro,
                         safety_label=ROLLBACK_SAFETY_LABEL,
                         before_load=partial(_drop_what_the_copy_lacks, mysql, tables),
+                        keeps_the_import_record=True,
                     )
                     restored.extend(report.databases)
                     safety.extend(report.safety_backup)
+                # T712: the databases are the copy's again, and so is the record of an
+                # unfinished import (kept, put back, or removed as it was when taken).
+                maintenance.set_import_record(
+                    server_dir, spec.import_service, snapshot.import_record
+                )
         except (
             maintenance.MaintenanceError,
             docker.DockerCommandError,

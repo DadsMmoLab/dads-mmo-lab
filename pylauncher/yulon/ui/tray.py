@@ -961,8 +961,20 @@ class YulonTray(QObject):
         for view in running:
             view.realm_badge.status_changed.connect(self._a_stop_moved)
             view.action_failed.connect(self._a_stop_failed)
-        for view in running:
-            view.stop_server()
+        # T711 review: a Stop the player declined (a restore still loading there) began
+        # nothing and will report nothing; the quit is off, the other Stops carry on.
+        kept = [view for view in running if view.stop_server() is False]
+        if kept:
+            self._stop_waiting_to_quit()
+            names = ", ".join(titles.get(view, view.entry.name) for view in kept)
+            logger.info(f"tray: quit called off, a Stop was declined: {names}")
+            self.show_server(kept[0])
+            self.tell(
+                "Yu'lon did not quit",
+                f"{names} was not stopped: you kept its restore running. Yu'lon stays open; "
+                "any other server's Stop carries on. Quit Yu'lon… asks again.",
+            )
+            return
         logger.info(f"tray: stopping {len(running)} server(s), then quitting")
         # A Stop's own job ends by `docker.STOP_PROCESS_DEADLINE_SECONDS`; a wait
         # past that and a margin is a Stop that will not report (adversarial

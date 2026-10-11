@@ -1830,6 +1830,7 @@ def restore(
     now: datetime | None = None,
     safety_label: str = "pre-restore",
     before_load: Callable[[], object] | None = None,
+    keeps_the_import_record: bool = False,
 ) -> RestoreReport:
     """Overwrite the databases `plan.backup` names. This destroys player data.
 
@@ -1867,6 +1868,11 @@ def restore(
     can prune them, and drops in `before_load` the tables its copy does not hold
     (`drop_tables_not_in()`), which turns this merge into a replacement for that
     one caller. The Maintenance tab passes neither.
+
+    `keeps_the_import_record` (T712): a finished restore removes the unfinished-import
+    record (T678 round 3), because a backup's databases are not the ones it described. The
+    rollback's copy IS those databases, taken moments before, so its put-back keeps the
+    record and sets it back to what it was when the copy was taken (`set_import_record()`).
 
     Raises:
         MaintenanceError: the confirmation does not match, the plan no longer
@@ -1914,6 +1920,7 @@ def restore(
             now=now,
             safety_label=safety_label,
             before_load=before_load,
+            keeps_the_import_record=keeps_the_import_record,
         )
 
 
@@ -1931,6 +1938,7 @@ def _restore_from(
     now: datetime | None,
     safety_label: str,
     before_load: Callable[[], object] | None,
+    keeps_the_import_record: bool = False,
 ) -> RestoreReport:
     """`restore()` from the marker onward, loading from `source`, the handle it checks here."""
     recorded = _recorded_game_of(source, plan.backup.name)
@@ -2011,7 +2019,7 @@ def _restore_from(
                     # T710: what to leave if this load finishes after Yu'lon has gone.
                     load_proof=proof,
                     load_after=unresolved,
-                    load_import_service=spec.import_service,
+                    load_import_service="" if keeps_the_import_record else spec.import_service,
                 ),
                 consequence="The restore is running, but its process could not be recorded.",
             )
@@ -2064,7 +2072,8 @@ def _restore_from(
                 f"that this one does not put right; {marker} still records them"
             )
     logger.info(f"restored {', '.join(plan.databases)} from {plan.backup}")
-    _forget_the_import_record(plan.server_dir, spec.import_service)
+    if not keeps_the_import_record:
+        _forget_the_import_record(plan.server_dir, spec.import_service)
     return RestoreReport(backup=plan.backup, databases=plan.databases, safety_backup=safety)
 
 
@@ -2086,6 +2095,38 @@ def _forget_the_import_record(server_dir: Path, import_service: str) -> None:
         logger.warning(f"the restore finished, but {record} could not be removed: {exc}")
     else:
         logger.info(f"the restore replaced the databases, so {record.name} no longer applies")
+
+
+def import_record_text(server_dir: Path, import_service: str) -> str | None:
+    """What the unfinished-import record says now, None if there is none (T712).
+
+    Raises:
+        OSError: it is there and cannot be read: what a copy taken now would need to put
+            back with it is unknown.
+    """
+    if not import_service:
+        return None
+    try:
+        return docker.one_shot_ended_marker(server_dir, import_service).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+
+
+def set_import_record(server_dir: Path, import_service: str, text: str | None) -> None:
+    """Make the unfinished-import record say `text`, or be absent for None (T712).
+
+    For a copy put back: the record goes back to what it was when the copy was taken. One
+    that stood then describes the half-imported databases the copy holds; one the failed run
+    wrote since (an importer it ended) describes what the copy replaced, and left standing it
+    would make Repair read the player's rows as the import's and clear them.
+    """
+    if not import_service:
+        return
+    record = docker.one_shot_ended_marker(server_dir, import_service)
+    if text is None:
+        record.unlink(missing_ok=True)
+    else:
+        record.write_text(text, encoding="utf-8")
 
 
 def safety_copy_sentence(report: BackupReport) -> str:

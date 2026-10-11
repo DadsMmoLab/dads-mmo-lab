@@ -399,3 +399,38 @@ def test_a_stop_during_this_sessions_own_restore_asks_nothing_new(
     view.shutdown()
 
     assert asked == [] and len(jobs) == 1
+
+
+def test_stop_then_quit_ends_its_wait_when_the_player_keeps_the_load(
+    qapp: object, tmp_path: Path, live_child: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T711 cold review: the tray's "Stop servers, then quit" asks the tab's Stop, the player
+    keeps the restore running, and no Stop job begins. The tray waited the whole
+    `STOP_WAIT_MS` and then said the server "did not report its Stop in time".
+
+    Through the real tray and the real tab. Mutation: drop the `kept` branch from
+    `YulonTray.stop_then_quit()` (or make `stop_server()` return None again).
+    """
+    from tests.test_tray import FakeTrayIcon, FakeWindow
+    from yulon.ui.tray import YulonTray
+
+    _marker_with(tmp_path, live_child.pid)
+    view, asked, jobs = _stop_view(tmp_path, monkeypatch, answer=None)
+    view.stop_button.setEnabled(True)
+    window = FakeWindow()
+    window.yulon_controllers.append(view)
+    tray = YulonTray(window, icon_factory=FakeTrayIcon, available=lambda: True)
+    told: list[tuple[str, str]] = []
+    tray.tell = lambda title, text: told.append((title, text))  # type: ignore[method-assign]
+    quits: list[int] = []
+    tray.quit = lambda: quits.append(1) or True  # type: ignore[method-assign]
+
+    tray.stop_then_quit([view])
+    view.shutdown()
+    window.deleteLater()
+
+    assert len(asked) == 1 and jobs == [], (asked, jobs)
+    assert tray._stopping == [], "the tray still waits for a Stop that never began"
+    assert tray._stop_deadline is None or not tray._stop_deadline.isActive()
+    assert quits == []
+    assert len(told) == 1 and "kept its restore" in told[0][1], told
