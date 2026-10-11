@@ -31,6 +31,8 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - After an update or rebuild that stopped part-way, **Start** is refused or allowed for a reason that is still true.
 - **Update the server to latest** no longer runs the SQL of a module Yu'lon applies itself, such as ARAC, a second time.
 - A **Rebuild** whose database updates fail puts your databases back as they were and names the update that failed.
+- A server list that an older copy of Yu'lon emptied comes back the next time you open this version.
+- **Update now** checks that the new version's window really opens before it installs it, as it was meant to.
 
 ### Changed
 - The Server tab's **Play** now starts the game; **Launcher…** opens the launcher. The tray's **Play** starts a stopped server.
