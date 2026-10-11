@@ -35,3 +35,36 @@ def test_ask_answers_true_only_for_quit_anyway(qapp: Any, monkeypatch: Any) -> N
             quit_anyway, "_run", lambda _box, buttons, which=pressed: buttons[which]
         )
         assert quit_anyway.ask(None, REASON) is expected
+
+
+def test_a_restore_is_said_to_carry_on_in_docker_not_to_be_cut_off(qapp: Any) -> None:
+    """Quit anyway does not stop the restore's `docker exec`; saying "cut off" would be false.
+
+    Mutation: return `COST` for every kind from `quit_anyway.cost_of()`.
+    """
+    from yulon import teardown
+
+    for kind in (teardown.RESTORE, teardown.UPDATE_BACKUP, teardown.MOVE):
+        box, _buttons = quit_anyway.build_box(teardown.Refusal(REASON, kind))
+        try:
+            text = box.text()
+            assert "carries on" in text and "Docker" in text, (kind, text)
+            assert "not start Yu'lon again" in text, (kind, text)
+            assert "cuts that work off" not in text, (kind, text)
+        finally:
+            box.deleteLater()
+
+
+def test_work_that_really_is_cut_off_says_so(qapp: Any) -> None:
+    from yulon import teardown
+
+    for reason in (
+        teardown.Refusal(REASON, teardown.BACKUP),
+        teardown.Refusal(REASON, teardown.NETWORK),
+        REASON,  # a plain string: a refusal that carries no kind is the cautious one
+    ):
+        box, _buttons = quit_anyway.build_box(reason)
+        try:
+            assert "cuts that work off" in box.text(), box.text()
+        finally:
+            box.deleteLater()

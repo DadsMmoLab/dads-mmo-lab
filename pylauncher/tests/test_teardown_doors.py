@@ -61,12 +61,16 @@ def _functions() -> Functions:
 
 
 def _own_nodes(function: ast.AST) -> list[ast.AST]:
-    """The nodes of one function, not of the functions nested inside it."""
+    """The nodes of one function: its lambdas included, the functions nested inside it not.
+
+    A `QTimer.singleShot(0, lambda: drop_controller(key))` is a door of the function that
+    writes it; skipping lambda bodies made it invisible.
+    """
     out: list[ast.AST] = []
     todo = list(ast.iter_child_nodes(function))
     while todo:
         node = todo.pop()
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
         out.append(node)
         todo.extend(ast.iter_child_nodes(node))
@@ -156,8 +160,76 @@ def _guarded(functions: Functions) -> set[str]:
     return guarded
 
 
-def _obeys(function: ast.AST, guards: set[str], before: int) -> bool:
-    """The function calls a guard before `before` and RETURNS or RAISES on its answer."""
+def _blocks(function: ast.AST) -> list[list[ast.stmt]]:
+    """Every statement list inside the function, not those of functions nested in it."""
+    found: list[list[ast.stmt]] = []
+    todo: list[list[ast.stmt]] = [list(getattr(function, "body", []))]
+    while todo:
+        block = todo.pop()
+        found.append(block)
+        for stmt in block:
+            if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                continue
+            for name in ("body", "orelse", "finalbody"):
+                inner = getattr(stmt, name, None)
+                if isinstance(inner, list) and inner and isinstance(inner[0], ast.stmt):
+                    todo.append(inner)
+            for handler in getattr(stmt, "handlers", []):
+                todo.append(handler.body)
+    return found
+
+
+def _is_answer(node: ast.AST, guards: set[str], bound: set[str]) -> bool:
+    """Is `node` a guard's answer: a call of one, a walrus over one, or a name bound from one."""
+    if isinstance(node, ast.Call):
+        return _callee_name(node) in guards
+    if isinstance(node, ast.NamedExpr):
+        return _is_answer(node.value, guards, bound) or node.target.id in bound
+    return isinstance(node, ast.Name) and node.id in bound
+
+
+def _polarity(test: ast.expr, guards: set[str], bound: set[str]) -> str | None:
+    """Which branch of `if test:` is the one taken on a REFUSAL: "body", "orelse", or None."""
+    if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+        inner = _polarity(test.operand, guards, bound)
+        return {"body": "orelse", "orelse": "body"}.get(inner or "")
+    if isinstance(test, ast.BoolOp):
+        for value in test.values:
+            if (found := _polarity(value, guards, bound)) is not None:
+                return found
+        return None
+    if (
+        isinstance(test, ast.Compare)
+        and len(test.ops) == 1
+        and isinstance(test.comparators[0], ast.Constant)
+        and test.comparators[0].value is None
+    ):
+        if not _is_answer(test.left, guards, bound):
+            return None
+        return "body" if isinstance(test.ops[0], (ast.IsNot, ast.NotEq)) else "orelse"
+    return "body" if _is_answer(test, guards, bound) else None
+
+
+def _same_function(node: ast.AST) -> list[ast.AST]:
+    """`node` and what is under it, without entering a function, lambda or class defined there."""
+    found: list[ast.AST] = [node]
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+        return found
+    for child in ast.iter_child_nodes(node):
+        found.extend(_same_function(child))
+    return found
+
+
+def _obeys(
+    function: ast.AST, guards: set[str], before: int, *, also_calls: set[str] | None = None
+) -> bool:
+    """The function calls a guard before `before` and, on a REFUSAL, returns or raises.
+
+    The branch taken on a refusal is found from the shape of the test (`is not None`,
+    `is None`, `not`, a bare call), so a flipped test fails: the refusal branch is then the
+    empty `else`, which is the rest of the block, and that holds the teardown itself.
+    `also_calls` names a call that branch must make too (the close filter's `event.ignore()`).
+    """
     bound: set[str] = set()
     for node in _own_nodes(function):
         value = None
@@ -170,28 +242,39 @@ def _obeys(function: ast.AST, guards: set[str], before: int) -> bool:
             isinstance(c, ast.Call) and _callee_name(c) in guards for c in ast.walk(value)
         ):
             bound.update(t.id for t in targets if isinstance(t, ast.Name))
-    for node in _own_nodes(function):
-        if not isinstance(node, ast.If) or node.lineno >= before:
-            continue
-        tested = list(ast.walk(node.test))
-        uses = any(isinstance(n, ast.Call) and _callee_name(n) in guards for n in tested) or any(
-            isinstance(n, ast.Name) and n.id in bound for n in tested
-        )
-        leaves = any(
-            isinstance(n, (ast.Return, ast.Raise)) for stmt in node.body for n in ast.walk(stmt)
-        )
-        if uses and leaves:
-            return True
+    for block in _blocks(function):
+        for index, stmt in enumerate(block):
+            if not isinstance(stmt, ast.If) or stmt.lineno >= before:
+                continue
+            polarity = _polarity(stmt.test, guards, bound)
+            if polarity is None:
+                continue
+            if polarity == "body":
+                branch: list[ast.stmt] = stmt.body
+            else:
+                branch = stmt.orelse or block[index + 1 :]
+            nodes = [n for part in branch for n in _same_function(part)]
+            leaves = any(isinstance(n, (ast.Return, ast.Raise)) for n in nodes)
+            tears = any(isinstance(n, ast.Call) and n.lineno >= before for n in nodes)
+            extra = also_calls is None or any(
+                isinstance(n, ast.Call) and _callee_name(n) in also_calls for n in nodes
+            )
+            if leaves and not tears and extra:
+                return True
     return False
 
 
 def _close_filter_obeys(functions: Functions, guarded: set[str]) -> bool:
-    """main's close filter asks `close_refusal()` and lets the close through only on None."""
+    """main's close filter asks `close_refusal()`, and on a refusal ignores the event.
+
+    `if reason is None: return False` alone is not enough: the refusal branch has to leave
+    through `event.ignore()`, or the close would be accepted.
+    """
     return any(
         path.name == "main.py"
         and "close_refusal" in _called(node)
         and "close_refusal" in guarded
-        and _obeys(node, {"close_refusal"}, 10**9)
+        and _obeys(node, {"close_refusal"}, 10**9, also_calls={"ignore"})
         for path, node in functions.get("eventFilter", [])
     )
 
@@ -230,10 +313,14 @@ EXEMPT: dict[str, tuple[str, set[str] | str, str]] = {
     "quit_app": ("after_close", {"_end"}, "the tray's seam for ending the event loop"),
     "_leave_with_jobs_still_running": (
         "after_close",
-        {"main"},
+        {"_leave_after_the_loop"},
         "the process end after the window's close was accepted (or forced) and jobs were joined",
     ),
-    "main": ("after_close", set(), "the process's own end, after `app.exec()` returned"),
+    "_leave_after_the_loop": (
+        "after_close",
+        {"main"},
+        "`main()`'s exit, after `app.exec()` returned: the close was accepted or forced",
+    ),
     "_finish_make": ("slot", "play_client_dir_changed:on_play_client_dir_changed", ""),
     "_play_client_deleted": ("slot", "play_client_dir_changed:on_play_client_dir_changed", ""),
     "finish_removal": (
@@ -358,3 +445,76 @@ def test_the_scan_sees_the_doors_this_ticket_names() -> None:
         "ask_to_quit",
     ):
         assert expected in doors, f"the scan no longer sees {expected}"
+
+
+# ---- the scan itself: polarity and lambdas (the review's two blind spots)
+
+
+def _function(source: str) -> ast.AST:
+    return ast.parse(source).body[0]
+
+
+def test_the_obeys_check_reads_the_polarity_of_the_guard_test() -> None:
+    guards = {"refused"}
+    right = _function(
+        "def door(key):\n    if refused(key):\n        return\n    drop_controller(key)\n"
+    )
+    flipped = _function(
+        "def door(key):\n    if not refused(key):\n        return\n    drop_controller(key)\n"
+    )
+    assert _obeys(right, guards, 4)
+    assert not _obeys(flipped, guards, 4), "a flipped guard test was accepted"
+
+    walrus = _function(
+        "def door(key):\n    if (why := refused(key)) is not None:\n        return why\n"
+        "    drop_controller(key)\n"
+    )
+    walrus_flipped = _function(
+        "def door(key):\n    if (why := refused(key)) is None:\n        return why\n"
+        "    drop_controller(key)\n"
+    )
+    assert _obeys(walrus, guards, 4)
+    assert not _obeys(walrus_flipped, guards, 4), "an `is None` that returns the answer"
+
+    bound = _function(
+        "def door(key):\n    why = refused(key)\n    if why is not None:\n        raise Stop\n"
+        "    drop_controller(key)\n"
+    )
+    ignored = _function(
+        "def door(key):\n    why = refused(key)\n    if why is not None:\n        log(why)\n"
+        "    drop_controller(key)\n"
+    )
+    assert _obeys(bound, guards, 5)
+    assert not _obeys(ignored, guards, 5), "a refusal that is logged and then ignored"
+
+
+def test_an_early_return_on_none_is_not_enough_for_the_close_filter() -> None:
+    guards = {"close_refusal"}
+    obeying = _function(
+        "def eventFilter(self, w, event):\n    reason = close_refusal(w)\n"
+        "    if reason is None:\n        return False\n    event.ignore()\n    return True\n"
+    )
+    letting_through = _function(
+        "def eventFilter(self, w, event):\n    reason = close_refusal(w)\n"
+        "    if reason is None:\n        return False\n    log(reason)\n    return False\n"
+    )
+    assert _obeys(obeying, guards, 10**9, also_calls={"ignore"})
+    assert not _obeys(letting_through, guards, 10**9, also_calls={"ignore"})
+
+
+def test_a_door_hidden_in_a_lambda_is_seen() -> None:
+    door = _function("def schedule(key):\n    QTimer.singleShot(0, lambda: drop_controller(key))\n")
+    assert "drop_controller" in _tears_down(door)
+
+
+def test_a_return_inside_a_nested_function_is_not_the_door_leaving() -> None:
+    guards = {"refused"}
+    nested = _function(
+        "def door(key):\n    if refused(key):\n        def later():\n            return 1\n"
+        "        log(later)\n    drop_controller(key)\n"
+    )
+    real = _function(
+        "def door(key):\n    if refused(key):\n        return\n    drop_controller(key)\n"
+    )
+    assert not _obeys(nested, guards, 6), "a `return` inside a nested def was taken for leaving"
+    assert _obeys(real, guards, 4)

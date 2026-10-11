@@ -10233,10 +10233,10 @@ class ControllerView(QWidget):
         tab's panel, last any Server action, including the stop a removal is
         already waiting for.
 
-        `quitting` is the one door that may leave a Stop running behind it: a Stop
-        carries on in Docker (`teardown.STOP_JOB`), and the tray's "Quit now" while it
-        stops servers promises exactly that. Nothing else is exempt, and a Stop beside a
-        restore is still refused for the restore.
+        `quitting` is the one door a Stop does not refuse (`teardown.STOP_JOB`): the quit
+        joins the Stop, so the window closes at once and the process ends when the Stop
+        has, which is what the tray's "Quit now" box says. Nothing else is exempt, and a
+        Stop beside a restore is still refused for the restore.
         """
         if self._backup_before_update:
             return teardown.UPDATE_BACKUP
@@ -17083,6 +17083,17 @@ class ControllerView(QWidget):
         record = self.services.interrupted_restore()
         if record is None:
             self.interrupted_label.setVisible(False)
+            self.forget_button.setVisible(False)
+            return
+        if record.load_running:
+            # The last session quit over this restore and its load carries on in Docker (T690):
+            # not an interrupted restore, and nothing here is offered until it ends.
+            named = ", ".join(record.databases) or "the databases"
+            self.interrupted_label.setText(
+                f"A restore of {named} from the last session is still running in Docker. "
+                "Wait for it to finish, then look at this tab again."
+            )
+            self.interrupted_label.setVisible(True)
             self.forget_button.setVisible(False)
             return
         if record.readable:

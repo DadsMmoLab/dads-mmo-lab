@@ -1505,7 +1505,33 @@ def _docker_exec_failing(monkeypatch: pytest.MonkeyPatch, *, fail: str) -> None:
             sink.write(good_dump(argv[-1]))  # type: ignore[union-attr]
         return subprocess.CompletedProcess(argv, 0, b"acore_world\n", b"")
 
+    class FakePopen:
+        """The restore's load starts with `Popen` so its pid can be recorded (T690).
+
+        Like a child, it "runs" at once and writes to the files it was given.
+        """
+
+        pid = 2**22 + 1  # above any pid a test box hands out
+
+        def __init__(self, argv: list[str], **kw: object) -> None:
+            done = fake_run(argv, **kw)
+            self.returncode = done.returncode
+            self._out, self._err = done.stdout, done.stderr
+            for stream, data in ((kw.get("stdout"), self._out), (kw.get("stderr"), self._err)):
+                if hasattr(stream, "write") and data:
+                    stream.write(data)  # type: ignore[union-attr]
+                    stream.flush()  # type: ignore[union-attr]
+
+        def communicate(self) -> tuple[bytes, bytes]:
+            return self._out, self._err
+
+        def kill(self) -> None: ...
+
+        def wait(self) -> int:
+            return self.returncode
+
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", FakePopen)
 
 
 @pytest.mark.parametrize("fail", ["list", "dump", "load"])

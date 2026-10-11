@@ -823,6 +823,20 @@ class YulonTray(QObject):
         elif choice == "stop":
             self.stop_then_quit(running)
 
+    def _removal_note(self) -> str:
+        """The sentence for a quit while a removal waits for its Stop (T690), or "".
+
+        The removal continues when the Stop ends, in the running window; a quit drops it, so
+        the server is still on the list at the next start. Kept that way on purpose.
+        """
+        pending = getattr(self.window, "yulon_removal_pending", None)
+        if pending is not None and pending():
+            return (
+                "A server is being stopped so it can be removed from Yu'lon. If you quit now "
+                "the server will still be listed next time; remove it again then."
+            )
+        return ""
+
     def _work_refusal(self) -> str | None:
         """What the window's close would refuse over, or None (`main.close_refusal()`, T690)."""
         refusing = getattr(self.window, "yulon_close_refusal", None)
@@ -836,7 +850,7 @@ class YulonTray(QObject):
 
     def choose_quit(self, count: int) -> str:
         """The quit box, answered: "leave", "stop" or "cancel". A seam for the tests."""
-        box, buttons = quit_box(count)
+        box, buttons = quit_box(count, self._removal_note())
         try:
             box.exec()
             clicked = box.clickedButton()
@@ -849,7 +863,7 @@ class YulonTray(QObject):
 
     def choose_while_stopping(self, count: int) -> str:
         """Quit tray… while Stop-then-quit waits: "wait" or "quit". A seam for the tests."""
-        box, buttons = while_stopping_box(count)
+        box, buttons = while_stopping_box(count, self._removal_note())
         try:
             box.exec()
             clicked = box.clickedButton()
@@ -1306,7 +1320,7 @@ OWN_DIALOG = "yulonTrayDialog"
 """A property on the tray's own boxes: asked from the tray, they need no window behind them."""
 
 
-def quit_box(count: int) -> tuple[QMessageBox, dict[str, QAbstractButton]]:
+def quit_box(count: int, note: str = "") -> tuple[QMessageBox, dict[str, QAbstractButton]]:
     """Quit tray… with `count` servers running: leave them (default), stop them, or cancel."""
     box = FittedMessageBox(QMessageBox.Icon.Question, "Quit Yu'lon?", "")
     if count == 1:
@@ -1319,7 +1333,7 @@ def quit_box(count: int) -> tuple[QMessageBox, dict[str, QAbstractButton]]:
             f"{count} servers are running. They keep running after Yu'lon quits: they are "
             "Docker containers, and Yu'lon picks them up again when it starts."
         )
-    box.setText(said)
+    box.setText(f"{said}\n\n{note}" if note else said)
     box.setProperty(OWN_DIALOG, True)
     plural = "server" if count == 1 else "servers"
     leave = box.addButton("Quit, leave servers running", QMessageBox.ButtonRole.AcceptRole)
@@ -1330,14 +1344,17 @@ def quit_box(count: int) -> tuple[QMessageBox, dict[str, QAbstractButton]]:
     return box, {"leave": leave, "stop": stop, "cancel": cancel}
 
 
-def while_stopping_box(count: int) -> tuple[QMessageBox, dict[str, QAbstractButton]]:
+def while_stopping_box(
+    count: int, note: str = ""
+) -> tuple[QMessageBox, dict[str, QAbstractButton]]:
     """Quit tray… again while Yu'lon waits for its Stops: keep waiting (default) or quit now."""
     noun = "server" if count == 1 else "servers"
     box = FittedMessageBox(QMessageBox.Icon.Question, "Yu'lon is stopping servers", "")
-    box.setText(
-        f"Yu'lon is stopping {count} {noun} and will quit when they are down. A stop that is "
-        "already running carries on if Yu'lon quits now."
+    said = (
+        f"Yu'lon is stopping {count} {noun} and will quit when they are down. If you quit now, "
+        "Yu'lon closes once the stop in progress has finished (about a minute or two)."
     )
+    box.setText(f"{said}\n\n{note}" if note else said)
     box.setProperty(OWN_DIALOG, True)
     wait = box.addButton("Keep waiting", QMessageBox.ButtonRole.RejectRole)
     now = box.addButton("Quit now", QMessageBox.ButtonRole.AcceptRole)
