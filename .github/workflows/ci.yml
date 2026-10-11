@@ -45,6 +45,14 @@ on:
     branches: [main, Yulon, "release/**"]
     tags: ["v*"]
   pull_request:
+  # T687: release.yml calls this whole file as its first job and builds nothing
+  # unless every job here is green on the commit it is about to ship. Measured
+  # on v0.9.16 (669eaaba): SHA256SUMS was attached at 21:32:57Z and Discord had
+  # announced the release at 21:38Z, while this workflow's tests on that same
+  # SHA finished at 21:55Z - a red tag would have shipped through self-update.
+  # A call adds no workflow file (DadsMmoLab never registers a new one) and
+  # keeps one list of what "green" means.
+  workflow_call:
 
 # Five pushes to `Yulon` inside three minutes each started their own 42-minute
 # run (2026-08-28 00:20-00:23). Only the newest tree's verdict is worth having,
@@ -145,6 +153,58 @@ jobs:
       # and the biggest file alone is a large share of the suite.
       - name: pytest (tests)
         run: python -m pytest -q -m "not integration" -n auto
+
+  # T687: THE OTHER TWO PLATFORMS THE RELEASE SHIPS. `lint-type-test` runs on
+  # Linux only, so until this job the Windows zip and the macOS dmg went out
+  # with no test ever run on either OS - Windows behaviour was covered only by
+  # fakes on Linux (test_winacl, test_winjob), and the mypy passes above can
+  # only SIMULATE the other platforms' imports. Not the whole suite: most of it
+  # drives POSIX paths, shells and Docker fakes written on Linux and was never
+  # meant to run elsewhere. What runs is the set below, which is about the
+  # code that branches on the OS (paths, ACLs, Job objects, self-update's file
+  # swap, the single-instance lock) plus an import of every module on the real
+  # interpreter. The set was measured green on both runners on the fork; a
+  # file joins it once it is green there too.
+  #
+  # Python 3.11 because that is what release.yml builds the artifacts with.
+  platform-smoke:
+    name: platform-smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            pylauncher/requirements-dev.txt
+            pylauncher/requirements.txt
+
+      - run: pip install -r requirements-dev.txt
+
+      - name: pytest (the OS-specific set, on the real OS)
+        shell: bash
+        run: >-
+          python -m pytest -q -m "not integration" -n auto
+          tests/test_every_module_imports.py
+          tests/test_platform.py
+          tests/test_winacl.py
+          tests/test_winjob.py
+          tests/test_selfupdate_layout.py
+          tests/test_selfupdate_swap.py
+          tests/test_selfupdate_detect.py
+          tests/test_serverlock.py
+          tests/test_single_instance.py
+          tests/test_autostart.py
+          tests/test_runner.py
+          tests/test_wsl.py
+          tests/test_support_machine.py
 
   # The Discord notifier (.github/scripts) lives outside pylauncher/, so the job
   # above never sees it. Linux only: it is a stdlib script run by GitHub Actions
