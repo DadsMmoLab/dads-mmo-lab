@@ -88,6 +88,11 @@ _last_failure: dict[str, str] = {}
 """The reason each server's last lock failed with, so a retry logs only a new one (T718)."""
 
 
+def forget_failures() -> None:
+    """The database went down: its next failure is a new one and is logged (T718)."""
+    _last_failure.clear()
+
+
 def is_not_locked(line: str | None) -> bool:
     """Whether `line` is the `NOT_LOCKED` notice, whatever its reason (T718)."""
     return line is not None and line.startswith(NOT_LOCKED.split("{", 1)[0])
@@ -199,8 +204,10 @@ def settle(
         changed = lock(ask, entry.databases.auth)
     except docker.DockerCommandError as exc:
         reason = _why(exc)
-        if _last_failure.get(entry.id) != reason:
-            _last_failure[entry.id] = reason
+        # A Start's own lock always says why; only the poll's retries are deduplicated.
+        if start_database or _last_failure.get(entry.id) != reason:
+            if not start_database:
+                _last_failure[entry.id] = reason
             logger.warning(f"{entry.id}: the seeded accounts were not locked: {exc}")
         return NOT_LOCKED.format(why=reason)
     _last_failure.pop(entry.id, None)

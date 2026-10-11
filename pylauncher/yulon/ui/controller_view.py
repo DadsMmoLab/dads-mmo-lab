@@ -10227,6 +10227,7 @@ class ControllerView(QWidget):
             self._seeded_asked = False
             self._seeded_retries = 0
             self._seeded_wait = 0
+            seeded_accounts.forget_failures()
         elif not stale and not self._seeded_asked:
             if self._seeded_wait > 0:
                 self._seeded_wait -= 1

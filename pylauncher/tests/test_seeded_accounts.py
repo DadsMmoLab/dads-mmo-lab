@@ -826,3 +826,38 @@ def test_a_not_locked_line_is_cleared_when_a_later_poll_finds_nothing_seeded(
         assert view.notice_label.text() == ""  # type: ignore[attr-defined]
     finally:
         view.shutdown()  # type: ignore[attr-defined]
+
+
+def test_a_database_that_goes_down_and_up_logs_its_next_failure_again(
+    qapp: object,
+    db: AuthDb,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    inline_jobs: None,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    up: list[str] = []
+    monkeypatch.setattr(docker, "status", lambda **_k: list(up))
+    seeded_accounts._last_failure.clear()
+    view = _view(an_install(tmp_path))
+
+    def warnings() -> int:
+        return len([r for r in caplog.records if "seeded accounts were not locked" in r.message])
+
+    try:
+        _tick(view)
+        db.fail_with = docker.DockerCommandError("Can't connect")
+        up.append(TBC.container_spec().db)
+        for _ in range(3):
+            _tick(view)
+        assert warnings() == 1
+        up.clear()
+        _tick(view)  # the database is down
+        up.append(TBC.container_spec().db)
+        for _ in range(3):
+            _tick(view)
+        assert warnings() == 2, "the same reason after a restart is a new failure"
+        assert settle(tmp_path) is not None
+        assert warnings() == 3, "a Start's own failed lock is logged whatever the poll said"
+    finally:
+        view.shutdown()  # type: ignore[attr-defined]
