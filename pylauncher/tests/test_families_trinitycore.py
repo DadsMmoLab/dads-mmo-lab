@@ -1520,7 +1520,12 @@ def test_uninstall_removes_a_leftover_copy_safely_before_the_server_folder(
     assert report.warnings == ()
     assert not os.path.lexists(target)
     assert not machine.server_dir.exists()
-    assert trees == [machine.server_dir], "rmtree never pointed at the copy"
+    # T682: the server folder goes sub-folder by sub-folder (its own records last), so rmtree
+    # is pointed at the folder's own sub-folders and then the folder -- never at the copy,
+    # which lives beside the client, outside it.
+    assert trees and trees[-1] == machine.server_dir, trees
+    assert all(t.is_relative_to(machine.server_dir) for t in trees), "rmtree went outside"
+    assert not [t for t in trees if t == target or t.is_relative_to(target)], "rmtree hit the copy"
     assert not [path for path in chmodded if path.is_relative_to(machine.client)]
     assert snapshot(machine.client) == before, "bytes, times and the read-only mode kept"
 
