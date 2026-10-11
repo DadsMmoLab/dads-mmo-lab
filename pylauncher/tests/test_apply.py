@@ -24,7 +24,7 @@ import pytest
 
 from yulon import apply as apply_module
 from yulon import git as git_module
-from yulon import module_answers
+from yulon import module_answers, module_deploys
 from yulon.apply import Applier, ApplyError, ApplyRefusal, ApplyReport, DockerSql, _set_conf_key
 from yulon.catalog import composegen, native, upstream
 from yulon.git import (
@@ -897,9 +897,12 @@ def test_remove_of_a_shared_dir_deploy_leaves_other_scripts_alone(tmp_path: Path
     assert report.skipped == ()
 
     # Clone already gone: a directory deploy cannot be undone safely → skipped, not guessed.
+    # Without the deploy record, that is (an install from before T684): with it, the
+    # record is the list (test_module_deploys.py).
     applier.install(m)
 
     shutil.rmtree(applier.clone_dir(m))
+    (tmp_path / module_deploys.DEPLOYS_FILE).unlink()
     report = applier.remove(m)
     assert foreign.exists() and (tmp_path / LUA / "battlepass").exists()
     assert any("left in place" in s for s in report.skipped)
@@ -5432,6 +5435,7 @@ def test_the_shipped_manifests_this_guard_stands_in_front_of() -> None:
     base game's ids, and the put-back of the 19 base rows between them.
     53 after T634: upstream renumbered its menus itself (38078d1d), so the two relocation
     steps are gone.
+    54 after T684: Battle Pass's Remove takes back the vendor creature its install made.
 
     Catches `WORLD_HELD_DBS` narrowed and the `applied_by` default flipped to
     `db-import`: either would empty this guard's blast radius without a word,
@@ -5452,7 +5456,7 @@ def test_the_shipped_manifests_this_guard_stands_in_front_of() -> None:
             games.add(path.parent.parent.name)
 
     assert (steps, len(files), sorted(games)) == (
-        53,
+        54,
         19,
         ["wow-tbc", "wow-tortoise", "wow-vanilla", "wow-wotlk"],
     )
