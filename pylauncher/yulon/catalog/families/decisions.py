@@ -794,6 +794,33 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         },
         hits=("'azerothcore'", "'trinitycore'"),
     ),
+    Site(
+        "yulon.account_rules",
+        "<module>",
+        "NAME_MAX: the longest account name each core accepts, per scheme (T673)",
+        {
+            "azerothcore": supported("its MAX_ACCOUNT_STR, 17"),
+            "cmangos": supported("mangos_srp6 / mangos_sha, 16"),
+            "trinitycore": supported("its MAX_ACCOUNT_STR, 16"),
+        },
+        hits=("'azerothcore'", "'trinitycore'"),
+    ),
+    Site(
+        "yulon.controller_wow_wotlk.accounts",
+        "<module>",
+        "the WotLK controller's MAX_USERNAME is AzerothCore's scheme's ceiling (T673)",
+        {
+            "azerothcore": supported(),
+            "cmangos": not_applicable(
+                "the Vanilla and TBC controllers set their own MAX_USERNAME from mangos_srp6"
+            ),
+            "trinitycore": not_applicable(
+                "create_account checks a Centurion name against its own scheme's ceiling "
+                "(account_rules.name_problem); this constant is the WotLK game's"
+            ),
+        },
+        hits=("'azerothcore'",),
+    ),
     # -- per-game controller packages that read their CMaNGOS block ---------------------
     Site(
         "yulon.controller_wow_tbc.docker_ctl",
