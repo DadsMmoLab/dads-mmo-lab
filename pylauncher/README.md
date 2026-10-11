@@ -10,12 +10,12 @@ to guess. The plan for the rest is in [`../pyplan/`](../pyplan/README.md).
 
 | | Linux | Windows 10/11 | macOS |
 |---|---|---|---|
-| Install a server from the Catalog | run live | no | run live¹ |
+| Install a server from the Catalog | run live | run live⁴ | run live¹ |
 | Attach to a server that already exists | run live | run live | never run |
 | Start and stop it | run live | run live | run live¹ |
 | Follow the worldserver log | run live | run live | never run |
 | GM console (type a command at the server) | built | no — no `os.openpty` | run live¹ |
-| The packaged download | AppImage³ or `.tar.gz`, opens | .exe, opens | .dmg, opened² |
+| The packaged download | AppImage³ or `.tar.gz`, opens | zip folder (`yulon.exe`), opens | .dmg, opened² |
 
 ¹ Through the module or the CLI harness on a real Apple M4 Pro with Docker Desktop 4.87.0
 (2026-08-29), not through the Catalog button — a cold start to a running WotLK server, plus
@@ -33,6 +33,9 @@ On clean Fedora 44 it opened (2026-09-04); on clean Arch, the same file, same sh
 before any of our code ran. The `.tar.gz` published beside it needs nothing. Which file to take,
 and what the refusal looks like, is under [Odds and ends](#odds-and-ends).
 
+⁴ WotLK, from an empty folder to three running containers, on a Windows 11 test VM
+(2026-09-05), driven by the CLI harness through the same engine the Catalog button calls.
+
 Three values, deliberately:
 
 - **run live** — somebody did this against a real server and wrote down what happened. The list
@@ -45,27 +48,26 @@ There is no Mac on THIS side of the project — Baerthe has the only one, and th
 are his runs, not ours. That is why they are footnoted rather than plain: what he drove was the
 engine and the modules, and the Catalog button on a Mac remains unpressed.
 
-"Opens" is also the weaker word it looks like. The evidence for the AppImage and the `.exe` is a
+"Opens" is also the weaker word it looks like. The evidence for the AppImage and the zip is a
 `YULON_SMOKE_TEST=1` run that builds the window and exits; a person has used the app on Linux and
 on Windows, but not from those artifacts.
 
 ## Installing a server
 
-**Linux only.** Every entry in `yulon/catalog/catalog.json` declares `install.platforms:
-["linux"]`, and
-the app says so on the tile rather than letting you press Install and fail: the Install button is
-disabled with the reason next to it. Proven on a fresh Ubuntu 24.04 VM (2026-08-21), which built
-AzerothCore with playerbots from source and ended with all three containers up.
+**Every game installs on Linux and Windows; WotLK and Unbound also on macOS.** Each entry in
+`yulon/catalog/catalog.json` declares its `install.platforms`, and on a platform an entry does
+not list, the tile says so and the Install button is disabled with the reason next to it.
 
-**Windows** cannot install a server through the app yet. What is proven is the layer underneath it:
-on a Windows 11 box that had never had Docker, `yulon.exe --provision` installed WSL2 and Docker
-Desktop and reached a working daemon (2026-08-23), asking for nothing but a reboot and the prompts
-Windows and Docker Desktop put in front of a person themselves. The install path that would sit on
-top of that is not built, and `--provision` is a diagnostic flag, not a button in the app.
+**Linux** was proven first, on a fresh Ubuntu 24.04 VM (2026-08-21), which built AzerothCore with
+playerbots from source and ended with all three containers up.
 
-**macOS** has neither. The `.dmg` opens — Baerthe ran 0.6.53 from Finder on 2026-08-25 — but
-nobody has written down what Gatekeeper asks of a user who has never seen it before, and it is
-built for Apple silicon only.
+**Windows** runs the servers in Docker Desktop on WSL2, which Yu'lon sets up first when they are
+missing (`yulon.exe --provision` is the same step as a diagnostic flag). A WotLK install from an
+empty folder reached three running containers on a Windows 11 test VM (2026-09-05).
+
+**macOS**: the `.dmg` opens — Baerthe ran 0.6.53 from Finder on 2026-08-25 — but nobody has
+written down what Gatekeeper asks of a user who has never seen it before, and it is built for
+Apple silicon only.
 
 ## Managing a server you already have
 
@@ -130,12 +132,10 @@ All of the below on Linux. On Windows, the command channel and the Accounts tab 
 
 ## Which servers
 
-The catalog lists four: WoW WotLK (stable), WoW TBC and WoW Vanilla (beta), WoW Tortoise (work in
-progress). All four have now been exercised against a live server in Phase 8 -- TBC, Vanilla and
-Tortoise each on the test box with a real game client of its own version -- and every ticked
-box in `pyplan/checklist.md` says what was measured on which tree. Tortoise stays work in
-progress for the reasons its entry gives: the running build has no command channel and its
-`account set password` locks an account out, both fixed upstream and not yet rebuilt in.
+The catalog lists six: WoW WotLK (stable), and WoW TBC, WoW Vanilla, WoW Tortoise, Centurion and
+WoW Unbound (beta). WotLK, TBC, Vanilla and Tortoise were exercised against a live server in
+Phase 8 -- TBC, Vanilla and Tortoise each on the test box with a real game client of its own
+version -- and every ticked box in `pyplan/checklist.md` says what was measured on which tree.
 
 ## Odds and ends
 
