@@ -66,6 +66,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - The Server tab's **Play** now starts the game; **Launcher…** opens the launcher. The tray's **Play** starts a stopped server.
 - The tray's menu and panel offer the same **Start**, **Stop**, **Restart** and **Play**; **Quit tray…** is **Quit Yu'lon…**.
 - **Battle Pass** no longer asks for its vendor's creature entry: the vendor it creates is always the one it uses.
+- A new version is offered only after its tests pass, and the Windows and Mac builds are now tested on their own systems.
 
 ## v0.9.16-Public — 2026-10-10
 

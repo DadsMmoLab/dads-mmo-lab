@@ -8,6 +8,7 @@ such a tag before building anything.
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -180,4 +181,9 @@ def test_the_release_workflow_runs_the_guard_before_it_builds() -> None:
     assert build, "the build job no longer follows the guard"
     assert 'python build/check_tag_order.py --tag "${GITHUB_REF_NAME}"' in job
     assert "fetch-depth: 0" in job, "a shallow clone has no other tags to compare with"
-    assert "needs: tag-order" in build.split("\n  notes-and-checksums:")[0]
+    # T687 made it a list (`needs: [tag-order, ci]`); the guard must still be in it.
+    assert re.search(
+        r"^    needs: (tag-order|\[[^\]]*\btag-order\b[^\]]*\])$",
+        build.split("\n  notes-and-checksums:")[0],
+        re.M,
+    ), "the build no longer waits for the tag check"

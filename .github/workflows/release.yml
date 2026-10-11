@@ -15,8 +15,11 @@ on:
   # to a GitHub Release (roadmap Phase 5 exit criteria).
   workflow_dispatch:
 
+# T687: read-only by default. Only the two jobs that attach to the GitHub
+# Release get `contents: write`, so the CI call, the tag check and anything
+# they download or run never hold a token that can rewrite a release.
 permissions:
-  contents: write
+  contents: read
 
 defaults:
   run:
@@ -29,6 +32,8 @@ jobs:
   # A no-op on a branch (manual run) and on a non-public tag.
   tag-order:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
         with:
@@ -43,8 +48,28 @@ jobs:
         shell: bash
         run: python build/check_tag_order.py --tag "${GITHUB_REF_NAME}"
 
+  # T687: THE SAME COMMIT MUST PASS CI BEFORE ANYTHING IS BUILT. Measured on
+  # v0.9.16 (669eaaba): this workflow attached SHA256SUMS at 21:32:57Z and
+  # Discord announced the release at 21:38Z; ci.yml's tests on that SHA
+  # finished at 21:55Z. Nothing here waited for them, so a red tag would have
+  # been offered to every install through self-update.
+  #
+  # The whole of ci.yml, called on this run's own commit, rather than a poll
+  # for the tag's separate ci run: no race with that run, no API polling, and
+  # one definition of "green". Lint, the three mypy passes, the Linux suite on
+  # 3.11 and 3.13, the live-Docker suite, the Discord scripts and the
+  # Windows/macOS smoke all have to pass. `build` needs it, so a red CI builds
+  # nothing, creates no release, and fails this run - and discord-merged.yml
+  # posts a release only for a run that concluded `success`.
+  ci:
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
   build:
-    needs: tag-order
+    needs: [tag-order, ci]
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -358,7 +383,13 @@ jobs:
           open("AppDir/yulon.png", "wb").write(png)
           EOF
           cp "$APPDIR/yulon.png" "$APPDIR/usr/share/icons/hicolor/256x256/apps/yulon.png"
-          curl -fsSL -o appimagetool https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          # T687: a fixed release checked against its sha256, not "continuous".
+          # The tool runs in a job that can write the release, and the moving
+          # tag gave whatever was uploaded last with no way to notice a change.
+          # The digest is the one GitHub records for this asset. To move to a
+          # newer appimagetool, change both lines together.
+          curl -fsSL -o appimagetool https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
+          echo "ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0  appimagetool" | sha256sum -c -
           chmod +x appimagetool
           ARCH=x86_64 ./appimagetool "$APPDIR" "Yulon-${YULON_REF}-x86_64.AppImage"
           mkdir -p release && mv Yulon-*.AppImage release/
@@ -425,7 +456,7 @@ jobs:
 
       - name: Attach to the GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           files: pylauncher/release/*
           # Stays as the FALLBACK. `notes-and-checksums` below replaces this
@@ -449,8 +480,14 @@ jobs:
   # `workflow_dispatch` run proves this job the same way it proves the matrix -
   # without publishing anything. `SHA256SUMS` then lands as a run artifact.
   notes-and-checksums:
-    needs: build
-    if: ${{ !cancelled() }}
+    needs: [ci, build]
+    # `needs.ci.result` as well, because `!cancelled()` alone starts this job
+    # after a red CI too (it skips `build`, it does not cancel the run). It
+    # would find nothing to checksum and attach nothing, but a job that may
+    # write the release has no business running for a commit CI refused.
+    if: ${{ !cancelled() && needs.ci.result == 'success' }}
+    permissions:
+      contents: write
     # EVERYTHING HERE IS ADDITIVE, so nothing here may turn a release that is
     # already published red. The three build jobs have attached the artifacts
     # by the time this starts; what this job adds is a checksum file and a
@@ -558,13 +595,13 @@ jobs:
 
       - name: Attach SHA256SUMS and the changelog body
         if: startsWith(github.ref, 'refs/tags/v') && steps.sums.outputs.have == 'true' && steps.notes.outputs.have == 'true'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           files: pylauncher/release/SHA256SUMS
           body_path: ${{ runner.temp }}/notes.md
 
       - name: Attach SHA256SUMS (the changelog gained nothing; generated notes stay)
         if: startsWith(github.ref, 'refs/tags/v') && steps.sums.outputs.have == 'true' && steps.notes.outputs.have != 'true'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           files: pylauncher/release/SHA256SUMS

@@ -56,7 +56,8 @@ def _step_with(job: str, needle: str) -> str:
 
 NOTES_JOB = _job("notes-and-checksums")
 BUILD_JOB = _job("build")
-ATTACH = "softprops/action-gh-release@v2"
+ATTACH = "softprops/action-gh-release@"
+"""Pinned by commit since T687, so the pins match the action, not its version."""
 
 
 def test_the_version_is_stamped_before_pyinstaller_runs() -> None:
@@ -67,7 +68,8 @@ def test_the_version_is_stamped_before_pyinstaller_runs() -> None:
 
 
 def test_a_final_job_waits_for_the_builds() -> None:
-    assert "needs: build" in NOTES_JOB
+    # T687 added `ci` beside it: `needs: [ci, build]`.
+    assert re.search(r"^    needs: (build|\[[^\]]*\bbuild\b[^\]]*\])$", NOTES_JOB, re.M)
     assert (
         "fetch-depth: 0" in NOTES_JOB
     ), "release_notes.py reads other tags; a shallow clone has none"
