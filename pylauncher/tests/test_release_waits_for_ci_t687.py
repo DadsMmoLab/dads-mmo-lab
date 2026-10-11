@@ -156,35 +156,68 @@ def test_discord_announces_only_a_green_release_run() -> None:
 SMOKE = CI["jobs"]["platform-smoke"]
 
 
-def _smoke_files() -> list[str]:
+def _smoke_lists() -> dict[str, str]:
+    """`{os: the pytest arguments that OS runs}`, from the matrix `include`."""
     runs = [str(step.get("run", "")) for step in _steps(SMOKE) if "pytest" in str(step.get("run"))]
     assert len(runs) == 1, runs
-    return re.findall(r"tests/\S+\.py", runs[0])
+    assert runs[0].rstrip().endswith("${{ matrix.tests }}"), "the run must use the per-OS list"
+    assert '-m "not integration"' in runs[0]
+    return {str(e["os"]): str(e["tests"]) for e in SMOKE["strategy"]["matrix"]["include"]}
+
+
+def _files(arguments: str) -> list[str]:
+    """The files a list runs, not the ones it only names in a `--deselect`."""
+    return re.findall(r"(?:^|\s)(tests/[^\s:]+\.py)(?=\s|$)", arguments)
 
 
 def test_the_smoke_runs_on_the_platforms_the_release_ships() -> None:
     assert SMOKE["runs-on"] == "${{ matrix.os }}"
-    oses = set(SMOKE["strategy"]["matrix"]["os"])
+    oses = set(_smoke_lists())
     built = {entry["os"] for entry in JOBS["build"]["strategy"]["matrix"]["include"]}
     assert oses == built - {"ubuntu-22.04"}, (oses, built)
 
 
-def test_the_smoke_runs_the_os_specific_tests() -> None:
-    files = _smoke_files()
-    for needed in (
-        "tests/test_every_module_imports.py",
-        "tests/test_platform.py",
-        "tests/test_winacl.py",
-        "tests/test_winjob.py",
-    ):
-        assert needed in files, f"{needed} is not in the smoke set"
+def test_the_smoke_runs_the_os_specific_tests_on_both() -> None:
+    for os_name, arguments in _smoke_lists().items():
+        files = _files(arguments)
+        for needed in (
+            "tests/test_every_module_imports.py",
+            "tests/test_platform.py",
+            "tests/test_winacl.py",
+            "tests/test_winjob.py",
+            "tests/test_selfupdate_layout.py",
+            "tests/test_selfupdate_detect.py",
+        ):
+            assert needed in files, f"{needed} is not in the {os_name} smoke set"
+
+
+def test_a_deselect_names_one_test_in_a_file_the_list_runs() -> None:
+    """A `--deselect` of a whole file, or of a file the list does not run, is a
+    file leaving the list without saying so."""
+    for os_name, arguments in _smoke_lists().items():
+        files = _files(arguments)
+        for target in re.findall(r"--deselect\s+(\S+)", arguments):
+            path, sep, test = target.partition("::")
+            assert sep and test, f"{os_name}: --deselect {target} drops a whole file"
+            assert path in files, f"{os_name}: --deselect {target} is for a file not run"
 
 
 def test_every_smoke_file_exists() -> None:
     """pytest exits 4 on a missing path, but a rename would turn the job red for a
     reason nobody reads as "the list is stale"; this names it."""
-    for name in _smoke_files():
-        assert (PYLAUNCHER / name).is_file(), f"{name} is in the smoke set and does not exist"
+    for arguments in _smoke_lists().values():
+        for name in _files(arguments):
+            assert (PYLAUNCHER / name).is_file(), f"{name} is in a smoke set and does not exist"
+
+
+def test_every_deselected_test_exists() -> None:
+    """A renamed test would make its `--deselect` match nothing and run it again on
+    the OS it fails on; this names the stale line instead."""
+    for arguments in _smoke_lists().values():
+        for target in re.findall(r"--deselect\s+(\S+)", arguments):
+            path, _, test = target.partition("::")
+            source = (PYLAUNCHER / path).read_text(encoding="utf-8")
+            assert re.search(rf"^def {re.escape(test)}\(", source, re.M), target
 
 
 # -- tools the release runs while it can write --------------------------------
