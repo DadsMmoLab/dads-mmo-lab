@@ -956,25 +956,28 @@ class YulonTray(QObject):
             )
             self.open_window()
             return
-        self.open_window()
-        self._stopping = list(running)
-        for view in running:
-            view.realm_badge.status_changed.connect(self._a_stop_moved)
-            view.action_failed.connect(self._a_stop_failed)
-        # T711 review: a Stop the player declined (a restore still loading there) began
-        # nothing and will report nothing; the quit is off, the other Stops carry on.
-        kept = [view for view in running if view.stop_server() is False]
+        # T711 review round 2: every tab's own question first (a restore still loading
+        # there), before any Stop begins or any wait is wired: a modal question runs its own
+        # event loop, and a Stop that ended under it was read as "not stopped". One kept
+        # load calls the quit off and stops nothing.
+        kept = [view for view in running if not getattr(view, "agrees_to_stop", lambda: True)()]
         if kept:
-            self._stop_waiting_to_quit()
             names = ", ".join(titles.get(view, view.entry.name) for view in kept)
             logger.info(f"tray: quit called off, a Stop was declined: {names}")
             self.show_server(kept[0])
             self.tell(
                 "Yu'lon did not quit",
-                f"{names} was not stopped: you kept its restore running. Yu'lon stays open; "
-                "any other server's Stop carries on. Quit Yu'lon… asks again.",
+                f"{names} was not stopped: you kept its restore running, so no server was "
+                "stopped and Yu'lon stays open. Quit Yu'lon… asks again.",
             )
             return
+        self.open_window()
+        self._stopping = list(running)
+        for view in running:
+            view.realm_badge.status_changed.connect(self._a_stop_moved)
+            view.action_failed.connect(self._a_stop_failed)
+        for view in running:
+            getattr(view, "stop_agreed", view.stop_server)()
         logger.info(f"tray: stopping {len(running)} server(s), then quitting")
         # A Stop's own job ends by `docker.STOP_PROCESS_DEADLINE_SECONDS`; a wait
         # past that and a margin is a Stop that will not report (adversarial

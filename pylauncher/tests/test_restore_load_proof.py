@@ -141,13 +141,18 @@ def _quit_once_the_load_is_recorded(monkeypatch: pytest.MonkeyPatch) -> Any:
 
 
 def _restore_and_quit(
-    tmp_path: Path, stub: Path, monkeypatch: pytest.MonkeyPatch, *databases: str
+    tmp_path: Path,
+    stub: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *databases: str,
+    backup: Path | None = None,
 ) -> tuple[Path, int]:
     """A restore whose Yu'lon quits once the load runs; (server folder, the load's pid)."""
     server = tmp_path / "server"
     server.mkdir(exist_ok=True)
     mysql = _LoadingMysql(DB, "pw")
-    backup = a_backup_of(tmp_path, *(databases or ("acore_world",)))
+    if backup is None:
+        backup = a_backup_of(tmp_path, *(databases or ("acore_world",)))
     plan = plan_restore(backup, server, running=running(DB))
     assert plan.allowed, plan.refusals
     real = _quit_once_the_load_is_recorded(monkeypatch)
@@ -341,3 +346,27 @@ def test_a_record_whose_leftover_cannot_be_read_is_never_put_down(
     assert _let_the_load_end(stub, pid, exit_code=0) == 0
 
     assert interrupted_restore(server) is not None
+
+
+def test_an_orphaned_rollback_copy_load_settles_the_import_record_it_carries(
+    tmp_path: Path, stub: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T712 note 4: a put-back's load left running by Quit anyway, finished with exit 0, sets
+    the unfinished-import record to the copy's (it does not remove it, nor leave it unknown).
+    Mutation: drop the `load_import_text` branch from `_settle_a_finished_load()`."""
+    from tests.test_maintenance import good_dump
+
+    first, rest = good_dump("acore_world").split(b"\n", 1)
+    line = maintenance.IMPORT_RECORD_LEAD + json.dumps(docker.IMPORT_UNDER_WAY + "\n")
+    copy = tmp_path / "rollback-copy.sql"
+    copy.write_bytes(first + b"\n" + line.encode() + b"\n" + rest)
+    server, pid = _restore_and_quit(tmp_path, stub, monkeypatch, backup=copy)
+    record = docker.one_shot_ended_marker(server, docker_ctl.SPEC.import_service)
+    assert record.is_file(), "the copy's record is written before its load"
+    recorded = interrupted_restore(server)
+    assert recorded is not None and recorded.load_import_text == docker.IMPORT_UNDER_WAY + "\n"
+    record.unlink()  # whatever happened to it meanwhile, the finished load sets it again
+    assert _let_the_load_end(stub, pid, exit_code=0) == 0
+
+    assert interrupted_restore(server) is None
+    assert record.read_text(encoding="utf-8") == docker.IMPORT_UNDER_WAY + "\n"

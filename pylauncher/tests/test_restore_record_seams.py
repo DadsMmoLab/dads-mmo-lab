@@ -136,6 +136,98 @@ def test_a_put_back_that_fails_part_way_keeps_the_record(
     assert record.is_file(), "a part-way put-back erased the unfinished-import record"
 
 
+def test_a_record_the_run_removed_stands_again_from_the_first_file_put_back(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """T712 round 2 (MUST-FIX 2): the record stood at the copy, the failed run's import
+    removed it, and the put-back dies inside its first load (Yu'lon's own put-back, or a
+    crash). That database is half-written from the copy, so the record must stand before
+    anything loads. Mutation: write the copy's record
+    only after the load in `_restore_from()`."""
+
+    class _FailsFirst(_TableServer):
+        loads = 0
+
+        def load_from(self, source: Any) -> None:
+            self.loads += 1
+            if self.loads == 1:
+                raise maintenance.MaintenanceError("the database went away")
+            super().load_from(source)
+
+    server = _FailsFirst({"acore_world": {"creature"}, "acore_characters": {"characters"}})
+    copy = _real_put_back(monkeypatch, server)
+    record = _import_record(tmp_path)
+    record.write_text(docker.IMPORT_UNDER_WAY + "\n", encoding="utf-8")
+    taken = copy.take(tmp_path, ("acore_world", "acore_characters"))
+    record.unlink()  # the failed run's verified import removed it
+
+    with pytest.raises(InstallerError):
+        copy.put_back(tmp_path, taken)
+
+    assert record.is_file() and docker.IMPORT_UNDER_WAY in record.read_text(encoding="utf-8")
+
+
+def _the_tabs_restore_of(path: Path, server_dir: Path) -> None:
+    """The Maintenance tab's Restore of `path`: `plan_restore()` then `restore()`, no options."""
+    from tests.test_maintenance import DB, plan_restore, restore, running
+
+    plan = plan_restore(path, server_dir, running=running(DB))
+    assert plan.allowed, plan.refusals
+    restore(
+        plan, _TableServer({"acore_world": {"creature"}}), confirm=plan.token, running=running(DB)
+    )
+
+
+def test_restoring_the_rollback_copy_from_the_tab_puts_its_record_back(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """T712 round 2 (MUST-FIX 3): a put-back that failed says "open Maintenance, choose the
+    copy and press Restore". That restore removed the record over the half-imported copy. The
+    copy now carries the record (`IMPORT_RECORD_LEAD`) and the tab's restore sets it back.
+    Mutation: forget the record after every restore again."""
+    server = _TableServer({"acore_world": {"creature"}})
+    copy = _real_put_back(monkeypatch, server)
+    record = _import_record(tmp_path)
+    record.write_text(docker.IMPORT_UNDER_WAY + "\n", encoding="utf-8")
+    taken = copy.take(tmp_path, ("acore_world",))
+    record.unlink()
+
+    _the_tabs_restore_of(taken.files[0], tmp_path)
+
+    assert record.is_file() and docker.IMPORT_UNDER_WAY in record.read_text(encoding="utf-8")
+
+
+def test_restoring_a_copy_taken_with_no_record_from_the_tab_removes_one(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    server = _TableServer({"acore_world": {"creature"}})
+    copy = _real_put_back(monkeypatch, server)
+    record = _import_record(tmp_path)
+    taken = copy.take(tmp_path, ("acore_world",))
+    assert maintenance.IMPORT_RECORD_LEAD.encode() + b"none" in taken.files[0].read_bytes()
+    record.write_text("was ended before it finished\n", encoding="utf-8")
+
+    _the_tabs_restore_of(taken.files[0], tmp_path)
+
+    assert not record.exists()
+
+
+def test_a_copy_whose_record_line_cannot_be_read_leaves_the_record_alone(tmp_path: Path) -> None:
+    """Neither set nor removed: what the copy held is unknown. Mutation: treat it as UNSAID."""
+    from tests.test_maintenance import good_dump
+
+    dump = good_dump("acore_world")
+    first, rest = dump.split(b"\n", 1)
+    path = tmp_path / "copy.sql"
+    path.write_bytes(first + b"\n" + maintenance.IMPORT_RECORD_LEAD.encode() + b"{oops\n" + rest)
+    record = _import_record(tmp_path)
+    record.write_text("kept as it is\n", encoding="utf-8")
+
+    _the_tabs_restore_of(path, tmp_path)
+
+    assert record.read_text(encoding="utf-8") == "kept as it is\n"
+
+
 def test_the_maintenance_tabs_own_restore_still_removes_the_record(
     tmp_path: Path,
 ) -> None:
@@ -186,6 +278,27 @@ def test_the_other_servers_database_is_not_stopped_under_a_restore_still_loading
     assert stopped == [], "the other server's database was stopped under its restore"
     said = str(refused.value)
     assert "restore" in said and "still" in said and "half-written" in said, said
+
+
+def test_the_other_server_with_an_unreadable_restore_record_is_not_stopped(
+    fake_docker: Path,  # noqa: F811 - the fixture
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T714 round 2 (lead): fail closed like T715, and name the way out.
+    Mutation: let an unreadable record through `restore_still_loading()`."""
+    ours, other, stopped = _other_server(tmp_path, monkeypatch)
+    marker = maintenance.marker_path(other)
+    marker.parent.mkdir(parents=True)
+    marker.write_text("{not json", encoding="utf-8")
+    controller = _Recorded(ours)
+    controller.port_conflicts = lambda: ["o-db"]  # type: ignore[method-assign]
+
+    with pytest.raises(docker.ServerHeldError) as refused:
+        controller.stop_conflicting()
+
+    assert stopped == []
+    assert "Forget that record" in str(refused.value), str(refused.value)
 
 
 def test_the_other_server_with_a_dead_restore_record_is_stopped_as_before(

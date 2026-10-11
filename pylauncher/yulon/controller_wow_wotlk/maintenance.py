@@ -232,6 +232,31 @@ GAME_RECORD = re.compile(r"-- yulon-backup: game=([a-z0-9]+(?:-[a-z0-9]+)*)")
 _GAME_RECORD_BYTES = re.compile(rb"-- yulon-backup: game=([a-z0-9]+(?:-[a-z0-9]+)*)")
 _GAME_RECORD_LEAD = b"-- yulon-backup:"
 
+IMPORT_RECORD_LEAD = "-- yulon-import-record: "
+"""The line a rollback copy carries: the unfinished-import record as the copy was taken (T712).
+
+`none`, or the record's text as one JSON string. Only `backup(import_record=...)` writes it
+(the Rebuild's and update's copy, `install_wiring._MaintenanceSnapshot.take()`), so whoever
+restores that file -- the rollback's put-back, or the player on the Maintenance tab after a
+put-back that failed -- puts the record back with the databases it describes.
+"""
+
+
+class _ImportState:
+    """What a dump says about the unfinished-import record (`_import_state_in()`)."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    def __repr__(self) -> str:
+        return self.name
+
+
+UNSAID = _ImportState("UNSAID")
+"""A dump with no import-record line: an ordinary backup (T678: a restore removes the record)."""
+UNREADABLE_LINE = _ImportState("UNREADABLE_LINE")
+"""A line that cannot be read: the record is left exactly as it is (neither set nor removed)."""
+
 
 class MaintenanceError(RuntimeError):
     """A backup or restore could not be completed, and nothing may be assumed about it.
@@ -766,6 +791,7 @@ def backup(
     running: RunningNames | None = None,
     wsl_distro: str | None = None,
     now: datetime | None = None,
+    import_record: str | None | _ImportState = UNSAID,
 ) -> BackupReport:
     """Dump every database this install has into `backups_dir(server_dir)`.
 
@@ -795,6 +821,9 @@ def backup(
             census. `mysql` carries the same fact for the dump itself; both are
             needed, because they are two different questions asked of docker.
         now: The timestamp in the filenames; defaults to the clock.
+        import_record: For a rollback copy (T712): the unfinished-import record as it reads
+            now (None: there is none), written into every file (`IMPORT_RECORD_LEAD`).
+            Left `UNSAID`, no line is written.
 
     Raises:
         MaintenanceError: the database container is not running, `only` named a
@@ -843,6 +872,7 @@ def backup(
                     directory / f"{stamp}_{middle}{database}.sql",
                     game,
                     tuple((ignore_tables or {}).get(database, ())),
+                    import_record,
                 )
             )
         except MaintenanceError as exc:
@@ -874,6 +904,7 @@ def _dump_one(
     target: Path,
     game: Game,
     ignore: tuple[str, ...] = (),
+    import_record: str | None | _ImportState = UNSAID,
 ) -> Dump:
     """Dump one database to `target`, via a `.partial` that is only renamed if it verifies.
 
@@ -891,12 +922,16 @@ def _dump_one(
         record = f"-- yulon-backup: game={game.id}"
         if GAME_RECORD.fullmatch(record) is None:
             raise MaintenanceError(f"{game.id!r} is not a game id a backup can record")
+        header = record.encode() + b"\n"
+        if not isinstance(import_record, _ImportState):
+            said = "none" if import_record is None else json.dumps(import_record)
+            header += f"{IMPORT_RECORD_LEAD}{said}\n".encode()
         # The dumps hold every account's login verifier and the realm session keys, so
         # they are as private as `.env` (T683 S5). Created 0600 rather than chmodded
         # after, and a leftover `.partial` goes first: truncating it would keep its mode.
         partial.unlink(missing_ok=True)
         with open(partial, "wb", opener=_private_opener) as sink:
-            sink.write(record.encode() + b"\n")
+            sink.write(header)
             # mysqldump writes to the file DESCRIPTOR, not through this object, so
             # a record still in Python's buffer would land after the dump (found on
             # a live mariadb-dump, 2026-10-09; a fake that writes through `sink` hides it).
@@ -907,7 +942,7 @@ def _dump_one(
                 mysql.dump_into(database, sink, ignore=ignore)  # type: ignore[call-arg]
             else:
                 mysql.dump_into(database, sink)
-        if partial.stat().st_size == len(record) + 1:
+        if partial.stat().st_size == len(header):
             # Only our own line: mysqldump wrote nothing. Said as `verify_dump()` says
             # an empty file, which the record in front of it would otherwise hide.
             raise MaintenanceError(f"{partial.name} is empty, so nothing was dumped")
@@ -1352,7 +1387,10 @@ class InterruptedRestore:
     this one does not cover. Read only when the load is proven to have finished cleanly.
     """
     load_import_service: str = ""
-    """The import service whose unfinished-import record a finished restore removes (T678)."""
+    """The import service whose unfinished-import record a finished load settles (T678)."""
+    load_import_text: str | None = None
+    """What that record must say once the load has finished (a rollback copy's, T712); None:
+    the record is removed, as after an ordinary restore."""
 
     @property
     def load_running(self) -> bool:
@@ -1409,6 +1447,8 @@ class InterruptedRestore:
                 after = self.load_after
                 fields["load_after"] = None if after is None else after._fields()
                 fields["load_import_service"] = self.load_import_service
+                if self.load_import_text is not None:
+                    fields["load_import_text"] = self.load_import_text
         return fields
 
 
@@ -1565,6 +1605,9 @@ def _read_record(server_dir: Path) -> InterruptedRestore | None:
     after = _after_record(marker, after_raw)
     if after_raw is not None and after is None:
         proof = ""  # what this load leaves behind cannot be read: never put the record down
+    import_text = raw.get("load_import_text")
+    if import_text is not None and not isinstance(import_text, str):
+        proof, import_text = "", None  # the same: what the record must say is unknown
     return InterruptedRestore(
         marker=marker,
         backup=Path(str(raw.get("backup", ""))),
@@ -1578,6 +1621,7 @@ def _read_record(server_dir: Path) -> InterruptedRestore | None:
         load_proof=proof,
         load_after=after,
         load_import_service=str(raw.get("load_import_service", "")),
+        load_import_text=import_text,
     )
 
 
@@ -1646,7 +1690,9 @@ def _settle_a_finished_load(
                 (record.marker.parent / name).unlink(missing_ok=True)
             except OSError as exc:
                 logger.warning(f"could not remove the finished load's {name}: {exc}")
-        if record.load_import_service:
+        if record.load_import_service and record.load_import_text is not None:
+            set_import_record(server_dir, record.load_import_service, record.load_import_text)
+        elif record.load_import_service:
             _forget_the_import_record(server_dir, record.load_import_service)
     logger.warning(
         f"the restore of {', '.join(record.databases)} that carried on after Yu'lon closed "
@@ -1830,7 +1876,6 @@ def restore(
     now: datetime | None = None,
     safety_label: str = "pre-restore",
     before_load: Callable[[], object] | None = None,
-    keeps_the_import_record: bool = False,
 ) -> RestoreReport:
     """Overwrite the databases `plan.backup` names. This destroys player data.
 
@@ -1869,10 +1914,12 @@ def restore(
     (`drop_tables_not_in()`), which turns this merge into a replacement for that
     one caller. The Maintenance tab passes neither.
 
-    `keeps_the_import_record` (T712): a finished restore removes the unfinished-import
-    record (T678 round 3), because a backup's databases are not the ones it described. The
-    rollback's copy IS those databases, taken moments before, so its put-back keeps the
-    record and sets it back to what it was when the copy was taken (`set_import_record()`).
+    The unfinished-import record (T712): a finished restore of an ordinary backup removes it
+    (T678 round 3), because a backup's databases are not the ones it described. A rollback
+    copy carries the record as it was when the copy was taken (`IMPORT_RECORD_LEAD`); its
+    restore -- the put-back, or the player's from the Maintenance tab -- sets the record back
+    to that instead. A record the copy names is written BEFORE the load (a load cut off
+    leaves half-imported databases that the record must cover); "none" is applied after it.
 
     Raises:
         MaintenanceError: the confirmation does not match, the plan no longer
@@ -1920,7 +1967,6 @@ def restore(
             now=now,
             safety_label=safety_label,
             before_load=before_load,
-            keeps_the_import_record=keeps_the_import_record,
         )
 
 
@@ -1938,7 +1984,6 @@ def _restore_from(
     now: datetime | None,
     safety_label: str,
     before_load: Callable[[], object] | None,
-    keeps_the_import_record: bool = False,
 ) -> RestoreReport:
     """`restore()` from the marker onward, loading from `source`, the handle it checks here."""
     recorded = _recorded_game_of(source, plan.backup.name)
@@ -1951,6 +1996,7 @@ def _restore_from(
             f"{plan.backup.name} is not the file that was checked — it changed in between. "
             "Nothing was restored; look at it again."
         )
+    import_state = _import_state_of(source, plan.backup.name)
     marker = marker_path(plan.server_dir)
     marker.parent.mkdir(parents=True, exist_ok=True)
     # `fresh`, not `plan`: the marker is the one thing here that can appear
@@ -2002,6 +2048,10 @@ def _restore_from(
     )
     logger.warning(f"restoring {', '.join(plan.databases)} from {plan.backup}")
     try:
+        if isinstance(import_state, str):
+            # T712: the copy is of half-imported databases; from the first byte loaded on
+            # they are that again, whatever happens to the load.
+            set_import_record(plan.server_dir, spec.import_service, import_state)
         if before_load is not None:
             before_load()
         source.seek(0)
@@ -2019,7 +2069,10 @@ def _restore_from(
                     # T710: what to leave if this load finishes after Yu'lon has gone.
                     load_proof=proof,
                     load_after=unresolved,
-                    load_import_service="" if keeps_the_import_record else spec.import_service,
+                    load_import_service=(
+                        "" if import_state is UNREADABLE_LINE else spec.import_service
+                    ),
+                    load_import_text=import_state if isinstance(import_state, str) else None,
                 ),
                 consequence="The restore is running, but its process could not be recorded.",
             )
@@ -2072,7 +2125,9 @@ def _restore_from(
                 f"that this one does not put right; {marker} still records them"
             )
     logger.info(f"restored {', '.join(plan.databases)} from {plan.backup}")
-    if not keeps_the_import_record:
+    if isinstance(import_state, str):
+        set_import_record(plan.server_dir, spec.import_service, import_state)
+    elif import_state is not UNREADABLE_LINE:
         _forget_the_import_record(plan.server_dir, spec.import_service)
     return RestoreReport(backup=plan.backup, databases=plan.databases, safety_backup=safety)
 
@@ -2120,7 +2175,7 @@ def set_import_record(server_dir: Path, import_service: str, text: str | None) -
     wrote since (an importer it ended) describes what the copy replaced, and left standing it
     would make Repair read the player's rows as the import's and clear them.
     """
-    if not import_service:
+    if not import_service or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", import_service):
         return
     record = docker.one_shot_ended_marker(server_dir, import_service)
     if text is None:
@@ -2151,6 +2206,34 @@ def _digest_of(source: IO[bytes], name: str) -> str:
     except OSError as exc:
         raise MaintenanceError(f"could not read {name}: {exc}") from exc
     return digest.hexdigest()
+
+
+def _import_state_of(source: IO[bytes], name: str) -> str | None | _ImportState:
+    """The import-record line of an open dump (`IMPORT_RECORD_LEAD`), then rewound (T712)."""
+    try:
+        source.seek(0)
+        head = source.read(_EDGE_BYTES)
+        source.seek(0)
+    except OSError as exc:
+        raise MaintenanceError(f"could not read {name}: {exc}") from exc
+    return _import_state_in(head)
+
+
+def _import_state_in(head: bytes) -> str | None | _ImportState:
+    """`UNSAID` without the line, None for "none", the record's text, or `UNREADABLE_LINE`."""
+    lead = IMPORT_RECORD_LEAD.encode()
+    for line in head.split(b"\n")[:-1]:  # the last piece may be cut by the edge
+        if not line.startswith(lead):
+            continue
+        said = line[len(lead) :].decode("utf-8", "replace").strip()
+        if said == "none":
+            return None
+        try:
+            text = json.loads(said)
+        except ValueError:
+            return UNREADABLE_LINE
+        return text if isinstance(text, str) else UNREADABLE_LINE
+    return UNSAID
 
 
 def _recorded_game_of(source: IO[bytes], name: str) -> str | None:

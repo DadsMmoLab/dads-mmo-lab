@@ -434,3 +434,64 @@ def test_stop_then_quit_ends_its_wait_when_the_player_keeps_the_load(
     assert tray._stop_deadline is None or not tray._stop_deadline.isActive()
     assert quits == []
     assert len(told) == 1 and "kept its restore" in told[0][1], told
+
+
+@pytest.mark.parametrize("answer", [None, "yes"])
+def test_stop_then_quit_asks_every_question_before_any_stop_begins(
+    qapp: object,
+    tmp_path: Path,
+    live_child: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    answer: str | None,
+) -> None:
+    """T711 review round 2: servers A and B, B's restore still loading. A's Stop began, then
+    B's modal question ran its own event loop; A's Stop ending under it was read as "B did
+    not read as stopped". Now every question is asked first; one kept load stops nothing.
+
+    Mutation: ask inside the Stop loop again (call `stop_server()` per view).
+    """
+    from tests.test_teardown_guard import _view
+    from tests.test_tray import FakeTrayIcon, FakeWindow
+    from yulon.ui import controller_view as controller_view_module
+    from yulon.ui.tray import YulonTray
+
+    a_view, _f, _ = _view(tmp_path, "a")
+    b_dir = tmp_path / "b-record"
+    _marker_with(b_dir, live_child.pid)
+    b_view, _f2, _ = _view(tmp_path, "b")
+    a_view.services.interrupted_restore = lambda: None  # type: ignore[method-assign,assignment]
+    b_view.services.interrupted_restore = lambda: interrupted_restore(b_dir)  # type: ignore[method-assign,assignment]
+    a_jobs: list[Any] = []
+    b_jobs: list[Any] = []
+    a_view._run = lambda *args, **_kw: a_jobs.append(args)  # type: ignore[method-assign]
+    b_view._run = lambda *args, **_kw: b_jobs.append(args)  # type: ignore[method-assign]
+    asked_with_a_stopping: list[int] = []
+
+    def ask(_parent: object, _title: str, _text: str, _yes: str, save: object = None) -> Any:
+        asked_with_a_stopping.append(len(a_jobs))
+        return answer
+
+    monkeypatch.setattr(controller_view_module, "_ask_with", ask)
+    for view in (a_view, b_view):
+        view.stop_button.setEnabled(True)
+    window = FakeWindow()
+    window.yulon_controllers.extend([a_view, b_view])
+    tray = YulonTray(window, icon_factory=FakeTrayIcon, available=lambda: True)
+    told: list[tuple[str, str]] = []
+    tray.tell = lambda title, text: told.append((title, text))  # type: ignore[method-assign]
+    tray.quit = lambda: True  # type: ignore[method-assign]
+
+    tray.stop_then_quit([a_view, b_view])
+    stopping = list(tray._stopping)
+    tray._stop_waiting_to_quit()
+    a_view.shutdown()
+    b_view.shutdown()
+    window.deleteLater()
+
+    assert asked_with_a_stopping == [0], "B was asked after A's Stop had begun"
+    if answer is None:
+        assert a_jobs == [] and b_jobs == [] and stopping == []
+        assert len(told) == 1 and "kept its restore" in told[0][1], told
+    else:
+        assert len(a_jobs) == 1 and len(b_jobs) == 1 and told == []
+        assert stopping == [a_view, b_view]
