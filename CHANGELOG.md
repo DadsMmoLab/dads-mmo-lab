@@ -23,6 +23,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Bringing in a server with Auction House Bot from another computer no longer stops on a missing character.
 - TBC and Vanilla servers no longer keep built-in admin accounts that anyone on your network could log in to.
 - Closing, quitting, updating or changing the client folder is refused while a restore, backup or install is running.
+- On Windows, **Quit anyway** now ends Yu'lon at once instead of leaving it running unseen for up to a minute.
 - **PLAY** at another computer's address skips the local server; your own public address counts as another computer.
 - **PLAY** after starting the server now waits for the realm to come up before it starts the game.
 - Install now asks before it starts or installs Docker Engine as root, and never installs a second engine over yours.
