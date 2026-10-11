@@ -542,7 +542,6 @@ def test_the_controller_locks_an_install_whose_database_is_already_up(
     assert len(db.updates()) == 4
 
 
-
 def test_the_lock_waits_while_a_restore_holds_the_server_and_says_nothing_false(
     db: AuthDb, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -563,6 +562,7 @@ def test_the_lock_waits_while_a_restore_holds_the_server_and_says_nothing_false(
     # The restore over, the next poll locks.
     assert controller.lock_seeded_accounts_if_up() is not None
     assert len(db.updates()) == 4
+
 
 # the Server tab and the Accounts tab, built the way main.py builds them
 
