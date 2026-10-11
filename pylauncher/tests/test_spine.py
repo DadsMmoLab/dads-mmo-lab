@@ -2699,9 +2699,15 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "precondition's own sentence; reporting a scripts-are-there when the folder could not "
         "be read is the one thing that would be worse, and this cannot"
     ),
-    ("apply.py", "_undeploy"): (
-        "re-derives what a `deploy` step put on disk from the clone's own `src` listing, so it "
-        "removes exactly those names; reads a folder this app filled, decides no write into it"
+    ("apply.py", "_deploy_files"): (
+        "lists the clone's own `src` folder (links never walked) to name the files a `deploy` "
+        "step will write, for the deploy record (T684); reads a folder this app just cloned, "
+        "and what is written or removed is decided by that record, not by this listing"
+    ),
+    ("platform.py", "_proc_listener"): (
+        "lists `/proc` to name the program holding a taken port in Start's sentence (T671); "
+        "best effort and read-only, an unreadable entry is skipped, and it never decides a "
+        "write or a refusal: the refusal comes from the bind probe, not from this name"
     ),
     ("apply.py", "_patches"): (
         "resolves a manifest's `patch.file` glob to real paths; a pattern that matches nothing "
