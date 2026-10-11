@@ -1807,3 +1807,25 @@ def test_a_folder_that_became_a_junction_after_the_plan_is_not_called_still_ther
         uninstaller.run(keep_characters=False)
     assert "still there afterwards" not in str(caught.value)
     assert "junction" in str(caught.value)
+
+
+def test_a_server_folder_that_cannot_be_looked_at_is_refused_before_docker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T717 round 2: "could not tell if it is a link" must refuse, not carry on."""
+    from yulon import links
+
+    rec = _recorder(tmp_path)
+    real = links._lstat
+
+    def deny(p: object, *a: object, **k: object) -> object:
+        if os.fspath(p) == os.fspath(rec.server_dir):  # type: ignore[call-overload]
+            raise PermissionError("access denied")
+        return real(p, *a, **k)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(links, "_lstat", deny)
+    uninstaller = rec.uninstaller(remove_folder=None)
+    assert "could not tell whether" in uninstaller.plan().refusal
+    with pytest.raises(purge.PurgeRefusal, match="could not tell"):
+        uninstaller.run(keep_characters=False)
+    assert [c for c in rec.order if c.startswith("remove_")] == []

@@ -1288,10 +1288,12 @@ def _junction_refusal(server_dir: Path) -> str | None:
     try:
         if not links.is_link(server_dir):
             return None
-    except OSError:
-        return None  # not a link we can prove; the ownership check says what it can see
+    except OSError as exc:
+        # Fail closed: "could not tell" must not let the Docker steps run first.
+        return f"Yu'lon could not tell whether {server_dir} is a link ({exc}). Nothing was changed."
     try:
-        where = f" to {os.readlink(server_dir)}"
+        target = os.readlink(server_dir)
+        where = f" to {target.removeprefix(chr(92) * 2 + '?' + chr(92))}"
     except OSError:
         where = ""  # a junction Python cannot read the target of: still a link
     return (
