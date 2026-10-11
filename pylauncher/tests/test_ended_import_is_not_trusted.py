@@ -228,12 +228,12 @@ def test_the_apps_reset_seam_hands_everything_down(monkeypatch: pytest.MonkeyPat
     from yulon import install_wiring
     from yulon.catalog.catalog import load_catalog
 
-    asked: list[bool] = []
+    asked: list[tuple[bool, bool]] = []
 
     def reset_unfinished(
-        sql: object, mysql: object, *, everything: bool = False
+        sql: object, mysql: object, *, everything: bool = False, seeded: bool = False
     ) -> tuple[str, ...]:
-        asked.append(everything)
+        asked.append((everything, seeded))
         return ()
 
     monkeypatch.setattr(repair, "reset_unfinished", reset_unfinished)
@@ -241,7 +241,8 @@ def test_the_apps_reset_seam_hands_everything_down(monkeypatch: pytest.MonkeyPat
     assert reset is not None
     reset()
     reset(everything=True)
-    assert asked == [False, True]
+    reset(everything=True, seeded=True)  # T678 review round 2: Repair's clean redo
+    assert asked == [(False, False), (True, False), (True, True)]
 
 
 # ------------------------------------------------------------------- Repair

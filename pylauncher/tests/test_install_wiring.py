@@ -93,7 +93,7 @@ def test_the_probe_reaches_repair_through_this_entry_s_db_container(
         return docker.ImportState("imported", "every acore_* schema has tables", complete=True)
 
     def fake_reset(
-        sql: DockerSql, mysql: DockerMysql, *, everything: bool = False
+        sql: DockerSql, mysql: DockerMysql, *, everything: bool = False, seeded: bool = False
     ) -> tuple[str, ...]:
         seen.append((sql.db_container, mysql.db_container))
         return ("acore_world",)

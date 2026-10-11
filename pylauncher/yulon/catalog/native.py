@@ -14234,9 +14234,16 @@ class StagedInstaller:
                 "nothing was imported. Nothing can be established about them either way."
             )
         if ended and before.state == "populated":
-            # T678: rows in databases whose import did not finish. A module's own updates
-            # seed accounts (City Bots: 400) before the world schema is done, and they read
-            # as player data, which is never cleared; nor are they ever finished.
+            if docker.import_record_is_from_empty(ctx.server_dir, service or ""):
+                # T678 review round 2: the rows are the unfinished first import's own (City
+                # Bots' accounts); Repair clears them under this record and imports again.
+                raise InstallerError(
+                    "This server's first database import did not finish, and it wrote data "
+                    f"before it stopped ({before.detail}). Nothing was run. Press Repair on the "
+                    "Server tab to clear what it wrote and import again."
+                )
+            # T678: an ended import (T658's kill record, written over any databases) with
+            # rows in them: they may be a player's, so they are never cleared.
             raise InstallerError(
                 f"An earlier import of these databases did not finish, and they already hold "
                 f"data ({before.detail}). Clearing them could lose a player's characters and "

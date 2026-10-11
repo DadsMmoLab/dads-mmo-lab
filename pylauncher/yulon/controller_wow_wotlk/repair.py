@@ -309,7 +309,7 @@ def _tables_in(sql: SqlQuery, through: Db) -> dict[str, set[str]]:
 
 
 def reset_unfinished(
-    sql: SqlWrite, mysql: MysqlDocker, *, everything: bool = False
+    sql: SqlWrite, mysql: MysqlDocker, *, everything: bool = False, seeded: bool = False
 ) -> tuple[str, ...]:
     """Drop the schemas an import left half-written, so it can write them again.
 
@@ -339,6 +339,12 @@ def reset_unfinished(
     leaves schemas that pass the marker test above and are not finished. The
     player-data refusal still comes first.
 
+    `seeded` (T678 review round 2, owner decision): with `everything`, rows are
+    cleared too. Only `docker.repair_import()` passes it, and only while
+    `docker.import_record_is_from_empty()` stands: the rows were then written by an
+    import that began over empty databases and never finished (City Bots seeds 400
+    accounts into acore_auth before the world schema), not by a player.
+
     Returns:
         The schemas dropped, in the order they were dropped. Empty if there was
         nothing unfinished, which is not an error.
@@ -352,8 +358,10 @@ def reset_unfinished(
             refusal, and a caller that swallows connection errors must not
             swallow this.
     """
+    if seeded and not everything:
+        raise ValueError("`seeded` clears rows only together with `everything`")
     state = import_state(sql, mysql)
-    if state.state == "populated":
+    if state.state == "populated" and not seeded:
         raise RuntimeError(
             f"this install holds player data ({state.detail}), so nothing was dropped."
         )

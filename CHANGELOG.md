@@ -32,7 +32,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - **Update the server to latest** no longer runs the SQL of a module Yu'lon applies itself, such as ARAC, a second time.
 - A **Rebuild** whose database updates fail puts your databases back as they were and names the update that failed.
 - **Start** on a WotLK or Unbound server whose build is gone from Docker now says so before anything starts.
-- A WotLK or Unbound database import that fails part-way is no longer taken as finished; it names the update that failed.
+- A WotLK or Unbound database import that fails part-way no longer counts as finished; **Repair** clears it and runs it again.
 
 ### Changed
 - The Server tab's **Play** now starts the game; **Launcher…** opens the launcher. The tray's **Play** starts a stopped server.

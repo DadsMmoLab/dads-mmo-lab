@@ -29,6 +29,7 @@ from yulon.catalog.installer import InstallerError, InstallOptions, InstallStopp
 from yulon.controller import ENDED_IMPORT_DETAIL, Controller
 
 IMPORTER = "ac-db-import"
+IMPORT_UP_ARGV = ["docker", "compose", "up", "--no-deps", "--exit-code-from", IMPORTER, IMPORTER]
 POPULATED_DONE = docker.ImportState("populated", "400 accounts", complete=True)
 
 # The importer's own last lines, from the T706 live run on yulon-ubuntu (2026-10-11).
@@ -297,3 +298,194 @@ def test_the_importers_words_are_read_through_composes_prefix_and_closing_lines(
     rebuild = docker.importer_failure(run, "Applying the database updates")
     assert "(ERROR 1146 (42S02)" in rebuild, rebuild
     assert "zz_t678_broken.sql" in docker.import_failed(IMPORTER, tmp_path, run).detail
+
+
+# ------------------------------------------------- review round 2: refuse + a clean redo
+#
+# Owner decision (2026-10-11): an import that died after it wrote rows (City Bots' 400
+# accounts land in acore_auth before acore_world fails) is refused by Start, and Repair
+# clears what it wrote and imports again -- but ONLY under the record written before that
+# import began, which stands only over databases that read empty or were cleared. Rows
+# without that record are somebody's, and nothing clears them.
+
+AUTH, CHARACTERS, WORLD = "acore_auth", "acore_characters", "acore_world"
+
+
+def _city_bots_crashed_server():  # type: ignore[no-untyped-def]
+    """acore_auth finished with City Bots' 400 accounts; acore_world died part-way."""
+    from tests.test_ended_import_is_not_trusted import _done, _Server
+
+    return _Server(
+        {AUTH: _done("account"), CHARACTERS: _done("characters"), WORLD: ["creature"]},
+        counts={f"{AUTH}.account": 400},
+    )
+
+
+def _real_seams(server):  # type: ignore[no-untyped-def]
+    """The WotLK probe and reset, the real functions, on the in-memory database."""
+    from yulon.controller_wow_wotlk import repair
+
+    def probe() -> docker.ImportState:
+        return repair.import_state(server, server)
+
+    def reset(**kw: bool) -> tuple[str, ...]:
+        return repair.reset_unfinished(server, server, **kw)
+
+    return probe, reset
+
+
+def _the_import_fills(server) -> None:  # type: ignore[no-untyped-def]
+    from tests.test_ended_import_is_not_trusted import _done
+
+    server.tables.update(
+        {AUTH: _done("account"), CHARACTERS: _done("characters"), WORLD: _done("creature")}
+    )
+
+
+def _crashed_repair(monkeypatch: pytest.MonkeyPatch, server_dir: Path) -> None:
+    """A real Repair from empty whose importer died: the record it leaves."""
+    from tests.test_docker import SPEC, UNIMPORTED, _probe
+
+    _repair_with_exit(monkeypatch, [], 1)
+    with pytest.raises(docker.DockerCommandError):
+        docker.repair_import(SPEC, server_dir, _probe(UNIMPORTED, IMPORTED))
+    assert docker.import_record_is_from_empty(server_dir, SPEC.import_service)
+
+
+def test_start_refuses_rows_a_crashed_first_import_left_and_points_at_repair(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from tests.test_docker import SPEC
+    from yulon.controller import ImportEnded
+
+    _crashed_repair(monkeypatch, tmp_path)
+    probe, reset = _real_seams(_city_bots_crashed_server())
+    assert probe().state == "populated"
+    ctl = Controller(SPEC, tmp_path, import_probe=probe, reset_unfinished=reset)
+    with pytest.raises(ImportEnded) as refused:
+        ctl.refuse_an_ended_import()
+    said = str(refused.value)
+    assert "did not finish" in said and "Repair" in said, said
+    assert ctl.import_state().repairable, "the Server tab must offer the Repair it names"
+
+
+def test_repair_clears_what_the_crashed_import_wrote_and_imports_again(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from tests.test_docker import SPEC, _repair_doubles
+
+    _crashed_repair(monkeypatch, tmp_path)
+    server = _city_bots_crashed_server()
+    probe, reset = _real_seams(server)
+    calls: list[list[str]] = []
+    _repair_doubles(
+        monkeypatch,
+        calls,
+        running={SPEC.db},
+        import_output=lambda: (_the_import_fills(server), ("World database is up-to-date!",))[1],
+    )
+    assert docker.repair_import(SPEC, tmp_path, probe, reset=reset) is True
+    assert server.dropped == [AUTH, CHARACTERS, WORLD], server.dropped
+    assert IMPORT_UP_ARGV in calls
+    assert not _marker(tmp_path).exists(), "a verified import keeps the record"
+    after = probe()  # City Bots seeds its accounts again: a finished import with rows
+    assert after.state == "populated" and after.complete, after
+
+
+@pytest.mark.parametrize("record", [None, "ended"], ids=["no-record", "only-a-kill-record"])
+def test_rows_without_the_record_from_empty_are_never_cleared(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, record: str | None
+) -> None:
+    """Player data: no record, or only T658's kill record (written over any databases)."""
+    from tests.test_docker import SPEC, _repair_doubles
+    from yulon.controller import ImportEnded
+
+    if record is not None:
+        _marker(tmp_path).write_text(f"{SPEC.import_service} was ended before it finished\n")
+    server = _city_bots_crashed_server()
+    probe, reset = _real_seams(server)
+    calls: list[list[str]] = []
+    _repair_doubles(monkeypatch, calls, running={SPEC.db})
+    with pytest.raises(docker.DockerCommandError, match="player data"):
+        docker.repair_import(SPEC, tmp_path, probe, reset=reset)
+    assert server.dropped == []
+    assert IMPORT_UP_ARGV not in calls
+    ctl = Controller(SPEC, tmp_path, import_probe=probe, reset_unfinished=reset)
+    try:
+        ctl.refuse_an_ended_import()
+    except ImportEnded as exc:  # pragma: no cover - the assertion below names it
+        pytest.fail(f"Start refused a server with player data: {exc}")
+
+
+def test_the_reset_itself_refuses_rows_unless_told_they_are_the_imports() -> None:
+    """The guard twice (`reset_unfinished`'s own rule): `everything` alone clears no rows."""
+    server = _city_bots_crashed_server()
+    _probe, reset = _real_seams(server)
+    with pytest.raises(RuntimeError, match="player data"):
+        reset(everything=True)
+    assert server.dropped == []
+
+
+def test_the_record_from_empty_is_never_written_over_databases_with_rows(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The invariant the clearing rests on, on both routes that write the record."""
+    from tests.test_docker import SPEC, _repair_doubles
+
+    server = _city_bots_crashed_server()
+    probe, reset = _real_seams(server)
+    _repair_doubles(monkeypatch, [], running={SPEC.db})
+    with pytest.raises(docker.DockerCommandError):
+        docker.repair_import(SPEC, tmp_path, probe, reset=reset)
+    assert not _marker(tmp_path).exists()
+
+    rec = Recorder(probe_answers=[POPULATED_DONE])
+    _press(rec, tmp_path / "s")  # a finished import with rows: left alone
+    assert f"one-shot:{IMPORTER}" not in rec.calls
+    assert not _marker(tmp_path / "s").exists()
+
+
+def test_a_stop_ending_our_own_import_keeps_the_record_from_empty(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`end_one_shot()`'s kill record must not replace it, or the redo is lost."""
+    from tests.test_ended_import_is_not_trusted import _Daemon
+
+    monkeypatch.setattr(docker, "pinned_project_name", lambda server_dir: "wow-server")
+    monkeypatch.setattr(docker.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(docker, "_docker", _Daemon([IMPORTER], tmp_path))
+    docker.mark_import_under_way(tmp_path, IMPORTER)
+    assert docker.end_one_shot(IMPORTER, tmp_path, record_ended=True) is None
+    assert docker.import_record_is_from_empty(tmp_path, IMPORTER)
+
+
+def test_the_install_press_points_rows_from_its_crashed_import_at_repair(tmp_path: Path) -> None:
+    server = tmp_path / "s"
+    rec = Recorder(probe_answers=[ABSENT, IMPORTED])
+    with pytest.raises(InstallerError):
+        _press(rec, server, docker.AttachedRun(1, DIED))
+    rec.calls.clear()
+    rec.probe_answers = [POPULATED_DONE]
+    with pytest.raises(InstallerError) as raised:
+        _press(rec, server)
+    assert "Repair" in str(raised.value), str(raised.value)
+    assert "empty folder" not in str(raised.value)
+    assert not any(call.startswith("reset") for call in rec.calls), rec.calls
+
+
+def test_the_failure_sentence_names_repair_and_no_way_that_does_not_work() -> None:
+    run = docker.AttachedRun(1, DIED)
+    said = docker.importer_failure(run, "The database import", first_import=True)
+    assert "Repair" in said and "mod-city-bots" in said, said
+    assert "without it" not in said, said
+
+
+def test_composes_exit_line_takes_none_of_the_importers_last_words() -> None:
+    tail = (
+        *COMPOSE_UP_SAID[:5],
+        "ac-db-import exited with code 1",
+        "ac-db-import  | one more line of its own",
+    )
+    words = docker.importer_last_words(tail)
+    assert not any("exited with code" in line for line in words), words
+    assert words[-1] == "one more line of its own", words
