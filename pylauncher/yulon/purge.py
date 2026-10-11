@@ -86,6 +86,7 @@ from yulon.catalog import composegen
 from yulon.catalog.native import (
     PARKED_TAG_SUFFIX,
     ROLLBACK_TAG_SUFFIX,
+    STATE_FILE,
     forget_parked_build,
     forget_stopped_build,
 )
@@ -162,8 +163,8 @@ LEFT_BEHIND = (
     "Docker, WSL, and every other dependency Yu'lon provisioned",
     "another install of this game in another folder — different path, "
     "different install id, different project",
-    "this install's saved log snapshots, its stored server credential, and — "
-    "if you keep your characters — the copy of the database password that "
+    "this install's saved log snapshots and — if you keep your characters — its "
+    "stored server credential, the copy of the database password that "
     "opens the volume they are in and the record of a command-channel account "
     "not yet proved, all under Yu'lon's own config directory",
 )
@@ -177,11 +178,12 @@ The last line is the one no document decided. The credential file
 (`credentials/<game>-<install_id>.json`) and the log snapshots are keyed by the
 same path-derived install id, so a reinstall to the same folder inherits both.
 After a TICKED purge that is right — same database, same account. After an
-unticked one the credential is a secret for a database that no longer exists.
-Removing it is not done here because owner answer 1 says "only the launcher's
-own state record", and this module does not widen an owner's answer on its own;
-it is named to the user instead, and named again in the gate plan as a question
-for the owner.
+unticked one the credential was a secret for a database that no longer exists:
+the reinstall loaded it, found no account row and asked for Repair (lifecycle
+audit L15). Since T682 an unticked purge removes it with the database, by the
+pending record's rule below (T682's recommended option, open to the owner; answer 1's "only
+the launcher's own state record" was about the server folder's contents, and
+this file is the channel's record of a row the purge has just deleted).
 
 The record of a command-channel account created and not yet proved
 (`credentials/pending/`, T138) is the exception, and it follows the database
@@ -579,6 +581,7 @@ class Uninstaller:
         remove_image: Callable[[str], str] | None = None,
         remove_folder: Callable[[Path], None] | None = None,
         forget_pending: Callable[[], None] | None = None,
+        forget_credential: Callable[[], None] | None = None,
         remove_extraction_client: Callable[[], str] | None = None,
         stop_background_jobs: Callable[[], None] | None = None,
         take_back_client_files: Callable[[], tuple[list[str], list[str]]] | None = None,
@@ -611,6 +614,9 @@ class Uninstaller:
         self._remove_folder = remove_folder if remove_folder is not None else remove_tree
         self._forget_pending = (
             forget_pending if forget_pending is not None else self._real_forget_pending
+        )
+        self._forget_credential = (
+            forget_credential if forget_credential is not None else self._real_forget_credential
         )
         self._remove_extraction_client = (
             remove_extraction_client
@@ -683,6 +689,17 @@ class Uninstaller:
         from yulon import channel_setup
 
         channel_setup.remove_pending(self.game, composegen.install_id(self.server_dir))
+
+    def _real_forget_credential(self) -> None:
+        """Remove the channel's saved credential, or raise saying why not (T682)."""
+        from yulon import channel_setup
+
+        channel_setup.remove_credential(self.game, composegen.install_id(self.server_dir))
+
+    def _credential_file(self) -> Path:
+        from yulon import channel_setup
+
+        return channel_setup.credential_path(self.game, composegen.install_id(self.server_dir))
 
     def _real_remove_extraction_client(self) -> str:
         """A temporary extraction client a crashed TrinityCore install left beside a client (T179).
@@ -984,6 +1001,17 @@ class Uninstaller:
                     f"could not be removed ({exc}); delete that file before installing into "
                     f"this folder again, or the new server's command channel will be refused."
                 )
+            # T682 (lifecycle L15): the saved credential follows the database too. Its account
+            # row went with the auth database, and a reinstall here (same install id) loaded it
+            # and asked for Repair; without it the new server's channel makes a fresh one.
+            try:
+                self._forget_credential()
+            except OSError as exc:
+                warnings.append(
+                    f"the command channel's saved credential {self._credential_file()} could not "
+                    f"be removed ({exc}); delete that file before installing into this folder "
+                    f"again, or the new server's command channel will ask for Repair."
+                )
 
         removed_images: list[str] = []
         for ref in self.image_refs:
@@ -1233,9 +1261,20 @@ def remove_tree(path: Path) -> None:
     is the failure this raise exists to make impossible.
     """
     try:
-        rmtree.remove_tree(path)
+        # T682: the records a second press reads go last (`REMOVED_LAST`), so a removal that
+        # stops part-way leaves an install the next Uninstall still knows as Yu'lon's.
+        rmtree.remove_tree_last(path, REMOVED_LAST)
     except rmtree.TreeRemovalError as exc:
         raise PurgeRefusal(_undeletable(path, _cause(exc))) from exc
+
+
+REMOVED_LAST = (".db_password", ".env", docker.FOLDER_ID_FILE, STATE_FILE)
+"""What the folder's removal takes last, in this order (T682): the files a second Uninstall reads.
+
+The database password a ticked box copies again, the `.env` that pins the compose project,
+the folder id the reservation is named by, and LAST the install record that proves the folder
+is Yu'lon's (`_default_claim`). Before T682 they went in listing order, usually first.
+"""
 
 
 def _cause(exc: rmtree.TreeRemovalError) -> object:

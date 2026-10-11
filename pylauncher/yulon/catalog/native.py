@@ -3769,15 +3769,40 @@ def folder_start_refusal(
 ) -> str | None:
     """Every refusal of a start that the server folder records, or None (T197, T223, T225).
 
-    `START_REFUSED_FILE` first, then a stopped build that landed or could not be
-    checked. A Rebuild (`rebuilding`) is the way out of both, so neither refuses it.
+    A restore that did not finish first, for every press including a Rebuild (T681): the
+    databases may be half-written, and every one of these presses ends in a start on them.
+    Then `START_REFUSED_FILE`, then a stopped build that landed or could not be
+    checked. A Rebuild (`rebuilding`) is the way out of those two, so neither refuses it.
     The one call every start path makes: the controller's `refuse_start()`, the
     engine's `start_refusal()`, the Tortoise bot rebuild's pre-check and the
     Centurion finish.
     """
+    unfinished = unfinished_restore_refusal(server_dir)
+    if unfinished is not None:
+        return unfinished
     if rebuilding:
         return None
     return owed_start_refusal(server_dir) or stopped_build_refusal(server_dir, image_id)
+
+
+def unfinished_restore_refusal(server_dir: Path) -> str | None:
+    """The restore record's refusal of a start (T681, lifecycle L8/L19), or None. Never raises.
+
+    The record is the shared Maintenance module's (`backups/restore-in-progress.json`), the
+    one every game's Restore and a move's load write. Imported here and not at module scope:
+    the spine names no game family at import time.
+    """
+    from yulon.controller_wow_wotlk import maintenance  # noqa: PLC0415
+
+    if docker.held_here(server_dir):
+        # A restore of this process is loading right now: its marker is not one that "did not
+        # finish", and the hold refuses the start in the restore's own words (T216).
+        return None
+    try:
+        return maintenance.unfinished_restore_refusal(server_dir)
+    except OSError as exc:  # a folder that cannot be read refuses nothing new; it says so
+        logger.warning(f"could not look for an unfinished restore in {server_dir}: {exc}")
+        return None
 
 
 REMOVE_KEPT_BUILD_LABEL = "Remove kept build…"
@@ -9733,7 +9758,7 @@ class StagedInstaller:
         # now always receives this route's work and the work finishes only what the
         # family's own work finishes. Mixed image tags are repaired by a Rebuild
         # alone (`START_REFUSED_FILE`), never by moving the sources under them.
-        owed = owed_start_refusal(server_dir)
+        owed = unfinished_restore_refusal(server_dir) or owed_start_refusal(server_dir)
         if owed is not None:
             raise InstallerError(f"{owed} Nothing was started.")
         moving = self.sources_that_move()

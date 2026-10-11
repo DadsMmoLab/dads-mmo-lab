@@ -1000,6 +1000,23 @@ def remove_pending(game: str, install_id: str, *, config_dir: Path | None = None
     _sync_folder(path.parent)
 
 
+def remove_credential(game: str, install_id: str, *, config_dir: Path | None = None) -> None:
+    """Remove the saved credential for good, or raise saying why it is still there (T682).
+
+    `remove_pending()`'s strict twin, for an uninstall that has just removed the database the
+    credential's account row lived in. Left behind, a reinstall into the same folder (same
+    install id) loaded it, found no row, and every channel feature said Repair until Repair
+    was pressed. No credential is the ordinary case and is fine.
+    """
+    path = credential_path(game, install_id, config_dir=config_dir)
+    try:
+        # A call, not `path.unlink` handed over, so the write ledger's walk sees it.
+        _tried_again_on_windows(lambda: path.unlink())
+    except FileNotFoundError:
+        return
+    _sync_folder(path.parent)
+
+
 def _forget_credential(game: str, install_id: str, *, config_dir: Path | None = None) -> None:
     """Remove a saved credential a Repair has just made wrong. Never raises (T386).
 

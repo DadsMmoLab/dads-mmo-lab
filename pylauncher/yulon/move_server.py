@@ -931,19 +931,44 @@ def write_marker(server_dir: Path, digest: str, done: Sequence[str], **more: obj
     os.replace(partial, target)
 
 
+def move_in_finished(marker: Mapping[str, object]) -> bool:
+    """A move-in record whose every step is done: a server, no longer a move (T682).
+
+    Before T682 a finished move kept its record for good; such a folder is read as what it is.
+    """
+    done = marker.get("done")
+    return isinstance(done, list) and all(step in done for step in STEPS)
+
+
+def unfinished_move_in(server_dir: Path) -> bool:
+    """`server_dir` holds a whole-server move that did not finish (T682). Never raises.
+
+    A record that cannot be read still says a move was building here, so it counts; one whose
+    every step is done does not.
+    """
+    try:
+        if not (server_dir / MOVE_IN_FILE).exists():
+            return False
+    except OSError:
+        return False
+    marker = read_marker(server_dir)
+    return marker is None or not move_in_finished(marker)
+
+
 def folder_refusal(server_dir: Path, digest: str) -> tuple[str | None, bool]:
     """`(refusal, resuming)` for the folder a whole server would be built in.
 
     A folder that is not there, or is empty, is a new install. One that holds a move-in record
     of THIS package is that move, unfinished, and carries on. Anything else is refused: an
-    existing Yu'lon server above all, whose databases a move would otherwise replace.
+    existing Yu'lon server above all, whose databases a move would otherwise replace -- a
+    FINISHED move among them (T682), which a second press would otherwise install again.
     """
     if not server_dir.exists():
         return None, False
     if not server_dir.is_dir():
         return not_empty(server_dir), False
     marker = read_marker(server_dir)
-    if marker is not None and marker.get("package") == digest:
+    if marker is not None and marker.get("package") == digest and not move_in_finished(marker):
         return None, True
     from yulon.catalog import native
 
@@ -1139,6 +1164,26 @@ class _Record:
         if self.server_dir.is_dir() and not (self.server_dir / MOVE_IN_FILE).exists():
             self.save()
 
+    def load_cut_off(self) -> bool:
+        """Every step before the data is done and a restore of this folder did not finish (T681).
+
+        The steps are recorded only after the install has run, so a record that has reached
+        the data step belongs to a folder whose install finished on an earlier press.
+        """
+        from yulon.controller_wow_wotlk import maintenance
+
+        if "data" in self.done or not all(step in self.done for step in STEPS[:-1]):
+            return False
+        return maintenance.interrupted_restore(self.server_dir) is not None
+
+    def forget(self) -> None:
+        """Remove the record once the move is finished (T682). A record that stays is harmless:
+        `move_in_finished()` reads one whose steps are all done as a finished move."""
+        try:
+            (self.server_dir / MOVE_IN_FILE).unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning(f"the finished move's record could not be removed: {exc}")
+
     def finished(self, step: str) -> None:
         self.done.append(step)
         self.save()
@@ -1226,14 +1271,24 @@ class MovedInInstall:
         # one "already holding a server". The core's clone into the server folder itself clears
         # the folder, so the record is put back after every line the install says.
         record.save()
-        try:
-            for line in self._engine.run(options, cancel=cancel, ask=ask):
+        if record.load_cut_off():
+            # T681 (lifecycle L19): the last press stopped inside the data step, so the databases
+            # are half-replaced. The install finished on an earlier press (every step runs after
+            # it), and its own start would bring the server up on them; the data step below
+            # loads every database again, which is how this is finished.
+            yield (
+                "The last press stopped while the databases were being put in. The server is "
+                "not started on them; they are all put in again below."
+            )
+        else:
+            try:
+                for line in self._engine.run(options, cancel=cancel, ask=ask):
+                    record.keep()
+                    yield line
+            finally:
+                # Also when the install fails before it says anything after the clone cleared
+                # the folder: whatever the install left, this file carries on in it.
                 record.keep()
-                yield line
-        finally:
-            # Also when the install fails before it says anything after the clone cleared the
-            # folder: whatever the install left, this file carries on in it.
-            record.keep()
         server = self._server_for(server_dir, options.client_dir)
         # One reservation of the server for every step, so another Yu'lon is refused for the
         # whole bring-in and the steps' own Stop runs inside it, not as a press of its own.
@@ -1250,6 +1305,9 @@ class MovedInInstall:
             except docker.ServerHeldError as exc:
                 raise MoveError(f"{exc} Nothing more was changed; {_CARRY_ON}") from exc
             yield from self._each_stage(server, server_dir, package, record, cancel)
+        # T682 (lifecycle L18): every step is done, so the folder is a server, no longer a move.
+        # A record left behind made "Use existing..." and Install refuse it for good.
+        record.forget()
         yield from self._closing(server_dir)
 
     def _each_stage(

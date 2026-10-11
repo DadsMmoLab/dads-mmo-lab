@@ -910,7 +910,11 @@ def test_a_lifecycle_command_that_fails_does_not_keep_the_server_marked(
 def test_the_server_buttons_work_again_once_a_failed_restore_has_ended(
     qapp: object, tmp_path: Path, ps: _Ps
 ) -> None:
-    """The hold is released by a restore that fails too: the next Start reaches compose."""
+    """The hold is released by a restore that fails too: the next Start reaches compose.
+
+    T681: once the half-written record is put down. Before that the Start is refused by the
+    record (not by a hold left behind), naming the way out.
+    """
     stack = _Stack()
     mysql = _Mysql(stack, fails_load="ERROR 2013 (HY000): Lost connection")
     view = _view(_real_maintenance(tmp_path, stack, mysql))
@@ -920,6 +924,12 @@ def test_the_server_buttons_work_again_once_a_failed_restore_has_ended(
     view.run_restore()
     assert failures and "failed part-way" in failures[-1], failures
 
+    view.start_server()
+    assert not any(c[:3] == ["docker", "compose", "up"] for c in ps.calls), ps.calls
+    said = " ".join(failures) + view.problem_label.text()
+    assert "did not finish" in said and forgetting.RESTORE_HOLDS_THE_SERVER not in said, said
+
+    assert maintenance.forget_interrupted_restore(tmp_path)
     view.start_server()
     assert any(c[:3] == ["docker", "compose", "up"] for c in ps.calls), ps.calls
 

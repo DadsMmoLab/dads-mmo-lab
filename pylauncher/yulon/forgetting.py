@@ -92,6 +92,22 @@ RESTORE_HOLDS_THE_DATABASES = (
     "A restore is writing into this server's databases on its Maintenance tab. Wait for "
     "it to finish, then try again."
 )
+# T681: what every other press of this Yu'lon that would write to the server is told while a
+# Restore loads (`docker.hold_the_server(alone=...)`): a Modules job's SQL, an account, a network
+# change, a bot rebuild. Nothing it would have written was written.
+RESTORE_WRITES_ALONE = (
+    "A restore is writing into this server's databases on its Maintenance tab, and nothing "
+    "else may write to them until it has finished. Wait for the restore to finish, then try "
+    "again. Nothing was changed."
+)
+
+
+def another_press_writes(press: str) -> str:
+    """Why a Restore is refused while another press of this Yu'lon works on the server (T681)."""
+    return (
+        f"{press} is working on this server right now, and a restore must be the only thing "
+        "writing to its databases. Wait for it to finish, then try again."
+    )
 MOVE_HOLDS_THE_SERVER = (
     "Accounts and characters are being packed or brought in on this server's Maintenance tab, "
     "with the database started on its own for it. Wait for that to finish, then try again. "

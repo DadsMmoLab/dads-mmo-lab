@@ -539,6 +539,52 @@ class _RestoredWithNote:
     note: str | None
 
 
+@dataclass(frozen=True)
+class _BackedUpWithNote:
+    """A backup's report, and the line saying the database it started is still running (T681)."""
+
+    report: wotlk_maintenance.BackupReport
+    note: str
+
+
+DATABASE_LEFT_RUNNING = (
+    "The database was started on its own for this and could not be stopped again ({problem}), "
+    "so it is still running. Stop the server on the Server tab when you are done with it."
+)
+"""T681: the note a Backup or Restore that worked carries when its database would not stop."""
+
+
+@dataclass(frozen=True)
+class _PutBack:
+    result: object
+    stop_note: str | None
+
+
+def _put_back_after(work: Callable[[], object], alone: DatabaseAlone) -> _PutBack:
+    """Run `work`, then stop the database the press started; the job's own outcome is the report.
+
+    T681 (lifecycle L10): the stop ran in a `finally`, so a stop that raised replaced the
+    job's answer -- a restore or backup that WORKED was reported as failed, the Tortoise bot
+    note was lost and the backup's automatic keep did not run. Now a job that worked keeps its
+    report, with `DATABASE_LEFT_RUNNING` as a note; a job that failed raises its own failure,
+    and a stop that fails after it is logged, not raised over it.
+    """
+    try:
+        result = work()
+    except BaseException:
+        try:
+            alone.take_down()
+        except Exception as exc:  # noqa: BLE001 - the job's own failure is the report
+            logger.warning(f"the database started for this job could not be stopped again: {exc}")
+        raise
+    try:
+        alone.take_down()
+    except Exception as exc:  # noqa: BLE001 - a note on a job that worked, never its failure
+        logger.warning(f"the database started for this job could not be stopped again: {exc}")
+        return _PutBack(result, DATABASE_LEFT_RUNNING.format(problem=exc))
+    return _PutBack(result, None)
+
+
 class ChannelSetup(Protocol):
     """What the Server tab needs of the command channel (8.2a).
 
@@ -17203,11 +17249,11 @@ class ControllerView(QWidget):
             started = alone.bring_up("no backup was taken")
             if not started:
                 held.close()
-            try:
                 return self.services.backup()
-            finally:
-                if started:
-                    alone.take_down()
+            backed_up = _put_back_after(self.services.backup, alone)
+            if backed_up.stop_note is None:
+                return backed_up.result
+            return _BackedUpWithNote(backed_up.result, backed_up.stop_note)
 
     @Slot()
     def back_up(self) -> None:
@@ -17233,6 +17279,10 @@ class ControllerView(QWidget):
         retain = self._retain_after_backup
         self._retain_after_backup = False
         self.backup_button.setEnabled(True)
+        stop_note = None
+        if isinstance(result, _BackedUpWithNote):
+            stop_note = result.note
+            result = result.report
         if not isinstance(result, wotlk_maintenance.BackupReport):
             self._settle_shelf_buttons()
             return
@@ -17245,6 +17295,8 @@ class ControllerView(QWidget):
             lines.append(f"  !! expected but absent: {', '.join(result.missing_core)}")
         if result.server_was_running:
             lines.append("  note: the server was running, so this is a hot copy.")
+        if stop_note:
+            lines.append(stop_note)
         # Re-list BEFORE writing the report: refresh_backups() writes its own
         # message when the directory is empty, so refreshing afterwards wipes
         # the one thing the user just asked for (caught by its own test).
@@ -17372,6 +17424,9 @@ class ControllerView(QWidget):
                         press=forgetting.PRESS_RESTORE,
                         spec=self.services.controller.spec,
                         wsl_distro=self.services.controller.wsl_distro,
+                        # T681: the only writer for the whole load; a Modules job's SQL, an
+                        # account or a network write of this Yu'lon is refused meanwhile.
+                        alone=forgetting.RESTORE_WRITES_ALONE,
                     )
                 )
             except docker.ServerHeldError as exc:
@@ -17385,11 +17440,19 @@ class ControllerView(QWidget):
                         "Nothing was restored: the database could not be started on its own "
                         f"for it. {exc}"
                     ) from exc
-            try:
+            if not started:
                 return self._restore_with_the_bot_request(plan)
-            finally:
-                if started:
-                    alone.take_down()  # type: ignore[union-attr]
+            restored = _put_back_after(
+                lambda: self._restore_with_the_bot_request(plan),
+                alone,  # type: ignore[arg-type]
+            )
+            if restored.stop_note is None:
+                return restored.result
+            result = restored.result
+            if isinstance(result, _RestoredWithNote):
+                note = " ".join(n for n in (result.note, restored.stop_note) if n)
+                return _RestoredWithNote(result.report, note)
+            return _RestoredWithNote(result, restored.stop_note)  # type: ignore[arg-type]
 
     def _restore_with_the_bot_request(self, plan: wotlk_maintenance.RestorePlan) -> object:
         """T144: take a pending `once:` bot rebuild back, THEN restore (worker thread).
@@ -19434,6 +19497,16 @@ class ControllerView(QWidget):
         a press already in flight are not, and a module job writes the record of
         module updates that a failing Rebuild also writes (T557).
         """
+        if self._restore_running:
+            # T681: a Modules job's SQL must not interleave with a restore's load. The docker
+            # layer refuses it too (`hold_the_server(alone=...)`), for every window; this says
+            # so before anything is asked.
+            self.module_report.setPlainText(
+                REBUILD_BLOCKS_MODULE_JOB.format(
+                    what=what[:1].upper() + what[1:], wait=wait_for("the restore")
+                )
+            )
+            return True
         if not (self._busy or self.rebuild_log.running):
             return False
         job = self._busy_job if self._busy and self._busy_job else "the server build"
@@ -20073,6 +20146,8 @@ class ControllerView(QWidget):
         route = self.services.update_to_latest
         if route is None:
             return False
+        if self._refused_over_an_unfinished_restore(f"Update {self.entry.name}"):
+            return False
         if self._update_route_busy():
             # FALSE, like every other refusal on this tab and like
             # `_start_update_to_latest()` and `return_to_the_tested_pin()`: the
@@ -20128,10 +20203,12 @@ class ControllerView(QWidget):
         self._backup_before_update = False
         self.backup_button.setEnabled(True)
         self._set_update_buttons()
-        if not isinstance(result, wotlk_maintenance.BackupReport):
+        report = result.report if isinstance(result, _BackedUpWithNote) else result
+        if not isinstance(report, wotlk_maintenance.BackupReport):
             self._backup_before_update_failed("the backup did not say what it wrote")
             return
         self._backup_done(result)
+        result = report
         if not said_yes(
             QMessageBox.question(
                 self,
@@ -20162,6 +20239,24 @@ class ControllerView(QWidget):
         self.action_failed.emit(f"{message} ({detail})" if detail else message)
         show_warning(self, f"{self.entry.name}", message)
         self._show_interrupted()
+
+    def _refused_over_an_unfinished_restore(self, title: str) -> bool:
+        """Say no, before any question or backup, while a restore is recorded unfinished (T681).
+
+        The engine refuses too (`native.unfinished_restore_refusal`); asked here first so the
+        update's backup is not taken of half-written databases and then refused anyway.
+        """
+        try:
+            record = self.services.interrupted_restore()
+        except Exception as exc:  # noqa: BLE001 - a record that cannot be read: the engine asks
+            logger.warning(f"could not read the restore record before {title}: {exc}")
+            return False
+        if record is None:
+            return False
+        said = wotlk_maintenance.unfinished_restore_sentence(record)
+        self.maintenance_report.setPlainText(said)
+        show_warning(self, title, said)
+        return True
 
     def _start_update_to_latest(self) -> bool:
         """Run the update in the shared panel. The one place either answer ends up.

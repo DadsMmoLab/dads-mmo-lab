@@ -1100,6 +1100,76 @@ RESTORE_STILL_RUNNING = (
 )
 
 
+def system_schema_refusal(name: str, schemas: Sequence[str]) -> str:
+    """Why a dump that writes MySQL's own schemas is not restored (T681, lifecycle L9).
+
+    An `--all-databases` dump carries `mysql`, the database server's own accounts and
+    passwords. Loaded over this server's container it replaces them, and after the next
+    restart the server no longer accepts its own root password -- the hazard `SYSTEM_SCHEMAS`
+    already keeps out of every backup. Refused rather than safety-copied: nothing Yu'lon makes
+    holds these, so a file that does was made elsewhere for another server.
+    """
+    named = ", ".join(schemas)
+    return (
+        f"{name} also writes MySQL's own system database ({named}): its user accounts and "
+        "passwords. Restoring it would replace this server's own, and the database could stop "
+        "accepting its password. Yu'lon does not restore such a file. Make a backup that holds "
+        "only the game's databases (this tab's Back up does that) and restore that instead"
+    )
+
+
+MOVE_IN_COPY_FOLDER = ".move-in-"
+"""The start of the folder name a move loads its copies from (T681)."""
+MOVE_IN_RECORD = ".yulon-move-in.json"
+"""`catalog.native.MOVE_IN_FILE` (pinned equal by a test): a whole-server move is building here."""
+
+
+def unfinished_restore_sentence(record: InterruptedRestore, *, moving_in: bool = False) -> str:
+    """Why nothing may start on a restore that did not finish, and the way out (T681, L8/L19).
+
+    One sentence for Start, Update, Rebuild and a Bring-in carried on, so they cannot disagree.
+    The way out is named: restore again (with the copy taken before it), or put the record
+    down once the databases are put right. A move-in's own load says to press Bring-in again,
+    which loads every database again.
+    """
+    if record.load_running:
+        return (
+            "A restore from the last session is still writing into this server's databases in "
+            "Docker, so the server is not started on them. Wait for it to finish, then try again."
+        )
+    if not record.readable:
+        return (
+            f"A restore of this server did not finish, and its record at {record.marker} cannot "
+            "be read, so the databases may be half-written and the server is not started on "
+            "them. On the Maintenance tab, restore a backup again, or press Forget that record "
+            "if you have already put the databases right."
+        )
+    named = ", ".join(record.databases) or "this server's databases"
+    if moving_in and record.backup.parent.name.startswith(MOVE_IN_COPY_FOLDER):
+        return (
+            f"Bringing this server from another computer stopped while it was putting {named} "
+            "in, so they are half-written and the server is not started on them. Press "
+            "Bring from another computer again with the same file and this folder: it puts "
+            "every database in again."
+        )
+    copy = ", ".join(str(p) for p in record.safety_backup)
+    taken = f" The copy taken just before it is {copy}." if copy else ""
+    return (
+        f"A restore of {named} did not finish, so those databases may be half-written and the "
+        "server is not started on them. On the Maintenance tab, restore a backup again to "
+        f"finish it, or press Forget that record if you have already put them right.{taken}"
+    )
+
+
+def unfinished_restore_refusal(server_dir: Path) -> str | None:
+    """`unfinished_restore_sentence()` for this folder's restore record, or None if it has none."""
+    record = interrupted_restore(server_dir)
+    if record is None:
+        return None
+    moving_in = (server_dir / MOVE_IN_RECORD).exists()
+    return unfinished_restore_sentence(record, moving_in=moving_in)
+
+
 def this_host() -> str:
     """This computer's name, written beside a recorded pid."""
     return socket.gethostname()
@@ -1504,6 +1574,11 @@ def plan_restore(
                     f"{backup_file.name} names no database (no USE or CREATE DATABASE), so "
                     "there is no telling what it would overwrite"
                 )
+            system = [name for name in databases if name.lower() in SYSTEM_SCHEMAS]
+            if system:
+                # T681 (lifecycle L9): `_safety_backup()` copies only `server_databases()`,
+                # which leaves these out, so nothing could put them back.
+                refusals.append(system_schema_refusal(backup_file.name, system))
             try:
                 recorded = backup_game(backup_file)
             except MaintenanceError as exc:
