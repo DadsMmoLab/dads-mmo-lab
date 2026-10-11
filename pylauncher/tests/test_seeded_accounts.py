@@ -646,6 +646,40 @@ def test_a_database_that_comes_up_later_is_asked_when_it_does(
         view.shutdown()  # type: ignore[attr-defined]
 
 
+def test_a_reservation_that_cannot_be_made_still_says_the_accounts_are_not_locked(
+    db: AuthDb, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T716 round 2: only a held server waits silently; an unavailable reservation is said.
+
+    Mutation: let `ServerReservationUnavailable` propagate like `ServerHeldError`.
+    """
+    monkeypatch.setattr(docker, "status", lambda **_k: [TBC.container_spec().db])
+
+    def cannot(*_a: object, **_k: object) -> None:
+        raise docker.ServerReservationUnavailable("The server's id file is unreadable.")
+
+    monkeypatch.setattr(docker, "server_hold", cannot)
+    controller = Controller(TBC.container_spec(), an_install(tmp_path))
+    controller.entry = TBC
+    said = controller.lock_seeded_accounts_if_up()
+    assert said is not None and "could not lock" in said and "id file is unreadable" in said
+    assert controller.seeded_accounts_locked == said
+    assert db.statements == []
+
+
+def test_polls_during_a_restore_log_no_warning(
+    db: AuthDb, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(docker, "status", lambda **_k: [TBC.container_spec().db])
+    controller = Controller(TBC.container_spec(), an_install(tmp_path))
+    controller.entry = TBC
+    with docker.hold_the_server(controller.server_dir, "A restore.", alone="Alone."):
+        for _ in range(3):
+            with pytest.raises(docker.ServerHeldError):
+                controller.lock_seeded_accounts_if_up()
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
 def test_a_poll_during_a_restore_writes_nothing_and_the_next_one_locks(
     qapp: object, db: AuthDb, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, inline_jobs: None
 ) -> None:
