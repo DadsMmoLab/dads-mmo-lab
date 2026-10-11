@@ -394,6 +394,9 @@ def test_a_start_that_is_refused_locks_nothing(
     controller.entry = TBC
     monkeypatch.setattr(controller, "port_conflicts", lambda: ["3724"])
     monkeypatch.setattr(controller, "_owners_of", lambda conflicts: {})
+    # The refusal names the ports the conflict holds (`_ports_taken_by`, T671): Docker's
+    # answer to who publishes them is faked too, so the refusal reaches no real CLI.
+    monkeypatch.setattr(docker, "port_publishers", lambda ports, **_kw: {})
     with pytest.raises(PortConflictError):
         controller.start()
     assert db.updates() == []
