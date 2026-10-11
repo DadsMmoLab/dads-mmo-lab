@@ -599,15 +599,26 @@ class Controller:
         the status poll makes, a stopped WSL distro included) and does nothing while the
         database is down; starts nothing. A note said earlier stays on `seeded_accounts_locked`
         until the next Start. Nothing for a core that does not seed the accounts.
+
+        Raises:
+            docker.ServerHeldError: a job holds the server (T716); nothing was written.
         """
         entry = self.entry or _entry_for(self.spec)
         if entry is None or entry.accounts.scheme != seeded_accounts.SCHEME:
             return None
         if not self.status().db:
             return None
-        said = seeded_accounts.settle(
-            entry, self.spec, self.server_dir, wsl_distro=self.wsl_distro, start_database=False
-        )
+        # T716: a write to the auth database is a press on the server like the Accounts tab's;
+        # a restore writing alone (or another Yu'lon) refuses it, and the poll asks again.
+        with docker.server_hold(
+            self.server_dir,
+            "Locking the built-in accounts",
+            spec=self.spec,
+            wsl_distro=self.wsl_distro,
+        ):
+            said = seeded_accounts.settle(
+                entry, self.spec, self.server_dir, wsl_distro=self.wsl_distro, start_database=False
+            )
         if said is not None:
             self.seeded_accounts_locked = said
         return said

@@ -542,6 +542,28 @@ def test_the_controller_locks_an_install_whose_database_is_already_up(
     assert len(db.updates()) == 4
 
 
+
+def test_the_lock_waits_while_a_restore_holds_the_server_and_says_nothing_false(
+    db: AuthDb, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T716: the poll's lock is a press on the server; a restore alone refuses it, writes nothing.
+
+    Mutation: call `seeded_accounts.settle()` outside `docker.server_hold()`.
+    """
+    monkeypatch.setattr(docker, "status", lambda **_k: [TBC.container_spec().db])
+    controller = Controller(TBC.container_spec(), an_install(tmp_path))
+    controller.entry = TBC
+    with docker.hold_the_server(
+        controller.server_dir, "A restore is running.", alone="A restore writes to it."
+    ):
+        with pytest.raises(docker.ServerHeldError):
+            controller.lock_seeded_accounts_if_up()
+        assert db.statements == [], "the lock reached the database inside a restore's hold"
+    assert controller.seeded_accounts_locked is None, "a false 'accounts still open' warning"
+    # The restore over, the next poll locks.
+    assert controller.lock_seeded_accounts_if_up() is not None
+    assert len(db.updates()) == 4
+
 # the Server tab and the Accounts tab, built the way main.py builds them
 
 
@@ -620,6 +642,28 @@ def test_a_database_that_comes_up_later_is_asked_when_it_does(
         up.append(TBC.container_spec().db)
         _tick(view)
         assert not any(db.seeded_state(n) for n in SEEDED)
+    finally:
+        view.shutdown()  # type: ignore[attr-defined]
+
+
+def test_a_poll_during_a_restore_writes_nothing_and_the_next_one_locks(
+    qapp: object, db: AuthDb, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, inline_jobs: None
+) -> None:
+    """T716: the status poll finds the database up inside a restore's hold; it waits silently."""
+    up: list[str] = []
+    monkeypatch.setattr(docker, "status", lambda **_k: list(up))
+    view = _view(an_install(tmp_path))
+    try:
+        server_dir = view.services.controller.server_dir  # type: ignore[attr-defined]
+        _tick(view)  # the database is down: nothing asked yet
+        up.append(TBC.container_spec().db)
+        with docker.hold_the_server(server_dir, "A restore.", alone="A restore writes alone."):
+            _tick(view)
+            assert db.statements == [], "the lock wrote beside the restore's load"
+            controller = view.services.controller  # type: ignore[attr-defined]
+            assert controller.seeded_accounts_locked is None
+        _tick(view)
+        assert len(db.updates()) == 4, "the poll after the restore locks them"
     finally:
         view.shutdown()  # type: ignore[attr-defined]
 
