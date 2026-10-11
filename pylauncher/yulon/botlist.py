@@ -108,21 +108,25 @@ class Page:
     """Where the next page starts, or None when this is the last one."""
 
 
-def escape_quotes(text: str) -> str:
-    """A value going inside a quoted literal, with its quote doubled."""
-    return text.replace("'", "''")
+def literal(text: str) -> str:
+    """One string as a hex blob, so the server never parses what is inside it.
+
+    The shape `play.literal` and `useraccounts` use. A quoted literal with its
+    quote doubled is not enough here: MySQL and MariaDB also read a backslash
+    inside quotes by default, so a typed `\\'` closed the literal (T683).
+    """
+    return "_utf8mb4 X'" + text.encode("utf-8").hex().upper() + "'"
 
 
 def escape_like(text: str) -> str:
-    """One user-typed filter, safe inside a quoted LIKE pattern.
+    """One user-typed filter, with the LIKE wildcards made literal.
 
-    Three characters and no more: the two LIKE wildcards, the escape itself, and
-    the quote that ends the literal. Anything else a person types is a
-    character in a character's name.
+    Two wildcards and the escape itself and no more: anything else a person
+    types is a character in a character's name. The result goes to the server
+    through `literal`, never inside quotes.
     """
     out = text.replace(ESCAPE, ESCAPE + ESCAPE)
-    out = out.replace("%", ESCAPE + "%").replace("_", ESCAPE + "_")
-    return out.replace("'", "''")
+    return out.replace("%", ESCAPE + "%").replace("_", ESCAPE + "_")
 
 
 def page(
@@ -157,13 +161,13 @@ def page(
     online = ops.characters.online
     where = f"({clause})"
     if name_like:
-        where += f" AND name LIKE '{escape_like(name_like)}%' ESCAPE '{ESCAPE}'"
+        where += f" AND name LIKE {literal(escape_like(name_like) + '%')} ESCAPE '{ESCAPE}'"
     counted = where
     if after is not None:
         # The row comparison, not `name > x OR (name = x AND guid > y)`: it is
         # the same thing, it is what an index on (name, guid) can seek to, and
         # it cannot be got subtly wrong.
-        where += f" AND (name, guid) > ('{escape_quotes(after[0])}', {int(after[1])})"
+        where += f" AND (name, guid) > ({literal(after[0])}, {int(after[1])})"
 
     try:
         counts = sql.query(

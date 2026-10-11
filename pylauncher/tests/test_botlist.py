@@ -8,6 +8,8 @@ disagree in the cases that matter.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from yulon import botlist, dbreads
@@ -107,8 +109,33 @@ def test_the_filter_is_escaped_with_a_character_a_stricter_sql_mode_keeps() -> N
     # The whole pattern, not a substring of it: asserting that "%" appears is
     # true whether or not it was escaped, which is how the first version of
     # this test survived a mutation that turned the escaping off.
-    assert "LIKE '10!%!_o''brien%' ESCAPE '!'" in rows
+    assert _like_pattern(rows) == "10!%!_o'brien%"
     assert "\\" not in rows, "a backslash escape stops escaping under NO_BACKSLASH_ESCAPES"
+
+
+def _like_pattern(statement: str) -> str:
+    """The LIKE pattern, read back out of its hex literal, or a failure."""
+    found = re.search(r"name LIKE _utf8mb4 X'([0-9A-F]*)' ESCAPE '!'", statement)
+    assert found, f"the filter is not a hex literal: {statement}"
+    return bytes.fromhex(found.group(1)).decode("utf-8")
+
+
+def test_a_typed_backslash_quote_cannot_end_the_filter_literal() -> None:
+    """MySQL and MariaDB read a backslash inside a quoted literal by default.
+
+    Doubling the quote is not enough then: `\\'` becomes `\\''`, which the server
+    reads as an escaped quote and then a closing one, and the rest of what was
+    typed is SQL. The filter goes in as hex, like every other typed value in
+    the tree, so nothing a person types is parsed at all.
+    """
+    sql = _Reader("1\t1\t0", "")
+    typed = "x\\'; DROP TABLE characters; -- "
+
+    botlist.page(sql, WOTLK, MARKER, name_like=typed)
+
+    for _db, statement in sql.asked:
+        assert "DROP TABLE" not in statement.upper(), statement
+    assert _like_pattern(sql.asked[1][1]) == typed + "%"
 
 
 def test_a_database_that_cannot_be_read_says_so() -> None:
@@ -174,7 +201,7 @@ def test_a_page_is_asked_for_by_where_the_last_one_ended() -> None:
 
     rows = sql.asked[1][1]
     assert "OFFSET" not in rows
-    assert "(name, guid) > ('Guglu', 42)" in rows
+    assert "(name, guid) > (_utf8mb4 X'4775676C75', 42)" in rows  # 'Guglu'
 
 
 def test_the_first_page_asks_for_no_cursor_at_all() -> None:

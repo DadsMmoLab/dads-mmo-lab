@@ -784,7 +784,8 @@ def backup(
         raise MaintenanceError(f"{spec.db} is running but reports no databases; nothing to back up")
 
     directory = backups_dir(server_dir)
-    directory.mkdir(parents=True, exist_ok=True)
+    # A new folder is the owner's alone; one that exists keeps the mode its owner gave it.
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     stamp = (now or datetime.now()).strftime(_TIMESTAMP_FORMAT)
     missing_core = tuple(name for name in core_databases if name not in present)
     if missing_core:
@@ -821,6 +822,11 @@ def backup(
     return report
 
 
+def _private_opener(path: str, flags: int) -> int:
+    """An `open(opener=)` that creates the file 0600 and never reuses one (`O_EXCL`)."""
+    return os.open(path, flags | os.O_EXCL, platform.PRIVATE_MODE)
+
+
 def _dump_one(
     mysql: MysqlDocker,
     database: str,
@@ -844,7 +850,11 @@ def _dump_one(
         record = f"-- yulon-backup: game={game.id}"
         if GAME_RECORD.fullmatch(record) is None:
             raise MaintenanceError(f"{game.id!r} is not a game id a backup can record")
-        with partial.open("wb") as sink:
+        # The dumps hold every account's login verifier and the realm session keys, so
+        # they are as private as `.env` (T683 S5). Created 0600 rather than chmodded
+        # after, and a leftover `.partial` goes first: truncating it would keep its mode.
+        partial.unlink(missing_ok=True)
+        with open(partial, "wb", opener=_private_opener) as sink:
             sink.write(record.encode() + b"\n")
             # mysqldump writes to the file DESCRIPTOR, not through this object, so
             # a record still in Python's buffer would land after the dump (found on

@@ -35,6 +35,8 @@ direction, rather than on a missing call.
 from __future__ import annotations
 
 import logging
+import os
+import stat
 import sys
 import tempfile
 import threading
@@ -181,6 +183,7 @@ def configure(
                 fallback = Path(tempfile.gettempdir()) / APP_NAME
                 _file_problem = f"Yu'lon could not write its log to {wanted}: {exc}."
                 try:
+                    _own_private_folder(fallback)
                     file_handler = _open_log(fallback, max_bytes, backup_count)
                     _file_problem += f"\n\nIt is logging to {fallback / f'{APP_NAME}.log'} instead."
                 except OSError as fallback_exc:
@@ -216,6 +219,27 @@ def _open_log(directory: Path, max_bytes: int, backup_count: int) -> RotatingFil
         backupCount=backup_count,
         encoding="utf-8",
     )
+
+
+def _own_private_folder(directory: Path) -> None:
+    """Make `directory` 0700, or raise `OSError` when it is not a real folder of this user's.
+
+    On Linux and macOS the temp dir is shared by every local user, and `mkdir`
+    with `exist_ok` takes a `yulon` folder, or a link, that someone else made
+    first: they would then own the log (T683 S2b). A Windows `%TEMP%` is the
+    user's own, and Windows has no `getuid`, so there is nothing to ask there.
+    """
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    getuid = getattr(os, "getuid", None)
+    if getuid is None:
+        return
+    found = directory.lstat()
+    if not stat.S_ISDIR(found.st_mode):
+        raise OSError(f"{directory} is not a plain folder")
+    if found.st_uid != getuid():
+        raise OSError(f"{directory} belongs to another user")
+    if stat.S_IMODE(found.st_mode) & 0o077:
+        directory.chmod(0o700)
 
 
 def _reset_for_tests() -> None:

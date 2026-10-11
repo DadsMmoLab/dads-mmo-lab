@@ -46,6 +46,10 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - The **Battle Pass** vendor can now be spawned in the world, and removing Battle Pass takes it away.
 - Removing or updating a Lua script module keeps any of its files you changed, and says which.
 - A Lua script module that would replace another module's file is refused, naming that module.
+- The Console tab no longer shows a typed account password, whether the command is shortened, capitalised or dotted.
+- A support file now also takes out the password of a shortened or quoted account command.
+- On Linux and macOS your database backups can now be read by you alone.
+- The Bots tab name filter no longer fails on a name typed with a backslash.
 
 ### Changed
 - The Server tab's **Play** now starts the game; **Launcher…** opens the launcher. The tray's **Play** starts a stopped server.
