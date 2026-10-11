@@ -815,7 +815,7 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
                 "the Vanilla and TBC controllers set their own MAX_USERNAME from mangos_srp6"
             ),
             "trinitycore": not_applicable(
-                "create_account checks a Centurion name against its own scheme's ceiling "
+                "create_account checks a TrinityCore entry's name against its own scheme's ceiling "
                 "(account_rules.name_problem); this constant is the WotLK game's"
             ),
         },
