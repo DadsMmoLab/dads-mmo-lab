@@ -23,6 +23,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Uninstall of a server folder that is a link now says so before it removes anything, instead of after the Docker side is gone.
 - Uninstall of a junction server folder no longer writes into the folder it points to, nor blames a read-only file.
 - The built-in account lock no longer writes to a TBC or Vanilla database while a restore is loading it.
+- The built-in accounts get locked when the database comes up after Yu'lon opened, however long it takes.
 - On a Mac, clicking Yu'lon in the Dock brings its window back when it was closed into the menu bar.
 - On Windows, deleting a folder no longer clears read-only flags or removes folders behind a junction inside it.
 - The update check no longer offers an older build as the newest once a version has a tenth patch release.

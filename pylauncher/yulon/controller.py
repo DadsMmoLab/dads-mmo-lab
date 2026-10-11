@@ -636,6 +636,9 @@ class Controller:
             said = seeded_accounts.NOT_LOCKED.format(why=first[0] if first else "no reservation")
         if said is not None:
             self.seeded_accounts_locked = said
+        elif seeded_accounts.is_not_locked(self.seeded_accounts_locked):
+            # T718: an earlier try failed (database not ready); this one found nothing seeded.
+            self.seeded_accounts_locked = None
         return said
 
     def refuse_an_old_compose(self) -> None:

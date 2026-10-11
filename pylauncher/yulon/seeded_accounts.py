@@ -78,6 +78,25 @@ NOT_LOCKED = (
     "anyone who can reach this server can use them."
 )
 
+RETRY_POLLS = 24
+"""How many status polls (five seconds apart) ask again at once after a lock that failed (T718)."""
+
+SLOW_EVERY = 12
+"""After RETRY_POLLS tries, ask on every this-many-th poll (about a minute), without end."""
+
+_last_failure: dict[str, str] = {}
+"""The reason each server's last lock failed with, so a retry logs only a new one (T718)."""
+
+
+def forget_failures() -> None:
+    """The database went down: its next failure is a new one and is logged (T718)."""
+    _last_failure.clear()
+
+
+def is_not_locked(line: str | None) -> bool:
+    """Whether `line` is the `NOT_LOCKED` notice, whatever its reason (T718)."""
+    return line is not None and line.startswith(NOT_LOCKED.split("{", 1)[0])
+
 
 def _writer() -> ModuleType:
     """The shared SRP6 writer (`controller_wow_wotlk.accounts`), imported when first needed.
@@ -184,8 +203,14 @@ def settle(
             )
         changed = lock(ask, entry.databases.auth)
     except docker.DockerCommandError as exc:
-        logger.warning(f"{entry.id}: the seeded accounts were not locked: {exc}")
-        return NOT_LOCKED.format(why=_why(exc))
+        reason = _why(exc)
+        # A Start's own lock always says why; only the poll's retries are deduplicated.
+        if start_database or _last_failure.get(entry.id) != reason:
+            if not start_database:
+                _last_failure[entry.id] = reason
+            logger.warning(f"{entry.id}: the seeded accounts were not locked: {exc}")
+        return NOT_LOCKED.format(why=reason)
+    _last_failure.pop(entry.id, None)
     if not changed:
         return None
     logger.info(f"{entry.id}: gave the seeded accounts {', '.join(changed)} random passwords")
