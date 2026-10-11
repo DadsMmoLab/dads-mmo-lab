@@ -407,6 +407,95 @@ def test_the_launcher_declares_which_thread_is_its_gui_thread(tmp_path: Path) ->
     assert done.returncode == 0, f"{done.stdout}\n{done.stderr}"
 
 
+_SMOKE_BUILDS_A_WINDOW = """\
+import sys
+
+sys.argv = ["yulon"]
+import main
+
+real = main.build_window
+built = []
+
+
+def build_window():
+    window = real()
+    built.append(window)
+    return window
+
+
+main.build_window = build_window
+code = main.main()
+if not built:
+    raise SystemExit("the smoke run returned without building the window")
+from yulon.ui.controller_view import ControllerView
+
+print(f"TABS {len(built[0].findChildren(ControllerView))}", flush=True)
+raise SystemExit(code)
+"""
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(sys.platform == "win32", reason="the stand-in docker is a shell script")
+def test_the_smoke_run_builds_every_servers_tab_and_asks_docker_nothing(tmp_path: Path) -> None:
+    """T676 round 3: the smoke run proves the window builds, not that the servers answer.
+
+    Since the instance claim no longer stops it, it builds every remembered server's
+    tab, and each tab's first status poll and account read went to docker: 24-30
+    calls for six servers, measured. On Docker Desktop each can take seconds, inside
+    the 60 s `SMOKE_TIMEOUT_SECONDS`, so a good update could be refused. The real
+    entry point runs in a child, with a `docker` first on PATH that records any call.
+    """
+    home, scratch, bin_ = tmp_path / "home", tmp_path / "temp", tmp_path / "bin"
+    for folder in (home, scratch, bin_):
+        folder.mkdir()
+    calls = tmp_path / "docker-calls"
+    for name in ("docker", "docker-compose", "podman"):
+        fake = bin_ / name
+        fake.write_text(f'#!/bin/sh\necho "{name} $*" >> "{calls}"\nexit 1\n', encoding="utf-8")
+        fake.chmod(0o755)
+    games = ["wow-wotlk", "wow-tbc", "wow-vanilla", "wow-tortoise", "wow-unbound", "wow-centurion"]
+    installs = []
+    for game in games:
+        server_dir = tmp_path / "servers" / game
+        server_dir.mkdir(parents=True)
+        installs.append({"game": game, "server_dir": str(server_dir)})
+    config = home / "yulon"
+    config.mkdir()
+    (config / "state.json").write_text(
+        json.dumps({"schema_version": 1, "installs": installs}), encoding="utf-8"
+    )
+
+    env = {k: v for k, v in os.environ.items() if not k.startswith("YULON_")}
+    path = [p for p in env.get("PATH", "").split(os.pathsep) if not p.startswith("/mnt/")]
+    env.update(
+        {
+            "PATH": os.pathsep.join([str(bin_), *path]),
+            "HOME": str(home),
+            "APPDATA": str(home),
+            "XDG_DATA_HOME": str(home),
+            "YULON_SMOKE_TEST": "1",
+            "QT_QPA_PLATFORM": "offscreen",
+            "TMPDIR": str(scratch),
+            "TEMP": str(scratch),
+            "TMP": str(scratch),
+            "PYTHONPATH": str(Path(main.__file__).parent),
+        }
+    )
+    done = subprocess.run(
+        [sys.executable, "-c", _SMOKE_BUILDS_A_WINDOW],
+        cwd=Path(main.__file__).parent,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+
+    assert done.returncode == 0, f"{done.stdout}\n{done.stderr}"
+    assert f"TABS {len(games)}" in done.stdout, "a tab was not built, so it asked nothing"
+    said = calls.read_text(encoding="utf-8") if calls.exists() else ""
+    assert said == "", f"the smoke run asked docker {said.count(chr(10))} time(s):\n{said}"
+
+
 def test_a_log_that_had_to_move_is_told_to_the_user_and_not_only_to_the_log(
     qapp: object, monkeypatch: pytest.MonkeyPatch
 ) -> None:

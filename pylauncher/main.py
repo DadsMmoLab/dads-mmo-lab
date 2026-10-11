@@ -1508,7 +1508,16 @@ def build_window() -> object:
             # `save_state()`'s `OSError` is caught by `purge.run()` and reported
             # as a warning on a finished uninstall.
             services.uninstall.forget = _forget_live_record(game, server_dir)
-        view = ControllerView(entry, services)
+        # T676 round 3: the smoke run proves the window BUILDS, not that the
+        # servers answer. A polling tab asks docker at once (ps, inspect, the
+        # account read: 24 calls for six servers, measured), and on Docker
+        # Desktop each can take seconds inside the 60 s the update allows.
+        # `status_poll_ms=0` is the tab's own "not polled at all" switch.
+        view = (
+            ControllerView(entry, services, status_poll_ms=0)
+            if in_smoke_test()
+            else ControllerView(entry, services)
+        )
         view.uninstalled.connect(on_uninstalled)
         view.client_dir_changed.connect(on_client_dir_changed)
         view.play_client_dir_changed.connect(on_play_client_dir_changed)
