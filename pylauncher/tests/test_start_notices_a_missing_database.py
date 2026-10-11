@@ -624,3 +624,93 @@ def test_a_rebuild_refused_on_an_empty_volume_says_it_is_empty(
     view._rebuild_finished(False, f"{database_presence.EMPTY} Nothing was changed.")
     assert view.problem_label.text() == database_presence.EMPTY
     assert view.repair_database_button.isVisibleTo(view)
+
+
+# -- the cut-off import refuses on every press that starts (T705: H5/H6) -------------------
+
+
+def _a_cut_off_import(controller: Controller) -> list[str]:
+    """The record an ended import leaves (T658), and a probe that reads `imported`, as one does.
+
+    The probe answers `imported` every time: AzerothCore's importer makes every schema's
+    `updates` tables before it fills them, so only the record tells the press it was cut off.
+    """
+    asked: list[str] = []
+
+    def probe() -> docker.ImportState:
+        asked.append("probe")
+        return docker.ImportState("imported", "", complete=True)
+
+    controller.import_probe = probe
+    service = controller.spec.import_service
+    assert service
+    docker.one_shot_ended_marker(controller.server_dir, service).write_text("ended\n")
+    return asked
+
+
+def test_start_refuses_a_cut_off_import_and_starts_no_server(
+    db: _DbDocker, tmp_path: Path
+) -> None:
+    from yulon.controller import IMPORT_ENDED, ImportEnded
+
+    controller = Controller(SPEC, tmp_path)
+    asked = _a_cut_off_import(controller)
+    with pytest.raises(ImportEnded) as refused:
+        controller.start()
+    assert str(refused.value) == IMPORT_ENDED
+    assert asked, "the databases were asked, through the real Start"
+    assert _started_servers(db) == []
+
+
+def test_without_the_record_the_same_start_goes_ahead(db: _DbDocker, tmp_path: Path) -> None:
+    controller = Controller(SPEC, tmp_path)
+    _a_cut_off_import(controller)
+    service = SPEC.import_service
+    assert service
+    docker.one_shot_ended_marker(tmp_path, service).unlink()
+    controller.start()
+    assert len(_started_servers(db)) == 1
+
+
+@pytest.mark.parametrize("press", ["_do_restart", "_do_recreate"])
+def test_restart_and_recreate_refuse_a_cut_off_import_before_they_stop_anything(
+    qapp: object, db: _DbDocker, tmp_path: Path, press: str
+) -> None:
+    """Asked by `refuse_before_a_stop()`: a refusal after the stop would leave the world down."""
+    from yulon.controller import ImportEnded
+
+    _all_up(db)
+    view = _view(db, tmp_path, [])
+    _a_cut_off_import(view.services.controller)
+    with pytest.raises(ImportEnded):
+        getattr(view, press)()
+    assert _stops(db) == [], "refused after the stop"
+    assert sorted(db.names.split()) == sorted((SPEC.db, SPEC.auth, SPEC.world))
+
+
+def test_the_bots_restart_refuses_a_cut_off_import_before_its_stop(
+    db: _DbDocker, tmp_path: Path
+) -> None:
+    from yulon.controller import ImportEnded
+    from yulon.controller_wow_tortoise import botpool
+
+    _all_up(db)
+    controller = Controller(SPEC, tmp_path)
+    _a_cut_off_import(controller)
+    with pytest.raises(ImportEnded):
+        botpool.restart_world(controller)
+    assert _stops(db) == []
+
+
+def test_stopping_the_other_server_refuses_a_cut_off_import_before_its_stop(
+    db: _DbDocker, tmp_path: Path
+) -> None:
+    from yulon.controller import ImportEnded
+
+    db.ports = "tbc-realmd\t0.0.0.0:3724->3724/tcp\n"
+    controller = Controller(SPEC, tmp_path)
+    _a_cut_off_import(controller)
+    with pytest.raises(Exception) as refused:  # noqa: PT011 - the stop is asked first
+        controller.stop_conflicting_and_start()
+    assert _stops(db) == [], "the other server was stopped for a start that was refused"
+    assert isinstance(refused.value, ImportEnded), refused.value
