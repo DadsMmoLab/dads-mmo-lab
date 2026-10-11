@@ -334,9 +334,17 @@ def test_a_stop_during_the_core_updates_names_the_press_not_the_install(tmp_path
         sink: object = None,
         cancel: object = None,
         record_ended: bool = False,
+        allowed_modules: str | None = None,
     ) -> AttachedRun:
         stop.set()
-        return inner(service, where, sink=sink, cancel=cancel, record_ended=record_ended)
+        return inner(
+            service,
+            where,
+            sink=sink,
+            cancel=cancel,
+            record_ended=record_ended,
+            allowed_modules=allowed_modules,
+        )
 
     made._seams = replace(made._seams, one_shot=one_shot)
     with pytest.raises(InstallerError) as raised:

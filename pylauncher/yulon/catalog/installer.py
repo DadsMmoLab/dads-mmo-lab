@@ -190,6 +190,15 @@ class InstallStopped(InstallerError, StopSaid):
     """
 
 
+class ImportWindowStopped(InstallStopped):
+    """Stop was pressed while a Rebuild's database updates ran, before its new build (T706).
+
+    Honoured once the importer is done, never part-way; the new build is not started and
+    the rebuild rolls back on it -- copy of the databases included -- as on a Stop in the
+    ready wait, so a clean put-back reads as "Stopped" the same way.
+    """
+
+
 class ReadyWaitStopped(InstallStopped):
     """Stop was pressed while the world server was being waited for (T247).
 
@@ -625,17 +634,21 @@ def rebuild_confirmation(entry: CatalogEntry, server_dir: Path, *, kept_build: b
     # T706: a family whose importer is a one-shot runs it before the new build starts.
     imports = bool(entry.containers.db_import)
     database = (
-        "Before it starts, the database updates the server and its modules carry that are not "
-        "applied yet are applied, by AzerothCore's own importer, which never runs one twice. "
+        "Before it starts, Yu'lon copies your databases, then applies the database updates "
+        "the server and its modules carry that are not applied yet, with AzerothCore's own "
+        "importer: it applies each one once, and again only if its file has changed since. "
         "Nothing else in your databases is touched."
         if imports
         else "Your characters, accounts and databases are not touched."
     )
-    written = (
-        "those database updates, and anything the new build writes into the database on its "
-        "first start,"
+    rollback = (
+        "If the new build does not come up, or you stop the rebuild before it does, the old one "
+        "is put back automatically, your databases go back to that copy, and the server is "
+        "started on it again. Once the new build has come up and played, nothing is put back."
         if imports
-        else "anything the new build writes into the database on its first start"
+        else "If the new build does not come up, the old one is put back automatically and the "
+        "server is started on it again. That rollback covers the server build only: anything "
+        "the new build writes into the database on its first start is not put back."
     )
     return (
         f"Rebuild {entry.name} in {server_dir}?\n\n"
@@ -647,9 +660,7 @@ def rebuild_confirmation(entry: CatalogEntry, server_dir: Path, *, kept_build: b
         f"{recipe}"
         f"Your server will be STOPPED and its containers replaced once the compile finishes, "
         f"and it will be down until it reports ready. {database}\n\n"
-        f"The build you have now is kept as a rollback while this runs. If the new build does "
-        f"not come up, the old one is put back automatically and the server is started on it "
-        f"again. That rollback covers the server build only: {written} is not put back.\n\n"
+        f"The build you have now is kept as a rollback while this runs. {rollback}\n\n"
         f"{native.no_rollback_confirmation(entry)}\n\n"
         f"Say no and nothing happens at all — the server you have now keeps running, exactly "
         f"as it is."

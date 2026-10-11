@@ -37,7 +37,12 @@ from yulon.catalog import snapshot
 from yulon.catalog.catalog import AzerothCoreData, CatalogEntry, EmulatorSource
 from yulon.catalog.families import carried, scriptdeploy
 from yulon.catalog.families.direction import moves_forward
-from yulon.catalog.installer import InstallerError, InstallStopped, OneShotLeftRunning
+from yulon.catalog.installer import (
+    ImportWindowStopped,
+    InstallerError,
+    InstallStopped,
+    OneShotLeftRunning,
+)
 from yulon.catalog.native import (
     DOWNLOAD_CANCEL_NOTE,
     IMPORT_STAGE_CANCEL_NOTE,
@@ -95,6 +100,58 @@ _SORTING_FOLDERS = frozenset({"updates", "archive", "base", "custom", "pending"}
 """Folders under `data/sql` that sort updates rather than name a database (T630)."""
 
 NOTHING_DONE = "Nothing was built, stopped or changed: your server stays on the code it runs."
+
+_FAILED_UPDATE = re.compile(r"Applying of file '([^']+\.sql)' to database '([^']*)' failed")
+"""The importer's own failure line (`apply._FAILED_UPDATE`'s pattern, which the Modules
+tab's report reads), with the database it names."""
+
+_MYSQL_ERROR = re.compile(r"^ERROR \d+ \(\w+\)")
+"""mysql's own error line, printed by the importer just before its failure line."""
+
+
+def importer_failure(run: docker.AttachedRun, what: str) -> str:
+    """Why a Rebuild's or an update's import failed, naming the file and the way past it.
+
+    T706 round 2. The pinned updater applies a file again whenever its SHA1 changed since
+    it was applied (`Updates.Redundancy` 1), and tries a failed one again on every run,
+    so one broken module file fails every Rebuild and update until it applies. The
+    sentence names that file, whose it is (the module folder it is in), mysql's error,
+    and the presses that get past it.
+    """
+    found: tuple[str, str, str] | None = None
+    error = ""
+    for line in run.tail:
+        plain = line.strip()
+        if _MYSQL_ERROR.match(plain):
+            error = plain
+            continue
+        match = _FAILED_UPDATE.search(plain)
+        if match:
+            found = (match.group(1), match.group(2), error)
+            error = ""
+    if found is None:
+        return (
+            f"{what} failed (exit {run.returncode}), so the new build was not started. Its "
+            f"last words were: {docker.last_words(run.tail)}"
+        )
+    path, database, mysql = found
+    parts = posixpath.normpath(path).split("/")
+    module = parts[parts.index("modules") + 1] if "modules" in parts[:-2] else ""
+    whose = f"one of {module}'s" if module else "one of the server's own"
+    why = f" ({mysql})" if mysql else ""
+    way = (
+        f"update or remove {module} on the Modules tab; “Apply module SQL” there, with the "
+        "server stopped, shows the importer's whole output."
+        if module
+        else "its whole output is under Details."
+    )
+    return (
+        f"The database update {posixpath.basename(path)}, {whose}, could not be applied to "
+        f"{database}{why}, so the new build was not started. AzerothCore's importer applies "
+        "an update again whenever its file has changed since, and tries a failed one again "
+        f"each time it runs, which every rebuild and update does, so each of them stops here "
+        f"until that file applies: {way}"
+    )
 
 
 def newer_updates_refusal(
@@ -631,12 +688,23 @@ class AzerothCoreInstaller(StagedInstaller):
         by hand (`docker compose up -d`) applied six files and the world came up.
 
         The same one-shot, on the image the tags now name, with the servers stopped and
-        the database up: upstream's updater applies only what its `updates` table does
-        not hold yet, so a Rebuild with nothing new applies nothing. The modules it may
-        update are the Modules tab's own split (`importer_modules`, T78) when the caller
-        supplies one, else what the compose file says. Not cancellable part-way, for
-        T220's reason; a Stop is honoured once the updates are in, before the new build
-        starts. A failure raises, and the rebuild puts the build from before back.
+        the database up. What upstream's updater does with each file, read from the pinned
+        source (`UpdateFetcher.cpp` at 2a2211cd, the WotLK and Unbound core pin) and
+        `dbimport.conf.dist`, neither of which this app overrides: a file its `updates`
+        table does not hold is applied; one it holds with the same SHA1 is skipped; one
+        whose SHA1 changed is applied AGAIN (`Updates.Redundancy` 1, "Reapplying update
+        ... (it changed)"), except an archived core file (`ArchivedRedundancy` 0). So a
+        Rebuild with nothing new applies nothing, and a module file edited after it was
+        applied runs again -- and if it then fails, every Rebuild and update fails on it
+        until the file applies, which `importer_failure()` says by name.
+
+        The modules it may update are the Modules tab's own split (`importer_modules`,
+        T78), which every engine the app builds is handed (`installer_for_app()`; the
+        reviewed exceptions in `test_rebuild_import_copy` build no engine that imports);
+        without one, what the compose file says. Not cancellable part-way, for T220's
+        reason; a Stop is honoured once the updates are in, before the new build starts.
+        A failure raises, and the rebuild puts the build from before back -- with the copy
+        of its databases taken just before this (`_rebuild_import_work()`).
         """
         service = self.entry.containers.db_import
         if not service:
@@ -667,9 +735,10 @@ class AzerothCoreInstaller(StagedInstaller):
             cancel=None,
             stage="import",
         )
-        self._check_run(run, "Applying the database updates", None, "")
+        if run.returncode != 0:
+            raise InstallerError(importer_failure(run, "Applying the database updates"))
         if ctx.cancel is not None and ctx.cancel.is_set():
-            raise InstallStopped(
+            raise ImportWindowStopped(
                 "The rebuild was stopped once the database updates were in, before the new "
                 "build started."
             )
@@ -1007,14 +1076,26 @@ class AzerothCoreInstaller(StagedInstaller):
                 f"Applying the new build's own database updates ({service}) with the servers "
                 "stopped, before it first starts."
             )
+            # T707: the Modules tab's own split, as a Rebuild's import is given.
+            allowed = (
+                self._importer_modules(ctx.server_dir)
+                if self._importer_modules is not None
+                else None
+            )
             run = yield from self._pump(
-                lambda sink: self._seams.one_shot(service, ctx.server_dir, sink=sink, cancel=None),
+                lambda sink: self._seams.one_shot(
+                    service, ctx.server_dir, sink=sink, cancel=None, allowed_modules=allowed
+                ),
                 cancel=None,
                 stage="import",
             )
             # `cancel=None`, then the press by name: `_check_run()`'s own check
             # says "the install was stopped", and this is an update (cold review).
-            self._check_run(run, "Applying the new build's database updates", None, "")
+            # T706 round 2: a failure names the file and the way past it.
+            if run.returncode != 0:
+                raise InstallerError(
+                    importer_failure(run, "Applying the new build's database updates")
+                )
             if ctx.cancel is not None and ctx.cancel.is_set():
                 raise InstallStopped(f"{press} was stopped. {CORE_UPDATES_NOTE}")
             yield "The new build's database updates are in."

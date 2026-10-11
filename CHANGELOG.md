@@ -18,6 +18,8 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ### Fixed
 - **Rebuild** now applies the database updates of a module you just installed, such as City Bots, so the world starts.
 - After an update or rebuild that stopped part-way, **Start** is refused or allowed for a reason that is still true.
+- **Update the server to latest** no longer runs the SQL of a module Yu'lon applies itself, such as ARAC, a second time.
+- A **Rebuild** whose database updates fail puts your databases back as they were and names the update that failed.
 
 ### Changed
 
