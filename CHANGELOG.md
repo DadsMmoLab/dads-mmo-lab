@@ -17,6 +17,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 
 - The Maintenance tab lists the backups an earlier uninstall kept, so a reinstall can restore them.
 ### Fixed
+- **Bring from another computer…** is pressable again on a game's tile right after **Remove from Yu'lon**.
 - A genuine Vanilla 1.12.1 client is no longer warned about as a repack.
 - A module install into a folder Yu'lon cannot write now names the folder and says what to do.
 - On Windows, Uninstall of a server folder that is a junction is refused before it empties the folder it points to.

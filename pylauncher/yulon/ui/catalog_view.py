@@ -839,6 +839,9 @@ class CatalogView(QWidget):
         button.setText("Install")
         button.setToolTip("")
         button.setEnabled(game_id not in self._gated)
+        bring = self._move_buttons.get(game_id)
+        if bring is not None:
+            bring.setEnabled(game_id not in self._gated)
 
     def button_for(self, game_id: str) -> QPushButton:
         """The Install button of a tile (tests / accessibility)."""

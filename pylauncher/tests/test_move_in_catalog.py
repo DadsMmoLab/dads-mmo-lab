@@ -163,6 +163,33 @@ def test_an_installed_game_offers_no_second_server(qapp: object, tmp_path: Path)
     assert bring is not None and not bring.isEnabled()
 
 
+def test_removing_the_install_offers_bring_from_another_computer_again(
+    qapp: object, tmp_path: Path
+) -> None:
+    from PySide6.QtWidgets import QPushButton
+
+    built = CatalogView(
+        CATALOG,
+        lambda e: _FakeInstaller(e, []),
+        LogPanel(),
+        home=tmp_path,
+        installed_games={WOTLK.id: tmp_path / "already"},
+        move_in=Mover(tmp_path).move_in(),
+        platform_id=lambda: "linux",
+    )
+    bring = built.findChild(QPushButton, f"move-in-{WOTLK.id}")
+    assert bring is not None and not bring.isEnabled()
+    built.forget_installed(WOTLK.id, {})
+    assert bring.isEnabled()
+    built.forget_installed(WOTLK.id, {WOTLK.id: tmp_path / "second"})
+    assert not bring.isEnabled()
+    built.forget_installed(WOTLK.id, {})
+    built._gated.add(WOTLK.id)
+    built.forget_installed(WOTLK.id, {WOTLK.id: tmp_path / "x"})
+    built.forget_installed(WOTLK.id, {})
+    assert not bring.isEnabled()
+
+
 def test_install_into_an_unfinished_move_sends_the_player_to_bring_in(
     qapp: object, tmp_path: Path, monkeypatch: object
 ) -> None:
