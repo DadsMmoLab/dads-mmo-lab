@@ -241,7 +241,7 @@ def import_state(
         tables = _tables_in(sql, through)
     except ApplyError as exc:
         return docker.ImportState("unreadable", str(exc))
-    populated = _player_data(sql, through, tables)
+    populated, characters = _player_data(sql, through, tables)
     if populated is None:
         return docker.ImportState(
             "unreadable", "the account and character counts could not be read"
@@ -267,6 +267,7 @@ def import_state(
                 else f"{populated}, but {_unfinished_detail(unfinished, tables)}"
             ),
             complete=not unfinished,
+            characters=characters,
         )
 
     if not unfinished:
@@ -306,6 +307,13 @@ def _tables_in(sql: SqlQuery, through: Db) -> dict[str, set[str]]:
         if schema in tables and table:
             tables[schema].add(table)
     return tables
+
+
+CHARACTERS_MEAN_PLAYERS = (
+    "these databases hold characters, which a first import that did not finish never writes: "
+    "somebody has played on this server"
+)
+"""Why rows are not cleared even under the unfinished-import record (T678 review round 3)."""
 
 
 def reset_unfinished(
@@ -365,6 +373,10 @@ def reset_unfinished(
         raise RuntimeError(
             f"this install holds player data ({state.detail}), so nothing was dropped."
         )
+    if state.state == "populated" and state.characters != 0:
+        # T678 review round 3, asked again here (the guard twice): an unfinished first
+        # import seeds accounts, never a character.
+        raise RuntimeError(f"{CHARACTERS_MEAN_PLAYERS} ({state.detail}), so nothing was dropped.")
     if state.state == "unreadable":
         raise MaintenanceError(
             f"the databases could not be asked what state they are in ({state.detail}), so "
@@ -417,8 +429,11 @@ def _holds(names: list[str]) -> str:
     return f"{', '.join(names)} {'holds' if len(names) == 1 else 'hold'}"
 
 
-def _player_data(sql: SqlQuery, through: Db, tables: dict[str, set[str]]) -> str | None:
-    """How much of this server somebody made, as a sentence — `""` for none.
+def _player_data(
+    sql: SqlQuery, through: Db, tables: dict[str, set[str]]
+) -> tuple[str | None, int | None]:
+    """How much of this server somebody made, as a sentence — `""` for none — and the
+    number of characters (T678; 0 when the table does not exist, None when not read).
 
     `None` means the question could not be answered, which callers must treat as
     "assume there is data": an unreadable count is the one case where guessing
@@ -432,25 +447,28 @@ def _player_data(sql: SqlQuery, through: Db, tables: dict[str, set[str]]) -> str
     if not asked:
         # Neither table exists, so there is nowhere for an account or a
         # character to be. Not a failed read — a proven zero.
-        return ""
+        return "", 0
     counts = ", ".join(f"(SELECT COUNT(*) FROM `{schema}`.`{table}`)" for schema, table in asked)
     try:
         answer = sql.query(through, f"SELECT {counts};")
     except ApplyError as exc:
         where = ", ".join(f"{schema}.{table}" for schema, table in asked)
         logger.warning(f"could not count the player data in {where}: {exc}")
-        return None
+        return None, None
     fields = answer.strip().split("\t")
     if len(fields) != len(asked):
         logger.warning(f"expected {len(asked)} counts from the server, got {answer.strip()!r}")
-        return None
+        return None, None
     said: list[str] = []
+    characters = 0
     for (schema, table), field in zip(asked, fields, strict=True):
         try:
             rows = int(field.strip())
         except ValueError:
             logger.warning(f"{schema}.{table} answered {field.strip()!r}, which is not a count")
-            return None
+            return None, None
         if rows:
             said.append(f"{rows} rows in {schema}.{table}")
-    return ", ".join(said)
+        if (schema, table) == (DB_NAMES["characters"], KEY_TABLES[DB_NAMES["characters"]]):
+            characters = rows
+    return ", ".join(said), characters

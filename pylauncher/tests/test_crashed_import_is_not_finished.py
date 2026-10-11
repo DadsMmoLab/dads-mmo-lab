@@ -384,8 +384,15 @@ def test_repair_clears_what_the_crashed_import_wrote_and_imports_again(
         running={SPEC.db},
         import_output=lambda: (_the_import_fills(server), ("World database is up-to-date!",))[1],
     )
-    assert docker.repair_import(SPEC, tmp_path, probe, reset=reset) is True
+    said: list[str] = []
+    assert (
+        docker.repair_import(
+            SPEC, tmp_path, probe, reset=reset, output=said.append, safety_copy=lambda: "COPY"
+        )
+        is True
+    )
     assert server.dropped == [AUTH, CHARACTERS, WORLD], server.dropped
+    assert "COPY" in said, "the safety copy was not named"
     assert IMPORT_UP_ARGV in calls
     assert not _marker(tmp_path).exists(), "a verified import keeps the record"
     after = probe()  # City Bots seeds its accounts again: a finished import with rows
@@ -489,3 +496,163 @@ def test_composes_exit_line_takes_none_of_the_importers_last_words() -> None:
     words = docker.importer_last_words(tail)
     assert not any("exited with code" in line for line in words), words
     assert words[-1] == "one more line of its own", words
+
+
+# ------------------------------------------------- review round 3: never a player's rows
+#
+# Two ways the record outlived the unfinished import and Repair's clean redo would have
+# deleted real players: a restored backup, and a server started by hand whose own updater
+# finished the world and that people then played on. Belt and braces: a finished restore
+# removes the record, a character anywhere refuses the clear, and a safety copy of the
+# three databases is taken before any of it is cleared.
+
+
+def _played_on_server(characters: int = 3):  # type: ignore[no-untyped-def]
+    from tests.test_ended_import_is_not_trusted import _done, _Server
+
+    return _Server(
+        {AUTH: _done("account"), CHARACTERS: _done("characters"), WORLD: _done("creature")},
+        counts={f"{AUTH}.account": 400, f"{CHARACTERS}.characters": characters},
+    )
+
+
+def test_the_probe_counts_the_characters() -> None:
+    probe, _reset = _real_seams(_played_on_server(3))
+    assert probe().characters == 3
+    probe, _reset = _real_seams(_city_bots_crashed_server())
+    assert probe().characters == 0
+
+
+def test_a_finished_restore_removes_the_record_so_repair_clears_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from tests.test_docker import SPEC, _repair_doubles
+    from tests.test_maintenance import (
+        AT,
+        DB,
+        FakeMysql,
+        a_backup_of,
+        plan_restore,
+        restore,
+        running,
+    )
+
+    docker.mark_import_under_way(tmp_path, SPEC.import_service)
+    mysql = FakeMysql(("acore_auth", "acore_characters", "acore_world"))
+    plan = plan_restore(a_backup_of(tmp_path, "acore_characters"), tmp_path, running=running(DB))
+    restore(plan, mysql, confirm=plan.token, running=running(DB), now=AT)
+    assert not _marker(tmp_path).exists(), "the restore left the unfinished-import record"
+
+    server = _played_on_server()
+    probe, reset = _real_seams(server)
+    _repair_doubles(monkeypatch, [], running={SPEC.db})
+    copies: list[str] = []
+    with pytest.raises(docker.DockerCommandError, match="player data"):
+        docker.repair_import(
+            SPEC, tmp_path, probe, reset=reset, safety_copy=lambda: copies.append("x") or "COPY"
+        )
+    assert server.dropped == [] and copies == []
+
+
+def test_characters_under_the_record_are_never_cleared(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Started by hand after the crash: the world finished, people played, the record stands."""
+    from tests.test_docker import SPEC, _repair_doubles
+
+    _crashed_repair(monkeypatch, tmp_path)
+    server = _played_on_server()
+    probe, reset = _real_seams(server)
+    calls: list[list[str]] = []
+    _repair_doubles(monkeypatch, calls, running={SPEC.db})
+    copies: list[str] = []
+    with pytest.raises(docker.DockerRefusal) as refused:
+        docker.repair_import(
+            SPEC, tmp_path, probe, reset=reset, safety_copy=lambda: copies.append("x") or "COPY"
+        )
+    said = str(refused.value)
+    assert "characters" in said and "Maintenance" in said, said
+    assert server.dropped == [] and copies == []
+    assert IMPORT_UP_ARGV not in calls
+
+
+def test_the_reset_itself_refuses_characters_even_when_told_the_rows_are_seeded() -> None:
+    server = _played_on_server()
+    _probe, reset = _real_seams(server)
+    with pytest.raises(RuntimeError, match="characters"):
+        reset(everything=True, seeded=True)
+    assert server.dropped == []
+
+
+def test_the_seeded_clear_takes_the_safety_copy_first(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from tests.test_docker import SPEC, _repair_doubles
+
+    _crashed_repair(monkeypatch, tmp_path)
+    server = _city_bots_crashed_server()
+    probe, real_reset = _real_seams(server)
+    order: list[str] = []
+
+    def reset(**kw: bool) -> tuple[str, ...]:
+        order.append("clear")
+        return real_reset(**kw)
+
+    def safety_copy() -> str:
+        order.append("copy")
+        assert server.dropped == [], "copied after the clear"
+        return "A copy of the databases was saved first, in backups: x.sql."
+
+    _repair_doubles(
+        monkeypatch,
+        [],
+        running={SPEC.db},
+        import_output=lambda: (_the_import_fills(server), ("done",))[1],
+    )
+    said: list[str] = []
+    docker.repair_import(
+        SPEC, tmp_path, probe, reset=reset, output=said.append, safety_copy=safety_copy
+    )
+    assert order == ["copy", "clear"], order
+    assert any("saved first" in line for line in said), said
+
+
+@pytest.mark.parametrize("copy", ["none", "fails"])
+def test_no_safety_copy_no_clear(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, copy: str
+) -> None:
+    from tests.test_docker import SPEC, _repair_doubles
+
+    _crashed_repair(monkeypatch, tmp_path)
+    server = _city_bots_crashed_server()
+    probe, reset = _real_seams(server)
+    _repair_doubles(monkeypatch, [], running={SPEC.db})
+
+    def failing() -> str:
+        raise OSError("disk full")
+
+    with pytest.raises(docker.DockerCommandError):
+        docker.repair_import(
+            SPEC, tmp_path, probe, reset=reset, safety_copy=None if copy == "none" else failing
+        )
+    assert server.dropped == []
+
+
+def test_the_repair_confirmation_says_what_is_cleared_and_that_a_copy_comes_first(
+    qapp: object, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from tests.test_controller_view import WOTLK, _Ps, _services
+    from yulon import runner
+    from yulon.controller import UNFINISHED_IMPORT_WROTE_DETAIL
+    from yulon.ui.controller_view import ControllerView
+
+    monkeypatch.setattr(runner, "run", _Ps())
+    view = ControllerView(WOTLK, _services(_Ps(), tmp_path, []), status_poll_ms=0)
+    view._import_state = docker.ImportState(
+        "partial", f"{UNFINISHED_IMPORT_WROTE_DETAIL} (400 rows in acore_auth.account)"
+    )
+    view.repair_import()  # the first press only arms it
+    said = view.danger_label.text()
+    assert "400 rows in acore_auth.account" in said, said
+    assert "copy" in said and "DELETED" in said, said
+    assert "hold no accounts" not in said, said

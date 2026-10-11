@@ -149,6 +149,7 @@ from yulon.controller import (
     ImportEnded,
     InstallStatus,
     PortConflictError,
+    unfinished_import_wrote,
 )
 from yulon.controller_wow_centurion import accounts as centurion_accounts
 from yulon.controller_wow_centurion import characters as centurion_characters
@@ -3793,6 +3794,18 @@ def _for_wotlk(
             reset_unfinished=reset,
             pre_stop=recorder,
             before_servers=_realm_port_keeper(entry, spec, server_dir, sql, wsl_distro=wsl_distro),
+            # T678 review round 3: a copy before Repair clears an unfinished first import.
+            safety_copy=lambda: wotlk_maintenance.safety_copy_sentence(
+                wotlk_maintenance.backup(
+                    server_dir,
+                    mysql,
+                    game=wotlk_maintenance.game_of(entry),
+                    label="before-repair",
+                    spec=spec,
+                    core_databases=entry.core_databases(),
+                    wsl_distro=wsl_distro,
+                )
+            ),
         ),
         sql=sql,
         # Three facts, from three different places, and the command needs all of
@@ -5704,6 +5717,23 @@ def dashboard_on_question(*, lan: bool) -> str:
         "If the server is running, it is then restarted so the bots module starts sending. "
         "Anyone playing is disconnected for a few minutes.\n\n"
         f"{where}\n\nSwitch it on?"
+    )
+
+
+def repair_armed_unfinished(state: docker.ImportState) -> str:
+    """Repair's armed paragraph over rows an unfinished first import wrote (T678 review round 3).
+
+    `state.detail` carries what the probe counted, in brackets after the reason.
+    """
+    counted = state.detail.partition(" (")[2].rstrip(")") or "rows it wrote"
+    return (
+        "This clears what the first database import wrote before it stopped, and runs the "
+        f"import again. The auth, characters and world databases are DELETED: they hold "
+        f"{counted}, written by that import, and no characters. A copy of all three is saved "
+        "in the server's backups folder first, and the Repair is refused if any character is "
+        "found. If people have played on this server, press Cancel now and restore a backup "
+        "from the Maintenance tab instead. The server must be stopped; a full import takes "
+        "10-30 minutes and cannot be stopped once it starts.\n\n"
     )
 
 
@@ -14191,16 +14221,22 @@ class ControllerView(QWidget):
 
         The armed paragraph says what is overwritten rather than what is kept —
         the opposite of the teardown's, and the honest way round. Everything the
-        import writes is replaced, and the only reason this is offered at all is
-        that the probe has already found no accounts and no characters to lose.
-        `docker.repair_import()` asks the database again itself and refuses if
-        that has changed since, so this text is a warning and not the guard.
+        import writes is replaced. It is offered in two states: the probe found no
+        accounts and no characters to lose, or (T678) the accounts it found were
+        written by a first import that never finished, under the record of that import.
+        `docker.repair_import()` asks the database again itself and refuses if the
+        state is not one of those two (it refuses any character in the second), so
+        this text is a warning and not the guard.
         """
         if not self._repair_armed:
             self._disarm_remove()
             self._repair_armed = True
             self.repair_button.setText(REPAIR_ARMED)
             self.arm_cancel_button.setVisible(True)
+            state = self._import_state
+            if state is not None and unfinished_import_wrote(state):
+                self._say_under_the_presses(repair_armed_unfinished(state) + ARMED_LAST_LINE)
+                return
             self._say_under_the_presses(
                 "This re-runs the database import that never finished. Everything in the auth, "
                 "characters and world databases is OVERWRITTEN. It is offered because those "

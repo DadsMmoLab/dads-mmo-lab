@@ -2433,6 +2433,14 @@ class ImportState:
     by omission.
     """
 
+    characters: int | None = None
+    """Rows in the characters table, when the probe counted them; None = not counted (T678).
+
+    Read by Repair before it clears what an unfinished first import wrote: that import
+    seeds accounts (City Bots) but never a character, so a character means somebody
+    played. None is never read as zero.
+    """
+
     @property
     def repairable(self) -> bool:
         """True only where re-running the import can put something right.
@@ -2502,8 +2510,13 @@ def repair_import(
     output: OutputSink | None = None,
     db_timeout: float = _DB_HEALTHY_TIMEOUT_SECONDS,
     wsl_distro: str | None = None,
+    safety_copy: Callable[[], str] | None = None,
 ) -> bool:
     """Re-run this install's one-shot database import. For a BROKEN install only.
+
+    `safety_copy` (T678 review round 3): dumps the core databases and says where, as a
+    sentence. Asked before what an unfinished first import wrote is cleared, and that
+    clear is refused without one.
 
     The installer is the only thing that runs the import on a healthy path, and
     `start_staged()` exists precisely so an ordinary Start can never reach it.
@@ -2665,14 +2678,36 @@ def repair_import(
         # T678 review round 2 (owner: "refuse + offer a clean redo"): rows written by an
         # import that began over empty databases and never finished -- a module's seeded
         # accounts. The record is why they are not a player's; without it, the refusal below.
-        if reset is None:
+        if reset is None or safety_copy is None:
             raise DockerRefusal(
                 "an earlier import of this install did not finish, and this game has no way to "
-                "clear what it wrote. Nothing was run."
+                "copy and clear what it wrote. Nothing was run."
+            )
+        if before.characters != 0:
+            # Review round 3: such an import seeds accounts (City Bots), never a character.
+            # A server started by hand on it, whose own updater finished the world, can have
+            # players since, and the record still stands: those are never cleared.
+            counted = "could not be counted" if before.characters is None else "were found"
+            raise DockerRefusal(
+                f"an earlier import of this install did not finish, but characters {counted} in "
+                f"its databases ({before.detail}). A first import never writes a character, so "
+                "somebody may have played on this server since, and nothing was cleared or run. "
+                "To go back, restore one of its backups on the Maintenance tab."
             )
         logger.warning(
-            f"repair_import(): clearing what an unfinished first import wrote ({before.detail})"
+            f"repair_import(): copying, then clearing, what an unfinished first import wrote "
+            f"({before.detail})"
         )
+        try:
+            saved = safety_copy()
+        except Exception as exc:
+            raise DockerCommandError(
+                "a safety copy of the databases could not be taken, so nothing was cleared or "
+                f"run: {exc}"
+            ) from exc
+        logger.warning(f"repair_import(): safety copy taken first: {saved}")
+        if output is not None:
+            output(saved)
         try:
             dropped = reset(everything=True, seeded=True)
         except Exception as exc:

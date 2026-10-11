@@ -1792,7 +1792,32 @@ def _restore_from(
                 f"that this one does not put right; {marker} still records them"
             )
     logger.info(f"restored {', '.join(plan.databases)} from {plan.backup}")
+    _forget_the_import_record(plan.server_dir, spec)
     return RestoreReport(backup=plan.backup, databases=plan.databases, safety_backup=safety)
+
+
+def _forget_the_import_record(server_dir: Path, spec: docker.ContainerSpec) -> None:
+    """A finished restore removes the record of an unfinished import (T678 review round 3).
+
+    The restore replaced the databases with a backup's, so that record no longer
+    describes them. Left standing, Start refused the restored server and Repair read
+    its players as rows the unfinished import wrote, and cleared them.
+    """
+    if not spec.import_service:
+        return
+    record = docker.one_shot_ended_marker(server_dir, spec.import_service)
+    try:
+        record.unlink(missing_ok=True)
+    except OSError as exc:
+        logger.warning(f"the restore finished, but {record} could not be removed: {exc}")
+    else:
+        logger.info(f"the restore replaced the databases, so {record.name} no longer applies")
+
+
+def safety_copy_sentence(report: BackupReport) -> str:
+    """Where Repair's safety copy went, in words (T678 review round 3)."""
+    files = ", ".join(dump.path.name for dump in report.dumps)
+    return f"A copy of the databases was saved first, in {report.directory}: {files}."
 
 
 def _digest_of(source: IO[bytes], name: str) -> str:

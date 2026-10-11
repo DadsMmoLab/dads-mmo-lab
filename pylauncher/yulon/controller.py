@@ -205,6 +205,11 @@ FIRST_IMPORT_UNFINISHED = (
 """Start's refusal for that case (owner decision, 2026-10-11: refuse and offer a clean redo)."""
 
 
+def unfinished_import_wrote(state: docker.ImportState) -> bool:
+    """Whether `Controller.import_state()` read rows an unfinished first import wrote (T678)."""
+    return state.detail.startswith(UNFINISHED_IMPORT_WROTE_DETAIL)
+
+
 class DatabaseMissing(StartRefused):
     """Raised by `Controller.start()` when Docker no longer has this server's database (T377).
 
@@ -234,8 +239,12 @@ class Controller:
         pre_stop: Callable[[], object] | None = None,
         start_guard: Callable[[], str | None] | None = None,
         before_servers: Callable[[], str | None] | None = None,
+        safety_copy: Callable[[], str] | None = None,
     ) -> None:
         self.spec = spec
+        # T678 review round 3: dumps the core databases and says where, before Repair
+        # clears what an unfinished first import wrote; that clear is refused without it.
+        self.safety_copy = safety_copy
         # A family's last word before its servers start, asked once every
         # refusal has passed -- the port check and the missing database (T377)
         # included, so it may write to the database without recreating one
@@ -641,7 +650,7 @@ class Controller:
         if state.detail == ENDED_IMPORT_DETAIL:
             logger.warning(f"start() refused: {IMPORT_ENDED}")
             raise ImportEnded(IMPORT_ENDED, state=state)
-        if state.detail == UNFINISHED_IMPORT_WROTE_DETAIL:
+        if unfinished_import_wrote(state):
             # T678 review round 2: rows a first import wrote before it died (City Bots'
             # accounts), with the world half-imported; never a player's (see Repair).
             logger.warning(f"start() refused: {FIRST_IMPORT_UNFINISHED}")
@@ -1091,7 +1100,11 @@ class Controller:
         ):
             # T678 review round 2: rows written by a first import that never finished, so
             # Repair is offered; `docker.repair_import()` clears them under the same record.
-            return docker.ImportState("partial", UNFINISHED_IMPORT_WROTE_DETAIL)
+            return docker.ImportState(
+                "partial",
+                f"{UNFINISHED_IMPORT_WROTE_DETAIL} ({state.detail})",
+                characters=state.characters,
+            )
         return state
 
     def repair_import(self, output: docker.OutputSink | None = None) -> bool:
@@ -1122,6 +1135,7 @@ class Controller:
             self.import_probe,
             reset=self.reset_unfinished,
             output=output,
+            safety_copy=self.safety_copy,
             wsl_distro=self.wsl_distro,
         )
 
