@@ -1876,6 +1876,7 @@ def restore(
     now: datetime | None = None,
     safety_label: str = "pre-restore",
     before_load: Callable[[], object] | None = None,
+    last_of_a_copy: bool = True,
 ) -> RestoreReport:
     """Overwrite the databases `plan.backup` names. This destroys player data.
 
@@ -1919,7 +1920,9 @@ def restore(
     copy carries the record as it was when the copy was taken (`IMPORT_RECORD_LEAD`); its
     restore -- the put-back, or the player's from the Maintenance tab -- sets the record back
     to that instead. A record the copy names is written BEFORE the load (a load cut off
-    leaves half-imported databases that the record must cover); "none" is applied after it.
+    leaves half-imported databases that the record must cover); "none" is applied after it,
+    and by a put-back of several files only after the last (`last_of_a_copy`): until then the
+    files not yet back still hold the failed run's import state.
 
     Raises:
         MaintenanceError: the confirmation does not match, the plan no longer
@@ -1967,6 +1970,7 @@ def restore(
             now=now,
             safety_label=safety_label,
             before_load=before_load,
+            last_of_a_copy=last_of_a_copy,
         )
 
 
@@ -1984,6 +1988,7 @@ def _restore_from(
     now: datetime | None,
     safety_label: str,
     before_load: Callable[[], object] | None,
+    last_of_a_copy: bool = True,
 ) -> RestoreReport:
     """`restore()` from the marker onward, loading from `source`, the handle it checks here."""
     recorded = _recorded_game_of(source, plan.backup.name)
@@ -1997,6 +2002,10 @@ def _restore_from(
             "Nothing was restored; look at it again."
         )
     import_state = _import_state_of(source, plan.backup.name)
+    # "none" is not applied by a file before the copy's last (T712 round 3, N1).
+    settles_the_record = import_state is not UNREADABLE_LINE and (
+        import_state is not None or last_of_a_copy
+    )
     marker = marker_path(plan.server_dir)
     marker.parent.mkdir(parents=True, exist_ok=True)
     # `fresh`, not `plan`: the marker is the one thing here that can appear
@@ -2041,6 +2050,17 @@ def _restore_from(
         ),
         started_at=(now or datetime.now()).isoformat(timespec="seconds"),
     )
+    if isinstance(import_state, str):
+        # T712: the copy is of half-imported databases; from the first byte loaded on they
+        # are that again, whatever happens to the load. Before the marker, so a record that
+        # cannot be written refuses a restore that has touched nothing (round 3, N2).
+        try:
+            set_import_record(plan.server_dir, spec.import_service, import_state)
+        except OSError as exc:
+            raise MaintenanceError(
+                f"Yu'lon could not write the record of an unfinished database import that "
+                f"{plan.backup.name} carries ({exc}). Nothing was restored."
+            ) from exc
     _write_marker(
         record,
         consequence="An interrupted restore could not have been detected afterwards, so "
@@ -2048,10 +2068,6 @@ def _restore_from(
     )
     logger.warning(f"restoring {', '.join(plan.databases)} from {plan.backup}")
     try:
-        if isinstance(import_state, str):
-            # T712: the copy is of half-imported databases; from the first byte loaded on
-            # they are that again, whatever happens to the load.
-            set_import_record(plan.server_dir, spec.import_service, import_state)
         if before_load is not None:
             before_load()
         source.seek(0)
@@ -2069,9 +2085,7 @@ def _restore_from(
                     # T710: what to leave if this load finishes after Yu'lon has gone.
                     load_proof=proof,
                     load_after=unresolved,
-                    load_import_service=(
-                        "" if import_state is UNREADABLE_LINE else spec.import_service
-                    ),
+                    load_import_service=spec.import_service if settles_the_record else "",
                     load_import_text=import_state if isinstance(import_state, str) else None,
                 ),
                 consequence="The restore is running, but its process could not be recorded.",
@@ -2126,8 +2140,13 @@ def _restore_from(
             )
     logger.info(f"restored {', '.join(plan.databases)} from {plan.backup}")
     if isinstance(import_state, str):
-        set_import_record(plan.server_dir, spec.import_service, import_state)
-    elif import_state is not UNREADABLE_LINE:
+        try:
+            set_import_record(plan.server_dir, spec.import_service, import_state)
+        except OSError as exc:
+            # Written before the load already; the restore finished and must say so (the
+            # marker's rule above: a finished restore is never reported as failed).
+            logger.error(f"the restore finished, but the import record was not rewritten: {exc}")
+    elif settles_the_record:
         _forget_the_import_record(plan.server_dir, spec.import_service)
     return RestoreReport(backup=plan.backup, databases=plan.databases, safety_backup=safety)
 
@@ -2222,7 +2241,13 @@ def _import_state_of(source: IO[bytes], name: str) -> str | None | _ImportState:
 def _import_state_in(head: bytes) -> str | None | _ImportState:
     """`UNSAID` without the line, None for "none", the record's text, or `UNREADABLE_LINE`."""
     lead = IMPORT_RECORD_LEAD.encode()
-    for line in head.split(b"\n")[:-1]:  # the last piece may be cut by the edge
+    banner = _DUMP_HEADER.search(head)
+    if banner is None:
+        return UNSAID
+    # Only Yu'lon's own lines above mysqldump's banner, as `_game_in_head()` reads (round 3,
+    # N3): a line further down an edited dump is not the copy's.
+    for line in head[: banner.start()].split(b"\n"):
+        line = line.rstrip(b" \t\r")
         if not line.startswith(lead):
             continue
         said = line[len(lead) :].decode("utf-8", "replace").strip()

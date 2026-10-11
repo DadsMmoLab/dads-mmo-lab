@@ -14,6 +14,7 @@ real `Controller.stop_conflicting()`, the real `purge.Uninstaller` with its reco
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from collections.abc import Iterator
@@ -356,3 +357,116 @@ def test_an_unreadable_restore_record_refuses_too(tmp_path: Path) -> None:
     with pytest.raises(purge.PurgeRefusal):
         rec.uninstaller().run(keep_characters=True)
     assert rec.order == []
+
+
+# ---------------------------------------------------------------- round 3 follow-up
+
+
+class _FailsAt(_TableServer):
+    """Loads until the `fail_at`-th load, which raises."""
+
+    def __init__(self, schemas: dict[str, set[str]], fail_at: int) -> None:
+        super().__init__(schemas)
+        self.fail_at = fail_at
+        self.loads = 0
+
+    def load_from(self, source: Any) -> None:
+        self.loads += 1
+        if self.loads == self.fail_at:
+            raise maintenance.MaintenanceError("the database went away")
+        super().load_from(source)
+
+
+def test_a_copy_taken_with_no_record_removes_one_only_after_its_last_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """N1: the mirror of must-fix 2. The copy says "none", the failed run wrote a record, and
+    the put-back dies at file 2: files 2 and 3 still hold the failed run's import state.
+    Mutation: remove the record after every file again."""
+    schemas = {"acore_auth": {"account"}, "acore_characters": {"c"}, "acore_world": {"w"}}
+    server = _FailsAt(schemas, fail_at=2)
+    copy = _real_put_back(monkeypatch, server)
+    record = _import_record(tmp_path)
+    taken = copy.take(tmp_path, ("acore_auth", "acore_characters", "acore_world"))
+    assert len(taken.files) == 3
+    record.write_text(docker.IMPORT_UNDER_WAY + "\n", encoding="utf-8")
+
+    with pytest.raises(InstallerError):
+        copy.put_back(tmp_path, taken)
+
+    assert record.is_file(), "the record went with file 1 while files 2 and 3 are the run's"
+
+
+def test_a_whole_put_back_of_a_copy_with_no_record_removes_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    schemas = {"acore_auth": {"account"}, "acore_world": {"w"}}
+    copy = _real_put_back(monkeypatch, _TableServer(schemas))
+    record = _import_record(tmp_path)
+    taken = copy.take(tmp_path, ("acore_auth", "acore_world"))
+    record.write_text(docker.IMPORT_UNDER_WAY + "\n", encoding="utf-8")
+    copy.put_back(tmp_path, taken)
+    assert not record.exists()
+
+
+def test_a_record_that_cannot_be_written_before_the_load_loads_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """N2: refused before anything loads, said as such, and no restore record is left.
+    Mutation: write the record inside the load's `try:` again."""
+    server = _TableServer({"acore_world": {"creature"}})
+    copy = _real_put_back(monkeypatch, server)
+    _import_record(tmp_path).write_text(docker.IMPORT_UNDER_WAY + "\n", encoding="utf-8")
+    taken = copy.take(tmp_path, ("acore_world",))
+
+    def refuse(*_a: Any) -> None:
+        raise PermissionError("read-only folder")
+
+    monkeypatch.setattr(maintenance, "set_import_record", refuse)
+    loads_before = len(server.statements)
+    with pytest.raises(InstallerError) as failed:
+        copy.put_back(tmp_path, taken)
+    assert "Nothing was restored" in str(failed.value), str(failed.value)
+    assert "part-way" not in str(failed.value)
+    assert len(server.statements) == loads_before, "a database was loaded"
+    assert maintenance.interrupted_restore(tmp_path) is None
+
+
+def test_a_record_that_cannot_be_written_after_the_load_does_not_fail_the_restore(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """N2: the data is loaded; a restore reported as failed invites running it again.
+    Mutation: let the OSError of the write after the load escape."""
+    server = _TableServer({"acore_world": {"creature"}})
+    copy = _real_put_back(monkeypatch, server)
+    _import_record(tmp_path).write_text(docker.IMPORT_UNDER_WAY + "\n", encoding="utf-8")
+    taken = copy.take(tmp_path, ("acore_world",))
+    real = maintenance.set_import_record
+    calls: list[int] = []
+
+    def second_refused(*args: Any) -> None:
+        calls.append(1)
+        if len(calls) == 2:
+            raise PermissionError("read-only folder")
+        real(*args)
+
+    monkeypatch.setattr(maintenance, "set_import_record", second_refused)
+    put = copy.put_back(tmp_path, taken)
+    assert put.restored == ("acore_world",) and len(calls) == 2
+
+
+def test_an_import_line_below_the_dump_banner_is_not_the_copys(tmp_path: Path) -> None:
+    """N3: only the lines Yu'lon writes before mysqldump's banner count, as the game record
+    does; a line further down (an edited dump) is not read. Mutation: read the whole head."""
+    from tests.test_maintenance import good_dump
+
+    dump = good_dump("acore_world")
+    banner_end = dump.index(b"\n", dump.index(b"-- MySQL dump")) + 1
+    planted = maintenance.IMPORT_RECORD_LEAD.encode() + json.dumps("planted\n").encode() + b"\n"
+    path = tmp_path / "edited.sql"
+    path.write_bytes(dump[:banner_end] + planted + dump[banner_end:])
+    record = _import_record(tmp_path)
+
+    _the_tabs_restore_of(path, tmp_path)
+
+    assert not record.exists(), "a line below the banner was taken as the copy's record"
