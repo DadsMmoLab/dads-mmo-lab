@@ -874,6 +874,18 @@ def test_json_nested_three_deep_still_masks_an_escaped_quote_password() -> None:
         "account create bob pa'{s}",
         'account create bob pa"{s}',
         'logged: \\"account create bob \\"{s} Qxy\\"\\"',
+        # Review round 2 (T683): Tortoise takes a bare `a` as `account` (first match)
+        "a cr bob {s}",
+        "a s p bob {s} {s}",
+        "a p old{s} {s} {s}",
+        # the mangos cores read name and password as '..', ".." or [..]
+        'account create "bob" "{s} Qxy"',
+        "account create bob [{s} Qxy]",
+        "account set password bob [{s} Qxy] [{s} Qxy]",
+        # AzerothCore splits on spaces: a quote may open a word and never close
+        "account create bob '{s}",
+        'acc create bob pa",{s}',
+        'account create bob "Qxy"{s}',
     ],
 )
 def test_an_abbreviated_or_quoted_account_password_command_is_masked(template: str) -> None:

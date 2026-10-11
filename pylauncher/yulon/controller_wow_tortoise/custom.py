@@ -55,6 +55,7 @@ from yulon.manifest import (
     Manifest,
     ManifestType,
     Slug,
+    is_inside_path,
     parse_manifest,
 )
 from yulon.module_source import NOTHING_CHANGED, DeriveError
@@ -399,6 +400,13 @@ def _conf_steps(root: Path, name: str) -> tuple[ConfFile, ...] | str:
         stem = dist.name[: -len(CONF_SUFFIX)]
         if not stem:
             continue
+        if not is_inside_path(f"conf/{dist.name}"):
+            return (
+                f"{name}'s settings file conf/{dist.name} has a name Yu'lon cannot use for a "
+                "server file (a colon or a backslash in it). The server needs every module "
+                "settings file it lists, so Yu'lon will not install this module until the file "
+                "is renamed."
+            )
         text = dist.read_text(encoding="utf-8-sig", errors="replace")
         if _SECTION.search(text) is None:
             return (

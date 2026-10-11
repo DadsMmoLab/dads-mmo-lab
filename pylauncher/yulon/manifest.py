@@ -411,10 +411,18 @@ def _stays_inside(value: str, what: str) -> str:
     S7), so a path that climbs out, starts at a root (`/etc`, `C:/x`) or spells a
     Windows separator is refused when the manifest loads.
     """
-    path = PurePosixPath(value)
-    if not path.parts or "\\" in value or ":" in value or path.is_absolute() or ".." in path.parts:
+    if not is_inside_path(value):
         raise ValueError(f"{what}: {value!r} must be a relative POSIX path inside its folder")
     return value
+
+
+def is_inside_path(value: str) -> bool:
+    """Whether `value` is a path `_stays_inside` accepts, for a caller that names files it
+    found on disk and has to say why one cannot go into a manifest."""
+    path = PurePosixPath(value)
+    return bool(path.parts) and not (
+        "\\" in value or ":" in value or path.is_absolute() or ".." in path.parts
+    )
 
 
 class ConfFile(_Strict):

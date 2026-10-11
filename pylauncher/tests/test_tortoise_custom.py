@@ -14,6 +14,7 @@ cloned and the kind decides where it is cloned to (`apply.CLONE_DIRS`).
 
 from __future__ import annotations
 
+import sys
 from datetime import date
 from pathlib import Path
 
@@ -378,6 +379,15 @@ def test_a_settings_file_with_no_section_line_is_refused_because_the_world_would
     said = _refused_completion(_module_link("mod-x"), clone)
     assert "conf/x.conf.dist" in said and "[" in said and "start" in said
     assert "Nothing" not in said
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows cannot name a file with a colon")
+def test_a_settings_file_named_with_a_colon_is_refused_in_words(tmp_path: Path) -> None:
+    """The manifest refuses a path with `:` in it (T683 S7), so the name is refused here,
+    in a sentence, rather than as a validation error from inside the derivation."""
+    clone = _tree(tmp_path / "c", {"src/a.cpp": "int x;\n", "conf/a:b.conf.dist": "[S]\n"})
+    said = _refused_completion(_module_link("mod-x"), clone)
+    assert "conf/a:b.conf.dist" in said and "Nothing" not in said
 
 
 @pytest.mark.parametrize("text", ["[S]\r\nX = 1\r\n", "\ufeff[S]\nX = 1\n", "  [S]  \nX=1\n"])
