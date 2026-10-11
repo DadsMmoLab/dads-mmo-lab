@@ -44,11 +44,14 @@ from __future__ import annotations
 import secrets
 from collections.abc import Callable
 from pathlib import Path
+from types import ModuleType
+from typing import TYPE_CHECKING
 
 from yulon import docker
-from yulon.catalog.catalog import CatalogEntry
-from yulon.controller_wow_wotlk.accounts import _text_literal, fold, mangos_srp6_credentials
 from yulon.log import get_logger
+
+if TYPE_CHECKING:
+    from yulon.catalog.catalog import CatalogEntry
 
 logger = get_logger(__name__)
 
@@ -76,13 +79,30 @@ NOT_LOCKED = (
 )
 
 
+def _writer() -> ModuleType:
+    """The shared SRP6 writer (`controller_wow_wotlk.accounts`), imported when first needed.
+
+    Not at module level: `catalog.native` imports this module for a `Seams` default, and the
+    writer's own import chain reaches `catalog.native` again, so a top-level import here made
+    `import yulon.seeded_accounts` and `import yulon.ui.controller_view` fail cold (T668).
+    This module stays a leaf of the import graph: only `docker` and `log` at the top.
+    """
+    from yulon.controller_wow_wotlk import accounts
+
+    return accounts
+
+
 def _is_seeded(name: str, s: str, v: str) -> bool:
     """Whether `v` is the verifier of `name` with password `name` under the salt `s`."""
     try:
         raw = bytes.fromhex(s)[::-1]
         if len(raw) != 32:
             return False
-        return v.upper() == mangos_srp6_credentials(fold(name), fold(name), salt=raw)[1]
+        writer = _writer()
+        verifier: str = writer.mangos_srp6_credentials(
+            writer.fold(name), writer.fold(name), salt=raw
+        )[1]
+        return v.upper() == verifier
     except ValueError:
         return False
 
@@ -96,6 +116,8 @@ def lock(ask: Callable[[str], str], schema: str) -> list[str]:
     count is per connection): a password set between the read and the write is not named.
     Raises whatever `ask` raises.
     """
+    writer = _writer()
+    _text_literal, fold = writer._text_literal, writer.fold  # noqa: N806, SLF001
     names = ", ".join(_text_literal(name) for name in NAMES)
     rows = ask(f"SELECT username, s, v FROM {schema}.account WHERE username IN ({names});")
     found: dict[str, tuple[str, str]] = {}
@@ -108,7 +130,7 @@ def lock(ask: Callable[[str], str], schema: str) -> list[str]:
         if name not in found or not _is_seeded(name, *found[name]):
             continue
         old_s, old_v = found[name]
-        new_s, new_v = mangos_srp6_credentials(name, secrets.token_hex(16))
+        new_s, new_v = writer.mangos_srp6_credentials(name, secrets.token_hex(16))
         counted = ask(
             f"UPDATE {schema}.account SET v = {_text_literal(new_v)}, s = {_text_literal(new_s)}"
             f" WHERE username = {_text_literal(name)}"
@@ -131,8 +153,9 @@ def settle(
     """Lock this server's seeded accounts before a start; the line to say, or None.
 
     `start_database=False` is for the app opening on a server Docker brought back by itself
-    (`restart: unless-stopped`): it asks only when the database container is already running
-    and starts nothing, so a stopped server stays stopped.
+    (`restart: unless-stopped`): it starts nothing, so a stopped server stays stopped. The
+    CALLER has seen the database running (`Controller.lock_seeded_accounts_if_up()` asks its
+    own `status()`, the seam the status poll reads), so this asks `docker` nothing about it.
 
     None when the core does not seed them or nothing was still seeded. A password that cannot
     be read is `NOT_LOCKED`, like a database that cannot be asked. Never raises: see the
@@ -140,12 +163,6 @@ def settle(
     """
     if entry.accounts.scheme != SCHEME:
         return None
-    if not start_database:
-        try:
-            if spec.db not in set(docker.status(wsl_distro=wsl_distro)):
-                return None
-        except docker.DockerCommandError:
-            return None
     password = entry.install.db_password(server_dir)
     if password is None:
         logger.warning(f"{entry.id}: the database password could not be read; accounts not locked")

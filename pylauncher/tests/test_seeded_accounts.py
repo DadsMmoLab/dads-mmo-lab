@@ -471,21 +471,7 @@ def test_a_player_who_kept_their_own_administrator_is_not_told_to_set_one(
     assert said is not None and "To use ADMINISTRATOR again" not in said
 
 
-def test_asked_with_the_database_down_it_starts_nothing_and_reads_nothing(
-    db: AuthDb, tmp_path: Path
-) -> None:
-    said = seeded_accounts.settle(
-        TBC, TBC.container_spec(), an_install(tmp_path), start_database=False
-    )
-    assert said is None
-    assert db.statements == [] and db.databases_started == 0
-    assert any(db.seeded_state(n) for n in SEEDED)
-
-
-def test_asked_with_the_database_up_it_locks_without_starting_anything(
-    db: AuthDb, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(docker, "status", lambda **_k: [TBC.container_spec().db])
+def test_asked_not_to_start_the_database_it_starts_nothing(db: AuthDb, tmp_path: Path) -> None:
     said = seeded_accounts.settle(
         TBC, TBC.container_spec(), an_install(tmp_path), start_database=False
     )
@@ -496,6 +482,48 @@ def test_asked_with_the_database_up_it_locks_without_starting_anything(
         TBC, TBC.container_spec(), an_install(tmp_path), start_database=False
     )
     assert again is None and len(db.updates()) == 4
+
+
+def test_the_controller_with_the_database_down_starts_nothing_and_reads_nothing(
+    db: AuthDb, tmp_path: Path
+) -> None:
+    controller = Controller(TBC.container_spec(), an_install(tmp_path))
+    controller.entry = TBC
+    assert controller.lock_seeded_accounts_if_up() is None  # `docker.status` answers: nothing up
+    assert db.statements == [] and db.databases_started == 0
+    assert controller.seeded_accounts_locked is None
+
+
+def test_the_controller_reads_the_database_through_its_own_status_seam(
+    db: AuthDb, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The status poll's seam (`status()`), which tests stub; never a second `docker ps`."""
+    from yulon.controller import InstallStatus
+
+    def no_docker(**_k: object) -> list[str]:
+        raise AssertionError("asked docker directly")
+
+    monkeypatch.setattr(docker, "status", no_docker)
+    controller = Controller(TBC.container_spec(), an_install(tmp_path))
+    controller.entry = TBC
+    monkeypatch.setattr(
+        controller, "status", lambda: InstallStatus(db=True, auth=False, world=False)
+    )
+    assert controller.lock_seeded_accounts_if_up() is not None
+    assert not any(db.seeded_state(n) for n in SEEDED)
+
+
+def test_another_cores_controller_asks_nothing_not_even_docker(
+    db: AuthDb, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def no_docker(**_k: object) -> list[str]:
+        raise AssertionError("asked docker")
+
+    monkeypatch.setattr(docker, "status", no_docker)
+    controller = Controller(WOTLK.container_spec(), an_install(tmp_path, WOTLK))
+    controller.entry = WOTLK
+    assert controller.lock_seeded_accounts_if_up() is None
+    assert db.statements == []
 
 
 def test_the_controller_locks_an_install_whose_database_is_already_up(
@@ -623,6 +651,13 @@ def test_on_a_stopped_distro_neither_reading_runs_until_it_is_up(
     try:
         up.append(TBC.container_spec().db)
         view.services.controller.wsl_distro = "Ubuntu-test"  # type: ignore[attr-defined]
+        from yulon.controller import InstallStatus
+
+        monkeypatch.setattr(
+            view.services.controller,  # type: ignore[attr-defined]
+            "status",
+            lambda: InstallStatus(db=True, auth=False, world=False),
+        )
         view._distro = "stopped"  # type: ignore[attr-defined]
         view.refresh_seeded_accounts()  # type: ignore[attr-defined]
         assert db.statements == [], "a stopped distro is not read"

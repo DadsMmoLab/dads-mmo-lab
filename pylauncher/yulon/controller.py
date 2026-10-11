@@ -457,11 +457,15 @@ class Controller:
     def lock_seeded_accounts_if_up(self) -> str | None:
         """T668: the same lock for a server whose database is already running; the line or None.
 
-        For the app opening on a server Docker restarted by itself. Starts nothing; a note
-        said earlier stays on `seeded_accounts_locked` until the next Start. Never raises.
+        For the app opening on a server Docker restarted by itself. Asks `status()` (the read
+        the status poll makes, a stopped WSL distro included) and does nothing while the
+        database is down; starts nothing. A note said earlier stays on `seeded_accounts_locked`
+        until the next Start. Nothing for a core that does not seed the accounts.
         """
         entry = self.entry or _entry_for(self.spec)
-        if entry is None:
+        if entry is None or entry.accounts.scheme != seeded_accounts.SCHEME:
+            return None
+        if not self.status().db:
             return None
         said = seeded_accounts.settle(
             entry, self.spec, self.server_dir, wsl_distro=self.wsl_distro, start_database=False
