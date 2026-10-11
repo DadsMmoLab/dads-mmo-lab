@@ -20,7 +20,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A message of the day or XP-rate text with a backslash in it no longer stops the install, and is written as typed.
 - A typed answer with a line break in it is refused instead of writing a second setting into the server's file.
 - **Azeroth Chatter** loads its holiday, season and month words again.
-- **AH Bot Plus** installed after **AH Bot** starts from its own settings file; removing and reinstalling one module keeps yours.
+- **AH Bot Plus** installed after **AH Bot** starts from its own settings; reinstalling one module keeps yours.
 - **Apply module SQL** no longer says "nothing to apply" for ten modules whose SQL the server does apply.
 
 ### Changed
