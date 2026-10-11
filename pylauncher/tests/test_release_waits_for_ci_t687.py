@@ -246,3 +246,10 @@ def test_the_release_action_is_pinned_by_commit() -> None:
     assert len(uses) == 3
     for use in uses:
         assert re.fullmatch(r"softprops/action-gh-release@[0-9a-f]{40}", use), use
+
+
+def test_the_called_ci_has_its_own_concurrency_group() -> None:
+    """In a call `github.workflow` is the caller's name, which is all that keeps the
+    release's CI out of the tag push's own ci.yml run (`cancel-in-progress`)."""
+    concurrency = CI["concurrency"]
+    assert "${{ github.workflow }}" in str(concurrency["group"])

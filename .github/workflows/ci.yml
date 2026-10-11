@@ -63,6 +63,14 @@ on:
 # would get both a `push` run and a `pull_request` run per commit. `Yulon` is
 # the branch other work is merged INTO rather than one that is PR'd out of, so
 # the case is unreached today; it is written down so it is not re-discovered.
+#
+# `github.workflow` is what keeps release.yml's call of this file (T687) out of
+# this file's own run on the same tag. In a called workflow the github context
+# is the CALLER's, so the call's group is `ci-release-<ref>` and the tag push's
+# own run is `ci-ci-<ref>` - read off a cancel message on fork run 38129724266.
+# Without it the two would share one group on every release and cancel each
+# other. A second release run on the same ref does cancel the first one's CI,
+# which ends that release run without building: the safe side.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
