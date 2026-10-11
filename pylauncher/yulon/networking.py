@@ -199,7 +199,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from yulon import client_names, platform, runner
+from yulon import client_names, links, platform, runner
 from yulon.apply import ApplyError, SqlRunner
 from yulon.catalog.catalog import CatalogEntry
 from yulon.log import get_logger
@@ -4456,23 +4456,31 @@ def _ssh_rules_still_missing(network_plan: NetworkPlan, done: list[str]) -> tupl
     )
 
 
+def _data_subfolders(client_dir: Path) -> list[Path]:
+    """The folders in a client's `Data/` (found whatever its case, T261), sorted by name.
+
+    A `Data` folder that cannot be listed offers none, and says so in the log.
+    """
+    data = client_names.find(client_dir, client_names.DATA_FOLDER)
+    if data is None or not data.is_dir():
+        return []
+    try:
+        return sorted(entry for entry in data.iterdir() if entry.is_dir())
+    except OSError as exc:
+        logger.warning(f"could not list {data} for its realmlist files: {exc}")
+        return []
+
+
 def _realmlist_candidates(client_dir: Path, realmlist_file: str) -> list[Path]:
     """Where a client keeps its realmlist: `Data/<locale>/` (retail), then the top level.
 
     Every name as the disk spells it (T261): `data/enus/realmlist.wtf`, which
     `unzip -LL` leaves, is the client's file on a disk that tells cases apart,
     and writing `Data/enUS/realmlist.wtf` beside it made a second, empty `Data/`
-    tree the game never reads. A `Data` folder that cannot be listed offers none.
+    tree the game never reads.
     """
-    found: list[Path] = []
-    data = client_names.find(client_dir, client_names.DATA_FOLDER)
-    if data is not None and data.is_dir():
-        try:
-            locales = sorted(entry for entry in data.iterdir() if entry.is_dir())
-        except OSError as exc:
-            logger.warning(f"could not list {data} for its realmlist files: {exc}")
-            locales = []
-        found = [f for f in (client_names.find(loc, realmlist_file) for loc in locales) if f]
+    locales = _data_subfolders(client_dir)
+    found = [f for f in (client_names.find(loc, realmlist_file) for loc in locales) if f]
     top = client_names.find(client_dir, realmlist_file) or client_dir / realmlist_file
     return [*found, top]
 
@@ -4481,6 +4489,29 @@ def _fresh_realmlist(client_dir: Path, realmlist_file: str) -> Path:
     """`Data/enUS/<realmlist_file>`, under the names already on disk (`data/enus/`, T261)."""
     rel = f"{client_names.DATA_FOLDER}/enUS/{realmlist_file}"
     return client_dir.joinpath(*client_names.on_disk(client_dir, rel).parts)
+
+
+def _missing_locale_realmlists(client_dir: Path, realmlist_file: str) -> list[Path]:
+    """`<realmlist_file>` for every locale folder of `Data/` that has none (T665).
+
+    A 3.3.5a client reads `Data/<its locale>/realmlist.wtf` and nothing at the top
+    level; without that file it logs in wherever Config.wtf's `realmList` says,
+    which in a copy is the player's old server (or, beside WotLK, its 3724). Only
+    a retail locale's folder (`enUS`, `enGB`, `deDE`, any case): a 1.12 client has
+    none and reads its top-level file, and gets no new folder. Never inside a
+    `Data` or a locale folder that is a link: a new file there would land in the
+    folder the link points at.
+    """
+    data = client_names.find(client_dir, client_names.DATA_FOLDER)
+    if data is None or links.is_link(data):
+        return []
+    return [
+        locale / realmlist_file
+        for locale in _data_subfolders(client_dir)
+        if client_names.retail_locale(locale.name) is not None
+        and not links.is_link(locale)
+        and client_names.find(locale, realmlist_file) is None
+    ]
 
 
 def _set_realmlist(target: Path, address: str) -> None:
@@ -4532,8 +4563,11 @@ def write_ready_to_play_realmlists(
     For the ready-to-play client only, never the player's own client. Every
     candidate, not the first: a client with two locales (`Data/enGB/`,
     `Data/enUS/`) or a repack's top-level file beside them reads whichever its
-    locale says, and a file left alone would still name another server. None
-    at all: `Data/enUS/` is made, as `write_client_realmlist()` does.
+    locale says, and a file left alone would still name another server. A
+    locale folder with no realmlist gets one (T665): a 3.3.5a copy whose only
+    realmlist was at the top level read none, and went where its Config.wtf
+    said. No locale folder and no realmlist: `Data/enUS/` is made, as
+    `write_client_realmlist()` does.
 
     A read-only file (copied with the original's read-only flag) is made
     writable first, but only a file with one link: the ready-to-play client
@@ -4544,11 +4578,9 @@ def write_ready_to_play_realmlists(
     """
     address = realmlist_value(address, auth_port)
     found = [c for c in _realmlist_candidates(play_dir, realmlist_file) if c.is_file()]
-    if not found:
-        fresh = _fresh_realmlist(play_dir, realmlist_file)
-        fresh.parent.mkdir(parents=True, exist_ok=True)
-        _set_realmlist(fresh, address)
-        return (fresh,)
+    fresh = _missing_locale_realmlists(play_dir, realmlist_file)
+    if not found and not fresh:
+        fresh = [_fresh_realmlist(play_dir, realmlist_file)]
     for target in found:
         st = os.lstat(target)
         if os.path.islink(target) or st.st_nlink > 1:
@@ -4564,4 +4596,7 @@ def write_ready_to_play_realmlists(
         if not st.st_mode & stat.S_IWRITE:
             os.chmod(target, st.st_mode | stat.S_IWRITE)
         _set_realmlist(target, address)
-    return tuple(found)
+    for target in fresh:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        _set_realmlist(target, address)
+    return (*found, *fresh)

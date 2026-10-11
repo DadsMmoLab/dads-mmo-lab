@@ -2755,13 +2755,15 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "mount from an empty mount point; its own `except OSError` logs and answers None, "
         "which is the honest 'cannot tell' this probe is allowed to give"
     ),
-    ("networking.py", "_realmlist_candidates"): (
-        "lists a client's `Data/` (found whatever its case, T261) for its locale folders, "
-        "and finds `realmlist.wtf` in each the same way, to find the file(s) to write: the "
-        "first for `write_client_realmlist()`, every one for T181's "
+    ("networking.py", "_data_subfolders"): (
+        "lists a client's `Data/` (found whatever its case, T261) for its locale folders; "
+        "`_realmlist_candidates()` finds `realmlist.wtf` in each the same way, to find the "
+        "file(s) to write: the first for `write_client_realmlist()`, every one for T181's "
         "`write_ready_to_play_realmlists()`, which is only ever handed a ready-to-play "
-        "client. Finding none falls back to `Data/enUS/` under the names already on disk, "
-        "and each write is to a named file. A `Data/` that cannot be listed offers none"
+        "client, and which also gives a retail locale folder without one a new file "
+        "(T665, never inside a link). Finding none falls back to `Data/enUS/` under the "
+        "names already on disk, and each write is to a named file. A `Data/` that cannot "
+        "be listed offers none"
     ),
     ("logsnap.py", "_prune"): (
         "lists this install's own snapshots in the app's logs directory to keep the newest "

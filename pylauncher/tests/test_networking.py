@@ -413,6 +413,110 @@ def test_a_ready_to_play_client_with_no_realmlist_gets_one(tmp_path: Path) -> No
     assert written[0].read_text(encoding="utf-8") == "set realmlist 127.0.0.1\n"
 
 
+def _locale_mpq(folder: Path, locale: str) -> Path:
+    """A locale folder as a 3.3.5a client has it: its `locale-xxXX.MPQ`, no realmlist."""
+    mpq = folder / "Data" / locale / f"locale-{locale}.MPQ"
+    mpq.parent.mkdir(parents=True)
+    mpq.write_bytes(b"MPQ")
+    return mpq.parent
+
+
+def test_a_client_with_only_a_top_level_realmlist_gets_one_in_its_locale_folder(
+    tmp_path: Path,
+) -> None:
+    """T665: 3.3.5a reads `Data/<locale>/realmlist.wtf`; only the top-level one was written."""
+    play = tmp_path / "play"
+    us = _locale_mpq(play, "enUS")
+    (play / "realmlist.wtf").write_text("set realmlist logon.warmane.com\n", encoding="utf-8")
+
+    written = networking.write_ready_to_play_realmlists(play, "127.0.0.1", auth_port=3725)
+
+    assert sorted(written) == sorted([us / "realmlist.wtf", play / "realmlist.wtf"])
+    for f in written:
+        assert f.read_text(encoding="utf-8") == "set realmlist 127.0.0.1:3725\n"
+
+
+def test_a_locale_folder_without_a_realmlist_beside_one_with_gets_one_too(
+    tmp_path: Path,
+) -> None:
+    """T665: a client set to enGB reads `Data/enGB/`, whatever `Data/enUS/` says."""
+    play = tmp_path / "play"
+    gb = _locale_mpq(play, "enGB")
+    us = play / "Data" / "enUS" / "realmlist.wtf"
+    us.parent.mkdir()
+    us.write_text("set realmlist logon.warmane.com\n", encoding="utf-8")
+
+    written = networking.write_ready_to_play_realmlists(play, "127.0.0.1", auth_port=3724)
+
+    assert sorted(written) == sorted([gb / "realmlist.wtf", us])
+    assert (gb / "realmlist.wtf").read_text(encoding="utf-8") == "set realmlist 127.0.0.1\n"
+
+
+def test_a_client_with_no_realmlist_gets_one_in_its_own_locale_folder(tmp_path: Path) -> None:
+    """T665: an enGB client never reads the `Data/enUS/` file it used to be given."""
+    play = tmp_path / "play"
+    gb = _locale_mpq(play, "enGB")
+
+    written = networking.write_ready_to_play_realmlists(play, "127.0.0.1", auth_port=3725)
+
+    assert written == (gb / "realmlist.wtf",)
+    assert not (play / "Data" / "enUS").exists()
+
+
+def test_a_folder_under_data_that_is_no_locale_gets_no_realmlist(tmp_path: Path) -> None:
+    play = tmp_path / "play"
+    us = _locale_mpq(play, "enUS")
+    (play / "Data" / "Cache").mkdir()
+
+    written = networking.write_ready_to_play_realmlists(play, "127.0.0.1", auth_port=3724)
+
+    assert written == (us / "realmlist.wtf",)
+    assert not (play / "Data" / "Cache" / "realmlist.wtf").exists()
+
+
+def test_a_client_with_a_top_level_realmlist_and_no_locale_folder_gets_no_new_folder(
+    tmp_path: Path,
+) -> None:
+    """A 1.12 client keeps its realmlist at the top level and has no locale folder to read."""
+    play = tmp_path / "play"
+    (play / "Data").mkdir(parents=True)
+    (play / "Data" / "dbc.MPQ").write_bytes(b"MPQ")
+    (play / "realmlist.wtf").write_text("set realmlist logon.example.com\n", encoding="utf-8")
+
+    written = networking.write_ready_to_play_realmlists(play, "127.0.0.1", auth_port=3724)
+
+    assert written == (play / "realmlist.wtf",)
+    assert _tree(play) == ["Data", "Data/dbc.MPQ", "realmlist.wtf"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a directory symlink needs privilege on Windows")
+def test_a_locale_folder_that_is_a_link_gets_no_new_realmlist(tmp_path: Path) -> None:
+    """A new file there would land in the folder the link points at: another client's."""
+    other = _locale_mpq(tmp_path / "other", "enGB")
+    play = tmp_path / "play"
+    us = _locale_mpq(play, "enUS")
+    (play / "Data" / "enGB").symlink_to(other, target_is_directory=True)
+
+    written = networking.write_ready_to_play_realmlists(play, "127.0.0.1", auth_port=3724)
+
+    assert written == (us / "realmlist.wtf",)
+    assert not (other / "realmlist.wtf").exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a directory symlink needs privilege on Windows")
+def test_a_data_folder_that_is_a_link_gets_no_new_realmlist(tmp_path: Path) -> None:
+    other = _locale_mpq(tmp_path / "other", "enUS")
+    play = tmp_path / "play"
+    play.mkdir()
+    (play / "Data").symlink_to(other.parent, target_is_directory=True)
+    (play / "realmlist.wtf").write_text("set realmlist logon.example.com\n", encoding="utf-8")
+
+    written = networking.write_ready_to_play_realmlists(play, "127.0.0.1", auth_port=3724)
+
+    assert written == (play / "realmlist.wtf",)
+    assert not (other / "realmlist.wtf").exists()
+
+
 def test_a_read_only_realmlist_of_its_own_is_made_writable_and_written(tmp_path: Path) -> None:
     """Finding 1: `create()` copies the original's read-only flag along with the file."""
     f = tmp_path / "play" / "Data" / "enUS" / "realmlist.wtf"

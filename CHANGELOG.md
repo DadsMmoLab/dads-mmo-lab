@@ -46,6 +46,8 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - The **Battle Pass** vendor can now be spawned in the world, and removing Battle Pass takes it away.
 - Removing or updating a Lua script module keeps any of its files you changed, and says which.
 - A Lua script module that would replace another module's file is refused, naming that module.
+- A ready-to-play WotLK or Unbound client whose realmlist sat beside Wow.exe now logs in to your server, not an old one.
+- **PLAY** in a client unpacked with lower-case folder names keeps your game settings instead of starting a new file.
 
 ### Changed
 - The Server tab's **Play** now starts the game; **Launcher…** opens the launcher. The tray's **Play** starts a stopped server.
