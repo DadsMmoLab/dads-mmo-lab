@@ -15,6 +15,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 
 ### New
 
+- The Maintenance tab lists the backups an earlier uninstall kept, so a reinstall can restore them.
 ### Fixed
 - On a Mac, clicking Yu'lon in the Dock brings its window back when it was closed into the menu bar.
 - On Windows, deleting a folder no longer clears read-only flags or removes folders behind a junction inside it.
@@ -22,9 +23,9 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Uninstall now moves your database backups to a folder beside the server folder and says where, instead of deleting them.
 - Bringing in a server with Auction House Bot from another computer no longer stops on a missing character.
 - TBC and Vanilla servers no longer keep built-in admin accounts that anyone on your network could log in to.
-- Closing, quitting, updating or changing the client folder is refused while a restore, backup or install is running.
-- **PLAY** at another computer's address skips the local server; your own public address counts as another computer.
-- **PLAY** after starting the server now waits for the realm to come up before it starts the game.
+- Closing, updating or changing the client folder waits for a running restore, backup or install; Quit asks first.
+- **Play** at another computer's address skips the local server; your own public address counts as another computer.
+- **Play** after starting the server now waits for the realm to come up before it starts the game.
 - Install now asks before it starts or installs Docker Engine as root, and never installs a second engine over yours.
 - A full drive is now said right after you pick the server folder, and a wrong move file before any folder is asked.
 - The Accounts tab only creates names and passwords that Delete, Set password and GM level can use afterwards.
@@ -49,7 +50,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Removing or updating a Lua script module keeps any of its files you changed, and says which.
 - A Lua script module that would replace another module's file is refused, naming that module.
 - A ready-to-play WotLK or Unbound client whose realmlist sat beside Wow.exe now logs in to your server, not an old one.
-- **PLAY** in a client unpacked with lower-case folder names keeps your game settings instead of starting a new file.
+- **Play** in a client unpacked with lower-case folder names keeps your game settings instead of starting a new file.
 - While a restore runs, Modules installs and other database changes wait for it instead of writing into it.
 - Start, Update and Rebuild refuse a server whose restore did not finish, and say how to finish or undo it.
 - Restore refuses a backup that would overwrite MySQL's own accounts and passwords.
@@ -65,7 +66,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A WotLK or Unbound database import that fails part-way no longer counts as finished; **Repair** clears and redoes it.
 
 ### Changed
-- The Server tab's **Play** now starts the game; **Launcher…** opens the launcher. The tray's **Play** starts a stopped server.
+- The Server tab's **Play** now starts the game; **Launcher…** opens the launcher. The tray's **Play** offers to start a stopped server.
 - The tray's menu and panel offer the same **Start**, **Stop**, **Restart** and **Play**; **Quit tray…** is **Quit Yu'lon…**.
 - **Battle Pass** no longer asks for its vendor's creature entry: the vendor it creates is always the one it uses.
 - A new version is offered only after its tests pass, and the Windows and Mac builds are now tested on their own systems.
