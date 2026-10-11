@@ -542,9 +542,13 @@ class _RestoredWithNote:
 
 @dataclass(frozen=True)
 class _BackedUpWithNote:
-    """A backup's report, and the line saying the database it started is still running (T681)."""
+    """A backup's report, and the line saying the database it started is still running (T681).
 
-    report: wotlk_maintenance.BackupReport
+    `report` is whatever the backup answered: a `BackupReport` normally, and the note is kept
+    when it is not, because the database was left running either way (review of T681).
+    """
+
+    report: object
     note: str
 
 
@@ -17261,12 +17265,10 @@ class ControllerView(QWidget):
                 held.close()
                 return self.services.backup()
             backed_up = _put_back_after(self.services.backup, alone)
-            report = backed_up.result
-            if backed_up.stop_note is None or not isinstance(
-                report, wotlk_maintenance.BackupReport
-            ):
-                return report
-            return _BackedUpWithNote(report, backed_up.stop_note)
+            if backed_up.stop_note is None:
+                return backed_up.result
+            # Kept whatever the backup answered: the database is running either way (review).
+            return _BackedUpWithNote(backed_up.result, backed_up.stop_note)
 
     @Slot()
     def back_up(self) -> None:
@@ -17297,6 +17299,8 @@ class ControllerView(QWidget):
             stop_note = result.note
             result = result.report
         if not isinstance(result, wotlk_maintenance.BackupReport):
+            if stop_note:
+                self.maintenance_report.setPlainText(stop_note)
             self._settle_shelf_buttons()
             return
         lines = [f"Backed up to {result.directory}:"]
@@ -20090,6 +20094,15 @@ class ControllerView(QWidget):
         failed — the update was not started" about a backup the user was
         watching succeed.
         """
+        held = docker.held_reason(self.services.controller.server_dir)
+        if self._restore_running or held is not None:
+            # T681 review: a restore of this server is loading (here, or in another window).
+            show_information(
+                self,
+                "A restore is running",
+                f"{held or forgetting.RESTORE_HOLDS_THE_DATABASES} Nothing was started.",
+            )
+            return True
         if self._backup_before_update:
             show_information(
                 self,
@@ -20218,7 +20231,8 @@ class ControllerView(QWidget):
         self._set_update_buttons()
         report = result.report if isinstance(result, _BackedUpWithNote) else result
         if not isinstance(report, wotlk_maintenance.BackupReport):
-            self._backup_before_update_failed("the backup did not say what it wrote")
+            note = f" {result.note}" if isinstance(result, _BackedUpWithNote) else ""
+            self._backup_before_update_failed(f"the backup did not say what it wrote.{note}")
             return
         self._backup_done(result)
         result = report
@@ -20259,6 +20273,10 @@ class ControllerView(QWidget):
         The engine refuses too (`native.unfinished_restore_refusal`); asked here first so the
         update's backup is not taken of half-written databases and then refused anyway.
         """
+        if self._restore_running or docker.held_here(self.services.controller.server_dir):
+            # The record is the restore running NOW (this tab's or another window's), not one
+            # from the last session: `_update_route_busy()` says so in the restore's words.
+            return False
         try:
             record = self.services.interrupted_restore()
         except Exception as exc:  # noqa: BLE001 - a record that cannot be read: the engine asks

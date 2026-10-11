@@ -102,6 +102,14 @@ RESTORE_WRITES_ALONE = (
 )
 
 
+MOVE_WRITES_ALONE = (
+    "Accounts and characters are being brought in on this server's Maintenance tab, and "
+    "nothing else may write to its databases until that has finished. Wait for it to finish, "
+    "then try again. Nothing was changed."
+)
+"""T681 review: a bring-in's load is a restore's load; every other writer waits for it."""
+
+
 def another_press_writes(press: str) -> str:
     """Why a Restore is refused while another press of this Yu'lon works on the server (T681)."""
     return (

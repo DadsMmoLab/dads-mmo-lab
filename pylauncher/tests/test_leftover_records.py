@@ -332,3 +332,34 @@ def test_a_cut_off_load_is_finished_by_bring_in_without_starting_the_server(
     assert any("not started on them" in line for line in lines), lines
     assert maintenance.interrupted_restore(mv.target.server_dir) is None
     assert not (mv.target.server_dir / move_server.MOVE_IN_FILE).exists()
+
+
+def test_nothing_else_writes_while_a_character_bring_in_loads(tmp_path: Path) -> None:
+    """The Maintenance tab's Bring in (accounts and characters) is a load like a Restore.
+
+    Mutation: drop `alone=` from the bring-in's `_database_session()`.
+    """
+    from tests.test_move_flows import packed, target
+    from yulon import docker, forgetting, move_flows
+
+    package = packed(tmp_path)
+    box = target(tmp_path)
+    plan = move_flows.plan_import(box.world, package)
+    assert plan.allowed, plan.refusals
+    seen: list[object] = []
+    load = box.db.load_from
+
+    def load_and_write(source: object) -> None:
+        try:
+            with docker.server_hold(box.server_dir, "Install mod-transmog", spec=None):
+                seen.append("written")
+        except docker.ServerHeldError as exc:
+            seen.append(str(exc))
+        load(source)  # type: ignore[arg-type]
+
+    box.db.load_from = load_and_write  # type: ignore[method-assign]
+    move_flows.run_import(
+        box.world, plan, confirm=None, use_old_realm_name=False, stop_allowed=False
+    )
+
+    assert seen and all(s == forgetting.MOVE_WRITES_ALONE for s in seen), seen

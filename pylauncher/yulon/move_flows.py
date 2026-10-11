@@ -440,7 +440,9 @@ PRESS_BRING_IN = "Bring in a move"
 
 
 @contextlib.contextmanager
-def _database_session(world: MoveWorld, *, because: str, undone: str, press: str) -> Iterator[None]:
+def _database_session(
+    world: MoveWorld, *, because: str, undone: str, press: str, alone: str | None = None
+) -> Iterator[None]:
     """The leased, held, database-up stretch a move works in. `undone` names what did not happen.
 
     The same four steps the Maintenance tab's Backup and Restore take, in the same order: the
@@ -453,7 +455,9 @@ def _database_session(world: MoveWorld, *, because: str, undone: str, press: str
     with contextlib.ExitStack() as stack:
         try:
             stack.enter_context(
-                docker.maintenance_lease(world.server_dir, forgetting.MOVE_HOLDS_THE_DATABASES)
+                docker.maintenance_lease(
+                    world.server_dir, forgetting.MOVE_HOLDS_THE_DATABASES, press=press
+                )
             )
         except docker.MaintenanceLeaseTaken as exc:
             raise MoveError(f"{exc} {undone}") from exc
@@ -465,6 +469,8 @@ def _database_session(world: MoveWorld, *, because: str, undone: str, press: str
                     press=press,
                     spec=world.spec,
                     wsl_distro=world.wsl_distro,
+                    # A load passes `alone` (T681 review): no Modules SQL mid-load.
+                    alone=alone,
                 )
             )
         except docker.ServerHeldError as exc:
@@ -1060,7 +1066,11 @@ def run_import(
     if running:
         world.stop_server()
     with _database_session(
-        world, because="nothing was brought in", undone=_NOT_IN, press=PRESS_BRING_IN
+        world,
+        because="nothing was brought in",
+        undone=_NOT_IN,
+        press=PRESS_BRING_IN,
+        alone=forgetting.MOVE_WRITES_ALONE,
     ):
         return _import_locked(world, plan, package, use_old_realm_name, stopped=running)
 

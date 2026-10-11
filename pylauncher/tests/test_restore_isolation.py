@@ -443,3 +443,190 @@ def test_a_failed_restore_keeps_its_own_failure_when_the_stop_fails_too(
     assert failures and "failed part-way" in failures[-1], failures
     assert "daemon busy" not in failures[-1]
     assert stack.stops == 1
+
+
+# -- review round 1 (cold review of 5db1c78b) ------------------------------------------------
+
+
+def test_update_during_this_tabs_own_restore_says_the_restore_is_running(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The live load's own marker (T690's pid, this process) is not "the last session".
+
+    Mutation: drop the `_restore_running` / `held_here` early return from
+    `_refused_over_an_unfinished_restore()`.
+    """
+    stack = _Stack()
+    services = _real_maintenance(tmp_path, stack, _Mysql(stack))
+    asked: list[str] = []
+
+    class Route:
+        upstream_news = None
+
+        def confirmation(self) -> str:
+            asked.append("confirmation")
+            return "Update?"
+
+        def press(self, cancel: object) -> object:
+            asked.append("press")
+            return iter(())
+
+        def source_version(self) -> native.SourceVersion:
+            return native.SourceVersion(line="", past_the_pin=False)
+
+    view = _view(replace(services, update_to_latest=Route()))
+    marker = maintenance.marker_path(tmp_path)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    token, name = maintenance.process_identity(os.getpid())
+    record = maintenance.InterruptedRestore(
+        marker=marker,
+        backup=tmp_path / "b.sql",
+        databases=("acore_characters",),
+        safety_backup=(),
+        started_at="",
+        load_pid=os.getpid(),
+        load_host=maintenance.this_host(),
+        load_token=token,
+        load_name=name,
+    )
+    marker.write_text(record.as_json(), encoding="utf-8")
+    shown: list[tuple[str, str]] = []
+    for seam in ("show_warning", "show_information"):
+        monkeypatch.setattr(
+            controller_view_module, seam, lambda _p, title, text: shown.append((title, text))
+        )
+    monkeypatch.setattr(
+        controller_view_module,
+        "ask_update_choice",
+        lambda *a, **k: asked.append("choice") or controller_view_module.UpdateChoice.CANCEL,
+    )
+    view._restore_running = True
+
+    assert view.update_to_latest() is False
+
+    said = " ".join(text for _t, text in shown)
+    assert "last session" not in said, shown
+    assert forgetting.RESTORE_HOLDS_THE_DATABASES in said, shown
+    assert asked == []
+    view._restore_running = False
+
+    # Another window's restore of the same server: the hold of this process says so.
+    shown.clear()
+    with docker.hold_the_server(tmp_path, forgetting.RESTORE_HOLDS_THE_SERVER):
+        assert view.update_to_latest() is False
+    said = " ".join(text for _t, text in shown)
+    assert "last session" not in said and forgetting.RESTORE_HOLDS_THE_SERVER in said, shown
+    assert asked == []
+
+
+def test_a_load_whose_session_ended_says_yulon_cannot_tell_whether_it_finished(
+    tmp_path: Path,
+) -> None:
+    """Quit anyway over a load that then finished: the marker keeps a dead pid.
+
+    Mutation: drop the `load_pid` branch from `unfinished_restore_sentence()`.
+    """
+    marker = maintenance.marker_path(tmp_path)
+    marker.parent.mkdir(parents=True)
+    record = maintenance.InterruptedRestore(
+        marker=marker,
+        backup=tmp_path / "b.sql",
+        databases=("acore_characters",),
+        safety_backup=(tmp_path / "pre-restore.sql",),
+        started_at="",
+        load_pid=2**22 + 12345,  # no such process
+        load_host=maintenance.this_host(),
+        load_token="gone",
+    )
+    marker.write_text(record.as_json(), encoding="utf-8")
+
+    said = native.folder_start_refusal(tmp_path, lambda ref: None)
+
+    assert said is not None
+    assert "cannot tell whether it finished" in said, said
+    assert "restore a backup again" in said and "Forget that record" in said
+    assert str(tmp_path / "pre-restore.sql") in said
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        b"INSERT INTO `mysql`.`user` VALUES ('root','%');\n",
+        b"INSERT INTO mysql.user VALUES ('root','%');\n",
+        b"CREATE USER 'x'@'%' IDENTIFIED BY 'y';\n",
+        b"GRANT ALL PRIVILEGES ON *.* TO 'x'@'%';\n",
+        b"ALTER USER 'root'@'localhost' IDENTIFIED BY 'z';\n",
+        b"DROP USER 'root'@'%';\n",
+        b"SET PASSWORD FOR 'root'@'%' = 'z';\n",
+        b"  grant select on acore_world.* to 'x'@'%';\n",
+    ],
+    ids=[
+        "insert-backquoted",
+        "insert-plain",
+        "create-user",
+        "grant",
+        "alter-user",
+        "drop-user",
+        "set-password",
+        "indented-lowercase",
+    ],
+)
+def test_a_dump_that_changes_mysql_accounts_is_refused(tmp_path: Path, statement: bytes) -> None:
+    """Without a `USE mysql`, a statement can still write MySQL's own accounts.
+
+    Mutation: drop the account-statement scan from `plan_restore()`.
+    """
+    body = good_dump("acore_characters").replace(
+        b"-- Dump completed", statement + b"-- Dump completed"
+    )
+    dump = tmp_path / "accounts.sql"
+    dump.write_bytes(body)
+    stack = _Stack(SPEC.db)
+    plan = maintenance.plan_restore(dump, tmp_path, game=GAME, running=stack.census)
+    assert not plan.allowed, statement
+    assert "MySQL's own" in plan.refusals[0], plan.refusals
+
+
+def test_account_words_inside_data_are_not_refused(tmp_path: Path) -> None:
+    """mysqldump escapes a newline inside a string, so a value never starts a line."""
+    rows = (
+        b"INSERT INTO `t` VALUES ('he said\\nGRANT ALL to me'),('CREATE USER x');\n"
+        b"INSERT INTO `mysql_log` VALUES (1);\n"
+        b"-- GRANT nothing, a comment\n"
+    )
+    body = good_dump("acore_characters").replace(b"-- Dump completed", rows + b"-- Dump completed")
+    dump = tmp_path / "data.sql"
+    dump.write_bytes(body)
+    stack = _Stack(SPEC.db)
+    plan = maintenance.plan_restore(dump, tmp_path, game=GAME, running=stack.census)
+    assert plan.allowed, plan.refusals
+
+
+def test_a_start_during_this_processs_own_restore_keeps_the_holds_sentence(
+    qapp: object, tmp_path: Path
+) -> None:
+    """The marker of a load in flight here is not "did not finish": the hold speaks.
+
+    Mutation: drop the `docker.held_here()` skip from `native.unfinished_restore_refusal()`.
+    """
+    stack = _Stack()
+    mysql = _Mysql(stack)
+    view = _view(_real_maintenance(tmp_path, stack, mysql))
+    _select_backup(view, tmp_path)
+    seen = _during_the_load(mysql, lambda: native.folder_start_refusal(tmp_path, lambda r: None))
+    view.show_restore_plan()
+    view.run_restore()
+    assert seen == [None], seen
+    # And the restore that held it finished, so its marker is gone.
+    assert maintenance.interrupted_restore(tmp_path) is None
+
+
+def test_a_backup_that_answers_nothing_still_says_the_database_was_left_running(
+    qapp: object, tmp_path: Path
+) -> None:
+    """Mutation: return the odd result without its note in `_back_up_under_the_lease()`."""
+    stack = _StopFails()
+    services = replace(_real_maintenance(tmp_path, stack, _Mysql(stack)), backup=lambda: None)
+    view = _view(services)
+    view.back_up()
+    assert "could not be stopped again" in view.maintenance_report.toPlainText()
