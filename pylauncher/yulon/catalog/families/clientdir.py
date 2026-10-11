@@ -247,7 +247,11 @@ def _warnings(client_dir: Path, data: Path, spec: ClientSpec, free_bytes: FreeBy
     checks = [_mpq_check(data, spec)]
     if spec.locale_mpq_required:
         checks.append(_locale_check(data, locales))
-    checks.append(_repack_check(client_dir, data, locales))
+    if spec.locale_mpq_required:
+        # Without a locale folder in the stock layout (Vanilla 1.12.1 keeps
+        # `realmlist.wtf` at the root and every archive directly in `Data/`)
+        # "no locale folder" says nothing about a repack.
+        checks.append(_repack_check(client_dir, data, locales))
     checks.append(_space_check(client_dir, spec, free_bytes))
     return checks
 
@@ -366,7 +370,7 @@ def _repack_check(client_dir: Path, data: Path, locales: tuple[Path, ...] | None
             REPACK_CHECK,
             "warn",
             f"{REPACK_FILE} sits at the root of {client_dir} and there is no locale folder, "
-            "which is how a repack looks",
+            "which is how a repack looks.",
             "Use a clean client of this expansion if extraction comes up short — repacks have "
             "rearranged archives and often extract incompletely.",
         )

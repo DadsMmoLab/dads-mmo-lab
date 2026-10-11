@@ -402,6 +402,27 @@ def test_module_install_touches_include_sh_activates_conf_and_writes_keys(tmp_pa
     assert [p.db for p in report.pending_sql] == ["world"]
 
 
+def test_a_claim_in_a_folder_yulon_cannot_write_is_told_without_the_raw_errno(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """U-7: `[Errno 13] Permission denied: '...'` was the whole sentence; now it names the
+    folder and what to do."""
+
+    def refused(clone: Path, **_kw: object) -> None:
+        raise PermissionError(13, "Permission denied", str(clone / apply_module.CLAIM_FILE))
+
+    monkeypatch.setattr(apply_module, "write_clone_claim", refused)
+    git = _FakeGit({"conf/mod_ahbot.conf.dist": "AuctionHouseBot.GUID = 0\n"})
+    report = Applier(tmp_path, git=git, sql=_FakeSql()).install(
+        parse_manifest(MODULE), {"bot_guid": "42"}
+    )
+    clone = tmp_path / "modules" / "mod-ah-bot"
+    said = " ".join(report.skipped)
+    assert "Errno" not in said and "Permission denied" not in said, said
+    assert str(clone) in said and "cannot write" in said, said
+    assert "write access" in said, said
+
+
 def test_a_module_conf_is_activated_without_the_lines_the_server_refuses(tmp_path: Path) -> None:
     """T204: the same rule as the server's own confs, at the moment the `.dist` is copied."""
     git = _FakeGit(

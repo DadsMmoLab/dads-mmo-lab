@@ -1844,6 +1844,22 @@ and inside that signature the name is the parameter. This is how the default
 still reaches the function."""
 
 
+def _cannot_write(exc: OSError, fallback: Path) -> str:
+    """A refused write in a plain sentence: the folder, and what to do (U-7).
+
+    The raw `[Errno 13] Permission denied: '<file>'` named a file, not a remedy.
+    Anything that is not a refusal keeps its own text, so a full disk is not
+    called a permission problem.
+    """
+    if not isinstance(exc, PermissionError):
+        return f"({exc})"
+    where = Path(str(exc.filename)).parent if exc.filename else fallback
+    return (
+        f"(Yu'lon cannot write to {where}; give your user write access to that folder, "
+        "then install again)"
+    )
+
+
 def write_clone_claim(
     clone: Path,
     *,
@@ -4010,8 +4026,9 @@ class Applier:
                 # is what the user asked for — but never silent either: without
                 # the claim the NEXT install of this item is refused, and the
                 # report is the only place that can say so in advance.
+                why = _cannot_write(exc, clone)
                 log.skipped.append(
-                    f"{CLAIM_FILE}: could not be written ({exc}), so this app will not "
+                    f"{CLAIM_FILE}: could not be written {why}, so this app will not "
                     f"recognise {_rel(self.server_dir, clone)} as its own next time"
                 )
             if manifest.type == "module":
@@ -4256,13 +4273,14 @@ class Applier:
             # menu -- so the failure is visible and harmless, where raising here
             # would report a finished install as a failure. One write carries
             # both facts, so one failure loses both and says so twice.
+            why = _cannot_write(exc, clone)
             if client_files:
                 log.skipped.append(
                     f"{CLAIM_FILE}: the record of what went into your game client could not be "
-                    f"written ({exc}), so removing {manifest.id} will leave those files in place"
+                    f"written {why}, so removing {manifest.id} will leave those files in place"
                 )
             log.skipped.append(
-                f"{CLAIM_FILE}: the finished mark could not be written ({exc}), so "
+                f"{CLAIM_FILE}: the finished mark could not be written {why}, so "
                 f"{_rel(self.server_dir, clone)} will keep offering Install"
             )
 
