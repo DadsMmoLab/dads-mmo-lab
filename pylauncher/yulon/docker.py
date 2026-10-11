@@ -554,6 +554,10 @@ SERVER_IN_MOTION = (
 _HOLD_LOCK = threading.Lock()
 _HELD: dict[str, list[str]] = {}
 _IN_FLIGHT: dict[str, int] = {}
+_PRESSES: dict[str, list[str]] = {}
+"""The presses of this process inside a reservation of each server right now (T681)."""
+_ALONE: dict[str, tuple[str, str]] = {}
+"""A server one job writes to alone: `(its press, what every other press is told)` (T681)."""
 
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
@@ -566,6 +570,37 @@ def _server_key(server_dir: Path | str) -> str:
     `\\\\wsl.localhost\\<distro>` starts a stopped distro (T133).
     """
     return os.path.normcase(os.path.abspath(os.fspath(server_dir)))
+
+
+@contextmanager
+def _press_on(server_dir: Path | str, press: str) -> Iterator[None]:
+    """Count `press` as inside a reservation of this server; refused while another writes alone.
+
+    T681: one process shares one reservation (`server_claim()` is re-entrant), so the
+    reservation itself could not keep a Modules job's SQL out of a Restore's load in the same
+    Yu'lon: the module's take simply joined the restore's. Every take in this process passes
+    here first, the cross-process ones and the spec-less ones alike, so a job that writes to the
+    server alone (`hold_the_server(alone=...)`) refuses every OTHER press by name, and is
+    itself refused while another press is inside.
+
+    Raises:
+        ServerHeldError: a job writes to this server alone, and `press` is not that job's.
+    """
+    key = _server_key(server_dir)
+    with _HOLD_LOCK:
+        alone = _ALONE.get(key)
+        if alone is not None and alone[0] != press:
+            logger.warning(f"refused {press} on {server_dir}: {alone[0]} writes to it alone")
+            raise ServerHeldError(alone[1])
+        _PRESSES.setdefault(key, []).append(press)
+    try:
+        yield
+    finally:
+        with _HOLD_LOCK:
+            presses = _PRESSES[key]
+            presses.remove(press)
+            if not presses:
+                del _PRESSES[key]
 
 
 @contextmanager
@@ -582,8 +617,26 @@ def _reserved_for(
 
     A caller that names no `spec` (the headless harness, a test) holds in this process only,
     as before. A reservation that is `moot` (Docker not answering, an unwritable folder) is
-    skipped: the job meets that itself.
+    skipped: the job meets that itself. Either way the press is counted (`_press_on()`).
     """
+    with (
+        _press_on(server_dir, press),
+        _reserved_across(server_dir, press, spec, wsl_distro, label, budget, avoid_images),
+    ):
+        yield
+
+
+@contextmanager
+def _reserved_across(
+    server_dir: Path | str,
+    press: str,
+    spec: ContainerSpec | None,
+    wsl_distro: str | None,
+    label: str | None,
+    budget: float | None,
+    avoid_images: Sequence[str],
+) -> Iterator[None]:
+    """`_reserved_for()`'s cross-process half."""
     if spec is None or not RESERVATIONS_ON:
         yield
         return
@@ -664,6 +717,7 @@ def hold_the_server(
     press: str = "A backup or restore",
     spec: ContainerSpec | None = None,
     wsl_distro: str | None = None,
+    alone: str | None = None,
 ) -> Iterator[None]:
     """Keep every start, stop and recreate of this server away while the block runs (T216).
 
@@ -702,14 +756,26 @@ def hold_the_server(
     Given a `spec` it also reserves the server across processes (T568), under `press`, for
     the block: another Yu'lon's Start or Update then refuses with this job's name.
 
+    `alone` (T681, the Restore's) makes the block the only writer of this server in this
+    process: every other press that reserves the server here -- a Modules job's SQL, an account
+    or a network write, a bot rebuild, a second window's press -- is refused with `alone`, and
+    the block is refused while one of them is inside. Another Yu'lon is kept out by the
+    cross-process reservation above, as before.
+
     Raises:
         ServerHeldError: a start, stop or recreate of this server is running
-            (`SERVER_IN_MOTION`), or another Yu'lon holds the server (`ServerReserved`).
+            (`SERVER_IN_MOTION`), another Yu'lon holds the server (`ServerReserved`), or, with
+            `alone`, another press of this process is working on it.
     """
     key = _server_key(server_dir)
     with _HOLD_LOCK:
         if _IN_FLIGHT.get(key):
             raise ServerHeldError(SERVER_IN_MOTION)
+        if alone is not None:
+            inside = [p for p in _PRESSES.get(key, ()) if p != press]
+            if inside:
+                raise ServerHeldError(forgetting.another_press_writes(inside[-1]))
+            _ALONE[key] = (press, alone)
         _HELD.setdefault(key, []).append(reason)
     try:
         with _reserved_for(server_dir, press, spec, wsl_distro):
@@ -720,6 +786,14 @@ def hold_the_server(
             reasons.remove(reason)
             if not reasons:
                 del _HELD[key]
+            if alone is not None:
+                del _ALONE[key]
+
+
+def held_here(server_dir: Path | str) -> bool:
+    """A Maintenance job of THIS process holds the server right now (`hold_the_server()`)."""
+    with _HOLD_LOCK:
+        return bool(_HELD.get(_server_key(server_dir)))
 
 
 def held_reason(server_dir: Path | str) -> str | None:
@@ -9011,6 +9085,45 @@ def _refused(holder: ServerHolder, label: str, this_press: str) -> ServerReserve
 
 @contextmanager
 def server_claim(
+    server_dir: Path | str,
+    *,
+    press: str,
+    images: Sequence[str] = (),
+    spec: ContainerSpec | None = None,
+    wsl_distro: str | None = None,
+    cancel: threading.Event | None = None,
+    label: str | None = None,
+    this_press: str | None = None,
+    up_timeout: float | None = None,
+    avoid_images: Sequence[str] = (),
+) -> Iterator[ClaimHeld]:
+    """`_server_claim()`, counted as `press` in this process (`_press_on()`, T681).
+
+    Raises:
+        ServerHeldError: a job of this process writes to the server alone (a Restore).
+        ServerReserved: another process (or an earlier run of this Yu'lon) holds it.
+        ServerReservationUnavailable: no reservation could be made.
+    """
+    with (
+        _press_on(server_dir, press),
+        _server_claim(
+            server_dir,
+            press=press,
+            images=images,
+            spec=spec,
+            wsl_distro=wsl_distro,
+            cancel=cancel,
+            label=label,
+            this_press=this_press,
+            up_timeout=up_timeout,
+            avoid_images=avoid_images,
+        ) as held,
+    ):
+        yield held
+
+
+@contextmanager
+def _server_claim(
     server_dir: Path | str,
     *,
     press: str,

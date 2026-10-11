@@ -85,6 +85,19 @@ PackagePicker = Callable[[QWidget, str, Path], Path | None]
 YesNo = Callable[[QWidget, str, str], bool]
 
 
+def _unfinished_move_in(server_dir: Path) -> bool:
+    """`MOVE_IN_FILE` is there and its move did not finish (T682): a finished one is a server.
+
+    Read through `move_server` only when the record is there, so this view does not import the
+    move engine at module scope for every folder it is shown.
+    """
+    if not (server_dir / MOVE_IN_FILE).exists():
+        return False
+    from yulon import move_server  # noqa: PLC0415
+
+    return move_server.unfinished_move_in(server_dir)
+
+
 def _unfinished_move(server_dir: Path) -> str:
     return (
         f"{server_dir} is a server being brought from another computer, and that did not "
@@ -867,7 +880,7 @@ class CatalogView(QWidget):
         )
         if server_dir is None:
             return False
-        if (server_dir / MOVE_IN_FILE).exists():
+        if _unfinished_move_in(server_dir):
             show_information(self, "A move that did not finish", _unfinished_move(server_dir))
             return False
         if compose_file(server_dir) is None:
@@ -1092,7 +1105,7 @@ class CatalogView(QWidget):
         if folders is None:
             return False
         server_dir, client_dir = folders
-        if (server_dir / MOVE_IN_FILE).exists():
+        if _unfinished_move_in(server_dir):
             # T601 level 2: a plain install would finish the build and never put the modules,
             # settings or data in, and then the tile could no longer bring the server in.
             show_information(self, "A move that did not finish", _unfinished_move(server_dir))

@@ -669,15 +669,31 @@ def test_the_old_channel_account_is_removed_after_the_load(tmp_path: Path) -> No
 
 
 def test_the_steps_are_recorded_and_a_second_press_does_them_once(tmp_path: Path) -> None:
+    """Each step is recorded as it is done; a press that finds them all done does none again.
+
+    T682: a finished move removes its record, so the all-done record here is the one a move
+    that stopped after its last step (or a build before T682) left; it is read as a server.
+    """
     mv = Move(tmp_path)
-    mv.run()
-    marker = move_server.read_marker(mv.target.server_dir)
-    assert marker is not None and marker["done"] == list(move_server.STEPS)
+    saved: list[list[str]] = []
+    real_write = move_server.write_marker
+
+    def write(server_dir: Path, digest: str, done: object, **more: object) -> None:
+        saved.append(list(done))  # type: ignore[call-overload]
+        real_write(server_dir, digest, done, **more)  # type: ignore[arg-type]
+
+    move_server.write_marker = write  # type: ignore[assignment]
+    try:
+        mv.run()
+    finally:
+        move_server.write_marker = real_write  # type: ignore[assignment]
+    assert saved[-1] == list(move_server.STEPS)
+    assert move_server.read_marker(mv.target.server_dir) is None
     before = list(mv.events)
-    lines = mv.run()
+    with pytest.raises(MoveError, match="already holds a server"):
+        mv.run()
     added = mv.events[len(before) :]
     assert not [e for e in added if e.startswith(("module:", "load:")) or e in ("rebuild", "rows")]
-    assert sum(1 for line in lines if line.startswith("Already done:")) == len(move_server.STEPS)
 
 
 def test_a_press_stopped_after_the_modules_carries_on_with_the_rebuild(tmp_path: Path) -> None:
@@ -945,7 +961,8 @@ def test_an_install_that_fails_leaves_a_folder_this_file_carries_on_in(tmp_path:
     assert again.allowed and again.resuming, again.refusals
     mv.engine.run = real_run  # type: ignore[method-assign]
     mv.run()
-    assert move_server.read_marker(mv.target.server_dir)["done"] == list(move_server.STEPS)  # type: ignore[index]
+    # T682: the finished move took its record with it.
+    assert move_server.read_marker(mv.target.server_dir) is None
 
 
 def test_a_carried_on_load_uses_the_address_read_before_the_first_load(tmp_path: Path) -> None:
@@ -1325,7 +1342,7 @@ def test_a_server_with_the_ah_bot_is_moved_in_although_its_characters_load_last(
     assert order == ["module:mod-ah-bot", "load:acore_characters"]  # the step order is unchanged
     assert real.asked == []  # nothing asked of the empty database
     marker = move_server.read_marker(mv.target.server_dir)
-    assert marker is not None and marker["done"] == list(move_server.STEPS)
+    assert marker is None  # T682: the finished move took its record with it
     skipped = [line for line in lines if line.startswith("  skipped: ") and "bot_guid=42" in line]
     assert skipped and apply.DEFERRED_EXISTS_NOTE in skipped[0]
     assert any("bot_account=7" in line for line in lines if line.startswith("  skipped: "))
@@ -1382,4 +1399,4 @@ def test_a_move_in_over_tortoises_guarded_applier_passes_the_deferral_through(
     assert "module:mod-ah-bot-plus" in mv.events
     assert any(apply.DEFERRED_EXISTS_NOTE in line for line in lines if "bot_guid=42" in line)
     marker = move_server.read_marker(mv.target.server_dir)
-    assert marker is not None and marker["done"] == list(move_server.STEPS)
+    assert marker is None  # T682: the finished move took its record with it

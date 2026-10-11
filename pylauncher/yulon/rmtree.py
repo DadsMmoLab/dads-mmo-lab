@@ -19,7 +19,7 @@ from __future__ import annotations
 import os
 import shutil
 import stat
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from yulon import links
@@ -167,6 +167,61 @@ def remove_tree(path: Path) -> None:
             raise TreeRemovalError(_undeletable(path, exc)) from exc
     if path.exists():
         raise TreeRemovalError(_undeletable(path, "it is still there afterwards"))
+
+
+def remove_tree_last(path: Path, last: Sequence[str]) -> None:
+    """`remove_tree(path)`, its folders first and the top-level names in `last` after all else.
+
+    T682: `shutil.rmtree` works in listing order, and on NTFS that is alphabetical, so an
+    install's own records at the top (`.yulon-install.json` among them) went before `src/`
+    and `.git`, where a removal actually stops (a held file, a read-only pack). The next
+    Uninstall then found no record and refused the folder as not Yu'lon's. Here every folder
+    goes first, then the other files at the top, then `last` in the order given, then the
+    folder itself: a removal that stops part-way leaves the records a second press reads.
+
+    A link or junction at the top is removed as a link, never entered. A root that is a link,
+    or not a folder, is `remove_tree()`'s to refuse.
+
+    Raises:
+        TreeRemovalError: as `remove_tree()`.
+    """
+    if path.is_symlink() or not path.is_dir():
+        remove_tree(path)
+        return
+    try:
+        with os.scandir(path) as listing:
+            entries = [entry for entry in listing if entry.name not in last]
+        folders = [e for e in entries if not _is_link(e.path) and e.is_dir(follow_symlinks=False)]
+    except OSError as exc:
+        raise TreeRemovalError(_undeletable(path, exc)) from exc
+    rest = [e for e in entries if e not in folders]
+    for entry in folders:
+        remove_tree(Path(entry.path))
+    for name in (*(e.name for e in rest), *last):
+        _remove_one(path / name)
+    remove_tree(path)
+
+
+def _remove_one(path: Path) -> None:
+    """Remove one top-level entry of `remove_tree_last()`; a name that is not there is fine."""
+    try:
+        if not os.path.lexists(path):
+            return
+        if _is_link(os.fspath(path)):
+            _unlink_link(os.fspath(path))
+        elif path.is_dir():
+            remove_tree(path)
+        else:
+            try:
+                os.unlink(path)
+            except PermissionError:
+                # Windows: a read-only file refuses its unlink until the bit is cleared.
+                os.chmod(path, stat.S_IREAD | stat.S_IWRITE)
+                os.unlink(path)
+    except TreeRemovalError:
+        raise
+    except OSError as exc:
+        raise TreeRemovalError(_undeletable(path, exc)) from exc
 
 
 def _undeletable(path: Path, problem: object) -> str:

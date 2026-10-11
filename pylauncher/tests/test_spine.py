@@ -2667,6 +2667,13 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "delete has already failed once, and an rmdir it cannot do is left for the retry "
         "to name against the tree"
     ),
+    ("rmtree.py", "remove_tree_last"): (
+        "lists the top of a folder the caller asked to delete (an Uninstall's server folder) "
+        "only to ORDER the deletion: every sub-folder first, then the other files, then the "
+        "names the caller wants last (the install record a second Uninstall proves ownership "
+        "from, T682). It decides no write on its own; a link at the top is unlinked, never "
+        "entered, and a root that is a link is `remove_tree()`'s to refuse"
+    ),
     ("rmtree.py", "_empty_stoppably"): (
         "walks the tree a press is deleting (the old map data, the pathfinding tiles) so it "
         "can ask the claim's `stop()` before each unlink and rmdir. It IS a write, and it is "

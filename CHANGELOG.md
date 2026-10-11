@@ -49,6 +49,13 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A Lua script module that would replace another module's file is refused, naming that module.
 - A ready-to-play WotLK or Unbound client whose realmlist sat beside Wow.exe now logs in to your server, not an old one.
 - **PLAY** in a client unpacked with lower-case folder names keeps your game settings instead of starting a new file.
+- While a restore runs, Modules installs and other database changes wait for it instead of writing into it.
+- Start, Update and Rebuild refuse a server whose restore did not finish, and say how to finish or undo it.
+- Restore refuses a backup that would overwrite MySQL's own accounts and passwords.
+- A backup or restore that worked is no longer reported as failed when the database cannot be stopped afterwards.
+- Uninstall can be pressed again after a folder that could not be fully deleted, and then finishes the job.
+- A server brought in from another computer can be used with Use existing and is not installed again.
+- Reinstalling after an uninstall that removed the characters sets up the command channel fresh, without Repair.
 
 ### Changed
 - The Server tab's **Play** now starts the game; **Launcher…** opens the launcher. The tray's **Play** starts a stopped server.
