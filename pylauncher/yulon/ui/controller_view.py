@@ -13357,6 +13357,15 @@ class ControllerView(QWidget):
             catalog_always=catalog_always,
             default_address_written=written_elsewhere,
         )
+        auth_port = self.entry.ports.auth
+        catalogs = {key.casefold() for key in catalog_always}
+        if auth_port != networking.STANDARD_AUTH_PORT and "realmlist" not in catalogs:
+            # T665: off 3724, Config.wtf's realmList is where a client with no locale
+            # realmlist goes, and a copy keeps the player's old server there; it gets this
+            # server's address, so it can name neither the old server nor WotLK's 3724.
+            picked.setdefault(
+                "realmList", networking.realmlist_value(_realm_address(record), auth_port)
+            )
         if cfg is None and (picked or removed):
             # An entry without `config_wtf` still gets the launcher's picks (T187); its
             # realmlist stays `_launch`'s, and no seed was written, so none is used up.

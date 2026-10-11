@@ -237,6 +237,75 @@ def test_a_wtf_folder_that_is_a_link_is_refused(tmp_path: Path) -> None:
     assert (original / "WTF" / "Config.wtf").read_bytes() == b'SET locale "enUS"\n'
 
 
+# -- T675: a client unpacked with lower-case names (`unzip -LL`) ---------------------
+
+
+def _lowercase_wtf(play: Path) -> Path:
+    """`wtf/config.wtf` in place of `WTF/Config.wtf`, holding a setting of the player's."""
+    (play / "WTF").rename(play / "wtf")
+    (play / "wtf" / "Config.wtf").rename(play / "wtf" / "config.wtf")
+    lower = play / "wtf" / "config.wtf"
+    lower.write_bytes(b'SET locale "enUS"\r\nSET gxResolution "1920x1080"\r\n')
+    return lower
+
+
+@needs_case_sensitive_disk
+def test_a_lowercase_wtf_config_wtf_is_the_one_merged(tmp_path: Path) -> None:
+    """T675: it made a second `WTF/Config.wtf` beside it, without the player's settings."""
+    _, play = make_play(tmp_path)
+    lower = _lowercase_wtf(play)
+
+    written = client_config.merge_config_wtf(play, CENTURION, first_run=True)
+
+    assert written == lower
+    lines = lower.read_bytes().splitlines()
+    assert lines[:2] == [b'SET locale "enUS"', b'SET gxResolution "1920x1080"']
+    assert b'SET realmList "127.0.0.1"' in lines
+    assert not (play / "WTF").exists()
+    assert sorted(p.name for p in (play / "wtf").iterdir()) == ["config.wtf"]
+
+
+@needs_case_sensitive_disk
+def test_a_removal_reaches_a_lowercase_config_wtf(tmp_path: Path) -> None:
+    _, play = make_play(tmp_path)
+    lower = _lowercase_wtf(play)
+    lower.write_bytes(lower.read_bytes() + b'SET accountName "BOB"\r\n')
+
+    client_config.merge_config_wtf(
+        play, ConfigWtf(always={}), first_run=False, remove=("accountName",)
+    )
+
+    assert b"accountName" not in lower.read_bytes()
+    assert not (play / "WTF").exists()
+
+
+@needs_case_sensitive_disk
+def test_a_lowercase_wtf_folder_that_is_a_link_is_refused(tmp_path: Path) -> None:
+    original, play = make_play(tmp_path)
+    shutil.rmtree(play / "WTF")
+    (play / "wtf").symlink_to(original / "WTF", target_is_directory=True)
+
+    with pytest.raises(play_client.PlayClientError, match="link"):
+        client_config.merge_config_wtf(play, CENTURION, first_run=True)
+
+    assert sorted(p.name for p in (original / "WTF").iterdir()) == ["Config.wtf"]
+    assert (original / "WTF" / "Config.wtf").read_bytes() == b'SET locale "enUS"\n'
+    assert not (play / "WTF").exists()
+
+
+@needs_case_sensitive_disk
+def test_a_hard_linked_lowercase_config_wtf_is_refused(tmp_path: Path) -> None:
+    original, play = make_play(tmp_path)
+    config_of(play).unlink()
+    os.link(original / "WTF" / "Config.wtf", play / "WTF" / "config.wtf")
+
+    with pytest.raises(play_client.PlayClientError, match="shares"):
+        client_config.merge_config_wtf(play, CENTURION, first_run=True)
+
+    assert (original / "WTF" / "Config.wtf").read_bytes() == b'SET locale "enUS"\n'
+    assert sorted(p.name for p in (play / "WTF").iterdir()) == ["config.wtf"]
+
+
 def test_a_folder_without_the_marker_gets_no_config_wtf(tmp_path: Path) -> None:
     _, play = make_play(tmp_path)
     (play / play_client.MARKER).unlink()
