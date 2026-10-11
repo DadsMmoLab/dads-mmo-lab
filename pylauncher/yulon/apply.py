@@ -49,6 +49,7 @@ from yulon import (
     forgetting,
     links,
     module_answers,
+    module_deploys,
     module_moves,
     platform,
     play_client,
@@ -4007,7 +4008,7 @@ class Applier:
                 self._refuse_a_players_addon(manifest, replace_addons, log)
             self._refuse_links(manifest, clone)
             self._check_hold()
-            self._deploy(manifest, clone, log)
+            self._deploy(manifest, clone, log, first=first)
             self._check_hold()
             self._folders(manifest, log)
             self._check_hold()
@@ -5024,9 +5025,11 @@ class Applier:
                     f"that {manifest.name} is installed could not be cleared ({problem}), so its "
                     "row will keep reading Installed"
                 )
-        for step in manifest.deploy:
-            self._check_hold()
-            self._undeploy(step, clone, log)
+        self._check_hold()
+        if not self._undeploy_recorded(manifest, log):
+            for step in manifest.deploy:
+                self._check_hold()
+                self._undeploy(step, clone, log)
         self._check_hold()
         self._unfolders(manifest, log)
         # T67, and BEFORE the `rmtree` below: the receipts that say which client
@@ -5823,7 +5826,7 @@ class Applier:
 
     # -- steps -------------------------------------------------------------
 
-    def _deploy(self, manifest: Manifest, clone: Path, log: _Log) -> None:
+    def _deploy(self, manifest: Manifest, clone: Path, log: _Log, *, first: bool = False) -> None:
         """Copy each `deploy` step's source in the checkout into the server folder.
 
         Never through a link in the checkout (T530): `_refuse_checkout_links()`
@@ -5831,24 +5834,206 @@ class Applier:
         of every folder it lists (`_stop_at_links`) and of the way to the source,
         because `copytree` follows a symlink and, on Python 3.11 under Windows,
         walks into a junction as a folder.
+
+        T684: every file the steps write is recorded (`module_deploys`) BEFORE
+        anything is moved or copied, and that record is what Remove and the next
+        Update take back. A file of the player's at one of those paths is moved
+        aside first (`ASIDE_SUFFIX`), never overwritten; Remove puts it back. A
+        file the previous deploy wrote and this one does not (upstream renamed or
+        dropped it) is taken back after the copy. Without a record nobody can tell
+        the module's files from the player's -- an install made before the record
+        existed, or a record that cannot be read -- so nothing is set aside or
+        taken back on a guess, and the copy runs as it always did.
         """
+        item = module_deploys.key(manifest.type, manifest.id)
+        ledger = module_deploys.read(self.server_dir)
+        before = ledger.get(item) if ledger is not None else None
+        if before is None and ledger is not None and first:
+            before = module_deploys.Deployed()
+        if ledger is None:
+            log.skipped.append(
+                f"{module_deploys.DEPLOYS_FILE}: the record of which files modules put in your "
+                f"server folder could not be read, so {manifest.name}'s files were copied without "
+                "setting aside any of yours they replace"
+            )
+        planned: list[tuple[Deploy, Path, Path]] = []
+        files: list[str] = []
+        roots: list[str] = []
         for step in manifest.deploy:
             src = clone / step.src
             target = self._deploy_target(step.src, step.dest)
             _look_again(clone, step.src)
+            if not (src.is_dir() or src.is_file()):
+                raise ApplyError(f"deploy source missing in clone: {src}")
+            files.extend(self._deploy_files(step, src, target))
+            roots.append(_posix_rel(self.server_dir, target if src.is_dir() else target.parent))
+            planned.append((step, src, target))
+        asides = dict(before.asides) if before is not None else {}
+        moves: list[tuple[str, Path, Path]] = []
+        if before is not None:
+            mine = set(before.files)
+            for rel in files:
+                path = self.server_dir / rel
+                if rel in mine or rel in asides or not (path.is_file() or path.is_symlink()):
+                    continue
+                aside = _free_aside(path)
+                asides[rel] = _posix_rel(self.server_dir, aside)
+                moves.append((rel, path, aside))
+            problem = module_deploys.write(
+                self.server_dir,
+                item,
+                module_deploys.Deployed(
+                    files=tuple(sorted(mine | set(files))),
+                    roots=tuple(sorted(set(before.roots) | set(roots))),
+                    asides=asides,
+                ),
+            )
+            if problem:
+                # Nothing is moved that the record cannot name: the copy overwrites,
+                # as every install before the record did, and the report says so.
+                log.skipped.append(
+                    f"{module_deploys.DEPLOYS_FILE}: {problem}, so {manifest.name}'s files were "
+                    "copied without setting aside any of yours they replace"
+                )
+                before, moves, asides = None, [], {}
+        for rel, path, aside in moves:
+            os.replace(path, aside)
+            log.done.append(
+                f"set aside your {rel} as {aside.name}: {manifest.name} has a file of that name"
+            )
+        for step, src, target in planned:
             if src.is_dir():
                 shutil.copytree(
                     src, target, dirs_exist_ok=True, ignore=_stop_at_links(manifest, clone)
                 )
-            elif src.is_file():
+            else:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(src, target)
-            else:
-                raise ApplyError(f"deploy source missing in clone: {src}")
             log.done.append(f"deploy {step.src} → {_rel(self.server_dir, target)}")
             for old, new in step.rename:
                 (target / old).replace(target / new)
                 log.done.append(f"rename {old} → {new}")
+        if ledger is None:
+            return
+        all_roots = set(roots) | (set(before.roots) if before is not None else set())
+        if before is not None:
+            # What the previous deploy wrote and this one did not: upstream renamed or
+            # dropped it, and left in place it would keep loading (catalog audit C4).
+            known = module_deploys.Deployed(
+                files=before.files, roots=tuple(all_roots), asides=asides
+            )
+            for rel in sorted(set(before.files) - set(files)):
+                self._take_back_deployed(rel, known, log)
+                asides.pop(rel, None)
+        record = module_deploys.Deployed(
+            files=tuple(sorted(set(files))), roots=tuple(sorted(all_roots)), asides=asides
+        )
+        problem = module_deploys.write(self.server_dir, item, record)
+        if problem:
+            log.skipped.append(
+                f"{module_deploys.DEPLOYS_FILE}: {problem}, so removing {manifest.name} will "
+                "take back its files by the list in its checkout"
+            )
+
+    def _deploy_files(self, step: Deploy, src: Path, target: Path) -> list[str]:
+        """The server-relative paths `step` writes: each file under `src`, renamed as it says."""
+        if src.is_file():
+            return [_posix_rel(self.server_dir, target)]
+        out: list[str] = []
+        for folder, dirs, names in os.walk(src):
+            # Links are refused by the copy itself (`_stop_at_links`); never walked here.
+            dirs[:] = [d for d in dirs if not os.path.islink(os.path.join(folder, d))]
+            for name in names:
+                rel = PurePosixPath(Path(folder, name).relative_to(src).as_posix())
+                for old, new in step.rename:
+                    old_p = PurePosixPath(old)
+                    if rel == old_p:
+                        rel = PurePosixPath(new)
+                    elif rel.is_relative_to(old_p):
+                        rel = PurePosixPath(new) / rel.relative_to(old_p)
+                out.append(_posix_rel(self.server_dir, target / rel))
+        return out
+
+    def _take_back_deployed(self, rel: str, record: module_deploys.Deployed, log: _Log) -> None:
+        """Delete one recorded deploy file, put back the player's file it replaced, tidy up.
+
+        Never through a link: a folder on the way that is a link now (the player
+        swapped `lua_scripts/lib` for one) is not this app's to walk into. A folder
+        the file leaves empty goes too, up to the folder the step deployed into,
+        which stays (it may be `lua_scripts`, which every script shares).
+        """
+        path = self.server_dir / rel
+        link = next(
+            (
+                p
+                for p in reversed(path.parents)
+                if p.is_relative_to(self.server_dir) and p != self.server_dir and p.is_symlink()
+            ),
+            None,
+        )
+        if link is not None:
+            log.skipped.append(
+                f"{rel}: {_rel(self.server_dir, link)} is a link now, so nothing was deleted "
+                "through it"
+            )
+            return
+        if path.is_symlink() or path.is_file():
+            path.unlink()
+            log.done.append(f"rm {rel}")
+        elif path.is_dir():
+            log.skipped.append(f"{rel}: a folder is there now, not the module's file; left")
+            return
+        aside = record.asides.get(rel)
+        if aside:
+            held = self.server_dir / aside
+            if (held.is_file() or held.is_symlink()) and not os.path.lexists(path):
+                os.replace(held, path)
+                log.done.append(f"put back your {rel}")
+            elif os.path.lexists(held):
+                log.skipped.append(f"{rel}: your own file is still set aside as {aside}")
+            else:
+                log.skipped.append(f"{rel}: your own file was set aside as {aside}, which is gone")
+        root = record.root_of(rel)
+        if root is None:
+            return
+        stop = self.server_dir / root
+        folder = path.parent
+        while folder != stop and folder.is_relative_to(stop):
+            try:
+                folder.rmdir()
+            except OSError:
+                break
+            folder = folder.parent
+
+    def _undeploy_recorded(self, manifest: Manifest, log: _Log) -> bool:
+        """Take back what the record says `manifest` deployed; False with no record (T684)."""
+        item = module_deploys.key(manifest.type, manifest.id)
+        ledger = module_deploys.read(self.server_dir)
+        record = ledger.get(item) if ledger is not None else None
+        if record is None:
+            return False
+        for rel in sorted(record.files):
+            self._check_hold()
+            self._take_back_deployed(rel, record, log)
+        # A player's file set aside at a path the record no longer lists.
+        for rel in sorted(set(record.asides) - set(record.files)):
+            self._take_back_deployed(rel, record, log)
+        # The OLD name of a renamed file too (T104): an install made before a rename
+        # was added to the manifest holds the file under that name, live.
+        for step in manifest.deploy:
+            target = self._deploy_target(step.src, step.dest)
+            for old, _new in step.rename:
+                path = target / old
+                rel = _posix_rel(self.server_dir, path)
+                if rel not in record.files and (path.is_file() or path.is_symlink()):
+                    self._take_back_deployed(rel, record, log)
+        problem = module_deploys.write(self.server_dir, item, None)
+        if problem:
+            log.skipped.append(
+                f"{module_deploys.DEPLOYS_FILE}: Yu'lon could not forget {manifest.id}'s "
+                f"files ({problem})"
+            )
+        return True
 
     def _folders(self, manifest: Manifest, log: _Log) -> None:
         """Make each `folders` entry, empty, where it is not already a folder (T587).
@@ -5923,15 +6108,30 @@ class Applier:
             # manifest after installs exist -- accountwide's Ashen Order script,
             # `.lua` -> `.lua.unused` -- leaves every earlier install holding the
             # OLD name, and deleting only the new one left that live script
-            # behind in silence. `_rm()` names what it found and skips what is
-            # not there, so the report says which of the two this install had.
-            deployed = {entry.name for entry in src.iterdir()}
-            for old, new in step.rename:
-                old_parts, new_parts = Path(old).parts, Path(new).parts
-                if len(old_parts) == 1 and old_parts[0] in deployed:
-                    deployed.add(new_parts[0])
-            for name in sorted(deployed):
-                self._rm(target / name, log)
+            # behind in silence.
+            #
+            # T684: FILES, never a whole folder. This is the install made before
+            # the deploy record, and it used to delete each top-level NAME, so
+            # Battle Pass's `lib/` took the player's own libraries with it.
+            listed = {PurePosixPath(rel) for rel in self._deploy_files(step, src, target)}
+            listed |= {
+                PurePosixPath(_posix_rel(self.server_dir, target / old))
+                for old, _new in step.rename
+            }
+            folders: set[Path] = set()
+            for rel in sorted(listed):
+                path = self.server_dir / rel
+                if path.is_symlink() or path.is_file():
+                    path.unlink()
+                    log.done.append(f"rm {rel}")
+                    folders.update(
+                        p for p in path.parents if p.is_relative_to(target) and p != target
+                    )
+            for folder in sorted(folders, key=lambda p: len(p.parts), reverse=True):
+                try:
+                    folder.rmdir()
+                except OSError:
+                    pass  # it holds something of the player's
             return
         if target.is_file():
             self._rm(target, log)
@@ -8628,6 +8828,21 @@ def _rel(base: Path, path: Path) -> str:
         return str(path.relative_to(base))
     except ValueError:
         return str(path)
+
+
+def _posix_rel(base: Path, path: Path) -> str:
+    """`path` under `base`, spelled with `/` on every OS: how the deploy record names a file."""
+    return path.relative_to(base).as_posix()
+
+
+def _free_aside(path: Path) -> Path:
+    """Where a player's file at `path` goes aside: `<name>.yulon-module-old`, then `.1`, `.2`..."""
+    aside = path.with_name(path.name + ASIDE_SUFFIX)
+    number = 1
+    while os.path.lexists(aside):
+        aside = path.with_name(f"{path.name}{ASIDE_SUFFIX}.{number}")
+        number += 1
+    return aside
 
 
 @dataclass(frozen=True)

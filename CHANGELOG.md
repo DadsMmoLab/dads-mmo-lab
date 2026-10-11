@@ -16,8 +16,13 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ### New
 
 ### Fixed
+- Removing **Battle Pass** no longer deletes your own Lua libraries from the lua_scripts folder.
+- A Lua script module that would replace one of your own files sets yours aside, and **Remove** puts it back.
+- Updating a Lua script module takes away the files its new version dropped, so they no longer load.
+- The **Battle Pass** vendor can now be spawned in the world, and removing Battle Pass takes it away.
 
 ### Changed
+- **Battle Pass** no longer asks for its vendor's creature entry: the vendor it creates is always the one it uses.
 
 ## v0.9.16-Public — 2026-10-10
 

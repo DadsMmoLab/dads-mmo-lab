@@ -28,7 +28,7 @@ import pytest
 
 from tests.test_apply import LUA, _FakeDbc, _FakeGit, _FakeSql, _have_requirements
 from yulon import apply as apply_module
-from yulon import links
+from yulon import links, module_deploys
 from yulon.apply import Applier, ApplyError, ApplyRefusal
 from yulon.git import CloneSpec
 from yulon.manifest import Manifest, parse_manifest
@@ -309,6 +309,8 @@ def test_remove_still_works_when_a_deploy_folder_became_a_link(tmp_path: Path) -
     clone = run.applier.clone_dir(run.manifest)
     shutil.rmtree(clone / "lua")
     os.symlink(run.outside, clone / "lua", target_is_directory=True)
+    # An install from before the deploy record (T684): the checkout is the only list.
+    (run.server / module_deploys.DEPLOYS_FILE).unlink()
 
     report = run.applier.remove(run.manifest)
 
@@ -513,6 +515,8 @@ def test_remove_does_not_list_a_deploy_folder_that_became_a_link_after_the_look(
     shutil.rmtree(clone / "lua")
     os.symlink(run.outside, clone / "lua", target_is_directory=True)
     monkeypatch.setattr(Applier, "_refuse_checkout_links", lambda *_a, **_k: None)
+    # An install from before the deploy record (T684): the checkout is the only list.
+    (run.server / module_deploys.DEPLOYS_FILE).unlink()
 
     report = run.applier.remove(run.manifest)
 

@@ -184,7 +184,7 @@ def test_update_that_fails_after_the_reset_keeps_the_entry(
     a = _installed_at_a(rig)
     b = _publish(rig.origin, "B")
 
-    def broken(*_args: object) -> None:
+    def broken(*_args: object, **_kwargs: object) -> None:
         raise ApplyError("deploy failed")
 
     monkeypatch.setattr(rig.applier, "_deploy", broken)
@@ -687,7 +687,7 @@ def test_a_put_back_that_moved_git_but_failed_after_says_it_is_back_on_the_old_v
     rig = _rig(tmp_path)
     a, _b = _updated_a_to_b(rig)
 
-    def broken(*_args: object) -> None:
+    def broken(*_args: object, **_kwargs: object) -> None:
         raise ApplyError("deploy failed")
 
     monkeypatch.setattr(rig.applier, "_deploy", broken)

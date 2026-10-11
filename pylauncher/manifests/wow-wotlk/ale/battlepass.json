@@ -37,13 +37,19 @@
     },
     {
       "db": "world",
-      "statement": "UPDATE battlepass_config SET config_value='{enabled}' WHERE config_key='enabled'; UPDATE battlepass_config SET config_value='{max_level}' WHERE config_key='max_level'; UPDATE battlepass_config SET config_value='{exp_per_level}' WHERE config_key='exp_per_level'; UPDATE battlepass_config SET config_value='{exp_scaling}' WHERE config_key='exp_scaling'; UPDATE battlepass_config SET config_value='{npc_entry}' WHERE config_key='npc_entry'; UPDATE battlepass_config SET config_value='{debug_mode}' WHERE config_key='debug_mode';",
+      "statement": "UPDATE battlepass_config SET config_value='{enabled}' WHERE config_key='enabled'; UPDATE battlepass_config SET config_value='{max_level}' WHERE config_key='max_level'; UPDATE battlepass_config SET config_value='{exp_per_level}' WHERE config_key='exp_per_level'; UPDATE battlepass_config SET config_value='{exp_scaling}' WHERE config_key='exp_scaling'; UPDATE battlepass_config SET config_value='90100' WHERE config_key='npc_entry'; UPDATE battlepass_config SET config_value='{debug_mode}' WHERE config_key='debug_mode';",
       "when": "configure"
     },
     {
       "db": "world",
-      "statement": "DELETE FROM creature_template WHERE entry=90100; INSERT INTO creature_template (entry, name, subname, minlevel, maxlevel, faction, npcflag, unit_class, unit_flags, type, AIName, ScriptName) VALUES (90100, 'Battle Pass Vendor', 'Battle Pass', 80, 80, 35, 1, 1, 512, 7, '', '');",
-      "note": "NPC 90100 is NOT in upstream SQL; wow-manage.sh inserts it (schema-adaptive display 25478 via creature_template_model or modelid1, 6834-6946). Worldserver restart required before .npc add — creature_template is not hot-loaded."
+      "statement": "DELETE FROM creature_template WHERE entry=90100; INSERT INTO creature_template (entry, name, subname, minlevel, maxlevel, faction, npcflag, unit_class, unit_flags, type, AIName, ScriptName) VALUES (90100, 'Battle Pass Vendor', 'Battle Pass', 80, 80, 35, 1, 1, 512, 7, '', ''); DELETE FROM creature_template_model WHERE CreatureID=90100; INSERT INTO creature_template_model (CreatureID, Idx, CreatureDisplayID, DisplayScale, Probability, VerifiedBuild) VALUES (90100, 0, 25478, 1, 1, 0);",
+      "note": "NPC 90100 is NOT in upstream SQL (the scripts read its entry from battlepass_config.npc_entry, upstream default 90100). The model row is what lets AzerothCore load it: without one Creature::InitEntry refuses the entry and .npc add 90100 fails. Display 25478 is the one wow-manage.sh used. Worldserver restart required before .npc add: creature_template is not hot-loaded."
+    },
+    {
+      "db": "world",
+      "statement": "DELETE FROM creature WHERE id=90100; DELETE FROM creature_template_model WHERE CreatureID=90100; DELETE FROM creature_template WHERE entry=90100;",
+      "when": "remove",
+      "note": "the vendor Yu'lon created goes with the module, spawns included: a spawn of an entry that is gone is an error at every world start"
     }
   ],
   "client": [
@@ -84,12 +90,6 @@
       "question": "XP scaling per level",
       "kind": "float",
       "default": "1.1"
-    },
-    {
-      "key": "npc_entry",
-      "question": "Vendor NPC entry",
-      "kind": "int",
-      "default": "90100"
     },
     {
       "key": "debug_mode",
