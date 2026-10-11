@@ -400,3 +400,61 @@ def test_a_folder_still_there_after_the_delete_is_never_reported_gone(
     monkeypatch.setattr(shutil, "rmtree", deleted_then_made_again)
     with pytest.raises(rmtree.TreeRemovalError, match="still there afterwards"):
         rmtree.remove_tree(tree)
+
+
+# -- T705 review notes: an unreadable root, a real symlink inside the tree ------------------
+
+_POSIX_USER = pytest.mark.skipif(
+    os.name == "nt" or getattr(os, "geteuid", lambda: 0)() == 0,
+    reason="POSIX modes refuse a user only",
+)
+
+
+@_POSIX_USER
+def test_a_root_that_cannot_be_looked_at_is_refused_as_unexamined_not_as_a_link(
+    tmp_path: Path,
+) -> None:
+    """A root whose `lstat` fails with EACCES is not a link: the refusal says what is true."""
+    parent = tmp_path / "locked"
+    tree = parent / "server"
+    (tree / "src").mkdir(parents=True)
+    parent.chmod(0o600)  # no search bit: nothing under it can be looked at
+    try:
+        with pytest.raises(rmtree.TreeRemovalError) as refused:
+            rmtree.remove_tree(tree)
+    finally:
+        parent.chmod(0o755)
+    said = str(refused.value)
+    assert "could not be examined" in said, said
+    assert "symbolic link" not in said, said
+    assert (tree / "src").is_dir(), "still refused: nothing was deleted"
+
+
+@_POSIX_USER
+def test_the_retry_never_clears_a_flag_through_a_real_symlink_inside_the_tree(
+    tmp_path: Path,
+) -> None:
+    """A real POSIX symlink to a read-only file outside, in a folder the first delete cannot empty.
+
+    The plain `shutil.rmtree` fails on the write-protected folder and leaves the link in it;
+    the retry's flag clearing then meets the link. `os.walk` + `os.chmod` (which follows
+    links) made the OUTSIDE file writable; the retry must clear the link's folder only.
+    """
+    outside = tmp_path / "elsewhere" / "realmlist.wtf"
+    outside.parent.mkdir()
+    outside.write_bytes(b"KEEP")
+    outside.chmod(0o444)
+    tree = tmp_path / "server"
+    held = tree / "held"
+    held.mkdir(parents=True)
+    (held / "realmlist.wtf").symlink_to(outside)
+    held.chmod(0o555)  # the first delete cannot unlink the link
+    try:
+        rmtree.remove_tree(tree)
+        assert not tree.exists() and not os.path.lexists(tree)
+        assert stat.S_IMODE(outside.stat().st_mode) == 0o444, "chmodded through the link"
+        assert outside.read_bytes() == b"KEEP"
+    finally:
+        if held.exists():
+            held.chmod(0o755)
+        outside.chmod(0o644)

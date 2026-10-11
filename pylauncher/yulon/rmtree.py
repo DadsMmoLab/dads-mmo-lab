@@ -136,7 +136,15 @@ def remove_tree(path: Path) -> None:
     success having deleted nothing is the failure this function exists to make
     impossible.
     """
-    if _is_link(os.fspath(path)):
+    try:
+        linked = links.is_link(path)
+    except OSError as exc:
+        # Not `_is_link()`, whose cautious "a link" is right for a walk that then
+        # touches only the name, and false as a sentence about a root it could not see.
+        raise TreeRemovalError(
+            f"{path} could not be examined ({exc}), so it was not deleted; nothing was changed."
+        ) from exc
+    if linked:
         # `shutil.rmtree` REFUSES a top-level directory symlink, and before the
         # review of 2026-09-13 the retry below then walked through it and chmodded
         # and `rmdir`-ed on the far side. A junction too (T705): `Path.is_symlink()`
