@@ -337,8 +337,8 @@ def test_an_error_in_a_module_that_was_not_updated_changes_nothing(
 
     assert two.head("mod-x") == two.a["mod-x"] and two.head("mod-y") == tips["mod-y"]
     assert (
-        "The build stopped on an error in mod-x. mod-x was not updated since your last build "
-        "that worked, so Yu'lon did not change it."
+        "The build stopped on an error in mod-x. Yu'lon has no update of mod-x to put back, so "
+        "it did not change it."
     ) in str(failed.value)
 
 

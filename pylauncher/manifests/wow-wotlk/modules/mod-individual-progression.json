@@ -14,12 +14,7 @@
   "sql": [
     {
       "db": "world",
-      "path": "data/sql/db-world/*.sql",
-      "applied_by": "db-import"
-    },
-    {
-      "db": "characters",
-      "path": "data/sql/db-characters/*.sql",
+      "path": "data/sql/world/base/*.sql",
       "applied_by": "db-import"
     }
   ],

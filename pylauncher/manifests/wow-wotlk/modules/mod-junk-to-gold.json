@@ -10,12 +10,5 @@
   },
   "build": {
     "rebuild": true
-  },
-  "sql": [
-    {
-      "db": "world",
-      "path": "data/sql/db-world/*.sql",
-      "applied_by": "db-import"
-    }
-  ]
+  }
 }

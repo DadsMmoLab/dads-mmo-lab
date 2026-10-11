@@ -16942,7 +16942,7 @@ def test_the_time_zone_leaves_nothing_on_the_tuning_tab_cut(
 
 
 ARAC_FILE = "modules/mod-arac/data/sql/db-world/arac.sql"
-AOE_FILE = "modules/mod-aoe-loot/data/sql/db-world/aoe_loot_module_string.sql"
+AOE_FILE = "modules/mod-aoe-loot/data/sql/db-world/base/aoe_loot_module_string.sql"
 APPLYING_AOE = ">> Applying update aoe_loot_module_string.sql"
 
 
@@ -16950,8 +16950,8 @@ def _two_modules_on_disk(server_dir: Path) -> None:
     """One shipped module of each route, with its SQL where its manifest says.
 
     `mod-arac` declares `data/sql/db-world/arac.sql` as `applied_by="direct"`
-    and `mod-aoe-loot` declares `data/sql/db-world/*.sql` as `db-import`, in the
-    bundled manifests these tests read through the real store.
+    and `mod-aoe-loot` declares `data/sql/db-world/base/*.sql` as `db-import` (where
+    upstream keeps it, T689), in the bundled manifests these tests read through the real store.
     """
     for rel in (ARAC_FILE, AOE_FILE):
         path = server_dir / rel
@@ -17020,7 +17020,7 @@ def test_the_module_sql_press_never_hands_the_updater_a_file_this_app_applied(
         "sql data/sql/db-world/arac.sql -> world: not handed to the updater: this app "
         "applies it itself at install" in text
     )
-    assert "sql data/sql/db-world/aoe_loot_module_string.sql -> world: applied" in text
+    assert "sql data/sql/db-world/base/aoe_loot_module_string.sql -> world: applied" in text
     assert "FAILED" not in text, text
 
 

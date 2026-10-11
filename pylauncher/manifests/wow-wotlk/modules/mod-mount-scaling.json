@@ -14,7 +14,7 @@
   "sql": [
     {
       "db": "world",
-      "path": "data/sql/db-world/*.sql",
+      "path": "data/sql/db_world/*.sql",
       "applied_by": "db-import",
       "note": "mount_scaling_trainer.sql lowers Apprentice Riding + ground-mount item level requirements to 1"
     }

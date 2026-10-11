@@ -36,9 +36,10 @@
     },
     {
       "file": "env/dist/etc/modules/lua_scripts/AzerothChatter/**/*.lua",
-      "find": "require\\(([\"\\'])data\\.context\\1\\)",
-      "replace": "require(\\1data.context_data\\1)",
-      "regex": true
+      "find": "([\"'])data\\.context\\1",
+      "replace": "\\1data.context_data\\1",
+      "regex": true,
+      "note": "the quoted module name, so both spellings upstream uses are caught: require(\"data.context\") and pcall(require, \"data.context\") (logic/context.lua:26, logic/chatter.lua:66 at 3ba6603)"
     }
   ],
   "notes": [

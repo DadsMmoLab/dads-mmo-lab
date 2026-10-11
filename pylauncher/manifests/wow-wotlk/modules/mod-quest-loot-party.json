@@ -14,7 +14,7 @@
   "sql": [
     {
       "db": "world",
-      "path": "data/sql/db-world/*.sql",
+      "path": "data/sql/db-world/base/*.sql",
       "applied_by": "db-import"
     }
   ],
