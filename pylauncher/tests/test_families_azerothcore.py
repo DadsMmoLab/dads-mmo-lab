@@ -2644,3 +2644,30 @@ def test_the_clone_stage_relays_gits_own_progress_under_this_stages_name(
     assert progress, "the clone stage relayed nothing a strip could move on"
     assert {one.stage for one in progress} == {"clone-core", "clone-modules"}
     assert {one.percent for one in progress} == {42}
+
+
+def test_the_clone_core_stage_refuses_somebody_elses_files_on_its_own(tmp_path: Path) -> None:
+    """T705 (G2): the stage's own copy of the folder guard, asked with `_guard()` not run first.
+
+    The clone seam deletes a destination that is not a git checkout before it clones
+    (`git.clone`), so the stage keeps its own check for the day the stages are reordered.
+    With only the spine's `_guard()` holding, every other test stays green.
+    """
+    server_dir = tmp_path / "not-empty"
+    server_dir.mkdir()
+    (server_dir / "holiday-photos.zip").write_text("mine", encoding="utf-8")
+    rec = Recorder()
+    ctx = native.StageContext(
+        server_dir=server_dir,
+        client_dir=None,
+        state=native.InstallState(
+            game_id=ENTRY.id,
+            install_id=composegen.install_id(server_dir, platform_id=lambda: "macos"),
+        ),
+        cancel=None,
+        secrets=native.Secrets(db_password="pw"),
+    )
+    with pytest.raises(InstallerError, match="has files in it"):
+        list(engine(rec)._clone_core(ctx))
+    assert (server_dir / "holiday-photos.zip").read_text(encoding="utf-8") == "mine"
+    assert "clone" not in " ".join(rec.calls)

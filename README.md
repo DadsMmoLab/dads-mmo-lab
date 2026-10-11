@@ -43,9 +43,11 @@ first time; choose "Run anyway" / right-click → Open. This is a known v1 trade
 
 ## Updates
 
-On launch, Yu'lon checks GitHub Releases and shows a banner with a download link if a newer
-version exists. It never replaces itself; you download the new file.
+On launch, Yu'lon checks GitHub Releases and says so if a newer public version exists.
+**Update now** downloads it, checks it against the release's `SHA256SUMS`, replaces the AppImage,
+the Linux folder or the Windows zip folder in place and restarts; on macOS it opens the checked
+`.dmg` for you. What it does on each platform is in [`pylauncher/README.md`](pylauncher/README.md).
 
 ## Developers
 
-See [`contribution.md`](pyplan/contribution.md) and the design docs in [`../pyplan/`](../pyplan/).
+See [`contribution.md`](pyplan/contribution.md) and the design docs in [`pyplan/`](pyplan/).

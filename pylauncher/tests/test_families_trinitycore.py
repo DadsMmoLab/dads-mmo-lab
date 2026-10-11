@@ -488,6 +488,41 @@ def install(m: Machine, *, entry: CatalogEntry = ENTRY, **overrides: object) -> 
     )
 
 
+def copies_by(monkeypatch: pytest.MonkeyPatch, reflink: Callable[[Path, Path], bool]) -> None:
+    """Every ready-to-play copy this file makes clones its archives with `reflink`.
+
+    `play_client.create` clones with `FICLONE` where the filesystem can (XFS, btrfs) and
+    hard-links where it cannot (ext4, NTFS). The two leave different things behind: a
+    hard link SHARES the player's file and its read-only flag, a clone does not. A
+    call that names its own `reflink` keeps it.
+    """
+    real = play_client.create
+
+    def create(*args: Any, **kwargs: Any) -> play_client.Marker:
+        kwargs.setdefault("reflink", reflink)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(play_client, "create", create)
+
+
+def a_clone(src: Path, dst: Path) -> bool:
+    """What `try_reflink` makes on XFS or btrfs: the same bytes and times, its own file."""
+    shutil.copy2(src, dst)
+    return True
+
+
+@pytest.fixture(autouse=True)
+def copies_hard_link(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The hard-link branch, whatever filesystem the test's tmp is on (T705, T10).
+
+    This file's tests of shared read-only flags are about the copy SHARING the player's
+    file, which is the hard link. On an XFS or btrfs tmp the real `try_reflink` cloned
+    instead and three of them failed on a good tree (yulon-fedora, measured). The clone
+    branch is asked by name: `test_uninstall_over_a_cloned_copy_leaves_the_client_whole`.
+    """
+    copies_by(monkeypatch, lambda src, dst: False)
+
+
 @pytest.fixture(autouse=True)
 def known_password(monkeypatch: pytest.MonkeyPatch) -> None:
     """The generated password, fixed, so the database double can check it travels in env."""
@@ -1486,6 +1521,38 @@ def test_uninstall_removes_a_leftover_copy_safely_before_the_server_folder(
     assert not os.path.lexists(target)
     assert not machine.server_dir.exists()
     assert trees == [machine.server_dir], "rmtree never pointed at the copy"
+    assert not [path for path in chmodded if path.is_relative_to(machine.client)]
+    assert snapshot(machine.client) == before, "bytes, times and the read-only mode kept"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the mode spy is POSIX here")
+def test_uninstall_over_a_cloned_copy_leaves_the_client_whole(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T705: the clone branch (XFS, btrfs), which CI's ext4 never takes by itself.
+
+    The copy's archive is its own file; its removal must still leave the player's
+    client, its read-only flag included, exactly as it was.
+    """
+    copies_by(monkeypatch, a_clone)
+    archive = machine.client / "Data" / "common.MPQ"
+    os.chmod(archive, 0o444)
+    target = leftover_copy(machine)
+    assert not os.path.samefile(target / "Data" / "common.MPQ", archive), "a clone, not a link"
+    before = snapshot(machine.client)
+    chmodded: list[Path] = []
+    real_chmod = os.chmod
+
+    def chmod(path: Any, mode: int, *args: Any, **kwargs: Any) -> None:
+        chmodded.append(Path(path))
+        real_chmod(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(os, "chmod", chmod)
+    rec = PurgeRecorder(machine.server_dir, remove_folder=purge.remove_tree)
+    report = rec.uninstaller(game=ENTRY.id).run(keep_characters=False)
+    assert report.warnings == ()
+    assert not os.path.lexists(target)
+    assert not machine.server_dir.exists()
     assert not [path for path in chmodded if path.is_relative_to(machine.client)]
     assert snapshot(machine.client) == before, "bytes, times and the read-only mode kept"
 

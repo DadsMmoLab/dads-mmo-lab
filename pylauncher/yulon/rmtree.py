@@ -136,17 +136,16 @@ def remove_tree(path: Path) -> None:
     success having deleted nothing is the failure this function exists to make
     impossible.
     """
-    if path.is_symlink():
-        # `shutil.rmtree` REFUSES a top-level directory symlink; the retry below
-        # would not. `_clear_read_only()` walks with `os.walk()` and chmods
-        # THROUGH the link, and `_remove_unenterable()` scandirs through it and
-        # can `os.rmdir()` on the far side -- so the recovery added for
-        # read-only git packs would reach outside the tree it was handed
-        # (review, 2026-09-13). Refused here rather than in each caller: this is
-        # the function that knows it is about to walk.
+    if _is_link(os.fspath(path)):
+        # `shutil.rmtree` REFUSES a top-level directory symlink, and before the
+        # review of 2026-09-13 the retry below then walked through it and chmodded
+        # and `rmdir`-ed on the far side. A junction too (T705): `Path.is_symlink()`
+        # calls one a folder, so this asks `links`. The retry's own walks no longer
+        # enter a link either; the root is still refused here, by the function that
+        # knows it is about to walk, rather than in each caller.
         raise TreeRemovalError(
-            f"{path} is a symbolic link, not a directory this app may delete through. "
-            f"Remove the link itself if that is what was meant; nothing was changed."
+            f"{path} is a symbolic link or junction, not a directory this app may delete "
+            f"through. Remove the link itself if that is what was meant; nothing was changed."
         )
     try:
         shutil.rmtree(path)
@@ -214,6 +213,14 @@ def _remove_unenterable(path: Path) -> None:
                 logger.info(f"could not remove {current}, leaving it for the retry: {exc}")
             continue
         for entry in children:
+            if _is_link(entry.path):
+                # Never entered (T705): a junction answers `is_dir` and scandirs on its far
+                # side. `rmdir` takes the link itself, the `0xa000001d` case above included.
+                try:
+                    os.rmdir(entry.path)
+                except OSError:
+                    pass
+                continue
             try:
                 is_dir = entry.is_dir(follow_symlinks=False)
             except OSError:
@@ -231,7 +238,9 @@ def _clear_read_only(path: Path) -> None:
     walk, and a failure on any single entry is left for the retry to report
     against the tree rather than raised against one file.
     """
-    for root, dirs, files in os.walk(path):
+    # `links.walk`, not `os.walk` (T705): on Python 3.11 under Windows `os.walk` goes
+    # through a junction and would clear the flags of the files it points at.
+    for root, dirs, files, _linked in links.walk(path):
         for name in (*dirs, *files):
             target = Path(root) / name
             try:
