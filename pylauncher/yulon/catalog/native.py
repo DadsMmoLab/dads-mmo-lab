@@ -3948,12 +3948,42 @@ def restore_still_loading(server_dir: Path) -> str | None:
         return _record_unread(server_dir, "")
     if not record.load_running:
         return None
+    return _loading_sentence(server_dir)
+
+
+def _loading_sentence(server_dir: Path) -> str:
+    """The one sentence for a restore load that outlived its Yu'lon (T714, T730)."""
     return (
         f"A restore of the server in {server_dir} is still loading its databases in Docker "
-        "(it carried on after the Yu'lon that started it closed). Stopping that server now "
-        "would leave them half-written, so nothing was stopped. Wait for it to finish, then "
-        "try again."
+        "(it carried on after the Yu'lon that started it closed). Doing this now would cut it "
+        "off and leave them half-written, so nothing was stopped or changed. Wait for it to "
+        "finish, then try again."
     )
+
+
+def orphaned_load_sentence(server_dir: Path | str) -> str | None:
+    """The sentence for a restore load of this folder that another Yu'lon left running, else None.
+
+    T730: what `docker.held_reason()` answers from the restore record. Unlike
+    `restore_still_loading()` it does NOT fail closed: a record that cannot be read, or a
+    dead load, holds nothing (every press of the server asks this, and a damaged record
+    must not lock a server for good; Start has its own refusal for it). Never raises.
+    """
+    from yulon.controller_wow_wotlk import maintenance  # noqa: PLC0415
+
+    try:
+        record = maintenance.interrupted_restore(Path(server_dir))
+    except Exception as exc:  # noqa: BLE001 - a record that cannot be read holds nothing
+        logger.warning(f"could not read the restore record in {server_dir}: {exc}")
+        return None
+    if record is None or not record.readable or not record.load_running:
+        return None
+    if not record.load_token:
+        # No start time was recorded, so a reused pid cannot be told from the load, and a hold
+        # on every press would have no way out (Forget refuses while `load_running`). Such a
+        # record keeps its old effect: Start, Stop and Restore refuse as before T730.
+        return None
+    return _loading_sentence(Path(server_dir))
 
 
 def _record_unread(server_dir: Path, why: str) -> str:

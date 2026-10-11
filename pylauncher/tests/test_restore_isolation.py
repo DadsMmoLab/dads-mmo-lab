@@ -486,7 +486,7 @@ def test_update_during_this_tabs_own_restore_says_the_restore_is_running(
         started_at="",
         load_pid=os.getpid(),
         load_host=maintenance.this_host(),
-        load_token=token,
+        load_token="",  # T730: no start time recorded, so the record holds nothing new
         load_name=name,
     )
     marker.write_text(record.as_json(), encoding="utf-8")

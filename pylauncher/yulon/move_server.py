@@ -1541,9 +1541,10 @@ def _check_cancel(cancel: threading.Event | None) -> None:
 
 
 def _stop_if_running(world: MoveWorld) -> Iterator[str]:
-    from yulon.move_flows import _server_is_up
+    from yulon.move_flows import _server_is_up, refuse_over_a_running_load
 
     if _server_is_up(world):
+        refuse_over_a_running_load(world)  # T730
         yield "Stopping the server for this step."
         world.stop_server()
 

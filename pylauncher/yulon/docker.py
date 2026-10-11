@@ -588,6 +588,11 @@ def _press_on(server_dir: Path | str, press: str) -> Iterator[None]:
         ServerHeldError: a job writes to this server alone, and `press` is not that job's.
     """
     key = _server_key(server_dir)
+    if press != forgetting.PRESS_STOP:
+        orphan = orphaned_restore_reason(server_dir)
+        if orphan is not None:
+            logger.warning(f"refused {press} on {server_dir}: {orphan}")
+            raise ServerHeldError(orphan)
     with _HOLD_LOCK:
         alone = _ALONE.get(key)
         if alone is not None and alone[0] != press:
@@ -791,8 +796,29 @@ def hold_the_server(
                 del _ALONE[key]
 
 
+def orphaned_restore_reason(server_dir: Path | str) -> str | None:
+    """The sentence of a restore load another Yu'lon left running here, or None (T730).
+
+    "Quit anyway" ends the Yu'lon that started a restore and leaves its load writing in
+    Docker (T690); only the restore record knows (`InterruptedRestore.load_running`: same
+    computer, start time matches). Nothing is answered while a job of THIS process holds the
+    server: that restore's load is its own, and its own hold speaks. A plain Stop is not
+    asked this ("Stop always stops": the Server tab asks first, T711).
+    """
+    key = _server_key(server_dir)
+    with _HOLD_LOCK:
+        if key in _HELD or key in _LEASED or key in _ALONE:
+            return None
+    from yulon.catalog import native  # noqa: PLC0415 - the spine names no game at import time
+
+    return native.orphaned_load_sentence(Path(server_dir))
+
+
 def held_reason(server_dir: Path | str) -> str | None:
-    """The sentence of the Maintenance job of THIS process holding the server now, or None.
+    """The sentence of the Maintenance job holding the server now, or None.
+
+    A job of THIS process, else (T730) a restore load another Yu'lon left running, which only
+    the restore record knows of (`orphaned_restore_reason()`).
 
     "Stop the other server" asks it of the server it is about to stop (T671): that can be a
     database a restore or a backup runs alone, and this process's own reservation of that
@@ -800,12 +826,19 @@ def held_reason(server_dir: Path | str) -> str | None:
     """
     with _HOLD_LOCK:
         reasons = _HELD.get(_server_key(server_dir))
-        return reasons[-1] if reasons else None
+        if reasons:
+            return reasons[-1]
+    return orphaned_restore_reason(server_dir)
 
 
 def held_here(server_dir: Path | str) -> bool:
-    """A Maintenance job of THIS process holds the server right now (`hold_the_server()`)."""
-    return held_reason(server_dir) is not None
+    """A Maintenance job of THIS process holds the server right now (`hold_the_server()`).
+
+    Only this process's: a restore load another Yu'lon left running (`held_reason()`, T730)
+    is exactly what callers of this tell apart from "did not finish".
+    """
+    with _HOLD_LOCK:
+        return bool(_HELD.get(_server_key(server_dir)))
 
 
 @contextmanager
@@ -883,6 +916,11 @@ def _in_flight(
     folder): it fails on its own, in its own words.
     """
     key = _server_key(server_dir)
+    if press != forgetting.PRESS_STOP:
+        orphan = orphaned_restore_reason(server_dir)  # T730: a load another Yu'lon left running
+        if orphan is not None:
+            logger.warning(f"refused {press} of {server_dir}: {orphan}")
+            raise ServerHeldError(orphan)
     with _HOLD_LOCK:
         held = _HELD.get(key)
         if held:
@@ -981,6 +1019,9 @@ def maintenance_lease(
         MaintenanceLeaseTaken: a Backup or Restore of this server holds it.
     """
     key = _server_key(server_dir)
+    orphan = orphaned_restore_reason(server_dir)  # T730: a Backup would dump half a load
+    if orphan is not None:
+        raise MaintenanceLeaseTaken(orphan)
     with _HOLD_LOCK:
         holder = _LEASED.get(key)
         if holder is not None:
