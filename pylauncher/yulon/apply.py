@@ -2692,6 +2692,9 @@ class _Log:
     # from then on a failed first install keeps its folder (and its record),
     # because the database may hold part of what it sent.
     sql_attempted: bool = False
+    # T684 review round 2. Set by `_deploy()` once the deploy record names this press's
+    # files: a first install refused before its SQL takes them back by that record.
+    deployed: bool = False
 
 
 TakenBack = Literal["taken", "gone", "kept"]
@@ -4004,6 +4007,7 @@ class Applier:
         try:
             self._refuse_checkout_links(manifest, clone, "install", vals)
             self._refuse_a_clash(manifest, clone)
+            self._refuse_a_deploy_clash(manifest, clone)
             if complete is not None:
                 self._refuse_a_players_addon(manifest, replace_addons, log)
             self._refuse_links(manifest, clone)
@@ -4013,6 +4017,7 @@ class Applier:
             self._folders(manifest, log)
             self._check_hold()
             self._patches(manifest, clone, vals, "install", log)
+            self._rehash_deployed(manifest)
             # Both SQL passes are refused as one, BEFORE either runs: the guard's
             # own sentence says no rows were written, and after the install-time
             # pass that would be false of the configure-time one.
@@ -4024,6 +4029,11 @@ class Applier:
                 # D5: nothing is undone in the database, and the report says so.
                 log.skipped.append(PUT_BACK_KEPT_SQL)
         except BaseException as exc:
+            # Review round 2 of T684: a FIRST install refused after its deploy and before
+            # any SQL (the running-world guard, mostly) takes its deployed files back and
+            # puts the player's set-aside files back, with the record entry.
+            if first and not log.sql_attempted and log.deployed:
+                self._take_back_a_refused_deploy(manifest, exc)
             # T596 (Codex review): a FIRST install from a link or a folder that is
             # refused before any SQL was sent -- a link in the checkout, a clash,
             # the running-world guard, an unreadable ledger, a failed backup --
@@ -4045,6 +4055,7 @@ class Applier:
         # which is the state a later `configure()` always finds.
         self._check_hold()
         self._patches(manifest, clone, vals, "configure", log)
+        self._rehash_deployed(manifest)
         if first_configure_sql and restore is None:
             self._sql(manifest, clone, vals, "configure", log)
         try:
@@ -4961,6 +4972,7 @@ class Applier:
         self._refuse_checkout_links(manifest, clone, "configure", vals)
         self._check_hold()
         self._patches(manifest, clone, vals, "configure", log)
+        self._rehash_deployed(manifest)
         self._sql(manifest, clone, vals, "configure", log)
         self._check_hold()
         self._conf(manifest, clone, vals, log)
@@ -5159,6 +5171,24 @@ class Applier:
                     f"{', '.join(carried)}, and Yu'lon's add-on route installs add-ons alone."
                 )
         return finished
+
+    def _take_back_a_refused_deploy(self, manifest: Manifest, exc: BaseException) -> None:
+        """Undo a refused first install's deploy by its record, and say so (review round 2).
+
+        Never raises: the refusal being raised is what the player must read. A hold lost
+        meanwhile stops the take-back at its first step, and then nothing is claimed.
+        """
+        try:
+            took = self._undeploy_recorded(manifest, _Log())
+        except Exception as failed:  # noqa: BLE001 - the refusal is what is reported
+            logger.warning(f"could not take back {manifest.id}'s deployed files: {failed}")
+            return
+        if took and isinstance(exc, ApplyError):
+            exc.args = (
+                f"{exc} The files {manifest.name} had copied into your server folder were "
+                "taken back, and any of yours it had set aside are in place again.",
+                *exc.args[1:],
+            )
 
     def _take_back_a_first_install(
         self, clone: Path, first: bool, exc: BaseException, *, completing: bool
@@ -5845,6 +5875,8 @@ class Applier:
         existed, or a record that cannot be read -- so nothing is set aside or
         taken back on a guess, and the copy runs as it always did.
         """
+        if not manifest.deploy:
+            return  # nothing to copy, and so nothing to record
         item = module_deploys.key(manifest.type, manifest.id)
         ledger = module_deploys.read(self.server_dir)
         before = ledger.get(item) if ledger is not None else None
@@ -5856,8 +5888,9 @@ class Applier:
                 f"server folder could not be read, so {manifest.name}'s files were copied without "
                 "setting aside any of yours they replace"
             )
+        fold = self._fold()
         planned: list[tuple[Deploy, Path, Path]] = []
-        files: list[str] = []
+        sources: dict[str, Path] = {}
         roots: list[str] = []
         for step in manifest.deploy:
             src = clone / step.src
@@ -5865,25 +5898,38 @@ class Applier:
             _look_again(clone, step.src)
             if not (src.is_dir() or src.is_file()):
                 raise ApplyError(f"deploy source missing in clone: {src}")
-            files.extend(self._deploy_files(step, src, target))
+            sources.update(self._deploy_files(step, src, target))
             roots.append(_posix_rel(self.server_dir, target if src.is_dir() else target.parent))
             planned.append((step, src, target))
+        files = sorted(sources)
         asides = dict(before.asides) if before is not None else {}
         moves: list[tuple[str, Path, Path]] = []
         if before is not None:
-            mine = set(before.files)
+            mine = {fold(rel) for rel in before.files}
+            held = {fold(rel) for rel, aside in asides.items() if self._still_aside(aside)}
             for rel in files:
                 path = self.server_dir / rel
-                if rel in mine or rel in asides or not (path.is_file() or path.is_symlink()):
+                # A set-aside the record planned and a killed process never made: the
+                # file at the name is still the player's, whatever the record lists.
+                unmoved = rel in asides and not self._still_aside(asides[rel])
+                if unmoved and not (path.is_file() or path.is_symlink()):
+                    asides.pop(rel)
+                if (not unmoved and fold(rel) in mine | held) or not (
+                    path.is_file() or path.is_symlink()
+                ):
                     continue
                 aside = _free_aside(path)
                 asides[rel] = _posix_rel(self.server_dir, aside)
                 moves.append((rel, path, aside))
+            # The record names every file this press may write, with the bytes it is
+            # about to write, and every move it is about to make, BEFORE any happens.
+            planned_files = dict(before.files)
+            planned_files.update({rel: sha256_of(src) for rel, src in sources.items()})
             problem = module_deploys.write(
                 self.server_dir,
                 item,
                 module_deploys.Deployed(
-                    files=tuple(sorted(mine | set(files))),
+                    files=planned_files,
                     roots=tuple(sorted(set(before.roots) | set(roots))),
                     asides=asides,
                 ),
@@ -5896,8 +5942,31 @@ class Applier:
                     "copied without setting aside any of yours they replace"
                 )
                 before, moves, asides = None, [], {}
-        for rel, path, aside in moves:
-            os.replace(path, aside)
+            else:
+                log.deployed = True
+        for number, (rel, path, aside) in enumerate(moves):
+            try:
+                os.replace(path, aside)
+            except OSError as exc:
+                # Review round 2: the record must say only what happened. The moves not
+                # made leave it, and nothing is copied over the file that did not move.
+                for undone, _path, _aside in moves[number:]:
+                    asides.pop(undone, None)
+                assert before is not None  # moves are only planned with a record
+                module_deploys.write(
+                    self.server_dir,
+                    item,
+                    module_deploys.Deployed(
+                        files=before.files,
+                        roots=tuple(sorted(set(before.roots) | set(roots))),
+                        asides=asides,
+                    ),
+                )
+                raise ApplyRefusal(
+                    f"Your {rel} could not be set aside ({exc}), so none of {manifest.name}'s "
+                    f"files were copied and your file is as it was. Close whatever has it "
+                    f"open, then install {manifest.name} again."
+                ) from exc
             log.done.append(
                 f"set aside your {rel} as {aside.name}: {manifest.name} has a file of that name"
             )
@@ -5919,14 +5988,20 @@ class Applier:
         if before is not None:
             # What the previous deploy wrote and this one did not: upstream renamed or
             # dropped it, and left in place it would keep loading (catalog audit C4).
+            # Compared case-blind where the filesystem is: `Foo.lua` -> `foo.lua` there
+            # is one file, and taking back the old name would delete the new one.
             known = module_deploys.Deployed(
                 files=before.files, roots=tuple(all_roots), asides=asides
             )
-            for rel in sorted(set(before.files) - set(files)):
-                self._take_back_deployed(rel, known, log)
-                asides.pop(rel, None)
+            now = {fold(rel) for rel in files}
+            for rel in sorted(before.files):
+                if fold(rel) not in now:
+                    self._take_back_deployed(rel, known, log)
+                    asides.pop(rel, None)
         record = module_deploys.Deployed(
-            files=tuple(sorted(set(files))), roots=tuple(sorted(all_roots)), asides=asides
+            files={rel: _sha_or_blank(self.server_dir / rel) for rel in files},
+            roots=tuple(sorted(all_roots)),
+            asides=asides,
         )
         problem = module_deploys.write(self.server_dir, item, record)
         if problem:
@@ -5934,12 +6009,82 @@ class Applier:
                 f"{module_deploys.DEPLOYS_FILE}: {problem}, so removing {manifest.name} will "
                 "take back its files by the list in its checkout"
             )
+        else:
+            log.deployed = True
 
-    def _deploy_files(self, step: Deploy, src: Path, target: Path) -> list[str]:
-        """The server-relative paths `step` writes: each file under `src`, renamed as it says."""
+    def _fold(self) -> Callable[[str], str]:
+        """How record paths compare here: case-blind where the filesystem is (review round 2)."""
+        if module_deploys.folds_case(self.server_dir):
+            return str.casefold
+        return str
+
+    def _still_aside(self, aside: str) -> bool:
+        """Is the player's file really at its recorded aside? A move the record planned and a
+        killed process never made is no aside (review round 2)."""
+        return os.path.lexists(self.server_dir / aside)
+
+    def _rehash_deployed(self, manifest: Manifest) -> None:
+        """Record the bytes this app's own patches left in the deployed files (review round 2).
+
+        Run after each pass of patches, so a file is "changed by the player" only when its
+        bytes differ from what this app last wrote.
+        """
+        item = module_deploys.key(manifest.type, manifest.id)
+        ledger = module_deploys.read(self.server_dir)
+        record = ledger.get(item) if ledger is not None else None
+        if record is None:
+            return
+        files = {rel: _sha_or_blank(self.server_dir / rel) for rel in record.files}
+        if files != dict(record.files):
+            module_deploys.write(
+                self.server_dir,
+                item,
+                module_deploys.Deployed(files=files, roots=record.roots, asides=record.asides),
+            )
+
+    def _refuse_a_deploy_clash(self, manifest: Manifest, clone: Path) -> None:
+        """Refuse a deploy onto a file ANOTHER module's deploy put there (review round 2).
+
+        T262's rule for the client, for the server folder: setting the other module's
+        file aside as if it were the player's would put the wrong file back at either
+        Remove. Both modules are named and nothing of this one is deployed.
+        """
+        ledger = module_deploys.read(self.server_dir)
+        if not ledger:
+            return
+        fold = self._fold()
+        mine: set[str] = set()
+        for step in manifest.deploy:
+            src = clone / step.src
+            if src.is_dir() or src.is_file():
+                target = self._deploy_target(step.src, step.dest)
+                mine.update(fold(rel) for rel in self._deploy_files(step, src, target))
+        item = module_deploys.key(manifest.type, manifest.id)
+        clashes: dict[str, list[str]] = {}
+        for other, record in ledger.items():
+            if other == item:
+                continue
+            for rel in record.files:
+                if fold(rel) in mine and os.path.lexists(self.server_dir / rel):
+                    clashes.setdefault(other.partition("/")[2], []).append(rel)
+        if not clashes:
+            return
+        said = "; ".join(
+            f"{', '.join(sorted(rels))}, which {other} put there"
+            for other, rels in sorted(clashes.items())
+        )
+        raise ApplyRefusal(
+            f"{manifest.id} would put a file into your server folder where another module's "
+            f"file already is: {said}. Remove {' and '.join(sorted(clashes))} first, then "
+            f"install {manifest.id}. Nothing of {manifest.id} was deployed."
+        )
+
+    def _deploy_files(self, step: Deploy, src: Path, target: Path) -> dict[str, Path]:
+        """The server-relative paths `step` writes, each with its source: every file under
+        `src`, renamed as the step says."""
         if src.is_file():
-            return [_posix_rel(self.server_dir, target)]
-        out: list[str] = []
+            return {_posix_rel(self.server_dir, target): src}
+        out: dict[str, Path] = {}
         for folder, dirs, names in os.walk(src):
             # Links are refused by the copy itself (`_stop_at_links`); never walked here.
             dirs[:] = [d for d in dirs if not os.path.islink(os.path.join(folder, d))]
@@ -5951,7 +6096,7 @@ class Applier:
                         rel = PurePosixPath(new)
                     elif rel.is_relative_to(old_p):
                         rel = PurePosixPath(new) / rel.relative_to(old_p)
-                out.append(_posix_rel(self.server_dir, target / rel))
+                out[_posix_rel(self.server_dir, target / rel)] = Path(folder, name)
         return out
 
     def _take_back_deployed(self, rel: str, record: module_deploys.Deployed, log: _Log) -> None:
@@ -5975,6 +6120,19 @@ class Applier:
             log.skipped.append(
                 f"{rel}: {_rel(self.server_dir, link)} is a link now, so nothing was deleted "
                 "through it"
+            )
+            return
+        recorded = record.files.get(rel, "")
+        if path.is_file() and not path.is_symlink() and recorded and sha256_of(path) != recorded:
+            # Review round 2: not the bytes this app left there, so not this app's to
+            # delete. The player's own file it replaced, if any, stays aside beside it.
+            log.skipped.append(
+                f"{rel}: kept because you changed it after the module put it there"
+                + (
+                    f"; your earlier file is still set aside as {record.asides[rel]}"
+                    if rel in record.asides
+                    else ""
+                )
             )
             return
         if path.is_symlink() or path.is_file():
@@ -8833,6 +8991,13 @@ def _rel(base: Path, path: Path) -> str:
 def _posix_rel(base: Path, path: Path) -> str:
     """`path` under `base`, spelled with `/` on every OS: how the deploy record names a file."""
     return path.relative_to(base).as_posix()
+
+
+def _sha_or_blank(path: Path) -> str:
+    """The SHA-256 of a regular file there, `""` for anything else (gone, a link, a folder)."""
+    if path.is_symlink() or not path.is_file():
+        return ""
+    return sha256_of(path)
 
 
 def _free_aside(path: Path) -> Path:

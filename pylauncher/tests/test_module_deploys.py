@@ -8,6 +8,8 @@ went with it. Each test drives the real `Applier.install()` / `update()` / `remo
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -16,6 +18,7 @@ import pytest
 from tests.test_apply import (
     LUA,
     _FakeGit,
+    _FakeSql,
     _git,
     _LocalOrigin,
     _origin,
@@ -23,9 +26,10 @@ from tests.test_apply import (
     _publish,
     _untouched,
 )
+from yulon import apply as apply_module
 from yulon import module_deploys
-from yulon.apply import Applier
-from yulon.git import git_available
+from yulon.apply import Applier, ApplyError, ApplyRefusal
+from yulon.git import CloneSpec, git_available
 from yulon.manifest import parse_manifest
 
 BATTLEPASS_SHAPE = {
@@ -239,3 +243,237 @@ def test_a_record_that_cannot_be_written_moves_none_of_the_players_files(
 
     assert not theirs.with_name(theirs.name + ".yulon-module-old").exists()
     assert any("the disk is full" in line for line in report.skipped)
+
+
+# ---------------------------------------------------------------- review round 2
+
+
+class _ResettingGit(_FakeGit):
+    """`_FakeGit` whose second clone is what `reset --hard` leaves: only the new files."""
+
+    def clone(self, spec: CloneSpec) -> None:
+        if spec.dest.is_dir():
+            for entry in spec.dest.iterdir():
+                if entry.name in (".git", apply_module.CLAIM_FILE):
+                    continue
+                if entry.is_dir():
+                    shutil.rmtree(entry)
+                else:
+                    entry.unlink()
+        super().clone(spec)
+
+
+def _replace_failing_on(monkeypatch: pytest.MonkeyPatch, nth: int) -> None:
+    """`os.replace` in the applier, refusing its `nth` move of a file to an aside name."""
+    real = os.replace
+    seen = {"n": 0}
+
+    def replace(src: object, dst: object) -> None:
+        if str(dst).endswith(apply_module.ASIDE_SUFFIX):
+            seen["n"] += 1
+            if seen["n"] == nth:
+                raise PermissionError(13, "The process cannot access the file", str(src))
+        real(src, dst)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(apply_module.os, "replace", replace)
+
+
+def _record(server: Path) -> module_deploys.Deployed:
+    ledger = module_deploys.read(server)
+    assert ledger is not None
+    return ledger["ale/battlepass"]
+
+
+def test_a_set_aside_that_fails_copies_nothing_and_leaves_the_players_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MUST 1: the second move refused (a file held open on Windows): no file of the player's
+    is overwritten, the one already moved is back, and the record claims nothing."""
+    m = parse_manifest(BATTLEPASS_SHAPE)
+    applier = Applier(tmp_path, git=_FakeGit(BP_FILES))
+    core = _player_file(tmp_path, "battlepass/01_BP_Core.lua", "-- the player's core")
+    csmh = _player_file(tmp_path, "lib/CSMH/CSMH_SMH.ext", "-- the player's csmh")
+    _replace_failing_on(monkeypatch, 2)
+
+    with pytest.raises(ApplyRefusal) as refused:
+        applier.install(m)
+
+    assert core.read_text(encoding="utf-8") == "-- the player's core"
+    assert csmh.read_text(encoding="utf-8") == "-- the player's csmh"
+    assert not list((tmp_path / LUA).rglob("*" + apply_module.ASIDE_SUFFIX))
+    assert "ale/battlepass" not in (module_deploys.read(tmp_path) or {})
+    assert "could not be set aside" in str(refused.value)
+
+
+def test_after_a_failed_set_aside_the_record_names_only_the_moves_made(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An Update (not a first install) keeps its record: only the move that happened is in it."""
+    m = parse_manifest(BATTLEPASS_SHAPE)
+    git = _ResettingGit({"lua_scripts/battlepass/01_BP_Core.lua": "-- bp core"})
+    applier = _untouched(Applier(tmp_path, git=git), m)
+    applier.install(m)
+    first = _player_file(tmp_path, "lib/A.ext", "-- the player's a")
+    second = _player_file(tmp_path, "lib/B.ext", "-- the player's b")
+    git.files = {
+        "lua_scripts/battlepass/01_BP_Core.lua": "-- bp core",
+        "lua_scripts/lib/A.ext": "-- a from battle pass",
+        "lua_scripts/lib/B.ext": "-- b from battle pass",
+    }
+    _replace_failing_on(monkeypatch, 2)
+
+    with pytest.raises(ApplyRefusal):
+        applier.install(m)
+
+    asides = _record(tmp_path).asides
+    assert list(asides) == [f"{LUA}/lib/A.ext"]
+    assert (tmp_path / asides[f"{LUA}/lib/A.ext"]).read_text(
+        encoding="utf-8"
+    ) == "-- the player's a"
+    assert second.read_text(encoding="utf-8") == "-- the player's b"
+    assert not first.exists()
+
+
+def _a_planned_move_never_made(tmp_path: Path) -> tuple[Applier, Path]:
+    """The record a process killed between its write and its moves leaves: a set-aside it
+    lists, no file at the aside name, and the player's file still at the module's name."""
+    m = parse_manifest(BATTLEPASS_SHAPE)
+    applier = _untouched(Applier(tmp_path, git=_FakeGit(BP_FILES)), m)
+    applier.install(m)
+    record = _record(tmp_path)
+    rel = f"{LUA}/lib/CSMH/CSMH_SMH.ext"
+    module_deploys.write(
+        tmp_path,
+        "ale/battlepass",
+        module_deploys.Deployed(
+            files=record.files,
+            roots=record.roots,
+            asides={rel: rel + apply_module.ASIDE_SUFFIX},
+        ),
+    )
+    theirs = tmp_path / rel
+    theirs.write_text("-- the player's csmh", encoding="utf-8")
+    return applier, theirs
+
+
+def test_a_planned_set_aside_never_made_does_not_let_the_next_install_overwrite(
+    tmp_path: Path,
+) -> None:
+    applier, theirs = _a_planned_move_never_made(tmp_path)
+    applier.install(parse_manifest(BATTLEPASS_SHAPE))
+    aside = theirs.with_name(theirs.name + apply_module.ASIDE_SUFFIX)
+    assert aside.read_text(encoding="utf-8") == "-- the player's csmh"
+
+
+def test_a_planned_set_aside_never_made_does_not_let_remove_delete_the_players_file(
+    tmp_path: Path,
+) -> None:
+    applier, theirs = _a_planned_move_never_made(tmp_path)
+    applier.remove(parse_manifest(BATTLEPASS_SHAPE))
+    assert theirs.read_text(encoding="utf-8") == "-- the player's csmh"
+
+
+def test_remove_keeps_a_module_file_the_player_changed_and_says_so(tmp_path: Path) -> None:
+    """SHOULD 2: the record's hash says whose bytes these are."""
+    m = parse_manifest(BATTLEPASS_SHAPE)
+    applier = Applier(tmp_path, git=_FakeGit(BP_FILES))
+    applier.install(m)
+    core = tmp_path / LUA / "battlepass" / "01_BP_Core.lua"
+    core.write_text("-- bp core, tuned by the player", encoding="utf-8")
+
+    report = applier.remove(m)
+
+    assert core.read_text(encoding="utf-8") == "-- bp core, tuned by the player"
+    assert any("kept because you changed it" in line for line in report.skipped)
+
+
+def test_an_install_time_patch_is_not_mistaken_for_the_players_change(tmp_path: Path) -> None:
+    """The hash is taken after this app's own patches, so Remove still deletes a patched file."""
+    m = parse_manifest(
+        {
+            **BATTLEPASS_SHAPE,
+            "patches": [
+                {"file": f"{LUA}/battlepass/01_BP_Core.lua", "find": "core", "replace": "x"}
+            ],
+        }
+    )
+    applier = Applier(tmp_path, git=_FakeGit(BP_FILES))
+    applier.install(m)
+    applier.remove(m)
+    assert not (tmp_path / LUA / "battlepass" / "01_BP_Core.lua").exists()
+
+
+def test_an_update_keeps_a_dropped_file_the_player_changed(tmp_path: Path) -> None:
+    m = parse_manifest(BATTLEPASS_SHAPE)
+    git = _ResettingGit(BP_FILES)
+    applier = _untouched(Applier(tmp_path, git=git), m)
+    applier.install(m)
+    old = tmp_path / LUA / "lib" / "CSMH" / "CSMH_SMH.ext"
+    old.write_text("-- csmh, tuned by the player", encoding="utf-8")
+    git.files = {"lua_scripts/battlepass/01_BP_Core.lua": "-- bp core"}
+
+    report = applier.install(m)
+
+    assert old.read_text(encoding="utf-8") == "-- csmh, tuned by the player"
+    assert any("kept because you changed it" in line for line in report.skipped)
+
+
+def test_a_file_another_module_deployed_refuses_the_install_by_name(tmp_path: Path) -> None:
+    """SHOULD 3: another module's file is not the player's: refused, both named, nothing copied."""
+    applier = Applier(tmp_path, git=_FakeGit(BP_FILES))
+    applier.install(parse_manifest(BATTLEPASS_SHAPE))
+    other = parse_manifest({**BATTLEPASS_SHAPE, "id": "csmh-pack", "name": "CSMH pack"})
+    git = _FakeGit(
+        {"lua_scripts/lib/CSMH/CSMH_SMH.ext": "-- csmh pack", "lua_scripts/pack/p.lua": "-- p"}
+    )
+
+    with pytest.raises(ApplyRefusal) as refused:
+        Applier(tmp_path, git=git).install(other)
+
+    assert "battlepass" in str(refused.value)
+    assert not (tmp_path / LUA / "pack").exists()
+    assert not list((tmp_path / LUA).rglob("*" + apply_module.ASIDE_SUFFIX))
+
+
+def test_a_case_only_rename_upstream_does_not_delete_the_new_file_where_case_folds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SHOULD 4: on Windows and macOS `Foo.lua` and `foo.lua` are one file; taking back the
+    old name would delete the one just deployed."""
+    monkeypatch.setattr(module_deploys, "folds_case", lambda _server: True)
+    m = parse_manifest(BATTLEPASS_SHAPE)
+    git = _ResettingGit({"lua_scripts/battlepass/Foo.lua": "-- foo"})
+    applier = _untouched(Applier(tmp_path, git=git), m)
+    applier.install(m)
+    git.files = {"lua_scripts/battlepass/foo.lua": "-- foo"}
+
+    report = applier.install(m)
+
+    assert not any(line.endswith("Foo.lua") and line.startswith("rm ") for line in report.done)
+    assert (tmp_path / LUA / "battlepass" / "foo.lua").is_file()
+
+
+def test_a_first_install_refused_while_the_world_runs_takes_its_files_back(
+    tmp_path: Path,
+) -> None:
+    """SHOULD 5: the running-world guard refuses after the deploy; nothing of it stays."""
+    m = parse_manifest(
+        {
+            **BATTLEPASS_SHAPE,
+            # A patch of the install's own, before the refusal: still the install's bytes.
+            "patches": [
+                {"file": f"{LUA}/battlepass/01_BP_Core.lua", "find": "core", "replace": "x"}
+            ],
+            "sql": [{"db": "world", "statement": "DELETE FROM creature WHERE id = 0;"}],
+        }
+    )
+    applier = Applier(tmp_path, git=_FakeGit(BP_FILES), sql=_FakeSql(), world_running=lambda: True)
+    theirs = _player_file(tmp_path, "lib/CSMH/CSMH_SMH.ext", "-- the player's csmh")
+
+    with pytest.raises(ApplyError) as refused:
+        applier.install(m)
+
+    assert not (tmp_path / LUA / "battlepass").exists()
+    assert theirs.read_text(encoding="utf-8") == "-- the player's csmh"
+    assert "ale/battlepass" not in (module_deploys.read(tmp_path) or {})
+    assert "taken back" in str(refused.value)

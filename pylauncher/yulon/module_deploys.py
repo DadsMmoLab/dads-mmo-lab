@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 import tempfile
 import threading
 from collections.abc import Mapping
@@ -55,9 +56,14 @@ def key(family: str, item_id: str) -> str:
 
 @dataclass(frozen=True)
 class Deployed:
-    """One item's deployed files, the folders they went into, and the player's files set aside."""
+    """One item's deployed files, the folders they went into, and the player's files set aside.
 
-    files: tuple[str, ...] = ()
+    `files` maps each server-relative path to the SHA-256 of the bytes this app last left
+    there (after its own patches), `""` when not known: a file whose bytes differ was
+    changed by the player and is never deleted on this record's word (review round 2).
+    """
+
+    files: Mapping[str, str] = field(default_factory=dict)
     roots: tuple[str, ...] = ()
     asides: Mapping[str, str] = field(default_factory=dict)
 
@@ -73,7 +79,10 @@ class Deployed:
         return best
 
     def as_json(self) -> dict[str, Any]:
-        out: dict[str, Any] = {"files": sorted(self.files), "roots": sorted(self.roots)}
+        out: dict[str, Any] = {
+            "files": dict(sorted(self.files.items())),
+            "roots": sorted(self.roots),
+        }
         if self.asides:
             out["asides"] = dict(sorted(self.asides.items()))
         return out
@@ -99,6 +108,15 @@ def _paths(value: object) -> tuple[str, ...]:
     return tuple(_inside(v) for v in value)
 
 
+def _files(value: object) -> dict[str, str]:
+    """`{path: sha256}`; a plain list (the first shape) reads as paths of unknown bytes."""
+    if isinstance(value, list):
+        return {path: "" for path in _paths(value)}
+    if not isinstance(value, dict) or not all(isinstance(v, str) for v in value.values()):
+        raise ValueError(f"files is not a map of hashes: {value!r}")
+    return {_inside(k): v for k, v in value.items()}
+
+
 def _item(said: object) -> Deployed:
     if not isinstance(said, dict):
         raise ValueError(f"not an item: {said!r}")
@@ -106,7 +124,7 @@ def _item(said: object) -> Deployed:
     if not isinstance(asides, dict):
         raise ValueError(f"asides is not a map: {asides!r}")
     return Deployed(
-        files=_paths(said.get("files")),
+        files=_files(said.get("files")),
         roots=_paths(said.get("roots", [])),
         asides={_inside(k): _inside(v) for k, v in asides.items()},
     )
@@ -136,6 +154,23 @@ def _load(path: Path) -> tuple[dict[str, Deployed] | None, str]:
         return _parse(json.loads(text)), ""
     except ValueError as exc:
         return None, f"{path} is not a record this Yu'lon can read ({exc}), so it was left as it is"
+
+
+def folds_case(server_dir: Path) -> bool:
+    """Does the filesystem under `server_dir` treat `a` and `A` as one name (Windows, macOS)?
+
+    `os.path.normcase` says so on Windows; elsewhere the server folder itself is asked:
+    its name with the case swapped names the same folder, or it does not.
+    """
+    if os.path.normcase("A") == "a" or sys.platform == "darwin":
+        return True
+    name = server_dir.name
+    if name.swapcase() == name:
+        return False
+    try:
+        return os.path.samefile(server_dir, server_dir.with_name(name.swapcase()))
+    except OSError:
+        return False
 
 
 def read(server_dir: Path) -> dict[str, Deployed] | None:
