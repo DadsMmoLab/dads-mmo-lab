@@ -293,6 +293,7 @@ def test_the_importers_words_are_read_through_composes_prefix_and_closing_lines(
     assert "Stopped" not in run.tail[-1] and "Could not update" in run.tail[-2], run.tail
     words = docker.importer_last_words(run.tail)
     assert any(line.startswith("ERROR 1146") for line in words), words
+    assert "" not in words, "a bare `ac-db-import  |` line read as a line of its own"
     rebuild = docker.importer_failure(run, "Applying the database updates")
     assert "(ERROR 1146 (42S02)" in rebuild, rebuild
     assert "zz_t678_broken.sql" in docker.import_failed(IMPORTER, tmp_path, run).detail

@@ -3644,7 +3644,7 @@ def importer_last_words(tail: Sequence[str]) -> list[str]:
     it that say what the importer made of it. Without one, the last five lines.
     Every line is kept whole; colour codes are already gone (`run_attached()`).
     """
-    said = [unprefixed(line) for line in tail if line.strip()]
+    said = [plain for line in tail if (plain := unprefixed(line))]
     errors = [i for i, line in enumerate(said) if _MYSQL_ERROR.match(line)]
     if not errors:
         return said[-_LAST_WORDS_LINES:] or ["it printed nothing at all"]
