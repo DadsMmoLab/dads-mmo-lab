@@ -52,7 +52,7 @@
       "undoes": [
         "level-one-mounts.sql"
       ],
-      "note": "upstream's revert sets level 20 and ten times AzerothCore's stock prices (10 gold mounts, 10 gold riding). T763: together with the backups put back after it, which hold every row level-one-mounts.sql changes, it takes that file back in full. An install from before the backups keeps the level-twenty values."
+      "note": "upstream's revert sets level 20 and ten times AzerothCore's stock prices (10 gold mounts, 10 gold riding). T763: together with the backups put back after it, which hold every row level-one-mounts.sql changes, it takes that file back in full. An install from before the backups is put back to stock by the steps after the restore."
     },
     {
       "db": "world",
@@ -63,6 +63,33 @@
       "db": "world",
       "statement": "UPDATE npc_trainer t JOIN yulon_lvl1_mounts_trainer_backup b ON b.ID = t.ID AND b.SpellID = t.SpellID SET t.ReqLevel = b.ReqLevel, t.MoneyCost = b.MoneyCost;",
       "when": "remove"
+    },
+    {
+      "db": "world",
+      "statement": "UPDATE item_template t LEFT JOIN yulon_lvl1_mounts_item_backup b ON b.entry = t.entry SET t.BuyPrice = 10000, t.SellPrice = 2500 WHERE b.entry IS NULL AND t.entry IN (1132,2411,2414,5655,5656,5665,5668,5864,5872,5873,8563,8588,8591,8592,8595,8629,8631,8632,13321,13322,13331,13332,13333,15277,15290,28481,28927,29220,29221,29222,29743,29744,46099,46100,46308,47100) AND t.RequiredLevel = 20 AND t.BuyPrice = 100000 AND t.SellPrice = 25000;",
+      "when": "remove",
+      "note": "T763 review round 2: an install from before the backups has none, so its rows are still at exactly the level-twenty values after the revert; those go to the pinned core's stock (azerothcore-wotlk @2a2211cd base item_template: RequiredLevel 20, these prices). Rows with a backup row were put back above and are not touched"
+    },
+    {
+      "db": "world",
+      "statement": "UPDATE item_template t LEFT JOIN yulon_lvl1_mounts_item_backup b ON b.entry = t.entry SET t.BuyPrice = 10000, t.SellPrice = 0 WHERE b.entry IS NULL AND t.entry IN (33224,49283) AND t.RequiredLevel = 20 AND t.BuyPrice = 100000 AND t.SellPrice = 25000;",
+      "when": "remove"
+    },
+    {
+      "db": "world",
+      "statement": "UPDATE item_template t LEFT JOIN yulon_lvl1_mounts_item_backup b ON b.entry = t.entry SET t.BuyPrice = 100000, t.SellPrice = 0 WHERE b.entry IS NULL AND t.entry IN (33976) AND t.RequiredLevel = 20 AND t.BuyPrice = 100000 AND t.SellPrice = 25000;",
+      "when": "remove"
+    },
+    {
+      "db": "world",
+      "statement": "UPDATE item_template t LEFT JOIN yulon_lvl1_mounts_item_backup b ON b.entry = t.entry SET t.BuyPrice = 0, t.SellPrice = 0 WHERE b.entry IS NULL AND t.entry IN (43599) AND t.RequiredLevel = 20 AND t.BuyPrice = 100000 AND t.SellPrice = 25000;",
+      "when": "remove"
+    },
+    {
+      "db": "world",
+      "statement": "UPDATE npc_trainer t LEFT JOIN yulon_lvl1_mounts_trainer_backup b ON b.ID = t.ID AND b.SpellID = t.SpellID SET t.MoneyCost = 40000 WHERE b.ID IS NULL AND t.ReqSkillLine = 762 AND t.ReqSkillRank = 0 AND t.ReqLevel = 20 AND t.MoneyCost = 100000;",
+      "when": "remove",
+      "note": "the same for Apprentice Riding: stock is 40000 at level 20 (npc_trainer 202010, spell 33388, the only ReqSkillLine 762 rank 0 row at the pin)"
     },
     {
       "db": "world",
@@ -77,6 +104,6 @@
   ],
   "notes": [
     "Takes effect after a restart.",
-    "Upstream's revert (level-twenty-mounts.sql) sets fixed level-twenty values, at ten times AzerothCore's stock prices, so the tables `yulon_lvl1_mounts_item_backup` and `yulon_lvl1_mounts_trainer_backup` are filled before the level-one file and put back after the revert on Remove. Do not drop them by hand."
+    "Upstream's revert (level-twenty-mounts.sql) sets fixed level-twenty values, at ten times AzerothCore's stock prices, so the tables `yulon_lvl1_mounts_item_backup` and `yulon_lvl1_mounts_trainer_backup` are filled before the level-one file and put back after the revert on Remove. Do not drop them by hand. An install from before the backups has none: Remove puts rows still at the level-twenty values back to AzerothCore's stock."
   ]
 }

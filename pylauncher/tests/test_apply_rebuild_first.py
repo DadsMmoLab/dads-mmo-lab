@@ -50,7 +50,10 @@ def _install_mod_ale(server_dir: Path) -> Manifest:
 def _install_battle_pass(server_dir: Path) -> Any:
     """In a NEW Applier, the state a restarted app is in: nothing carried over in memory."""
     bp = wotlk_modules.store().load("ale", "battlepass")
-    return Applier(server_dir, git=_FakeGit(_bp_files()), sql=_FakeSql()).install(bp)
+    applier = Applier(server_dir, git=_FakeGit(_bp_files()), sql=_FakeSql())
+    if (applier.clone_dir(bp) / ".git").is_dir():
+        _untouched(applier, bp)  # a second install over its own fake clone
+    return applier.install(bp)
 
 
 def _built(server_dir: Path) -> None:
@@ -120,3 +123,16 @@ def native_stamp(server_dir: Path) -> str | None:
     from yulon.apply import built_stamp
 
     return built_stamp(server_dir)
+
+
+def test_a_rebuild_that_stops_after_mod_ale_was_built_does_not_bring_it_back(
+    tmp_path: Path,
+) -> None:
+    """Cold review: once a build settled the entry, a later Rebuild that fails or is stopped
+    forgets the build record, and the running build (with ALE) is the old one. The entry
+    must be gone by then, not read as never built again."""
+    _install_mod_ale(tmp_path)
+    _built(tmp_path)
+    assert _install_battle_pass(tmp_path).rebuild_first == ()
+    native.forget_built_from(tmp_path)
+    assert _install_battle_pass(tmp_path).rebuild_first == ()

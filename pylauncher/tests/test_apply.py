@@ -5557,6 +5557,8 @@ def test_the_shipped_manifests_this_guard_stands_in_front_of() -> None:
     54 after T684: Battle Pass's Remove takes back the vendor creature its install made.
     64 after T763: Level One Mounts backs up the rows it changes (two tables, two fills) before
     its file, and on Remove creates, puts back and drops both around upstream's revert.
+    69 after its review round 2: five Remove steps put an install from before the backups back to
+    the pinned core's stock prices (four item groups, one trainer row).
 
     Catches `WORLD_HELD_DBS` narrowed and the `applied_by` default flipped to
     `db-import`: either would empty this guard's blast radius without a word,
@@ -5577,7 +5579,7 @@ def test_the_shipped_manifests_this_guard_stands_in_front_of() -> None:
             games.add(path.parent.parent.name)
 
     assert (steps, len(files), sorted(games)) == (
-        64,
+        69,
         19,
         ["wow-tbc", "wow-tortoise", "wow-vanilla", "wow-wotlk"],
     )

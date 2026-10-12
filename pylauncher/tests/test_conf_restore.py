@@ -15,7 +15,7 @@ import pytest
 
 from tests.test_apply import _FakeGit, _FakeSql, _untouched
 from yulon import module_answers, tuning
-from yulon.apply import Applier
+from yulon.apply import Applier, ApplyError
 from yulon.controller_wow_wotlk import modules as wotlk_modules
 from yulon.manifest import Manifest, parse_manifest
 
@@ -137,3 +137,52 @@ def test_restore_needs_a_default_to_put_back() -> None:
                 "conf": [{"file": CORE, "keys": [{"key": "K", "restore": True}]}],
             }
         )
+
+
+class _BrokenSql(_FakeSql):
+    def run_statement(self, db: str, statement: str) -> None:
+        raise ApplyError("mysql said no")
+
+
+SQL_MOD: dict[str, object] = {
+    "schema_version": 1,
+    "id": "x-mod",
+    "name": "X",
+    "type": "mod",
+    "game": "wow-wotlk",
+    "source": {"repo": "a/b"},
+    "conf": [
+        {"file": CORE, "keys": [{"key": "EnablePlayerSettings", "default": "1", "restore": True}]}
+    ],
+    "sql": [
+        {"db": "world", "statement": "UPDATE a SET b = 1;"},
+        {"db": "world", "statement": "UPDATE a SET b = 0;", "when": "remove"},
+    ],
+}
+
+
+def test_a_remove_whose_sql_fails_leaves_the_value_and_its_record_to_try_again(
+    tmp_path: Path,
+) -> None:
+    core = _server(tmp_path)
+    m = parse_manifest(SQL_MOD)
+    Applier(tmp_path, git=_FakeGit({"README.md": "x"}), sql=_FakeSql()).install(m)
+    with pytest.raises(ApplyError):
+        Applier(tmp_path, git=_FakeGit({"README.md": "x"}), sql=_BrokenSql()).remove(m)
+    assert _values(core)[0] == "1"
+    assert module_answers.conf_before(tmp_path, m) != {}
+    Applier(tmp_path, git=_FakeGit({"README.md": "x"}), sql=_FakeSql()).remove(m)
+    assert _values(core)[0] == "0"
+    assert module_answers.conf_before(tmp_path, m) == {}
+
+
+def test_a_value_already_put_back_by_an_earlier_try_is_not_called_changed(tmp_path: Path) -> None:
+    """A Remove that put the value back and then failed later keeps the record: the retry
+    finds the old value and says nothing about the player having changed it."""
+    core = _server(tmp_path)
+    _applier(tmp_path).install(_ip())
+    core.write_text(STOCK, encoding="utf-8")  # as the first try left it
+    report = _applier(tmp_path).remove(_ip())
+    assert core.read_text(encoding="utf-8") == STOCK
+    assert not [s for s in report.skipped if "changed since" in s], report.skipped
+    assert module_answers.conf_before(tmp_path, _ip()) == {}

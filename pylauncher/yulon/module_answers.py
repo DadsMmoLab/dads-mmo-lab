@@ -378,6 +378,30 @@ def rebuilds_owed(server_dir: Path, build: str | None) -> dict[str, bool]:
     }
 
 
+def settle_rebuilds(server_dir: Path, build: str | None) -> str:
+    """Drop every entry a finished build has settled; `""` if written or nothing to drop.
+
+    Called by every reader (`apply.rebuilds_owed_now()`), so an entry is gone the first time
+    anything sees a build record newer than its own (cold review, T750 round 2). Kept until
+    then, a Rebuild that later stopped part-way -- it forgets the record before it changes
+    anything -- would leave no record, and the entry would read as never built again while
+    the old build, with the module in it, runs. No record now (`build` None) settles nothing.
+    """
+    entries = _owed_entries(server_dir)
+    if build is None or not entries:
+        return ""
+    keep = rebuilds_owed(server_dir, build)
+    if set(keep) == set(entries):
+        return ""
+
+    def change(everything: dict[str, Any]) -> None:
+        current = everything.get(REBUILD_OWED, {})
+        current = dict(current) if isinstance(current, dict) else {}
+        everything[REBUILD_OWED] = {k: v for k, v in current.items() if k in keep}
+
+    return _write_record(server_dir, change, "the rebuilds a build has settled")
+
+
 def record_rebuild_owed(
     server_dir: Path, manifest: Manifest, build: str | None, *, never_built: bool
 ) -> str:

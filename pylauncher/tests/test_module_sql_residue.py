@@ -13,6 +13,7 @@ applies, and `data/sql/world/` / `data/sql/characters/` got none.
 
 from __future__ import annotations
 
+import re
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -480,3 +481,60 @@ def test_a_walked_folder_with_an_unsafe_name_gets_no_step_and_no_carried_one(
     else:
         assert steps == ()
         assert module_source.beyond_derived_shape(carried) == "sql"
+
+
+LOM_IDS = (
+    "1132,2411,2414,5655,5656,5665,5668,5864,5872,5873,8563,8588,8591,8592,8595,8629,8631,8632,"
+    "13321,13322,13331,13332,13333,15277,15290,28481,28927,29220,29221,29222,29743,29744,33224,"
+    "33976,43599,46099,46100,46308,47100,49283"
+)
+"""level-one-mounts.sql's own item list (tomcoffingiii/mod-level-one-mounts @143f5da)."""
+
+LOM_STOCK = {
+    **{int(i): (10000, 2500) for i in LOM_IDS.split(",")},
+    33224: (10000, 0),
+    49283: (10000, 0),
+    33976: (100000, 0),
+    43599: (0, 0),
+}
+"""BuyPrice, SellPrice of those 40 items in the pinned core's base item_template
+(mod-playerbots/azerothcore-wotlk @2a2211cd, data/sql/base/db_world/item_template.sql,
+read 2026-10-12); every one is RequiredLevel 20 there, which the level-twenty file keeps."""
+
+
+def test_an_install_from_before_the_backup_gets_the_stock_prices_back() -> None:
+    """T763 review round 2: an install made before the backups has nothing in them, and the
+    level-twenty file leaves its rows at 10x. Rows with no backup row and exactly the
+    level-twenty values go back to the pinned core's stock, after the backups are put back."""
+    m = wotlk_modules.store().load("mod", "lvl1-mounts")
+    remove = [s.statement or s.path or "" for s in m.sql if s.when == "remove"]
+    restored = max(
+        i
+        for i, s in enumerate(remove)
+        if s.startswith("UPDATE") and " JOIN " in s and "LEFT JOIN" not in s
+    )
+    dropped = min(i for i, s in enumerate(remove) if s.startswith("DROP"))
+    got: dict[int, tuple[int, int]] = {}
+    trainer = []
+    for i, s in enumerate(remove):
+        if "LEFT JOIN" not in s:
+            continue
+        assert restored < i < dropped, remove
+        if "item_template" in s:
+            assert "LEFT JOIN yulon_lvl1_mounts_item_backup b ON b.entry = t.entry" in s, s
+            assert "b.entry IS NULL" in s and "t.RequiredLevel = 20" in s, s
+            assert "t.BuyPrice = 100000 AND t.SellPrice = 25000" in s, s
+            prices = re.search(r"SET t\.BuyPrice = (\d+), t\.SellPrice = (\d+) WHERE", s)
+            ids = re.search(r"t\.entry IN \(([\d,]+)\)", s)
+            assert prices and ids, s
+            for entry in ids.group(1).split(","):
+                assert int(entry) not in got, entry
+                got[int(entry)] = (int(prices.group(1)), int(prices.group(2)))
+        else:
+            trainer.append(s)
+    assert got == LOM_STOCK
+    assert trainer == [
+        "UPDATE npc_trainer t LEFT JOIN yulon_lvl1_mounts_trainer_backup b ON b.ID = t.ID AND "
+        "b.SpellID = t.SpellID SET t.MoneyCost = 40000 WHERE b.ID IS NULL AND t.ReqSkillLine = 762 "
+        "AND t.ReqSkillRank = 0 AND t.ReqLevel = 20 AND t.MoneyCost = 100000;"
+    ]

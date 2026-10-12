@@ -655,6 +655,8 @@ def built_stamp(server_dir: Path) -> str | None:
     """
     from yulon.catalog import native  # noqa: PLC0415 - the install engine; apply must not need it
 
+    # The inode is in the stamp: a server folder restored or moved reads as a new build and
+    # settles every entry, which is the same answer as before this record existed.
     try:
         stat_result = (server_dir / native.BUILT_FROM_FILE).stat()
     except OSError:
@@ -671,11 +673,25 @@ def unbuilt_requirements(manifest: Manifest, server_dir: Path) -> tuple[str, ...
     restart. A module this app has no record of installing (the server's own, or one from
     before the record) is not named: nothing here can say it is missing from the build.
     """
+    owed = rebuilds_owed_now(server_dir)
     if not manifest.requires:
         return ()
-    owed = module_answers.rebuilds_owed(server_dir, built_stamp(server_dir))
     never_built = {key.split("/", 1)[1] for key, first in owed.items() if first and "/" in key}
     return tuple(needed for needed in manifest.requires if needed in never_built)
+
+
+def rebuilds_owed_now(server_dir: Path) -> dict[str, bool]:
+    """`<type>/<id>` -> never built, for the modules no build has compiled since (T750).
+
+    THE reader: it first drops what a finished build has settled
+    (`module_answers.settle_rebuilds()`), so a Rebuild that later stops part-way cannot bring
+    an entry back. A view seeding its "Rebuild pending" chip should read this.
+    """
+    stamp = built_stamp(server_dir)
+    problem = module_answers.settle_rebuilds(server_dir, stamp)
+    if problem:
+        logger.warning(f"could not drop the rebuilds a build settled: {problem}")
+    return module_answers.rebuilds_owed(server_dir, stamp)
 
 
 def rebuild_first(item_name: str, needed: str) -> str:
@@ -5158,11 +5174,14 @@ class Applier:
         self._refuse_checkout_links(manifest, clone, "remove", vals)
         self._check_hold()
         self._patches(manifest, clone, vals, "remove", log)
-        self._restore_conf(manifest, log)
+        rebuilds_owed_now(self.server_dir)  # T750 round 2: every load settles what a build did
         sent = log.sql_sent
         self._sql(manifest, clone, vals, "remove", log)
         if log.sql_sent > sent:
             self._record_database(manifest, vals, "remove", log)
+        # T753 round 2: after the SQL, so a remove step that fails leaves the conf as the
+        # install wrote it; the record goes only once the whole Remove went through (below).
+        self._restore_conf(manifest, log)
         if self.sql_backup is not None and any(
             step.when == "install" and step.applied_by == "direct" for step in manifest.sql
         ):
@@ -5215,6 +5234,13 @@ class Applier:
                     f"{module_answers.ANSWERS_FILE}: Yu'lon could not forget that "
                     f"{manifest.name} waited for a rebuild ({problem})"
                 )
+        # T753 round 2: last, so a Remove stopped by a later step keeps what to put back.
+        problem = module_answers.forget_conf_before(self.server_dir, manifest)
+        if problem:
+            log.skipped.append(
+                f"{module_answers.ANSWERS_FILE}: Yu'lon could not forget the values from before "
+                f"{manifest.name} ({problem})"
+            )
         # T557, after the remove: an update or a skipped version of a module
         # that is gone says nothing about the next install of it.
         problem = module_moves.drop(self.server_dir, module_moves.key(manifest.type, manifest.id))
@@ -7411,7 +7437,9 @@ class Applier:
 
         Each `restore` key the install changed goes back to what the file held before,
         but only while it still reads what the install wrote: a value the player set since
-        is theirs, and stays. A key the install added is taken out again.
+        is theirs, and stays. A key the install added is taken out again. A key already back
+        at its old value (a Remove that stopped after this step) is left as it is; the record
+        is dropped by `_remove()` once everything else went through.
         """
         recorded = module_answers.conf_before(self.server_dir, manifest)
         for rel, keys in recorded.items():
@@ -7424,7 +7452,9 @@ class Applier:
                         f"conf {rel}: could not be read ({exc}), so {key} was not put back"
                     )
                     continue
-                if now != wrote.strip().strip('"'):
+                if now == (None if was is None else _unquoted(was)):
+                    continue  # an earlier Remove that stopped later already put it back
+                if now != _unquoted(wrote):
                     log.skipped.append(
                         f"conf {rel}: {key} was changed since {manifest.name} set it, so it is "
                         "left as it is"
@@ -7437,12 +7467,6 @@ class Applier:
                     _set_conf_key(target, key, was)
                     log.done.append(f"put back {key} = {was} in {rel}, as before {manifest.name}")
                 log.conf_restart = True
-        problem = module_answers.forget_conf_before(self.server_dir, manifest)
-        if problem:
-            log.skipped.append(
-                f"{module_answers.ANSWERS_FILE}: Yu'lon could not forget the values from before "
-                f"{manifest.name} ({problem})"
-            )
 
     def _set_an_earlier_conf_aside(
         self, manifest: Manifest, rel: str, target: Path, log: _Log
@@ -9464,6 +9488,11 @@ def _raw_conf_value(path: Path, key: str) -> str | None:
         if sep and head.strip() == key:
             return tail.strip()
     return None
+
+
+def _unquoted(value: str) -> str:
+    """A written conf value as `tuning.conf_value()` reads it back: trimmed, `"` removed."""
+    return value.strip().strip('"')
 
 
 def _drop_conf_key(path: Path, key: str) -> None:
