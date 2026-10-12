@@ -447,6 +447,14 @@ class InstallOptions:
 
     server_dir: Path | None = None
     client_dir: Path | None = None
+    first_install: bool = False
+    """This press is the first install of its folder: the Install button or the install harness.
+
+    The only press that may turn a command channel on at install (T723), handed to the
+    stages on `StageContext.first_install`. Nothing else sets it. A move ("Bring from
+    another computer") runs the same `run()` over a folder it fills itself, so it keeps
+    the default; Update, Rebuild and Repair never call `run()`.
+    """
 
 
 _PLATFORM_NAMES: dict[str, str] = {"windows": "Windows", "macos": "macOS", "linux": "Linux"}

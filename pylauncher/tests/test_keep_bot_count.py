@@ -74,6 +74,7 @@ def _generate(server_dir: Path) -> str:
                 state=_state(server_dir),
                 cancel=None,
                 secrets=native.Secrets(db_password=WOTLK.install.db_password(server_dir)),
+                first_install=True,
             )
         )
     )

@@ -1293,4 +1293,7 @@ def engine(rec: Recorder, **overrides: object) -> AzerothCoreInstaller:
 
 
 def install(rec: Recorder, server_dir: Path, **overrides: object) -> list[str]:
-    return list(engine(rec, **overrides).run(InstallOptions(server_dir=server_dir)))
+    """The install the Install button runs: a first install, so `first_install` is set (T723)."""
+    return list(
+        engine(rec, **overrides).run(InstallOptions(server_dir=server_dir, first_install=True))
+    )

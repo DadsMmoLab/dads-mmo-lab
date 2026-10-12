@@ -7,23 +7,35 @@ from "Turn on the command channel", so a fresh install booted with
 `AC_SOAP_ENABLED` absent, and its post-install settle asked a port nothing was
 listening on.
 
+Only the press that made the folder may switch the channel on: the Install button
+and the install harness set `first_install`, and nothing else does. The disk
+cannot tell a first install from a folder whose override was deleted later, so
+the tests below also cover what an Update and a move do to such a folder.
+
 Every test drives `generate-compose`, the stage the install runs for its compose
-files and a Repair runs again, through the same engine the install uses. Nothing
-here calls the press to get the channel on.
+files, through the same engine the install uses. Update is driven through
+`_rewrite_what_we_own()`, the route Update takes. Nothing here calls the press to
+get the channel on.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import os
 from pathlib import Path
 
+import pytest
+
 from tests.support_native import Recorder
+from tests.support_native import engine as pipeline_engine
+from tests.support_native import install as run_install_pipeline
 from tests.test_families_cmangos import context as cm_context
 from tests.test_families_cmangos import engine as cm_engine
 from yulon import channel_setup, resources
 from yulon.catalog import composegen, native
 from yulon.catalog.catalog import load_catalog
 from yulon.catalog.families.azerothcore import AzerothCoreInstaller
+from yulon.catalog.installer import InstallOptions
 
 CATALOG = load_catalog()
 WOTLK = CATALOG.get("wow-wotlk")
@@ -37,9 +49,8 @@ def _linux() -> str:
     return "linux"
 
 
-def _generate(entry, server_dir: Path) -> str:
-    """The `generate-compose` stage, as the install and a Repair both run it."""
-    engine = AzerothCoreInstaller(
+def _engine(entry) -> AzerothCoreInstaller:
+    return AzerothCoreInstaller(
         entry,
         seams=native.Seams(
             platform_id=_linux,
@@ -47,7 +58,10 @@ def _generate(entry, server_dir: Path) -> str:
             fs_type=lambda path: "ext4",
         ),
     )
-    context = native.StageContext(
+
+
+def _context(entry, server_dir: Path, *, first_install: bool) -> native.StageContext:
+    return native.StageContext(
         server_dir=server_dir,
         client_dir=None,
         state=native.InstallState(
@@ -57,8 +71,27 @@ def _generate(entry, server_dir: Path) -> str:
         ),
         cancel=None,
         secrets=native.Secrets(db_password=entry.install.db_password(server_dir)),
+        first_install=first_install,
     )
+
+
+def _generate(entry, server_dir: Path, *, first_install: bool) -> str:
+    """The `generate-compose` stage, run by the install's press (True) or a later one (False)."""
+    engine = _engine(entry)
+    context = _context(entry, server_dir, first_install=first_install)
     list(engine.stage_generate_compose(context))
+    return (server_dir / OVERRIDE).read_text(encoding="utf-8")
+
+
+def _update(entry, server_dir: Path) -> str:
+    """Update to latest's put-back, through `_rewrite_what_we_own()`, which runs the stage."""
+    state = native.InstallState(
+        game_id=entry.id,
+        install_id=composegen.install_id(server_dir, platform_id=_linux),
+        family="azerothcore",
+    )
+    options = InstallOptions(server_dir=server_dir)
+    list(_engine(entry)._rewrite_what_we_own(server_dir, options, state))
     return (server_dir / OVERRIDE).read_text(encoding="utf-8")
 
 
@@ -86,12 +119,36 @@ def _press(entry, server_dir: Path) -> None:
     )
 
 
+def _installed_off(entry, server_dir: Path) -> str:
+    """A finished install whose channel is off, made the way a person makes it:
+    the install, then the rollback.
+
+    The rollback leaves the released claim `127.0.0.1:0` in `.env`.
+    """
+    _generate(entry, server_dir, first_install=True)
+    assert _tab(entry, server_dir).roll_back() is True
+    return (server_dir / OVERRIDE).read_text(encoding="utf-8")
+
+
+def _installed_no_port_line(entry, server_dir: Path) -> str:
+    """An install the way it stood before T723: channel off, no backup, and no port line in `.env`.
+
+    Made by the stage with no first-install flag, on an empty folder, which is what
+    a pre-T723 install's own stage wrote. Nothing was ever pressed, so `.env` never
+    got a `DOCKER_SOAP_EXTERNAL_PORT` line at all.
+    """
+    override = _generate(entry, server_dir, first_install=False)
+    assert _claim(server_dir) is None, "control: no port line in .env"
+    assert not (server_dir / BACKUP).exists(), "control: no press record"
+    return override
+
+
 def _claim(server_dir: Path) -> str | None:
     return composegen.dotenv_value(server_dir, channel_setup.HOST_PORT_VAR)
 
 
 def test_a_fresh_wotlk_install_starts_with_the_channel_on(tmp_path: Path) -> None:
-    override = _generate(WOTLK, tmp_path)
+    override = _generate(WOTLK, tmp_path, first_install=True)
 
     for key in CHANNEL_KEYS:
         assert key in override
@@ -99,13 +156,13 @@ def test_a_fresh_wotlk_install_starts_with_the_channel_on(tmp_path: Path) -> Non
 
 
 def test_the_channel_port_on_a_fresh_install_is_claimed_on_loopback_only(tmp_path: Path) -> None:
-    _generate(WOTLK, tmp_path)
+    _generate(WOTLK, tmp_path, first_install=True)
 
     assert _claim(tmp_path) == "127.0.0.1:7878"
 
 
 def test_a_fresh_unbound_install_claims_its_own_loopback_port(tmp_path: Path) -> None:
-    override = _generate(UNBOUND, tmp_path)
+    override = _generate(UNBOUND, tmp_path, first_install=True)
 
     for key in CHANNEL_KEYS:
         assert key in override
@@ -113,8 +170,8 @@ def test_a_fresh_unbound_install_claims_its_own_loopback_port(tmp_path: Path) ->
 
 
 def test_a_repair_of_a_fresh_install_keeps_the_channel_on(tmp_path: Path) -> None:
-    first = _generate(WOTLK, tmp_path)
-    again = _generate(WOTLK, tmp_path)
+    first = _generate(WOTLK, tmp_path, first_install=True)
+    again = _generate(WOTLK, tmp_path, first_install=False)
 
     assert again == first
     for key in CHANNEL_KEYS:
@@ -122,7 +179,7 @@ def test_a_repair_of_a_fresh_install_keeps_the_channel_on(tmp_path: Path) -> Non
 
 
 def test_the_server_tabs_rollback_turns_a_fresh_channel_off(tmp_path: Path) -> None:
-    _generate(WOTLK, tmp_path)
+    _generate(WOTLK, tmp_path, first_install=True)
 
     assert _tab(WOTLK, tmp_path).roll_back() is True
 
@@ -133,23 +190,113 @@ def test_the_server_tabs_rollback_turns_a_fresh_channel_off(tmp_path: Path) -> N
     assert not composegen.channel_is_on(tmp_path)
 
 
-def test_a_turned_off_install_is_not_switched_back_on_by_a_repair(tmp_path: Path) -> None:
-    """The switch-on is for a folder with no override yet, never for one a rollback took back."""
-    _generate(WOTLK, tmp_path)
+@pytest.mark.parametrize("first_install", [False, True], ids=["update", "first-install-flag"])
+def test_a_turned_off_install_is_not_switched_back_on_by_a_later_run(
+    tmp_path: Path, first_install: bool
+) -> None:
+    """With the override still there, no later run may switch the channel back on."""
+    _generate(WOTLK, tmp_path, first_install=True)
     _press(WOTLK, tmp_path)
     assert _tab(WOTLK, tmp_path).roll_back() is True
     off = (tmp_path / OVERRIDE).read_text(encoding="utf-8")
 
-    again = _generate(WOTLK, tmp_path)
+    again = _generate(WOTLK, tmp_path, first_install=first_install)
 
     assert again == off
     assert "AC_SOAP_ENABLED" not in again
     assert not composegen.channel_is_on(tmp_path)
 
 
+def test_a_rolled_back_install_whose_override_is_gone_stays_off_on_update(tmp_path: Path) -> None:
+    """A rollback leaves `127.0.0.1:0` in `.env`.
+
+    Losing the override must not make an Update a first install.
+    """
+    _installed_off(WOTLK, tmp_path)
+    (tmp_path / OVERRIDE).unlink()
+
+    override = _update(WOTLK, tmp_path)
+
+    assert "AC_SOAP_ENABLED" not in override
+    assert _claim(tmp_path) == channel_setup.RELEASED_HOST_PORT
+    assert not (tmp_path / BACKUP).exists()
+    assert not composegen.channel_is_on(tmp_path)
+
+
+def test_a_never_pressed_install_whose_override_is_gone_stays_off_on_update(tmp_path: Path) -> None:
+    """A pre-T723 install that was never pressed has no port line.
+
+    Losing its override must not turn SOAP on.
+    """
+    _installed_no_port_line(WOTLK, tmp_path)
+    (tmp_path / OVERRIDE).unlink()
+
+    override = _update(WOTLK, tmp_path)
+
+    assert "AC_SOAP_ENABLED" not in override
+    assert _claim(tmp_path) is None
+    assert not (tmp_path / BACKUP).exists()
+
+
+def test_a_first_install_through_the_install_pipeline_starts_on(tmp_path: Path) -> None:
+    """The real `run()`, with the stages the harness stubs: the Install button's path."""
+    server_dir = tmp_path / "wow"
+
+    run_install_pipeline(Recorder(images=False), server_dir)
+
+    override = (server_dir / OVERRIDE).read_text(encoding="utf-8")
+    for key in CHANNEL_KEYS:
+        assert key in override
+    assert _claim(server_dir) == "127.0.0.1:7878"
+
+
+def test_an_install_run_no_install_button_started_leaves_the_channel_off(tmp_path: Path) -> None:
+    """`run()` is also the move's engine, with no first-install flag.
+
+    The move must not switch SOAP on.
+    """
+    server_dir = tmp_path / "wow"
+
+    list(pipeline_engine(Recorder(images=False)).run(InstallOptions(server_dir=server_dir)))
+
+    assert "AC_SOAP_ENABLED" not in (server_dir / OVERRIDE).read_text(encoding="utf-8")
+    assert _claim(server_dir) is None
+    assert not (server_dir / BACKUP).exists()
+
+
+def test_a_first_install_into_a_folder_that_already_claims_the_port_stays_off(
+    tmp_path: Path,
+) -> None:
+    """The second guard: a port line in `.env` says a channel was here before."""
+    released = channel_setup.RELEASED_HOST_PORT
+    composegen.write_dotenv(tmp_path, {channel_setup.HOST_PORT_VAR: released})
+
+    override = _generate(WOTLK, tmp_path, first_install=True)
+
+    assert "AC_SOAP_ENABLED" not in override
+    assert _claim(tmp_path) == channel_setup.RELEASED_HOST_PORT
+    assert not composegen.channel_is_on(tmp_path)
+
+
+def test_a_first_install_into_a_folder_with_an_unpressed_override_stays_off(tmp_path: Path) -> None:
+    """The first guard on its own: an override that exists is an install that exists."""
+    _installed_no_port_line(WOTLK, tmp_path)
+
+    override = _generate(WOTLK, tmp_path, first_install=True)
+
+    assert "AC_SOAP_ENABLED" not in override
+    assert _claim(tmp_path) is None
+    assert not (tmp_path / BACKUP).exists()
+
+
 def test_a_cmangos_tree_is_not_switched_on_by_the_compose_stage(tmp_path: Path) -> None:
-    """TBC's channel is its conf file's, and T87 already writes it at install. Nothing else."""
-    list(cm_engine(Recorder()).stage_generate_compose(cm_context(tmp_path)))
+    """TBC's channel is its conf file's, written at install by T87.
+
+    Nothing else switches it on, even on a first install.
+    """
+    ctx = dataclasses.replace(cm_context(tmp_path), first_install=True)
+
+    list(cm_engine(Recorder()).stage_generate_compose(ctx))
 
     assert not (tmp_path / BACKUP).exists()
     assert _claim(tmp_path) is None
@@ -158,7 +305,7 @@ def test_a_cmangos_tree_is_not_switched_on_by_the_compose_stage(tmp_path: Path) 
 def test_the_env_file_stays_owner_only_once_the_claim_is_written(tmp_path: Path) -> None:
     if os.name == "nt":
         return
-    _generate(WOTLK, tmp_path)
+    _generate(WOTLK, tmp_path, first_install=True)
 
     env = tmp_path / composegen.DOTENV_FILE
     assert env.is_file()
@@ -170,6 +317,6 @@ def test_a_leftover_press_record_is_never_overwritten_by_the_switch_on(tmp_path:
     leftover = "# the record of an earlier press\n"
     (tmp_path / BACKUP).write_text(leftover, encoding="utf-8")
 
-    _generate(WOTLK, tmp_path)
+    _generate(WOTLK, tmp_path, first_install=True)
 
     assert (tmp_path / BACKUP).read_text(encoding="utf-8") == leftover

@@ -1212,7 +1212,9 @@ class CatalogView(QWidget):
         *,
         title: str | None = None,
     ) -> bool:
-        options = InstallOptions(server_dir=server_dir, client_dir=client_dir)
+        # The Install button is the first install of its folder (T723): the only press that
+        # may switch a WotLK or Unbound command channel on at install.
+        options = InstallOptions(server_dir=server_dir, client_dir=client_dir, first_install=True)
         # No synchronous preflight here: `run()` re-preflights on the worker
         # thread, and preflight can mean full Docker provisioning — minutes of
         # work that used to freeze the window (review finding, 2026-08-21).

@@ -231,20 +231,27 @@ def channel_is_on(server_dir: Path) -> bool:
     return dotenv_value(server_dir, CHANNEL_PORT_VAR) != CHANNEL_PORT_RELEASED
 
 
-def channel_starts_on(entry: CatalogEntry, server_dir: Path) -> bool:
+def channel_starts_on(entry: CatalogEntry, server_dir: Path, *, first_install: bool) -> bool:
     """Whether this install's first render switches its channel on (T723).
 
-    True for an environment-route channel (`operations.enable_env`) into a folder
-    with no override yet: a first install. The owner decided on 2026-10-12 that
-    it starts on, the way the conf-file trees' keys are written at install
-    (T87), so the first boot binds the channel and nothing has to be pressed.
+    Three things must hold. The press says it is the FIRST install of its folder
+    (`first_install`, which only the Install button and the install harness set).
+    The entry's channel is an environment route (`operations.enable_env`). And the
+    folder shows no channel history: no override, no `.before-channel` record, and
+    no `DOCKER_SOAP_EXTERNAL_PORT` line in `.env`. The owner decided on 2026-10-12
+    that a first install starts on, the way the conf-file trees' keys are written
+    at install (T87), so the first boot binds the channel and nothing is pressed.
 
-    A folder that already has an override is an install that exists, and its
-    channel is whatever its own press or rollback left. Repair and Update run
-    the same stage with the override already written, so they never switch it on.
+    The disk alone cannot make this decision. A folder whose override was deleted
+    later looks like a first install to it, and Update runs the same stage. The
+    flag does the work for Update, which never sets it. The port line covers the
+    rolled-back case even if a caller did set it: a rollback leaves `127.0.0.1:0`
+    in `.env`, while a never-pressed install has no port line at all (T723 round 2).
     """
     operations = entry.operations
-    if operations is None or not operations.enable_env:
+    if not first_install or operations is None or not operations.enable_env:
+        return False
+    if dotenv_value(server_dir, CHANNEL_PORT_VAR) is not None:
         return False
     return (
         not (server_dir / OVERRIDE_FILE).exists()

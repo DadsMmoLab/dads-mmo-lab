@@ -293,7 +293,14 @@ def test_the_script_lineage_is_gone() -> None:
     assert {name for name in vars(installer_module) if not name.startswith("__")} == (
         MODULE_SURFACE_AFTER_7_2
     )
-    assert {f.name for f in fields(InstallOptions)} == {"server_dir", "client_dir"}
+    # `first_install` is T723's, the one press flag the install's channel switch reads
+    # (only the Install button and the install harness set it). Anything else added here
+    # is still a deliberate change this test must see.
+    assert {f.name for f in fields(InstallOptions)} == {
+        "server_dir",
+        "client_dir",
+        "first_install",
+    }
 
 
 # The names the bash engine owned, every one of them deleted by F.3 or by the

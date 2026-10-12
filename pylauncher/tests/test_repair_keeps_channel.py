@@ -57,6 +57,7 @@ def _context(server_dir: Path) -> native.StageContext:
         ),
         cancel=None,
         secrets=native.Secrets(db_password=WOTLK.install.db_password(server_dir)),
+        first_install=True,
     )
 
 

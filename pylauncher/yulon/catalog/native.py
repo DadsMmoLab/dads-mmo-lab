@@ -5313,6 +5313,15 @@ class StageContext:
     learned to read this field still takes the older route, which refuses
     anything that does not read as a finished import (cold review, round 1).
     """
+    first_install: bool = False
+    """The press was the FIRST install of its folder (`InstallOptions.first_install`).
+
+    Read by `stage_generate_compose()` alone, and only to decide whether a WotLK or
+    Unbound command channel starts on (T723). The disk cannot tell a first install
+    from a folder whose override was deleted later, so the press that made the folder
+    has to say so. Every other context leaves it False: Update, Rebuild, Reset and a
+    move ("Bring from another computer") never switch a channel on at install.
+    """
 
 
 @dataclass(frozen=True)
@@ -8043,6 +8052,7 @@ class StagedInstaller:
             cancel=cancel,
             secrets=self.resolve_secrets(server_dir),
             installing=True,
+            first_install=opts.first_install,
         )
 
         # The failure record for anything in here is written by `_staged()`,
@@ -14045,10 +14055,15 @@ class StagedInstaller:
         # at install (T87). The record a press keeps is written first, from the
         # override this render gives without the channel, and the second render
         # then carries the channel the way every later regeneration does. Asked
-        # before anything is written, so a folder with an override (a Repair, an
-        # Update, an install that was turned off) is never switched on here.
+        # before anything is written. Only the press that made the folder may ask
+        # (`ctx.first_install`, set by the install's `run()` and by nothing else), and
+        # the disk must agree: no override, no record, and no port line in `.env`. A
+        # folder whose override was deleted later is not a first install, because a
+        # rollback keeps its released claim in `.env` (T723 round 2).
         try:
-            switch_on = composegen.channel_starts_on(self.entry, ctx.server_dir)
+            switch_on = composegen.channel_starts_on(
+                self.entry, ctx.server_dir, first_install=ctx.first_install
+            )
             plan = self._render_compose(ctx.server_dir, ctx.secrets, label)
             if switch_on:
                 composegen.record_channel_press(self.entry, ctx.server_dir, plan.override)
