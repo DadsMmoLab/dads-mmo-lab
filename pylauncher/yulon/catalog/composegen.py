@@ -664,8 +664,31 @@ def render(
         raise ComposeGenError(
             f"the time zone could not be written into the override: {exc}"
         ) from exc
-    build = fill(
-        texts["build.yml.tmpl"],
+    build = _fill_build(entry, texts["build.yml.tmpl"])
+    return ComposePlan(base, override, build, {"DB_ROOT_PASSWORD": password} if generated else {})
+
+
+def render_build(entry: CatalogEntry, *, templates_root: Path) -> str:
+    """The build overlay alone, byte for byte what `render()` puts in `ComposePlan.build`.
+
+    T740 split it out for the Rebuild, which writes this one file again and none of the
+    other two. Until then only `render()` made it, and the Rebuild ran no
+    `generate-compose`, so an install kept the overlay of the day it was installed: on
+    yulon-win11 one from 2026-09-12 lacked T525's buildx group, and authserver sent its
+    whole context cold on its own buildx folder (T733's gate). It needs no password, bind
+    label or zone: the template fills only `BUILD_CONTEXT` and the catalog facts.
+
+    Raises:
+        ComposeGenError: the entry has no `install.native` block, the template cannot be
+            read, or a placeholder was left unfilled.
+    """
+    native = _native_of(entry)
+    return _fill_build(entry, _read_template(templates_root / native.templates / "build.yml.tmpl"))
+
+
+def _fill_build(entry: CatalogEntry, template: str) -> str:
+    return fill(
+        template,
         {
             # `.` and not the absolute path: the server dir IS the checkout, and
             # compose resolves a relative context against the file's own
@@ -682,7 +705,6 @@ def render(
             **entry_tokens(entry),
         },
     )
-    return ComposePlan(base, override, build, {"DB_ROOT_PASSWORD": password} if generated else {})
 
 
 def _read_if_there(path: Path) -> str | None:
@@ -1658,18 +1680,41 @@ def write_plan(
         (BUILD_FILE, plan.build),
     ):
         path = server_dir / name
-        if name not in replaceable and not is_ours(path):
-            raise ComposeGenError(
-                f"{path} was not written by Yu'lon, so it was not touched and nothing was "
-                "installed. Point the install at an empty folder, or move that file aside."
-            )
-        if path.exists() and path.read_text(encoding="utf-8") == text:
-            continue
-        _replace_whole(path, text)
-        written.append(path)
+        if _write_one(path, text, replaceable=name in replaceable):
+            written.append(path)
     if plan.dotenv:
         written.append(write_dotenv(server_dir, plan.dotenv))
     return tuple(written)
+
+
+def write_build(server_dir: Path, text: str) -> bool:
+    """Write the build overlay alone, by `write_plan()`'s rules; True when it was written.
+
+    T740's Rebuild writes this one file and no other. The rules are `write_plan()`'s,
+    shared through `_write_one()`: a file without the marker is refused, never
+    replaced, and matching text is left alone so its mtime does not move.
+
+    Raises:
+        ComposeGenError: the file there was not written by Yu'lon.
+        OSError: it could not be written; `_replace_whole()` left the old file whole.
+    """
+    path = server_dir / BUILD_FILE
+    if not is_ours(path):
+        # Its own sentence: `_write_one()`'s speaks of an install, and this is no install.
+        raise ComposeGenError(f"{path} was not written by Yu'lon, so it was not touched")
+    return _write_one(path, text, replaceable=True)
+
+
+def _write_one(path: Path, text: str, *, replaceable: bool) -> bool:
+    if not replaceable and not is_ours(path):
+        raise ComposeGenError(
+            f"{path} was not written by Yu'lon, so it was not touched and nothing was "
+            "installed. Point the install at an empty folder, or move that file aside."
+        )
+    if path.exists() and path.read_text(encoding="utf-8") == text:
+        return False
+    _replace_whole(path, text)
+    return True
 
 
 COMPOSE_TEMP_PREFIX = ".yulon-tmp-"

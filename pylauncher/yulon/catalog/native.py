@@ -479,6 +479,7 @@ def rebuild_opening_note(
     parked: bool = False,
     imports: bool = False,
     copies: bool = False,
+    rewrites_overlay: bool = False,
 ) -> str:
     """What a rebuild costs and what it leaves alone, said before the first stage.
 
@@ -529,6 +530,11 @@ def rebuild_opening_note(
     `imports` (T706): the family runs its database importer with the servers stopped
     before the new build starts (`imports_with_the_servers_down()`), which is one more
     thing it does, and "does not touch your database" was false of it from then on.
+
+    `rewrites_overlay` (T740): the build overlay on disk differs from this version's
+    render, so the press writes it again before the compile (`_plan_build_overlay()`).
+    False when the file is already current, so the note stayed what it was for every
+    install that needs nothing.
     """
     compiles = (
         "compiles the server again from the source and modules in the folder below, or, if the "
@@ -551,7 +557,13 @@ def rebuild_opening_note(
         if imports
         else ""
     )
-    count = ("three", "four", "five")[bool(recipe) + bool(sql)]
+    overlay = (
+        f"it writes {composegen.BUILD_FILE}, the file that tells Docker what to build, again "
+        "from the template this app ships, "
+        if rewrites_overlay
+        else ""
+    )
+    count = ("three", "four", "five", "six")[bool(recipe) + bool(overlay) + bool(sql)]
     database = (
         "It does not rewrite your settings, and your database is changed only by those "
         "updates: AzerothCore's own importer applies each one once, and again only if its file "
@@ -570,7 +582,7 @@ def rebuild_opening_note(
     return (
         "You can stop this at any time; stopping before the containers are replaced leaves the "
         f"server you have now exactly as it is. This does {count} things "
-        f"and nothing else: {recipe}it "
+        f"and nothing else: {recipe}{overlay}it "
         f"{compiles}, {sql}it replaces "
         "the running containers so the new build is what starts, and it waits for the server to "
         "come back up. It fetches no new source code, though Docker may go online while it "
@@ -3193,6 +3205,18 @@ class _Parking:
     still_kept: bool = False
     """A kept build was being used and Docker refused a tag part-way: its names and
     record were not touched, so it is still kept and nothing new is."""
+
+
+@dataclass(frozen=True)
+class _OverlayPlan:
+    """The build overlay a rebuild writes before F0 (T740): the new render and the old bytes.
+
+    `was` goes into the recipe ground, so `_put_recipe_back()` puts the old file back on
+    a failure or a Stop before the containers are replaced, as it does the Dockerfile.
+    """
+
+    fresh: str
+    was: bytes
 
 
 ROLLBACK_LEFT_RUNNING = (
@@ -8035,6 +8059,10 @@ class StagedInstaller:
         keeps the family's own `recorded=True` for the opposite reason: it is
         the install's stage, run with the install's body, and it really did
         happen.
+
+        T740 left this tuple as it was: the build overlay, the one compose file
+        only a build reads, is written again by `rebuild()` inside its `build`
+        wrapper, before F0 (`_plan_build_overlay()`), and not by a stage here.
         """
         recipe = (
             (self.stage_named(DOCKERFILE_STAGE),) if DOCKERFILE_STAGE in self.stage_names() else ()
@@ -9532,6 +9560,12 @@ class StagedInstaller:
         # The update route never holds: it refused up front (it cannot meet a gone build).
         held = self._held_by_an_unfinished_import(server_dir) if servers_down is None else None
         yield f"Rebuilding {self.entry.name} in {server_dir}"
+        # T740: the build overlay as this version renders it, or None when the file is
+        # current. Asked here so the opening note can say so and the put-back has the bytes;
+        # written in the build stage, before F0.
+        overlay = yield from self._plan_build_overlay(server_dir)
+        if overlay is not None:
+            ground = {**ground, composegen.BUILD_FILE: overlay.was}
         imports = servers_down is None and held is None and self.imports_with_the_servers_down()
         # T706 round 2 (owner, 2026-10-11): a Rebuild that imports copies the databases
         # first, with its servers down, and a rollback puts that copy back before the old
@@ -9553,6 +9587,7 @@ class StagedInstaller:
             parked=read_parked_build(server_dir) is not None,
             imports=imports,
             copies=bool(own_copy is not None and own_copy.names),
+            rewrites_overlay=overlay is not None,
         )
         if held is not None:
             yield f"{held} {HELD_OPENING}"
@@ -9617,6 +9652,9 @@ class StagedInstaller:
 
         def build(stage_ctx: StageContext) -> Iterator[str]:
             nonlocal built
+            if overlay is not None:
+                # T740: before F0, so the fingerprint and the compile read the same overlay.
+                yield from self._write_build_overlay(server_dir, overlay)
             compiled_from.update(source_heads(server_dir, self.entry.emulator.sources))
             # T224: F0, after `write-dockerfile` rendered the recipe this compiles.
             parking.fingerprint = self._seams.context_fingerprint(server_dir, refs=refs)
@@ -12314,6 +12352,76 @@ class StagedInstaller:
                 logger.warning(f"could not read {server_dir / name} before the rebuild: {exc}")
                 ground[name] = UNREADABLE_RECIPE
         return ground
+
+    def _plan_build_overlay(self, server_dir: Path) -> Generator[str, None, _OverlayPlan | None]:
+        """The build overlay to write before this rebuild's F0, or None to leave it (T740).
+
+        **How it got here.** `rebuild_stages()` left `generate-compose` out from its first
+        version (its docstring gives the reason), and with it the build overlay. T525
+        (2026-10-07) then gave WotLK's world and auth servers one buildx group, which
+        reached new installs only: on yulon-win11 a playerbots install from 2026-09-12
+        had no group key, so its first split Rebuild built authserver on a buildx folder
+        of its own and sent its whole 1.41-1.53 GB context cold, about 8 minutes on that
+        box (T733's gate, `.notes/gates/t733-build-context-2026-10-12/`). The `composegen`
+        module docstring described the overlay as never auto-loaded, read by builds only,
+        so T740 wrote it again the way `write-dockerfile` was made to write the recipe
+        (T8), and split `composegen.render_build()` out of `render()` to render it alone.
+
+        **The first Rebuild after T740, and the kept-build rule (T224).** `build_context`
+        was written to hash the overlay's bytes, so on an install whose overlay was older,
+        F0 is taken over the new file. A build kept by an earlier press was recorded over
+        the old file and no longer matches: it is removed and the server is compiled, as
+        for any changed file. That was T740's decision (its lane, owner asleep, 2026-10-12),
+        and it is what the confirmation's kept-build sentence promised when T740 was
+        written ("if the files it was made from have not changed since"). A build kept
+        after this records the new overlay, and the next press renders the same file, so
+        the two agree (`test_a_build_kept_after_the_overlay_was_written_again_is_used_next_time`).
+        On WotLK that compile was meant to build authserver on worldserver's buildx folder
+        (T525); T733 measured a second send into a warm folder at 186 kB on m910q and
+        563 kB on yulon-win11, against 1.41-1.53 GB cold.
+
+        None when the file already holds this version's render, as an install made since
+        T525 does, and as every press after the first finds it. A render or a read that
+        fails is said in one line and also answers None: no Rebuild wrote the overlay
+        before T740, so building on the one in the folder was the behaviour until then.
+        The marker was checked by `_refuse_unless_rebuildable()`, and is checked again by
+        `composegen.write_build()` at the write.
+        """
+        path = server_dir / composegen.BUILD_FILE
+        try:
+            fresh = composegen.render_build(self.entry, templates_root=self.installers_root)
+            was = path.read_bytes()
+        except (composegen.ComposeGenError, OSError) as exc:
+            logger.warning(f"could not render {path} again before the rebuild: {exc}")
+            yield (
+                f"Yu'lon could not render {composegen.BUILD_FILE} again ({exc}), so this build "
+                "uses the one already in the folder."
+            )
+            return None
+        if was == fresh.encode("utf-8"):
+            return None
+        return _OverlayPlan(fresh=fresh, was=was)
+
+    def _write_build_overlay(self, server_dir: Path, overlay: _OverlayPlan) -> Iterator[str]:
+        """Write the overlay `_plan_build_overlay()` rendered; a failure is said, not raised (T740).
+
+        Not raised for `_plan_build_overlay()`'s reason: the overlay in the folder still
+        builds the server, as it did on every Rebuild before T740. `_replace_whole()`
+        leaves the old file whole when the write fails, so there is nothing to put back.
+        """
+        try:
+            composegen.write_build(server_dir, overlay.fresh)
+        except (composegen.ComposeGenError, OSError) as exc:
+            logger.warning(f"could not write {server_dir / composegen.BUILD_FILE} again: {exc}")
+            yield (
+                f"{composegen.BUILD_FILE} could not be written again ({exc}), so this build "
+                "uses the one already in the folder."
+            )
+            return
+        yield (
+            f"Wrote {composegen.BUILD_FILE} again from this version's template. If this "
+            "rebuild stops before your server is replaced, the old one is put back."
+        )
 
     def _put_recipe_back(
         self, ctx: StageContext, ground: Mapping[str, RecipeGround]
