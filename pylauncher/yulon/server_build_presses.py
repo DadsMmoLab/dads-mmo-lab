@@ -17,6 +17,7 @@ SERVER_BUILD = "Server build ▾"
 REBUILD = "Rebuild the server…"
 UPDATE_TO_LATEST = "Update the server to latest…"
 RETURN_TO_PIN = "Return to the tested pin…"
+PUT_THE_FOLDERS_BACK = "Put the folders back…"
 
 
 def under_server_build(entry: str) -> str:
