@@ -3464,16 +3464,18 @@ def _can_bind(ip: str) -> bool:
 def holds_here(address: str, *, under_wsl: bool | None = None) -> bool:
     """Whether this computer holds `address`, asked the way a realm on it is reached (T674 round 2).
 
-    Under WSL the question is the listing both sides report (`platform.local_ipv4_addresses()`).
-    A Windows adapter's address is reached through the Windows forwarder, and a bind inside the VM
-    does not answer for it: WSL's NAT mode does not give the VM those addresses (measured on this
-    laptop: Errno 99). Everywhere else the OS answers for itself with a bind, which is what
-    `_can_bind()` asks. Under WSL the choice list and this check read the same listing, so every
-    address the list offers is accepted here.
+    Under WSL the question is the WINDOWS address listing (`platform.local_ipv4_addresses()` with
+    `wsl=True`), never the VM's interfaces. A Windows adapter's address is reached through the
+    Windows forwarder, and a bind inside the VM does not answer for it: WSL's NAT mode does not
+    give the VM those addresses (measured on this laptop: Errno 99), and an address only the VM
+    holds is not one a friend reaches. Everywhere else the OS answers for itself with a bind,
+    which is what `_can_bind()` asks. Under WSL the choice list and this check read the same
+    listing, so every address the list offers is accepted here.
     """
     wsl = platform.in_wsl() if under_wsl is None else under_wsl
     if wsl:
-        return address in {offered.address for offered in platform.local_ipv4_addresses()}
+        listed = platform.local_ipv4_addresses(wsl=True)
+        return address in {offered.address for offered in listed}
     return _can_bind(address)
 
 

@@ -656,12 +656,12 @@ ADDRESS_LISTING_QUERY = (
 """Every IPv4 address Windows holds, one `interface|address` line each. A read, and a read only."""
 
 
-LocalSide = Literal["here", "windows", "wsl"]
+LocalSide = Literal["here", "windows"]
 """Which side an address is on (T674 round 2).
 
-`here` is every machine that is not WSL, the computer itself. Under WSL, `windows` is the Windows
-host, whose adapters a server running in WSL reaches through the Windows forwarder, and `wsl` is the
-Linux VM's own interfaces (a Tailscale installed inside WSL shows there).
+`here` is every machine that is not WSL, the computer itself. Under WSL it is always `windows`: the
+Windows host, whose adapters a server running in WSL is reached on through the Windows forwarder.
+The WSL VM's own interfaces are never listed.
 """
 
 
@@ -759,12 +759,12 @@ def local_ipv4_addresses(
 
     Not what `detect_lan_ip()` answers. That is the address of the default route, and a Tailscale
     or other VPN interface is never the default route, so the address a friend on that network has
-    to type exists only in this listing. Under WSL the listing has two sides (`LocalSide`): the
-    Windows adapters, which a server reaches through the Windows forwarder, and the VM's own
-    interfaces. The choice list and `networking.holds_here()` both read this listing under WSL, so
-    every address offered is one the guard accepts. Loopback and link-local (169.254/16) addresses
-    are dropped, and Docker's bridges are left out. A listing that cannot be read answers nothing,
-    and nothing is guessed in its place.
+    to type exists only in this listing. Under WSL it is the Windows adapters only, which a server
+    in WSL is reached on through the Windows forwarder; the VM's own interfaces are never read. The
+    choice list and `networking.holds_here()` both read this listing under WSL, so every address
+    offered is one the guard accepts, and an address only the VM holds is neither. Loopback and
+    link-local (169.254/16) addresses are dropped, and Docker's bridges are left out. A listing
+    that cannot be read answers nothing, and nothing is guessed in its place.
     """
     do: RunCmd = run if run is not None else (lambda argv: runner.run(argv, timeout=8.0))
     where = detect() if system is None else system
@@ -773,10 +773,10 @@ def local_ipv4_addresses(
     ip_listing = ["ip", "-4", "-o", "addr", "show"]
     sources: list[tuple[LocalSide, list[str], _PairParser]]
     if under_wsl:
-        sources = [
-            ("windows", powershell, _parse_powershell_addresses),
-            ("wsl", ip_listing, _parse_ip_addr),
-        ]
+        # The Windows side only. A server in WSL is reached through the Windows forwarder on a
+        # Windows adapter's address; the VM's own interfaces (eth0, a Tailscale inside WSL) are
+        # not what a friend reaches, so they are neither offered nor accepted (T674 round 2).
+        sources = [("windows", powershell, _parse_powershell_addresses)]
     elif where == "windows":
         sources = [("here", powershell, _parse_powershell_addresses)]
     elif where == "macos":

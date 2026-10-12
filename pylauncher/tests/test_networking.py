@@ -7269,9 +7269,8 @@ def test_a_listing_that_cannot_be_read_answers_nothing() -> None:
 # -- T674 round 2: under WSL the choice list and the guard read the same listing -------------
 
 WSL_LISTING = (
-    platform.LocalAddress("Tailscale", "100.72.215.6", True),
-    platform.LocalAddress("Wi-Fi 2", "192.168.1.210", False),
-    platform.LocalAddress("tailscale0", "100.86.248.75", True),
+    platform.LocalAddress("Tailscale", "100.72.215.6", True, "windows"),
+    platform.LocalAddress("Wi-Fi 2", "192.168.1.210", False, "windows"),
 )
 WSL_WINDOWS_OUT = "Tailscale|100.72.215.6\nWi-Fi 2|192.168.1.210\n"
 WSL_VM_OUT = (
@@ -7345,15 +7344,50 @@ def test_holds_here_off_wsl_binds_the_address(monkeypatch: pytest.MonkeyPatch) -
     assert asked == ["192.168.1.25"]
 
 
-def test_under_wsl_the_listing_has_the_windows_adapters_and_the_vm_interfaces_labelled() -> None:
-    def by_program(argv: list[str]) -> subprocess.CompletedProcess[str]:
+def _wsl_both_sides(seen: list[list[str]]) -> Callable[..., subprocess.CompletedProcess[str]]:
+    """Answers the Windows listing and the VM's `ip` listing, recording what was asked."""
+
+    def by_program(argv: list[str], *_a: object, **_k: object) -> subprocess.CompletedProcess[str]:
+        seen.append(argv)
         out = WSL_WINDOWS_OUT if argv[0] == "powershell.exe" else WSL_VM_OUT
         return subprocess.CompletedProcess(argv, 0, out, "")
 
-    found = platform.local_ipv4_addresses(run=by_program, system="linux", wsl=True)
+    return by_program
+
+
+def test_under_wsl_the_listing_is_the_windows_side_only_and_the_vm_is_never_read() -> None:
+    """Round 2 must-fix 1: a WSL server's realm address is a Windows-side address.
+
+    A bind inside the WSL VM of a Windows adapter's address fails (measured: Errno 99), and the
+    VM's own interfaces (eth0, a Tailscale inside WSL) are not what the Windows forwarder serves,
+    so the VM's interfaces are neither offered nor read.
+    """
+    seen: list[list[str]] = []
+    found = platform.local_ipv4_addresses(run=_wsl_both_sides(seen), system="linux", wsl=True)
+    assert [argv[0] for argv in seen] == ["powershell.exe"]
     assert {(a.side, a.interface, a.address, a.vpn) for a in found} == {
         ("windows", "Tailscale", "100.72.215.6", True),
         ("windows", "Wi-Fi 2", "192.168.1.210", False),
-        ("wsl", "eth0", "172.24.144.5", False),
-        ("wsl", "tailscale0", "100.86.248.75", True),
     }
+
+
+@pytest.mark.parametrize("vm_only", ["172.24.144.5", "100.86.248.75"])
+def test_holds_here_under_wsl_refuses_an_address_only_the_vm_holds(
+    vm_only: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The real listing, with only the programs it runs faked; the guard reads the Windows side.
+
+    `in_wsl()` answers False here on purpose: `holds_here(under_wsl=True)` must ask for the WSL
+    listing itself, not leave the listing to guess on a machine (CI) that is not WSL.
+    """
+    seen: list[list[str]] = []
+    monkeypatch.setattr(runner, "run", _wsl_both_sides(seen))
+    monkeypatch.setattr(platform, "in_wsl", lambda: False)
+
+    def no_bind(ip: str) -> bool:
+        raise AssertionError(f"{ip} was bound inside the VM")
+
+    monkeypatch.setattr(networking, "_can_bind", no_bind)
+    assert networking.holds_here(vm_only, under_wsl=True) is False
+    assert networking.holds_here("100.72.215.6", under_wsl=True) is True
+    assert all(argv[0] == "powershell.exe" for argv in seen), seen
