@@ -1491,6 +1491,11 @@ def test_another_window_during_a_whole_server_load_is_told_a_server_is_being_bro
     Each press runs on a thread of its own (another window's), during the real run's first
     load, under the hold, lease and `alone` the run itself took.
     Mutation: `load_the_data` passes the per-account sentences (`_database_session`'s defaults).
+
+    T738: a move (Pack, Bring in, a second Bring from another computer… on the same folder)
+    is told the hold in a move's words, `MOVE_IN_HOLDS_A_MOVE` ("Nothing was packed or
+    brought in."); the Start keeps "Nothing was started or stopped."
+    Mutation: drop the MOVE_IN entry from `move_flows._FOR_A_MOVE`.
     """
     from tests.test_move_flows import packed
 
@@ -1521,9 +1526,14 @@ def test_another_window_during_a_whole_server_load_is_told_a_server_is_being_bro
         with docker.server_hold(server_dir, "Install mod-transmog", spec=None):
             return "written"
 
+    def bring_in_again() -> object:
+        options = InstallOptions(server_dir=server_dir)
+        return list(mv.install().run(options))
+
     presses: dict[str, Callable[[], object]] = {
         "pack": lambda: move_flows.plan_export(mv.target.world),
         "bring in": lambda: move_flows.plan_import(mv.target.world, accounts),
+        "bring in again": bring_in_again,
         "start": start,
         "backup": backup,
         "module": module_sql,
@@ -1543,9 +1553,15 @@ def test_another_window_during_a_whole_server_load_is_told_a_server_is_being_bro
 
     pack, bring_in = said["pack"], said["bring in"]
     assert isinstance(pack, move_flows.ExportPlan), pack
-    assert pack.refusals == (forgetting.MOVE_IN_HOLDS_THE_SERVER,), pack.refusals
+    assert pack.refusals == (forgetting.MOVE_IN_HOLDS_A_MOVE,), pack.refusals
     assert isinstance(bring_in, move_flows.ImportPlan), bring_in
-    assert forgetting.MOVE_IN_HOLDS_THE_SERVER in bring_in.refusals, bring_in.refusals
+    assert forgetting.MOVE_IN_HOLDS_A_MOVE in bring_in.refusals, bring_in.refusals
+    assert forgetting.MOVE_IN_HOLDS_THE_SERVER not in bring_in.refusals, bring_in.refusals
+    again = said["bring in again"]
+    assert isinstance(again, MoveError), again
+    assert str(again) == forgetting.MOVE_IN_HOLDS_A_MOVE
+    assert forgetting.MOVE_IN_HOLDS_A_MOVE.endswith(" Nothing was packed or brought in.")
+    assert "started or stopped" not in forgetting.MOVE_IN_HOLDS_A_MOVE
     assert isinstance(said["start"], docker.ServerHeldError), said["start"]
     assert str(said["start"]) == forgetting.MOVE_IN_HOLDS_THE_SERVER
     assert isinstance(said["backup"], docker.MaintenanceLeaseTaken), said["backup"]
@@ -1554,6 +1570,7 @@ def test_another_window_during_a_whole_server_load_is_told_a_server_is_being_bro
     assert str(said["module"]) == forgetting.MOVE_IN_WRITES_ALONE
     for sentence in (
         forgetting.MOVE_IN_HOLDS_THE_SERVER,
+        forgetting.MOVE_IN_HOLDS_A_MOVE,
         forgetting.MOVE_IN_HOLDS_THE_DATABASES,
         forgetting.MOVE_IN_WRITES_ALONE,
     ):

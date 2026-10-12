@@ -264,7 +264,10 @@ def _server_is_up(world: MoveWorld) -> bool:
     return spec.world in names or spec.auth in names
 
 
-_FOR_A_MOVE = {forgetting.RESTORE_HOLDS_THE_SERVER: forgetting.RESTORE_HOLDS_A_MOVE}
+_FOR_A_MOVE = {
+    forgetting.RESTORE_HOLDS_THE_SERVER: forgetting.RESTORE_HOLDS_A_MOVE,
+    forgetting.MOVE_IN_HOLDS_THE_SERVER: forgetting.MOVE_IN_HOLDS_A_MOVE,  # T738
+}
 """A hold's sentence that is about starting and stopping -> what a move is told instead (T737)."""
 
 
@@ -273,7 +276,9 @@ def move_held_reason(server_dir: Path | str) -> str | None:
 
     T737: the Maintenance tab's Restore holds the server with the sentence a Start or Stop is
     told (why starting or stopping would harm the restore). A Pack or Bring in is told
-    `RESTORE_HOLDS_A_MOVE` instead; every other holder's sentence is passed as it is.
+    `RESTORE_HOLDS_A_MOVE` instead. T738: likewise a whole-server bring-in's load
+    (`MOVE_IN_HOLDS_THE_SERVER` -> `MOVE_IN_HOLDS_A_MOVE`). Every other holder's sentence is
+    passed as it is.
     """
     held = docker.held_reason(server_dir)
     return None if held is None else _FOR_A_MOVE.get(held, held)

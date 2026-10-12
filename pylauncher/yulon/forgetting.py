@@ -144,6 +144,15 @@ MOVE_IN_HOLDS_THE_SERVER = (
     "in with the database started on its own for it. Wait for that to finish, then try again. "
     "Nothing was started or stopped."
 )
+# T738: what a Pack, a Bring in, or a second "Bring from another computer…" on the same folder
+# is told during that load (`move_flows.move_held_reason()`). The sentence above ends in a
+# Start's or Stop's words; a move neither starts nor stops anything.
+MOVE_IN_HOLDS_A_MOVE = (
+    "This server is being brought in from another computer, and its databases are being put "
+    "in. Packing them now would take a half-made copy, and bringing a move in would write "
+    "over what is being put in. Wait for that to finish, then try again. Nothing was packed "
+    "or brought in."
+)
 MOVE_IN_HOLDS_THE_DATABASES = (
     "This server is being brought in from another computer, and its databases are being put "
     "in. Wait for that to finish, then try again."
