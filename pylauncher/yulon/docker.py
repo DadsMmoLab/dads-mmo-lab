@@ -7134,7 +7134,8 @@ def build_staged(
     press is just as cold. The second try runs on the same folder, so a send
     that does finish is kept for every later Rebuild. It waits until Docker
     answers again (`_docker_answers_again()`, at most
-    `SESSION_RETRY_PATIENCE_S`); with no answer by then, the first try's run is
+    `SESSION_RETRY_PATIENCE_S`, the panel told `SESSION_WAIT_LINE` as the wait
+    starts, T742); with no answer by then, the first try's run is
     the answer, and a Stop during the wait ends the build as a Stop. It is made
     only once, and never after a Stop; if it also fails, its run is the answer.
     `.notes/tickets/T733-windows-rebuild-context-timeout-on-big-server-folder.md`
@@ -7201,6 +7202,9 @@ def build_staged(
         )
         run = build_it()
         if _session_died(run) and not (cancel is not None and cancel.is_set()):
+            with contextlib.suppress(Exception):  # run_attached()'s rule: a dead sink is dropped
+                if sink is not None:
+                    sink(SESSION_WAIT_LINE)
             answered = _docker_answers_again(wsl_distro, cancel)
             if answered is None:
                 logger.warning(f"build_staged(): stopped while waiting for Docker ({service})")
@@ -7252,6 +7256,19 @@ SESSION_RETRY_PATIENCE_S = 180.0
 On yulon-win11 Docker was still not answering about 55 s after the session died
 (Yu'lon's own ask then waited 16 s, 02:55:56 local). The three minutes are the
 recreate's own patience for the same Docker (`native.DOCKER_PATIENCE_S`).
+"""
+
+SESSION_WAIT_LINE = (
+    f"Waiting up to {SESSION_RETRY_PATIENCE_S / 60:g} minutes for Docker to answer again."
+)
+"""What the build panel is told as the wait before the second try starts (T742).
+
+Without it the panel's last line for up to `SESSION_RETRY_PATIENCE_S` is
+BuildKit's "failed to solve", which reads as a finished failure while the press
+is still busy. It goes out before the first ask, so it promises no retry: if
+Docker does not answer, the first try's failure is the answer and
+`SESSION_RETRY_LINE` is never told. The same rules as that line: no service, no
+folder, no BuildKit words.
 """
 
 SESSION_RETRY_POLL_S = 5.0

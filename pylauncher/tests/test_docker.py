@@ -3958,6 +3958,141 @@ def test_a_stop_that_ends_a_dead_session_is_not_tried_again(
     ]
 
 
+def _lines_and_asks(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """One list that the panel's lines and the asks of Docker both land in, in order (T742)."""
+    seen: list[str] = []
+    asked = docker.daemon_ready
+
+    def ask(**kwargs: object) -> bool:
+        seen.append("<ask>")
+        return asked(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(docker, "daemon_ready", ask)
+    return seen
+
+
+def test_the_panel_says_the_build_waits_for_docker_as_the_wait_starts(
+    build_cli: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T742: up to three minutes of wait must not read as the finished failure above it.
+
+    Without it the panel's last line during the wait is BuildKit's "failed to
+    solve ... session healthcheck failed fatally" while the press stays busy. The
+    waiting line goes out once, after the dead try's own lines and before the
+    first ask, so it is there whatever the asks answer; the retry line still
+    follows only once Docker answers and the second try runs.
+    """
+    monkeypatch.setattr(docker, "SESSION_RETRY_POLL_S", 0.01)
+    _session_dies(build_cli, "ac-db-import", 1)
+    (build_cli / "info-unanswered").write_text("1", encoding="utf-8")
+    seen = _lines_and_asks(monkeypatch)
+    run = docker.build_staged(_server_with(tmp_path, WOTLK_OVERLAY), THREE_FILES, sink=seen.append)
+    assert run.returncode == 0, run.tail
+    assert seen.count(docker.SESSION_WAIT_LINE) == 1, seen
+    waited = seen.index(docker.SESSION_WAIT_LINE)
+    assert "<ask>" not in seen[:waited], seen
+    assert any(docker.SESSION_DIED in line for line in seen[:waited]), seen
+    assert seen[waited + 1 :].count("<ask>") == 2, seen
+    retried = seen.index(docker.SESSION_RETRY_LINE)
+    assert retried > waited
+    assert "<ask>" not in seen[retried:], seen
+    assert seen.count(docker.SESSION_RETRY_LINE) == 1, seen
+
+
+def test_the_waiting_line_is_one_plain_sentence() -> None:
+    """The waiting line follows the retry line's rules (T742, T733 review N2).
+
+    It is said wherever the session died, so it names no service and no folder
+    and quotes none of BuildKit's words; one short sentence that fits a panel
+    line. The bound it states is the patience the wait really has.
+    """
+    said = docker.SESSION_WAIT_LINE
+    assert said != docker.SESSION_RETRY_LINE
+    assert said.count(".") == 1 and said.endswith(".") and len(said) <= 80, said
+    assert ";" not in said and "\n" not in said
+    assert "Docker" in said
+    lowered = said.lower()
+    for word in (*WOTLK_SERVICES, "db-import", "worldserver", "authserver", "ac-"):
+        assert word not in lowered, word
+    for word in ("buildkit", "buildx", "session", "healthcheck", "context", "solve", "folder"):
+        assert word not in lowered, word
+    assert docker.SESSION_DIED not in said
+    assert f"{docker.SESSION_RETRY_PATIENCE_S / 60:g} minutes" in said
+
+
+def test_no_waiting_line_when_no_session_died(build_cli: Path, tmp_path: Path) -> None:
+    """The line is told only when a wait really starts (T742).
+
+    Not for a build that passed (a session that died after the send costs
+    nothing, and nothing waits), and not for one that failed for its own reason.
+    """
+    (build_cli / "session-dies-late-ac-worldserver").write_text("", encoding="utf-8")
+    lines_seen: list[str] = []
+    run = docker.build_staged(
+        _server_with(tmp_path, WOTLK_OVERLAY), THREE_FILES, sink=lines_seen.append
+    )
+    assert run.returncode == 0, run.tail
+    assert docker.SESSION_WAIT_LINE not in lines_seen
+    assert docker.SESSION_RETRY_LINE not in lines_seen
+
+    (build_cli / "fail-build-ac-authserver").write_text("", encoding="utf-8")
+    lines_seen.clear()
+    run = docker.build_staged(
+        _server_with(tmp_path, WOTLK_OVERLAY, "failed"), THREE_FILES, sink=lines_seen.append
+    )
+    assert run.returncode == 17
+    assert docker.SESSION_WAIT_LINE not in lines_seen
+    assert docker.SESSION_RETRY_LINE not in lines_seen
+
+
+def test_a_docker_that_never_answers_leaves_the_waiting_line_and_no_retry_line(
+    build_cli: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The waiting line is not a promise of a retry (T742).
+
+    With no answer within the patience the first try's failure is the answer:
+    the panel was told the build waited, and never that it tried once more.
+    """
+    monkeypatch.setattr(docker, "SESSION_RETRY_POLL_S", 0.01)
+    monkeypatch.setattr(docker, "SESSION_RETRY_PATIENCE_S", 0.3)
+    _session_dies(build_cli, "ac-db-import", 1)
+    (build_cli / "info-unanswered").write_text("1000000", encoding="utf-8")
+    seen = _lines_and_asks(monkeypatch)
+    run = docker.build_staged(_server_with(tmp_path, WOTLK_OVERLAY), THREE_FILES, sink=seen.append)
+    assert run.returncode == 1
+    assert any(docker.SESSION_DIED in line for line in run.tail)
+    assert docker.SESSION_WAIT_LINE not in run.tail
+    assert seen.count(docker.SESSION_WAIT_LINE) == 1, seen
+    assert seen.index(docker.SESSION_WAIT_LINE) < seen.index("<ask>")
+    assert docker.SESSION_RETRY_LINE not in seen
+
+
+def test_a_panel_that_refuses_the_waiting_line_does_not_stop_the_wait_or_the_retry(
+    build_cli: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`run_attached()`'s rule for a dead sink holds for the waiting line too (T742)."""
+    monkeypatch.setattr(docker, "SESSION_RETRY_POLL_S", 0.01)
+    told: list[str] = []
+
+    def sink(line: str) -> None:
+        if line == docker.SESSION_WAIT_LINE:
+            raise RuntimeError("the panel is gone")
+        told.append(line)
+
+    _session_dies(build_cli, "ac-db-import", 1)
+    (build_cli / "info-unanswered").write_text("1", encoding="utf-8")
+    run = docker.build_staged(_server_with(tmp_path, WOTLK_OVERLAY), THREE_FILES, sink=sink)
+    assert run.returncode == 0, run.tail
+    assert _calls_around_the_retry(build_cli) == [
+        "ac-db-import",
+        "info",
+        "info",
+        "ac-db-import",
+        "ac-client-data-init",
+    ]
+    assert told.count(docker.SESSION_RETRY_LINE) == 1
+
+
 def test_a_wsl_build_sends_each_buildx_config_across_as_a_path(
     build_cli: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
