@@ -119,6 +119,8 @@ def apply_update(
     pressed Cancel. Both leave the install untouched and remove what was
     staged.
     """
+    # T765: a download killed outright left its hidden part in the player's Downloads.
+    fetch.sweep_stale_parts(downloads_dir)
     name, size = _what_to_ask_for(result, install)
     tag = str(result.latest)
     _stop_if_cancelled(cancelled)

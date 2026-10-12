@@ -2363,6 +2363,13 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "THIS install's marker -- a directory this app made -- so what an unreadable "
         "backup can cost is the app's own backup, never a folder of the player's"
     ),
+    ("selfupdate/fetch.py", "sweep_stale_parts"): (
+        "T765. Lists the folder a download-only update saves into (the player's Downloads) "
+        "for the hidden `.<name>.yulon-part` a download killed outright left. It decides a "
+        "DELETE, so it is narrow: only that hidden name with Yu'lon's own suffix, only a plain "
+        "file (lstat: never a link or a folder), and only one unchanged for 15 minutes, which "
+        "a live download never is. An unreadable folder answers nothing removed"
+    ),
     ("selfupdate/stage.py", "staged_entries"): (
         "T90 plan 3. Lists the STAGING directory this app filled moments earlier, to find the "
         "top-level names the new build ships. It decides no write of its own; what it feeds is "

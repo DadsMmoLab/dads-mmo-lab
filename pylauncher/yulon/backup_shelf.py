@@ -408,6 +408,11 @@ def _row(path: Path, name: str, kind: Kind, st: os.stat_result, game_id: str | N
             break
     if usable and label in _LEFTOVER_LABELS:
         usable, problem = False, PACK_LEFTOVER
+    elif label in _LEFTOVER_LABELS and not maintenance.head_names(path, database):
+        # Not verified, so no reading was confirmed above (T765): a cut-short copy of a
+        # database really named `move_x` is not a pack's leftover of `x` unless its own USE
+        # line says so.
+        label, database = candidates[-1]
     item = None
     if label is not None and label not in _FIXED_LABELS and label.startswith(_ITEM_LABEL_LEAD):
         item = label.removeprefix(_ITEM_LABEL_LEAD)

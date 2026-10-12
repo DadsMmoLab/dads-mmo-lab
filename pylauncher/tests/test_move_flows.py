@@ -1665,3 +1665,21 @@ def test_a_start_during_an_accounts_bring_in_is_told_accounts_and_characters(
     assert isinstance(said["start"], docker.ServerHeldError)
     assert str(said.get("backup")) == forgetting.MOVE_HOLDS_THE_DATABASES, said
     assert isinstance(said["backup"], docker.MaintenanceLeaseTaken)
+
+
+def test_clear_pack_folder_takes_a_dead_packs_folder_and_follows_no_link(tmp_path: Path) -> None:
+    """T765: the engine half of the uninstall's sweep (purge.py calls it after its redesign)."""
+    server = tmp_path / "server"
+    work = move_flows.pack_folder(server)
+    work.mkdir(parents=True)
+    (work / "20261001_000000_move_acore_auth.sql").write_bytes(b"every verifier")
+    move_flows.clear_pack_folder(server)
+    assert not os.path.lexists(work)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "mine.sql").write_bytes(b"the player's")
+    work.symlink_to(elsewhere, target_is_directory=True)
+    move_flows.clear_pack_folder(server)
+    assert not os.path.lexists(work)
+    assert (elsewhere / "mine.sql").read_bytes() == b"the player's"
+    move_flows.clear_pack_folder(server)  # nothing there: nothing to do

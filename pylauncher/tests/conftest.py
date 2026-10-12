@@ -595,6 +595,29 @@ def qapp() -> Iterator[object]:
     yield app
 
 
+@pytest.fixture(autouse=True, scope="session")
+def _no_job_thread_runs_into_interpreter_teardown() -> Iterator[None]:
+    """Join every view job's thread at the end of the run, as `main()` does at exit (T764).
+
+    A view job's thread quits through `worker.done -> thread.quit`, a call queued to the GUI
+    thread, so a test that builds a view and never pumps the event loop leaves the thread in
+    its event loop. Held by `job.in_flight()` into interpreter teardown, that QThread is
+    destroyed while running and Qt aborts the run AFTER pytest has printed its summary
+    ("QThread: Destroyed while thread '' is still running", rc 134): five files alone did it,
+    and the full run passed only because a later test pumped the loop. `wait_all()` quits each
+    thread directly. A job still busy past the bound is named here rather than in an abort.
+    """
+    yield
+    job = sys.modules.get("yulon.ui.widgets.job")
+    holder = getattr(job, "_in_flight", None) if job is not None else None
+    if holder is None:
+        return
+    if not holder.wait_all(timeout_ms=HANG_BOUND_MS):
+        raise RuntimeError(
+            f"background jobs still running at the end of the run: {holder.still_running()}"
+        )
+
+
 def process_events(ms: int = 50) -> None:
     """Pump the Qt event loop for `ms` milliseconds (lets queued signals deliver)."""
     from PySide6.QtCore import QCoreApplication, QDeadlineTimer, QEventLoop

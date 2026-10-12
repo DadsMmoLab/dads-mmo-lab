@@ -1029,6 +1029,21 @@ def verify_dump(path: Path, database: str | None = None) -> int:
     return size
 
 
+def head_names(path: Path, database: str) -> bool:
+    """Whether the dump's own head names `database` in a `USE`/`CREATE DATABASE` line (T765).
+
+    For a file `verify_dump()` refused, which may still hold its head (a cut-short dump does):
+    only text below the file's own banner counts, as there. A head that cannot be read, or
+    with no banner of its own, answers False: nothing confirms the name.
+    """
+    try:
+        head = _read_edge(path, 0)
+    except OSError as exc:
+        logger.info(f"could not read the head of {path}: {exc}")
+        return False
+    return _banner_is_the_files_own(head) and database in _databases_named_in_bytes(head)
+
+
 def _banner_is_the_files_own(head: bytes) -> bool:
     """Is the dump banner this file's OWN opening, or just text inside it?
 

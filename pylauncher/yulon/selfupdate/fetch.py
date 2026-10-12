@@ -36,6 +36,8 @@ import http.client
 import os
 import re
 import ssl
+import stat
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -282,6 +284,46 @@ def artifact_url(tag: str, name: str) -> str:
     return url
 
 
+HIDDEN_PART = ".yulon-part"
+"""`download(keep_existing=True)` works in `.<name>.yulon-part`, in a folder of the player's."""
+
+STALE_PART_SECONDS = 15 * 60
+"""A hidden part unchanged this long is a dead download's: a live one is written every
+`STALL_SECONDS` or stopped, so this leaves one another Yu'lon is still writing alone."""
+
+
+def sweep_stale_parts(folder: Path, *, now: float | None = None) -> list[Path]:
+    """Remove the hidden `.<name>.yulon-part` files a killed download left in `folder` (T765).
+
+    `download()` removes its part on every way out but one: a process killed outright. The
+    name is Yu'lon's own (hidden, with Yu'lon's suffix), so only that shape is touched, only a
+    plain file (never a link or a folder wearing the name), and only one nothing has written to
+    for `STALE_PART_SECONDS`. Never raises: this is tidying, and an update must not fail on it.
+    """
+    removed: list[Path] = []
+    try:
+        entries = list(os.scandir(folder))
+    except OSError as exc:
+        logger.info(f"self-update: could not look for old downloads in {folder}: {exc}")
+        return removed
+    cutoff = (time.time() if now is None else now) - STALE_PART_SECONDS
+    for entry in entries:
+        name = entry.name
+        if not name.startswith(".") or not name.endswith(HIDDEN_PART):
+            continue
+        try:
+            st = os.lstat(entry.path)
+            if not stat.S_ISREG(st.st_mode) or st.st_mtime > cutoff:
+                continue
+            os.unlink(entry.path)
+        except OSError as exc:
+            logger.info(f"self-update: could not remove {entry.path}: {exc}")
+            continue
+        logger.info(f"self-update: removed {entry.path}, left by a download that was stopped")
+        removed.append(Path(entry.path))
+    return removed
+
+
 def download(
     url: str,
     dest: Path,
@@ -316,7 +358,7 @@ def download(
     Every failure removes the `.part` and raises `UpdateError`; a `cancelled()`
     that answers True raises `Cancelled`, which the UI shows as nothing at all.
     """
-    part = dest.with_name(f".{dest.name}.yulon-part" if keep_existing else dest.name + ".part")
+    part = dest.with_name(f".{dest.name}{HIDDEN_PART}" if keep_existing else dest.name + ".part")
     dest.parent.mkdir(parents=True, exist_ok=True)
     done = 0
     try:

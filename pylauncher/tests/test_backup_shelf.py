@@ -1347,3 +1347,33 @@ def test_a_players_backup_of_a_database_named_move_something_is_still_a_good_cop
     r = row(shelf(server), path.name)
     assert (r.label, r.database, r.usable) == (None, "move_stuff", True)
     assert r.kept_because == "it is the newest good copy of move_stuff."
+
+
+def test_a_broken_dump_of_a_database_named_move_something_is_not_read_as_a_leftover(
+    server: Path,
+) -> None:
+    """T765: a cut-short file has no verified reading, so the first one used to win: a
+    player's own `move_stuff` copy was named a move package's leftover of `stuff`. The `move`
+    reading is taken only when the file's own `USE` line names the database it would mean."""
+    path = put(server, "20261001_100000", "move_stuff", whole=False)
+    r = row(shelf(server), path.name)
+    assert (r.label, r.database) == (None, "move_stuff")
+    assert "move package" not in backup_shelf.describe(r, GAME)
+    assert "not a backup" not in backup_shelf.describe(r, GAME)
+
+
+def test_a_broken_move_leftover_whose_use_line_agrees_still_reads_as_one(server: Path) -> None:
+    path = put(server, "20261012_090000", "acore_auth", label="move", whole=False)
+    r = row(shelf(server), path.name)
+    assert (r.label, r.database, r.usable) == ("move", "acore_auth", False)
+    assert "move package" in backup_shelf.describe(r, GAME)
+
+
+def test_a_use_line_above_no_banner_of_its_own_confirms_nothing(server: Path) -> None:
+    """Only the file's own head counts (as for `verify_dump`): text that merely holds a USE line
+    is not a pack's dump."""
+    path = folder_of(server) / "20261012_090000_move_acore_auth.sql"
+    path.write_bytes(b"a note of mine\nUSE `acore_auth`;\n")
+    age(path)
+    r = row(shelf(server), path.name)
+    assert (r.label, r.database) == (None, "move_acore_auth")

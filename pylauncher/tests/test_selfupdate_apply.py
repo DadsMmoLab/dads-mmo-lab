@@ -11,6 +11,8 @@ Nothing here touches the network, and nothing runs a process.
 from __future__ import annotations
 
 import hashlib
+import os
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -572,3 +574,86 @@ def test_a_good_download_with_the_name_free_takes_the_artifacts_own_name(tmp_pat
     outcome = _download_only(tmp_path, b"Y" * 64, published=b"Y" * 64)
     assert outcome.path == tmp_path / "Downloads" / f"Yulon-{TAG}-macos.dmg"
     assert sorted(p.name for p in outcome.path.parent.iterdir()) == [outcome.path.name]
+
+
+# ------------------------------------------------- a killed download's hidden part (T765)
+
+OLD_PART = ".Yulon-v0.8.60-Public-macos.dmg.yulon-part"
+
+
+def _aged(path: Path, minutes: int = 60) -> Path:
+    then = time.time() - minutes * 60
+    os.utime(path, (then, then), follow_symlinks=False)
+    return path
+
+
+def test_a_killed_downloads_hidden_part_goes_at_the_next_update(tmp_path: Path) -> None:
+    """A SIGKILL mid-download skips `download()`'s clean-up and leaves `.<name>.yulon-part`
+    in the player's Downloads; the next update, of whatever version, takes it away."""
+    downloads = tmp_path / "Downloads"
+    downloads.mkdir()
+    part = downloads / OLD_PART
+    part.write_bytes(b"half of an older release")
+    _aged(part)
+    outcome = _download_only(tmp_path, b"Y" * 64, published=b"Y" * 64)
+    assert sorted(p.name for p in downloads.iterdir()) == [outcome.path.name]
+
+
+def test_a_failed_update_still_takes_the_killed_downloads_part_away(tmp_path: Path) -> None:
+    downloads = tmp_path / "Downloads"
+    downloads.mkdir()
+    part = downloads / OLD_PART
+    part.write_bytes(b"half of an older release")
+    _aged(part)
+    with pytest.raises(UpdateError, match="checksum does not match"):
+        _download_only(tmp_path, b"X" * 64, published=b"Y" * 64)
+    assert not os.path.lexists(part)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "Yulon-v0.8.60-Public-macos.dmg.yulon-part",  # not hidden: not the name Yu'lon writes
+        ".Yulon-v0.8.60-Public-macos.dmg.part",  # a browser's, not Yu'lon's
+        ".Yulon-v0.8.60-Public-macos.dmg.yulon-partial",  # another suffix
+    ],
+)
+def test_the_players_own_files_are_never_swept(tmp_path: Path, name: str) -> None:
+    downloads = tmp_path / "Downloads"
+    downloads.mkdir()
+    theirs = downloads / name
+    theirs.write_bytes(b"the player's")
+    _aged(theirs)
+    _download_only(tmp_path, b"Y" * 64, published=b"Y" * 64)
+    assert theirs.read_bytes() == b"the player's"
+
+
+def test_a_part_written_in_the_last_minutes_is_left_for_the_yulon_writing_it(
+    tmp_path: Path,
+) -> None:
+    downloads = tmp_path / "Downloads"
+    downloads.mkdir()
+    live = downloads / OLD_PART
+    live.write_bytes(b"another Yu'lon is still downloading this")
+    _download_only(tmp_path, b"Y" * 64, published=b"Y" * 64)
+    assert live.read_bytes() == b"another Yu'lon is still downloading this"
+
+
+def test_a_link_or_folder_wearing_the_part_name_is_never_swept(tmp_path: Path) -> None:
+    downloads = tmp_path / "Downloads"
+    downloads.mkdir()
+    target = tmp_path / "elsewhere.dmg"
+    target.write_bytes(b"the player's")
+    link = downloads / OLD_PART
+    try:
+        link.symlink_to(target)
+    except OSError:
+        pytest.skip("this system cannot make a symbolic link")
+    _aged(link)
+    folder = downloads / ".Yulon-v0.8.61-Public-macos.dmg.yulon-part"
+    folder.mkdir()
+    (folder / "inside").write_bytes(b"x")
+    _aged(folder)
+    _download_only(tmp_path, b"Y" * 64, published=b"Y" * 64)
+    assert link.is_symlink() and target.read_bytes() == b"the player's"
+    assert (folder / "inside").read_bytes() == b"x"

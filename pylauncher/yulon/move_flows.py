@@ -753,6 +753,25 @@ def pack_folder(server_dir: Path) -> Path:
     return maintenance.backups_dir(server_dir) / PACK_FOLDER
 
 
+def clear_pack_folder(server_dir: Path) -> None:
+    """Take away what a pack killed before its clean-up left in its working folder (T765).
+
+    That folder holds the pack's dumps, an auth one with every account's login verifier, and
+    the Backups list never shows it. A link or file at its name is unlinked, never followed.
+    The caller holds the server: a pack holds it from start to clean-up, so under the hold
+    whatever is there is a dead pack's. Every pack calls this first; an uninstall that keeps
+    the backups should call it before it moves them (`purge.py` is waiting on its redesign).
+
+    Raises:
+        OSError: it could not be removed.
+    """
+    work = pack_folder(server_dir)
+    if work.is_symlink() or work.is_file():
+        work.unlink()
+    elif work.exists():
+        shutil.rmtree(work)
+
+
 def _backup_for_the_package(
     world: MoveWorld, wanted: Sequence[str], auth: str | None
 ) -> BackupReport:
@@ -766,10 +785,7 @@ def _backup_for_the_package(
     """
     work = pack_folder(world.server_dir)
     try:
-        if work.is_symlink() or work.is_file():
-            work.unlink()
-        elif work.exists():
-            shutil.rmtree(work)
+        clear_pack_folder(world.server_dir)
         maintenance.backups_dir(world.server_dir).mkdir(parents=True, exist_ok=True, mode=0o700)
         work.mkdir(mode=0o700)
     except OSError as exc:
@@ -1378,6 +1394,7 @@ __all__ = [
     "MoveWorld",
     "PACK_FOLDER",
     "Replaces",
+    "clear_pack_folder",
     "engine_for",
     "export_package",
     "pack_folder",
