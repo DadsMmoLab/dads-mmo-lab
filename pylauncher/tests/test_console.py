@@ -202,6 +202,39 @@ def _distro_send(command: str = "server info", **kwargs: Any) -> tuple[Any, _Fak
     return reply, made[0]
 
 
+# Measured on yulon-win11 (WSL 2.7.12, 2026-10-12) against a distro with no `script`:
+# audits/proofs/security-platform/missing_program_exec_output.txt.
+_NO_SCRIPT_SAID = {
+    "wsl --exec (since T744)": b"<3>WSL (26 - Relay) ERROR: CreateProcessCommon:818: "
+    b"execvpe(script) failed: No such file or directory\n",
+    "ash behind --": b"/bin/sh: script: not found\n",
+    "bash behind --": b"bash: line 1: script: command not found\n",
+}
+
+
+@pytest.mark.parametrize("said", list(_NO_SCRIPT_SAID))
+def test_a_distro_without_script_gets_the_install_help_not_a_server_reply(
+    reachable_distro: None, said: str
+) -> None:
+    """The distro's "no such program" must not reach the console panel as the server's answer.
+
+    Since T744 the attach starts `script` with `wsl --exec`, so wsl.exe itself
+    reports the failed exec; the shell's wording from before is still recognised.
+    Mutation: drop the `execvpe` match in `_says_no_script()`.
+    """
+    with pytest.raises(console.ConsoleError) as caught:
+        _distro_send(stdout=io.BytesIO(_NO_SCRIPT_SAID[said]))
+    assert str(caught.value) == console.NO_SCRIPT_HELP.format(
+        distro="dml-arch", container="ac-worldserver"
+    )
+
+
+def test_a_server_reply_that_names_a_script_is_still_a_reply(reachable_distro: None) -> None:
+    """Only the distro's failure is recognised: a Lua script line from the server passes through."""
+    reply, _proc = _distro_send(stdout=io.BytesIO(b"AC> \r\nLoaded 3 Lua script files\r\n"))
+    assert isinstance(reply, console.ConsoleReply), reply
+
+
 def test_a_wsl_console_allocates_its_pty_inside_the_distro(reachable_distro: None) -> None:
     """Windows has no pty to give docker; the distro does, and script(1) opens it.
 

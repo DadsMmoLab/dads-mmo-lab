@@ -241,13 +241,30 @@ def test_the_wsl_prefix_execs_the_command_rather_than_handing_it_to_a_shell(
     assert platform.docker_prefix(DISTRO) == (LAUNCHER, "-d", DISTRO, "--exec", "docker")
 
 
+_DISTRO_FLAGS = ("-d", "--distribution")
+_EXEC_FLAGS = ("--exec", "-e")
+
+
 def _shell_separators(tree: ast.AST) -> Iterator[int]:
-    """Lines building a list or tuple holding `-d` and then a bare `--`: a wsl.exe shell route."""
+    """Lines building a wsl.exe argv that reaches the distro through its shell.
+
+    Two shapes: a list or tuple holding `-d` (or `--distribution`) and then a
+    bare `--`; and one that STARTS `<launcher>, -d, ...` (a non-literal first,
+    the distro flag second, which is how wsl.exe is called here) with no
+    `--exec` after it, since wsl.exe hands a command with no separator to the
+    shell as well. The second shape is anchored at index 1 so docker's own
+    `run -d` / `up -d` are not mistaken for it.
+    """
     for node in ast.walk(tree):
         if not isinstance(node, (ast.List, ast.Tuple)):
             continue
-        words = [e.value for e in node.elts if isinstance(e, ast.Constant)]
-        if "-d" in words and "--" in words[words.index("-d") :]:
+        words = [e.value if isinstance(e, ast.Constant) else None for e in node.elts]
+        flags = [i for i, w in enumerate(words) if w in _DISTRO_FLAGS]
+        if not flags:
+            continue
+        after = words[flags[0] :]
+        starts_like_wsl = len(words) > 2 and words[0] is None and words[1] in _DISTRO_FLAGS
+        if "--" in after or (starts_like_wsl and not any(w in _EXEC_FLAGS for w in after)):
             yield node.lineno
 
 
@@ -269,10 +286,18 @@ def test_the_source_guard_sees_the_spelling_it_is_for() -> None:
     """The guard is not blind: the old prefix and a hand-built argv both trip it."""
     old = 'def f(launcher, d, location):\n    return (launcher, "-d", d, *location, "--")\n'
     built = 'x = [launcher, "-d", distro, "--", "sh", "-c", script]\n'
+    long_flag = 'x = [launcher, "--distribution", distro, "--", "docker", "ps"]\n'
+    no_separator = 'x = [launcher, "-d", distro, "docker", "ps"]\n'
     git_style = 'y = ["diff", old, new, "--", path]\n'
+    docker_detached = 'z = [*prefix, "compose", "up", "-d", service]\n'
+    docker_run = 'z = [program, "run", "-d", image]\n'
+    exec_route = 'w = [launcher, "-d", distro, "--cd", inside, "--exec", "sh", "-c", s]\n'
     assert list(_shell_separators(ast.parse(old))) == [2]
     assert list(_shell_separators(ast.parse(built))) == [1]
-    assert list(_shell_separators(ast.parse(git_style))) == []
+    assert list(_shell_separators(ast.parse(long_flag))) == [1]
+    assert list(_shell_separators(ast.parse(no_separator))) == [1]
+    for clean in (git_style, docker_detached, docker_run, exec_route):
+        assert list(_shell_separators(ast.parse(clean))) == [], clean
 
 
 # ------------------------------------------- every function that splices the prefix
