@@ -160,21 +160,30 @@ class _Direction:
     dest: Path
     old: str
     new: str
+    _asked: bool = False
     _said: bool | None = None
+    _why: str = ""
+
+    def peek(self) -> bool | None:
+        """True / False when git or GitHub can say; None when neither can (T767). Never refuses."""
+        if not self._asked:
+            self._said, self._why = moves_forward(
+                self.seams, self.repo, self.dest, self.old, self.new
+            )
+            self._asked = True
+        return self._said
 
     def known(self) -> bool:
         """True when forward; refuses (fail closed) when neither git nor GitHub can say."""
-        if self._said is None:
-            said, why = moves_forward(self.seams, self.repo, self.dest, self.old, self.new)
-            if said is None:
-                raise InstallerError(
-                    updates_unread(
-                        f"the move takes away in {self.repo}",
-                        f"{why}, so the direction of the move is unknown",
-                    )
+        said = self.peek()
+        if said is None:
+            raise InstallerError(
+                updates_unread(
+                    f"the move takes away in {self.repo}",
+                    f"{self._why}, so the direction of the move is unknown",
                 )
-            self._said = said
-        return self._said
+            )
+        return said
 
 
 def updates_unread(source: str, why: str) -> str:
@@ -802,13 +811,17 @@ class AzerothCoreInstaller(StagedInstaller):
           an update upstream moved to its archive), never one for another database --
           `db_characters/2026_09_21_00.sql` is not `db_world/2026_09_21_00.sql`; or
         * the move goes forward in history (`direction.moves_forward()`: git, else GitHub's
-          compare; when neither can say the Return refuses), and it and a file the target
-          ships in the same folder are both dated (`YYYY_MM_DD_NN`, how AzerothCore and
-          mod-playerbots name their updates) and the target's sorts at or after it: it is
-          older than what the target has, which a Return that moves forward (T588) over a
-          squash removes. Going back the name says nothing: an update written before the
-          target's newest but merged after it is newer. A name that is not dated says
-          nothing about order (cold review of a72e048f).
+          compare), whatever the file is called (T767): the target descends from the
+          running commit, so upstream removed the file after the database met it, as
+          mod-playerbots 79bd428 removed 7bae1b5's undated `world/base/charsections_dbc.sql`.
+          A Return that moves forward (T588) is an update, which asks nothing of the kind.
+
+        Going back, or when neither git nor GitHub can give the direction, the name says
+        nothing: an update written before the target's newest but merged after it is
+        newer, so every such file counts and the database is asked. One exception keeps
+        the T632 refusal: with no direction, a dated (`YYYY_MM_DD_NN`) file the target
+        ships a later-dated file beside refuses and says why, as it may be a squash or a
+        newer update (cold review of a72e048f).
         """
         lacked: dict[str, None] = {}
         for source, dest, old in moved:
@@ -851,15 +864,27 @@ class AzerothCoreInstaller(StagedInstaller):
             for path in tracked:
                 if path.endswith(".sql"):
                     beside.setdefault(posixpath.dirname(path), []).append(posixpath.basename(path))
-            # Only a move FORWARD in history can have a squashed-away file: going back,
-            # every update the running commit added since is one the target lacks, however
-            # its name is dated (mod-playerbots names one by the day it was written).
+            unshipped = [
+                path
+                for path in removed
+                if (_database_part(path), posixpath.basename(path)) not in shipped
+            ]
+            if not unshipped:
+                continue
+            # T767: a target that descends from the running commit removed these files
+            # itself, whatever they are called (mod-playerbots 79bd428 removed 7bae1b5's
+            # undated base files): nothing it lacks is newer. Going back, every update the
+            # running commit added since is one the target lacks, however its name is dated
+            # (mod-playerbots names one by the day it was written).
             forward = _Direction(self._seams, source.repo, dest, old, new)
+            if forward.peek():
+                continue
             left: list[str] = []
-            for path in removed:
+            for path in unshipped:
                 name = posixpath.basename(path)
-                if (_database_part(path), name) in shipped:
-                    continue
+                # With no direction (`known()` refuses), a dated file older than one the
+                # target ships beside it may be a squash or a newer update: say so. Going
+                # back (`known()` is False) it counts like any other.
                 if (
                     _DATED.match(name)
                     and any(

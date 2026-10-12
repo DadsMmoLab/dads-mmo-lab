@@ -162,21 +162,30 @@ class _Direction:
     dest: Path
     old: str
     new: str
+    _asked: bool = False
     _said: bool | None = None
+    _why: str = ""
+
+    def peek(self) -> bool | None:
+        """True / False when git or GitHub can say; None when neither can (T767). Never refuses."""
+        if not self._asked:
+            self._said, self._why = moves_forward(
+                self.seams, self.repo, self.dest, self.old, self.new
+            )
+            self._asked = True
+        return self._said
 
     def known(self) -> bool:
         """True when forward; refuses (fail closed) when neither git nor GitHub can say."""
-        if self._said is None:
-            said, why = moves_forward(self.seams, self.repo, self.dest, self.old, self.new)
-            if said is None:
-                raise InstallerError(
-                    updates_unread_sentence(
-                        f"going back takes away in {self.repo}",
-                        f"{why}, so the direction of the move is unknown",
-                    )
+        said = self.peek()
+        if said is None:
+            raise InstallerError(
+                updates_unread_sentence(
+                    f"going back takes away in {self.repo}",
+                    f"{self._why}, so the direction of the move is unknown",
                 )
-            self._said = said
-        return self._said
+            )
+        return said
 
 
 def updates_unread_sentence(source: str, why: str) -> str:
@@ -888,10 +897,12 @@ class CmangosInstaller(StagedInstaller):
         `<module>:<SHA-1>`, so the same bytes under the same module and database count as
         shipped by the target whatever the file is now called; the same bytes in another
         module's or database's folder do not. Only a file present at the running commit
-        counts, and when the target is ahead of it in history (`Seams.is_ancestor`) a file
-        the target's name list lacks was deleted upstream: older, not newer (a Return that
-        moves forward over a squash). Never by name order: going back, a migration written
-        before the target's newest but merged after it is newer.
+        counts, and when the target is ahead of it in history (`direction.moves_forward()`:
+        git, else GitHub's compare) no file counts: the target deleted or changed it
+        upstream, so it is older, not newer (a Return that moves forward over a squash or an
+        edit, T767). With no direction a changed file counts and a deleted one refuses and
+        says why. Never by name order: going back, a migration written before the target's
+        newest but merged after it is newer.
         """
         sources = self.entry.emulator.sources
         lacked: dict[Db, dict[str, tuple[str, ...]]] = {}
@@ -922,6 +933,11 @@ class CmangosInstaller(StagedInstaller):
                 for name, hashes in files.items():
                     if shipped.intersection(hashes):
                         continue
+                    # T767: a target that descends from the running commit changed or
+                    # deleted this file itself, so its bytes are not newer than the target.
+                    if forward.peek():
+                        continue
+                    # No direction: a deleted name refuses and says why (`known()`).
                     if name not in after[role] and forward.known():
                         continue
                     label = f"{module}/{name}" if module else name
