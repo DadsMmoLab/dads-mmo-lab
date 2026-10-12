@@ -8,7 +8,9 @@ order, and the guards are the flow's own.
 
 from __future__ import annotations
 
+import os
 import re
+import stat
 import subprocess
 import sys
 import threading
@@ -306,6 +308,100 @@ def test_the_temporary_dumps_are_gone_and_nothing_else_in_backups_is_touched(
     folder.mkdir()
     move_flows.export_package(box.world, folder, stop_allowed=False)
     assert sorted(p.name for p in backups.iterdir()) == [mine.name]
+
+
+def test_the_packs_dumps_never_land_where_the_backups_list_reads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T747: a pack killed mid-zip left `<stamp>_move_acore_auth.sql` that Delete refused."""
+    from yulon import backup_shelf
+
+    box = Box(tmp_path, running_now=("ac-database",))
+    listed: list[tuple[str, ...]] = []
+    packed_from: list[Path] = []
+    real = move.write_package
+
+    def watching(dest: Path, header: Header, dumps: list[DumpFile], **kw: object) -> object:
+        shelf = backup_shelf.read_shelf(box.server_dir, game_id="wow-wotlk", installed={})
+        listed.append(tuple(r.name for r in shelf.rows))
+        packed_from.extend(d.path for d in dumps)
+        return real(dest, header, dumps, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(move, "write_package", watching)
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    move_flows.export_package(box.world, folder, stop_allowed=False)
+    assert listed == [()], listed
+    work = move_flows.pack_folder(box.server_dir)
+    assert packed_from and all(p.parent == work for p in packed_from), packed_from
+    assert not work.exists(), "the working folder was left after a pack that worked"
+
+
+def test_a_killed_packs_leftovers_are_cleared_when_the_next_pack_starts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    box = Box(tmp_path, running_now=("ac-database",))
+    work = move_flows.pack_folder(box.server_dir)
+    work.mkdir(parents=True)
+    leftover = work / "20261001_000000_move_acore_auth.sql"
+    leftover.write_bytes(b"every verifier, from a pack that was killed")
+    seen: list[bool] = []
+    real = move.write_package
+
+    def watching(*a: object, **kw: object) -> object:
+        seen.append(leftover.exists())
+        return real(*a, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(move, "write_package", watching)
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    move_flows.export_package(box.world, folder, stop_allowed=False)
+    assert seen == [False], "the last pack's leftover was still there while this one packed"
+    assert not work.exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX modes; Windows has the folder's ACL")
+def test_the_packs_working_folder_is_owner_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    box = Box(tmp_path, running_now=("ac-database",))
+    backups = maintenance.backups_dir(box.server_dir)
+    backups.mkdir(parents=True)
+    backups.chmod(0o775)  # a backups folder made before T683 S5
+    modes: list[int] = []
+    real = move.write_package
+
+    def watching(*a: object, **kw: object) -> object:
+        modes.append(stat.S_IMODE(move_flows.pack_folder(box.server_dir).stat().st_mode))
+        return real(*a, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(move, "write_package", watching)
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    old = os.umask(0o002)
+    try:
+        move_flows.export_package(box.world, folder, stop_allowed=False)
+    finally:
+        os.umask(old)
+    assert modes == [0o700], [oct(m) for m in modes]
+
+
+def test_a_failed_pack_leaves_no_working_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    box = Box(tmp_path, running_now=("ac-database",))
+
+    def broken(*_a: object, **_kw: object) -> object:
+        raise move.MovePackageError("the disk went away")
+
+    monkeypatch.setattr(move, "write_package", broken)
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    with pytest.raises(MaintenanceError, match="the disk went away"):
+        move_flows.export_package(box.world, folder, stop_allowed=False)
+    assert not move_flows.pack_folder(box.server_dir).exists()
+    backups = maintenance.backups_dir(box.server_dir)
+    assert not [p.name for p in backups.iterdir()] if backups.exists() else True
 
 
 def test_a_running_server_is_not_stopped_without_a_yes(tmp_path: Path) -> None:
@@ -689,6 +785,33 @@ def test_the_extracted_dumps_do_not_stay_behind(tmp_path: Path) -> None:
     )
     backups = maintenance.backups_dir(box.server_dir)
     assert not [p for p in backups.iterdir() if p.is_dir()]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX modes; Windows has the folder's ACL")
+def test_the_folder_a_bring_in_unpacks_into_is_owner_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The unpacked auth dump holds every verifier: the folder is 0700 whatever backups/ is."""
+    box, _package, plan = ready(tmp_path)
+    backups = maintenance.backups_dir(box.server_dir)
+    backups.mkdir(parents=True, exist_ok=True)
+    backups.chmod(0o775)  # a backups folder made before T683 S5
+    seen: list[int] = []
+    real = move_flows._checked_plans
+
+    def recording(world: object, package: object, schemas: object, folder: Path) -> object:
+        seen.append(stat.S_IMODE(folder.stat().st_mode))
+        return real(world, package, schemas, folder)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(move_flows, "_checked_plans", recording)
+    old = os.umask(0o002)
+    try:
+        move_flows.run_import(
+            box.world, plan, confirm=None, use_old_realm_name=False, stop_allowed=False
+        )
+    finally:
+        os.umask(old)
+    assert seen == [0o700], [oct(m) for m in seen]
 
 
 def test_replacing_players_needs_the_plans_own_token(tmp_path: Path) -> None:
@@ -1130,6 +1253,8 @@ def test_a_backup_that_fails_part_way_leaves_no_dump_behind(tmp_path: Path) -> N
         move_flows.export_package(box.world, folder, stop_allowed=False)
     backups = maintenance.backups_dir(box.server_dir)
     assert not [p for p in backups.glob("*_move_*")], "an auth dump with every verifier stayed"
+    # T747: the dumps are written into the pack's working folder now, so that goes too.
+    assert not move_flows.pack_folder(box.server_dir).exists(), "the working folder stayed"
 
 
 def test_a_stop_that_fails_half_way_still_has_the_server_started_again(tmp_path: Path) -> None:

@@ -9,6 +9,8 @@ move's own, and every refusal comes from the move's own guard.
 from __future__ import annotations
 
 import hashlib
+import os
+import stat
 import subprocess
 import sys
 import threading
@@ -594,6 +596,28 @@ def test_the_run_installs_then_puts_everything_in_in_order(tmp_path: Path) -> No
         "load:acore_world",
     ]
     assert "It is stopped" in lines[-2]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX modes; Windows has the folder's ACL")
+def test_the_folder_a_whole_server_unpacks_into_is_owner_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """It holds the unpacked auth dump with every verifier: 0700 under any umask (T745)."""
+    mv = Move(tmp_path)
+    seen: list[int] = []
+    real = move_flows._checked_plans
+
+    def recording(world: object, package: object, schemas: object, folder: Path) -> object:
+        seen.append(stat.S_IMODE(folder.stat().st_mode))
+        return real(world, package, schemas, folder)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(move_flows, "_checked_plans", recording)
+    old = os.umask(0o002)
+    try:
+        mv.run()
+    finally:
+        os.umask(old)
+    assert seen == [0o700], [oct(m) for m in seen]
 
 
 def test_the_module_goes_back_at_its_commit_with_its_old_answers(tmp_path: Path) -> None:

@@ -792,6 +792,7 @@ def backup(
     wsl_distro: str | None = None,
     now: datetime | None = None,
     import_record: str | None | _ImportState = UNSAID,
+    directory: Path | None = None,
 ) -> BackupReport:
     """Dump every database this install has into `backups_dir(server_dir)`.
 
@@ -824,6 +825,8 @@ def backup(
         import_record: For a rollback copy (T712): the unfinished-import record as it reads
             now (None: there is none), written into every file (`IMPORT_RECORD_LEAD`).
             Left `UNSAID`, no line is written.
+        directory: Where the dumps go instead of `backups_dir(server_dir)`. Only the move
+            package uses it (T747): its dumps are working files the Backups list never shows.
 
     Raises:
         MaintenanceError: the database container is not running, `only` named a
@@ -853,7 +856,7 @@ def backup(
     if not wanted:
         raise MaintenanceError(f"{spec.db} is running but reports no databases; nothing to back up")
 
-    directory = backups_dir(server_dir)
+    directory = backups_dir(server_dir) if directory is None else directory
     # A new folder is the owner's alone; one that exists keeps the mode its owner gave it.
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     stamp = (now or datetime.now()).strftime(_TIMESTAMP_FORMAT)

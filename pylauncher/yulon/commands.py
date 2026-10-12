@@ -464,7 +464,7 @@ def ends_the_world(typed: str) -> bool:
     """Does this console line shut the world server down for good (T412)?
 
     `server shutdown`, `server exit` and `server idleshutdown`, with or without a
-    leading dot, in any case, and ABBREVIATED as the consoles accept them
+    leading `.` or `!`, in any case, and ABBREVIATED as the consoles accept them
     (AzerothCore, TrinityCore and CMaNGOS all take a command by any prefix of each
     word, so `ser shut 1` is `server shutdown 1`) -- and not their `cancel`.
     Measured on yulon-ubuntu 2026-10-05 (WotLK): `server shutdown 1` saved and
@@ -477,7 +477,12 @@ def ends_the_world(typed: str) -> bool:
     too: nothing a player needs is lost by that, and the console would not have
     run it either.
     """
-    words = typed.strip().lstrip(".").lower().split()
+    stripped = typed.strip()
+    # One leading `.` OR `!`, as every core's console strips it and as `line()` does (T745):
+    # `!server shutdown 1` closes the world just the same.
+    if stripped[:1] in (".", "!"):
+        stripped = stripped[1:]
+    words = stripped.lower().split()
     if len(words) < 2 or not "server".startswith(words[0]):
         return False
     if not any(verb.startswith(words[1]) for verb in _ENDS_THE_WORLD):

@@ -293,6 +293,56 @@ def test_a_stale_part_file_from_an_earlier_attempt_is_overwritten(tmp_path: Path
     assert not part.exists()
 
 
+def test_a_digest_is_checked_on_the_part_before_anything_wears_the_real_name(
+    tmp_path: Path,
+) -> None:
+    """T745: unverified bytes never sit under the real name, and what was there is kept."""
+    dest = tmp_path / "Yulon.tar.gz"
+    dest.write_bytes(b"what was here before")
+    with pytest.raises(UpdateError, match="checksum does not match"):
+        download(
+            "https://github.com/x/y/releases/download/v1/Yulon.tar.gz",
+            dest,
+            expected_size=3,
+            progress=_nothing,
+            cancelled=_never,
+            open_url=_opener(_Response([b"bad"])),
+            digest=hashlib.sha256(b"new").hexdigest(),
+        )
+    assert dest.read_bytes() == b"what was here before"
+    assert sorted(p.name for p in tmp_path.iterdir()) == [dest.name], "the .part was left"
+
+
+@pytest.mark.parametrize(
+    ("name", "free"),
+    [
+        ("Yulon-v1-x86_64.tar.gz", "Yulon-v1-x86_64 (1).tar.gz"),
+        ("Yulon-v1-macos.dmg", "Yulon-v1-macos (1).dmg"),
+        ("Yulon-v1-x86_64.AppImage", "Yulon-v1-x86_64 (1).AppImage"),
+        ("Yulon-v1-windows-x64.zip", "Yulon-v1-windows-x64 (1).zip"),
+    ],
+)
+def test_keeping_what_is_there_saves_under_the_next_free_name(
+    tmp_path: Path, name: str, free: str
+) -> None:
+    dest = tmp_path / name
+    dest.write_bytes(b"the player's")
+    out = download(
+        f"https://github.com/x/y/releases/download/v1/{name}",
+        dest,
+        expected_size=3,
+        progress=_nothing,
+        cancelled=_never,
+        open_url=_opener(_Response([b"new"])),
+        digest=hashlib.sha256(b"new").hexdigest(),
+        keep_existing=True,
+    )
+    assert out == tmp_path / free
+    assert out.read_bytes() == b"new"
+    assert dest.read_bytes() == b"the player's"
+    assert sorted(p.name for p in tmp_path.iterdir()) == sorted([name, free])
+
+
 # -- sha256 and verify -------------------------------------------------------
 
 

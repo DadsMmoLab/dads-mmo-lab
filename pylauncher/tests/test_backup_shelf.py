@@ -1305,3 +1305,45 @@ def test_a_kept_file_can_be_neither_deleted_nor_cleaned_up(server: Path) -> None
         backup_shelf.plan_delete(found, name)
     plan = backup_shelf.plan_clean_up(found, Rule(older_than_days=0), now=NOW)
     assert name not in plan.names
+
+
+# ------------------------------------------------------------------ a pack's leftover (T747)
+
+
+def test_a_leftover_move_dump_reads_as_a_leftover_and_can_be_deleted(server: Path) -> None:
+    """A pack killed mid-zip left its auth dump (every verifier, no realmlist) in backups/."""
+    path = put(server, "20261012_090000", "acore_auth", label="move")
+    age(path)
+    r = row(shelf(server), path.name)
+    assert (r.label, r.database) == ("move", "acore_auth")
+    assert r.usable is False, "a move package's working copy is never a good copy"
+    assert r.problem and "not a backup" in r.problem
+    assert "move package" in backup_shelf.describe(r, GAME)
+    assert r.cannot_delete is None, r.cannot_delete
+    assert backup_shelf.plan_delete(shelf(server), r.name).names == (r.name,)
+    assert path.name in backup_shelf.plan_clean_up(shelf(server), Rule(include_unusable=True)).names
+
+
+def test_a_newer_move_leftover_never_takes_the_newest_good_copy_from_a_real_backup(
+    server: Path,
+) -> None:
+    mine = put(server, "20261001_100000", "acore_auth")
+    leftover = put(server, "20261012_090000", "acore_auth", label="move")
+    age(leftover)
+    found = shelf(server)
+    assert row(found, mine.name).kept_because == "it is the newest good copy of acore_auth."
+    assert row(found, mine.name).cannot_delete is not None
+    assert row(found, leftover.name).kept_because is None
+    plan = backup_shelf.plan_clean_up(found, Rule(keep_newest=1, include_unusable=True), now=NOW)
+    assert mine.name not in plan.names
+    assert leftover.name in plan.names
+
+
+def test_a_players_backup_of_a_database_named_move_something_is_still_a_good_copy(
+    server: Path,
+) -> None:
+    """The label is only read when the file's own `USE` line agrees (as for every label)."""
+    path = put(server, "20261001_100000", "move_stuff")
+    r = row(shelf(server), path.name)
+    assert (r.label, r.database, r.usable) == (None, "move_stuff", True)
+    assert r.kept_because == "it is the newest good copy of move_stuff."

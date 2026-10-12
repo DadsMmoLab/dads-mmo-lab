@@ -80,11 +80,20 @@ _FIXED_LABELS = (
     "pre-restore",
     "before-move-load",
     "before-move",
+    "move",
 )
 # What a move into this server writes (T601): the copy taken first, and the copies taken
 # before each load. Read before the `before-<id>` shape, or a move would read as an item
 # called "move".
 _MOVE_LABELS = ("before-move", "before-move-load")
+# A pack's own dump (T747): a working file an older Yu'lon wrote into this folder and a killed
+# pack left behind. It holds every verifier, and an auth one leaves out the realm row, so it is
+# never a good copy: listed as a leftover the player may delete.
+_LEFTOVER_LABELS = ("move",)
+PACK_LEFTOVER = (
+    "Left over from making a move package that did not finish. It is not a backup (an accounts "
+    "copy leaves out the realm list), and it holds every account's login data: delete it."
+)
 _IN_USE_MINUTES = 30
 """A `.partial` changed this recently may still be being written, so it is left alone."""
 _ITEM_LABEL_LEAD = "before-"
@@ -396,6 +405,8 @@ def _row(path: Path, name: str, kind: Kind, st: os.stat_result, game_id: str | N
                 continue
             label, database = cand_label, cand_db
             break
+    if usable and label in _LEFTOVER_LABELS:
+        usable, problem = False, PACK_LEFTOVER
     item = None
     if label is not None and label not in _FIXED_LABELS and label.startswith(_ITEM_LABEL_LEAD):
         item = label.removeprefix(_ITEM_LABEL_LEAD)
@@ -973,6 +984,7 @@ _MADE_BY = {
     "after-new-build": "the new build's data, taken as an update went back",
     "before-move": "taken before moving accounts and characters in",
     "before-move-load": "taken before one step of moving in",
+    "move": "left over from making a move package",
 }
 
 
@@ -1012,6 +1024,8 @@ def describe(r: ShelfRow, game_id: str | None = None) -> str:
     parts = [when, database, size, what_made_it(r), game]
     if r.unchecked:
         parts.append("could not be checked")
+    elif r.label in _LEFTOVER_LABELS and r.kind == "dump":
+        parts.append("not a backup")
     elif not r.usable and r.kind == "dump":
         parts.append("cut short or unreadable")
     return " · ".join(parts)

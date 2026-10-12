@@ -3209,13 +3209,6 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "and Yu'lon's records skipped) to READ its files into a move package. It decides no "
         "write: the files are read, never changed, and the package is written elsewhere"
     ),
-    ("move_flows.py", "_backup_for_the_package"): (
-        "T601. Lists the server's own `sql_scripts/backups/` before and after a pack's backup, "
-        "to delete the dumps THAT backup wrote when it fails part-way (only names that were "
-        "not there before, and only `*_move_*`, the label the pack gives them). It decides no "
-        "write outside the install: those files are the run's own, in the install's own "
-        "backups folder, and an auth dump with every verifier must not stay behind"
-    ),
     ("catalog/families/mmaps.py", "_keep_finished"): (
         "T209. Lists `data/mmaps` -- the pathfinding job's own output folder, refused when it "
         "or `data/` is a link -- to remove each `.mmtile` that is not whole (the tile the "

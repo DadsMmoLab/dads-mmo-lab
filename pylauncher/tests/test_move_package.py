@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import stat
+import sys
 import zipfile
 from datetime import datetime
 from pathlib import Path
@@ -479,14 +482,15 @@ def test_a_full_disk_while_unpacking_says_so_with_the_size_needed(
     package = read_package(path)
     out = tmp_path / "out"
     out.mkdir()
-    real_open = Path.open
+    real_opener = move._private_opener
 
-    def full(self: Path, mode: str = "r", *a: object, **k: object):  # type: ignore[no-untyped-def]
-        if self.parent == out:
+    # The unpacked dump is opened through the private opener (T745), so that is where it fails.
+    def full(path: str, flags: int) -> int:
+        if Path(path).parent == out:
             raise OSError(errno.ENOSPC, "No space left on device")
-        return real_open(self, mode, *a, **k)  # type: ignore[arg-type]
+        return real_opener(path, flags)
 
-    monkeypatch.setattr(Path, "open", full)
+    monkeypatch.setattr(move, "_private_opener", full)
     with pytest.raises(MovePackageError) as raised:
         package.extract("acore_auth", out)
     assert str(raised.value) == (
@@ -504,14 +508,15 @@ def test_another_write_failure_while_unpacking_is_not_called_a_bad_package(
     package = read_package(path)
     out = tmp_path / "out"
     out.mkdir()
-    real_open = Path.open
+    real_opener = move._private_opener
 
-    def denied(self: Path, mode: str = "r", *a: object, **k: object):  # type: ignore[no-untyped-def]
-        if self.parent == out:
+    # The unpacked dump is opened through the private opener (T745), so that is where it fails.
+    def denied(path: str, flags: int) -> int:
+        if Path(path).parent == out:
             raise OSError(errno.EACCES, "Permission denied")
-        return real_open(self, mode, *a, **k)  # type: ignore[arg-type]
+        return real_opener(path, flags)
 
-    monkeypatch.setattr(Path, "open", denied)
+    monkeypatch.setattr(move, "_private_opener", denied)
     with pytest.raises(MovePackageError) as raised:
         package.extract("acore_auth", out)
     assert str(raised.value) != move.NOT_A_PACKAGE
@@ -552,3 +557,47 @@ def test_counts_phrase_says_what_travels_in_plain_words() -> None:
     assert counts_phrase(Counts(accounts=2, characters=3, bot_accounts=500)) == (
         "2 accounts and 3 characters of players, plus 500 bot accounts"
     )
+
+
+# ------------------------------------------------------------------ owner only (T745)
+
+
+def _mode(path: Path) -> int:
+    return stat.S_IMODE(path.stat().st_mode)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX modes; Windows has the folder's ACL")
+def test_the_package_is_owner_only_like_the_dumps_it_carries(tmp_path: Path) -> None:
+    """It holds every account's verifier and salt, as a backup does (T683 S5 made those 0600)."""
+    old = os.umask(0o002)  # Ubuntu's default user umask
+    try:
+        dest = tmp_path / "yulon-move-wow-wotlk-20261012-1200-keep-private.zip"
+        write_package(dest, header(), [dump(tmp_path, "acore_auth")])
+    finally:
+        os.umask(old)
+    assert _mode(dest) == 0o600, oct(_mode(dest))
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX modes; Windows has the folder's ACL")
+def test_a_leftover_partial_is_not_reused_with_the_mode_it_had(tmp_path: Path) -> None:
+    """A crash leaves `<name>.zip.partial`; opening it again would keep its old mode."""
+    dest = tmp_path / "out.zip"
+    leftover = dest.with_name(dest.name + ".partial")
+    leftover.write_bytes(b"what a crash left")
+    leftover.chmod(0o644)
+    write_package(dest, header(), [dump(tmp_path, "acore_auth")])
+    assert _mode(dest) == 0o600, oct(_mode(dest))
+    assert read_package(dest).manifest.databases[0].schema_name == "acore_auth"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX modes; Windows has the folder's ACL")
+def test_a_dump_unpacked_from_a_package_is_owner_only(tmp_path: Path) -> None:
+    path = pack(tmp_path, "acore_auth")
+    folder = tmp_path / "unpack"
+    folder.mkdir()
+    old = os.umask(0o002)
+    try:
+        written = read_package(path).extract("acore_auth", folder)
+    finally:
+        os.umask(old)
+    assert _mode(written) == 0o600, oct(_mode(written))

@@ -161,7 +161,7 @@ class MoveWorld:
     server_dir: Path
     mysql: FlowMysql
     backup: BackupFn
-    """`(only=, label=, ignore_tables=) -> BackupReport`, bound by `engine_for`."""
+    """`(only=, label=, ignore_tables=, directory=) -> BackupReport`, bound by `engine_for`."""
     plan_restore: PlanRestoreFn
     restore: RestoreFn
     """`(plan, safety_label) -> RestoreReport`."""
@@ -200,6 +200,7 @@ def engine_for(
         only: Sequence[str] | None = None,
         label: str | None = None,
         ignore_tables: Mapping[str, Sequence[str]] | None = None,
+        directory: Path | None = None,
     ) -> BackupReport:
         return maintenance.backup(
             server_dir,
@@ -208,6 +209,7 @@ def engine_for(
             only=only,
             label=label,
             ignore_tables=ignore_tables,
+            directory=directory,
             spec=spec,
             core_databases=core,
             running=running,
@@ -729,8 +731,8 @@ def _export_locked(
                 files=facts.files if facts is not None else (),
             )
         finally:
-            for dump in report.dumps:
-                dump.path.unlink(missing_ok=True)
+            # The working folder goes with them (T747), whether the pack worked or not.
+            shutil.rmtree(pack_folder(world.server_dir), ignore_errors=True)
     return ExportResult(path=dest, manifest=manifest, restarted=None)
 
 
@@ -742,16 +744,38 @@ def _tables_of(schema: str, path: Path) -> tuple[str, ...]:
     return tables
 
 
+PACK_FOLDER = ".move-out"
+"""The pack's working folder in `backups/` (T747): the Backups list shows top-level files only."""
+
+
+def pack_folder(server_dir: Path) -> Path:
+    """Where a pack writes the dumps it zips: never where the Backups list reads."""
+    return maintenance.backups_dir(server_dir) / PACK_FOLDER
+
+
 def _backup_for_the_package(
     world: MoveWorld, wanted: Sequence[str], auth: str | None
 ) -> BackupReport:
-    """The engine's backup of the packed schemas, and no stray dump if it fails part-way.
+    """The engine's backup of the packed schemas, into the pack's own working folder.
 
-    The dumps are this run's own files in `backups/`, and an auth dump among them holds every
-    account's verifier: left behind after a failure, Restore would list it as an ordinary backup.
+    An auth dump among them holds every account's verifier and, for accounts and characters,
+    leaves out the realm row. Written into `backups/` itself, a pack killed before its clean-up
+    left it there as an ordinary backup the list kept and would not delete (T747). The working
+    folder is the owner's alone, emptied before this pack and removed after it; what a killed
+    pack left there goes at the next one.
     """
-    directory = maintenance.backups_dir(world.server_dir)
-    before = {p.name for p in directory.glob("*")} if directory.is_dir() else set()
+    work = pack_folder(world.server_dir)
+    try:
+        if work.is_symlink() or work.is_file():
+            work.unlink()
+        elif work.exists():
+            shutil.rmtree(work)
+        maintenance.backups_dir(world.server_dir).mkdir(parents=True, exist_ok=True, mode=0o700)
+        work.mkdir(mode=0o700)
+    except OSError as exc:
+        raise MoveError(
+            f"Yu'lon could not clear its working folder {work} ({exc}). Nothing was packed."
+        ) from exc
     try:
         return world.backup(
             only=wanted,
@@ -759,11 +783,10 @@ def _backup_for_the_package(
             # A whole server keeps its realm row (the old name travels; the address is put
             # right on the new computer). Accounts and characters leave it with the server.
             ignore_tables={auth: (world.entry.realmlist.table,)} if auth is not None else None,
+            directory=work,
         )
     except BaseException:
-        for path in directory.glob("*_move_*"):
-            if path.name not in before:
-                path.unlink(missing_ok=True)
+        shutil.rmtree(work, ignore_errors=True)
         raise
 
 
@@ -1167,7 +1190,9 @@ def _import_locked(
     folder = maintenance.backups_dir(world.server_dir) / (
         ".move-in-" + world.now().strftime("%Y%m%d-%H%M%S")
     )
-    folder.mkdir(parents=True, exist_ok=False)
+    # The owner's alone (T745): the auth dump unpacked here holds every verifier, and a
+    # backups folder made before T683 S5 is 0775.
+    folder.mkdir(parents=True, exist_ok=False, mode=0o700)
     try:
         plans = _checked_plans(world, package, plan.schemas, folder)
         loaded: list[str] = []
@@ -1351,9 +1376,11 @@ __all__ = [
     "MoveError",
     "MoveServices",
     "MoveWorld",
+    "PACK_FOLDER",
     "Replaces",
     "engine_for",
     "export_package",
+    "pack_folder",
     "plan_export",
     "plan_import",
     "run_import",

@@ -290,8 +290,17 @@ def download(
     progress: Progress,
     cancelled: IsCancelled,
     open_url: Opener = _open,
+    digest: str | None = None,
+    keep_existing: bool = False,
 ) -> Path:
     """Fetch `url` to `dest`, reporting progress and stopping when asked.
+
+    `digest`, given, is checked on the `.part` BEFORE the rename (T745), so bytes that fail it
+    never wear the real name and a file already there is never touched by a refusal.
+    `keep_existing` is for a folder that is the player's (Downloads): nothing in it is ever
+    replaced, the file takes the next free name (`name (1).ext`), and the working file is
+    Yu'lon's own `.<name>.yulon-part`, not a `.part` a browser may be writing. The path the
+    file landed at is returned.
 
     Written to `<dest>.part` and renamed onto `dest` only after the byte count
     agrees with what the release declared, so nothing that is not a complete
@@ -307,7 +316,7 @@ def download(
     Every failure removes the `.part` and raises `UpdateError`; a `cancelled()`
     that answers True raises `Cancelled`, which the UI shows as nothing at all.
     """
-    part = dest.with_name(dest.name + ".part")
+    part = dest.with_name(f".{dest.name}.yulon-part" if keep_existing else dest.name + ".part")
     dest.parent.mkdir(parents=True, exist_ok=True)
     done = 0
     try:
@@ -366,7 +375,12 @@ def download(
                 f"The download stopped after {done} bytes; this release says it is "
                 f"{expected_size} bytes."
             )
-        os.replace(part, dest)
+        if digest is not None:
+            _refuse_unless_it_hashes_to(part, digest)
+        if keep_existing:
+            dest = _move_to_a_free_name(part, dest)
+        else:
+            os.replace(part, dest)
     except BaseException:
         # Every path, `Cancelled` and a KeyboardInterrupt included: a `.part`
         # left beside the install is rubbish nobody comes back for, and the
@@ -374,6 +388,49 @@ def download(
         part.unlink(missing_ok=True)
         raise
     return dest
+
+
+_COMPOUND_SUFFIXES = (".tar.gz", ".tar.xz", ".tar.bz2")
+_FREE_NAME_TRIES = 1000
+
+
+def _numbered(dest: Path, n: int) -> Path:
+    """`name (n).ext`, with `.tar.gz` kept whole: what a browser names a second copy."""
+    if n == 0:
+        return dest
+    lowered = dest.name.lower()
+    suffix = next((s for s in _COMPOUND_SUFFIXES if lowered.endswith(s)), dest.suffix)
+    stem = dest.name[: len(dest.name) - len(suffix)] if suffix else dest.name
+    return dest.with_name(f"{stem} ({n}){dest.name[len(stem) :]}")
+
+
+def _move_to_a_free_name(part: Path, dest: Path) -> Path:
+    """Give `part` the first of `dest`, `dest (1)`, ... that is free, never replacing a file.
+
+    A hard link fails when the name is taken, so the check and the claim are one step; a disk
+    that cannot link (FAT, some network shares) falls back to a rename, which on Windows also
+    refuses a name that is taken and on POSIX is checked first.
+    """
+    for n in range(_FREE_NAME_TRIES):
+        target = _numbered(dest, n)
+        try:
+            os.link(part, target)
+        except FileExistsError:
+            continue
+        except OSError:
+            if os.path.lexists(target):
+                continue
+            try:
+                os.rename(part, target)
+            except FileExistsError:
+                continue
+            return target
+        part.unlink()
+        return target
+    raise UpdateError(
+        f"{dest.parent} already holds {dest.name} and {_FREE_NAME_TRIES - 1} numbered copies of "
+        "it, so Yu'lon did not save another. Nothing was installed."
+    )
 
 
 def _refuse_if_stalled(watcher: _Deadline) -> None:
@@ -407,9 +464,16 @@ def verify(path: Path, digest: str) -> None:
     claims to be a build of Yu'lon and is not, sitting beside the install under
     a name the next attempt would otherwise find.
     """
+    try:
+        _refuse_unless_it_hashes_to(path, digest)
+    except UpdateError:
+        path.unlink(missing_ok=True)
+        raise
+
+
+def _refuse_unless_it_hashes_to(path: Path, digest: str) -> None:
     actual = sha256_of(path)
     if actual != digest.strip().lower():
-        path.unlink(missing_ok=True)
         raise UpdateError(
             f"The download's checksum does not match what the release published "
             f"({actual[:16]}… instead of {digest.strip().lower()[:16]}…). "

@@ -1752,7 +1752,9 @@ def load_the_data(
         folder = maintenance.backups_dir(world.server_dir) / (
             ".move-in-" + world.now().strftime("%Y%m%d-%H%M%S")
         )
-        folder.mkdir(parents=True, exist_ok=False)
+        # The owner's alone (T745): the auth dump unpacked here holds every verifier, and a
+        # backups folder made before T683 S5 is 0775.
+        folder.mkdir(parents=True, exist_ok=False, mode=0o700)
         safety: list[Path] = []
         loaded: list[str] = []
         try:
