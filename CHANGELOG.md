@@ -17,7 +17,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 
 - The Maintenance tab lists the backups an earlier uninstall kept, so a reinstall can restore them.
 ### Fixed
-- A server build now tries once more when Docker stops answering while the server folder is being sent to it.
+- A server build now waits for Docker and tries once more when Docker stops answering during it.
 - The command channel now proves itself once the world is up, and **Turn on the command channel** gives its tries back.
 - **Bring from another computer…** is pressable again on a game's tile right after **Remove from Yu'lon**.
 - A restore still loading after "Quit anyway" now blocks starts, module and account writes, Back up now and moves, with its own message.

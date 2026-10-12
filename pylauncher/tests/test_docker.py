@@ -3730,9 +3730,13 @@ def test_a_service_whose_build_session_died_is_built_once_more_on_its_own_folder
     configs = [Path(config) for config, _, _ in build_env(build_cli)]
     assert configs[2] == configs[3]
     assert configs[2].name == "ac-db-import"
-    told = [line for line in lines_seen if line.startswith("Docker lost")]
-    assert len(told) == 1, lines_seen
-    assert "ac-db-import" in told[0]
+    assert lines_seen.count(docker.SESSION_RETRY_LINE) == 1, lines_seen
+    # T733 review N2: one short sentence that holds wherever the session died, so it
+    # names no service and quotes none of BuildKit's words.
+    said = docker.SESSION_RETRY_LINE
+    assert "ac-" not in said and "db-import" not in said
+    assert docker.SESSION_DIED not in said and "session" not in said.lower()
+    assert said.count(".") == 1 and said.endswith(".") and len(said) <= 80
 
 
 def test_a_build_session_that_dies_twice_ends_the_build_with_the_second_tries_lines(
@@ -3781,13 +3785,155 @@ def test_a_panel_that_refuses_the_retry_line_does_not_stop_the_retry(
     """
 
     def sink(line: str) -> None:
-        if line.startswith("Docker lost"):
+        if line == docker.SESSION_RETRY_LINE:
             raise RuntimeError("the panel is gone")
 
     _session_dies(build_cli, "ac-db-import", 1)
     run = docker.build_staged(_server_with(tmp_path, WOTLK_OVERLAY), THREE_FILES, sink=sink)
     assert run.returncode == 0, run.tail
     assert [line.split()[-1] for line in _build_lines(build_cli)].count("ac-db-import") == 2
+
+
+def _calls_around_the_retry(state: Path) -> list[str]:
+    """The fake's calls from the first db-import build on: builds by service, asks as `info`."""
+    seen = [
+        call.split()[-1] if call.startswith("compose ") else call.split()[0]
+        for call in fake_calls(state)
+        if call.startswith(("compose ", "info"))
+    ]
+    return seen[seen.index("ac-db-import") :]
+
+
+def test_the_second_try_waits_until_docker_answers_again(
+    build_cli: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T733 review N1: Docker was still not answering 55 s after the session died.
+
+    On yulon-win11 Yu'lon's own ask after the failure waited 16 s for an answer
+    (02:55:56 local). A second try sent into a Docker that does not answer dies
+    the same way, so the build asks Docker first, a pause apart, and builds again
+    only once it answers.
+    """
+    monkeypatch.setattr(docker, "SESSION_RETRY_POLL_S", 0.01)
+    _session_dies(build_cli, "ac-db-import", 1)
+    (build_cli / "info-unanswered").write_text("2", encoding="utf-8")
+    run = docker.build_staged(_server_with(tmp_path, WOTLK_OVERLAY), THREE_FILES)
+    assert run.returncode == 0, run.tail
+    assert _calls_around_the_retry(build_cli) == [
+        "ac-db-import",
+        "info",
+        "info",
+        "info",
+        "ac-db-import",
+        "ac-client-data-init",
+    ]
+
+
+def test_a_docker_that_never_answers_again_ends_the_build_with_the_first_failure(
+    build_cli: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Bounded (T733 review N1): no answer within the patience is the first try's answer.
+
+    Its status and lines are what the press reports, no second build is started
+    into a Docker that is not there, and no later service is built.
+    """
+    monkeypatch.setattr(docker, "SESSION_RETRY_POLL_S", 0.01)
+    monkeypatch.setattr(docker, "SESSION_RETRY_PATIENCE_S", 0.3)
+    _session_dies(build_cli, "ac-db-import", 1)
+    (build_cli / "info-unanswered").write_text("1000000", encoding="utf-8")
+    lines_seen: list[str] = []
+    run = docker.build_staged(
+        _server_with(tmp_path, WOTLK_OVERLAY), THREE_FILES, sink=lines_seen.append
+    )
+    assert run.returncode == 1
+    assert any("session healthcheck failed fatally" in line for line in run.tail)
+    around = _calls_around_the_retry(build_cli)
+    assert around[0] == "ac-db-import"
+    assert set(around[1:]) == {"info"}
+    assert len(around) >= 3
+    assert docker.SESSION_RETRY_LINE not in lines_seen
+
+
+def test_a_stop_during_the_ask_that_docker_answers_starts_no_second_try(
+    build_cli: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The wait honours Stop (T733 review N1): one pressed during the ask wins over its answer."""
+    cancel = threading.Event()
+    asked = docker.daemon_ready
+
+    def ask_then_stop(**kwargs: object) -> bool:
+        answer = asked(**kwargs)  # type: ignore[arg-type]
+        cancel.set()
+        return answer
+
+    monkeypatch.setattr(docker, "daemon_ready", ask_then_stop)
+    _session_dies(build_cli, "ac-db-import", 1)
+    run = docker.build_staged(_server_with(tmp_path, WOTLK_OVERLAY), THREE_FILES, cancel=cancel)
+    assert run.returncode == docker.CANCELLED_RETURNCODE
+    assert _calls_around_the_retry(build_cli) == ["ac-db-import", "info"]
+
+
+def test_a_stop_during_the_pause_ends_the_wait_at_once(
+    build_cli: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Stop between two asks lands at once, not after the pause (T733 review N1)."""
+    monkeypatch.setattr(docker, "SESSION_RETRY_POLL_S", 30.0)
+    cancel = threading.Event()
+    _session_dies(build_cli, "ac-db-import", 1)
+    (build_cli / "info-unanswered").write_text("1000000", encoding="utf-8")
+    asked = docker.daemon_ready
+
+    def ask_then_stop_soon(**kwargs: object) -> bool:
+        answer = asked(**kwargs)  # type: ignore[arg-type]
+        threading.Timer(0.2, cancel.set).start()  # after the ask: the Stop lands in the pause
+        return answer
+
+    monkeypatch.setattr(docker, "daemon_ready", ask_then_stop_soon)
+    started = time.monotonic()
+    run = docker.build_staged(_server_with(tmp_path, WOTLK_OVERLAY), THREE_FILES, cancel=cancel)
+    assert time.monotonic() - started < 10.0
+    assert run.returncode == docker.CANCELLED_RETURNCODE
+    assert _calls_around_the_retry(build_cli) == ["ac-db-import", "info"]
+
+
+def test_the_wait_for_docker_asks_the_installs_own_docker_each_ask_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every ask goes to the server's own Docker (a WSL distro's, T125) and has its own bound.
+
+    A `docker info` into a frozen Docker can hang, so no ask may run unbounded or
+    past the patience: each one gets at most `_SESSION_RETRY_ASK_S`, cut to what
+    is left, and none starts once the patience is spent (T733 review N1).
+    """
+    asks: list[tuple[str | None, float]] = []
+
+    def unanswered(*, wsl_distro: str | None = None, timeout: float = 30.0) -> bool:
+        asks.append((wsl_distro, timeout))
+        time.sleep(0.05)
+        return False
+
+    monkeypatch.setattr(docker, "daemon_ready", unanswered)
+    monkeypatch.setattr(docker, "SESSION_RETRY_POLL_S", 0.01)
+    monkeypatch.setattr(docker, "SESSION_RETRY_PATIENCE_S", 0.3)
+    started = time.monotonic()
+    assert docker._docker_answers_again("Ubuntu-24.04", None) is False
+    assert time.monotonic() - started < 0.3 + 0.05 + 1.0
+    assert len(asks) >= 2
+    assert {distro for distro, _ in asks} == {"Ubuntu-24.04"}
+    assert all(0 < timeout <= 0.3 for _, timeout in asks), asks
+    assert asks[0][1] == pytest.approx(0.3, abs=0.05)
+
+    asks.clear()
+    monkeypatch.setattr(docker, "SESSION_RETRY_PATIENCE_S", 600.0)
+    answers = iter([False, True])
+
+    def late(*, wsl_distro: str | None = None, timeout: float = 30.0) -> bool:
+        asks.append((wsl_distro, timeout))
+        return next(answers)
+
+    monkeypatch.setattr(docker, "daemon_ready", late)
+    assert docker._docker_answers_again(None, threading.Event()) is True
+    assert asks == [(None, docker._SESSION_RETRY_ASK_S), (None, docker._SESSION_RETRY_ASK_S)]
 
 
 def test_a_stop_that_ends_a_dead_session_is_not_tried_again(
@@ -3804,7 +3950,7 @@ def test_a_stop_that_ends_a_dead_session_is_not_tried_again(
     run = docker.build_staged(
         _server_with(tmp_path, WOTLK_OVERLAY), THREE_FILES, sink=sink, cancel=cancel
     )
-    assert run.returncode != 0
+    assert run.returncode == docker.CANCELLED_RETURNCODE
     assert [line.split()[-1] for line in _build_lines(build_cli)] == [
         "ac-worldserver",
         "ac-authserver",

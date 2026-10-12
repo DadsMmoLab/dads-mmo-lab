@@ -7126,8 +7126,11 @@ def build_staged(
     failed through the freeze and the Rebuild was over. A send that dies keeps
     nothing (measured on m910q and on the box), so without a retry the next
     press is just as cold. The second try runs on the same folder, so a send
-    that does finish is kept for every later Rebuild. It is made only once, and
-    never after a Stop; if it also fails, its run is the answer.
+    that does finish is kept for every later Rebuild. It waits until Docker
+    answers again (`_docker_answers_again()`, at most
+    `SESSION_RETRY_PATIENCE_S`); with no answer by then, the first try's run is
+    the answer, and a Stop during the wait ends the build as a Stop. It is made
+    only once, and never after a Stop; if it also fails, its run is the answer.
     `.notes/tickets/T733-windows-rebuild-context-timeout-on-big-server-folder.md`
     holds the measurements.
 
@@ -7192,11 +7195,20 @@ def build_staged(
         )
         run = build_it()
         if _session_died(run) and not (cancel is not None and cancel.is_set()):
-            said = session_died_line(service)
-            logger.warning(f"build_staged(): {said}")
+            answered = _docker_answers_again(wsl_distro, cancel)
+            if answered is None:
+                logger.warning(f"build_staged(): stopped while waiting for Docker ({service})")
+                return AttachedRun(CANCELLED_RETURNCODE, run.tail)
+            if not answered:
+                logger.warning(
+                    f"build_staged(): Docker did not answer within {SESSION_RETRY_PATIENCE_S:g} s "
+                    f"after {service}'s build session died; not trying again"
+                )
+                return run
+            logger.warning(f"build_staged(): {service}'s build session died; building it again")
             with contextlib.suppress(Exception):  # run_attached()'s rule: a dead sink is dropped
                 if sink is not None:
-                    sink(said)
+                    sink(SESSION_RETRY_LINE)
             run = build_it()
         if run.returncode != 0:
             return run
@@ -7221,13 +7233,60 @@ def _session_died(run: AttachedRun) -> bool:
     return run.returncode != 0 and any(SESSION_DIED in line for line in run.tail)
 
 
-def session_died_line(service: str) -> str:
-    """What the build panel is told when one service is built a second time (T733)."""
-    return (
-        f"Docker lost touch with the build of {service} while the server folder was "
-        f'being sent to it ("{SESSION_DIED}"), so {service} is built once more. The '
-        "folder is sent again from the start, which can take several minutes."
-    )
+SESSION_RETRY_LINE = "Docker stopped answering during the build; trying once more."
+"""What the build panel is told before the second try (T733).
+
+True whenever the retry runs: the session can die while the context is sent or
+later in the build, so the line names neither the folder nor the service.
+"""
+
+SESSION_RETRY_PATIENCE_S = 180.0
+"""How long the build waits for Docker to answer before the second try (T733 review N1).
+
+On yulon-win11 Docker was still not answering about 55 s after the session died
+(Yu'lon's own ask then waited 16 s, 02:55:56 local). The three minutes are the
+recreate's own patience for the same Docker (`native.DOCKER_PATIENCE_S`).
+"""
+
+SESSION_RETRY_POLL_S = 5.0
+"""The pause between two asks while waiting (T733 review N1)."""
+
+_SESSION_RETRY_ASK_S = 10.0
+"""One ask's own bound: `docker info` against a Docker that is not answering can hang."""
+
+
+def _docker_answers_again(wsl_distro: str | None, cancel: threading.Event | None) -> bool | None:
+    """Ask Docker until it answers: True once it does, False after the patience, None on a Stop.
+
+    Each ask is `daemon_ready()`, the question every rebuild asks of the Docker
+    the install lives on: for a WSL server that is the distro's own Docker
+    through `wsl.exe` (T125), not the local CLI that `platform._wait_docker_ready()`
+    polls. `native`'s recreate wait (`DOCKER_PATIENCE_S`) is a stage method on
+    its seams and yields panel lines, so it cannot be called from here.
+
+    Bounded by the clock: no ask starts once `SESSION_RETRY_PATIENCE_S` is spent,
+    and each ask is cut to what is left (at most `_SESSION_RETRY_ASK_S`, which
+    `runner.run()` enforces by killing the ask). The pause is `cancel.wait()`, so
+    a Stop ends it at once; a Stop during an ask is read when the ask returns.
+    """
+    started = time.monotonic()
+    while True:
+        left = SESSION_RETRY_PATIENCE_S - (time.monotonic() - started)
+        if left <= 0:
+            return False
+        answered = daemon_ready(wsl_distro=wsl_distro, timeout=min(_SESSION_RETRY_ASK_S, left))
+        if cancel is not None and cancel.is_set():
+            return None
+        if answered:
+            return True
+        left = SESSION_RETRY_PATIENCE_S - (time.monotonic() - started)
+        if left <= 0:
+            return False
+        pause = min(SESSION_RETRY_POLL_S, left)
+        if cancel is None:
+            time.sleep(pause)
+        elif cancel.wait(pause):
+            return None
 
 
 BUILDER_PROBE_TIMEOUT = 30.0

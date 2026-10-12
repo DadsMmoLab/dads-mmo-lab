@@ -25,6 +25,8 @@ state folder. A `session-dies-<service>` file holding a count N makes the next N
 builds of that service end the way a build ends when BuildKit's session dies
 while the context is sent (T733): compose's own lines and exit 1; a
 `session-dies-late-<service>` file prints those words in a build that passes.
+`info` answers a server version, or, while `info-unanswered` holds a count N,
+refuses the next N asks as a daemon that is not answering would.
 It records `BUILDX_BUILDER` too (`build_builders()`, T413), and
 `buildx inspect` names the builder a plain build would use (`buildx-current`
 holds "<name> <driver>"; the default is the context's own `default`, driver
@@ -338,9 +340,21 @@ if args[:1] == ["compose"] and "build" in args:
     if (state / f"session-dies-late-{{target}}").exists():
         # The session dies after the context is in, and the build passes anyway: on
         # yulon-win11 the worldserver compile did exactly that (23:58Z, 2026-10-11).
+        # The line is a STAND-IN, not captured output: the daemon logged that death
+        # in Docker Desktop's VM log, and what the client printed was not kept.
         sys.stderr.write(
             "#17 WARNING: session healthcheck failed fatally: context deadline exceeded\\n"
         )
+    sys.exit(0)
+if args[:1] == ["info"]:
+    # T733 review N1: `docker info` is how Yu'lon asks whether Docker answers. With
+    # `info-unanswered` holding a count N, the next N asks get the daemon's refusal.
+    quiet = state / "info-unanswered"
+    if quiet.exists() and int(quiet.read_text(encoding="utf-8") or "0") > 0:
+        quiet.write_text(str(int(quiet.read_text(encoding="utf-8")) - 1), encoding="utf-8")
+        sys.stderr.write("Cannot connect to the Docker daemon. Is the docker daemon running?\\n")
+        sys.exit(1)
+    sys.stdout.write("29.0.0\\n")
     sys.exit(0)
 if args[:1] == ["logs"]:
     # `docker logs [--tail N] <name>`: the container's stdout on stdout and its
