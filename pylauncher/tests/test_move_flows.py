@@ -1410,8 +1410,10 @@ def _press_during_own_restore(
 def test_a_pack_during_this_yulons_own_restore_names_the_restore(
     tmp_path: Path, live_load: subprocess.Popen[bytes], load_named: bool
 ) -> None:
-    """T736: the restore's own sentence, never "did not finish ... Restore again".
+    """T736: the restore is named, never "did not finish ... Restore again".
 
+    T737: in a move's own words (`RESTORE_HOLDS_A_MOVE`), not the Start/Stop sentence the hold
+    carries, whose reason is what starting or stopping would do.
     Mutation: ask only `orphaned_restore_reason()` in `_refuse_if_unsafe` (it steps aside for
     this process's own hold, so the record's "did not finish" was said).
     """
@@ -1425,7 +1427,7 @@ def test_a_pack_during_this_yulons_own_restore_names_the_restore(
     )
     assert record_there, "the restore record was not in place: the test proves nothing"
     assert isinstance(plan, move_flows.ExportPlan), plan
-    assert plan.refusals == (forgetting.RESTORE_HOLDS_THE_SERVER,), plan.refusals
+    assert plan.refusals == (forgetting.RESTORE_HOLDS_A_MOVE,), plan.refusals
     assert move_flows.plan_export(box.world).allowed, "the restore is over: Pack goes ahead"
 
 
@@ -1446,7 +1448,7 @@ def test_a_pack_during_this_yulons_own_restore_stops_and_packs_nothing(tmp_path:
 
     raised, _ = _press_during_own_restore(box, pack)
     assert isinstance(raised, move_flows.MoveError), raised
-    assert str(raised) == forgetting.RESTORE_HOLDS_THE_SERVER
+    assert str(raised) == forgetting.RESTORE_HOLDS_A_MOVE
     assert events_at_press[0] == events_at_press[1], "the pack stopped, dumped or started"
     assert not list(folder.iterdir())
 
@@ -1463,4 +1465,78 @@ def test_a_bring_in_plan_during_this_yulons_own_restore_names_the_restore(
     )
     assert record_there
     assert isinstance(plan, move_flows.ImportPlan), plan
-    assert plan.refusals == (forgetting.RESTORE_HOLDS_THE_SERVER,), plan.refusals
+    assert plan.refusals == (forgetting.RESTORE_HOLDS_A_MOVE,), plan.refusals
+
+
+def test_a_start_during_the_same_restore_keeps_the_start_and_stop_sentence(tmp_path: Path) -> None:
+    """T737: only a move is told the move's sentence; a Start in the same restore keeps T216's.
+
+    Mutation: rewrite the hold's sentence itself instead of what a move is told (a Start would
+    then be told about packing).
+    """
+    from yulon import forgetting
+
+    box = Box(tmp_path, running_now=("ac-database",))
+
+    def start() -> object:
+        with docker._in_flight(box.server_dir, press=forgetting.PRESS_START):
+            return "started"
+
+    raised, record_there = _press_during_own_restore(box, start)
+    assert record_there
+    assert isinstance(raised, docker.ServerHeldError), raised
+    assert str(raised) == forgetting.RESTORE_HOLDS_THE_SERVER
+    said = forgetting.RESTORE_HOLDS_A_MOVE
+    assert said != forgetting.RESTORE_HOLDS_THE_SERVER
+    assert "Starting" not in said and "started or stopped" not in said, said
+    assert "Wait for the restore to finish, then try again." in said, said
+
+
+def test_a_start_during_an_accounts_bring_in_is_told_accounts_and_characters(
+    tmp_path: Path,
+) -> None:
+    """T737's other side: the Maintenance tab's Bring in keeps its own sentences.
+
+    Mutation: make `_database_session`'s hold and lease sentences the whole-server ones.
+    """
+    from yulon import forgetting
+
+    package = packed(tmp_path)
+    box = target(tmp_path)
+    plan = move_flows.plan_import(box.world, package)
+    assert plan.allowed, plan.refusals
+    said: dict[str, object] = {}
+    load = box.db.load_from
+
+    def start() -> object:
+        with docker._in_flight(box.server_dir, press=forgetting.PRESS_START):
+            return "started"
+
+    def backup() -> object:
+        with docker.maintenance_lease(
+            box.server_dir, forgetting.BACKUP_HOLDS_THE_DATABASES, press=forgetting.PRESS_BACKUP
+        ):
+            return "backed up"
+
+    def answer(name: str, press: Callable[[], object]) -> None:
+        try:
+            said[name] = press()
+        except Exception as exc:  # noqa: BLE001 - the press's answer, whatever it is
+            said[name] = exc
+
+    def load_and_press(source: IO[bytes]) -> None:
+        if not said:
+            for name, press in (("start", start), ("backup", backup)):
+                worker = threading.Thread(target=answer, args=(name, press))
+                worker.start()
+                worker.join(30)
+        load(source)
+
+    box.db.load_from = load_and_press  # type: ignore[method-assign]
+    move_flows.run_import(
+        box.world, plan, confirm=None, use_old_realm_name=False, stop_allowed=False
+    )
+    assert str(said.get("start")) == forgetting.MOVE_HOLDS_THE_SERVER, said
+    assert isinstance(said["start"], docker.ServerHeldError)
+    assert str(said.get("backup")) == forgetting.MOVE_HOLDS_THE_DATABASES, said
+    assert isinstance(said["backup"], docker.MaintenanceLeaseTaken)

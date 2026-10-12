@@ -1474,6 +1474,88 @@ def test_a_carry_on_while_this_yulons_own_restore_holds_the_folder_names_the_res
         alone=forgetting.RESTORE_WRITES_ALONE,
     ):
         lines, refused = _carry_on(mv)
-    assert str(refused) == forgetting.RESTORE_HOLDS_THE_SERVER
+    assert str(refused) == forgetting.RESTORE_HOLDS_A_MOVE  # T737: a move's own reason
     assert not any("last press stopped" in line for line in lines), lines
     assert (record.read_bytes(), record.stat().st_mtime_ns) == before, "the record was written"
+
+
+# ================================================== another window during a whole-server load
+
+
+def test_another_window_during_a_whole_server_load_is_told_a_server_is_being_brought_in(
+    tmp_path: Path,
+) -> None:
+    """T737: a whole-server bring-in's load names itself, not "Accounts and characters ...
+    on this server's Maintenance tab", which is the per-account Pack and Bring in.
+
+    Each press runs on a thread of its own (another window's), during the real run's first
+    load, under the hold, lease and `alone` the run itself took.
+    Mutation: `load_the_data` passes the per-account sentences (`_database_session`'s defaults).
+    """
+    from tests.test_move_flows import packed
+
+    mv = Move(tmp_path)
+    server_dir = mv.target.server_dir
+    (tmp_path / "accounts").mkdir()
+    accounts = packed(tmp_path / "accounts")
+    said: dict[str, object] = {}
+    load = mv.target.db.load_from
+
+    def answer(name: str, press: Callable[[], object]) -> None:
+        try:
+            said[name] = press()
+        except Exception as exc:  # noqa: BLE001 - the press's answer, whatever it is
+            said[name] = exc
+
+    def start() -> object:
+        with docker._in_flight(server_dir, press=forgetting.PRESS_START):
+            return "started"
+
+    def backup() -> object:
+        with docker.maintenance_lease(
+            server_dir, forgetting.BACKUP_HOLDS_THE_DATABASES, press=forgetting.PRESS_BACKUP
+        ):
+            return "backed up"
+
+    def module_sql() -> object:
+        with docker.server_hold(server_dir, "Install mod-transmog", spec=None):
+            return "written"
+
+    presses: dict[str, Callable[[], object]] = {
+        "pack": lambda: move_flows.plan_export(mv.target.world),
+        "bring in": lambda: move_flows.plan_import(mv.target.world, accounts),
+        "start": start,
+        "backup": backup,
+        "module": module_sql,
+    }
+
+    def load_and_press(source: object) -> None:
+        if not said:
+            for name, press in presses.items():
+                worker = threading.Thread(target=answer, args=(name, press))
+                worker.start()
+                worker.join(30)
+        load(source)  # type: ignore[arg-type]
+
+    mv.target.db.load_from = load_and_press  # type: ignore[method-assign]
+    mv.run()
+    assert set(said) == set(presses), said
+
+    pack, bring_in = said["pack"], said["bring in"]
+    assert isinstance(pack, move_flows.ExportPlan), pack
+    assert pack.refusals == (forgetting.MOVE_IN_HOLDS_THE_SERVER,), pack.refusals
+    assert isinstance(bring_in, move_flows.ImportPlan), bring_in
+    assert forgetting.MOVE_IN_HOLDS_THE_SERVER in bring_in.refusals, bring_in.refusals
+    assert isinstance(said["start"], docker.ServerHeldError), said["start"]
+    assert str(said["start"]) == forgetting.MOVE_IN_HOLDS_THE_SERVER
+    assert isinstance(said["backup"], docker.MaintenanceLeaseTaken), said["backup"]
+    assert str(said["backup"]) == forgetting.MOVE_IN_HOLDS_THE_DATABASES
+    assert isinstance(said["module"], docker.ServerHeldError), said["module"]
+    assert str(said["module"]) == forgetting.MOVE_IN_WRITES_ALONE
+    for sentence in (
+        forgetting.MOVE_IN_HOLDS_THE_SERVER,
+        forgetting.MOVE_IN_HOLDS_THE_DATABASES,
+        forgetting.MOVE_IN_WRITES_ALONE,
+    ):
+        assert "brought in from another computer" in sentence, sentence
+        assert "Accounts and characters" not in sentence and "Maintenance" not in sentence

@@ -77,6 +77,15 @@ RESTORE_HOLDS_THE_SERVER = (
     "would leave the databases half-written. Wait for the restore to finish, then try "
     "again. Nothing was started or stopped."
 )
+# T737: what a Pack or Bring in is told while that restore holds the server (`move_flows`'s
+# `move_held_reason()`). The sentence above is about starting and stopping, which a move asks
+# neither of; a move's own reason is what it would read or write.
+RESTORE_HOLDS_A_MOVE = (
+    "A restore is writing into this server's databases on its Maintenance tab. Packing them "
+    "now would take a half-restored copy, and bringing a move in would write over what is "
+    "being restored. Wait for the restore to finish, then try again. Nothing was packed or "
+    "brought in."
+)
 BACKUP_HOLDS_THE_SERVER = (
     "A backup is running on this server's Maintenance tab with the database started on its "
     "own for it, and the database is stopped again when the backup ends. Wait for the "
@@ -126,6 +135,23 @@ MOVE_HOLDS_THE_SERVER = (
 MOVE_HOLDS_THE_DATABASES = (
     "Accounts and characters are being packed or brought in on this server's Maintenance "
     "tab. Wait for that to finish, then try again."
+)
+# T737: the same three for a whole-server bring-in (the Catalog tile's "Bring from another
+# computer…") while it puts the databases in: it is not on the Maintenance tab, and it brings
+# in the whole server, not accounts and characters.
+MOVE_IN_HOLDS_THE_SERVER = (
+    "This server is being brought in from another computer, and its databases are being put "
+    "in with the database started on its own for it. Wait for that to finish, then try again. "
+    "Nothing was started or stopped."
+)
+MOVE_IN_HOLDS_THE_DATABASES = (
+    "This server is being brought in from another computer, and its databases are being put "
+    "in. Wait for that to finish, then try again."
+)
+MOVE_IN_WRITES_ALONE = (
+    "This server is being brought in from another computer, and nothing else may write to its "
+    "databases while they are being put in. Wait for that to finish, then try again. Nothing "
+    "was changed."
 )
 MOVE_RUNNING = (
     "Accounts and characters are being packed or brought in on this server's Maintenance "

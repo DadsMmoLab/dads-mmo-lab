@@ -54,7 +54,7 @@ from yulon.catalog.git_head import read_head_file
 from yulon.log import get_logger
 from yulon.manifest import Manifest, ManifestType
 from yulon.move import PackedModule, PackedSource, PackFile, ServerFacts, ServerSpec, counts_phrase
-from yulon.move_flows import PRESS_BRING_IN, MoveError, MoveWorld
+from yulon.move_flows import PRESS_BRING_IN, MoveError, MoveWorld, move_held_reason
 from yulon.server_build_presses import REBUILD, under_server_build
 from yulon.support import redact
 from yulon.support.sources import conf_files
@@ -1276,7 +1276,8 @@ class MovedInInstall:
         # save and `load_cut_off()` included: a restore load another Yu'lon left running (the
         # T730 sentence), or a job of this Yu'lon. The record then reads as "cut off" too, and
         # "The last press stopped ... put in again" beside "wait for it" said two things.
-        held = docker.held_reason(server_dir)
+        # T737: in a move's words, so a Restore's hold is not told as a Start's.
+        held = move_held_reason(server_dir)
         if held is not None:
             raise MoveError(held)
         record = _Record.read(server_dir, digest)
@@ -1724,7 +1725,9 @@ def load_the_data(
         because="the databases are put in",
         undone=undone,
         press=PRESS_BRING_IN,
-        alone=forgetting.MOVE_WRITES_ALONE,
+        alone=forgetting.MOVE_IN_WRITES_ALONE,
+        leased=forgetting.MOVE_IN_HOLDS_THE_DATABASES,
+        held=forgetting.MOVE_IN_HOLDS_THE_SERVER,
     ):
         roles = _present_roles(world, SERVER_ROLES)
         here = _read_versions(world, roles)

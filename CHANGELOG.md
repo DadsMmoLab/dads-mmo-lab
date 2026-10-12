@@ -21,6 +21,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - **Bring from another computer…** is pressable again on a game's tile right after **Remove from Yu'lon**.
 - A restore still loading after "Quit anyway" now blocks starts, module and account writes, Back up now and moves, with its own message.
 - Moving accounts or a whole server while a restore is still loading, Yu'lon's own included, now says to wait for it, not to restore again.
+- A press refused during **Bring from another computer…** now names it instead of an accounts and characters move.
 - Installing the Lua engine (ALE) on a WotLK server from an older Yu'lon no longer breaks its build with a compile error.
 - A genuine Vanilla 1.12.1 client is no longer warned about as a repack.
 - A module install into a folder Yu'lon cannot write now names the folder and says what to do.

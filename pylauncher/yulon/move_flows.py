@@ -264,6 +264,21 @@ def _server_is_up(world: MoveWorld) -> bool:
     return spec.world in names or spec.auth in names
 
 
+_FOR_A_MOVE = {forgetting.RESTORE_HOLDS_THE_SERVER: forgetting.RESTORE_HOLDS_A_MOVE}
+"""A hold's sentence that is about starting and stopping -> what a move is told instead (T737)."""
+
+
+def move_held_reason(server_dir: Path | str) -> str | None:
+    """`docker.held_reason()` in a move's words, or None when nothing holds the server.
+
+    T737: the Maintenance tab's Restore holds the server with the sentence a Start or Stop is
+    told (why starting or stopping would harm the restore). A Pack or Bring in is told
+    `RESTORE_HOLDS_A_MOVE` instead; every other holder's sentence is passed as it is.
+    """
+    held = docker.held_reason(server_dir)
+    return None if held is None else _FOR_A_MOVE.get(held, held)
+
+
 def _refuse_if_unsafe(world: MoveWorld) -> None:
     """Refuse a move out of or into a server whose databases cannot be trusted right now.
 
@@ -271,11 +286,12 @@ def _refuse_if_unsafe(world: MoveWorld) -> None:
     THIS Yu'lon (T736: the Maintenance tab's own Restore, whose record is in place while it
     loads), else a restore load another Yu'lon left running (T734, the T730 sentence). Either
     way the record is there too, but "did not finish ... Restore again" would have the player
-    fight the load. They are told the holder's own sentence instead: wait for it.
+    fight the load. They are told the holder's sentence instead, in a move's words
+    (`move_held_reason()`, T737): wait for it.
     """
     if world.ownership() is Ownership.UNKNOWN:
         raise MoveError(INSTALL_RECORD_DAMAGED)
-    held = docker.held_reason(world.server_dir)
+    held = move_held_reason(world.server_dir)
     if held is not None:
         raise MoveError(held)
     if maintenance.interrupted_restore(world.server_dir) is not None:
@@ -463,9 +479,19 @@ PRESS_BRING_IN = "Bring in a move"
 
 @contextlib.contextmanager
 def _database_session(
-    world: MoveWorld, *, because: str, undone: str, press: str, alone: str | None = None
+    world: MoveWorld,
+    *,
+    because: str,
+    undone: str,
+    press: str,
+    alone: str | None = None,
+    leased: str = forgetting.MOVE_HOLDS_THE_DATABASES,
+    held: str = forgetting.MOVE_HOLDS_THE_SERVER,
 ) -> Iterator[None]:
     """The leased, held, database-up stretch a move works in. `undone` names what did not happen.
+
+    `leased` and `held` are what another press is told while it runs: the Maintenance tab's
+    Pack and Bring in by default, the whole-server bring-in's own sentences from its load (T737).
 
     The same four steps the Maintenance tab's Backup and Restore take, in the same order: the
     lease (one Backup, Restore or move of a server at a time), the hold (no Start, Stop or
@@ -476,18 +502,14 @@ def _database_session(
     """
     with contextlib.ExitStack() as stack:
         try:
-            stack.enter_context(
-                docker.maintenance_lease(
-                    world.server_dir, forgetting.MOVE_HOLDS_THE_DATABASES, press=press
-                )
-            )
+            stack.enter_context(docker.maintenance_lease(world.server_dir, leased, press=press))
         except docker.MaintenanceLeaseTaken as exc:
             raise MoveError(f"{exc} {undone}") from exc
         try:
             stack.enter_context(
                 docker.hold_the_server(
                     world.server_dir,
-                    forgetting.MOVE_HOLDS_THE_SERVER,
+                    held,
                     press=press,
                     spec=world.spec,
                     wsl_distro=world.wsl_distro,
