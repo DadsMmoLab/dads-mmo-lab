@@ -125,6 +125,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A TBC, Vanilla, Tortoise or Centurion install that did not finish installing no longer starts on a half-imported world.
 
 ### Changed
+- On an older WotLK install, the first Rebuild sends the whole server to Docker once (about 5 GB); later ones are quick.
 - The Server tab's **Play** now starts the game; **Launcher…** opens the launcher. The tray's **Play** offers to start a stopped server.
 - The tray's menu and panel offer the same **Start**, **Stop**, **Restart** and **Play**; **Quit tray…** is **Quit Yu'lon…**.
 - **Battle Pass** no longer asks for its vendor's creature entry: the vendor it creates is always the one it uses.
