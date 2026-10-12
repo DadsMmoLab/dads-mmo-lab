@@ -2177,7 +2177,47 @@ REBUILD_CLOSING_NOTE_IMPORTED = (
 """`REBUILD_CLOSING_NOTE` for a family that imports before the new build starts (T706).
 
 Said only after the importer exited 0 and the world reported ready, so "were applied"
-is what the importer said of its own run, not a guess about the database."""
+is what the importer said of its own run, not a guess about the database. Also the update
+route's closing note for that family (T739): its own work runs the same importer (T220)."""
+
+UPDATE_CLOSING_NOTE = (
+    "The server is running the build that was just made, with every module in this folder "
+    "compiled into it. Any database update this press applied is named above. If a module you "
+    "added still does not seem to be there in-game, check the worldserver log for its own "
+    "startup line and for database updates it applied."
+)
+"""The update route's closing note for a family whose Rebuild imports nothing (T739).
+
+Its own work may apply SQL (CMaNGOS's world catch-up, T531; TrinityCore's world tables,
+T179), so `REBUILD_CLOSING_NOTE`'s "ran no SQL" is not this press's to say; live, an
+AzerothCore update said it right after its importer applied 91 queries (T707's proof)."""
+
+UNFINISHED_IMPORT_REFUSAL = (
+    "This server's first database import did not finish, so its databases are unfinished, "
+    "whatever rows it wrote before it stopped, and its world must not start on them. Press "
+    "Repair on the Server tab to clear what that import wrote and import again."
+)
+"""Why the engine starts no world while `docker.mark_import_under_way()`'s record stands (T739).
+
+The engine's half of the Controller's `FIRST_IMPORT_UNFINISHED` (T678). Asked without the
+databases: that record is written only over databases that read empty or were cleared, so
+while it stands every row in them is the unfinished import's, and a world started on them
+writes rows (bot accounts and characters, live on yulon-ubuntu2) after which Repair's own
+"characters were found" refusal leaves the server with no way on."""
+
+ENDED_IMPORT_REFUSAL = (
+    "This server's last database import was cut off before it finished, so its databases are "
+    "unfinished whatever their tables say, and its world must not start on them. Press Repair "
+    "on the Server tab to clear them and import again."
+)
+"""The same for T658's record (an importer that was ended), when the databases read
+`imported` or `partial`: the Controller's `IMPORT_ENDED`."""
+
+NEW_BUILD_NOT_STARTED_ON_AN_UNFINISHED_IMPORT = (
+    "This server's earlier database import never finished, and a rebuild's database updates "
+    "do not finish it, so the new build was not started."
+)
+"""The failure a Rebuild or update rolls back on when its recreate finds the record (T739)."""
 
 CORRECTIONS_WAIT_HINT = (
     'Stop ends this here and applies nothing: the world keeps running. "Stop now anyway" '
@@ -7482,10 +7522,46 @@ class StagedInstaller:
         before it starts the old build again. The spine's: `START_REFUSED_FILE`
         (T197 fix round 2), which a Rebuild (`rebuilding`) may clear for itself.
         TrinityCore's adds a world update left unfinished
-        (`trinitycore.world_update_start_refusal`).
+        (`trinitycore.world_update_start_refusal`). Then an import that never finished
+        (`unfinished_import_refusal()`, T739), for a Rebuild as well.
         """
         # T225 (live): with a stopped rebuild's build that may have landed since.
-        return folder_start_refusal(server_dir, self._seams.image_id, rebuilding=rebuilding)
+        # T739: a Rebuild is no way out of an unfinished import: its importer applies only
+        # updates and never clears what that import wrote, so each way a Rebuild ends -- its
+        # new build's start or its rollback's -- would start a world on those databases.
+        return folder_start_refusal(
+            server_dir, self._seams.image_id, rebuilding=rebuilding
+        ) or self.unfinished_import_refusal(server_dir)
+
+    def unfinished_import_refusal(
+        self, server_dir: Path, *, ask_the_databases: bool = True
+    ) -> str | None:
+        """Why no world may start while this server's import record stands, or None (T739).
+
+        The engine's half of `Controller.refuse_an_ended_import()`, with its rule:
+        `docker.mark_import_under_way()`'s record refuses on its own (every row is the
+        unfinished import's); T658's kill record refuses only when the databases read
+        `imported` or `partial`, never over a player's rows, and not when they cannot be
+        asked (a database that is down answers `unreadable`, as it does for Start).
+        `ask_the_databases` False reads the record only, for a question before a press.
+        No record, or a game with no import one-shot, asks nothing. The service is read off
+        the catalog entry, not `container_spec()`, which may read the compose file.
+        """
+        service = self.entry.containers.db_import
+        if not service:
+            return None
+        if not docker.one_shot_ended_marker(server_dir, service).is_file():
+            return None
+        if docker.import_record_is_from_empty(server_dir, service):
+            logger.warning(f"no start in {server_dir}: {UNFINISHED_IMPORT_REFUSAL}")
+            return UNFINISHED_IMPORT_REFUSAL
+        if not ask_the_databases or self._probe is None:
+            return None
+        state = self._probe()
+        if state.state in ("imported", "partial"):
+            logger.warning(f"no start in {server_dir}: {ENDED_IMPORT_REFUSAL}")
+            return ENDED_IMPORT_REFUSAL
+        return None
 
     def family_start_refusal(self, server_dir: Path) -> str | None:
         """The family's own reason no start may run, apart from `START_REFUSED_FILE` (T223).
@@ -9047,6 +9123,13 @@ class StagedInstaller:
             if servers_down is not None:
                 yield from servers_down.forward(ctx)
 
+        if not rollback and self.unfinished_import_refusal(ctx.server_dir) is not None:
+            # T739: the last door before the new build's world starts, asked once its own
+            # import has run (the database is up, so T658's record can be asked too). A
+            # rollback asks `start_refusal()` itself, before it comes here, and is left
+            # STOPPED with that sentence; raised here, the press rolls back to that.
+            raise InstallerError(NEW_BUILD_NOT_STARTED_ON_AN_UNFINISHED_IMPORT)
+
         # T657: right before the replace, with the old world already down on the update route:
         # the bot settings under the prefix the checkout being started reads (a Return and a
         # rollback rename back), or the refusal, with the old containers untouched.
@@ -9711,7 +9794,13 @@ class StagedInstaller:
             # T633's rule, on the Rebuild's own copy: older copies go only after a success.
             self._forget_older_copies(server_dir, own_copy)
         yield from self.after_ready(server_dir)
-        yield REBUILD_CLOSING_NOTE_IMPORTED if imports else REBUILD_CLOSING_NOTE
+        # T739: the update route's own work ran the importer too (T220) for the family whose
+        # Rebuild imports, and may have applied SQL for the others; "ran no SQL" is said only
+        # by a plain Rebuild that ran none.
+        if self.imports_with_the_servers_down():
+            yield REBUILD_CLOSING_NOTE_IMPORTED
+        else:
+            yield REBUILD_CLOSING_NOTE if servers_down is None else UPDATE_CLOSING_NOTE
         yield f"{self.entry.name} was rebuilt and is running in {server_dir}"
 
     @_reserving_call(REMOVE_KEPT_BUILD_LABEL)
@@ -10076,7 +10165,13 @@ class StagedInstaller:
         # now always receives this route's work and the work finishes only what the
         # family's own work finishes. Mixed image tags are repaired by a Rebuild
         # alone (`START_REFUSED_FILE`), never by moving the sources under them.
-        owed = unfinished_restore_refusal(server_dir) or owed_start_refusal(server_dir)
+        # T739: an import that never finished, too: this route's importer applies only
+        # updates, and its new build's start and its rollback's would both be refused.
+        owed = (
+            unfinished_restore_refusal(server_dir)
+            or owed_start_refusal(server_dir)
+            or self.unfinished_import_refusal(server_dir)
+        )
         if owed is not None:
             raise InstallerError(f"{owed} Nothing was started.")
         moving = self.sources_that_move()
@@ -12257,6 +12352,11 @@ class StagedInstaller:
         clash = self._modules_that_take_the_cores_names(server_dir)
         if clash is not None:
             return clash
+        # T739: the press refuses an unfinished import before its first stage; the record
+        # alone is read here, the databases are not asked before the question.
+        unfinished = self.unfinished_import_refusal(server_dir, ask_the_databases=False)
+        if unfinished is not None:
+            return unfinished
         state = read_state(server_dir, valid=self.stage_names())
         if state is None:
             return None
