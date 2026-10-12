@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.support_native import Recorder, engine
+from tests.support_native import ENTRY, Recorder, engine
 from tests.test_rebuild import (  # noqa: F401 - `cmangos_gate` is a fixture
     _Daemon,
     _daemon_for,
@@ -33,7 +33,7 @@ from tests.test_rebuild_parks_a_finished_build import (
     REUSED,
     _parked_once,
 )
-from yulon import docker
+from yulon import docker, resources
 from yulon.catalog import build_context, composegen, native
 from yulon.catalog.installer import InstallerError, InstallOptions
 
@@ -150,10 +150,13 @@ def test_a_stop_during_the_compile_puts_the_old_overlay_back(tmp_path: Path) -> 
     assert _overlay(server_dir) == old
 
 
-def test_an_overlay_that_cannot_be_rendered_leaves_the_old_one_and_builds(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_an_overlay_that_cannot_be_made_leaves_the_old_one_and_builds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Before T740 no Rebuild wrote the overlay; a render that fails is no worse than that."""
+    """Before T740 no Rebuild wrote the overlay; a template that fails is no worse than that.
+
+    Round 2: the reason goes to the log, not into the panel's sentence.
+    """
     rec = Recorder(images=True)
     server_dir = a_finished_install(rec, tmp_path)
     _fresh, old = _before_t525(server_dir)
@@ -165,13 +168,37 @@ def test_an_overlay_that_cannot_be_rendered_leaves_the_old_one_and_builds(
     said = list(engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
     assert "build" in rec.calls, rec.calls
     assert _overlay(server_dir) == old
-    told = [line for line in said if "the template is gone" in line]
-    assert len(told) == 1 and "uses the one already in the folder" in told[0], said
+    told = [line for line in said if composegen.BUILD_FILE in line]
+    assert len(told) == 1 and "could not prepare" in told[0], said
+    assert "uses the one already in the folder" in told[0] and "render" not in told[0], told
+    assert not any("the template is gone" in line for line in said), said
+    assert "the template is gone" in caplog.text
     assert OVERLAY_CLAUSE not in _note(said), _note(said)
 
 
+def test_an_overlay_that_cannot_be_read_leaves_it_and_builds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    rec = Recorder(images=True)
+    server_dir = a_finished_install(rec, tmp_path)
+    _fresh, old = _before_t525(server_dir)
+
+    def unreadable(*_args: object, **_kwargs: object) -> bool:
+        raise PermissionError(13, "Permission denied", "/srv/x/docker-compose.build.yml")
+
+    monkeypatch.setattr(composegen, "build_is_current", unreadable, raising=True)
+    said = list(engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
+    assert "build" in rec.calls, rec.calls
+    assert _overlay(server_dir) == old
+    told = [line for line in said if composegen.BUILD_FILE in line]
+    assert len(told) == 1 and "could not read" in told[0], said
+    assert "render" not in told[0] and "prepare" not in told[0], told
+    assert not any("Permission denied" in line for line in said), said
+    assert "Permission denied" in caplog.text
+
+
 def test_an_overlay_that_cannot_be_written_leaves_the_old_one_and_builds(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     rec = Recorder(images=True)
     server_dir = a_finished_install(rec, tmp_path)
@@ -184,32 +211,94 @@ def test_an_overlay_that_cannot_be_written_leaves_the_old_one_and_builds(
     said = list(engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
     assert "build" in rec.calls, rec.calls
     assert _overlay(server_dir) == old
-    told = [line for line in said if "No space left on device" in line]
+    told = [line for line in said if "could not be written again" in line]
     assert len(told) == 1 and "uses the one already in the folder" in told[0], said
+    assert not any("No space left on device" in line for line in said), said
+    assert "No space left on device" in caplog.text
+    assert not any(line.startswith(f"Wrote {composegen.BUILD_FILE}") for line in said), said
 
 
-def test_a_kept_build_made_on_the_old_overlay_is_removed_and_the_server_compiled(
+def test_a_crlf_copy_of_the_current_overlay_is_neither_written_nor_said_to_be(
     tmp_path: Path,
 ) -> None:
-    """The decision for the first Rebuild after T740 on an install that holds a kept build.
+    """Round 2: the plan and the write ask one question (`composegen.build_is_current()`).
 
-    A kept build made by an older Yu'lon recorded a fingerprint over the overlay from
-    before T525. The overlay is written again before F0, so F0 differs and T224's
-    exact-match rule removes the kept build and compiles. Simulated by giving the
-    record the fingerprint of the folder with the old overlay in it.
+    The write reads text, so a CRLF copy of the current overlay is the same text to it.
+    A plan that compared bytes said "Wrote ... again" and told the note, and wrote nothing.
+    """
+    rec = Recorder(images=True)
+    server_dir = a_finished_install(rec, tmp_path)
+    path = server_dir / composegen.BUILD_FILE
+    crlf = path.read_bytes().replace(b"\n", b"\r\n")
+    path.write_bytes(crlf)
+    said = list(engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
+    assert path.read_bytes() == crlf
+    assert not any(composegen.BUILD_FILE in line for line in said if line != _note(said)), said
+    assert OVERLAY_CLAUSE not in _note(said), _note(said)
+
+
+def _kept_over_the_old_overlay(tmp_path: Path) -> tuple[Recorder, _Daemon, Path, bytes, bytes]:
+    """A kept build an older Yu'lon made over the overlay from before T525.
+
+    Simulated by giving `_parked_once()`'s record the fingerprint of the folder with the
+    old overlay in it.
     """
     rec, daemon, server_dir = _parked_once(tmp_path)
-    _before_t525(server_dir)
+    fresh, old = _before_t525(server_dir)
     record_path = server_dir / native.PARKED_BUILD_FILE
     record = json.loads(record_path.read_text(encoding="utf-8"))
     record["fingerprint"] = build_context.fingerprint(server_dir, refs=_refs(server_dir))
     assert record["fingerprint"] is not None
     record_path.write_text(json.dumps(record), encoding="utf-8")
+    return rec, daemon, server_dir, fresh, old
+
+
+def test_a_kept_build_made_on_the_old_overlay_is_used_and_the_overlay_waits(
+    tmp_path: Path,
+) -> None:
+    """Round 2, the coordinator's decision: the kept build is used, as the confirmation says.
+
+    The overlay is left as it is on that press and written by the next, which has no
+    record once the kept build was used.
+    """
+    rec, daemon, server_dir, fresh, old = _kept_over_the_old_overlay(tmp_path)
     said = list(
         engine(rec, **_seams_of(rec, daemon)).rebuild(InstallOptions(server_dir=server_dir))
     )
+    assert "build" not in rec.calls, rec.calls
+    assert any(REUSED in line for line in said), said
+    assert _overlay(server_dir) == old
+    assert any("left as it is for now" in line for line in said), said
+    assert not any(line.startswith(f"Wrote {composegen.BUILD_FILE}") for line in said), said
+    assert "unless the kept build can be used with the file as it is" in _note(said)
+    assert native.read_parked_build(server_dir) is None
+    rec.calls.clear()
+    again = list(
+        engine(rec, **_seams_of(rec, daemon)).rebuild(InstallOptions(server_dir=server_dir))
+    )
     assert "build" in rec.calls, rec.calls
-    assert not any(REUSED in line for line in said), said
+    assert _overlay(server_dir) == fresh
+    assert OVERLAY_CLAUSE in _note(again) and "unless the kept build" not in _note(again)
+
+
+def test_a_kept_build_whose_files_changed_compiles_with_the_new_overlay(tmp_path: Path) -> None:
+    from tests.test_rebuild_parks_a_finished_build import SOURCE
+
+    rec, daemon, server_dir, fresh, _old = _kept_over_the_old_overlay(tmp_path)
+    (server_dir / SOURCE).write_text("void World::Update() { tick(); }\n", encoding="utf-8")
+    built: list[bytes] = []
+    seams = _seams_of(rec, daemon)
+    inner = seams["build"]
+    assert callable(inner)
+
+    def build(folder: Path, *args: object, **kw: object) -> object:
+        built.append(_overlay(folder))
+        return inner(folder, *args, **kw)
+
+    said = list(
+        engine(rec, **{**seams, "build": build}).rebuild(InstallOptions(server_dir=server_dir))
+    )
+    assert built == [fresh], "the compile was handed the old overlay"
     assert any(CHANGED in line for line in said), said
     assert native.read_parked_build(server_dir) is None
 
@@ -217,17 +306,19 @@ def test_a_kept_build_made_on_the_old_overlay_is_removed_and_the_server_compiled
 def test_a_build_kept_after_the_overlay_was_written_again_is_used_next_time(
     tmp_path: Path,
 ) -> None:
-    """The other half: F0 and the kept build's record are both taken over the new overlay.
+    """The keeping press puts the OLD overlay back after F1 was taken over the new one.
 
-    The press that keeps its build puts the OLD overlay back (nothing was replaced), and
-    the next press writes it again before F0, so the two fingerprints agree.
+    Round 2: with a record, the first F0 (old overlay) does not match, so the overlay is
+    written and F0 taken again, which matches, and the kept build is used.
     """
     rec, daemon, server_dir = _parked_after_a_rerender(tmp_path)
+    fresh = composegen.render_build(ENTRY, templates_root=resources.installers_dir())
     said = list(
         engine(rec, **_seams_of(rec, daemon)).rebuild(InstallOptions(server_dir=server_dir))
     )
     assert "build" not in rec.calls, rec.calls
     assert any(REUSED in line for line in said), said
+    assert _overlay(server_dir) == fresh.encode("utf-8")
 
 
 def _parked_after_a_rerender(tmp_path: Path) -> tuple[Recorder, _Daemon, Path]:
@@ -273,3 +364,25 @@ def test_a_cmangos_rebuild_writes_its_overlay_again_too(tmp_path: Path) -> None:
     assert built == [fresh]
     stages = [line for line in said if line.startswith("--- ")]
     assert stages == ["--- write-dockerfile", "--- build", "--- recreate", "--- ready"], said
+
+
+def test_the_confirmation_names_the_overlay_for_every_native_game_without_reading_it(
+    tmp_path: Path,
+) -> None:
+    """Round 2 (cold review): an edit under the marker is replaced, and the question says so.
+
+    The folder does not exist, so a confirmation that read it to decide would fail or drop
+    the sentence; it is static. `kept_build=False` keeps the kept-build read out too.
+    """
+    from yulon.catalog.catalog import load_catalog
+    from yulon.catalog.installer import rebuild_confirmation
+
+    entries = [e for e in load_catalog().games if e.install.native is not None]
+    assert len(entries) >= 4, "the catalog lost its native entries"
+    for entry in entries:
+        text = rebuild_confirmation(entry, tmp_path / "absent", kept_build=False)
+        paragraph = next((p for p in text.split("\n\n") if composegen.BUILD_FILE in p), "")
+        assert paragraph, (entry.id, text)
+        assert "including anything you changed underneath it" in paragraph, paragraph
+        assert "put back as it was" in paragraph, paragraph
+    assert not (tmp_path / "absent").exists()

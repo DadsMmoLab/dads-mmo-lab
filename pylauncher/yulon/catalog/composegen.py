@@ -1705,13 +1705,30 @@ def write_build(server_dir: Path, text: str) -> bool:
     return _write_one(path, text, replaceable=True)
 
 
+def build_is_current(server_dir: Path, text: str) -> bool:
+    """Does the build overlay on disk already say `text`, by the test `write_build()` writes on?
+
+    T740 round 2 (cold review): the Rebuild compared bytes to plan its write while the write
+    compared `read_text()`, which reads a CRLF copy as the same text, so a CRLF overlay was
+    reported written and never was. Both now ask `_already()`.
+
+    Raises:
+        OSError, UnicodeDecodeError: the file could not be read as UTF-8 text.
+    """
+    return _already(server_dir / BUILD_FILE, text)
+
+
+def _already(path: Path, text: str) -> bool:
+    return path.exists() and path.read_text(encoding="utf-8") == text
+
+
 def _write_one(path: Path, text: str, *, replaceable: bool) -> bool:
     if not replaceable and not is_ours(path):
         raise ComposeGenError(
             f"{path} was not written by Yu'lon, so it was not touched and nothing was "
             "installed. Point the install at an empty folder, or move that file aside."
         )
-    if path.exists() and path.read_text(encoding="utf-8") == text:
+    if _already(path, text):
         return False
     _replace_whole(path, text)
     return True

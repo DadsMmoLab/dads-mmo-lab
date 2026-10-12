@@ -619,6 +619,18 @@ def rebuild_confirmation(entry: CatalogEntry, server_dir: Path, *, kept_build: b
         if native_block is not None and native_block.dockerfile_dir is not None
         else ""
     )
+    # T740 round 2 (cold review): the press may write the build overlay again, and the
+    # Dockerfile's clause above was the only warning about a file replaced under a user's
+    # edit; WotLK and Unbound had none. Said statically: no folder is read on the GUI thread.
+    overlay = (
+        f"Before it compiles, Yu'lon may also write {composegen.BUILD_FILE} in that folder, "
+        "the file that tells Docker what to build, again from the template this version of "
+        "the app ships. While the line Yu'lon writes at its top is there, the file is "
+        "replaced, including anything you changed underneath it. If you stop the rebuild or it "
+        "fails before your server is replaced, it is put back as it was.\n\n"
+        if native_block is not None
+        else ""
+    )
     # T224: read off the record alone; no fingerprint is taken on the GUI thread.
     # `kept_build` False is a server inside a WSL distro, which keeps none (D4) and
     # whose folder a read would start (T133).
@@ -678,6 +690,7 @@ def rebuild_confirmation(entry: CatalogEntry, server_dir: Path, *, kept_build: b
             f"{MEASURED_BUILD_TIMES}.\n\n"
             f"{kept}"
             f"{recipe}"
+            f"{overlay}"
             f"{native.HELD_CONFIRMATION}\n\n"
             f"Say no and nothing happens at all."
         )
@@ -689,6 +702,7 @@ def rebuild_confirmation(entry: CatalogEntry, server_dir: Path, *, kept_build: b
         f"predict it better than that range does.\n\n"
         f"{kept}"
         f"{recipe}"
+        f"{overlay}"
         f"Your server will be STOPPED and its containers replaced once the compile finishes, "
         f"and it will be down until it reports ready. {database}\n\n"
         f"The build you have now is kept as a rollback while this runs. {rollback}\n\n"

@@ -532,9 +532,11 @@ def rebuild_opening_note(
     thing it does, and "does not touch your database" was false of it from then on.
 
     `rewrites_overlay` (T740): the build overlay on disk differs from this version's
-    render, so the press writes it again before the compile (`_plan_build_overlay()`).
+    template, so the press writes it again before the compile (`_plan_build_overlay()`).
     False when the file is already current, so the note stayed what it was for every
-    install that needs nothing.
+    install that needs nothing. With `parked` too, round 2 (cold review) made the write
+    wait on the kept build: it is written only if that build cannot be used with the file
+    as it is, and the clause says so.
     """
     compiles = (
         "compiles the server again from the source and modules in the folder below, or, if the "
@@ -559,7 +561,9 @@ def rebuild_opening_note(
     )
     overlay = (
         f"it writes {composegen.BUILD_FILE}, the file that tells Docker what to build, again "
-        "from the template this app ships, "
+        "from the template this app ships"
+        + (", unless the kept build can be used with the file as it is" if parked else "")
+        + ", "
         if rewrites_overlay
         else ""
     )
@@ -3209,10 +3213,10 @@ class _Parking:
 
 @dataclass(frozen=True)
 class _OverlayPlan:
-    """The build overlay a rebuild writes before F0 (T740): the new render and the old bytes.
+    """The build overlay a rebuild writes before F0 (T740): the new text and the old bytes.
 
-    `was` goes into the recipe ground, so `_put_recipe_back()` puts the old file back on
-    a failure or a Stop before the containers are replaced, as it does the Dockerfile.
+    T740 put `was` into `rebuild()`'s recipe ground, the map T8 made `_put_recipe_back()`
+    restore on a failure or a Stop before the containers are replaced.
     """
 
     fresh: str
@@ -8060,9 +8064,10 @@ class StagedInstaller:
         the install's stage, run with the install's body, and it really did
         happen.
 
-        T740 left this tuple as it was: the build overlay, the one compose file
-        only a build reads, is written again by `rebuild()` inside its `build`
-        wrapper, before F0 (`_plan_build_overlay()`), and not by a stage here.
+        T740 (2026-10-12) left this tuple as it was and had `rebuild()` write the
+        build overlay inside its `build` wrapper, before F0 (`_plan_build_overlay()`),
+        rather than add a stage here: the `composegen` module docstring described that
+        file as never auto-loaded and read by builds only.
         """
         recipe = (
             (self.stage_named(DOCKERFILE_STAGE),) if DOCKERFILE_STAGE in self.stage_names() else ()
@@ -9560,12 +9565,13 @@ class StagedInstaller:
         # The update route never holds: it refused up front (it cannot meet a gone build).
         held = self._held_by_an_unfinished_import(server_dir) if servers_down is None else None
         yield f"Rebuilding {self.entry.name} in {server_dir}"
-        # T740: the build overlay as this version renders it, or None when the file is
+        # T740: the build overlay from this version's template, or None when the file is
         # current. Asked here so the opening note can say so and the put-back has the bytes;
-        # written in the build stage, before F0.
+        # written in the build stage, around F0 (round 2: after it, with a kept build).
         overlay = yield from self._plan_build_overlay(server_dir)
         if overlay is not None:
             ground = {**ground, composegen.BUILD_FILE: overlay.was}
+        parked_before = read_parked_build(server_dir) is not None
         imports = servers_down is None and held is None and self.imports_with_the_servers_down()
         # T706 round 2 (owner, 2026-10-11): a Rebuild that imports copies the databases
         # first, with its servers down, and a rollback puts that copy back before the old
@@ -9584,7 +9590,7 @@ class StagedInstaller:
         window = servers_down if own_copy is None else self._rebuild_import_work(own_copy)
         yield rebuild_opening_note(
             renders_dockerfile=renders,
-            parked=read_parked_build(server_dir) is not None,
+            parked=parked_before,
             imports=imports,
             copies=bool(own_copy is not None and own_copy.names),
             rewrites_overlay=overlay is not None,
@@ -9652,12 +9658,17 @@ class StagedInstaller:
 
         def build(stage_ctx: StageContext) -> Iterator[str]:
             nonlocal built
-            if overlay is not None:
+            if overlay is not None and not parked_before:
                 # T740: before F0, so the fingerprint and the compile read the same overlay.
                 yield from self._write_build_overlay(server_dir, overlay)
             compiled_from.update(source_heads(server_dir, self.entry.emulator.sources))
             # T224: F0, after `write-dockerfile` rendered the recipe this compiles.
             parking.fingerprint = self._seams.context_fingerprint(server_dir, refs=refs)
+            if overlay is not None and parked_before:
+                # T740 round 2: a kept build is asked first, with the overlay as it is.
+                parking.fingerprint = yield from self._overlay_after_f0(
+                    server_dir, refs, overlay, parking.fingerprint
+                )
             used = yield from self._use_or_clear_the_kept_build(server_dir, refs, kept, parking)
             if used:
                 parking.after = parking.fingerprint
@@ -12354,7 +12365,7 @@ class StagedInstaller:
         return ground
 
     def _plan_build_overlay(self, server_dir: Path) -> Generator[str, None, _OverlayPlan | None]:
-        """The build overlay to write before this rebuild's F0, or None to leave it (T740).
+        """The build overlay to write in this rebuild's build stage, or None to leave it (T740).
 
         **How it got here.** `rebuild_stages()` left `generate-compose` out from its first
         version (its docstring gives the reason), and with it the build overlay. T525
@@ -12365,63 +12376,120 @@ class StagedInstaller:
         box (T733's gate, `.notes/gates/t733-build-context-2026-10-12/`). The `composegen`
         module docstring described the overlay as never auto-loaded, read by builds only,
         so T740 wrote it again the way `write-dockerfile` was made to write the recipe
-        (T8), and split `composegen.render_build()` out of `render()` to render it alone.
+        (T8), and split `composegen.render_build()` out of `render()` to make it alone.
+        On WotLK the compile that follows was meant to build authserver on worldserver's
+        buildx folder (T525); T733 measured a second send into a warm folder at 186 kB on
+        m910q and 563 kB on yulon-win11, against 1.41-1.53 GB cold. The `ac-authserver`
+        folder an earlier split Rebuild made was left where it was.
 
-        **The first Rebuild after T740, and the kept-build rule (T224).** `build_context`
-        was written to hash the overlay's bytes, so on an install whose overlay was older,
-        F0 is taken over the new file. A build kept by an earlier press was recorded over
-        the old file and no longer matches: it is removed and the server is compiled, as
-        for any changed file. That was T740's decision (its lane, owner asleep, 2026-10-12),
-        and it is what the confirmation's kept-build sentence promised when T740 was
-        written ("if the files it was made from have not changed since"). A build kept
-        after this records the new overlay, and the next press renders the same file, so
-        the two agree (`test_a_build_kept_after_the_overlay_was_written_again_is_used_next_time`).
-        On WotLK that compile was meant to build authserver on worldserver's buildx folder
-        (T525); T733 measured a second send into a warm folder at 186 kB on m910q and
-        563 kB on yulon-win11, against 1.41-1.53 GB cold.
+        **The kept-build rule (T224), round 2.** `build_context` was written to hash the
+        overlay's bytes, so writing it changes F0. Round 1 wrote it before F0 always, and
+        the cold review found the cost: a build kept over the old file was removed and
+        compiled again on the first press, though the confirmation says a kept build is
+        used when its files have not changed. The coordinator's decision (2026-10-12) was
+        to leave the overlay alone when a kept build is recorded. Taken literally it would
+        have thrown away the build a post-T740 press keeps: round 1 put the overlay into
+        the recipe ground, so that press put the OLD overlay back (`_put_recipe_back()`, T8)
+        after taking F1 over the new one. So with a
+        record, F0 is taken over the file as it is first, and the overlay is written,
+        and F0 taken again, only when that F0 does not match (`_overlay_after_f0()`):
+        - a build kept over the old file is used, and the overlay is left for the next
+          press, which has no record once the build is used;
+        - a build kept by a post-T740 press matches the second F0 and is used;
+        - a build whose files changed matches neither, and is compiled with the new file;
+        - a match whose images Docker no longer holds is compiled with the file as it is,
+          and the next press, with no record, writes it.
+        Without a record the overlay is written before F0, as in round 1.
 
-        None when the file already holds this version's render, as an install made since
-        T525 does, and as every press after the first finds it. A render or a read that
-        fails is said in one line and also answers None: no Rebuild wrote the overlay
-        before T740, so building on the one in the folder was the behaviour until then.
-        The marker was checked by `_refuse_unless_rebuildable()`, and is checked again by
+        None when the file already says what this version's template says, by the same
+        test `composegen.write_build()` writes on (`composegen.build_is_current()`; round 2:
+        a byte test planned a CRLF copy that the write then left alone). A template that
+        cannot be filled or a file that cannot be read is said in one line, with the
+        reason in the log, and also answers None: no Rebuild wrote the overlay before
+        T740, so building on the one in the folder was the behaviour until then. The
+        marker was checked by `_refuse_unless_rebuildable()`, and is checked again by
         `composegen.write_build()` at the write.
         """
         path = server_dir / composegen.BUILD_FILE
         try:
             fresh = composegen.render_build(self.entry, templates_root=self.installers_root)
-            was = path.read_bytes()
-        except (composegen.ComposeGenError, OSError) as exc:
-            logger.warning(f"could not render {path} again before the rebuild: {exc}")
+        except composegen.ComposeGenError as exc:
+            logger.warning(f"could not make {path} again from its template: {exc}")
             yield (
-                f"Yu'lon could not render {composegen.BUILD_FILE} again ({exc}), so this build "
-                "uses the one already in the folder."
+                f"Yu'lon could not prepare a new {composegen.BUILD_FILE}, so this build uses the "
+                "one already in the folder. The log says why."
             )
             return None
-        if was == fresh.encode("utf-8"):
+        try:
+            was = path.read_bytes()
+            current = composegen.build_is_current(server_dir, fresh)
+        except (OSError, UnicodeDecodeError) as exc:
+            logger.warning(f"could not read {path} before the rebuild: {exc}")
+            yield (
+                f"Yu'lon could not read the {composegen.BUILD_FILE} in the server folder, so it "
+                "is left as it is and this build uses it. The log says why."
+            )
+            return None
+        if current:
             return None
         return _OverlayPlan(fresh=fresh, was=was)
 
-    def _write_build_overlay(self, server_dir: Path, overlay: _OverlayPlan) -> Iterator[str]:
-        """Write the overlay `_plan_build_overlay()` rendered; a failure is said, not raised (T740).
+    def _overlay_after_f0(
+        self,
+        server_dir: Path,
+        refs: Sequence[str],
+        overlay: _OverlayPlan,
+        first: str | None,
+    ) -> Generator[str, None, str | None]:
+        """With a kept build recorded: F0 as it stands, or the overlay written and F0 again.
 
-        Not raised for `_plan_build_overlay()`'s reason: the overlay in the folder still
-        builds the server, as it did on every Rebuild before T740. `_replace_whole()`
-        leaves the old file whole when the write fails, so there is nothing to put back.
+        T740 round 2; `_plan_build_overlay()` gives the reason. A first F0 that matches the
+        record keeps the overlay as it is, for `_use_or_clear_the_kept_build()`, which T224
+        wrote to use a build only on an exact match. Otherwise the overlay is written and F0
+        is taken over it: equal to a record that a post-T740 press made, and the kept build
+        is used; unequal, and the build is removed and the server compiled with the new
+        file, as with no record.
         """
-        try:
-            composegen.write_build(server_dir, overlay.fresh)
-        except (composegen.ComposeGenError, OSError) as exc:
-            logger.warning(f"could not write {server_dir / composegen.BUILD_FILE} again: {exc}")
+        record = read_parked_build(server_dir)
+        if record is not None and first is not None and first == record.fingerprint:
             yield (
-                f"{composegen.BUILD_FILE} could not be written again ({exc}), so this build "
-                "uses the one already in the folder."
+                f"The kept build was made with the {composegen.BUILD_FILE} in the folder now, "
+                "so that file is left as it is for now, and the next server build writes it "
+                "again."
             )
-            return
-        yield (
-            f"Wrote {composegen.BUILD_FILE} again from this version's template. If this "
-            "rebuild stops before your server is replaced, the old one is put back."
-        )
+            return first
+        written = yield from self._write_build_overlay(server_dir, overlay)
+        if not written:
+            return first
+        return self._seams.context_fingerprint(server_dir, refs=refs)
+
+    def _write_build_overlay(
+        self, server_dir: Path, overlay: _OverlayPlan
+    ) -> Generator[str, None, bool]:
+        """Write the overlay `_plan_build_overlay()` planned; True when it was (T740).
+
+        A failure is said, not raised, for `_plan_build_overlay()`'s reason: the overlay in
+        the folder was what every Rebuild before T740 built with.
+        `_replace_whole()` was written to leave the old file whole when a write fails, so
+        there is nothing to put back. The line is said only on `write_build()`'s own True
+        (round 2), so it cannot claim a write that did not happen.
+        """
+        path = server_dir / composegen.BUILD_FILE
+        try:
+            written = composegen.write_build(server_dir, overlay.fresh)
+        except (composegen.ComposeGenError, OSError, UnicodeDecodeError) as exc:
+            logger.warning(f"could not write {path} again: {exc}")
+            yield (
+                f"{composegen.BUILD_FILE} could not be written again, so this build uses the "
+                "one already in the folder. The log says why."
+            )
+            return False
+        if written:
+            yield (
+                f"Wrote {composegen.BUILD_FILE} again from this version's template. If this "
+                "rebuild stops before your server is replaced, the old one is put back."
+            )
+        return written
 
     def _put_recipe_back(
         self, ctx: StageContext, ground: Mapping[str, RecipeGround]
