@@ -91,8 +91,13 @@ def test_a_kept_rebuild_forgets_the_start_refusal_it_resolved(tmp_path: Path) ->
 def test_a_kept_rebuild_forgets_the_sources_off_record(tmp_path: Path) -> None:
     rec = Recorder(images=True)
     server_dir = a_finished_install(rec, tmp_path)
-    core = server_dir / ENTRY.emulator.sources[1].dest
-    assert native.remember_sources_off(server_dir, [("some/repo", core, OLD)]) == ""
+    # T758: a folder the Rebuild does not build from. A row for one it does (a source
+    # off its build) refuses the Rebuild before anything, so it never gets this far.
+    stray = server_dir / "elsewhere"
+    (stray / ".git").mkdir(parents=True)
+    (stray / ".git" / "HEAD").write_text("c" * 40 + "\n")
+    assert native.remember_sources_off(server_dir, [("some/repo", stray, OLD)]) == ""
+    assert native.sources_off_refusal(server_dir) is not None, "the ground: Start refuses"
 
     with pytest.raises(WorldStoppedAfterReadyError):
         list(

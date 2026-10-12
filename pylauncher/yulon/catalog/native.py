@@ -4020,10 +4020,23 @@ class StoppedBuild:
     refs: tuple[str, ...]
     fingerprint: str | None
     made_unix: int
+    readable: bool = True
+    """False for a record that is there but could not be read (T760): it names no ref, so
+    Start refuses (`STOPPED_BUILD_UNREADABLE_REFUSAL`) and the next press checks every one."""
+
+
+_UNREADABLE_STOPPED_BUILD = StoppedBuild((), None, 0, readable=False)
 
 
 def read_stopped_build(server_dir: Path) -> StoppedBuild | None:
-    """The record of a stopped build in `server_dir`, or None: absent, unreadable or not one."""
+    """The record of a stopped build in `server_dir`, or None when there is none.
+
+    A file that is there but cannot be read, or is not a record this version reads (a
+    power cut can leave it empty: it is written without an fsync), answers a record with
+    `readable` False, never None (T760). The start-refused and restore records fail
+    closed the same way: "no record" would let Start run a build Docker may have
+    finished in the background.
+    """
     path = server_dir / STOPPED_BUILD_FILE
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
@@ -4031,7 +4044,7 @@ def read_stopped_build(server_dir: Path) -> StoppedBuild | None:
         return None
     except (OSError, ValueError) as exc:
         logger.warning(f"{path} is not a stopped build's record: {exc}")
-        return None
+        return _UNREADABLE_STOPPED_BUILD
     refs = raw.get("refs") if isinstance(raw, dict) else None
     fingerprint = raw.get("fingerprint") if isinstance(raw, dict) else None
     if (
@@ -4048,7 +4061,7 @@ def read_stopped_build(server_dir: Path) -> StoppedBuild | None:
         or isinstance(raw.get("made_unix"), bool)
     ):
         logger.warning(f"{path} is not a stopped build's record this version reads")
-        return None
+        return _UNREADABLE_STOPPED_BUILD
     return StoppedBuild(tuple(refs), fingerprint, raw["made_unix"])
 
 
@@ -4094,11 +4107,14 @@ def stopped_build_refusal(server_dir: Path, image_id: Callable[[str], str | None
     the two answers (a lookup that timed out, a `-rollback` name deleted by hand)
     -- the check could not be completed, which refuses too
     (`STOPPED_BUILD_UNCHECKED_REFUSAL`); neither answers -- Docker is silent, and
-    a Start fails on its own then, so that alone refuses nothing. Never raises.
+    a Start fails on its own then, so that alone refuses nothing. A record that is there
+    but cannot be read refuses without asking (T760). Never raises.
     """
     record = read_stopped_build(server_dir)
     if record is None:
         return None
+    if not record.readable:
+        return STOPPED_BUILD_UNREADABLE_REFUSAL
 
     def ask(ref: str) -> str | None:
         try:
@@ -4131,6 +4147,15 @@ STOPPED_BUILD_UNCHECKED_REFUSAL = (
     f"{server_build_presses.under_server_build(server_build_presses.REBUILD)}, which settles it."
 )
 """Why no start may run while Docker half-answers the stopped-build check (T225, lead)."""
+
+STOPPED_BUILD_UNREADABLE_REFUSAL = (
+    "Yu'lon's record of a rebuild that was stopped could not be read, so it cannot check whether "
+    "that build finished in Docker's background, and if it did, a Start would run a build that "
+    "never started. Start is refused: press "
+    f"{server_build_presses.under_server_build(server_build_presses.REBUILD)}, which checks every "
+    "image tag of this server and settles it."
+)
+"""Why no start may run while the stopped-build record cannot be read (T760): fails closed."""
 
 
 def folder_start_refusal(
@@ -10503,9 +10528,17 @@ class StagedInstaller:
         # alone (`START_REFUSED_FILE`), never by moving the sources under them.
         # T739: an import that never finished, too: this route's importer applies only
         # updates, and its new build's start and its rollback's would both be refused.
+        # T758: but not the scripts record while a folder is off its build. Rebuild refuses
+        # that folder and names this press, and this record named Rebuild: a loop only a
+        # hand `git checkout` got out of. This press lays every script from the sources it
+        # builds, and a success clears the record; a rollback leaves the old build stopped
+        # under it, with its folders back on its commits, where Rebuild is no longer refused.
+        start_owed = owed_start_refusal(server_dir)
+        if start_owed == SCRIPTS_NOT_BACK_REFUSAL and sources_still_off(server_dir):
+            start_owed = None
         owed = (
             unfinished_restore_refusal(server_dir)
-            or owed_start_refusal(server_dir)
+            or start_owed
             or self.unfinished_import_refusal(server_dir)
         )
         if owed is not None:
@@ -11028,8 +11061,16 @@ class StagedInstaller:
         than inside the loop that moves them: the restore path needs a commit
         that was read before anything fetched, and a read taken after the first
         source has already moved is a read of a tree this press has changed.
+
+        T758: for a folder `SOURCES_OFF_FILE` says an earlier press left off its build,
+        the sha is the commit that build was made from, not the folder's HEAD. Every
+        put-back then returns it to the commit the old build runs on, so a rollback
+        starts the old build on its own sources (it started it on the stray ones, the
+        crash-loop T217 (a) refuses), and the family reads the move from the commit
+        the databases belong to.
         """
         ours = self.app_written_paths(server_dir)
+        off = {row.dest: row.built for row in sources_still_off(server_dir)}
         plan: list[tuple[EmulatorSource, Path, str]] = []
         for source in moving:
             dest = server_dir / source.dest
@@ -11080,7 +11121,7 @@ class StagedInstaller:
                     f"put that checkout back if the new build failed. Nothing in that folder "
                     f"was changed."
                 )
-            plan.append((source, dest, sha))
+            plan.append((source, dest, off.get(dest, sha)))
         return tuple(plan)
 
     def _moved_line(self, source: EmulatorSource, dest: Path, old: str) -> str:
@@ -11894,7 +11935,10 @@ class StagedInstaller:
         # Asked on every rollback, not only the update route's (T197 fix round 8): a
         # Rebuild pressed to repair MIXED tags (`START_REFUSED_FILE`) keeps those mixed
         # tags as its rollback, and a repair that failed must not start them again.
-        refused = self.start_refusal(ctx.server_dir)
+        # T758: nor on a folder `SOURCES_OFF_FILE` still names once the sources are back,
+        # the start every Start refuses (T217 (a)); `start_refusal()` leaves that record
+        # out only because "Return to the tested pin" is a way out of it.
+        refused = self.start_refusal(ctx.server_dir) or sources_off_refusal(ctx.server_dir)
         if mixed_scripts is not None and mixed_scripts.scripts:
             # T602: held in memory too, for a marker the disk would not take.
             refused = f"{refused or SCRIPTS_NOT_BACK_REFUSAL}{mixed_scripts.not_saved_note()}"
@@ -12168,8 +12212,9 @@ class StagedInstaller:
         """Put the tags back after a stopped build that landed, and keep it if it can (T225).
 
         Runs at the start of every rebuild, Update and Return, before the rollback is
-        kept. With no `STOPPED_BUILD_FILE` it asks nothing. A ref moved when it and its
-        `-rollback` name both answer and differ. A whole landed build is kept as
+        kept. With no `STOPPED_BUILD_FILE` it asks nothing; one it cannot read names no
+        ref, and every ref of the press is asked about all the same (T760). A ref moved
+        when it and its `-rollback` name both answer and differ. A whole landed build is kept as
         `<ref>-parked` with the fingerprint the stopped press took before it compiled
         (`_park()`'s write order), so the build stage may use it; a partial one is not.
         Every moved tag then goes back onto its `-rollback` name. A tag Docker will not
@@ -12760,13 +12805,20 @@ class StagedInstaller:
         """Refuse a Rebuild whose source folders are not where the running build came from (T217).
 
         "Where it came from" is the install record's `source_revs[].built`, which
-        only an update writes. With no record the folder is compared with this
-        Yu'lon's pin, and a difference is NOT refused: an install records nothing
-        and pins move between releases, so it is a server installed on an older
-        pin. The line returned says so and names Update to latest, which moves
-        the sources and the databases together. It never advises checking out the
-        pin, which would compile the new core over the old databases (the T220
-        crash; cold review of 23361ca3).
+        only an update that succeeded writes, else the commit `SOURCES_OFF_FILE`
+        names for the folder (T758): a first update that failed, or a Yu'lon that
+        died mid-compile, writes that record before any `source_revs` exists, and
+        compiling the moved folder then ran the new core on the old databases
+        without the update's database work (the T220 crash).
+
+        With neither, the folder is compared with this Yu'lon's pin, and a
+        difference is NOT refused: an install records nothing and pins move
+        between releases, so it is most likely a server installed on an older pin.
+        The line returned says "older pin" only where git shows the folder's
+        commit is in the pin's history (T758), and names Update to latest, which
+        moves the sources and the databases together. It never advises checking
+        out the pin, which would compile the new core over the old databases (the
+        T220 crash; cold review of 23361ca3).
 
         A folder git will not read is not refused either -- Rebuild is the repair
         press, and an unreadable checkout must not lock it out (the owner's answer
@@ -12780,10 +12832,12 @@ class StagedInstaller:
         """
         unchecked: list[str] = []
         update = server_build_presses.under_server_build(server_build_presses.UPDATE_TO_LATEST)
+        off = {row.dest: row.built for row in sources_still_off(server_dir)}
         for source in self.sources_that_move():
             dest = server_dir / source.dest
             recorded = state.rev_for(source.repo)
             built = recorded.built.split()[0] if recorded is not None and recorded.built else ""
+            built = built or off.get(dest, "")
             expected = built or (source.rev or "")
             if not expected:
                 continue
@@ -12796,15 +12850,33 @@ class StagedInstaller:
                 continue
             if not built:
                 if not head.startswith(expected):
-                    unchecked.append(
-                        f"{dest} is on {head[:7]}, an older pin than the {expected[:7]} this "
-                        f"version of Yu'lon ships. It is compiled as it stands. {update} "
-                        "moves every source to the new pin safely, the databases included."
-                    )
+                    unchecked.append(self._not_on_the_pin(dest, head, expected, update))
                 continue
             if not head.startswith(expected):
                 raise InstallerError(source_off_its_build(dest, head, expected))
         return tuple(unchecked)
+
+    def _not_on_the_pin(self, dest: Path, head: str, pin: str, update: str) -> str:
+        """The line for a folder with no recorded build that is not on this Yu'lon's pin.
+
+        "An older pin" only where git shows `head` in the pin's history (T758: the line
+        called a folder an update had moved PAST the pin an older one). A git that cannot
+        answer, or answers no, gets the line that claims neither.
+        """
+        try:
+            older = self._seams.is_ancestor(dest, head, pin)
+        except Exception as exc:  # noqa: BLE001 - a question for one sentence's wording
+            logger.warning(f"could not ask git whether {head[:7]} is older than {pin[:7]}: {exc}")
+            older = None
+        where = (
+            f"an older pin than the {pin[:7]} this version of Yu'lon ships"
+            if older is True
+            else f"not on the {pin[:7]} this version of Yu'lon ships"
+        )
+        return (
+            f"{dest} is on {head[:7]}, {where}. It is compiled as it stands. {update} moves "
+            "every source to the new pin safely, the databases included."
+        )
 
     def _modules_that_take_the_cores_names(self, server_dir: Path) -> str | None:
         """The sentence for a server module whose name the core's own `modules/` holds (T611).
@@ -12823,7 +12895,8 @@ class StagedInstaller:
         `.git/HEAD` is read first (`read_head_file()`, no git run), and only a
         folder it says is off its build is asked again of the press's own reader
         (`Seams.head_sha`). Where git cannot answer the press goes on, and so
-        does this: None. No record or no recorded build is None too.
+        does this: None. No recorded build -- neither `source_revs` nor a
+        `SOURCES_OFF_FILE` row for the folder (T758) -- is None too.
         """
         retired = server_build_gone.rebuild_refusal(self.entry, server_dir)
         if retired is not None:
@@ -12834,12 +12907,14 @@ class StagedInstaller:
         state = read_state(server_dir, valid=self.stage_names())
         if state is None:
             return None
+        off = {row.dest: row.built for row in sources_still_off(server_dir)}
         for source in self.sources_that_move():
+            dest = server_dir / source.dest
             recorded = state.rev_for(source.repo)
             built = recorded.built.split()[0] if recorded is not None and recorded.built else ""
+            built = built or off.get(dest, "")
             if not built:
                 continue
-            dest = server_dir / source.dest
             seen = read_head_file(dest)
             if seen is None or seen.startswith(built):
                 continue

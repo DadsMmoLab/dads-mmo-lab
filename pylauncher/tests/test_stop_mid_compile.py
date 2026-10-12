@@ -702,3 +702,77 @@ def test_the_tortoise_bot_rebuild_asks_the_servers_own_docker(
     assert isinstance(seam, poolreset.PoolRebuild)
     seam.image_id("yulon.local/tortoise:native-0")
     assert asked == ["Ubuntu-24.04"]
+
+
+# -- T760: a record that cannot be read fails closed ----------------------------
+
+UNREADABLE = native.STOPPED_BUILD_UNREADABLE_REFUSAL
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "",  # a power cut after the rename, before the bytes reached the disk
+        "{not json",
+        json.dumps({"version": 2, "refs": ["x"], "fingerprint": None, "made_unix": 1}),
+        json.dumps({"version": 1, "refs": [], "fingerprint": None, "made_unix": 1}),
+    ],
+)
+def test_a_stopped_build_record_that_cannot_be_read_refuses_start(
+    tmp_path: Path, body: str
+) -> None:
+    """T760: like the start-refused and restore records, never "no record" for one that is
+    there. Docker is not asked: the record names nothing to ask about."""
+    (tmp_path / native.STOPPED_BUILD_FILE).write_text(body, encoding="utf-8")
+    asked: list[str] = []
+    assert native.folder_start_refusal(tmp_path, lambda ref: asked.append(ref) or None) == (
+        UNREADABLE
+    )
+    assert asked == []
+    assert (
+        native.folder_start_refusal(tmp_path, lambda ref: None, rebuilding=True) is None
+    ), "the Rebuild it names is not refused"
+    rebuild = server_build_presses.under_server_build(server_build_presses.REBUILD)
+    assert rebuild in UNREADABLE and "could not be read" in UNREADABLE
+
+
+def test_no_stopped_build_record_refuses_nothing(tmp_path: Path) -> None:
+    assert native.folder_start_refusal(tmp_path, lambda ref: "sha256:x") is None
+
+
+def test_the_controllers_start_is_refused_by_an_unreadable_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Start a player presses, after a stop mid-compile whose record a power cut emptied
+    and whose build then landed: refused, where it ran the never-started build before."""
+    rec, daemon, server_dir = _recorded(tmp_path)
+    (server_dir / native.STOPPED_BUILD_FILE).write_text("", encoding="utf-8")
+    daemon.compiled()
+    controller = _controller_with(monkeypatch, server_dir, daemon.image_id)
+    with pytest.raises(StartRefused) as refused:
+        controller.refuse_start()
+    assert str(refused.value) == UNREADABLE
+
+
+def test_a_rebuild_settles_a_landed_build_whose_record_cannot_be_read(tmp_path: Path) -> None:
+    """T760: the press checks every ref of its own, so the tags go back on the build the
+    server ran, and the failed press keeps the (unreadable) record: Start stays refused."""
+    rec, daemon, server_dir = _recorded(tmp_path)
+    (server_dir / native.STOPPED_BUILD_FILE).write_text("", encoding="utf-8")
+    daemon.compiled()
+    rec.build_result = docker.AttachedRun(1, ("cc1plus: error",))
+    with pytest.raises(InstallerError) as failed:
+        list(engine(rec, **_seams_of(rec, daemon)).rebuild(InstallOptions(server_dir=server_dir)))
+    assert all(daemon.names[ref] == "before" for ref in _refs(server_dir)), daemon.names
+    assert sorted(daemon.transient()) == _rollback_names(server_dir), daemon.transient()
+    assert (server_dir / native.STOPPED_BUILD_FILE).is_file()
+    assert native.folder_start_refusal(server_dir, daemon.image_id) == UNREADABLE, failed.value
+
+
+def test_a_rebuild_that_succeeds_forgets_an_unreadable_record(tmp_path: Path) -> None:
+    rec, daemon, server_dir = _recorded(tmp_path)
+    (server_dir / native.STOPPED_BUILD_FILE).write_text("", encoding="utf-8")
+    daemon.compiled()
+    list(engine(rec, **_seams_of(rec, daemon)).rebuild(InstallOptions(server_dir=server_dir)))
+    assert not (server_dir / native.STOPPED_BUILD_FILE).exists()
+    assert native.folder_start_refusal(server_dir, daemon.image_id) is None
