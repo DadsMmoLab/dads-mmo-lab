@@ -1692,11 +1692,17 @@ def staged_up_argv(spec: ContainerSpec, *, force_recreate: bool = False) -> list
     was measured to decide on (`start_staged()` below, Docker 29.1.3) is
     "a service whose CONFIGURATION changed". A rebuild changes neither the
     compose files nor the image TAG — `composegen.image_tag()` is derived from
-    the folder — only the image the tag points at, and nothing in this
-    repository records what compose does with that. So the rebuild asks for the
-    replacement outright rather than hoping: the failure mode of hoping is an
-    hour of correct compiler output followed by the old binary still running,
-    which is the exact report this control exists to answer.
+    the folder — only the image the tag points at. What compose did with that
+    was measured by T741 on m910q (2026-10-12, Docker 29.9.0 with Compose 5.6.0,
+    and again with the standalone Compose 2.10.0): with only the image under the
+    tag changed, `up -d --no-deps` recreated the stopped long-running container
+    and Repair's `up --no-deps --exit-code-from` recreated the one-shot, both
+    without `--force-recreate` (`.notes/gates/t741-compose-recreate-m910q-2026-10-12/`).
+    Docker Desktop's Compose was not measured. The rebuild still asks for the
+    replacement outright rather than relying on that: the failure mode of a
+    compose that did not would be an hour of correct compiler output followed by
+    the old binary still running, which is the exact report this control exists
+    to answer.
     """
     argv = ["compose", "up", "-d"]
     if force_recreate:
