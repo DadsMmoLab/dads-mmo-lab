@@ -23,6 +23,7 @@ from typing import IO
 
 import pytest
 
+from tests.conftest import take_every_held_answer
 from tests.test_controller import _FakeRunner
 from tests.test_controller_view import _last, _put_back_view
 from tests.test_maintenance import good_dump
@@ -176,6 +177,7 @@ def test_a_modules_press_says_wait_for_the_restore_and_asks_nothing(
     assert asked == [] and view._module_pending is None
     view._restore_running = False
     view.shutdown()
+    take_every_held_answer()
 
 
 # -- L9: a dump that writes MySQL's own schema ----------------------------------------------

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from tests.conftest import wait_for_panel
 from tests.test_catalog_view import _FakeInstaller
 from yulon import move_server
 from yulon.catalog.catalog import load_catalog
@@ -87,6 +88,8 @@ def test_a_yes_to_the_plan_runs_its_engine_in_the_suggested_folder(
     mover = Mover(tmp_path)
     built, asked = view(tmp_path, mover)
     assert built.bring_from_another_computer(WOTLK) is True
+    # The job it started runs on the panel's thread: let it end here (T771).
+    wait_for_panel(built._log)
     folder = tmp_path / WOTLK.install.default_server_dir
     assert mover.planned == [(tmp_path / "w.zip", folder)]
     assert [a[0] for a in asked] == ["Bring this server in?"]

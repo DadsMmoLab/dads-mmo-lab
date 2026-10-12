@@ -635,10 +635,20 @@ def _app_window(qapp: object) -> Iterator[Any]:
 
     # A test about which tab exists must not also be shelling out to docker on a
     # 5-second timer, into a worker thread that outlives the assertions.
+    #
+    # Nor may a tab's own jobs (its tuning reads, the update news, the party panel's)
+    # outlive the test that opened it (T771): `build_window()` gives each tab the
+    # default threaded runner, and no test here pumps until all of them answer, so
+    # 65 tests left threads whose answers landed in a later test. A tab built here
+    # runs its jobs inline instead; a test that hands a view its own runner keeps it.
+    # The window's own runners (the update check, the start-up sweep) are untouched.
+    from yulon.ui.widgets.job import run_inline
+
     real_init = ControllerView.__init__
 
     def _no_polling(self: Any, entry: Any, services: Any, **kwargs: Any) -> None:
         kwargs["status_poll_ms"] = 0
+        kwargs.setdefault("job_runner", run_inline)
         real_init(self, entry, services, **kwargs)
 
     monkeypatch.setattr(ControllerView, "__init__", _no_polling)
@@ -1868,6 +1878,9 @@ def test_quitting_over_a_stop_still_joins_it_so_the_stop_finishes(
     the real job runner, released by a timer after the exit has begun waiting.
     Mutation: re-add the Stop branch to `_quick_exit_reason()`.
     """
+    from yulon.controller import InstallStatus
+    from yulon.ui.widgets.job import ThreadedJobRunner, in_flight, run_inline
+
     server_dir = tmp_path / "t690-stop-exit"
     _catalog_view(window).installed.emit("wow-wotlk", server_dir, None)
     view = _tab_for(window, server_dir)
@@ -1880,7 +1893,11 @@ def test_quitting_over_a_stop_still_joins_it_so_the_stop_finishes(
         return True
 
     view.services.controller.stop = slow_stop
+    # The Stop on the real threaded runner, which is what the exit joins. Tabs here run
+    # their jobs inline otherwise (T771), and an inline Stop would block before the timer.
+    view._jobs = ThreadedJobRunner(view)
     view.stop_server()
+    stop_answer = in_flight()._pairs[-1][2]
     quitting = SimpleNamespace(
         yulon_controllers=[view], yulon_log_panels=[], yulon_launchers={}, yulon_forced_quit=""
     )
@@ -1892,6 +1909,12 @@ def test_quitting_over_a_stop_still_joins_it_so_the_stop_finishes(
 
     assert finished, "the exit left before the Stop had finished"
     assert time.monotonic() - started >= 1.0, "the exit did not wait for the Stop"
+    # Joined, the Stop's answer is still queued: it lands here, not in a later test, and the
+    # status read it asks for is answered without the real docker (T771).
+    view._jobs = run_inline
+    view.services.controller.status = lambda: InstallStatus(db=False, auth=False, world=False)
+    assert stop_answer is not None
+    pump_until(lambda: stop_answer.delivered, "the joined Stop's answer never arrived")
 
 
 def test_a_real_tray_quit_now_while_stopping_goes_through(
@@ -5702,6 +5725,9 @@ def test_pressing_the_catalog_pin_shows_the_catalog(
     process_events(10)
     assert tabs.currentIndex() == 1
     assert pins.buttons[1].isChecked() and not pins.buttons[0].isChecked()
+    # Shown, the Logs tab reads its sources on a job thread: let that answer land here (T771).
+    logs = tabs.currentWidget()
+    pump_until(lambda: not logs._reading, "the Logs tab's read never answered")
 
 
 def test_the_next_tab_bumper_from_the_last_server_lands_on_the_catalog(
@@ -6440,6 +6466,10 @@ def test_the_tray_can_put_a_server_tab_and_the_logs_on_screen(window: Any, tmp_p
         window.yulon_show_logs()
         assert tabs.currentIndex() == 1
         assert window.isVisible(), "the Logs from the tray did not bring the window"
+        # Shown, the Logs tab reads its sources on a job thread: let that answer land here,
+        # not in whichever test pumps next (T771).
+        logs = tabs.currentWidget()
+        pump_until(lambda: not logs._reading, "the Logs tab's read never answered")
     finally:
         if not was_visible:
             window.hide()

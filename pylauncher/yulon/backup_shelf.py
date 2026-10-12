@@ -410,14 +410,19 @@ def _row(path: Path, name: str, kind: Kind, st: os.stat_result, game_id: str | N
             break
     if usable and label in _LEFTOVER_LABELS:
         usable, problem = False, PACK_LEFTOVER
-    elif (
-        label in _LEFTOVER_LABELS and not read_failed and not maintenance.head_names(path, database)
-    ):
+    elif label in _LEFTOVER_LABELS and not read_failed:
         # Not verified, so no reading was confirmed above (T765): a cut-short copy of a
         # database really named `move_x` is not a pack's leftover of `x` unless its own USE
-        # line says so. Not after a failed read (T769): the head check reads the file again,
-        # and a read that fails answers "not named", which would drop the label kept above.
-        label, database = candidates[-1]
+        # line says so. Not after a failed read (T769): nothing read later can settle it. And
+        # a failed read of the head itself is not "not named" either (T771): the label is
+        # kept and the file held back as one that could not be checked, as above.
+        try:
+            head_says = maintenance.head_names(path, database)
+        except MaintenanceError as exc:
+            head_says, unchecked = True, True
+            problem = f"Yu'lon could not check this file just now ({exc.__cause__ or exc})."
+        if not head_says:
+            label, database = candidates[-1]
     item = None
     if label is not None and label not in _FIXED_LABELS and label.startswith(_ITEM_LABEL_LEAD):
         item = label.removeprefix(_ITEM_LABEL_LEAD)

@@ -29,6 +29,7 @@ from tests.conftest import (
     HANG_BOUND_MS,
     process_events,
     pump_until,
+    take_every_held_answer,
     three_way_only,
     wait_for_panel,
 )
@@ -2056,8 +2057,10 @@ def test_the_importers_last_words_go_under_details_and_yulons_sentence_stays_on_
     )
     with pytest.raises(docker.DockerCommandError) as raised:
         docker.apply_module_sql(SPEC, tmp_path)
-    monkeypatch.undo()
-    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    monkeypatch.undo()  # `_inline_jobs` with it: the view is given `run_inline` again (T771)
+    view = ControllerView(
+        WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, job_runner=run_inline
+    )
     view.module_report.setPlainText("ac-db-import: applying mod-aoe-loot…")
     failures: list[str] = []
     view.action_failed.connect(failures.append)
@@ -2089,8 +2092,10 @@ def test_a_repair_whose_import_died_says_so_with_its_last_words_under_details(
     )
     with pytest.raises(docker.DockerCommandError) as raised:
         docker.repair_import(SPEC, tmp_path, _probe(UNIMPORTED))
-    monkeypatch.undo()
-    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    monkeypatch.undo()  # `_inline_jobs` with it: the view is given `run_inline` again (T771)
+    view = ControllerView(
+        WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, job_runner=run_inline
+    )
     failures: list[str] = []
     view.action_failed.connect(failures.append)
 
@@ -2137,8 +2142,10 @@ def test_a_repair_that_did_not_finish_says_so_in_words_and_puts_the_command_unde
     probe = _probe(UNIMPORTED) if after is None else _probe(UNIMPORTED, after)
     with pytest.raises(docker.DockerCommandError) as raised:
         docker.repair_import(SPEC, tmp_path, probe)
-    monkeypatch.undo()
-    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    monkeypatch.undo()  # `_inline_jobs` with it: the view is given `run_inline` again (T771)
+    view = ControllerView(
+        WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, job_runner=run_inline
+    )
 
     view._repair_failed(raised.value)
 
@@ -2162,8 +2169,10 @@ def test_a_repair_whose_database_never_came_up_names_no_command_on_the_line(
     _repair_doubles(monkeypatch, [], running=set(), health="starting")
     with pytest.raises(docker.DockerCommandError) as raised:
         docker.repair_import(SPEC, tmp_path, _probe(UNIMPORTED), db_timeout=0)
-    monkeypatch.undo()
-    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    monkeypatch.undo()  # `_inline_jobs` with it: the view is given `run_inline` again (T771)
+    view = ControllerView(
+        WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, job_runner=run_inline
+    )
 
     view._repair_failed(raised.value)
 
@@ -2233,8 +2242,10 @@ def test_a_stop_docker_would_not_do_says_so_in_words_with_dockers_words_below(
     monkeypatch.setattr(docker, "_docker", refused)
     with pytest.raises(docker.DockerCommandError) as raised:
         docker._run_docker_stop("ac-worldserver")
-    monkeypatch.undo()
-    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    monkeypatch.undo()  # `_inline_jobs` with it: the view is given `run_inline` again (T771)
+    view = ControllerView(
+        WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, job_runner=run_inline
+    )
 
     view._stop_failed(raised.value)
 
@@ -2279,8 +2290,10 @@ def test_a_start_whose_containers_did_not_stay_up_puts_the_log_command_under_det
     monkeypatch.setattr(docker, "_status_safe", lambda **_k: [SPEC.db, SPEC.auth])
     with pytest.raises(docker.DockerRefusal) as raised:
         docker.start_staged(SPEC, tmp_path)
-    monkeypatch.undo()
-    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    monkeypatch.undo()  # `_inline_jobs` with it: the view is given `run_inline` again (T771)
+    view = ControllerView(
+        WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, job_runner=run_inline
+    )
     failures: list[str] = []
     view.action_failed.connect(failures.append)
 
@@ -8463,6 +8476,8 @@ def test_a_rebuild_the_sources_refuse_is_refused_before_the_question(
     services.rebuild_refusal = lambda: None
     view = ControllerView(WOTLK, services, status_poll_ms=0)
     assert view.rebuild_server() is True
+    # The job it started runs on the panel's thread: let it end here (T771).
+    wait_for_panel(view.rebuild_log)
     assert len(asked) == 1, "nothing to refuse: the question is asked as before"
 
 
@@ -10111,6 +10126,7 @@ def _client_dir_view(
     client_dir: Path | None = None,
     fake: _FakeClientDir | None = None,
     pick_client_dir: Callable[..., Path | None] = lambda *_: None,
+    job_runner: Callable[..., Any] | None = None,
 ) -> tuple[ControllerView, _FakeClientDir]:
     """A tab wired with the T36 write seam, over the real factory wiring.
 
@@ -10123,7 +10139,10 @@ def _client_dir_view(
     services = ControllerServices.for_entry(entry, server_dir, client_dir=client_dir)
     fake = fake if fake is not None else _FakeClientDir()
     services.set_client_dir = fake
-    view = ControllerView(entry, services, status_poll_ms=0, pick_client_dir=pick_client_dir)
+    extra = {} if job_runner is None else {"job_runner": job_runner}
+    view = ControllerView(
+        entry, services, status_poll_ms=0, pick_client_dir=pick_client_dir, **extra
+    )
     return view, fake
 
 
@@ -14235,6 +14254,7 @@ def test_a_finished_recreate_is_reported_on_the_gui_thread_by_a_real_threaded_ru
         "the recreate's report",
     )
     assert all(runner.wait(HANG_BOUND_MS) for runner in runners)
+    take_every_held_answer()  # joined directly: take the answers still queued (T771)
 
     assert view._busy is False
     assert view._tuning_owed.get("restart") is None, "a recreate covers the restart it owed"
@@ -14826,6 +14846,8 @@ def test_the_server_cloned_rows_update_chip_runs_the_server_update(
     assert row.detail_button.text() == UPDATE_TO_LATEST_BUTTON_LABEL
     row.detail_button.click()
     pump_until(lambda: len(spy.presses) == 1, "the chip started the server update")
+    # The job it started runs on the panel's thread: let it end here (T771).
+    wait_for_panel(view.rebuild_log)
     row.hide()
 
     assert len(boxes) == 1, "the update started without its confirmation"

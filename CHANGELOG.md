@@ -123,6 +123,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A download of an update that was stopped by force no longer leaves a hidden file in Downloads after the next update.
 - Stop, Restart or Quit during a WotLK or Unbound database import now records it, so Start offers **Repair** instead.
 - A TBC, Vanilla, Tortoise or Centurion install that did not finish installing no longer starts on a half-imported world.
+- A leftover database copy from a move keeps its name when its first lines cannot be read for a moment.
 
 ### Changed
 - On an older WotLK install, the first Rebuild sends the whole server to Docker once (about 5 GB); later ones are quick.

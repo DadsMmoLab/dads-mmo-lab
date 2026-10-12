@@ -620,60 +620,112 @@ def _no_job_thread_runs_into_interpreter_teardown() -> Iterator[None]:
         )
 
 
-def _running_job_threads() -> list[tuple[Any, Any, Any]]:
-    """Every `(thread, worker, delivery)` `job.in_flight()` holds whose thread still runs.
+_HELD_BEFORE_THE_TEST: list[list[Any]] = []
+"""The threads held when each running guard began, innermost last (read by the helper below)."""
+
+
+def _held_job_pairs() -> list[tuple[Any, Any, Any]]:
+    """Every `(thread, worker, delivery)` `job.in_flight()` holds, running or already ended.
 
     Read through `sys.modules`, as the session fixture above does: a test that never
     imported the job module cannot have started a job, and importing it here would load Qt
-    for every test.
+    for every test. An ended thread is still held while its answer has not returned (T771).
     """
     job = sys.modules.get("yulon.ui.widgets.job")
     holder = getattr(job, "_in_flight", None) if job is not None else None
     if holder is None:
         return []
-    return [pair for pair in holder._pairs if pair[0].isRunning()]
+    return list(holder._pairs)
 
 
 def joining_the_job_threads_left_behind(bound_ms: int) -> Iterator[None]:
-    """The body of the fixture below: note what runs, yield to the test, join what it added.
+    """The body of the fixture below: note what is held, yield to the test, join what it added.
 
     A plain generator so `test_job_threads_left_behind.py` can drive the very code the
     fixture runs, inside one test, with a bound of its own.
     """
-    before = [thread for thread, _worker, _delivery in _running_job_threads()]
-    yield
-    left = [pair for pair in _running_job_threads() if not any(pair[0] is t for t in before)]
+    before = [pair[0] for pair in _held_job_pairs()]
+    _HELD_BEFORE_THE_TEST.append(before)
+    try:
+        yield
+    finally:
+        assert _HELD_BEFORE_THE_TEST.pop() is before
+    left = [pair for pair in _held_job_pairs() if not any(pair[0] is t for t in before)]
+    # A thread joined directly (an exit join, `wait_all`) has ended with its answer still
+    # queued to the GUI thread: it is held, not running, and still a leak (T771).
+    left = [pair for pair in left if pair[0].isRunning() or pair[2] is not None]
     if not left:
         return
     job = sys.modules["yulon.ui.widgets.job"]
     hung: list[str] = []
-    for thread, worker, _delivery in left:
-        thread.quit()
-        if not thread.wait(bound_ms):
-            hung.append(job.in_flight()._labels.get(id(thread)) or job.describe(worker))
+    unpumped: list[str] = []
+    for thread, worker, delivery in left:
+        name = job.in_flight()._labels.get(id(thread)) or job.describe(worker)
+        if thread.isRunning():
+            thread.quit()
+            if not thread.wait(bound_ms):
+                hung.append(name)
+                continue
+        if delivery is None or not delivery.delivered:
+            # Its answer was handed over and the thread is only on its way out: that is a
+            # test that waited for its job, not a leak. Anything else never got its answer.
+            unpumped.append(name)
     if hung:
         pytest.fail(
             f"this test left background jobs running that did not finish within {bound_ms} ms "
             f"of being told to quit (T769): {hung}. Join them in the test's own teardown."
         )
+    if unpumped:
+        pytest.fail(
+            f"this test left background jobs whose answer it never took (T771): {unpumped}. "
+            "They are joined now. Build the view with `job_runner=run_inline`, or pump the "
+            "event loop until the job's answer has arrived."
+        )
 
 
 @pytest.fixture(autouse=True)
 def _job_threads_a_test_leaves_running_are_joined() -> Iterator[None]:
-    """Join, at its own end, every job thread a test started and left running (T769).
+    """Fail a test that leaves a job thread running, and join that thread at its end.
 
     A view built with real job threads and never pumped leaves each job's thread in its event
     loop: the `worker.done -> thread.quit` call is queued to the GUI thread and nothing
     delivers it. Five files did that alone, and before T764 the run aborted after its
     summary. The session fixture above joined them, but only at the end of the run, so a job
-    that HUNG was reported against no test, or against whichever ran last. Joined here
-    instead, the hang fails the test that started it. A thread the test merely did not pump
-    is joined and passes: the queued `quit` is all it was waiting for.
+    that HUNG was reported against no test, or against whichever ran last (T769: joined here,
+    the hang fails the test that started it). Since T771 every leak fails too, once the last
+    leaking files were fixed: a job whose answer the test never took is a test that did not
+    wait for what it started, and its answer would land in whichever test pumps next.
 
     Threads already running when the test began (a module fixture's) are left to their
     owner; the session fixture still joins whatever is left at the end of the run.
     """
     yield from joining_the_job_threads_left_behind(HANG_BOUND_MS)
+
+
+def take_every_held_answer() -> None:
+    """Deliver the answers of job threads that have ALREADY ENDED, right after a test joined
+    them directly (`shutdown()`, `wait()`).
+
+    A joined thread has ended but its answer is still queued to the GUI thread; the guard
+    above fails the test that leaves it there (T771), so a test that joins pumps it here.
+    Never takes a thread still running (an unpumped job is the guard's to fail: draining it
+    would switch the guard off) nor one held before the test began (a module fixture's).
+    """
+    before = _HELD_BEFORE_THE_TEST[-1] if _HELD_BEFORE_THE_TEST else []
+    ended = [
+        delivery
+        for thread, _worker, delivery in _held_job_pairs()
+        if delivery is not None and not thread.isRunning() and not any(thread is t for t in before)
+    ]
+    # Each answer on its own: a pump over the whole queue would deliver a running job's too.
+    from PySide6.QtCore import QCoreApplication
+
+    deadline = time.monotonic() + HANG_BOUND
+    for delivery in ended:
+        while not delivery.delivered:
+            assert time.monotonic() < deadline, "a joined job's answer never arrived"
+            QCoreApplication.sendPostedEvents(delivery, 0)
+            time.sleep(0.005)
 
 
 def process_events(ms: int = 50) -> None:

@@ -1417,6 +1417,54 @@ def test_a_read_error_while_naming_a_move_leftovers_database_keeps_the_move_labe
     assert "move package" in backup_shelf.describe(r, GAME)
 
 
+def test_a_broken_move_leftover_whose_head_cannot_be_read_just_now_keeps_its_move_label(
+    server: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The file is read and found cut short, then the head check's own read fails (T771):
+    "could not read" is not "not named", so the `move` reading stays and the row is held back
+    as one that could not be checked, the same as for every other failed read."""
+    path = put(server, "20261012_090000", "acore_auth", label="move", whole=False)
+    real_verify, real_edge = maintenance.verify_dump, maintenance._read_edge
+    verified: list[bool] = []
+
+    def verify(p: Path, database: str | None = None) -> int:
+        try:
+            return real_verify(p, database)
+        finally:
+            verified.append(True)
+
+    def edge(p: Path, offset: int) -> bytes:
+        if verified:
+            raise OSError("busy")
+        return real_edge(p, offset)
+
+    monkeypatch.setattr(maintenance, "verify_dump", verify)
+    monkeypatch.setattr(maintenance, "_read_edge", edge)
+    r = row(shelf(server), path.name)
+    assert verified, "the file was never verified"
+    assert (r.label, r.database, r.usable) == ("move", "acore_auth", False)
+    assert r.unchecked is True
+    assert "busy" in (r.problem or "")
+    assert "move package" in backup_shelf.describe(r, GAME)
+
+
+def test_head_names_tells_a_failed_read_from_a_head_that_does_not_name_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "x.sql"
+    path.write_bytes(dump_of("acore_auth", whole=False))
+    assert maintenance.head_names(path, "acore_auth") is True
+    assert maintenance.head_names(path, "acore_world") is False
+
+    def busy(_path: Path, _offset: int) -> bytes:
+        raise OSError("busy")
+
+    monkeypatch.setattr(maintenance, "_read_edge", busy)
+    with pytest.raises(MaintenanceError, match="busy") as caught:
+        maintenance.head_names(path, "acore_auth")
+    assert isinstance(caught.value.__cause__, OSError)
+
+
 def test_a_use_line_above_no_banner_of_its_own_confirms_nothing(server: Path) -> None:
     """Only the file's own head counts (as for `verify_dump`): text that merely holds a USE line
     is not a pack's dump."""

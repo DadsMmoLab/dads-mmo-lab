@@ -24,6 +24,7 @@ from typing import IO, Any
 
 import pytest
 
+from tests.conftest import take_every_held_answer
 from tests.test_maintenance import (
     AT,
     DB,
@@ -211,6 +212,7 @@ def test_the_tab_says_wait_and_offers_nothing_while_the_load_runs(
 
     view._show_interrupted()
     view.shutdown()
+    take_every_held_answer()
 
     assert not view.interrupted_label.isHidden()
     text = view.interrupted_label.text()
@@ -349,6 +351,7 @@ def test_a_stop_over_a_load_that_outlived_yulon_asks_and_keeps_it_on_no(
 
     view.stop_server()
     view.shutdown()
+    take_every_held_answer()
 
     assert len(asked) == 1 and "half-written" in asked[0] and "Stop anyway" in asked[0], asked
     assert jobs == [], "the Stop ran over a load the player chose to keep"
@@ -364,6 +367,7 @@ def test_a_stop_over_a_running_load_stops_when_told_to(
 
     view.stop_server()
     view.shutdown()
+    take_every_held_answer()
 
     assert len(asked) == 1 and len(jobs) == 1
 
@@ -379,6 +383,7 @@ def test_a_stop_with_no_running_load_asks_nothing(
 
     view.stop_server()
     view.shutdown()
+    take_every_held_answer()
 
     assert asked == [] and len(jobs) == 1
 
@@ -397,6 +402,7 @@ def test_a_stop_during_this_sessions_own_restore_asks_nothing_new(
 
     view.stop_server()
     view.shutdown()
+    take_every_held_answer()
 
     assert asked == [] and len(jobs) == 1
 
@@ -427,6 +433,7 @@ def test_stop_then_quit_ends_its_wait_when_the_player_keeps_the_load(
 
     tray.stop_then_quit([view])
     view.shutdown()
+    take_every_held_answer()
     window.deleteLater()
 
     assert len(asked) == 1 and jobs == [], (asked, jobs)
@@ -485,7 +492,9 @@ def test_stop_then_quit_asks_every_question_before_any_stop_begins(
     stopping = list(tray._stopping)
     tray._stop_waiting_to_quit()
     a_view.shutdown()
+    take_every_held_answer()
     b_view.shutdown()
+    take_every_held_answer()
     window.deleteLater()
 
     assert asked_with_a_stopping == [0], "B was asked after A's Stop had begun"
@@ -535,7 +544,9 @@ def test_stop_then_quit_looks_again_after_the_questions(
     stopping = list(tray._stopping)
     tray._stop_waiting_to_quit()
     a_view.shutdown()
+    take_every_held_answer()
     b_view.shutdown()
+    take_every_held_answer()
     window.deleteLater()
 
     assert jobs == [] and stopping == []

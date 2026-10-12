@@ -21,7 +21,14 @@ from pathlib import Path
 import pytest
 from PySide6.QtCore import QObject, Slot
 
-from tests.conftest import HANG_BOUND, HANG_BOUND_MS, process_events, pump_until, spelled_bounds
+from tests.conftest import (
+    HANG_BOUND,
+    HANG_BOUND_MS,
+    process_events,
+    pump_until,
+    spelled_bounds,
+    take_every_held_answer,
+)
 from yulon.ui.widgets.job import LineRelay, ThreadedJobRunner, in_flight, run_inline
 
 STILL_RUNNING = 0.2
@@ -370,6 +377,7 @@ def test_wait_joins_running_jobs(qapp: object) -> None:
     runner = ThreadedJobRunner(receiver)
     runner(lambda: time.sleep(STILL_RUNNING), receiver.done, receiver.failed)
     assert runner.wait(HANG_BOUND_MS) is True
+    take_every_held_answer()  # the joined job's answer is still queued (T771)
 
 
 def test_a_job_still_running_is_named_by_the_work_it_was_given(qapp: object) -> None:
@@ -401,6 +409,7 @@ def test_a_job_still_running_is_named_by_the_work_it_was_given(qapp: object) -> 
         lambda: not any("a_job_that_waits_for_its_gate" in n for n in in_flight().still_running()),
         "the finished job left the still-running list",
     )
+    take_every_held_answer()
 
 
 def test_a_line_relay_delivers_on_the_gui_thread_whoever_emits(qapp: object) -> None:

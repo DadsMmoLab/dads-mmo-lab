@@ -109,6 +109,8 @@ def test_a_drive_with_room_goes_on_to_the_client_folder(
     dialogs.install(monkeypatch)
     view = _view(tmp_path, dialogs, ready_check=lambda _entry, _dir: None)
     view.start_install(TBC)
+    # The install it started runs on the panel's thread: let it end here (T771).
+    wait_for_panel(view._log)
     assert dialogs.events[0] == "suggestion"
     assert dialogs.events[1].startswith("pick:Select your"), dialogs.events
     assert not dialogs.infos

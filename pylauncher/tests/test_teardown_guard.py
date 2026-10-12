@@ -111,7 +111,11 @@ def _view(
     chosen = tmp_path / "new-client"
     (chosen / "Data").mkdir(parents=True, exist_ok=True)
     view, fake = _client_dir_view(
-        WOTLK, tmp_path / name, client_dir=real, pick_client_dir=lambda *_: chosen
+        WOTLK,
+        tmp_path / name,
+        client_dir=real,
+        pick_client_dir=lambda *_: chosen,
+        job_runner=run_inline,  # no job thread outlives the test (T771)
     )
     rebuilds: list[tuple[Any, ...]] = []
     view.client_dir_changed.connect(lambda *a: rebuilds.append(a))
