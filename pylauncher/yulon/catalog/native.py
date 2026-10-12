@@ -385,6 +385,15 @@ With a rollback kept, `STOPPED_BUILD_NOTE` says this and every Start compares th
 the `-rollback` names. With none there is nothing to compare, so only the sentence is left;
 "its images are still not all there" is then true only until the build lands."""
 
+HELD_NO_ROLLBACK_STOPPED_NOTE = (
+    "The compile was stopped, and Docker may still finish it in the background and give "
+    "this install's image names to the new build, which Repair and Start then use."
+)
+"""`NO_ROLLBACK_STOPPED_NOTE` for a held Rebuild (T768 round 2).
+
+Under the import record Start refuses (`start_refusal()`), so "which the next Start then
+runs" was false there, and it contradicted `HELD_NO_ROLLBACK_KEPT` on the same panel."""
+
 NO_ROLLBACK_UNTOUCHED = (
     "No build was kept as a rollback, because this install's images were not all in Docker. "
     "The compile finished and its images are in Docker under this install's tags, but the "
@@ -504,6 +513,7 @@ def rebuild_opening_note(
     copies: bool = False,
     rewrites_overlay: bool = False,
     held: bool = False,
+    started_db: bool = False,
 ) -> str:
     """What a rebuild costs and what it leaves alone, said before the first stage.
 
@@ -569,6 +579,10 @@ def rebuild_opening_note(
     ready"; held, the note says only what the press does. `imports` is False then (the
     press applies no update). T768: the database's container is not removed
     (`_remove_the_old_servers()`), and may be running, started to ask T658's record.
+
+    `started_db` (T768 round 2): the press started the database itself to read T658's record
+    (`_held_by_an_unfinished_import()`), so "left running or stopped, as it is" read as if
+    the press had not touched it; the note says it was started for that and is left running.
     """
     compiles = (
         "compiles the server again from the source and modules in the folder below, or, if the "
@@ -623,13 +637,18 @@ def rebuild_opening_note(
         "packages its cache no longer holds."
     )
     if held:
+        left = (
+            "the database's container, which this rebuild started to read how the last import "
+            "ended, is left running"
+            if started_db
+            else "the database's container is left running or stopped, as it is"
+        )
         return (
-            "You can stop this at any time; stopping before the old servers are stopped leaves "
-            f"the server you have now exactly as it is. This does {count} things and nothing "
-            f"else: {recipe}{overlay}it {compiles}, and it removes the containers of the old auth "
-            "and world servers, stopping any that run and keeping every volume; the database's "
-            "container is left running or stopped, as it is. It starts nothing, so the server "
-            f"stays STOPPED. {online} {database}"
+            "You can stop this at any time; stopping before the old auth and world servers are "
+            f"stopped leaves the server you have now exactly as it is. This does {count} things "
+            f"and nothing else: {recipe}{overlay}it {compiles}, and it removes the containers of "
+            "the old auth and world servers, stopping any that run and keeping every volume; "
+            f"{left}. It starts nothing, so the server stays STOPPED. {online} {database}"
         )
     return (
         "You can stop this at any time; stopping before the containers are replaced leaves the "
@@ -7844,8 +7863,10 @@ class StagedInstaller:
             return ENDED_IMPORT_REFUSAL
         return None
 
-    def _held_by_an_unfinished_import(self, server_dir: Path) -> str | None:
-        """Why a plain Rebuild must compile and then leave the server stopped, or None (T739).
+    def _held_by_an_unfinished_import(self, server_dir: Path) -> tuple[str | None, bool]:
+        """Why a plain Rebuild must compile and then leave the server stopped, or None (T739),
+        and whether the database was started here to be asked (T768 round 2: the opening note
+        says so).
 
         The lead's decision on the cold review of round 1: under the import record a Rebuild
         compiles and tags as usual -- a server whose build is gone (T627) has no other way to
@@ -7856,19 +7877,24 @@ class StagedInstaller:
         """
         service = self.entry.containers.db_import
         if not service or not docker.one_shot_ended_marker(server_dir, service).is_file():
-            return None
+            return None, False
+        started = False
         if (
             not docker.import_record_is_from_empty(server_dir, service)
             and self._probe is not None
             and self._probe().state == "unreadable"
         ):
             try:
-                self._seams.start_db(
-                    self.entry.container_spec(), server_dir, because="nothing was built"
+                # `docker.start_database()` answers True only when it had to start it.
+                started = (
+                    self._seams.start_db(
+                        self.entry.container_spec(), server_dir, because="nothing was built"
+                    )
+                    is True
                 )
             except docker.DockerCommandError as exc:
                 logger.warning(f"the database could not be started to ask the import: {exc}")
-        return self.unfinished_import_refusal(server_dir, strict=True)
+        return self.unfinished_import_refusal(server_dir, strict=True), started
 
     def family_start_refusal(self, server_dir: Path) -> str | None:
         """The family's own reason no start may run, apart from `START_REFUSED_FILE` (T223).
@@ -9717,7 +9743,11 @@ class StagedInstaller:
         # T739 round 2 (the lead's decision): under the import record the press compiles and
         # tags, applies no database update and starts no world; it ends stopped for Repair.
         # The update route never holds: it refused up front (it cannot meet a gone build).
-        held = self._held_by_an_unfinished_import(server_dir) if servers_down is None else None
+        held, started_db = (
+            self._held_by_an_unfinished_import(server_dir)
+            if servers_down is None
+            else (None, False)
+        )
         yield f"Rebuilding {self.entry.name} in {server_dir}"
         # T740: the build overlay from this version's template, or None when the file is
         # current. Asked here so the opening note can say so and the put-back has the bytes;
@@ -9749,6 +9779,7 @@ class StagedInstaller:
             copies=bool(own_copy is not None and own_copy.names),
             rewrites_overlay=overlay is not None,
             held=held is not None,
+            started_db=held is not None and started_db,
         )
         if held is not None:
             yield f"{held} {HELD_OPENING}"
@@ -9981,7 +10012,12 @@ class StagedInstaller:
                 message = f"{exc} {NO_ROLLBACK_NOT_BUILT}"
                 if self._build_exit == docker.CANCELLED_RETURNCODE:
                     # T768 (T225): no `-rollback` name, so no record and no check at Start.
-                    message = f"{message} {NO_ROLLBACK_STOPPED_NOTE}"
+                    stopped = (
+                        HELD_NO_ROLLBACK_STOPPED_NOTE
+                        if held is not None
+                        else NO_ROLLBACK_STOPPED_NOTE
+                    )
+                    message = f"{message} {stopped}"
                 self._record_error(server_dir, ctx.state, message)
                 raise carry_detail(exc, InstallerError(message)) from exc
             if isinstance(exc, WorldStoppedAfterReadyError):

@@ -747,11 +747,14 @@ class Recorder:
 
     def start_db(
         self, spec: docker.ContainerSpec, server_dir: Path, *, because: str = "nothing was run"
-    ) -> None:
+    ) -> bool:
         self.calls.append("start-db")
         if self.db_start_error:
             raise docker.DockerCommandError(self.db_start_error)
+        # `docker.start_database()`'s answer: True only when it had to start it.
+        was = self.db_started
         self.db_started = True
+        return not was
 
     def run_container(
         self,
