@@ -283,12 +283,25 @@ class UpdateRefused(InstallerError):
     `repo` and `commit` name the source and the upstream commit refused, so
     "Update the server to latest…" remembers it in the install record and the
     Server tab stops offering that same commit (`StagedInstaller.upstream_news`).
+    `also` names further `(repo, commit)` pairs the same press refused (T770: the
+    core and TortoiseBots can both change a migration), so none of them is offered.
     """
 
-    def __init__(self, *args: object, repo: str, commit: str) -> None:
+    def __init__(
+        self, *args: object, repo: str, commit: str, also: tuple[tuple[str, str], ...] = ()
+    ) -> None:
         super().__init__(*args)
         self.repo = repo
         self.commit = commit
+        self.also = also
+
+    @property
+    def pairs(self) -> tuple[tuple[str, str], ...]:
+        """Every `(repo, commit)` refused, the first one first; one commit per repo."""
+        found: dict[str, str] = {}
+        for repo, commit in ((self.repo, self.commit), *self.also):
+            found.setdefault(repo, commit)
+        return tuple(found.items())
 
 
 class DockerUnavailableError(InstallerError):

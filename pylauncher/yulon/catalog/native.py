@@ -11636,8 +11636,9 @@ class StagedInstaller:
         fresh = read_state(server_dir, valid=self.stage_names())
         if fresh is None:
             return
-        kept = tuple(pair for pair in fresh.refused_updates if pair[0] != refused.repo)
-        pairs = tuple(sorted((*kept, (refused.repo, refused.commit))))
+        repos = {repo for repo, _commit in refused.pairs}
+        kept = tuple(pair for pair in fresh.refused_updates if pair[0] not in repos)
+        pairs = tuple(sorted((*kept, *refused.pairs)))
         write_state(server_dir, replace(fresh, refused_updates=pairs))
 
     def _keep_rollback(

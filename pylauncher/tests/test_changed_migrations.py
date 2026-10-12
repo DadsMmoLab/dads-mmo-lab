@@ -327,3 +327,77 @@ def test_git_that_cannot_list_a_folder_refuses_an_update_in_its_own_words(
     assert "git could not list sql/database_updates/auth" in message
     _refused_clean(rec, server_dir)
     assert "start-db" not in rec.calls
+
+
+# -- round 2: no other press offered, how long it lasts, every source, one ask ---------------
+
+
+@PRESSES
+def test_the_refusal_offers_no_other_press_as_a_way_forward(tmp_path: Path, to_pin: bool) -> None:
+    """Either press moves to code that still carries the edited file, so it refuses too."""
+    from yulon import server_build_presses
+
+    rec, server_dir, made = _ready(tmp_path)
+    _core_changed(rec, server_dir, to_pin)
+
+    _said, raised = _return(made, server_dir, to_pin=to_pin)
+
+    assert raised is not None
+    message = str(raised)
+    for press in (server_build_presses.UPDATE_TO_LATEST, server_build_presses.RETURN_TO_PIN):
+        assert server_build_presses.under_server_build(press) not in message, message
+
+
+@PRESSES
+def test_the_refusal_says_it_lasts_until_upstream_puts_the_old_contents_back(
+    tmp_path: Path, to_pin: bool
+) -> None:
+    rec, server_dir, made = _ready(tmp_path)
+    _core_changed(rec, server_dir, to_pin)
+
+    _said, raised = _return(made, server_dir, to_pin=to_pin)
+
+    message = str(raised)
+    assert (
+        "until upstream ships the old contents of that file again or removes it; until then, "
+        "keep the build you have." in message
+    ), message
+
+
+def test_both_refused_sources_are_remembered(tmp_path: Path) -> None:
+    """The core and TortoiseBots both change a migration: neither commit is offered again."""
+    from tests.test_return_newer_migrations import BOTS_CMAKE, CMAKE
+
+    rec, server_dir, made = _ready(tmp_path)
+    _core_changed(rec, server_dir, False)
+    bots = server_dir / BOTS.dest
+    rec.byte_trees[(bots, OLD, BOTS_WORLD)] = {BOTS_NAME: RAN}
+    rec.byte_trees[(bots, NEW, BOTS_WORLD)] = {BOTS_NAME: EDITED}
+    rec.blobs[(bots, NEW, BOTS_CMAKE)] = CMAKE
+    rec.migrations["tw_world"] = f":{_hash(RAN)}\nTortoiseBots:{_hash(RAN)}\n"
+
+    _said, raised = _return(made, server_dir, to_pin=False)
+
+    assert raised is not None
+    assert f"TortoiseBots/{BOTS_NAME}" in str(raised) and OLDER_NAME in str(raised)
+    record = native.read_state(server_dir, valid=made.stage_names())
+    assert record is not None
+    assert {(CORE.repo, NEW), (BOTS.repo, NEW)} <= set(record.refused_updates), record
+
+
+def test_a_return_asks_a_stopped_database_once_for_both_checks(tmp_path: Path) -> None:
+    """Going back, the changed file is also one the target lacks: one start, one stop."""
+    rec, server_dir, made = _ready(tmp_path)
+    dest = server_dir / CORE.dest
+    rec.byte_trees[(dest, OLD, CORE_WORLD)] = {OLDER_NAME: RAN}
+    rec.byte_trees[(dest, CORE_PIN, CORE_WORLD)] = {OLDER_NAME: EDITED}
+    rec.migrations["tw_world"] = f":{_hash(OLDER)}\n"
+    rec.db_was_up = False
+
+    said, raised = _return(made, server_dir, to_pin=True)
+
+    assert raised is None, raised
+    assert any("None of them was applied" in line for line in said), said
+    assert any("so no migration runs a second time" in line for line in said), said
+    assert rec.calls.count("start-db") == 1, rec.calls
+    assert len([c for c in rec.calls if c.startswith("stop-db:")]) == 1, rec.calls

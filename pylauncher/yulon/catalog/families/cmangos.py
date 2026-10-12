@@ -252,26 +252,23 @@ def changed_migrations_refusal(again: Mapping[str, Sequence[str]], *, to_pin: bo
     and whose new bytes it does not. Yu'lon has no mechanism to skip a migration or mark it
     applied: the ledger is the core's, and writing a key into it is only safe when the new
     bytes' effect is already in the database, which nothing here can know without running
-    them. So the refusal names the files and the way that is left: keep the build.
+    them. So the refusal names the files and how long it lasts, and offers no other press
+    as a way forward: either one, moving to code with the new contents, refuses too.
     """
     total = sum(len(labels) for labels in again.values())
     shown = "; ".join(f"{schema}: {', '.join(labels)}" for schema, labels in again.items())
     one = total == 1
     where = "The commit this Yu'lon was tested with" if to_pin else "Upstream's newest code"
-    if to_pin:
-        other = server_build_presses.under_server_build(server_build_presses.UPDATE_TO_LATEST)
-        way = f"{other} keeps it current, and checks the same way"
-    else:
-        other = server_build_presses.under_server_build(server_build_presses.RETURN_TO_PIN)
-        way = f"{other} is still there, and a newer upstream commit is checked the same way"
     return (
         f"{where} changes {total} database migration{'' if one else 's'} your server already "
         f"ran ({shown}). Tortoise's server knows a migration it ran by the file's bytes, not "
         f"its name, so at its next start it would run {'it' if one else 'them'} again with the "
         "new bytes, and a migration that cannot run twice stops the world from starting. "
         f"Yu'lon cannot tell whether {'it' if one else 'they'} can run twice, and it has no "
-        f"safe way to skip a migration or mark it done. {NOTHING_DONE} Keep the build you "
-        f"have: {way}."
+        f"safe way to skip a migration or mark it done. {NOTHING_DONE} Any update or return "
+        "to code that carries the new contents is refused the same way, until upstream ships "
+        f"the old contents of {'that file' if one else 'those files'} again or removes "
+        f"{'it' if one else 'them'}; until then, keep the build you have."
     )
 
 
@@ -296,6 +293,10 @@ class _MovedMigrations:
 
     def keys(self, hashes: Sequence[str]) -> tuple[str, ...]:
         return tuple(f"{self.module}:{h}" for h in hashes)
+
+
+_Changed = dict[Db, dict[str, tuple[_MovedMigrations, tuple[str, ...], tuple[str, ...]]]]
+"""Per database, `{file label: (its source, the old bytes' keys, the new bytes' keys)}` (T770)."""
 
 
 MODULE_INSTALL_RULE = re.compile(
@@ -637,9 +638,7 @@ class CmangosInstaller(StagedInstaller):
                 )
         if self._updates_at_start():
             trees = self._migrations_moved(moved, to_pin=to_pin)
-            if to_pin:
-                yield from self._refuse_newer_migrations(server_dir, trees)
-            yield from self._refuse_changed_migrations(server_dir, trees, to_pin=to_pin)
+            yield from self._refuse_what_the_databases_ran(server_dir, trees, to_pin=to_pin)
         return _MovedChanges(catch_up=catch_up, confs=self._conf_defaults_moved(moved))
 
     # -- a moved module's changed conf defaults, carried into the live conf (T656) ----
@@ -768,9 +767,60 @@ class CmangosInstaller(StagedInstaller):
 
     # -- going back over migrations a newer build already applied (T632) ----
 
-    def _refuse_newer_migrations(
-        self, server_dir: Path, trees: Sequence[_MovedMigrations]
+    def _refuse_what_the_databases_ran(
+        self, server_dir: Path, trees: Sequence[_MovedMigrations], *, to_pin: bool
     ) -> Generator[str, None, None]:
+        """T632's and T770's refusals, with one question to the databases for both.
+
+        A Return reads what the target lacks (`_refuse_newer_migrations()`), both presses
+        what it changed (`_refuse_changed_migrations()`); the keys of both go to
+        `_ledger_holds()` once, so a stopped database is started at most once per press.
+        T632's refusal comes first: going back, a changed file is also one the target lacks.
+        Before anything is built, stopped or copied; a refusal puts every source back.
+        """
+        lacked = self._migrations_the_target_lacks(trees) if to_pin else {}
+        changed = self._migrations_the_target_changes(trees)
+        if not lacked and not changed:
+            return
+        asked: dict[Db, list[str]] = {}
+        if lacked:
+            count = sum(len(files) for files in lacked.values())
+            yield (
+                f"The tested commit does not ship {count} database migration"
+                f"{'' if count == 1 else 's'} the code you run has; asking the databases "
+                f"whether they already hold {'it' if count == 1 else 'them'}."
+            )
+            for role, files in lacked.items():
+                asked.setdefault(role, []).extend(k for keys in files.values() for k in keys)
+        if changed:
+            changes = sum(len(files) for files in changed.values())
+            where = "The tested commit" if to_pin else "Upstream's newest code"
+            yield (
+                f"{where} changes the bytes of {changes} database migration"
+                f"{'' if changes == 1 else 's'} the code you run has; asking the databases "
+                f"whether they already ran {'it' if changes == 1 else 'them'}."
+            )
+            for role, labelled in changed.items():
+                asked.setdefault(role, []).extend(
+                    k for _owner, ran, new in labelled.values() for k in (*ran, *new)
+                )
+        held = self._ledger_holds(server_dir, asked)
+        if lacked:
+            self._refuse_newer_migrations(server_dir, lacked, held)
+            yield "None of them was applied, so the older server can start on your databases."
+        if changed:
+            self._refuse_changed_migrations(changed, held, to_pin=to_pin)
+            yield (
+                f"The databases did not run {'it' if changes == 1 else 'them'} with the old "
+                "bytes, so no migration runs a second time."
+            )
+
+    def _refuse_newer_migrations(
+        self,
+        server_dir: Path,
+        lacked: Mapping[Db, Mapping[str, tuple[str, ...]]],
+        held: Mapping[Db, set[str]],
+    ) -> None:
         """Refuse "Return to the tested pin…" onto databases a newer build already migrated.
 
         Tortoise's worldserver applies its core's and TortoiseBots' migration files at
@@ -781,26 +831,8 @@ class CmangosInstaller(StagedInstaller):
         AzerothCore by file name; here the ledger is keyed by hash, not name, so the
         files the move takes away are read from git at both commits and hashed
         (`_migrations_the_target_lacks()`), and only then are the databases asked.
-        Before anything is built, stopped or copied; a refusal puts every source back.
-        Only a Return (`check_moved_sources()` asks), and only for a tree whose conf
-        switches that updater on.
+        Only a Return, and only for a tree whose conf switches that updater on.
         """
-        lacked = self._migrations_the_target_lacks(trees)
-        if not lacked:
-            return
-        count = sum(len(files) for files in lacked.values())
-        yield (
-            f"The tested commit does not ship {count} database migration"
-            f"{'' if count == 1 else 's'} the code you run has; asking the databases whether "
-            f"they already hold {'it' if count == 1 else 'them'}."
-        )
-        held = self._ledger_holds(
-            server_dir,
-            {
-                role: [key for keys in files.values() for key in keys]
-                for role, files in lacked.items()
-            },
-        )
         schemas = self.entry.schema_map()
         applied: dict[str, dict[str, tuple[str, ...]]] = {}
         for role, files in lacked.items():
@@ -823,29 +855,19 @@ class CmangosInstaller(StagedInstaller):
                 for schema, found in applied.items()
             }
             raise InstallerError(newer_migrations_refusal(applied, copies))
-        yield "None of them was applied, so the older server can start on your databases."
 
     # -- going forward over a migration whose bytes changed under its name (T770) ----
 
-    def _refuse_changed_migrations(
-        self, server_dir: Path, trees: Sequence[_MovedMigrations], *, to_pin: bool
-    ) -> Generator[str, None, None]:
-        """Refuse a move that would make the world run a migration again with new bytes.
+    def _migrations_the_target_changes(self, trees: Sequence[_MovedMigrations]) -> _Changed:
+        """Per database, each file both commits ship by name with other bytes at the target.
 
         The AutoUpdater skips a file only when its `<module>:<SHA-1>` key is in the
-        database's ledger (`AutoUpdater.cpp` `ProcessTargetUpdates()`), so a file the
-        target ships under the same name with other bytes runs again at the next start,
-        and its plain `INSERT` or `DROP INDEX` then stops the world (T600). Both presses,
-        whatever the direction: going back, `_refuse_newer_migrations()` has already
-        refused a changed file whose old bytes the database holds, so in practice this
-        is a forward Return or "Update the server to latest…" (T767 made the forward
-        Return skip that file). A file counts when the running commit and the target
-        both ship its name, the target ships its old bytes under no name, the ledger
-        holds an old key and holds no new one. No SQL is run to test whether the new
-        bytes could run twice. Before anything is built, stopped or copied.
+        database's ledger (`AutoUpdater.cpp` `ProcessTargetUpdates()`; the ledger's `Name`
+        only feeds a log line), so such a file runs again at the next start, and its plain
+        `INSERT` or `DROP INDEX` then stops the world (T600). A file whose old bytes the
+        target still ships under some name is not counted: that key stays in the ledger.
         """
-        changed: dict[Db, dict[str, tuple[_MovedMigrations, tuple[str, ...], tuple[str, ...]]]]
-        changed = {}
+        changed: _Changed = {}
         for tree in trees:
             for role, files in tree.before.items():
                 now = tree.after[role]
@@ -858,42 +880,39 @@ class CmangosInstaller(StagedInstaller):
                         tree.keys(hashes),
                         tree.keys(now[name]),
                     )
-        if not changed:
-            return
-        count = sum(len(files) for files in changed.values())
-        where = "The tested commit" if to_pin else "Upstream's newest code"
-        yield (
-            f"{where} changes the bytes of {count} database migration"
-            f"{'' if count == 1 else 's'} the code you run has; asking the databases whether "
-            f"they already ran {'it' if count == 1 else 'them'}."
-        )
-        held = self._ledger_holds(
-            server_dir,
-            {
-                role: [key for _tree, ran, new in files.values() for key in (*ran, *new)]
-                for role, files in changed.items()
-            },
-        )
+        return changed
+
+    def _refuse_changed_migrations(
+        self, changed: _Changed, held: Mapping[Db, set[str]], *, to_pin: bool
+    ) -> None:
+        """Refuse a move that would make the world run a migration again with new bytes.
+
+        Both presses, whatever the direction: going back, `_refuse_newer_migrations()`
+        has already refused a changed file whose old bytes the database holds, so in
+        practice this is a forward Return or "Update the server to latest…" (T767 made the
+        forward Return skip that file). A file refuses when the ledger holds an old key
+        and no new one. No SQL is run to test whether the new bytes could run twice. Every
+        source with such a file is named in the `UpdateRefused`, so the Server tab offers
+        none of their commits again.
+        """
         schemas = self.entry.schema_map()
         again: dict[str, list[str]] = {}
-        first: _MovedMigrations | None = None
+        refused: dict[str, str] = {}
         for role, labelled in changed.items():
             for label, (owner, ran, new) in labelled.items():
                 if any(k.upper() in held[role] for k in ran) and not any(
                     k.upper() in held[role] for k in new
                 ):
                     again.setdefault(schemas[role], []).append(label)
-                    first = first or owner
-        if first is not None:
+                    refused.setdefault(owner.source.repo, owner.new)
+        if refused:
+            (repo, commit), *also = refused.items()
             raise UpdateRefused(
                 changed_migrations_refusal(again, to_pin=to_pin),
-                repo=first.source.repo,
-                commit=first.new,
+                repo=repo,
+                commit=commit,
+                also=tuple(also),
             )
-        yield (
-            f"The databases did not run {'it' if count == 1 else 'them'} with the old bytes, so "
-            "no migration runs a second time."
-        )
 
     def _conf_value(self, key: str) -> str | None:
         """The entry's conf table's value for `key`, unquoted, or None."""
