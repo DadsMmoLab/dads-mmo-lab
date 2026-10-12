@@ -633,6 +633,14 @@ def rebuild_confirmation(entry: CatalogEntry, server_dir: Path, *, kept_build: b
     )
     # T706: a family whose importer is a one-shot runs it before the new build starts.
     imports = bool(entry.containers.db_import)
+    # T739: under an unfinished import's record the press compiles and starts nothing.
+    # Read off the record alone (no database is asked on the GUI thread), and not for a
+    # server inside a WSL distro (`kept_build` False), whose folder a read would start.
+    held = (
+        kept_build
+        and imports
+        and docker.import_record_is_from_empty(server_dir, entry.containers.db_import or "")
+    )
     database = (
         "Before it starts, Yu'lon copies your databases, then applies the database updates "
         "the server and its modules carry that are not applied yet, with AzerothCore's own "
@@ -650,6 +658,17 @@ def rebuild_confirmation(entry: CatalogEntry, server_dir: Path, *, kept_build: b
         "server is started on it again. That rollback covers the server build only: anything "
         "the new build writes into the database on its first start is not put back."
     )
+    if held:
+        return (
+            f"Rebuild {entry.name} in {server_dir}?\n\n"
+            f"This compiles the server again from the source and modules in that folder. It is "
+            f"the same compile an install does, and it has taken "
+            f"{MEASURED_BUILD_TIMES}.\n\n"
+            f"{kept}"
+            f"{recipe}"
+            f"{native.HELD_CONFIRMATION}\n\n"
+            f"Say no and nothing happens at all."
+        )
     return (
         f"Rebuild {entry.name} in {server_dir}?\n\n"
         f"This compiles the server again from the source and modules in that folder. It is "

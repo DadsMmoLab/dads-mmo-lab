@@ -1078,6 +1078,10 @@ class Recorder:
             stop_world=lambda containers, **_kw: self.calls.append(
                 f"stop-world:{','.join(containers)}"
             ),
+            # T739: a Rebuild under an unfinished import removes its old servers' containers.
+            remove_service=lambda server_dir, service, **_kw: self.calls.append(
+                f"remove_service:{service}"
+            ),
         )
         # T170's two, bound after construction like an override, the two
         # readings a test states through `folder_projects`/`project_images`.

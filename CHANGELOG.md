@@ -86,7 +86,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A failed Rebuild or update that puts the databases back keeps the record of an unfinished database import.
 - Stop the other server and start this one no longer stops a database a restore is still loading.
 - Uninstall is refused while a restore is running or did not finish, so a reinstall never starts on half-written data.
-- Rebuild and update no longer start a server whose database import never finished; they point at **Repair** instead.
+- Rebuild and update no longer start a server whose database import never finished; it stays stopped for **Repair**.
 
 ### Changed
 - The Server tab's **Play** now starts the game; **Launcher…** opens the launcher. The tray's **Play** offers to start a stopped server.
