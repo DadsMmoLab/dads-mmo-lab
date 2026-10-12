@@ -50,11 +50,8 @@ class CenturionController(Controller):
             server_dir,
             wsl_distro=wsl_distro,
             pre_stop=pre_stop,
-            # Inside a WSL distro the tab has no "Finish the world update": the
-            # sentence names the update press, which finishes it too.
-            start_guard=lambda: trinitycore.world_update_start_refusal(
-                server_dir, press_here=wsl_distro is None
-            ),
+            # "Finish the world update" is on the tab inside a WSL distro too (T757).
+            start_guard=lambda: trinitycore.world_update_start_refusal(server_dir),
         )
         self.entry = entry
 

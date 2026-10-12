@@ -5119,6 +5119,13 @@ class StageContext:
     outcome can disagree, which is a refusal firing on a press that is about to
     compile.
     """
+    installing: bool = False
+    """The press was INSTALL (`run()`), whose failure has no tab to point at yet (T757).
+
+    A game gets its tab only once an install succeeds, so a sentence the install's own
+    stages end on names "Install again" or "Use existing…" on the folder, never a press
+    on a tab. Every other press is pressed on a tab and keeps naming it.
+    """
     updates_only: bool = False
     """The press was an UPDATES press, so the import stage may apply the plan's
     re-runnable phases and NOTHING else.
@@ -7141,13 +7148,16 @@ class Seams:
         the ones it rendered then.
 
         What a rebuild or an update never asks is not addressed to the distro
-        but REFUSED: provisioning, the install's preflight, the extraction and
-        conf containers and the import check belong to an install, and Yu'lon
-        does not install into a distro (`pyplan/wsl-resident-servers.md` §7).
-        A refusal there is loud; the local default would be a quiet question to
-        the wrong Docker. `tests/test_wsl_update_route.py` derives the list of
-        seams that must be bound from their signatures, so a new docker seam
-        added to this class fails that test until it is bound here.
+        but REFUSED: provisioning, the install's preflight, and the extraction
+        and conf containers belong to an install, and Yu'lon does not install
+        into a distro (`pyplan/wsl-resident-servers.md` §7). A refusal there is
+        loud; the local default would be a quiet question to the wrong Docker.
+        The import check is NOT one of them (T756): "Repair the database…" and
+        an update's re-import are offered here and end in it, and it asks only
+        the probe, which the engine's import gate already addresses to the distro.
+        `tests/test_wsl_update_route.py` derives the list of seams that must be
+        bound from their signatures, so a new docker seam added to this class
+        fails that test until it is bound here.
         """
         repo = git.ContainerGit(wsl_distro=distro)
         on = functools.partial
@@ -7190,7 +7200,7 @@ class Seams:
             context_fingerprint=_no_fingerprint,
             one_shot=on(docker.run_one_shot, wsl_distro=distro),
             end_one_shot=on(docker.end_one_shot, wsl_distro=distro),
-            verify_import=refused("Checking a database import"),
+            verify_import=docker.verify_import,
             container_exists=on(docker.container_exists, wsl_distro=distro),
             container_project=on(docker.container_project, wsl_distro=distro),
             container_working_dir=on(docker.container_working_dir, wsl_distro=distro),
@@ -7870,6 +7880,7 @@ class StagedInstaller:
             state=state,
             cancel=cancel,
             secrets=self.resolve_secrets(server_dir),
+            installing=True,
         )
 
         # The failure record for anything in here is written by `_staged()`,
@@ -14810,10 +14821,17 @@ class StagedInstaller:
             if docker.import_record_is_from_empty(ctx.server_dir, service or ""):
                 # T678 review round 2: the rows are the unfinished first import's own (City
                 # Bots' accounts); Repair clears them under this record and imports again.
+                where = (
+                    # T757: a failed install has no tab yet; "Use existing…" gives it one.
+                    f'Press "Use existing…" and choose {ctx.server_dir}, then press Repair on '
+                    "its Server tab"
+                    if ctx.installing
+                    else "Press Repair on the Server tab"
+                )
                 raise InstallerError(
                     "This server's first database import did not finish, and it wrote data "
-                    f"before it stopped ({before.detail}). Nothing was run. Press Repair on the "
-                    "Server tab to clear what it wrote and import again."
+                    f"before it stopped ({before.detail}). Nothing was run. {where} to clear "
+                    "what it wrote and import again."
                 )
             # T678: an ended import (T658's kill record, written over any databases) with
             # rows in them: they may be a player's, so they are never cleared.
@@ -14923,7 +14941,7 @@ class StagedInstaller:
         if run.returncode != 0:
             # T678: a failure whatever the probe reads now. An importer that died part-way
             # leaves schemas that read `imported` (T658); the record above stays.
-            failed = docker.import_failed(service, ctx.server_dir, run)
+            failed = docker.import_failed(service, ctx.server_dir, run, installing=ctx.installing)
             raise carry_detail(failed, InstallerError(str(failed))) from failed
         try:
             after = self._seams.verify_import(gate.probe, service, ctx.server_dir, run)

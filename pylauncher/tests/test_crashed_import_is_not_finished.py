@@ -656,3 +656,79 @@ def test_the_repair_confirmation_says_what_is_cleared_and_that_a_copy_comes_firs
     assert "400 rows in acore_auth.account" in said, said
     assert "copy" in said and "DELETED" in said, said
     assert "hold no accounts" not in said, said
+
+
+# ------------------------------- T757: a failed first install has no tab to point at yet
+#
+# A tab exists only once an install has succeeded (`ui/catalog_view.py`), so the install's
+# own failure sentences name the way to one ("Use existing…" on the folder) or Install
+# again; Repair's route, run from the Server tab, keeps naming that tab.
+
+
+def test_a_failed_install_on_a_modules_file_says_how_to_reach_the_tabs_it_names(
+    tmp_path: Path,
+) -> None:
+    server = tmp_path / "s"
+    rec = Recorder(probe_answers=[ABSENT, IMPORTED])
+    with pytest.raises(InstallerError) as raised:
+        _press(rec, server, docker.AttachedRun(1, DIED))
+    said = str(raised.value)
+    assert "Use existing" in said and str(server) in said, said
+    assert said.index("Use existing") < said.index("Modules tab"), said
+    assert said.index("Use existing") < said.index("Server tab"), said
+
+
+def test_a_failed_install_with_no_file_named_says_install_again_and_names_no_tab(
+    tmp_path: Path,
+) -> None:
+    server = tmp_path / "s"
+    rec = Recorder(probe_answers=[ABSENT, IMPORTED])
+    with pytest.raises(InstallerError) as raised:
+        _press(rec, server, docker.AttachedRun(1, ("Lost connection to MySQL server",)))
+    said = str(raised.value)
+    assert "Install again" in said, said
+    assert "Server tab" not in said and "Modules tab" not in said, said
+
+
+def test_the_install_press_on_rows_its_crashed_import_left_says_how_to_reach_repair(
+    tmp_path: Path,
+) -> None:
+    server = tmp_path / "s"
+    rec = Recorder(probe_answers=[ABSENT, IMPORTED])
+    with pytest.raises(InstallerError):
+        _press(rec, server, docker.AttachedRun(1, DIED))
+    rec.calls.clear()
+    rec.probe_answers = [POPULATED_DONE]
+    with pytest.raises(InstallerError) as raised:
+        _press(rec, server)
+    said = str(raised.value)
+    assert "Use existing" in said and str(server) in said, said
+    assert said.index("Use existing") < said.index("Server tab"), said
+
+
+def test_repair_the_database_on_its_tab_keeps_naming_the_server_tab(tmp_path: Path) -> None:
+    """The same import failing under "Repair the database…", which IS on the Server tab."""
+    from yulon.database_presence import Reading
+
+    server = tmp_path / "s"
+    rec = Recorder(images=True)
+    install(rec, server)
+    rec.calls.clear()
+    rec.db_started = False
+    rec.probe_answers = [ABSENT, IMPORTED]
+
+    def one_shot(service: str, server_dir: Path, **_kw: object) -> docker.AttachedRun:
+        rec.calls.append(f"one-shot:{service}")
+        return docker.AttachedRun(1, DIED) if service == IMPORTER else docker.AttachedRun(0, ())
+
+    repair = engine(
+        rec,
+        one_shot=one_shot,
+        verify_import=docker.verify_import,
+        read_database=lambda entry, d: Reading("missing"),
+    ).repair_database(InstallOptions(server_dir=server))
+    with pytest.raises(InstallerError) as raised:
+        list(repair)
+    said = str(raised.value)
+    assert "on the Server tab" in said and "mod-city-bots" in said, said
+    assert "Use existing" not in said, said

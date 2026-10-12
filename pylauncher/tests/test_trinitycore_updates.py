@@ -2164,12 +2164,15 @@ def test_with_both_records_the_rebuild_goes_first_and_then_the_finish(box: Box) 
     assert box.pending() is None and box.world.running is True
 
 
-def test_inside_a_wsl_distro_the_engine_names_the_update_press(box: Box) -> None:
+def test_inside_a_wsl_distro_the_engine_names_the_finish_press_its_tab_offers(box: Box) -> None:
+    """T757: the WSL tab offers "Finish the world update" (`world_reimport_for_app`), so a
+    Start refused for it names that press, not an hour-long Update to latest."""
     box.leave_pending([f"{WORLD_SQL}/creature.sql"])
     box.distro = "Ubuntu"
+    assert world_reimport_for_app(ENTRY, box.server_dir, wsl_distro="Ubuntu") is not None
     refused = box.engine().start_refusal(box.server_dir)
-    assert refused is not None and "“Update the server to latest…”" in refused
-    assert "Finish the world update" not in refused
+    assert refused is not None and "“Finish the world update”" in refused, refused
+    assert "Update the server to latest" not in refused, refused
 
 
 # -- the movement-map job of a server inside a WSL distro (T179 final round) ------------------

@@ -543,16 +543,18 @@ def test_stopping_the_other_server_to_start_this_one_is_refused_before_the_stop(
     assert fake.calls == [], "the other server was not stopped"
 
 
-def test_inside_a_wsl_distro_the_refusal_names_the_update_press(tmp_path: Path) -> None:
+def test_inside_a_wsl_distro_the_refusal_names_the_finish_press_its_tab_offers(
+    tmp_path: Path,
+) -> None:
+    """T757: the WSL tab offers "Finish the world update" too, so Start names it, not an
+    hour-long Update to latest that also moves the sources."""
     server, _ = _server(tmp_path)
     _leave_pending(server)
     made = centurion_controller.CenturionController(ENTRY, server, wsl_distro="Ubuntu")
     assert made.start_guard is not None
-    assert made.start_guard() == (
-        "This server's last update didn't finish importing its world tables. Press "
-        f"{server_build_presses.under_server_build(server_build_presses.UPDATE_TO_LATEST)} "
-        "again first."
-    )
+    refused = made.start_guard()
+    assert refused is not None and f"\u201c{trinitycore.FINISH_WORLD_BUTTON}\u201d" in refused
+    assert server_build_presses.UPDATE_TO_LATEST not in refused, refused
 
 
 # -- a finished pathfinding set stays switched on (T179 final round) --------------------------

@@ -1348,7 +1348,7 @@ class TrinityCoreInstaller(CmangosInstaller):
 
     def family_start_refusal(self, server_dir: Path) -> str | None:
         """A world update left unfinished (T179); the spine's question, answered (T223)."""
-        return world_update_start_refusal(server_dir, press_here=self._seams.distro is None)
+        return world_update_start_refusal(server_dir)
 
     def servers_down_work(
         self, server_dir: Path, changes: object, *, press: str
@@ -2774,7 +2774,7 @@ WORLD_UPDATE_UNFINISHED = (
 """Why no start is allowed while `WORLD_REIMPORT_FILE` is there (T179 final round, lead ruling)."""
 
 
-def world_update_start_refusal(server_dir: Path, *, press_here: bool = True) -> str | None:
+def world_update_start_refusal(server_dir: Path) -> str | None:
     """Why this server must not start now: a world update left unfinished, or None.
 
     The world server would load tables half of one version and half of another.
@@ -2782,18 +2782,12 @@ def world_update_start_refusal(server_dir: Path, *, press_here: bool = True) -> 
     that something waits is not (`_read_pending`). Asked by every start -- the
     controller's `start_guard` and the engine's `start_refusal()` -- except the
     finish itself, which removes the record before it starts the server.
-    `press_here` False is a tab with no "Finish the world update" (a server in a
-    WSL distro): the update press, which finishes it too, is named instead.
+    "Finish the world update" is named for a server inside a WSL distro too
+    (T757): its tab offers that press (`install_wiring.world_reimport_for_app`).
     """
     if _read_pending(server_dir) is None:
         return None
-    if press_here:
-        return WORLD_UPDATE_UNFINISHED
-    update = server_build_presses.under_server_build(server_build_presses.UPDATE_TO_LATEST)
-    return (
-        "This server's last update didn't finish importing its world tables. Press "
-        f"{update} again first."
-    )
+    return WORLD_UPDATE_UNFINISHED
 
 
 def _parts_on_disk(server_dir: Path, stem: str) -> bool:

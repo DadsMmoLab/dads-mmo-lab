@@ -12,13 +12,15 @@ The machine is `support_native.Recorder`; the reading is the engine's
 
 from __future__ import annotations
 
+import dataclasses
+import functools
 from pathlib import Path
 
 import pytest
 
 from tests.support_native import ABSENT, ENTRY, IMPORTED, Recorder, engine, install
 from tests.test_families_cmangos import engine as cm_engine
-from yulon import database_presence
+from yulon import database_presence, docker, git
 from yulon.catalog import native
 from yulon.catalog.installer import InstallerError, InstallOptions
 from yulon.database_presence import Reading
@@ -125,6 +127,52 @@ def test_the_engine_asks_docker_by_default() -> None:
     """The real reading, not a stand-in, unless a test says otherwise."""
     assert native.Seams().read_database is database_presence.take_reading
     assert ENTRY.install.native is not None
+
+
+def _what_wsl_does_not_address_to_the_distro() -> dict[str, object]:
+    """Every seam `Seams.in_wsl()` sets to something other than a distro-bound question (T756).
+
+    Its refusals and its stated answers (`platform_id`, `install_id`, `context_fingerprint`,
+    ...), derived from the seams themselves rather than listed, so a refusal bound to a seam
+    the WSL Repair reaches fails here whichever seam it is. The distro-bound docker and git
+    seams are left to the Recorder: they are the same functions with the distro named.
+    """
+    wsl, local = native.Seams.in_wsl("Ubuntu"), native.Seams()
+    kept: dict[str, object] = {}
+    for field in dataclasses.fields(native.Seams):
+        value = getattr(wsl, field.name)
+        if field.name == "distro" or value is getattr(local, field.name):
+            continue
+        if isinstance(value, functools.partial) and "wsl_distro" in value.keywords:
+            continue
+        if isinstance(getattr(value, "__self__", None), git.ContainerGit):
+            continue
+        kept[field.name] = value
+    return kept
+
+
+def test_the_wsl_repair_keeps_every_seam_wsl_does_not_address_and_finishes(
+    tmp_path: Path,
+) -> None:
+    """T756: the press offered on a WSL server runs on its seams to the end.
+
+    The import's check was bound to a refusal ("belongs to an install"), so the press ran the
+    whole import, then refused, left the under-way record and started nothing.
+    """
+    rec = Recorder(images=True)
+    server_dir = _finished(rec, tmp_path)
+    rec.db_started = False
+    rec.probe_answers = [ABSENT, IMPORTED]
+    wsl = _what_wsl_does_not_address_to_the_distro()
+    assert "run_container" in wsl and "platform_id" in wsl, sorted(wsl)
+    said = list(
+        engine(rec, read_database=_reads("missing"), **wsl).repair_database(
+            InstallOptions(server_dir=server_dir)
+        )
+    )
+    assert "one-shot:ac-db-import" in rec.calls and "start" in rec.calls, rec.calls
+    assert not docker.one_shot_ended_marker(server_dir, "ac-db-import").is_file()
+    assert said[-1].endswith("restore it on the Maintenance tab."), said[-1]
 
 
 # -- the wiring ----------------------------------------------------------------------------

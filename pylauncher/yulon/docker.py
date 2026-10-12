@@ -3315,7 +3315,9 @@ _FAILED_UPDATE = re.compile(r"Applying of file '([^']+\.sql)' to database '([^']
 tab's report reads), with the database it names."""
 
 
-def importer_failure(run: AttachedRun, what: str, *, first_import: bool = False) -> str:
+def importer_failure(
+    run: AttachedRun, what: str, *, first_import: bool = False, install_dir: Path | None = None
+) -> str:
     """Why an import one-shot failed, naming the file and the way past it.
 
     T706 round 2, for a Rebuild's or an update's import: the pinned updater applies a
@@ -3328,6 +3330,10 @@ def importer_failure(run: AttachedRun, what: str, *, first_import: bool = False)
     nothing before it. Nothing was started then, and the databases are unfinished,
     whatever the probe reads of them afterwards: the importer creates every schema's
     `updates` tables before it applies the updates (T658).
+
+    `install_dir` (T757): the first import was the INSTALL's, into that folder. A game
+    has no tab until an install succeeds, so the sentence names Install again, or
+    "Use existing…" on the folder before the tabs it names, instead of a tab's press.
     """
     found: tuple[str, str, str] | None = None
     error = ""
@@ -3346,6 +3352,11 @@ def importer_failure(run: AttachedRun, what: str, *, first_import: bool = False)
         else "the new build was not started"
     )
     if found is None:
+        if first_import and install_dir is not None:
+            return (
+                f"{what} failed (exit {run.returncode}), so {outcome}. Press Install again and "
+                f"choose {install_dir} to run it again. {IMPORT_REST_UNDER_DETAILS}"
+            )
         if first_import:
             # T214's rule for these presses: the importer's own words are under Details.
             return (
@@ -3369,10 +3380,17 @@ def importer_failure(run: AttachedRun, what: str, *, first_import: bool = False)
             if module
             else "press Repair"
         )
+        # T757: Install again stops on the same file, and the install has no tab yet.
+        tab = (
+            f'press "Use existing…" and choose {install_dir} to get its tabs, then {first} on '
+            "the Server tab"
+            if install_dir is not None
+            else f"{first} on the Server tab"
+        )
         return (
             f"The database update {posixpath.basename(path)}, {whose}, could not be applied "
             f"to {database}, so {outcome}. The importer tries that file again each time it "
-            f"runs, so every import stops there until it applies: {first} on the Server tab, "
+            f"runs, so every import stops there until it applies: {tab}, "
             f"which clears what this import wrote and runs it again. {IMPORT_REST_UNDER_DETAILS}"
         )
     way = (
@@ -3390,10 +3408,20 @@ def importer_failure(run: AttachedRun, what: str, *, first_import: bool = False)
     )
 
 
-def import_failed(service: str, server_dir: Path, run: AttachedRun) -> DockerRefusal:
-    """The refusal for a first import whose one-shot exited non-zero (T678), Details attached."""
+def import_failed(
+    service: str, server_dir: Path, run: AttachedRun, *, installing: bool = False
+) -> DockerRefusal:
+    """The refusal for a first import whose one-shot exited non-zero (T678), Details attached.
+
+    `installing` (T757): the install's own import, whose sentence names no tab.
+    """
     return DockerRefusal(
-        importer_failure(run, "The database import", first_import=True),
+        importer_failure(
+            run,
+            "The database import",
+            first_import=True,
+            install_dir=server_dir if installing else None,
+        ),
         detail=_import_details(service, server_dir, run),
     )
 

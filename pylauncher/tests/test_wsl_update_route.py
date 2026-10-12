@@ -292,7 +292,8 @@ _NOT_ADDRESSED_TO_THE_DISTRO = {
     "run_container": "install-only (extraction); takes no distro, so it is refused instead",
     "folder_claim": "T543: the Re-extract claim, beside `run_container`; refused the same way",
     "copy_from_image": "install-only (conf templates); takes no distro, so it is refused instead",
-    "verify_import": "install-only (the import stage); takes no distro",
+    "verify_import": "the import's check (T756): Repair the database and an update's re-import "
+    "end in it, and it asks only the probe, which the WSL engine's gate addresses to the distro",
     "install_id": "the id the install RECORDED (`recorded_install_id`), tested on its own",
     "host_zone": "a new install's zone (T171); a rebuild or update of an installed server "
     "carries its own off the override, and Windows is the computer the player sits at",
@@ -371,7 +372,6 @@ def test_the_install_only_seams_refuse_rather_than_reach_windows(
         "run_container",
         "folder_claim",
         "copy_from_image",
-        "verify_import",
         "ensure_docker",
     ):
         with pytest.raises(InstallerError, match="inside"):

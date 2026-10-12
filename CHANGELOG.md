@@ -20,6 +20,9 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Removing a module now names the accounts, characters and tables its SQL left in the databases.
 - Removing a module now names its own uninstall SQL and what it would delete, without running it.
 - A module added from a link or folder now reports the SQL the server applies, and says which SQL nothing applies.
+- **Repair the database…** on a WotLK server inside WSL now finishes and starts it, instead of failing after its import.
+- A failed first install now says to press Install again or **Use existing…**, not to use a tab it does not have yet.
+- Start on a Centurion server inside WSL with an unfinished world update now names **Finish the world update**.
 - A server build now waits for Docker and tries once more when Docker stops answering during it.
 - Rebuilding a WotLK server from an older Yu'lon no longer sends its whole source to Docker again for the login server.
 - The command channel now proves itself once the world is up, and **Turn on the command channel** gives its tries back.
