@@ -242,6 +242,8 @@ def test_main_streams_the_engine_and_maps_failures_to_exit_codes(
     out = capsys.readouterr()
     assert out.out.splitlines() == ["cloning", "ready"]
     assert options_seen[-1].server_dir == tmp_path and options_seen[-1].client_dir is None
+    # T723: the harness is an install run, so it asks for the channel switch like the button.
+    assert options_seen[-1].first_install is True
 
     monkeypatch.setattr(install_wiring, "installer_for_app", lambda entry, **_k: _Engine(fail=True))
     assert install_wiring.main(["wow-wotlk"]) == 1

@@ -14055,12 +14055,16 @@ class StagedInstaller:
         # at install (T87). The record a press keeps is written first, from the
         # override this render gives without the channel, and the second render
         # then carries the channel the way every later regeneration does. Asked
-        # before anything is written. Only the press that made the folder may ask
-        # (`ctx.first_install`, set by the install's `run()` and by nothing else), and
-        # the disk must agree: no override, no record, and no port line in `.env`. A
-        # folder whose override was deleted later is not a first install, because a
-        # rollback keeps its released claim in `.env` (T723 round 2).
+        # before anything is written. Only an install run may ask (`ctx.first_install`,
+        # set by the Install button and the install harness and by nothing else); what
+        # is or is not on the disk never decides it, because a folder with files missing
+        # looks like a first install and is not one. The one thing read from the disk is
+        # a refusal: a port line already in `.env` is the user's and is left alone
+        # (T723 round 2).
         try:
+            refusal = composegen.channel_start_refusal(
+                self.entry, ctx.server_dir, first_install=ctx.first_install
+            )
             switch_on = composegen.channel_starts_on(
                 self.entry, ctx.server_dir, first_install=ctx.first_install
             )
@@ -14074,6 +14078,9 @@ class StagedInstaller:
             raise InstallerError(
                 f"the command channel could not be written into {ctx.server_dir}: {exc}"
             ) from exc
+        if refusal is not None:
+            logger.info(refusal)
+            yield refusal
         made = self._make_server_folders(ctx.server_dir)
         for path in made:
             yield f"Made {path.name}/ for the server to write into."

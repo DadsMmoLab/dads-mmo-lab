@@ -278,15 +278,68 @@ def test_a_first_install_into_a_folder_that_already_claims_the_port_stays_off(
     assert not composegen.channel_is_on(tmp_path)
 
 
-def test_a_first_install_into_a_folder_with_an_unpressed_override_stays_off(tmp_path: Path) -> None:
-    """The first guard on its own: an override that exists is an install that exists."""
+def test_a_reinstall_into_a_folder_with_an_override_is_an_install_and_switches_on(
+    tmp_path: Path,
+) -> None:
+    """The Install button over an existing folder is an install run, so the channel comes on.
+
+    Nothing in the folder says otherwise: no port line in `.env`.
+    """
     _installed_no_port_line(WOTLK, tmp_path)
 
     override = _generate(WOTLK, tmp_path, first_install=True)
 
+    for key in CHANNEL_KEYS:
+        assert key in override
+    assert _claim(tmp_path) == "127.0.0.1:7878"
+    assert composegen.channel_is_on(tmp_path)
+
+
+def test_a_reinstall_keeps_the_press_record_it_finds(tmp_path: Path) -> None:
+    """A record of the override before any channel is the first kept, never replaced."""
+    before = _installed_no_port_line(WOTLK, tmp_path)
+    leftover = "# the record of an earlier press\n"
+    (tmp_path / BACKUP).write_text(leftover, encoding="utf-8")
+
+    _generate(WOTLK, tmp_path, first_install=True)
+
+    assert (tmp_path / BACKUP).read_text(encoding="utf-8") == leftover
+    assert leftover != before
+    assert _claim(tmp_path) == "127.0.0.1:7878"
+
+
+def test_an_env_with_the_users_own_port_line_is_left_alone(tmp_path: Path) -> None:
+    """The user set DOCKER_SOAP_EXTERNAL_PORT: no SOAP setting is written, and it is said."""
+    mine = f"{channel_setup.HOST_PORT_VAR}=0.0.0.0:9999"
+    (tmp_path / composegen.DOTENV_FILE).write_text(f"{mine}\nOTHER=1\n", encoding="utf-8")
+    env_before = (tmp_path / composegen.DOTENV_FILE).read_bytes()
+
+    engine = _engine(WOTLK)
+    said = list(engine.stage_generate_compose(_context(WOTLK, tmp_path, first_install=True)))
+
+    override = (tmp_path / OVERRIDE).read_text(encoding="utf-8")
+    assert "AC_SOAP_ENABLED" not in override
+    assert (tmp_path / composegen.DOTENV_FILE).read_bytes() == env_before
+    assert not (tmp_path / BACKUP).exists()
+    assert not composegen.channel_is_on(tmp_path)
+    assert any(channel_setup.HOST_PORT_VAR in line and "left as it is" in line for line in said)
+
+
+def test_a_non_install_path_with_every_file_missing_does_not_switch_on(tmp_path: Path) -> None:
+    """Missing files are not a first install: Update into an empty folder leaves SOAP off."""
+    override = _update(WOTLK, tmp_path)
+
     assert "AC_SOAP_ENABLED" not in override
     assert _claim(tmp_path) is None
     assert not (tmp_path / BACKUP).exists()
+    assert not composegen.channel_is_on(tmp_path)
+
+
+def test_the_stage_without_the_flag_on_an_empty_folder_does_not_switch_on(tmp_path: Path) -> None:
+    override = _generate(WOTLK, tmp_path, first_install=False)
+
+    assert "AC_SOAP_ENABLED" not in override
+    assert _claim(tmp_path) is None
 
 
 def test_a_cmangos_tree_is_not_switched_on_by_the_compose_stage(tmp_path: Path) -> None:
@@ -313,7 +366,10 @@ def test_the_env_file_stays_owner_only_once_the_claim_is_written(tmp_path: Path)
 
 
 def test_a_leftover_press_record_is_never_overwritten_by_the_switch_on(tmp_path: Path) -> None:
-    """A backup from a press that outlived its override is kept as it is, never replaced."""
+    """A backup from a press that outlived its override is kept as it is, never replaced.
+
+    With no port line in `.env` the folder gives no reason to refuse, so the channel is on.
+    """
     leftover = "# the record of an earlier press\n"
     (tmp_path / BACKUP).write_text(leftover, encoding="utf-8")
 

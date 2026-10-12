@@ -231,31 +231,55 @@ def channel_is_on(server_dir: Path) -> bool:
     return dotenv_value(server_dir, CHANNEL_PORT_VAR) != CHANNEL_PORT_RELEASED
 
 
+def channel_start_refusal(
+    entry: CatalogEntry, server_dir: Path, *, first_install: bool
+) -> str | None:
+    """Why a first install must leave its command channel alone, or `None` (T723).
+
+    The one thing that refuses is a `DOCKER_SOAP_EXTERNAL_PORT` line already in the
+    folder's `.env`: somebody chose the host port claim (a press, a rollback's
+    released `127.0.0.1:0`, or a hand edit), and the install does not overwrite what
+    the user set. It asks nothing of the override or of any backup file: the
+    decision to switch on is the press's (`first_install`), never the folder's
+    contents, because a folder with files missing looks like a first install to the
+    disk and is not one.
+    """
+    if not first_install or not _channel_on_env_route(entry):
+        return None
+    claim = dotenv_value(server_dir, CHANNEL_PORT_VAR)
+    if claim is None:
+        return None
+    return (
+        f"The command channel was left as it is: .env already has {CHANNEL_PORT_VAR}={claim}, "
+        "a setting that was chosen before this install."
+    )
+
+
+def _channel_on_env_route(entry: CatalogEntry) -> bool:
+    operations = entry.operations
+    return operations is not None and bool(operations.enable_env)
+
+
 def channel_starts_on(entry: CatalogEntry, server_dir: Path, *, first_install: bool) -> bool:
     """Whether this install's first render switches its channel on (T723).
 
-    Three things must hold. The press says it is the FIRST install of its folder
-    (`first_install`, which only the Install button and the install harness set).
-    The entry's channel is an environment route (`operations.enable_env`). And the
-    folder shows no channel history: no override, no `.before-channel` record, and
-    no `DOCKER_SOAP_EXTERNAL_PORT` line in `.env`. The owner decided on 2026-10-12
-    that a first install starts on, the way the conf-file trees' keys are written
-    at install (T87), so the first boot binds the channel and nothing is pressed.
+    Two things decide it, and neither is a file being missing. The press says it is
+    an install run (`first_install`, set by the Install button and the install
+    harness, and by nothing else: Update, Repair, Reset and a move never set it).
+    And the entry's channel is an environment route (`operations.enable_env`, WotLK
+    and Unbound). The owner decided on 2026-10-12 that such an install starts on,
+    the way the conf-file trees' keys are written at install (T87), so the first
+    boot binds the channel and nothing is pressed.
 
-    The disk alone cannot make this decision. A folder whose override was deleted
-    later looks like a first install to it, and Update runs the same stage. The
-    flag does the work for Update, which never sets it. The port line covers the
-    rolled-back case even if a caller did set it: a rollback leaves `127.0.0.1:0`
-    in `.env`, while a never-pressed install has no port line at all (T723 round 2).
+    The one exception is `channel_start_refusal()`: a `DOCKER_SOAP_EXTERNAL_PORT`
+    line already in `.env` is the user's, and is left alone. An install into a folder
+    that already has an override is still an install, so it switches on too, unless
+    that line is there (a press or a rollback always leaves it).
     """
-    operations = entry.operations
-    if not first_install or operations is None or not operations.enable_env:
-        return False
-    if dotenv_value(server_dir, CHANNEL_PORT_VAR) is not None:
-        return False
     return (
-        not (server_dir / OVERRIDE_FILE).exists()
-        and not (server_dir / f"{OVERRIDE_FILE}{CHANNEL_BACKUP_SUFFIX}").exists()
+        first_install
+        and _channel_on_env_route(entry)
+        and channel_start_refusal(entry, server_dir, first_install=first_install) is None
     )
 
 
@@ -276,7 +300,10 @@ def record_channel_press(entry: CatalogEntry, server_dir: Path, before: str) -> 
         raise ComposeGenError(f"{entry.id} has no command channel port to claim")
     target = server_dir / OVERRIDE_FILE
     backup = target.with_name(target.name + CHANNEL_BACKUP_SUFFIX)
-    backup.write_text(before, encoding="utf-8", newline="\n")
+    if not backup.exists():
+        # As `enable()` does: the record of the override before ANY channel is the first
+        # one kept, so a leftover one from an earlier press is never replaced.
+        backup.write_text(before, encoding="utf-8", newline="\n")
     write_dotenv(server_dir, {CHANNEL_PORT_VAR: f"127.0.0.1:{operations.port}"})
 
 
