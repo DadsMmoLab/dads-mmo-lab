@@ -223,11 +223,12 @@ MODULE_SURFACE_AFTER_7_2 = {
     "provision_lines",
     "unsupported_platform_message",
     # T755, added deliberately: the record says an install never finished its import,
-    # and the Start and "Use existing…" sentences that refuse it.
+    # the family's import gate asked of its databases, and Start's refusal of the two.
     "IMPORT_STAGE",
+    "UNFINISHED_IMPORT_STATES",
+    "install_import_state",
     "unfinished_import",
-    "unfinished_import_adopt_refusal",
-    "unfinished_import_start_refusal",
+    "unfinished_install_refusal",
     # what it imports, which is the other half of the evidence: the bash engine
     # needed `os`, `re`, `secrets`, `shutil`, `subprocess`, `sys`, `deque` and
     # `Mapping`, and none of them may come back unnoticed either.

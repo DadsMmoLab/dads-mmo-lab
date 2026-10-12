@@ -974,6 +974,19 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         hits=(".trinitycore",),
     ),
     Site(
+        "yulon.catalog.installer",
+        "install_import_state",
+        "Start asks the SQL plan's import gate of an install that did not finish installing (T755)",
+        {
+            "azerothcore": not_applicable(
+                "never asked: an import service's own record and probe refuse Start (T658/T678)"
+            ),
+            "cmangos": supported("the plan's `MarkerGate`, `native.cmangos.sql`"),
+            "trinitycore": supported("the inherited `MarkerGate`, `native.trinitycore.sql`"),
+        },
+        hits=(".cmangos", ".trinitycore"),
+    ),
+    Site(
         "yulon.catalog.preflight",
         "world_data_gb",
         "the room the map-data volume takes on Docker's disk, added to its floors on Windows",

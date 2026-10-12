@@ -548,6 +548,7 @@ class Controller:
             self.seeded_accounts_locked = None
             self.refuse_a_missing_image()
             self.refuse_a_missing_database()
+            self.refuse_an_unfinished_install()
             self.refuse_an_ended_import()
             if not asked_before_the_servers:
                 self._ask_before_the_servers()
@@ -668,6 +669,27 @@ class Controller:
             raise ComposeTooOld(
                 reason, offer=platform.compose_update_offered(wsl_distro=self.wsl_distro)
             )
+
+    def refuse_an_unfinished_install(self) -> None:
+        """Raise `StartRefused` for a CMaNGOS or Centurion install that did not finish installing.
+
+        T755. "Use existing…" could take a folder whose install was stopped during
+        its import, and these games' login tables read `present` long before the
+        world is in, so Start ran on a half-imported world. Refused only when Yu'lon's
+        own record says the import never finished AND the family's import gate reads
+        the databases `absent` or `partial` (`installer.unfinished_install_refusal()`);
+        a played world, a finished import or a database that cannot be asked starts as
+        before. After `refuse_a_missing_database()`, which has the database up.
+        """
+        entry = self.entry or _entry_for(self.spec)
+        if entry is None:
+            return
+        reason = installer.unfinished_install_refusal(
+            entry, self.server_dir, wsl_distro=self.wsl_distro
+        )
+        if reason:
+            logger.warning(f"start() refused: {reason}")
+            raise StartRefused(reason)
 
     def refuse_an_ended_import(self) -> None:
         """Raise `ImportEnded` while this server's last import stands cut off (T658).
@@ -976,13 +998,6 @@ class Controller:
             # T217 (a), the owner's decision of 2026-10-05: a source folder a failed
             # update could not put back refuses every start (`native.SOURCES_OFF_FILE`).
             reason = native.sources_off_refusal(self.server_dir)
-        if not reason:
-            # T755: a CMaNGOS or Centurion install stopped before its import finished
-            # ("Use existing…" took it before that refused), whose login tables read
-            # `present` over a half-imported world.
-            entry = self.entry or _entry_for(self.spec)
-            if entry is not None:
-                reason = installer.unfinished_import_start_refusal(entry, self.server_dir)
         if not reason and self.start_guard is not None:
             reason = self.start_guard()
         if reason:
@@ -1010,6 +1025,7 @@ class Controller:
         self.refuse_an_old_compose()
         self.refuse_a_missing_image()
         self.refuse_a_missing_database()
+        self.refuse_an_unfinished_install()
         self.refuse_an_ended_import()
         self._ask_before_the_servers()
 
@@ -1041,6 +1057,7 @@ class Controller:
             self.refuse_an_old_compose()
             self.refuse_a_missing_image()
             self.refuse_a_missing_database()
+            self.refuse_an_unfinished_install()
             self.refuse_an_ended_import()
             asked = not self.port_conflicts()
             if asked:

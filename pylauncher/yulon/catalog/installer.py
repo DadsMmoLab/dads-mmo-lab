@@ -755,32 +755,90 @@ def unfinished_import(entry: CatalogEntry, server_dir: Path) -> Path | None:
     return server_dir / native.STATE_FILE
 
 
-def unfinished_import_start_refusal(entry: CatalogEntry, server_dir: Path) -> str | None:
-    """Start's sentence for `unfinished_import()`, or None (T755)."""
+def install_import_state(
+    entry: CatalogEntry, server_dir: Path, *, wsl_distro: str | None = None
+) -> docker.ImportState:
+    """What the family's own import gate reads in this install's databases (T755). Never raises.
+
+    The `sqlplan.MarkerGate` the install's `import` stage asks
+    (`CmangosInstaller._marker_gate()`, which Centurion inherits), built from the
+    entry: its SQL plan, its database container and client, the password the
+    install generated, and its schemas by name. Its `partial` is NOT turned into
+    `unreadable` the way `controller_wow_tbc.repair.import_state()` turns it: that
+    one reads folders "Use existing…" brought in from anywhere, while this is asked
+    only under Yu'lon's own record of an install that never finished its import,
+    which is exactly the state the gate's `partial` describes. Anything that
+    cannot be asked (no password file, a database that is down) is `unreadable`.
+    """
+    # Local import: the families import this module (see the top).
+    from yulon.catalog.families import sqlplan
+
+    native_block = entry.install.native
+    data = None if native_block is None else (native_block.cmangos or native_block.trinitycore)
+    if native_block is None or data is None:
+        return docker.ImportState("unreadable", f"{entry.name} has no SQL plan of its own")
+    password = entry.install.db_password(server_dir)
+    if password is None:
+        return docker.ImportState(
+            "unreadable", f"this install's database password could not be read in {server_dir}"
+        )
+    names = entry.databases
+    try:
+        gate = sqlplan.MarkerGate(
+            data.sql,
+            container=entry.container_spec().db,
+            client=native_block.db.client,
+            password=password,
+            schemas={n: n for n in (names.auth, names.characters, names.world, *names.extra)},
+            sql_query=docker.sql_query,
+            exec_stdin=docker.exec_stdin,
+            wsl_distro=wsl_distro,
+        )
+    except InstallerError as exc:
+        return docker.ImportState("unreadable", str(exc))
+    return gate.probe()
+
+
+UNFINISHED_IMPORT_STATES = ("absent", "partial")
+"""What the gate reads when Start refuses an unfinished install (T755 round 2).
+
+Exactly the two states the Install route clears and imports again (`stage_import()`).
+`populated` is player data: the old Stop popup sent players to "Use existing…" on
+such a folder, they may have played since, and the Install route refuses those
+databases ("already hold data"), so refusing Start would leave no way out.
+`imported` is a marker the import wrote after it verified, the record not yet
+written. `unreadable` refuses nothing, as Start's WotLK import check does not.
+"""
+
+
+def unfinished_install_refusal(
+    entry: CatalogEntry, server_dir: Path, *, wsl_distro: str | None = None
+) -> str | None:
+    """Start's refusal of an install that did not finish installing, or None (T755).
+
+    Two facts, both needed: Yu'lon's own record says the import never finished
+    (`unfinished_import()`), and the family's import gate reads the databases as
+    `absent` or `partial` (`install_import_state()`). The gate is asked only when
+    the record says so, and needs the database up: Start asks after
+    `refuse_a_missing_database()` has started it.
+    """
     record = unfinished_import(entry, server_dir)
     if record is None:
         return None
-    return (
-        f"{entry.name} was not started: its install was stopped before the database import "
-        f"finished ({record} does not list the import as done), so its world is only partly "
-        f'in the database. Press "{forgetting.BUTTON_LABEL}" (it keeps the folder, the database '
-        f"and the images), then press Install on the {entry.name} tile in the Catalog and choose "
-        f"{server_dir}: the install carries on from the import, and clears what the stopped one "
-        "half-wrote first."
-    )
-
-
-def unfinished_import_adopt_refusal(entry: CatalogEntry, server_dir: Path) -> str | None:
-    """The sentence "Use existing…" refuses with for `unfinished_import()`, or None (T755)."""
-    record = unfinished_import(entry, server_dir)
-    if record is None:
+    state = install_import_state(entry, server_dir, wsl_distro=wsl_distro)
+    if state.state not in UNFINISHED_IMPORT_STATES:
+        logger.info(
+            f"{record} does not list the import as done, but the databases read "
+            f"{state.state} ({state.detail}); not refused"
+        )
         return None
     return (
-        f"The install in {server_dir} was stopped before its database import finished "
-        f"({record} does not list the import as done), so its world is only partly in the "
-        f'database and "Use existing…" will not take it. Press Install on this tile and '
-        f"choose {server_dir}: the install carries on from the import, and clears what the "
-        "stopped one half-wrote first."
+        f"{entry.name} was not started: it did not finish installing ({record} does not list "
+        f"the database import as done, and its databases read {state.state}: {state.detail}), "
+        f'so its world is not all there. Press "{forgetting.BUTTON_LABEL}" (it keeps the '
+        f"folder, the database and the images), then press Install on the {entry.name} tile in "
+        f"the Catalog and choose {server_dir}: the install carries on where it stopped, and "
+        "clears a half-written import before it imports again."
     )
 
 
@@ -1035,7 +1093,7 @@ def cancelled_install_message(entry: CatalogEntry, server_dir: Path) -> str:
     # cannot drift from it. They did: `adoptable` alone gated the delete, and
     # `adoptable` alone is true in this branch too.
     # T755: a CMaNGOS or Centurion install whose record does not list `import` would be
-    # adopted on a half-imported world, so "Use existing…" refuses it and is not offered.
+    # adopted on a half-imported world, so "Use existing…" is not offered for it.
     import_unfinished = unfinished_import(entry, server_dir) is not None
     promised_nothing_lost = adoptable is not None and bool(ours) and not import_unfinished
 
@@ -1049,8 +1107,9 @@ def cancelled_install_message(entry: CatalogEntry, server_dir: Path) -> str:
     elif ours and import_unfinished:
         parts.append(
             f"The compose files this app writes are there ({', '.join(ours)}), but {record} "
-            "shows the database import had not finished, so the world is only partly in the "
-            f'database and "Use existing…" will not take {server_dir}.'
+            "shows the server had not finished installing (its database import is not recorded "
+            'as done), so do not take it with "Use existing…": its world would be only partly '
+            "there."
         )
     elif ours:
         parts.append(
