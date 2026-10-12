@@ -17,6 +17,8 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 
 - The Maintenance tab lists the backups an earlier uninstall kept, so a reinstall can restore them.
 ### Fixed
+- Installing or updating a module again on a server inside WSL no longer fails when Git for Windows is installed.
+- **Find in WSL…** no longer labels a running server stopped because its one-time setup containers have finished.
 - **Return to the tested pin…** no longer refuses a move forward because upstream removed or changed older SQL files.
 - A Tortoise update no longer runs a database migration again because upstream changed it; it stops and names the file.
 - A Rebuild that waits for Repair no longer says the server comes back up, and counts only the steps it runs.

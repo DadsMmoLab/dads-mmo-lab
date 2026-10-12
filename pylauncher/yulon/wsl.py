@@ -329,6 +329,23 @@ def missing_distro_problem(distro: str | None, returncode: int, output: str = ""
     )
 
 
+_RUNNING_PART = re.compile(r"(?:^|,)\s*running\(\d+\)")
+
+
+def _any_running(status: str) -> bool:
+    """Is any container of a `docker compose ls` project running? (T773)
+
+    Compose folds a project's containers into one `state(count)` per state, joined by
+    ", " in alphabetical order: `running(3)`, `exited(3)`, and for a server whose
+    one-shots (database import, client-data init) have finished, `exited(2), running(3)`.
+    Asking whether the status STARTS with "running" read that last one as stopped, and
+    the picker labelled a running Unbound server "(stopped)" (yulon-win11, 2026-10-12).
+    A one-shot never stays running, so a running container is one of the long-lived
+    services (database, auth, world): the project is up.
+    """
+    return _RUNNING_PART.search(status) is not None
+
+
 def parse_compose_ls(distro: str, stdout: str) -> tuple[FoundServer, ...]:
     """Turn `docker compose ls --all --format json` into servers we could adopt.
 
@@ -370,8 +387,7 @@ def parse_compose_ls(distro: str, stdout: str) -> tuple[FoundServer, ...]:
             FoundServer(
                 distro=distro,
                 project=name,
-                # `running(1)`, `exited(3)`, `paused(2)` - only the first says up.
-                running=str(project.get("Status") or "").startswith("running"),
+                running=_any_running(str(project.get("Status") or "")),
                 server_dir=server_dir,
             )
         )

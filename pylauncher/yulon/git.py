@@ -2626,6 +2626,21 @@ class ContainerGit:
             )
         return ["--user", found]
 
+    def _host_git_may_redo(self, exc: GitError) -> bool:
+        """May host git do what the container failed to? Not without a docker or a git, and
+        never inside a distro (T772).
+
+        Host git is the fallback for "containerised git cannot run here", and inside a
+        distro it cannot run either: Git for Windows refused the `\\\\wsl.localhost`
+        checkout as "dubious ownership" (yulon-win11, 2026-10-12), so handing it a failed
+        fetch there showed the player that refusal instead of the failure that happened.
+        """
+        return (
+            self.wsl_distro is None
+            and platform.DOCKER_CLI_MISSING_HELP not in str(exc)
+            and git_available()
+        )
+
     def _ask_filesystem(self, path: Path) -> str | None:
         ask = self.filesystem_type
         return (ask if ask is not None else platform.filesystem_type)(path)
@@ -3009,7 +3024,7 @@ class ContainerGit:
                 if _resets_to_the_tip(spec):
                     self._run(spec, ["reset", "--hard", "FETCH_HEAD"])
             except GitError as exc:
-                if platform.DOCKER_CLI_MISSING_HELP not in str(exc) and git_available():
+                if self._host_git_may_redo(exc):
                     logger.warning(
                         f"containerized git update failed in {spec.dest} ({exc}); "
                         "falling back to host git"
@@ -3040,7 +3055,7 @@ class ContainerGit:
                     spec, [*_excluding_clone_args(spec, progress=False), spec.url, "."]
                 )
             except GitError as exc:
-                if platform.DOCKER_CLI_MISSING_HELP not in str(exc) and git_available():
+                if self._host_git_may_redo(exc):
                     logger.warning(
                         f"containerized git clone failed in {spec.dest} ({exc}); "
                         "falling back to host git"
@@ -3070,7 +3085,7 @@ class ContainerGit:
         try:
             self._clone_with_mount_race_retry(spec, [*argv, spec.url, "."])
         except GitError as exc:
-            if platform.DOCKER_CLI_MISSING_HELP not in str(exc) and git_available():
+            if self._host_git_may_redo(exc):
                 logger.warning(
                     f"containerized git clone failed in {spec.dest} ({exc}); "
                     "falling back to host git"
@@ -3428,11 +3443,7 @@ class ContainerGit:
                 if _resets_to_the_tip(spec):
                     self._run(spec, ["reset", "--hard", "FETCH_HEAD"])
             except GitError as exc:
-                if (
-                    _falls_back(exc)
-                    and platform.DOCKER_CLI_MISSING_HELP not in str(exc)
-                    and git_available()
-                ):
+                if _falls_back(exc) and self._host_git_may_redo(exc):
                     logger.warning(
                         f"containerized git update failed in {spec.dest} ({exc}); "
                         "falling back to host git"
@@ -3449,11 +3460,7 @@ class ContainerGit:
                     spec, [*_excluding_clone_args(spec, progress=True), spec.url, "."], stage=stage
                 )
             except GitError as exc:
-                if (
-                    _falls_back(exc)
-                    and platform.DOCKER_CLI_MISSING_HELP not in str(exc)
-                    and git_available()
-                ):
+                if _falls_back(exc) and self._host_git_may_redo(exc):
                     logger.warning(
                         f"containerized git clone failed in {spec.dest} ({exc}); "
                         "falling back to host git"
@@ -3489,11 +3496,7 @@ class ContainerGit:
                 spec, [*argv, spec.url, "."], stage=stage
             )
         except GitError as exc:
-            if (
-                _falls_back(exc)
-                and platform.DOCKER_CLI_MISSING_HELP not in str(exc)
-                and git_available()
-            ):
+            if _falls_back(exc) and self._host_git_may_redo(exc):
                 logger.warning(
                     f"containerized git clone failed in {spec.dest} ({exc}); "
                     "falling back to host git"

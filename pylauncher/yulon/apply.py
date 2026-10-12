@@ -124,8 +124,37 @@ def is_server_source(manifest: Manifest, folders: Set[PurePosixPath]) -> bool:
     return PurePosixPath(CLONE_DIRS[manifest.type]) / manifest.id in folders
 
 
+def _distro_git(server_dir: Path) -> ContainerGit | None:
+    """The git of the WSL distro `server_dir` lives in; None for a folder outside WSL (T772).
+
+    A server inside a distro is kept as its `\\\\wsl.localhost\\<distro>\\...` path, and Git
+    for Windows refused a checkout reached that way. Measured on yulon-win11
+    (2026-10-12) from the desktop session, on mod-arac's clone in the adopted Unbound
+    server: `remote get-url origin` and `rev-parse HEAD` both exited 128 with "detected
+    dubious ownership in repository at '//wsl.localhost/Ubuntu/...' ... may refer to a
+    non-local directory". So the second Install of a module refused as a checkout git
+    "would not say" the repository of. The same checkout answered through the distro's
+    own docker, which is how the server install clones (`ContainerGit(wsl_distro=)`), so
+    every Modules-tab git question about such a server goes there. The distro is the one
+    the folder names, which is the one `ContainerGit._in_distro()` checks it against.
+
+    Not by adding the folder to `safe.directory` in the player's global git config: that
+    is the player's file, and it would trust a checkout another user owns.
+    """
+    found = platform.wsl_location(server_dir)
+    return None if found is None else ContainerGit(wsl_distro=found[0])
+
+
+def module_git(server_dir: Path) -> RunnerGit | ContainerGit:
+    """The git that reads the module checkouts under `server_dir`: the distro's for a server
+    inside WSL (`_distro_git()`), host git otherwise (T772)."""
+    inside = _distro_git(server_dir)
+    return inside if inside is not None else RunnerGit()
+
+
 def _default_git(server_dir: Path) -> Git:
-    """Host git where it can actually run, containerised git otherwise (T58).
+    """The distro's git for a server inside WSL; host git where it can actually run,
+    containerised git otherwise (T58, T772).
 
     The SERVER install has always cloned through `ContainerGit`, so Docker alone
     is enough to get a running server and a user never finds out whether they
@@ -143,23 +172,17 @@ def _default_git(server_dir: Path) -> Git:
 
     Host git is still PREFERRED where it works: it needs no daemon, no image
     pull and no bind mount, and `ContainerGit` already falls back to it for the
-    same reason.
+    same reason. It does not work on a folder inside WSL (`_distro_git()`), which is
+    asked first. Until T772 a WSL server with no host git was refused here instead,
+    because the containerised git of that day bind-mounted the `\\\\wsl.localhost`
+    path and Docker Desktop refuses that mount source; the distro's own docker mounts
+    the distro's spelling of the folder, so that refusal has nothing left to refuse.
     """
+    inside = _distro_git(server_dir)
+    if inside is not None:
+        return inside
     if git_available():
         return RunnerGit()
-    # No host git. The containerised seam BIND-MOUNTS the destination, and
-    # Docker Desktop refuses a `\\wsl.localhost\...` mount source -- so for a
-    # WSL-backed install it cannot work either, and picking it would trade one
-    # failure for a slower one after pulling an image (review, 2026-09-14).
-    # Refuse precisely instead; `wsl_linux_path()` is the same test the rest of
-    # the app uses to spot that shape.
-    if platform.wsl_linux_path(server_dir) is not None:
-        raise ApplyRefusal(
-            f"This server lives inside WSL, at {server_dir}. Yu'lon clones modules with git, "
-            f"and this machine has none it can run: the container it would fall back to cannot "
-            f"reach a \\\\wsl.localhost path. Install Git inside the distro (or on Windows) "
-            f"and try again. Nothing was changed."
-        )
     return ContainerGit()
 
 
@@ -9984,9 +10007,13 @@ def refresh_module_updates(
     Host git only: where the host has none, the Check press falls back to a container, and a
     `docker run` is not something to start unasked, so nothing is counted. Returns `()` for
     that and for a run that was cancelled; the caller keeps what it had.
+
+    A server inside WSL is counted by the press alone, for the same reason (T772): Git for
+    Windows refuses its checkouts, and the git that can read them is a `docker run` in the
+    distro (`_distro_git()`).
     """
     if git is None:
-        if not git_available():
+        if _distro_git(server_dir) is not None or not git_available():
             return ()
         git = RefreshGit(cancel)
     rows = cached_module_updates(

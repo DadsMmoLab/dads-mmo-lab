@@ -31,6 +31,7 @@ from yulon.git import (
     Behind,
     BehindCount,
     CloneSpec,
+    ContainerGit,
     Counted,
     RunnerGit,
     git_available,
@@ -6005,30 +6006,22 @@ def test_a_git_that_cannot_be_started_is_reported_as_git(tmp_path: Path) -> None
     assert "Nothing was changed" in said or "install" in said.lower()
 
 
-def test_a_wsl_backed_install_is_refused_precisely_rather_than_failed_slowly(
+def test_a_wsl_backed_install_clones_through_the_distro_with_no_host_git(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """The container fallback cannot reach a `\\\\wsl.localhost` path (T58 review).
+    """A server inside WSL gets the distro's git, with or without host git (T58 review, T772).
 
-    `ContainerGit` bind-mounts the destination, and Docker Desktop refuses a
-    `\\\\wsl.localhost\\...` mount source. One of the two reporters has exactly
-    that: his server is at `\\\\wsl.localhost\\dml-arch\\home\\dml\\games\\Wowbots`.
-
-    Falling back there would trade a fast host-git failure for a slow
-    containerised one, after pulling an image, and still not install anything.
-    A refusal that names the reason and a remedy is worth more than a fallback
-    that cannot work.
+    T58's review refused here: the containerised git of that day bind-mounted the
+    `\\\\wsl.localhost\\...` path and Docker Desktop refuses that mount source. One of
+    the two reporters has exactly that: his server is at
+    `\\\\wsl.localhost\\dml-arch\\home\\dml\\games\\Wowbots`. The distro's own docker
+    (`ContainerGit(wsl_distro=)`, T125) mounts the distro's spelling instead, and T772
+    measured host git refusing those checkouts, so that route is the one either way.
     """
     monkeypatch.setattr(apply_module, "git_available", lambda: False)
     unc = Path(r"\\wsl.localhost\dml-arch\home\dml\games\Wowbots")
-    monkeypatch.setattr(
-        apply_module.platform, "wsl_linux_path", lambda path: "/home/dml/games/Wowbots"
-    )
-    with pytest.raises(ApplyError) as caught:
-        apply_module._default_git(unc)
-    said = str(caught.value)
-    assert "WSL" in said and "git" in said.lower(), said
-    assert "Nothing was changed" in said
+    seam = apply_module._default_git(unc)
+    assert isinstance(seam, ContainerGit) and seam.wsl_distro == "dml-arch"
 
 
 def test_building_an_applier_does_not_probe_for_git(tmp_path: Path, monkeypatch) -> None:
