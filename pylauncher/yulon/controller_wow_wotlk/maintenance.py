@@ -793,6 +793,7 @@ def backup(
     now: datetime | None = None,
     import_record: str | None | _ImportState = UNSAID,
     directory: Path | None = None,
+    restore_safety_copy: bool = False,
 ) -> BackupReport:
     """Dump every database this install has into `backups_dir(server_dir)`.
 
@@ -827,15 +828,24 @@ def backup(
             Left `UNSAID`, no line is written.
         directory: Where the dumps go instead of `backups_dir(server_dir)`. Only the move
             package uses it (T747): its dumps are working files the Backups list never shows.
+        restore_safety_copy: True only from `_safety_backup()`: the copy a restore takes of
+            what it is about to overwrite. It is the one backup taken while a restore record
+            stands (T746), because restoring again is the way out that record names.
 
     Raises:
-        MaintenanceError: the database container is not running, `only` named a
+        MaintenanceError: a restore of this folder did not finish (T746: its databases may
+            be half-written, and a copy of them would be listed as a good backup; the T681
+            sentence, said for a backup), the database container is not running, `only` named a
             database this server does not have, there was nothing to dump, a
             dump failed, or a dump came back untrustworthy (`verify_dump()`).
             Dumps already finished are left in place and named in the message —
             they are complete and verified, and deleting them would be the
             second mistake.
     """
+    if not restore_safety_copy:
+        unfinished = unfinished_restore_refusal(server_dir, backing_up=True)
+        if unfinished is not None:
+            raise MaintenanceError(f"{unfinished} No backup was taken.")
     names = _census(running, wsl_distro=wsl_distro)
     if spec.db not in names:
         raise MaintenanceError(
@@ -1207,29 +1217,39 @@ def system_schema_refusal(name: str, schemas: Sequence[str]) -> str:
     )
 
 
+HALF_RESTORED_LABEL = "half-restored"
+"""The label of a restore's safety copy of a database an earlier restore left half-written
+and whose own copy is gone (T746): a copy, and never a good one (`backup_shelf`)."""
+
 MOVE_IN_COPY_FOLDER = ".move-in-"
 """The start of the folder name a move loads its copies from (T681)."""
 MOVE_IN_RECORD = ".yulon-move-in.json"
 """`catalog.native.MOVE_IN_FILE` (pinned equal by a test): a whole-server move is building here."""
 
 
-def unfinished_restore_sentence(record: InterruptedRestore, *, moving_in: bool = False) -> str:
+def unfinished_restore_sentence(
+    record: InterruptedRestore, *, moving_in: bool = False, backing_up: bool = False
+) -> str:
     """Why nothing may start on a restore that did not finish, and the way out (T681, L8/L19).
 
     One sentence for Start, Update, Rebuild and a Bring-in carried on, so they cannot disagree.
     The way out is named: restore again (with the copy taken before it), or put the record
     down once the databases are put right. A move-in's own load says to press Bring-in again,
     which loads every database again.
+
+    `backing_up`: the same sentence for a backup (T746), which is refused for the same reason:
+    a copy of half-written databases would be listed beside the good backups as one of them.
     """
+    held_off = "no backup is taken of" if backing_up else "the server is not started on"
     if record.load_running:
         return (
             "A restore from the last session is still writing into this server's databases in "
-            "Docker, so the server is not started on them. Wait for it to finish, then try again."
+            f"Docker, so {held_off} them. Wait for it to finish, then try again."
         )
     if not record.readable:
         return (
             f"A restore of this server did not finish, and its record at {record.marker} cannot "
-            "be read, so the databases may be half-written and the server is not started on "
+            f"be read, so the databases may be half-written and {held_off} "
             "them. On the Maintenance tab, restore a backup again, or press Forget that record "
             "if you have already put the databases right."
         )
@@ -1244,31 +1264,31 @@ def unfinished_restore_sentence(record: InterruptedRestore, *, moving_in: bool =
         # well have finished in Docker after Yu'lon went; nothing here can say which.
         return (
             f"A restore of {named} was still loading when Yu'lon last closed, and Yu'lon cannot "
-            "tell whether it finished, so the server is not started on those databases. On "
+            f"tell whether it finished, so {held_off} those databases. On "
             "the Maintenance tab, restore a backup again to be sure, or press Forget that "
             f"record if you know it finished.{taken}"
         )
     if moving_in and record.backup.parent.name.startswith(MOVE_IN_COPY_FOLDER):
         return (
             f"Bringing this server from another computer stopped while it was putting {named} "
-            "in, so they are half-written and the server is not started on them. Press "
+            f"in, so they are half-written and {held_off} them. Press "
             "Bring from another computer again with the same file and this folder: it puts "
             "every database in again."
         )
     return (
-        f"A restore of {named} did not finish, so those databases may be half-written and the "
-        "server is not started on them. On the Maintenance tab, restore a backup again to "
+        f"A restore of {named} did not finish, so those databases may be half-written and "
+        f"{held_off} them. On the Maintenance tab, restore a backup again to "
         f"finish it, or press Forget that record if you have already put them right.{taken}"
     )
 
 
-def unfinished_restore_refusal(server_dir: Path) -> str | None:
+def unfinished_restore_refusal(server_dir: Path, *, backing_up: bool = False) -> str | None:
     """`unfinished_restore_sentence()` for this folder's restore record, or None if it has none."""
     record = interrupted_restore(server_dir)
     if record is None:
         return None
     moving_in = (server_dir / MOVE_IN_RECORD).exists()
-    return unfinished_restore_sentence(record, moving_in=moving_in)
+    return unfinished_restore_sentence(record, moving_in=moving_in, backing_up=backing_up)
 
 
 def this_host() -> str:
@@ -2029,6 +2049,7 @@ def _restore_from(
         plan,
         mysql,
         kept,
+        earlier=earlier,
         game=game,
         label=safety_label,
         spec=spec,
@@ -2318,6 +2339,7 @@ def _safety_backup(
     mysql: MysqlDocker,
     kept: dict[str, Path],
     *,
+    earlier: InterruptedRestore | None = None,
     game: Game,
     label: str,
     spec: docker.ContainerSpec,
@@ -2347,6 +2369,12 @@ def _safety_backup(
     whatever else that marker says. Until 2026-08-23 this was decided once for
     all of them, on the existence of the marker file, so a marker about
     `acore_world` sent `acore_characters` under with no copy of it anywhere.
+
+    The only `backup()` taken over that marker, by its explicit exemption (T746). A database
+    `earlier` names (every one, when it cannot be read or names none) whose copy is gone is
+    dumped as it
+    is, half-written, under `HALF_RESTORED_LABEL`, so the Backups list never counts it as a
+    good copy and the automatic keep never deletes a good one because of it.
     """
     present = set(server_databases(mysql))
     at_risk = [name for name in plan.databases if name in present]
@@ -2357,13 +2385,24 @@ def _safety_backup(
             f"{path.name} rather than dumping a half-restored database over it"
         )
     to_dump = [name for name in at_risk if name not in covered]
-    if to_dump:
+    if earlier is None:
+        part_written: set[str] = set()
+    elif not earlier.readable or not earlier.databases:
+        part_written = set(at_risk)  # a record that names nothing cannot vouch for any of them
+    else:
+        part_written = set(earlier.databases)
+    half = [name for name in to_dump if name in part_written]
+    whole = [name for name in to_dump if name not in part_written]
+    for names, named in ((whole, label), (half, HALF_RESTORED_LABEL)):
+        if not names:
+            continue
         report = backup(
             plan.server_dir,
             mysql,
             game=game,
-            only=to_dump,
-            label=label,
+            only=names,
+            label=named,
+            restore_safety_copy=True,
             spec=spec,
             # THREADED, and it was not until 2026-09-04. Without it this one
             # call fell back to AzerothCore's `CORE_DATABASES` default, so a

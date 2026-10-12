@@ -26,6 +26,8 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Move files Yu'lon writes can be read by you alone, and a pack's leftover copy can be deleted from Backups.
 - The Console tab now refuses a shutdown command typed with a leading ! as it does one with a dot.
 - An update saved to your Downloads folder never replaces or deletes a file of yours with the same name.
+- **Back up now** is refused while a restore that did not finish may have left the databases half-written.
+- **Create** on a name that already exists is refused, not silently raising its GM level and dropping your password.
 - A server build now waits for Docker and tries once more when Docker stops answering during it.
 - Rebuilding a WotLK server from an older Yu'lon no longer sends its whole source to Docker again for the login server.
 - The command channel now proves itself once the world is up, and **Turn on the command channel** gives its tries back.

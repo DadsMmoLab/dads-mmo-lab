@@ -112,6 +112,22 @@ def reserved_problem(name: str) -> str:
     return ""
 
 
+def bot_problem(name: str, bot_prefix: str | None) -> str:
+    """Why `name` is the random bots' to have, or "": it starts with their account prefix (T749).
+
+    `bot_prefix` is the catalog's (`observability.bots.account_prefix`, the module's own
+    default; Centurion's fixed `PLAYERBOT` rows). Yu'lon's population count reads every
+    account whose name starts with it as a bot (`dbreads`: `UPPER(username) LIKE 'PREFIX%'`),
+    so a player's account named so would be counted as one.
+    """
+    if bot_prefix and name.strip().upper().startswith(bot_prefix.upper()):
+        return (
+            f"Names that start with {bot_prefix.upper()} are the random bots' accounts on this "
+            "server. Choose another name."
+        )
+    return ""
+
+
 def digits_problem(name: str, *, digits_are_ids: bool) -> str:
     """Why an all-digit `name` cannot be made on a tree that reads digits as an id, or ""."""
     if digits_are_ids and name.strip().isdigit():
@@ -128,14 +144,18 @@ def create_problem(entry: CatalogEntry, name: str, password: str) -> str:
 
     The rule the writer applies (name, password, digits), plus the reserved prefix,
     which only a player's account is refused for: the command channel creates its
-    own `YULON_` account through the same writer.
+    own `YULON_` account through the same writer. And the random bots' prefix (T749).
+    A name that already exists is the writer's refusal (`accounts.AccountExists`): only
+    the database can say.
     """
     from yulon import commands  # the tree's digit rule; commands imports this module
 
     clean = name.strip()
     scheme = entry.accounts.scheme
+    bots = entry.observability.bots.account_prefix if entry.observability else None
     return (
         reserved_problem(clean)
+        or bot_problem(clean, bots)
         or name_problem(clean, scheme=scheme)
         or digits_problem(clean, digits_are_ids=entry.id not in commands.NAME_LOOKUP_TREES)
         or password_problem(password)

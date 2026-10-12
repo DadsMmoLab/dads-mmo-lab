@@ -106,18 +106,17 @@ def test_a_created_account_lands_in_the_auth_database_as_a_thirty_two_byte_row(
         _drop(sql, username)
 
 
-def test_creating_the_same_account_twice_reports_it_and_leaves_the_first_one_alone(
+def test_creating_the_same_account_twice_refuses_and_leaves_the_first_one_alone(
     sql: DockerSql,
 ) -> None:
-    """A second attempt must not re-salt the account and lock the owner out."""
+    """A second attempt must not re-salt the account and lock the owner out (T749: refused)."""
     username = _throwaway_name()
     try:
-        first = accounts.create_account(sql, username, _PASSWORD)
+        accounts.create_account(sql, username, _PASSWORD)
         before = _stored(sql, username)
 
-        second = accounts.create_account(sql, username.lower(), "Different!1")
-        assert second.created is False
-        assert second.account_id == first.account_id
+        with pytest.raises(accounts.AccountExists):
+            accounts.create_account(sql, username.lower(), "Different!1")
         assert _stored(sql, username) == before  # untouched, so the old password still works
     finally:
         _drop(sql, username)
@@ -131,7 +130,6 @@ def test_an_explicit_gm_level_is_written_and_read_back(sql: DockerSql) -> None:
             "auth", f"SELECT gmlevel, RealmID FROM account_access WHERE id = {result.account_id}"
         ).splitlines()
         assert [cell.strip() for cell in rows[0].split("\t")] == ["3", "-1"]
-        assert accounts.create_account(sql, username, _PASSWORD).gm_level == 3
     finally:
         _drop(sql, username)
 

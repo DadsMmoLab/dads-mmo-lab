@@ -78,6 +78,7 @@ _FIXED_LABELS = (
     "before-new-build",
     "after-new-build",
     "pre-restore",
+    maintenance.HALF_RESTORED_LABEL,
     "before-move-load",
     "before-move",
     "move",
@@ -458,6 +459,22 @@ def _foreign(r: ShelfRow, game_id: str | None) -> bool:
     return game_id is not None and r.game is not None and r.game != game_id
 
 
+def _a_good_copy(r: ShelfRow, game_id: str | None) -> bool:
+    """A whole dump of one of this game's databases, as it stood: what "keep the newest" counts.
+
+    A restore's copy of a database an earlier restore left half-written (`half-restored`,
+    T746) is a copy and never a good one: counted, it would push a good backup out of the
+    newest copies kept.
+    """
+    return (
+        r.kind == "dump"
+        and r.usable
+        and r.database is not None
+        and r.label != maintenance.HALF_RESTORED_LABEL
+        and not _foreign(r, game_id)
+    )
+
+
 def _protections(
     server_dir: Path,
     rows: list[ShelfRow],
@@ -503,7 +520,7 @@ def _protections(
     # 1. the newest good copy of every database
     newest: dict[str, ShelfRow] = {}
     for r in rows:
-        if r.kind != "dump" or not r.usable or r.database is None or _foreign(r, game_id):
+        if r.database is None or not _a_good_copy(r, game_id):
             continue
         best = newest.get(r.database)
         if best is None or (r.made_at, r.name) > (best.made_at, best.name):
@@ -741,7 +758,7 @@ def _select(shelf: Shelf, rule: Rule, now: datetime) -> list[ShelfRow]:
     if rule.keep_newest is not None:
         by_database: dict[str, list[ShelfRow]] = {}
         for r in shelf.rows:
-            if r.kind == "dump" and r.usable and r.database and not _foreign(r, shelf.game_id):
+            if r.database is not None and _a_good_copy(r, shelf.game_id):
                 by_database.setdefault(r.database, []).append(r)
         for copies in by_database.values():
             copies.sort(key=lambda r: (r.made_at, r.name), reverse=True)
@@ -980,6 +997,9 @@ def set_keep_setting(server_dir: Path, keep: int | None) -> None:
 _MADE_BY = {
     None: "a backup you took",
     "pre-restore": "taken before a restore",
+    maintenance.HALF_RESTORED_LABEL: (
+        "taken before a restore, of a database an earlier restore left half-written"
+    ),
     "before-new-build": "taken before an update",
     "after-new-build": "the new build's data, taken as an update went back",
     "before-move": "taken before moving accounts and characters in",

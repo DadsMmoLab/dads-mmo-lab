@@ -317,9 +317,11 @@ def test_the_cap_is_the_callers_scale_when_the_tree_has_more_ranks() -> None:
 
 
 def test_an_existing_username_is_reported_not_raised() -> None:
-    sql = _FakeSql({"TAKEN": 7})
+    """For Yu'lon's own account only (T749): any other name that exists is refused
+    (`tests/test_create_existing_account.py`)."""
+    sql = _FakeSql({"YULON_TAKEN": 7})
     sql.access[7] = 2
-    result = accounts.create_account(sql, "taken", PASSWORD)
+    result = accounts.create_account(sql, "yulon_taken", PASSWORD)
 
     assert result.created is False  # how the caller tells this from a failure
     assert result.account_id == 7
@@ -330,8 +332,8 @@ def test_an_existing_username_is_reported_not_raised() -> None:
 
 
 def test_an_existing_username_is_matched_regardless_of_the_case_it_was_typed_in() -> None:
-    sql = _FakeSql({"TAKEN": 7})
-    assert accounts.create_account(sql, "TaKeN", PASSWORD).created is False
+    sql = _FakeSql({"YULON_TAKEN": 7})
+    assert accounts.create_account(sql, "Yulon_TaKeN", PASSWORD).created is False
 
 
 def test_losing_a_race_for_the_username_is_reported_as_already_existing() -> None:
@@ -346,7 +348,7 @@ def test_losing_a_race_for_the_username_is_reported_as_already_existing() -> Non
     sql.failure = ApplyError("SQL failed (inline → acore_auth): Duplicate entry")
 
     def _appear() -> None:
-        sql.table["RACED"] = 99
+        sql.table["YULON_RACED"] = 99
 
     original = sql.run_statement
 
@@ -356,7 +358,7 @@ def test_losing_a_race_for_the_username_is_reported_as_already_existing() -> Non
         original(db, statement)
 
     sql.run_statement = racing  # type: ignore[method-assign]
-    result = accounts.create_account(sql, "Raced", PASSWORD)
+    result = accounts.create_account(sql, "Yulon_Raced", PASSWORD)
     assert result.created is False
     assert result.account_id == 99
 
@@ -395,12 +397,14 @@ def test_a_call_that_dies_after_the_account_row_is_finished_by_the_next_one() ->
     sql = _FakeSql()
     sql.fail_on = "INSERT INTO account_access"
     with pytest.raises(accounts.AccountError, match="could not grant GM level 3"):
-        accounts.create_account(sql, "Admin", PASSWORD, gm_level=3)
-    assert sql.table == {"ADMIN": 12401}, "the account row is committed and stays"
+        accounts.create_account(sql, "Yulon_Admin", PASSWORD, gm_level=3)
+    assert sql.table == {"YULON_ADMIN": 12401}, "the account row is committed and stays"
     assert sql.access == {}, "and the grant it was supposed to carry is missing"
 
-    sql.fail_on = None  # the database comes back; the user tries the same thing again
-    again = accounts.create_account(sql, "Admin", PASSWORD, gm_level=3)
+    # The database comes back; the channel's settle tries the same thing again. (A player's
+    # Create is refused here since T749 and names Set GM level, the press that finishes it.)
+    sql.fail_on = None
+    again = accounts.create_account(sql, "Yulon_Admin", PASSWORD, gm_level=3)
     assert again.created is False  # the row was already there
     assert again.account_id == 12401
     assert again.gm_level == 3  # ... and the missing grant is made
@@ -416,7 +420,12 @@ def test_an_account_the_console_already_made_still_gets_the_gm_level_asked_for()
     existing account can still be raised. It could not before 2026-08-23.
     """
     sql = _FakeSql({"ADMIN": 42})
-    result = accounts.create_account(sql, "Admin", PASSWORD, gm_level=3)
+    with pytest.raises(accounts.AccountExists):  # T749: a player's Create; Set GM level does it
+        accounts.create_account(sql, "Admin", PASSWORD, gm_level=3)
+    assert sql.access == {}
+
+    sql = _FakeSql({"YULON_ADMIN": 42})  # Yu'lon's own account is still brought up
+    result = accounts.create_account(sql, "Yulon_Admin", PASSWORD, gm_level=3)
     assert result.created is False
     assert result.gm_level == 3
     assert sql.access == {42: 3}
@@ -430,9 +439,9 @@ def test_raising_the_level_of_an_account_that_already_has_a_row_updates_it() -> 
     the key. (Dropping the clause left the whole suite green before 2026-08-23,
     because nothing reached it — review, 2026-08-23.)
     """
-    sql = _FakeSql({"MOD": 7})
+    sql = _FakeSql({"YULON_MOD": 7})
     sql.access[7] = 1
-    result = accounts.create_account(sql, "Mod", PASSWORD, gm_level=3)
+    result = accounts.create_account(sql, "Yulon_Mod", PASSWORD, gm_level=3)
     assert result.gm_level == 3
     assert sql.access == {7: 3}
 
@@ -443,9 +452,9 @@ def test_asking_for_less_than_the_account_already_holds_takes_nothing_away() -> 
     Otherwise the default `NO_GM` would demote the administrator the moment
     anyone re-ran a create for their own account.
     """
-    sql = _FakeSql({"BOSS": 7})
+    sql = _FakeSql({"YULON_BOSS": 7})
     sql.access[7] = 3
-    result = accounts.create_account(sql, "Boss", PASSWORD, gm_level=1)
+    result = accounts.create_account(sql, "Yulon_Boss", PASSWORD, gm_level=1)
     assert result.gm_level == 3
     assert not [s for _, s in sql.statements if "account_access" in s]
 
@@ -456,8 +465,8 @@ def test_the_realm_character_counters_are_seeded_on_the_already_exists_path_too(
     `WHERE acctid IS NULL` is what makes running it again safe, and running it
     again is the only way the missing counter row ever appears.
     """
-    sql = _FakeSql({"HALFDONE": 7})
-    accounts.create_account(sql, "Halfdone", PASSWORD)
+    sql = _FakeSql({"YULON_HALFDONE": 7})
+    accounts.create_account(sql, "Yulon_Halfdone", PASSWORD)
     assert "WHERE acctid IS NULL" in _one_statement(sql, "INSERT INTO realmcharacters")
 
 
@@ -697,13 +706,13 @@ def test_a_mangos_account_is_written_the_way_that_core_writes_it() -> None:
 def test_a_mangos_account_takes_its_gm_level_from_the_rank_column() -> None:
     """CMaNGOS-family cores have no `account_access`; the level is a column."""
     sql = _FakeSql()
-    result = accounts.create_account(sql, "gmo", "hunter2", gm_level=3, scheme="mangos_sha")
+    result = accounts.create_account(sql, "yulon_gmo", "hunter2", gm_level=3, scheme="mangos_sha")
     assert result.gm_level == 3
     grant = _one_statement(sql, "UPDATE account SET `rank`")
     assert "`rank` = 3" in grant and f"WHERE id = {result.account_id}" in grant
 
     # `gm_level` is a floor on this scheme too: asking for less writes nothing.
-    again = accounts.create_account(sql, "gmo", "hunter2", gm_level=1, scheme="mangos_sha")
+    again = accounts.create_account(sql, "yulon_gmo", "hunter2", gm_level=1, scheme="mangos_sha")
     assert again.created is False and again.gm_level == 3
     assert len([s for _, s in sql.statements if s.startswith("UPDATE account SET `rank`")]) == 1
 
@@ -1195,9 +1204,9 @@ def test_a_trinitycore_level_is_read_as_what_every_realm_holds_at_least() -> Non
 
 def test_a_trinitycore_account_that_already_holds_the_level_is_left_alone() -> None:
     sql = _TrinitySql()
-    sql.table["ADMIN"] = 90
+    sql.table["YULON_ADMIN"] = 90
     sql.access = {(90, -1): 3}
-    result = accounts.create_account(sql, "admin", PASSWORD, gm_level=3, scheme="trinitycore")
+    result = accounts.create_account(sql, "yulon_admin", PASSWORD, gm_level=3, scheme="trinitycore")
     assert result.created is False and result.gm_level == 3
     assert not any("account_access" in s for s in sql.statements)
 

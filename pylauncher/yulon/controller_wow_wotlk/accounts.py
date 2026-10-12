@@ -119,6 +119,21 @@ class AccountError(RuntimeError):
     """
 
 
+class AccountExists(AccountError):
+    """A player's Create named an account that is already there (T749). Nothing was written.
+
+    Only Yu'lon's own accounts (`APP_ACCOUNT_PREFIX`) are kept and brought up to the level
+    asked: an existing account anyone else made keeps its password AND its level, and the
+    player is told which presses change them.
+    """
+
+    def __init__(self, name: str) -> None:
+        super().__init__(
+            f"An account named {name} already exists, so nothing was changed. Use Set password "
+            "or Set GM level for it."
+        )
+
+
 @dataclass(frozen=True)
 class AccountResult:
     """The outcome of one `create_account()` call.
@@ -409,7 +424,16 @@ def create_account(
     AzerothCore wrote it, and the GM grant is skipped when the account is
     already at the level.
 
-    An account that exists keeps its credentials — salt and verifier are never
+    **Only Yu'lon's own accounts (`APP_ACCOUNT_PREFIX`, the command channel's) are
+    brought up to what was asked when they exist (T749).** Any other name that exists is
+    refused with `AccountExists` before anything is written: this is the player's Create
+    (every family's Create and the launcher's go through here), and keeping the old password
+    in silence while raising someone else's account, or a bot's, to the level typed is not
+    what a Create may do. `account_rules.create_problem()` refuses a player the app's prefix,
+    so a player's press never reaches the keep-and-raise half; the channel's settle does, and
+    reads `created is False` as "the row is there with a password this machine lacks" (T386).
+
+    An own account that exists keeps its credentials — salt and verifier are never
     rewritten, so a second call with a different password does not lock the
     owner out — and its GM level is only ever raised. `gm_level` means "at
     least this", so the default cannot demote an administrator and a caller
@@ -434,6 +458,7 @@ def create_account(
         genuine failure never returns.
 
     Raises:
+        AccountExists: the name is taken and is not one of Yu'lon's own (T749).
         AccountError: the username or password is unusable, `gm_level` is out
             of range (above `max_gm_level` -- AzerothCore's 3 by default, the tree's
             own `accounts.level.max_level` where a wrapper passes it: Tortoise's is 4,
@@ -455,7 +480,8 @@ def create_account(
     if not NO_GM <= gm_level <= max_gm_level:
         raise AccountError(f"GM level must be between {NO_GM} and {max_gm_level}, got {gm_level}")
 
-    account_id, created = _account_row(sql, name, password, scheme)
+    keep_existing = name.startswith(APP_ACCOUNT_PREFIX)
+    account_id, created = _account_row(sql, name, password, scheme, keep_existing=keep_existing)
     # AccountMgr::CreateAccount runs LOGIN_INS_REALM_CHARACTERS_INIT right after
     # the insert. Reproduced verbatim; its `WHERE acctid IS NULL` makes it
     # idempotent, which is what lets it run on the already-exists path too.
@@ -587,13 +613,16 @@ def _valid_password(password: str) -> bool:
     return commands.valid_account_password(password)
 
 
-def _account_row(sql: SqlSeam, name: str, password: str, scheme: Scheme) -> tuple[int, bool]:
+def _account_row(
+    sql: SqlSeam, name: str, password: str, scheme: Scheme, *, keep_existing: bool
+) -> tuple[int, bool]:
     """The account's id, and whether *this* call wrote its row.
 
     Never touches a row that is already there: re-salting a taken name would
     silently change the owner's password, which is the one thing worse than
     refusing (`tests/integration/test_accounts_live.py` checks that against a
-    real database).
+    real database). Without `keep_existing` (anything but Yu'lon's own account, T749) a
+    row that is there, or that appears while this inserts, is `AccountExists`.
     """
     # Built before the lookup, so a scheme this module does not know refuses
     # having asked the database nothing at all rather than after a SELECT. The
@@ -602,6 +631,9 @@ def _account_row(sql: SqlSeam, name: str, password: str, scheme: Scheme) -> tupl
     statement = _insert_statement(name, password, scheme)
     existing = _account_id(sql, name)
     if existing is not None:
+        if not keep_existing:
+            logger.info(f"account {name} already exists (id {existing}); Create refused")
+            raise AccountExists(name)
         logger.info(f"account {name} already exists (id {existing}), keeping its password")
         return existing, False
 
@@ -622,6 +654,8 @@ def _account_row(sql: SqlSeam, name: str, password: str, scheme: Scheme) -> tupl
             # back in some errors. `from exc` keeps the reason on the chain.
             raise AccountError(f"could not create account {name}: the insert failed") from exc
         logger.info(f"account {name} appeared while we were inserting it (id {raced})")
+        if not keep_existing:
+            raise AccountExists(name) from exc
         return raced, False
 
     account_id = _account_id(sql, name)

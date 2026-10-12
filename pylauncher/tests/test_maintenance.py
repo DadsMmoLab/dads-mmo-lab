@@ -1043,7 +1043,11 @@ def test_a_marker_that_cannot_be_read_stands_in_for_no_safety_copy(
     report = restore(plan, mysql, confirm=plan.token, running=running(DB), now=AT)
 
     assert mysql.dumped == ["acore_world"]
-    assert [p.name for p in report.safety_backup] == ["20260823_143005_pre-restore_acore_world.sql"]
+    # T746: a record that cannot be read (or names nothing) cannot say the database is whole,
+    # so its copy is labelled as one that may be half-written, never counted as a good copy.
+    assert [p.name for p in report.safety_backup] == [
+        "20260823_143005_half-restored_acore_world.sql"
+    ]
     assert all(p.is_file() for p in report.safety_backup)
 
 
@@ -1097,8 +1101,10 @@ def test_a_carried_forward_safety_copy_that_is_not_there_is_not_reported_as_one(
     report = restore(plan, mysql, confirm=plan.token, running=running(DB), now=AT)
 
     assert mysql.dumped == ["acore_world"], "no copy was taken and none existed"
+    # T746: the marker says acore_world is part-written and its own copy is gone, so the copy
+    # taken now is of the half-written database and is labelled so.
     assert [(p.name, p.is_file()) for p in report.safety_backup] == [
-        ("20260823_143005_pre-restore_acore_world.sql", True)
+        ("20260823_143005_half-restored_acore_world.sql", True)
     ]
 
 
