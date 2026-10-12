@@ -9762,22 +9762,28 @@ def _new_reservation(
     ]
     claim: _Claim | None = None
     last: ClaimUnavailable | None = None
-    if wsl_distro is not None and not wsl.boot(
-        wsl_distro,
-        cancel=cancel,
-        timeout=None if budget_end is None else max(0.0, budget_end - time.monotonic()),
-    ):
-        # T775: the first command into a STOPPED distro boots it, and that takes longer than
-        # the seconds a reservation question gets; it was booted first, with a wait of its own,
-        # and its Docker never answered. NOT `moot`: asking on would read "Docker is down" and
-        # let the press go ahead with no reservation, into a daemon that is not there.
-        raise ServerReservationUnavailable(
-            forgetting.server_reservation_unavailable(
-                label,
-                f"The WSL distro {wsl_distro} was stopped and its Docker did not answer after "
-                "it was started; wait a moment and try again.",
-            )
+    if wsl_distro is not None:
+        booted = wsl.boot(
+            wsl_distro,
+            cancel=cancel,
+            timeout=None if budget_end is None else max(0.0, budget_end - time.monotonic()),
         )
+        if booted != "up":
+            # T775/T776: the first command into a cold distro boots it, which takes longer than the
+            # seconds a reservation question gets, so its Docker was waited for. The advice fits
+            # the cause. `moot` (the press goes ahead and meets the failure itself) when no
+            # reservation can race with it: no Docker program, Docker Desktop off, a socket that
+            # refuses this user, a vanished distro, or a distro that was already running whose
+            # daemon never answered (stopped on purpose). Otherwise Uninstall, Backup and the
+            # other holds would refuse a broken install that must stay removable (T622). NOT moot
+            # after a boot was seen ("slow") or on Cancel: asking on would read "Docker is down"
+            # and let the press run unreserved into a daemon that is about to appear.
+            raise ServerReservationUnavailable(
+                forgetting.server_reservation_unavailable(
+                    label, forgetting.wsl_docker_unreachable(wsl_distro, booted)
+                ),
+                moot=booted not in ("slow", "cancelled"),
+            )
     chain = _reservation_images(spec, images, wsl_distro, budget_end, avoid_images)
     waited_for_a_dying_one = False
     while True:

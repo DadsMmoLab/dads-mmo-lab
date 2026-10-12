@@ -203,7 +203,41 @@ _BOOT_RETRY_SECONDS = 2.0
 
 _NO_SUCH_PROGRAM = "execvpe("
 """What wsl.exe says when `--exec` cannot find the program: no Docker CLI in the distro, which
-waiting does not fix."""
+waiting does not fix. It is also what a Docker Desktop distro says while Desktop is not running
+(the CLI is a link into Desktop's own mount, which is gone)."""
+
+_DESKTOP_STUB = "could not be found in this wsl"
+"""Docker Desktop's stand-in `docker` for a distro it is not integrated with: "The command 'docker'
+could not be found in this WSL 2 distro. We recommend to activate the WSL integration in Docker
+Desktop settings." Lower-cased. UNMEASURED: Docker Desktop's message as remembered, never
+seen on a test box. If it is wrong the text matches nothing and the probe falls through to the
+transient path (retry, then "slow" or "silent"), so the worst case is a wait, not a bad refusal."""
+
+_BOOT_SIGN = "systemd user session"
+"""The line a distro prints while it is booting ("Failed to start the systemd user session for
+'pk'"), seen live both on a failing probe and on a probe that then exited 0."""
+
+_PERMISSION = "permission denied while trying to connect"
+"""The Docker CLI's own sentence for a socket that refuses this user ("permission denied while
+trying to connect to the Docker daemon socket", also in `docker_advice`). Not the bare words: a
+distro's boot-time stderr can say "permission denied" about something else."""
+
+BootResult = Literal[
+    "up", "slow", "silent", "cancelled", "gone", "no-docker", "desktop", "permission"
+]
+"""Why `boot()` returned:
+
+* `up`: Docker answered, or there was nothing to wait for.
+* `slow`: it did not answer in time after a boot was SEEN; a second try may fix it.
+* `silent`: it never answered and no boot was seen (a running distro whose daemon is stopped).
+* `cancelled`; `gone` (wsl.exe: no such distro); `no-docker` (no docker program in the distro);
+  `desktop` (its docker needs Docker Desktop's WSL integration); `permission` (the socket
+  refuses this user)."""
+
+_PROBE_SECONDS = 60.0
+"""One probe's own bound. A cold distro's first `docker version` blocked ~33 s and then exited 0
+(measured live, unc-probe-output.txt), so the bound sits well above it, inside `BOOT_TIMEOUT`; a
+hung one must still not eat the whole wait."""
 
 
 def boot(
@@ -211,53 +245,61 @@ def boot(
     *,
     cancel: threading.Event | None = None,
     timeout: float | None = None,
-) -> bool:
-    """Bring a STOPPED `distro` up until its Docker answers; False if it did not in time (T775).
+) -> BootResult:
+    """Wait until `distro`'s Docker answers, and say why not if it does not (T775, T776).
 
-    A stopped distro is booted by the first `wsl -d` command into it, and that boot (the VM,
-    systemd's user session, then dockerd) takes longer than the few seconds Docker questions
-    get: the first Start after a reboot or after WSL's idle timer failed with "Docker is not
-    answering". So the question that must be quick is asked of a distro whose Docker is up.
+    A cold distro's first `wsl -d` command boots it (the VM, systemd's user session, then
+    dockerd), which takes longer than the few seconds Docker questions get. Whoever booted it --
+    the press, or Yu'lon reading the server folder over the WSL share when it opened -- WSL may
+    already LIST it as running while its Docker is 30 s from answering (T775 round 3, measured on
+    yulon-win11), so the state is not a gate: a warm distro costs one quick `docker version`.
 
-    The probe is a Docker question (`docker version`), not a shell command: a distro that
-    runs `true` can still have no daemon, and a reservation asked then reads "Docker is down"
-    -- which lets the press go ahead WITHOUT a reservation. It is retried every 2 s while it
-    fails (user session starting, then no `docker.sock` yet).
+    The probe is a Docker question, not a shell command: a distro that runs `true` can still have
+    no daemon, and a reservation asked then reads "Docker is down", which lets the press go ahead
+    WITHOUT a reservation. It is retried every 2 s while the failure is the transient kind (user
+    session starting, no `docker.sock` yet, a probe that timed out), for at most `timeout`
+    (`BOOT_TIMEOUT`). Permanent failures end it at once, each with its own result: no docker
+    program, Docker Desktop's integration, permission denied.
 
-    Acts only when WSL SAID the distro is stopped (`distro_state()`): True without doing
-    anything for a running one, one WSL does not list (deleted, renamed), a listing that did
-    not answer, or a host without wsl.exe -- those fail as fast as before at the real call.
-    False when `timeout` (`BOOT_TIMEOUT`) ran out, `cancel` was set, a command timed out, wsl.exe
-    said the distro is gone, or the distro has no `docker` program. Never raises.
+    A distro WSL does not list (deleted, renamed), a listing that did not answer, or a host
+    without wsl.exe skip it as "up": those fail as fast as before at the real call. Never raises.
     """
-    if distro_state(distro) != "stopped":
-        return True
+    state = distro_state(distro)
+    if state == "unknown":
+        return "up"
+    saw_boot = state == "stopped"
     prefix = platform.docker_prefix(distro)
     if prefix is None:
-        return True
+        return "up"
     argv = [*prefix, "version", "--format", "{{.Server.Version}}"]
     limit = BOOT_TIMEOUT if timeout is None else timeout
     deadline = time.monotonic() + limit
-    logger.info(f"{distro} is stopped; waiting for it and its Docker before asking anything")
+    logger.info(f"waiting for {distro}'s Docker to answer before asking anything")
     while True:
         left = deadline - time.monotonic()
-        if left <= 0 or (cancel is not None and cancel.is_set()):
-            return False
+        if cancel is not None and cancel.is_set():
+            return "cancelled"
+        if left <= 0:
+            return "slow" if saw_boot else "silent"
+        asked = min(left, _PROBE_SECONDS)
         if cancel is None:
-            done = runner.run(argv, timeout=left)
+            done = runner.run(argv, timeout=asked)
         else:
-            done = runner.run_cancellable(argv, timeout=left, cancel=cancel)
+            done = runner.run_cancellable(argv, timeout=asked, cancel=cancel)
+        said = f"{done.stdout}{done.stderr}".replace("\x00", "").lower()
+        saw_boot = saw_boot or _BOOT_SIGN in said
         if done.returncode == 0:
-            logger.info(f"{distro} is up and its Docker answers")
-            return True
-        said = f"{done.stdout}{done.stderr}".replace("\x00", "")
-        if (
-            done.returncode == _DISTRO_NOT_FOUND_RETURNCODE
-            or runner.timed_out(done)
-            or _NO_SUCH_PROGRAM in said
-        ):
-            return False
-        logger.info(f"{distro} is not answering yet ({done.returncode}); asking again")
+            logger.info(f"{distro}'s Docker answers")
+            return "up"
+        if done.returncode == _DISTRO_NOT_FOUND_RETURNCODE:
+            return "gone"
+        if _NO_SUCH_PROGRAM in said:
+            return "no-docker"
+        if _DESKTOP_STUB in said:
+            return "desktop"
+        if _PERMISSION in said:
+            return "permission"
+        logger.info(f"{distro}'s Docker is not answering yet ({done.returncode}); asking again")
         time.sleep(min(_BOOT_RETRY_SECONDS, max(0.0, deadline - time.monotonic())))
 
 

@@ -294,6 +294,36 @@ def server_reservation_unavailable(label: str, said: str) -> str:
     return f"Yu'lon could not reserve {label} in Docker. {said} Nothing was changed."
 
 
+def wsl_docker_unreachable(distro: str, why: str) -> str:
+    """Why a WSL distro's Docker did not answer, and what fits that cause (`wsl.BootResult`)."""
+    if why == "no-docker":
+        return (
+            f"The WSL distro {distro} has no Docker program. If it uses Docker Desktop, start "
+            f"Docker Desktop and turn on its WSL integration for {distro}; otherwise install "
+            "Docker in it."
+        )
+    if why == "desktop":
+        return (
+            f"The WSL distro {distro} needs Docker Desktop. Start Docker Desktop and turn on its "
+            f"WSL integration for {distro} (Settings, Resources, WSL integration)."
+        )
+    if why == "permission":
+        return (
+            f"The WSL distro {distro} will not let your user use Docker (permission denied). Add "
+            "your user to the docker group in that distro, then open a new session and try again."
+        )
+    if why == "silent":
+        return f"Docker is not running in the WSL distro {distro}. Start it there, then try again."
+    if why == "gone":
+        return f"Windows says the WSL distro {distro} no longer exists."
+    if why == "cancelled":
+        return f"Yu'lon stopped waiting for the WSL distro {distro}."
+    return (
+        f"The WSL distro {distro} was starting and its Docker did not answer in time; wait a "
+        "moment and try again."
+    )
+
+
 def module_running(what: str) -> str:
     """The Modules tab's job, by the name its own report line gives it ("install mod-ah-bot")."""
     return (
