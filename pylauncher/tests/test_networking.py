@@ -23,7 +23,7 @@ from tests.support_case import needs_case_sensitive_disk
 from yulon import docker, networking, platform, runner
 from yulon.apply import ApplyError
 from yulon.catalog import native
-from yulon.catalog.catalog import load_catalog
+from yulon.catalog.catalog import CatalogEntry, load_catalog
 
 WOTLK = load_catalog().get("wow-wotlk")
 TORTOISE = load_catalog().get("wow-tortoise")
@@ -7000,3 +7000,360 @@ def test_t644_a_batch_that_wrote_no_results_is_not_reported_done(
     report = networking.apply(p, sql=None, run=_batch_runner([], 0, None))
     assert not any("netsh" in d for d in report.done)
     assert any("Yulon 3724" in s for s in report.skipped)
+
+
+# -- T674: a chosen local address (Tailscale or another VPN's) is the realm address ----------
+
+VPN_ADDRESS = "100.64.0.10"
+LAN_ADDRESS = "192.168.1.25"
+GAMES = load_catalog().games
+
+
+@pytest.mark.parametrize("entry", GAMES, ids=lambda entry: entry.id)
+def test_a_chosen_vpn_address_is_the_realm_address_on_every_family(entry: CatalogEntry) -> None:
+    """The detected LAN address is not written, and the chosen one is, on every family.
+
+    `localAddress` is written exactly where the family's realmlist has that column
+    (catalog.json: WotLK, Centurion and Unbound have it; TBC, Vanilla and Tortoise do not).
+    """
+    p = networking.plan(
+        entry,
+        "lan",
+        chosen_address=VPN_ADDRESS,
+        can_bind=lambda ip: ip == VPN_ADDRESS,
+        detect_lan=lambda: LAN_ADDRESS,
+        firewall="none",
+        steamos=False,
+        wsl=False,
+    )
+    assert p.ready and p.refusals == ()
+    assert p.lan_ip == VPN_ADDRESS and p.chosen_address == VPN_ADDRESS
+    assert p.realmlist_sql == networking.realmlist_sql(entry, VPN_ADDRESS, VPN_ADDRESS)
+    assert p.client_realmlist == networking.realmlist_value(VPN_ADDRESS, entry.ports.auth)
+    assert LAN_ADDRESS not in (p.realmlist_sql or "")
+    local = entry.realmlist.local_address_column
+    assert (f"{local}='{VPN_ADDRESS}'" in (p.realmlist_sql or "")) is (local is not None)
+
+
+def test_a_chosen_loopback_is_refused_and_writes_no_row() -> None:
+    """`advertisable()` refuses the loopback however the address arrives (bug-checklist §35).
+
+    A chosen `127.0.0.1` would tell every client the world server is on its own machine.
+    """
+    p = networking.plan(
+        WOTLK,
+        "lan",
+        chosen_address="127.0.0.1",
+        can_bind=lambda ip: True,
+        detect_lan=lambda: LAN_ADDRESS,
+        firewall="none",
+        steamos=False,
+        wsl=False,
+    )
+    assert p.ready is False and p.realmlist_sql is None and p.chosen_address is None
+    assert p.refusals and "127.0.0.1" in p.refusals[0]
+    assert p.refusals[0] in p.warnings
+
+
+def test_a_chosen_address_this_computer_does_not_hold_is_refused() -> None:
+    """An address no interface of this computer owns cannot be reached through it."""
+    p = networking.plan(
+        WOTLK,
+        "lan",
+        chosen_address="100.64.9.9",
+        can_bind=lambda ip: False,
+        detect_lan=lambda: LAN_ADDRESS,
+        firewall="none",
+        steamos=False,
+        wsl=False,
+    )
+    assert p.ready is False and p.realmlist_sql is None
+    assert p.refusals and "100.64.9.9" in p.refusals[0]
+
+
+@pytest.mark.parametrize("mode", ["internet", "loopback"])
+def test_a_chosen_address_is_advertised_on_the_lan_mode_only(mode: str) -> None:
+    with pytest.raises(ValueError, match="lan mode"):
+        networking.plan(
+            WOTLK,
+            mode,
+            chosen_address=VPN_ADDRESS,
+            can_bind=lambda ip: True,
+            firewall="none",
+            steamos=False,
+            wsl=False,
+        )
+
+
+def test_a_chosen_address_and_a_lan_ip_cannot_both_be_given() -> None:
+    with pytest.raises(ValueError, match="not both"):
+        networking.plan(
+            WOTLK,
+            "lan",
+            lan_ip=LAN_ADDRESS,
+            chosen_address=VPN_ADDRESS,
+            can_bind=lambda ip: True,
+            firewall="none",
+            steamos=False,
+            wsl=False,
+        )
+
+
+def test_a_plan_without_a_chosen_address_writes_what_it_always_did() -> None:
+    """The default is untouched: the detected address goes to both columns, as before T674."""
+    p = networking.plan(WOTLK, "lan", lan_ip=LAN_ADDRESS, firewall="none", steamos=False, wsl=False)
+    assert p.realmlist_sql == (
+        "UPDATE acore_auth.realmlist SET address='192.168.1.25', localAddress='192.168.1.25' "
+        "WHERE id=1;"
+    )
+
+
+def test_the_intent_remembers_a_chosen_address_and_reads_it_back(tmp_path: Path) -> None:
+    networking.record_network_intent(tmp_path, "lan", VPN_ADDRESS)
+    intent = networking.read_network_intent(tmp_path)
+    assert intent is not None and (intent.mode, intent.address) == ("lan", VPN_ADDRESS)
+
+    plain = tmp_path / "plain"
+    networking.record_network_intent(plain, "lan")
+    text = (plain / networking.INTENT_FILE).read_text(encoding="utf-8")
+    assert "address" not in text, "a default lan choice gained an address key"
+    plain_intent = networking.read_network_intent(plain)
+    assert plain_intent is not None and plain_intent.address is None
+
+
+@pytest.mark.parametrize(
+    "stored",
+    [
+        '{"mode": "lan", "address": "127.0.0.1", "recorded_unix": 1}',
+        '{"mode": "lan", "address": "1.2.3.4; DROP", "recorded_unix": 1}',
+        '{"mode": "lan", "address": 42, "recorded_unix": 1}',
+        '{"mode": "loopback", "address": "100.64.0.10", "recorded_unix": 1}',
+    ],
+)
+def test_a_stored_address_that_cannot_be_advertised_is_read_as_no_address(
+    tmp_path: Path, stored: str
+) -> None:
+    """A damaged or out-of-mode address falls back to the detected path, never to a loopback."""
+    (tmp_path / networking.INTENT_FILE).write_text(stored + "\n", encoding="utf-8")
+    intent = networking.read_network_intent(tmp_path)
+    assert intent is not None and intent.address is None
+
+
+class _RefusingSql:
+    def run_file(self, db: str, path: Path) -> None:  # pragma: no cover - unused here
+        raise AssertionError
+
+    def run_statement(self, db: str, statement: str) -> None:
+        raise ApplyError("the auth database refused the statement")
+
+
+def test_apply_remembers_the_chosen_address_only_once_the_realm_row_is_written(
+    tmp_path: Path,
+) -> None:
+    p = networking.plan(
+        WOTLK,
+        "lan",
+        chosen_address=VPN_ADDRESS,
+        can_bind=lambda ip: True,
+        detect_lan=lambda: LAN_ADDRESS,
+        firewall="none",
+        steamos=False,
+        wsl=False,
+    )
+    report = networking.apply(p, sql=_RefusingSql(), server_dir=tmp_path)
+    assert any("realmlist not updated" in s for s in report.skipped), report.skipped
+    assert networking.read_network_intent(tmp_path) is None, "an unwritten choice was remembered"
+
+    report = networking.apply(p, sql=_RecordingSql(), server_dir=tmp_path)
+    assert report.restart_required
+    intent = networking.read_network_intent(tmp_path)
+    assert intent is not None and (intent.mode, intent.address) == ("lan", VPN_ADDRESS)
+
+
+IP_ADDR_OUT = (
+    "1: lo    inet 127.0.0.1/8 scope host lo\n"
+    "2: enp0s31f6    inet 192.168.1.5/24 brd 192.168.1.255 scope global dynamic enp0s31f6\n"
+    "3: docker0    inet 172.17.0.1/16 brd 172.17.255.255 scope global docker0\n"
+    "5: wg0    inet 10.8.0.2/24 scope global wg0\n"
+    "6: tailscale0    inet 100.64.0.10/32 scope global tailscale0\n"
+    "7: eth2    inet 169.254.7.7/16 brd 169.254.255.255 scope link eth2\n"
+    "8: enp0s9    inet 100.64.0.99/32 scope global enp0s9\n"
+    "4: br-0a1b2c3d4e5f    inet 172.18.0.1/16 brd 172.18.255.255 scope global br-0a1b2c3d4e5f\n"
+    "9: veth9f3e21a    inet 10.88.0.1/16 scope global veth9f3e21a\n"
+)
+
+
+def _listing_answer(
+    output: str, *, code: int = 0, seen: list[list[str]] | None = None
+) -> Callable[[list[str]], subprocess.CompletedProcess[str]]:
+    def run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        if seen is not None:
+            seen.append(argv)
+        return subprocess.CompletedProcess(argv, code, output, "")
+
+    return run
+
+
+def test_the_linux_listing_names_every_address_and_the_interface_holding_it() -> None:
+    seen: list[list[str]] = []
+    found = platform.local_ipv4_addresses(
+        run=_listing_answer(IP_ADDR_OUT, seen=seen), system="linux", wsl=False
+    )
+    assert seen == [["ip", "-4", "-o", "addr", "show"]]
+    assert {(a.interface, a.address, a.vpn) for a in found} == {
+        ("enp0s31f6", "192.168.1.5", False),
+        ("wg0", "10.8.0.2", True),
+        ("tailscale0", "100.64.0.10", True),
+        # Named nothing a VPN uses, yet on the tailnet block: the CGNAT rule alone tags it.
+        ("enp0s9", "100.64.0.99", True),
+    }
+
+
+def test_the_windows_listing_tags_the_tailnet_adapter_and_skips_loopback_and_apipa() -> None:
+    out = (
+        "Ethernet|192.168.1.5\n"
+        "Tailscale|100.64.0.10\n"
+        "Loopback Pseudo-Interface 1|127.0.0.1\n"
+        "Ethernet 3|169.254.20.7\n"
+        "vEthernet (WSL)|172.24.144.1\n"
+    )
+    seen: list[list[str]] = []
+    found = platform.local_ipv4_addresses(
+        run=_listing_answer(out, seen=seen), system="windows", wsl=False
+    )
+    assert seen and seen[0][0] == "powershell.exe"
+    assert {(a.interface, a.address, a.vpn) for a in found} == {
+        ("Ethernet", "192.168.1.5", False),
+        ("Tailscale", "100.64.0.10", True),
+        ("vEthernet (WSL)", "172.24.144.1", False),
+    }
+
+
+def test_under_wsl_the_adapters_are_the_windows_ones() -> None:
+    seen: list[list[str]] = []
+    platform.local_ipv4_addresses(
+        run=_listing_answer("Tailscale|100.64.0.10\n", seen=seen), system="linux", wsl=True
+    )
+    assert seen and seen[0][0] == "powershell.exe"
+
+
+def test_the_macos_listing_reads_ifconfig() -> None:
+    out = (
+        "lo0: flags=8049<UP,LOOPBACK,RUNNING,MULTICAST> mtu 16384\n"
+        "\tinet 127.0.0.1 netmask 0xff000000\n"
+        "en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500\n"
+        "\tinet 192.168.1.5 netmask 0xffffff00 broadcast 192.168.1.255\n"
+        "utun3: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1380\n"
+        "\tinet 100.100.1.2 --> 100.100.1.2 netmask 0xffffffff\n"
+    )
+    seen: list[list[str]] = []
+    found = platform.local_ipv4_addresses(
+        run=_listing_answer(out, seen=seen), system="macos", wsl=False
+    )
+    assert seen == [["ifconfig"]]
+    assert {(a.interface, a.address, a.vpn) for a in found} == {
+        ("en0", "192.168.1.5", False),
+        ("utun3", "100.100.1.2", True),
+    }
+
+
+def test_a_listing_that_cannot_be_read_answers_nothing() -> None:
+    def missing(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        raise FileNotFoundError(argv[0])
+
+    assert platform.local_ipv4_addresses(run=missing, system="linux", wsl=False) == ()
+    failed = _listing_answer(IP_ADDR_OUT, code=1)
+    assert platform.local_ipv4_addresses(run=failed, system="linux", wsl=False) == ()
+
+
+# -- T674 round 2: under WSL the choice list and the guard read the same listing -------------
+
+WSL_LISTING = (
+    platform.LocalAddress("Tailscale", "100.72.215.6", True),
+    platform.LocalAddress("Wi-Fi 2", "192.168.1.210", False),
+    platform.LocalAddress("tailscale0", "100.86.248.75", True),
+)
+WSL_WINDOWS_OUT = "Tailscale|100.72.215.6\nWi-Fi 2|192.168.1.210\n"
+WSL_VM_OUT = (
+    "2: eth0    inet 172.24.144.5/20 brd 172.24.159.255 scope global eth0\n"
+    "3: tailscale0    inet 100.86.248.75/32 scope global tailscale0\n"
+)
+
+
+@pytest.mark.parametrize("offered", WSL_LISTING, ids=lambda offered: offered.address)
+def test_under_wsl_every_listed_address_passes_the_real_guard(
+    offered: platform.LocalAddress, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only the listing is faked; the guard is the real default (T674 round 2).
+
+    Before this round the default guard bound inside the WSL VM, and the VM does not own the
+    Windows adapters' addresses in NAT mode (measured on this laptop: Errno 99), so every address
+    the choice list offered was refused.
+    """
+    monkeypatch.setattr(platform, "local_ipv4_addresses", lambda *a, **k: WSL_LISTING)
+    p = networking.plan(
+        WOTLK,
+        "lan",
+        chosen_address=offered.address,
+        wsl=True,
+        firewall="none",
+        steamos=False,
+        detect_lan=lambda: LAN_ADDRESS,
+    )
+    assert p.ready and p.refusals == (), p.refusals
+    assert p.lan_ip == offered.address and p.chosen_address == offered.address
+    assert p.realmlist_sql == networking.realmlist_sql(WOTLK, offered.address, offered.address)
+
+
+def test_under_wsl_an_address_nobody_lists_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(platform, "local_ipv4_addresses", lambda *a, **k: WSL_LISTING)
+    p = networking.plan(
+        WOTLK,
+        "lan",
+        chosen_address="100.64.9.9",
+        wsl=True,
+        firewall="none",
+        steamos=False,
+        detect_lan=lambda: LAN_ADDRESS,
+    )
+    assert p.ready is False and p.realmlist_sql is None
+    assert p.refusals and "100.64.9.9" in p.refusals[0]
+
+
+def test_holds_here_under_wsl_reads_the_listing_and_never_binds_in_the_vm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(platform, "local_ipv4_addresses", lambda *a, **k: WSL_LISTING)
+
+    def no_bind(ip: str) -> bool:
+        raise AssertionError(f"{ip} was bound inside the VM")
+
+    monkeypatch.setattr(networking, "_can_bind", no_bind)
+    assert networking.holds_here("100.72.215.6", under_wsl=True) is True
+    assert networking.holds_here("100.64.9.9", under_wsl=True) is False
+
+
+def test_holds_here_off_wsl_binds_the_address(monkeypatch: pytest.MonkeyPatch) -> None:
+    asked: list[str] = []
+
+    def binds(ip: str) -> bool:
+        asked.append(ip)
+        return True
+
+    monkeypatch.setattr(networking, "_can_bind", binds)
+    assert networking.holds_here("192.168.1.25", under_wsl=False) is True
+    assert asked == ["192.168.1.25"]
+
+
+def test_under_wsl_the_listing_has_the_windows_adapters_and_the_vm_interfaces_labelled() -> None:
+    def by_program(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        out = WSL_WINDOWS_OUT if argv[0] == "powershell.exe" else WSL_VM_OUT
+        return subprocess.CompletedProcess(argv, 0, out, "")
+
+    found = platform.local_ipv4_addresses(run=by_program, system="linux", wsl=True)
+    assert {(a.side, a.interface, a.address, a.vpn) for a in found} == {
+        ("windows", "Tailscale", "100.72.215.6", True),
+        ("windows", "Wi-Fi 2", "192.168.1.210", False),
+        ("wsl", "eth0", "172.24.144.5", False),
+        ("wsl", "tailscale0", "100.86.248.75", True),
+    }

@@ -4359,3 +4359,109 @@ def test_a_real_run_writes_those_two_shapes_and_no_marker_ever_carries_a_prefix(
     assert {log_lines.parse(line).kind for line in steps} == {"stage"}
     assert {log_lines.parse(line).kind for line in markers} == {"marker"}
     assert [log_lines.parse(line).text for line in steps + markers] == steps + markers
+
+
+def test_the_install_advertises_the_address_the_owner_chose_on_a_vpn(tmp_path: Path) -> None:
+    """A chosen VPN address survives an install; the detected LAN address does not return (T674).
+
+    The intent file is written in the shape `record_network_intent()` gives it when a chosen
+    address is recorded. Against code that ignores that key, the closing step detects the LAN
+    address and writes it, which is the assertion that fails.
+    """
+    server = tmp_path / "wow"
+    server.mkdir()
+    (server / networking.INTENT_FILE).write_text(
+        '{"mode": "lan", "address": "100.64.0.10", "recorded_unix": 1}\n', encoding="utf-8"
+    )
+    rec = Recorder(realm_row=f"{native.INSTALL_REALM_HOST}\t{native.INSTALL_REALM_HOST}\n")
+    asked: list[str] = []
+
+    def detect() -> str:
+        asked.append("the LAN address was detected")
+        return "192.168.1.25"
+
+    said = _advertising(rec, server, lan_ip=detect)
+    assert asked == [], "a LAN address was detected although the owner chose one"
+    assert _statements(rec) == [networking.realmlist_sql(ENTRY, "100.64.0.10", "100.64.0.10")]
+    assert [line for line in said if "now advertises 100.64.0.10" in line], said
+
+
+def _recorded_address(server: Path, address: str) -> None:
+    (server / networking.INTENT_FILE).write_text(
+        f'{{"mode": "lan", "address": "{address}", "recorded_unix": 1}}\n', encoding="utf-8"
+    )
+
+
+def test_a_recorded_address_replaces_a_lan_row_from_an_earlier_install(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Route (b): a recorded address that differs from the row is written over it (T674 round 2).
+
+    The row holds the LAN address an earlier install wrote and the owner has since recorded a
+    Tailscale address. Round 1 left any reachable row alone, so the recorded choice never took
+    effect, and the line said the LAN address was reachable.
+    """
+    monkeypatch.setattr(platform, "in_wsl", lambda: False)
+    server = tmp_path / "wow"
+    server.mkdir()
+    _recorded_address(server, "100.64.0.10")
+    rec = Recorder(realm_row="192.168.1.25\t192.168.1.25\n")
+    said = _advertising(rec, server, lan_ip=lambda: "192.168.1.25")
+    assert _statements(rec) == [networking.realmlist_sql(ENTRY, "100.64.0.10", "100.64.0.10")]
+    assert [line for line in said if "now advertises 100.64.0.10" in line], said
+
+
+def test_a_recorded_address_is_written_when_only_its_local_column_differs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The address column matches the choice but `localAddress` does not, so the row changes."""
+    monkeypatch.setattr(platform, "in_wsl", lambda: False)
+    server = tmp_path / "wow"
+    server.mkdir()
+    _recorded_address(server, "100.64.0.10")
+    rec = Recorder(realm_row="100.64.0.10\t192.168.1.25\n")
+    _advertising(rec, server, lan_ip=lambda: "192.168.1.25")
+    assert _statements(rec) == [networking.realmlist_sql(ENTRY, "100.64.0.10", "100.64.0.10")]
+
+
+def test_a_recorded_address_the_row_already_holds_is_left_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(platform, "in_wsl", lambda: False)
+    server = tmp_path / "wow"
+    server.mkdir()
+    _recorded_address(server, "100.64.0.10")
+    rec = Recorder(realm_row="100.64.0.10\t100.64.0.10\n")
+    said = _advertising(rec, server, lan_ip=lambda: "192.168.1.25")
+    assert _statements(rec) == []
+    assert [line for line in said if "already advertises 100.64.0.10" in line], said
+
+
+def test_a_recorded_address_this_computer_no_longer_holds_is_warned_about_and_still_advertised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One plain warning line; the address is still written, because it is the owner's choice."""
+    monkeypatch.setattr(platform, "in_wsl", lambda: False)
+    monkeypatch.setattr(networking, "_can_bind", lambda ip: False)
+    server = tmp_path / "wow"
+    server.mkdir()
+    _recorded_address(server, "100.64.0.10")
+    rec = Recorder(realm_row="192.168.1.25\t192.168.1.25\n")
+    said = _advertising(rec, server, lan_ip=lambda: "192.168.1.25")
+    warnings = [line for line in said if line.startswith("Warning:")]
+    assert len(warnings) == 1 and "100.64.0.10" in warnings[0], said
+    assert _statements(rec) == [networking.realmlist_sql(ENTRY, "100.64.0.10", "100.64.0.10")]
+
+
+def test_a_recorded_address_this_computer_still_holds_gets_no_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(platform, "in_wsl", lambda: False)
+    monkeypatch.setattr(networking, "_can_bind", lambda ip: True)
+    server = tmp_path / "wow"
+    server.mkdir()
+    _recorded_address(server, "100.64.0.10")
+    rec = Recorder(realm_row="192.168.1.25\t192.168.1.25\n")
+    said = _advertising(rec, server, lan_ip=lambda: "192.168.1.25")
+    assert not [line for line in said if line.startswith("Warning:")], said
+    assert _statements(rec) == [networking.realmlist_sql(ENTRY, "100.64.0.10", "100.64.0.10")]

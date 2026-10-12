@@ -649,6 +649,156 @@ def _windows_lan_ip_from_wsl() -> str | None:
     return ip or None
 
 
+ADDRESS_LISTING_QUERY = (
+    "Get-NetIPAddress -AddressFamily IPv4 | ForEach-Object "
+    "{ $_.InterfaceAlias + '|' + $_.IPAddress }"
+)
+"""Every IPv4 address Windows holds, one `interface|address` line each. A read, and a read only."""
+
+
+LocalSide = Literal["here", "windows", "wsl"]
+"""Which side an address is on (T674 round 2).
+
+`here` is every machine that is not WSL, the computer itself. Under WSL, `windows` is the Windows
+host, whose adapters a server running in WSL reaches through the Windows forwarder, and `wsl` is the
+Linux VM's own interfaces (a Tailscale installed inside WSL shows there).
+"""
+
+
+@dataclass(frozen=True)
+class LocalAddress:
+    """An IPv4 address this computer holds, and the interface that holds it (T674).
+
+    `vpn` is a label for the person choosing, not a rule. It is True for a Tailscale address
+    (100.64.0.0/10, the block every tailnet draws from) and for an interface a VPN names
+    (WireGuard, OpenVPN, ZeroTier, Tailscale's own). Nothing refuses a VPN address. `side` says
+    which side of a WSL machine the address is on; see `LocalSide`.
+    """
+
+    interface: str
+    address: str
+    vpn: bool
+    side: LocalSide = "here"
+
+
+_VPN_NAME_PARTS = ("tailscale", "wireguard", "zerotier", "openvpn", "nordlynx", "vpn")
+_VPN_NAME_PREFIXES = ("wg", "tun", "tap", "zt", "utun", "ipsec", "ppp")
+_CONTAINER_BRIDGE_PREFIXES = ("docker", "br-", "veth")
+"""Docker's interfaces and bridges. Their addresses are no use to a friend, so no listing offers
+them."""
+
+
+def _vpn_like(interface: str, address: IPv4Address) -> bool:
+    name = interface.casefold()
+    return (
+        address in _CGNAT
+        or any(part in name for part in _VPN_NAME_PARTS)
+        or name.startswith(_VPN_NAME_PREFIXES)
+    )
+
+
+def _parse_ip_addr(text: str) -> tuple[tuple[str, str], ...]:
+    """(interface, address) for each IPv4 line of `ip -4 -o addr show`, bridges left out."""
+    pairs: list[tuple[str, str]] = []
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) < 4 or parts[2] != "inet":
+            continue
+        name = parts[1].split("@", 1)[0]
+        if name.startswith(_CONTAINER_BRIDGE_PREFIXES):
+            continue
+        pairs.append((name, parts[3].split("/", 1)[0]))
+    return tuple(pairs)
+
+
+def _parse_ifconfig(text: str) -> tuple[tuple[str, str], ...]:
+    """(interface, address) for each `inet` line under an interface header of `ifconfig`."""
+    pairs: list[tuple[str, str]] = []
+    name = ""
+    for line in text.splitlines():
+        if line and not line[0].isspace():
+            name = line.split(":", 1)[0]
+            continue
+        parts = line.split()
+        if name and len(parts) >= 2 and parts[0] == "inet":
+            pairs.append((name, parts[1]))
+    return tuple(pairs)
+
+
+def _parse_powershell_addresses(text: str) -> tuple[tuple[str, str], ...]:
+    """(interface, address) for each `interface|address` line of `ADDRESS_LISTING_QUERY`."""
+    pairs: list[tuple[str, str]] = []
+    for line in text.splitlines():
+        name, sep, address = line.rpartition("|")
+        if sep and name.strip() and address.strip():
+            pairs.append((name.strip(), address.strip()))
+    return tuple(pairs)
+
+
+_PairParser = Callable[[str], tuple[tuple[str, str], ...]]
+
+
+def _listing(do: RunCmd, argv: list[str], parse: _PairParser) -> tuple[tuple[str, str], ...]:
+    """What one listing command says, or () if it cannot be run or exits non-zero."""
+    try:
+        proc = do(argv)
+    except OSError:
+        return ()
+    if proc.returncode != 0:
+        return ()
+    return parse(proc.stdout)
+
+
+def local_ipv4_addresses(
+    run: RunCmd | None = None,
+    *,
+    system: PlatformId | None = None,
+    wsl: bool | None = None,
+) -> tuple[LocalAddress, ...]:
+    """Every usable IPv4 address this computer holds, with the interface that holds it (T674).
+
+    Not what `detect_lan_ip()` answers. That is the address of the default route, and a Tailscale
+    or other VPN interface is never the default route, so the address a friend on that network has
+    to type exists only in this listing. Under WSL the listing has two sides (`LocalSide`): the
+    Windows adapters, which a server reaches through the Windows forwarder, and the VM's own
+    interfaces. The choice list and `networking.holds_here()` both read this listing under WSL, so
+    every address offered is one the guard accepts. Loopback and link-local (169.254/16) addresses
+    are dropped, and Docker's bridges are left out. A listing that cannot be read answers nothing,
+    and nothing is guessed in its place.
+    """
+    do: RunCmd = run if run is not None else (lambda argv: runner.run(argv, timeout=8.0))
+    where = detect() if system is None else system
+    under_wsl = in_wsl() if wsl is None else wsl
+    powershell = ["powershell.exe", "-NoProfile", "-Command", ADDRESS_LISTING_QUERY]
+    ip_listing = ["ip", "-4", "-o", "addr", "show"]
+    sources: list[tuple[LocalSide, list[str], _PairParser]]
+    if under_wsl:
+        sources = [
+            ("windows", powershell, _parse_powershell_addresses),
+            ("wsl", ip_listing, _parse_ip_addr),
+        ]
+    elif where == "windows":
+        sources = [("here", powershell, _parse_powershell_addresses)]
+    elif where == "macos":
+        sources = [("here", ["ifconfig"], _parse_ifconfig)]
+    else:
+        sources = [("here", ip_listing, _parse_ip_addr)]
+    found: dict[tuple[LocalSide, str, str], LocalAddress] = {}
+    for side, argv, parse in sources:
+        for interface, text in _listing(do, argv, parse):
+            try:
+                ip = IPv4Address(text)
+            except ValueError:
+                continue
+            if ip.is_loopback or ip.is_link_local or ip.is_unspecified:
+                continue
+            found.setdefault(
+                (side, interface, text),
+                LocalAddress(interface, text, _vpn_like(interface, ip), side),
+            )
+    return tuple(found.values())
+
+
 DOCKER_BLOCK_QUERY = (
     "Get-NetFirewallRule -Direction Inbound -Action Block -Enabled True -ErrorAction "
     "SilentlyContinue | Where-Object { $_.DisplayName -like '*Docker Desktop*' } | "
