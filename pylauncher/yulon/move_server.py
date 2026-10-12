@@ -1272,6 +1272,13 @@ class MovedInInstall:
         refusal, _resuming = folder_refusal(server_dir, digest)
         if refusal:
             raise MoveError(f"{refusal} Nothing was started.")
+        # T735: a hold on the folder is asked before anything is written or said, the record's
+        # save and `load_cut_off()` included: a restore load another Yu'lon left running (the
+        # T730 sentence), or a job of this Yu'lon. The record then reads as "cut off" too, and
+        # "The last press stopped ... put in again" beside "wait for it" said two things.
+        held = docker.held_reason(server_dir)
+        if held is not None:
+            raise MoveError(held)
         record = _Record.read(server_dir, digest)
         yield f"Bringing a {manifest.game.name} server from another computer into {server_dir}"
         # The record goes in BEFORE the install, so an install that fails or is stopped part-way

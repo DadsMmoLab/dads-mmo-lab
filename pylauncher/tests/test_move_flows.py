@@ -11,7 +11,8 @@ from __future__ import annotations
 import re
 import subprocess
 import sys
-from collections.abc import Iterator
+import threading
+from collections.abc import Callable, Iterator
 from datetime import datetime
 from pathlib import Path
 from typing import IO
@@ -1339,3 +1340,127 @@ def test_a_damaged_install_record_is_still_said_first_over_a_running_load(
     box = Box(tmp_path, running_now=("ac-database",), ownership=Ownership.UNKNOWN)
     _marker_with(box.server_dir, live_load.pid)
     assert move_flows.plan_export(box.world).refusals == (move_flows.INSTALL_RECORD_DAMAGED,)
+
+
+# =============================================================== this Yu'lon's own restore (T736)
+
+
+def _press_during_own_restore(
+    box: Box, press: Callable[[], object], *, live_pid: int | None = None
+) -> tuple[object, bool]:
+    """A real restore of `box`, held the way the Maintenance tab holds one; `press` mid-load.
+
+    The lease and the hold are `controller_view._restore_with_the_database()` and
+    `_restore_under_the_lease()`'s own: `RESTORE_HOLDS_THE_DATABASES`, then
+    `hold_the_server(alone=RESTORE_WRITES_ALONE)`. The engine's restore then writes its record
+    and loads; `press` runs on a thread of its own (the tab's JobRunner gives each press one)
+    while the first database is being loaded. `live_pid` names a real process as the load's,
+    as a real `docker exec` load is recorded. Returns what the press returned or raised, and
+    whether the restore record was in place when it was pressed.
+    """
+    from yulon import forgetting
+
+    report = box.world.backup()
+    plan = box.world.plan_restore(
+        next(d.path for d in report.dumps if d.database == "acore_characters")
+    )
+    assert plan.allowed, plan.refusals
+    load = box.db.load_from
+    got: list[object] = []
+    record_there: list[bool] = []
+
+    def load_and_press(source: IO[bytes]) -> None:
+        if not got:
+            if live_pid is not None:
+                _marker_with(box.server_dir, live_pid)
+            record_there.append(maintenance.interrupted_restore(box.server_dir) is not None)
+
+            def pressed() -> None:
+                try:
+                    got.append(press())
+                except Exception as exc:  # noqa: BLE001 - the press's answer, whatever it is
+                    got.append(exc)
+
+            worker = threading.Thread(target=pressed)
+            worker.start()
+            worker.join(30)
+        load(source)
+
+    box.db.load_from = load_and_press  # type: ignore[method-assign]
+    with (
+        docker.maintenance_lease(
+            box.server_dir,
+            forgetting.RESTORE_HOLDS_THE_DATABASES,
+            press=forgetting.PRESS_RESTORE,
+        ),
+        docker.hold_the_server(
+            box.server_dir,
+            forgetting.RESTORE_HOLDS_THE_SERVER,
+            press=forgetting.PRESS_RESTORE,
+            alone=forgetting.RESTORE_WRITES_ALONE,
+        ),
+    ):
+        box.world.restore(plan, "before-the-test")
+    box.db.load_from = load  # type: ignore[method-assign]
+    assert got and record_there, "the press never ran mid-load"
+    return got[0], record_there[0]
+
+
+@pytest.mark.parametrize("load_named", [False, True], ids=["no-load-pid", "live-load-pid"])
+def test_a_pack_during_this_yulons_own_restore_names_the_restore(
+    tmp_path: Path, live_load: subprocess.Popen[bytes], load_named: bool
+) -> None:
+    """T736: the restore's own sentence, never "did not finish ... Restore again".
+
+    Mutation: ask only `orphaned_restore_reason()` in `_refuse_if_unsafe` (it steps aside for
+    this process's own hold, so the record's "did not finish" was said).
+    """
+    from yulon import forgetting
+
+    box = Box(tmp_path, running_now=("ac-database",))
+    plan, record_there = _press_during_own_restore(
+        box,
+        lambda: move_flows.plan_export(box.world),
+        live_pid=live_load.pid if load_named else None,
+    )
+    assert record_there, "the restore record was not in place: the test proves nothing"
+    assert isinstance(plan, move_flows.ExportPlan), plan
+    assert plan.refusals == (forgetting.RESTORE_HOLDS_THE_SERVER,), plan.refusals
+    assert move_flows.plan_export(box.world).allowed, "the restore is over: Pack goes ahead"
+
+
+def test_a_pack_during_this_yulons_own_restore_stops_and_packs_nothing(tmp_path: Path) -> None:
+    from yulon import forgetting
+
+    box = Box(tmp_path, running_now=("ac-database",))
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    events_at_press: list[int] = []
+
+    def pack() -> object:
+        events_at_press.append(len(box.events))
+        try:
+            return move_flows.export_package(box.world, folder, stop_allowed=True)
+        finally:
+            events_at_press.append(len(box.events))
+
+    raised, _ = _press_during_own_restore(box, pack)
+    assert isinstance(raised, move_flows.MoveError), raised
+    assert str(raised) == forgetting.RESTORE_HOLDS_THE_SERVER
+    assert events_at_press[0] == events_at_press[1], "the pack stopped, dumped or started"
+    assert not list(folder.iterdir())
+
+
+def test_a_bring_in_plan_during_this_yulons_own_restore_names_the_restore(
+    tmp_path: Path,
+) -> None:
+    from yulon import forgetting
+
+    package = packed(tmp_path)
+    box = target(tmp_path)
+    plan, record_there = _press_during_own_restore(
+        box, lambda: move_flows.plan_import(box.world, package)
+    )
+    assert record_there
+    assert isinstance(plan, move_flows.ImportPlan), plan
+    assert plan.refusals == (forgetting.RESTORE_HOLDS_THE_SERVER,), plan.refusals

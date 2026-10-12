@@ -267,15 +267,17 @@ def _server_is_up(world: MoveWorld) -> bool:
 def _refuse_if_unsafe(world: MoveWorld) -> None:
     """Refuse a move out of or into a server whose databases cannot be trusted right now.
 
-    A restore load another Yu'lon left running is asked before the restore record (T734):
-    that record is there too, but "did not finish ... Restore again" would have the player
-    fight the load. They are told to wait for it instead (the T730 sentence).
+    A hold on the server is asked before the restore record (`docker.held_reason()`): a job of
+    THIS Yu'lon (T736: the Maintenance tab's own Restore, whose record is in place while it
+    loads), else a restore load another Yu'lon left running (T734, the T730 sentence). Either
+    way the record is there too, but "did not finish ... Restore again" would have the player
+    fight the load. They are told the holder's own sentence instead: wait for it.
     """
     if world.ownership() is Ownership.UNKNOWN:
         raise MoveError(INSTALL_RECORD_DAMAGED)
-    loading = docker.orphaned_restore_reason(world.server_dir)
-    if loading is not None:
-        raise MoveError(loading)
+    held = docker.held_reason(world.server_dir)
+    if held is not None:
+        raise MoveError(held)
     if maintenance.interrupted_restore(world.server_dir) is not None:
         raise MoveError(_UNFINISHED_RESTORE)
 

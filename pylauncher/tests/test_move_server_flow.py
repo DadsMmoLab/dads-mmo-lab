@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
@@ -1400,3 +1401,79 @@ def test_a_move_in_over_tortoises_guarded_applier_passes_the_deferral_through(
     assert any(apply.DEFERRED_EXISTS_NOTE in line for line in lines if "bot_guid=42" in line)
     marker = move_server.read_marker(mv.target.server_dir)
     assert marker is None  # T682: the finished move took its record with it
+
+
+# ============================================================ a carry-on over a running load
+
+
+def _cut_off_move(tmp_path: Path) -> Move:
+    """A whole-server move whose data step failed part-way: the restore record is left."""
+    from yulon.controller_wow_wotlk import maintenance
+
+    mv = Move(
+        tmp_path, fresh_db=Db([], realm="10.0.0.7\t127.0.0.1", fail_load_of="acore_characters")
+    )
+    with pytest.raises(MoveError):
+        mv.run()
+    assert maintenance.interrupted_restore(mv.target.server_dir) is not None
+    mv.target.db.fail_load_of = None
+    return mv
+
+
+def _carry_on(mv: Move) -> tuple[list[str], Exception]:
+    """Press Bring from another computer… again; the lines said and what refused it."""
+    lines: list[str] = []
+    options = InstallOptions(server_dir=mv.target.server_dir)
+    with pytest.raises(MoveError) as raised:
+        for line in mv.install().run(options):
+            lines.append(line)
+    return lines, raised.value
+
+
+def test_a_carry_on_while_a_restore_load_still_runs_says_only_to_wait(tmp_path: Path) -> None:
+    """T735: the T730 sentence alone, before the record is touched.
+
+    The load another Yu'lon left running (Quit anyway) is a real child process the record
+    names. Before the fix the press first said "The last press stopped while the databases
+    were being put in..." and saved the move-in record, and only then was refused.
+    Mutation: drop the hold check at the top of `MovedInInstall.run`.
+    """
+    from tests.test_restore_load_pid import _marker_with
+
+    mv = _cut_off_move(tmp_path)
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        _marker_with(mv.target.server_dir, child.pid)
+        record = mv.target.server_dir / move_server.MOVE_IN_FILE
+        before = (record.read_bytes(), record.stat().st_mtime_ns)
+        events, installs = list(mv.events), mv.engine.runs
+        lines, refused = _carry_on(mv)
+    finally:
+        child.kill()
+        child.wait()
+    said = str(refused)
+    assert "is still loading its databases in Docker" in said, said
+    assert "Wait for it to finish" in said, said
+    assert "did not finish" not in said and "put in again" not in said, said
+    assert not any("last press stopped" in line for line in lines), lines
+    assert (record.read_bytes(), record.stat().st_mtime_ns) == before, "the record was written"
+    assert mv.events == events and mv.engine.runs == installs
+
+
+def test_a_carry_on_while_this_yulons_own_restore_holds_the_folder_names_the_restore(
+    tmp_path: Path,
+) -> None:
+    """The same door while a job of THIS Yu'lon holds the server: its own sentence, first."""
+    mv = _cut_off_move(tmp_path)
+    record = mv.target.server_dir / move_server.MOVE_IN_FILE
+    before = (record.read_bytes(), record.stat().st_mtime_ns)
+    with docker.hold_the_server(
+        mv.target.server_dir,
+        forgetting.RESTORE_HOLDS_THE_SERVER,
+        press=forgetting.PRESS_RESTORE,
+        alone=forgetting.RESTORE_WRITES_ALONE,
+    ):
+        lines, refused = _carry_on(mv)
+    assert str(refused) == forgetting.RESTORE_HOLDS_THE_SERVER
+    assert not any("last press stopped" in line for line in lines), lines
+    assert (record.read_bytes(), record.stat().st_mtime_ns) == before, "the record was written"
