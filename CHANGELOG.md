@@ -20,6 +20,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - The command channel now proves itself once the world is up, and **Turn on the command channel** gives its tries back.
 - **Bring from another computer…** is pressable again on a game's tile right after **Remove from Yu'lon**.
 - A restore still loading after "Quit anyway" now blocks starts, module and account writes, Back up now and moves, with its own message.
+- Moving accounts in or out while a restore is still loading now says to wait for it, not to restore again.
 - Installing the Lua engine (ALE) on a WotLK server from an older Yu'lon no longer breaks its build with a compile error.
 - A genuine Vanilla 1.12.1 client is no longer warned about as a repack.
 - A module install into a folder Yu'lon cannot write now names the folder and says what to do.

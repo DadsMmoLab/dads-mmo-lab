@@ -9,12 +9,16 @@ order, and the guards are the flow's own.
 from __future__ import annotations
 
 import re
+import subprocess
+import sys
+from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
 from typing import IO
 
 import pytest
 
+from tests.test_restore_load_pid import _marker_with
 from yulon import docker, move, move_flows
 from yulon.catalog.catalog import CatalogEntry, load_catalog
 from yulon.controller_wow_wotlk import maintenance
@@ -1242,3 +1246,96 @@ def test_a_target_without_the_playerbots_schema_is_not_asked_about_its_ledger(
     package = packed_with(tmp_path, present=PLAYERBOTS)
     box = target(tmp_path)  # acore_auth, acore_characters, acore_world only
     assert move_flows.plan_import(box.world, package).allowed
+
+
+# =============================================================== a restore load still running
+
+
+@pytest.fixture
+def live_load() -> Iterator[subprocess.Popen[bytes]]:
+    """A real process the restore record names as its load (never a fake pid)."""
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    yield child
+    child.kill()
+    child.wait()
+
+
+def _ended_load_pid() -> int:
+    gone = subprocess.Popen([sys.executable, "-c", "pass"])
+    gone.wait()
+    return gone.pid
+
+
+STILL_LOADING = "is still loading its databases in Docker"
+
+
+def test_a_running_load_refuses_the_export_plan_in_its_own_words(
+    tmp_path: Path, live_load: subprocess.Popen[bytes]
+) -> None:
+    """T734: a load another Yu'lon left running is waited for, not "restored again"."""
+    box = Box(tmp_path, running_now=("ac-database", "ac-authserver", "ac-worldserver"))
+    _marker_with(box.server_dir, live_load.pid)
+    plan = move_flows.plan_export(box.world)
+    assert len(plan.refusals) == 1, plan.refusals
+    assert STILL_LOADING in plan.refusals[0]
+    assert "Wait for it to finish" in plan.refusals[0]
+    assert "did not finish" not in plan.refusals[0]
+    assert "Restore again" not in plan.refusals[0]
+
+
+@pytest.mark.parametrize("stop_allowed", [False, True])
+def test_a_running_load_refuses_the_export_before_anything_is_stopped_or_packed(
+    tmp_path: Path, live_load: subprocess.Popen[bytes], stop_allowed: bool
+) -> None:
+    box = Box(tmp_path, running_now=("ac-database", "ac-authserver", "ac-worldserver"))
+    _marker_with(box.server_dir, live_load.pid)
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    with pytest.raises(move_flows.MoveError) as raised:
+        move_flows.export_package(box.world, folder, stop_allowed=stop_allowed)
+    said = str(raised.value)
+    assert STILL_LOADING in said and "did not finish" not in said, said
+    assert box.events == [], "nothing was stopped, dumped or started"
+    assert not list(folder.iterdir())
+
+
+def test_a_running_load_refuses_the_import_plan_in_its_own_words(
+    tmp_path: Path, live_load: subprocess.Popen[bytes]
+) -> None:
+    package = packed(tmp_path)
+    box = target(tmp_path)
+    _marker_with(box.server_dir, live_load.pid)
+    plan = move_flows.plan_import(box.world, package)
+    assert not plan.allowed
+    assert [r for r in plan.refusals if STILL_LOADING in r] == list(plan.refusals), plan.refusals
+    assert len(plan.refusals) == 1
+    assert "did not finish" not in plan.refusals[0]
+    assert box.events == []
+
+
+def test_a_load_that_ended_still_refuses_the_export_and_the_import_as_unfinished(
+    tmp_path: Path,
+) -> None:
+    """The record outlives its load: "did not finish ... Restore again" is the right advice."""
+    package = packed(tmp_path)
+    source = Box(tmp_path, running_now=("ac-database",))
+    _marker_with(source.server_dir, _ended_load_pid())
+    record = maintenance.interrupted_restore(source.server_dir)
+    assert record is not None and not record.load_running
+    assert move_flows.plan_export(source.world).refusals == (move_flows._UNFINISHED_RESTORE,)
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    with pytest.raises(move_flows.MoveError) as raised:
+        move_flows.export_package(source.world, folder, stop_allowed=False)
+    assert str(raised.value) == move_flows._UNFINISHED_RESTORE
+    box = target(tmp_path)
+    _marker_with(box.server_dir, _ended_load_pid())
+    assert move_flows.plan_import(box.world, package).refusals == (move_flows._UNFINISHED_RESTORE,)
+
+
+def test_a_damaged_install_record_is_still_said_first_over_a_running_load(
+    tmp_path: Path, live_load: subprocess.Popen[bytes]
+) -> None:
+    box = Box(tmp_path, running_now=("ac-database",), ownership=Ownership.UNKNOWN)
+    _marker_with(box.server_dir, live_load.pid)
+    assert move_flows.plan_export(box.world).refusals == (move_flows.INSTALL_RECORD_DAMAGED,)
