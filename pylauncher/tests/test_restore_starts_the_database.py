@@ -37,6 +37,7 @@ from tests.test_controller_view import _Ps, _services
 from tests.test_maintenance import good_dump
 from yulon import docker, forgetting, runner
 from yulon.catalog.catalog import load_catalog
+from yulon.controller import Controller
 from yulon.controller_wow_wotlk import maintenance
 from yulon.controller_wow_wotlk.maintenance import MaintenanceError, RestorePlan
 from yulon.ui import controller_view as controller_view_module
@@ -1109,6 +1110,7 @@ def test_a_restore_cannot_begin_between_the_bot_rebuild_s_stop_and_start(tmp_pat
             """No start is refused here: the hold is what is under test (T197)."""
 
         refuse_before_a_stop = refuse_start  # T377: the restart asks this, the database included
+        restart = Controller.restart  # T761: the real composite, reserved first, over these steps
 
         def stop(self) -> bool:
             return True
@@ -1133,6 +1135,7 @@ def test_a_held_server_refuses_a_bot_restart_as_a_failed_stop(tmp_path: Path) ->
             """No start is refused here: the hold is what is under test (T197)."""
 
         refuse_before_a_stop = refuse_start  # T377: the restart asks this, the database included
+        restart = Controller.restart  # T761: the real composite, reserved first, over these steps
 
         def stop(self) -> bool:
             raise AssertionError("stopped a held server")

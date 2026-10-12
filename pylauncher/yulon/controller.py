@@ -52,6 +52,12 @@ _REBIND_PAUSE = 1.0
 A server stopped a moment ago (a Restart's own stop, "Stop the other server") may
 not have handed its listener back yet; a port still taken after this is taken."""
 
+PRESS_RESTART = "Restart the server"
+"""How `Controller.restart()`'s reservation names it to another Yu'lon (T761)."""
+
+PRESS_RECREATE = "Remove the server's containers"
+"""How `Controller.recreate()`'s reservation names it to another Yu'lon (T761)."""
+
 
 def _catalog_specs() -> tuple[docker.ContainerSpec, ...]:
     """Every catalogue game's `ContainerSpec`, for naming another install's containers (T158)."""
@@ -1061,6 +1067,69 @@ class Controller:
             self.spec, self.server_dir, wsl_distro=self.wsl_distro, control=self.stop_control
         )
         self._let_the_distro_go(removed)
+        return removed
+
+    def restart(
+        self,
+        *,
+        stopping: Callable[[], None] | None = None,
+        stopped: Callable[[], None] | None = None,
+    ) -> bool:
+        """Stop, then start, as ONE lifecycle command reserved before anything is asked (T761).
+
+        The reservation comes first, as `start()`'s does (T568): `refuse_before_a_stop()`
+        starts the database and sends `before_servers` (the realm-port UPDATE), so asked
+        outside it, a Restart under another Yu'lon's job wrote to that server before it was
+        refused. Then every start refusal, before the stop, so a refusal leaves a running
+        world running (T179, T377). One command from the stop to the start (T216 review
+        round 3), so a restore cannot take its hold between them.
+
+        `stopping` is called once every refusal has passed, just before the stop; `stopped`
+        once the stop has returned, before the start. Both on the calling thread. They tell a
+        caller which half raised: neither called, nothing changed; `stopping` only, the stop
+        raised and nothing was started; both, the start raised.
+
+        Returns:
+            What `stop()` returned: True if something of this install was running.
+
+        Raises:
+            docker.ServerHeldError: a job of this process or another Yu'lon holds the
+                server; nothing was asked or changed.
+            StartRefused, DatabaseMissing, ImportEnded: a start refusal; nothing was stopped.
+        """
+        with docker.lifecycle(
+            self.server_dir, press=PRESS_RESTART, spec=self.spec, wsl_distro=self.wsl_distro
+        ):
+            self.refuse_before_a_stop()
+            if stopping is not None:
+                stopping()
+            was_up = self.stop()
+            if stopped is not None:
+                stopped()
+            self.start()
+        return was_up
+
+    def recreate(self) -> bool:
+        """Remove the containers, then start: `restart()` with `remove()` for its stop (T761).
+
+        `remove()` keeps every volume, so the characters are not touched and the start
+        creates the containers again with the current environment and conf files.
+        Reserved before anything is asked, and one lifecycle command, as `restart()` is:
+        a gap between the two would leave the server removed.
+
+        Returns:
+            What `remove()` returned: True if this install had containers.
+
+        Raises:
+            docker.ServerHeldError: the server is held; nothing was asked or changed.
+            StartRefused, DatabaseMissing, ImportEnded: a start refusal; nothing was removed.
+        """
+        with docker.lifecycle(
+            self.server_dir, press=PRESS_RECREATE, spec=self.spec, wsl_distro=self.wsl_distro
+        ):
+            self.refuse_before_a_stop()
+            removed = self.remove()
+            self.start()
         return removed
 
     def _fresh_stop(self) -> None:

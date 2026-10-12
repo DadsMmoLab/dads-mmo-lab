@@ -27,6 +27,7 @@ from yulon.catalog import composegen, native
 from yulon.catalog.catalog import load_catalog
 from yulon.catalog.families import cmangos
 from yulon.catalog.families.cmangos import CmangosInstaller
+from yulon.controller import Controller
 from yulon.controller_wow_tortoise import botdash
 from yulon.controller_wow_tortoise import controller as tortoise_controller
 from yulon.ui import controller_view as controller_view_module
@@ -159,6 +160,7 @@ class _Lifecycle:
         return None
 
     refuse_before_a_stop = refuse_start  # T377: the restart asks this, the database included
+    restart = Controller.restart  # T761: the real composite, reserved first, over these steps
 
     def stop(self) -> bool:
         self.calls.append("stop")

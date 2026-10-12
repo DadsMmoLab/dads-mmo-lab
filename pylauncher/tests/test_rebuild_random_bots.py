@@ -28,6 +28,7 @@ from tests.conftest import pump_until, three_way_only
 from yulon import docker, tuning
 from yulon.catalog.catalog import load_catalog
 from yulon.channel import Answer
+from yulon.controller import Controller
 from yulon.controller_wow_tortoise import botpool, poolreset
 from yulon.ui import controller_view as controller_view_module
 from yulon.ui.widgets.job import run_inline
@@ -1299,6 +1300,7 @@ def test_restart_world_says_which_half_failed() -> None:
             return None
 
         refuse_before_a_stop = refuse_start  # T377: the restart asks this, the database included
+        restart = Controller.restart  # T761: the real composite, reserved first, over these steps
 
         def stop(self) -> None:
             raise RuntimeError("no stop")
@@ -1315,6 +1317,7 @@ def test_restart_world_says_which_half_failed() -> None:
             return None
 
         refuse_before_a_stop = refuse_start  # T377: the restart asks this, the database included
+        restart = Controller.restart  # T761: the real composite, reserved first, over these steps
 
         def stop(self) -> None:
             return None

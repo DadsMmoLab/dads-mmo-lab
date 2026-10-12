@@ -101,6 +101,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Stop the other server and start this one no longer stops a database a restore is still loading.
 - Uninstall is refused while a restore is running or did not finish, so a reinstall never starts on half-written data.
 - Rebuild and update no longer start a server whose database import never finished; it stays stopped for **Repair**.
+- The bots' restart on a Tortoise server no longer touches its database while another Yu'lon is working on it.
 
 ### Changed
 - The Server tab's **Play** now starts the game; **Launcher…** opens the launcher. The tray's **Play** offers to start a stopped server.
