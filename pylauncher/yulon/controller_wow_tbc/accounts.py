@@ -138,12 +138,13 @@ def sql_for_install(server_dir: Path, *, wsl_distro: str | None = None) -> Docke
 def create_account(
     sql: SqlSeam, username: str, password: str, *, gm_level: int = NO_GM
 ) -> AccountResult:
-    """Create one TBC game account, or bring an existing one up to `gm_level`.
+    """Create one TBC game account.
 
     The shared `create_account()` with this game's scheme bound. Every rule it
-    documents still holds and is not restated here: an existing account keeps
-    its password, `gm_level` is a floor and never a demotion, and a repeated
-    call finishes one that died half way.
+    documents still holds and is not restated here. Until T749 (2026-10-12) it also
+    brought an existing account up to `gm_level` and kept its password; since then a
+    name that exists is refused (`AccountExists`) unless it is Yu'lon's own `YULON_`
+    account, which still keeps its password and has its level raised (a floor).
 
     Raises:
         AccountError: everything the shared function raises, plus the case

@@ -15,6 +15,7 @@ good copy, so the automatic keep cannot delete a good backup because of it.
 from __future__ import annotations
 
 import functools
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -69,7 +70,8 @@ def test_back_up_now_over_an_unfinished_restore_is_refused_and_dumps_nothing(
     assert "acore_characters" in said
     assert "did not finish" in said
     assert "Forget that record" in said
-    assert "No backup was taken." in said
+    assert said.count("no backup is taken of them") == 1, "said once (round 2)"
+    assert "No backup was taken" not in said
     assert "not started" not in said, "the Start sentence, not the backup's"
 
 
@@ -115,8 +117,7 @@ def test_a_load_yu_lon_lost_track_of_refuses_with_its_own_words(tmp_path: Path) 
     with pytest.raises(MaintenanceError) as refused:
         maintenance.backup(tmp_path, FakeMysql(("acore_world",)), game=GAME, running=running(DB))
     said = str(refused.value)
-    assert "cannot tell whether it finished" in said
-    assert "No backup was taken." in said
+    assert "cannot tell whether it finished, so no backup is taken of those databases" in said
 
 
 def test_the_exemption_is_explicit_and_only_the_restores_own(tmp_path: Path) -> None:
@@ -211,3 +212,32 @@ def test_the_automatic_keep_never_deletes_a_good_copy_because_of_a_half_written_
     assert "newest good copy" not in (half.kept_because or "")
     assert "half-written" in backup_shelf.what_made_it(half)
     assert rows[good.path.name].database == half.database == "acore_characters"
+
+
+def test_a_load_still_running_is_refused_in_one_sentence(tmp_path: Path) -> None:
+    """Round 2 (review): "...so no backup is taken of them. Wait for it to finish, then try
+    again. No backup was taken." said it twice; now once."""
+    picked = a_backup_of(tmp_path, "acore_world", name="picked.sql")
+    marker = maintenance.marker_path(tmp_path)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(
+        maintenance.InterruptedRestore(
+            marker=marker,
+            backup=picked,
+            databases=("acore_world",),
+            safety_backup=(),
+            started_at="2026-10-12T08:00:00",
+            load_pid=os.getpid(),  # a live process on this computer, as a running load is
+            load_host=maintenance.this_host(),
+        ).as_json(),
+        encoding="utf-8",
+    )
+    record = maintenance.interrupted_restore(tmp_path)
+    assert record is not None and record.load_running
+    with pytest.raises(MaintenanceError) as refused:
+        maintenance.backup(tmp_path, FakeMysql(("acore_world",)), game=GAME, running=running(DB))
+    said = str(refused.value)
+    assert said == (
+        "A restore from the last session is still writing into this server's databases in "
+        "Docker, so no backup is taken of them. Wait for it to finish, then try again."
+    )

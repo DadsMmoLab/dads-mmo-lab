@@ -119,12 +119,14 @@ def sql_for(
 def create_account(
     sql: SqlSeam, username: str, password: str, *, gm_level: int = NO_GM
 ) -> AccountResult:
-    """Create one account on this core, or bring an existing one up to `gm_level`.
+    """Create one account on this core.
 
-    Every rule the shared writer documents holds unchanged: an existing account
-    keeps its password, `gm_level` is a floor and never a demotion, a repeated
-    call finishes one that died half way, and no password reaches argv, a log
-    line or the returned object. What this adds is the scheme, from data.
+    Every rule the shared writer documents holds unchanged, and no password reaches
+    argv, a log line or the returned object. Until T749 (2026-10-12) it also brought an
+    existing account up to `gm_level` and kept its password; since then a name that
+    exists is refused (`AccountExists`) unless it is Yu'lon's own `YULON_` account,
+    which still keeps its password and has its level raised (a floor). What this adds
+    is the scheme, from data.
 
     Raises:
         AccountError: the name or password is unusable, `gm_level` is out of

@@ -70,7 +70,7 @@ from __future__ import annotations
 import hashlib
 import secrets
 from dataclasses import dataclass
-from typing import Literal, Protocol, get_args
+from typing import Literal, NamedTuple, Protocol, get_args
 
 from yulon import account_rules
 from yulon.apply import ApplyError, DockerSql
@@ -622,13 +622,16 @@ def _account_row(
     silently change the owner's password, which is the one thing worse than
     refusing (`tests/integration/test_accounts_live.py` checks that against a
     real database). Without `keep_existing` (anything but Yu'lon's own account, T749) a
-    row that is there, or that appears while this inserts, is `AccountExists`.
+    row that is there, or that appears while this inserts, is `AccountExists` -- unless the
+    insert answered an error and the row holds the salt it wrote: then it is this call's
+    row (committed, the answer lost) and is finished as created. Where that cannot be told,
+    the player is told so (`_maybe_created()`).
     """
     # Built before the lookup, so a scheme this module does not know refuses
     # having asked the database nothing at all rather than after a SELECT. The
     # cost is a salt derived for a name that turns out to be taken, which is a
     # SHA1 and a modular exponentiation nobody waits for.
-    statement = _insert_statement(name, password, scheme)
+    insert = _insert_statement(name, password, scheme)
     existing = _account_id(sql, name)
     if existing is not None:
         if not keep_existing:
@@ -639,7 +642,7 @@ def _account_row(
 
     logger.info(f"creating account {name}")  # never the password
     try:
-        sql.run_statement(_ACCOUNTS_DB, statement)
+        sql.run_statement(_ACCOUNTS_DB, insert.statement)
     except ApplyError as exc:
         # Something raced us to the name between the check above and here. Ask
         # the database again rather than reading the driver's error text: the
@@ -654,9 +657,18 @@ def _account_row(
             # back in some errors. `from exc` keeps the reason on the chain.
             raise AccountError(f"could not create account {name}: the insert failed") from exc
         logger.info(f"account {name} appeared while we were inserting it (id {raced})")
-        if not keep_existing:
-            raise AccountExists(name) from exc
-        return raced, False
+        if keep_existing:
+            return raced, False
+        # T749 round 2: the error may have come AFTER the insert committed (a timeout, an exec
+        # that died on the way back), and then the row is the player's own, with the password
+        # typed and no GM grant yet. Told apart by what only this insert wrote.
+        ours = _is_this_inserts_row(sql, raced, insert)
+        if ours:
+            logger.info(f"account {name}: the insert answered an error, but its row is there")
+            return raced, True
+        if ours is None:
+            raise AccountError(_maybe_created(name)) from exc
+        raise AccountExists(name) from exc
 
     account_id = _account_id(sql, name)
     if account_id is None:
@@ -667,7 +679,44 @@ def _account_row(
     return account_id, True
 
 
-def _insert_statement(name: str, password: str, scheme: Scheme) -> str:
+class _Insert(NamedTuple):
+    """An `account` INSERT, and how to tell the row it writes from anybody else's (T749)."""
+
+    statement: str
+    proof: tuple[str, str] | None
+    """`(column expression, the value this insert wrote)`, read back by
+    `_is_this_inserts_row()`: the random salt. None where the stored value is the same for
+    anyone who types that name and password (`mangos_sha`'s hash), so it proves nothing."""
+
+
+def _is_this_inserts_row(sql: SqlSeam, account_id: int, insert: _Insert) -> bool | None:
+    """Whether the row `account_id` is the one `insert` wrote; None when that cannot be told."""
+    if insert.proof is None:
+        return None
+    column, wrote = insert.proof
+    try:
+        rows = _query_rows(
+            sql,
+            f"SELECT {column} FROM account WHERE id = {account_id}",
+            f"read back account {account_id}",
+        )
+    except AccountError as exc:
+        logger.warning(f"could not tell whether account {account_id} is this insert's: {exc}")
+        return None
+    return bool(rows) and rows[0].upper() == wrote.upper()
+
+
+def _maybe_created(name: str) -> str:
+    """The sentence for an insert that answered an error with a row of that name there after."""
+    return (
+        f"Yu'lon cannot tell whether it created {name}: the database answered with an error, "
+        "and an account by that name is there now. Look for it in the account list: if it "
+        "is the one you just made, its password is the one you typed, and Set GM level gives "
+        "it a level. Nothing else was changed."
+    )
+
+
+def _insert_statement(name: str, password: str, scheme: Scheme) -> _Insert:
     """The `account` INSERT this core wants — or a refusal naming the scheme.
 
     The columns ARE the scheme, so there is no shape to fall back to: until
@@ -682,37 +731,41 @@ def _insert_statement(name: str, password: str, scheme: Scheme) -> str:
         # at its own default and raised by `_grant_gm()` when asked, so an
         # ordinary account is never briefly an administrator.
         s_hex, v_hex = mangos_srp6_credentials(name, password)
-        return (
+        return _Insert(
             "INSERT INTO account (username, v, s, joindate)"
             f" VALUES ({_text_literal(name)}, {_text_literal(v_hex)},"
-            f" {_text_literal(s_hex)}, NOW())"
+            f" {_text_literal(s_hex)}, NOW())",
+            ("s", s_hex),
         )
     if scheme == "mangos_sha":
         # Byte for byte what the core's own `account create` emits, columns and
         # all: it names only these three, and every other column on that table
         # has a default. Adding `expansion` or `email` here would be this app
         # inventing a row shape the core does not write.
-        return (
+        return _Insert(
             "INSERT INTO account(username,sha_pass_hash,joindate)"
             f" VALUES({_text_literal(name)},"
-            f"{_text_literal(mangos_password_hash(name, password))},NOW())"
+            f"{_text_literal(mangos_password_hash(name, password))},NOW())",
+            None,
         )
     if scheme == "azerothcore":
         salt, verifier = registration_data(name, password)
-        return (
+        return _Insert(
             "INSERT INTO account (username, salt, verifier, expansion, reg_mail, email, joindate)"
             f" VALUES ({_text_literal(name)}, {_hex_literal(salt)}, {_hex_literal(verifier)},"
-            f" {EXPANSION}, '', '', NOW())"
+            f" {EXPANSION}, '', '', NOW())",
+            ("HEX(salt)", salt.hex()),
         )
     if scheme == "trinitycore":
         # `LOGIN_INS_ACCOUNT` (CENTURION faac5fc9, `LoginDatabase.cpp:63`), column for
         # column. No `expansion`: the column's default is 2 on Centurion's schema
         # (`auth_schema.sql:33`), which is what the core's own `account create` leaves.
         salt, verifier = registration_data(name, password)
-        return (
+        return _Insert(
             "INSERT INTO account (username, salt, verifier, reg_mail, email, joindate)"
             f" VALUES ({_text_literal(name)}, {_hex_literal(salt)}, {_hex_literal(verifier)},"
-            " '', '', NOW())"
+            " '', '', NOW())",
+            ("HEX(salt)", salt.hex()),
         )
     raise _unknown_scheme(scheme, "write an account row for")
 

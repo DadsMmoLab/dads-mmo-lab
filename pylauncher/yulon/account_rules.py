@@ -36,6 +36,8 @@ import re
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from yulon.catalog.catalog import CatalogEntry
 
 NAME_MIN = 3
@@ -112,11 +114,30 @@ def reserved_problem(name: str) -> str:
     return ""
 
 
+def bot_prefix(entry: CatalogEntry, server_dir: Path | None = None) -> str | None:
+    """The random bots' account prefix on this server, or None for a game with no bots marker.
+
+    With `server_dir`, the one the server really runs with (`dbreads.resolve_marker()`: the
+    install's playerbots conf, e.g. `AiPlayerbot.RandomBotAccountPrefix = bot`). Without it,
+    or when that conf cannot say (unreadable, set twice, blank), the catalog's default
+    (`observability.bots.account_prefix`; Centurion's fixed `PLAYERBOT` rows), which is what
+    the module uses when nothing overrides it.
+    """
+    if entry.observability is None:
+        return None
+    if server_dir is not None:
+        from yulon import dbreads  # dbreads reads the catalog; this module must stay light
+
+        answer = dbreads.resolve_marker(entry, server_dir)
+        if answer.marker is not None:
+            return answer.marker.prefix
+    return entry.observability.bots.account_prefix
+
+
 def bot_problem(name: str, bot_prefix: str | None) -> str:
     """Why `name` is the random bots' to have, or "": it starts with their account prefix (T749).
 
-    `bot_prefix` is the catalog's (`observability.bots.account_prefix`, the module's own
-    default; Centurion's fixed `PLAYERBOT` rows). Yu'lon's population count reads every
+    `bot_prefix` is `bot_prefix()`'s answer. Yu'lon's population count reads every
     account whose name starts with it as a bot (`dbreads`: `UPPER(username) LIKE 'PREFIX%'`),
     so a player's account named so would be counted as one.
     """
@@ -139,8 +160,13 @@ def digits_problem(name: str, *, digits_are_ids: bool) -> str:
     return ""
 
 
-def create_problem(entry: CatalogEntry, name: str, password: str) -> str:
+def create_problem(
+    entry: CatalogEntry, name: str, password: str, *, server_dir: Path | None = None
+) -> str:
     """Everything a player's Create checks before it writes, or "" (T673; T696 calls it).
+
+    `server_dir` lets the bots' prefix be the one this install runs with (`bot_prefix()`);
+    without it the catalog's default is refused.
 
     The rule the writer applies (name, password, digits), plus the reserved prefix,
     which only a player's account is refused for: the command channel creates its
@@ -152,10 +178,9 @@ def create_problem(entry: CatalogEntry, name: str, password: str) -> str:
 
     clean = name.strip()
     scheme = entry.accounts.scheme
-    bots = entry.observability.bots.account_prefix if entry.observability else None
     return (
         reserved_problem(clean)
-        or bot_problem(clean, bots)
+        or bot_problem(clean, bot_prefix(entry, server_dir))
         or name_problem(clean, scheme=scheme)
         or digits_problem(clean, digits_are_ids=entry.id not in commands.NAME_LOOKUP_TREES)
         or password_problem(password)

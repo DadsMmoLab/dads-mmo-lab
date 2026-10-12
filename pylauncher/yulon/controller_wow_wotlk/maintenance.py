@@ -845,7 +845,7 @@ def backup(
     if not restore_safety_copy:
         unfinished = unfinished_restore_refusal(server_dir, backing_up=True)
         if unfinished is not None:
-            raise MaintenanceError(f"{unfinished} No backup was taken.")
+            raise MaintenanceError(unfinished)  # it already says no backup is taken (round 2)
     names = _census(running, wsl_distro=wsl_distro)
     if spec.db not in names:
         raise MaintenanceError(

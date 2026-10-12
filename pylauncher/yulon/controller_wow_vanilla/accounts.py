@@ -161,13 +161,14 @@ def create_account(
     *,
     gm_level: int = NO_GM,
 ) -> AccountResult:
-    """Create one Vanilla game account, or bring an existing one up to `gm_level`.
+    """Create one Vanilla game account.
 
-    The shared writer with this game's scheme filled in. Everything it
-    documents holds unchanged: an existing account keeps its credentials, the
-    level is a floor and never a demotion, a repeated call finishes one that
-    died half way, and no password reaches a statement, a log line or an
-    exception message.
+    The shared writer with this game's scheme filled in. Everything it documents
+    holds unchanged, and no password reaches a statement, a log line or an
+    exception message. Until T749 (2026-10-12) it also brought an existing account up
+    to `gm_level` and kept its credentials; since then a name that exists is refused
+    (`AccountExists`) unless it is Yu'lon's own `YULON_` account, which still keeps
+    its credentials and has its level raised (a floor).
 
     `gm_level` defaults to 0 — an ordinary player. The bootstrap administrator
     passes 3 explicitly; defaulting to it would make every family member who

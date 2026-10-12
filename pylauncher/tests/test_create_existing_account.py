@@ -15,6 +15,7 @@ refuses the random bots' account prefix, so a player's account cannot be made in
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import get_args
 
 import pytest
@@ -74,25 +75,104 @@ def test_a_bot_account_the_list_hides_is_not_made_a_gm() -> None:
     assert sql.access == {}
 
 
+class _InsertAnswersAnError(_FakeSql):
+    """An `account` INSERT that answers `ApplyError`, and the row the database holds after.
+
+    `committed=True`: the insert itself went in and only the answer was lost (a timeout, an
+    exec that died on the way back), so the row holds the salt THIS call wrote. False:
+    somebody else made the name in between, with a salt of their own. `readback_fails`: the
+    question "whose row is it" cannot be asked.
+    """
+
+    def __init__(self, *, committed: bool, readback_fails: bool = False) -> None:
+        super().__init__()
+        self.committed = committed
+        self.readback_fails = readback_fails
+        self.stored: dict[int, str] = {}
+
+    def run_statement(self, db: Db, statement: str) -> None:
+        if not statement.startswith(("INSERT INTO account (", "INSERT INTO account(")):
+            super().run_statement(db, statement)
+            return
+        self.statements.append((db, statement))
+        name = _literals(statement)[0].decode()
+        self.table[name] = 99
+        if statement.startswith("INSERT INTO account (username, v, s"):
+            written = _literals(statement)[2].decode()  # `s`, stored as hex text
+        elif "salt" in statement:
+            written = _literals(statement)[1].hex().upper()
+        else:
+            written = ""
+        self.stored[99] = written if self.committed else "AB" * 32
+        raise ApplyError("SQL failed (inline → acore_auth): Lost connection")
+
+    def query(self, db: Db, statement: str) -> str:
+        if statement.startswith(("SELECT HEX(salt) FROM account", "SELECT s FROM account")):
+            self.queries.append((db, statement))
+            if self.readback_fails:
+                raise ApplyError("SQL failed: Lost connection")
+            return self.stored[int(statement.rsplit("= ", 1)[1])] + "\n"
+        return super().query(db, statement)
+
+
+def _literals(statement: str) -> list[bytes]:
+    return [bytes.fromhex(part.split("'")[0]) for part in statement.split("X'")[1:]]
+
+
 def test_losing_the_race_for_a_players_name_is_refused_too() -> None:
     """Someone made the name between the look and the insert: it is not the player's account.
 
     Mutation: return the raced row as "already existed" again -> red.
     """
-    sql = _FakeSql()
-    original = sql.run_statement
-
-    def racing(db: Db, statement: str) -> None:
-        if statement.startswith("INSERT INTO account ("):
-            sql.table["RACED"] = 99
-            sql.statements.append((db, statement))
-            raise ApplyError("SQL failed (inline → acore_auth): Duplicate entry")
-        original(db, statement)
-
-    sql.run_statement = racing  # type: ignore[method-assign]
+    sql = _InsertAnswersAnError(committed=False)
     with pytest.raises(accounts.AccountError, match="RACED already exists"):
         accounts.create_account(sql, "Raced", PASSWORD, gm_level=3)
     assert sql.access == {}
+
+
+@pytest.mark.parametrize("scheme", ["azerothcore", "mangos_srp6"])
+def test_an_insert_that_went_in_before_its_error_is_finished_as_the_players_own(
+    scheme: str,
+) -> None:
+    """Round 2 (review): the row holds the salt this call wrote, so it is the player's account,
+    with the password typed. It is finished (counters seeded, level granted) and reported
+    as created, not "already exists ... nothing was changed".
+
+    Mutation: treat a row whose salt matches as somebody else's -> red.
+    """
+    sql = _InsertAnswersAnError(committed=True)
+    made = accounts.create_account(sql, "mine", PASSWORD, scheme=scheme)  # type: ignore[arg-type]
+    assert made.created is True and made.account_id == 99
+    assert any(s.startswith("INSERT INTO realmcharacters") for s in _writes(sql))
+
+
+def test_a_committed_insert_also_gets_the_gm_level_asked_for() -> None:
+    sql = _InsertAnswersAnError(committed=True)
+    made = accounts.create_account(sql, "mine", PASSWORD, gm_level=2)
+    assert made.created is True and made.gm_level == 2
+    assert sql.access == {99: 2}
+
+
+@pytest.mark.parametrize(
+    ("committed", "readback_fails", "scheme"),
+    [(True, False, "mangos_sha"), (True, True, "azerothcore"), (False, True, "azerothcore")],
+    ids=["hash-proves-nothing", "readback-fails", "readback-fails-not-ours"],
+)
+def test_an_insert_whose_row_cannot_be_told_says_so_plainly(
+    committed: bool, readback_fails: bool, scheme: str
+) -> None:
+    """Neither "already exists" (it may be theirs) nor a GM grant (it may not be)."""
+    sql = _InsertAnswersAnError(committed=committed, readback_fails=readback_fails)
+    with pytest.raises(accounts.AccountError) as said:
+        accounts.create_account(
+            sql, "mine", "hunter2", gm_level=3, scheme=scheme  # type: ignore[arg-type]
+        )
+    assert type(said.value).__name__ != "AccountExists"
+    text = str(said.value)
+    assert text.startswith("Yu'lon cannot tell whether it created MINE")
+    assert "account list" in text and "Set GM level" in text
+    assert "hunter2" not in text
+    assert sql.access == {} and sql.ranks == {}
 
 
 def test_a_new_name_is_still_created() -> None:
@@ -168,3 +248,31 @@ def test_create_still_takes_an_ordinary_name_and_ahbot() -> None:
     assert account_rules.create_problem(entry, "bob", PASSWORD) == ""
     assert account_rules.create_problem(entry, "AHBOT", PASSWORD) == ""
     assert account_rules.create_problem(entry, "botfan", PASSWORD) == ""
+
+
+def test_the_bot_prefix_this_install_runs_with_is_refused(tmp_path: Path) -> None:
+    """Round 2: `AiPlayerbot.RandomBotAccountPrefix = bot` in the install's conf.
+
+    Mutation: ignore `server_dir` (catalog default only) -> red.
+    """
+    entry = CATALOG.get("wow-wotlk")
+    assert entry.observability is not None
+    conf = tmp_path / str(entry.observability.bots.prefix_conf_file)
+    conf.parent.mkdir(parents=True, exist_ok=True)
+    conf.write_text("AiPlayerbot.RandomBotAccountPrefix = bot\n", encoding="utf-8")
+
+    said = account_rules.create_problem(entry, "botty", PASSWORD, server_dir=tmp_path)
+    assert said.startswith("Names that start with BOT are the random bots'")
+    # The catalog's default is not this server's prefix, so it is a free name here.
+    assert account_rules.create_problem(entry, "rndbot1", PASSWORD, server_dir=tmp_path) == ""
+    # Without the folder the default still stands.
+    assert account_rules.create_problem(entry, "rndbot1", PASSWORD) != ""
+
+
+def test_a_conf_that_cannot_say_falls_back_to_the_default(tmp_path: Path) -> None:
+    entry = CATALOG.get("wow-wotlk")
+    assert entry.observability is not None
+    conf = tmp_path / str(entry.observability.bots.prefix_conf_file)
+    conf.parent.mkdir(parents=True, exist_ok=True)
+    conf.write_text("AiPlayerbot.RandomBotAccountPrefix =\n", encoding="utf-8")  # blank
+    assert account_rules.create_problem(entry, "rndbot1", PASSWORD, server_dir=tmp_path) != ""
