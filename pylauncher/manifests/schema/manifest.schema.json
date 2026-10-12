@@ -180,6 +180,12 @@
           "default": null,
           "title": "Note"
         },
+        "restore": {
+          "default": false,
+          "description": "On Remove, the value this key had before the install goes back, when the key still reads what the install wrote (T753). For a key in a file other things share, such as the core's own worldserver.conf. Needs a `default`.",
+          "title": "Restore",
+          "type": "boolean"
+        },
         "type": {
           "anyOf": [
             {

@@ -383,6 +383,21 @@ class ConfKey(_Strict):
         ),
     )
 
+    restore: bool = Field(
+        default=False,
+        description=(
+            "On Remove, the value this key had before the install goes back, when the key "
+            "still reads what the install wrote (T753). For a key in a file other things "
+            "share, such as the core's own worldserver.conf. Needs a `default`."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _restore_needs_a_default(self) -> ConfKey:
+        if self.restore and self.default is None:
+            raise ValueError(f"{self.key}: `restore` puts back what a `default` wrote; it has none")
+        return self
+
     @model_validator(mode="after")
     def _unsigned_belongs_to_an_int(self) -> ConfKey:
         if self.unsigned and self.type != "int":

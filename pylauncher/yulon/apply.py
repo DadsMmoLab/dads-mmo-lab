@@ -645,6 +645,49 @@ def requirement_refusal(item_id: str, needed: str) -> str:
     )
 
 
+def built_stamp(server_dir: Path) -> str | None:
+    """Which finished build the server folder's build record is, or None for no record (T750).
+
+    The record (`native.BUILT_FROM_FILE`) is written anew, through a rename, each time a
+    compile finishes and becomes the server's build, and forgotten when a Rebuild starts.
+    Its file identity, time and size tell one writing from the next even when the commits
+    it names are the same ones.
+    """
+    from yulon.catalog import native  # noqa: PLC0415 - the install engine; apply must not need it
+
+    try:
+        stat_result = (server_dir / native.BUILT_FROM_FILE).stat()
+    except OSError:
+        return None
+    return f"{stat_result.st_ino}:{stat_result.st_mtime_ns}:{stat_result.st_size}"
+
+
+def unbuilt_requirements(manifest: Manifest, server_dir: Path) -> tuple[str, ...]:
+    """Every id in `manifest.requires` this app installed and no build has compiled yet (T750).
+
+    `missing_requirements()` asks the disk, and mod-ale's folder is there from its Install
+    on, while the world has no Lua engine until the Rebuild. The answer is read from the
+    server folder's record (`module_answers.REBUILD_OWED`), so it holds across an app
+    restart. A module this app has no record of installing (the server's own, or one from
+    before the record) is not named: nothing here can say it is missing from the build.
+    """
+    if not manifest.requires:
+        return ()
+    owed = module_answers.rebuilds_owed(server_dir, built_stamp(server_dir))
+    never_built = {key.split("/", 1)[1] for key, first in owed.items() if first and "/" in key}
+    return tuple(needed for needed in manifest.requires if needed in never_built)
+
+
+def rebuild_first(item_name: str, needed: str) -> str:
+    """The report line for an item installed over `needed` before its first build (T750)."""
+    return (
+        f"{item_name} does not run yet: {needed} is installed, but no worldserver build has "
+        f"finished since, so the server does not have it. Rebuild first: press "
+        f"{server_build_presses.under_server_build(server_build_presses.REBUILD)}. A Stop and "
+        "a Start alone do not load it"
+    )
+
+
 # Manifest `db` → MySQL schema name (AzerothCore defaults; acore_ale is Paragon's).
 DB_NAMES: dict[Db, str] = {
     "auth": "acore_auth",
@@ -2677,6 +2720,13 @@ class ApplyReport:
     and after the Install the report said *"Press Stop and then Start"* to a
     player whose world this run had just read as stopped.
     """
+    rebuild_first: tuple[str, ...] = ()
+    """The `requires` ids this install went in over before their first build (T750).
+
+    Each also has its line in `skipped` (`rebuild_first()`), which is what the report box
+    shows today. The closing line still says Stop and then Start beside it, and only the
+    Modules tab's view can say this in its place (BLOCKED on the redesign).
+    """
 
 
 @dataclass
@@ -2712,6 +2762,8 @@ class _Log:
     """A Remove's line naming the backup taken before the database changes it kept (T596)."""
     uninstall_sql: list[str] = field(default_factory=list)
     """A Remove's lines for the module's own uninstall SQL, read before the clone went (T751)."""
+    rebuild_first: list[str] = field(default_factory=list)
+    """The `requires` ids no build has compiled yet, read before this install (T750)."""
     # T130. Set by `_sql()` when the running-world guard's own reading was an
     # explicit "not running"; see `ApplyReport.world_stopped`.
     world_stopped: bool = False
@@ -3858,6 +3910,9 @@ class Applier:
         missing = self._requires_refusal(manifest)
         if missing:
             raise ApplyRefusal(missing)
+        # T750: read before this install writes anything, so the module it needs is told
+        # as it was found.
+        log.rebuild_first = list(unbuilt_requirements(manifest, self.server_dir))
         # T613 review round 1: before the clone, for the add-ons the manifest already
         # names; once more after a completion that named them only then.
         self._refuse_a_players_addon(manifest, replace_addons, log)
@@ -4170,7 +4225,28 @@ class Applier:
         if folder is None:
             self._record_settings(manifest, vals, log)
         self._remember(manifest, values, log)
+        self._record_rebuild_owed(manifest, never_built=not was_completed, log=log)
+        log.skipped.extend(rebuild_first(manifest.name, needed) for needed in log.rebuild_first)
         return self._report("install", manifest, log)
+
+    def _record_rebuild_owed(self, manifest: Manifest, *, never_built: bool, log: _Log) -> None:
+        """Record a C++ module's install as owing a build, in the server folder (T750).
+
+        Last, after every step that can raise, like `_remember()`: an install that stopped
+        records nothing. `never_built` is whether the install found no finished one of its
+        own here, so its code is in no build yet.
+        """
+        if not manifest.build.rebuild:
+            return
+        problem = module_answers.record_rebuild_owed(
+            self.server_dir, manifest, built_stamp(self.server_dir), never_built=never_built
+        )
+        if problem:
+            log.skipped.append(
+                f"{module_answers.ANSWERS_FILE}: the note that {manifest.name} waits for a "
+                f"rebuild could not be saved ({problem}), so after a restart Yu'lon will not "
+                "know it is not built yet"
+            )
 
     def _record_settings(self, manifest: Manifest, vals: Mapping[str, str], log: _Log) -> None:
         """Write a settings-only mod's receipt, the one thing that says it is installed (T380).
@@ -5082,6 +5158,7 @@ class Applier:
         self._refuse_checkout_links(manifest, clone, "remove", vals)
         self._check_hold()
         self._patches(manifest, clone, vals, "remove", log)
+        self._restore_conf(manifest, log)
         sent = log.sql_sent
         self._sql(manifest, clone, vals, "remove", log)
         if log.sql_sent > sent:
@@ -5127,6 +5204,17 @@ class Applier:
             self._check_hold()
             rmtree.remove_tree(clone)
             log.done.append(f"rm -r {_rel(self.server_dir, clone)}")
+        if manifest.build.rebuild:
+            # T750: a module that is gone owes no build of its own, and nothing that
+            # requires it can be installed until it is back.
+            problem = module_answers.forget_rebuild_owed(
+                self.server_dir, manifest, built_stamp(self.server_dir)
+            )
+            if problem:
+                log.skipped.append(
+                    f"{module_answers.ANSWERS_FILE}: Yu'lon could not forget that "
+                    f"{manifest.name} waited for a rebuild ({problem})"
+                )
         # T557, after the remove: an update or a skipped version of a module
         # that is gone says nothing about the next install of it.
         problem = module_moves.drop(self.server_dir, module_moves.key(manifest.type, manifest.id))
@@ -7291,9 +7379,14 @@ class Applier:
                 log.skipped.append(f"conf {conf.file}: file missing, keys not written")
                 continue
             changed = False
+            restoring = {k.key for k in conf.keys if k.restore}
             for key, default in writes:
-                mode = _set_conf_key(target, key, _render(default, vals, f"conf {key}"))
+                value = _render(default, vals, f"conf {key}")
+                was = _raw_conf_value(target, key) if key in restoring else None
+                mode = _set_conf_key(target, key, value)
                 changed = changed or mode != "unchanged"
+                if key in restoring and mode != "unchanged":
+                    self._record_conf_before(manifest, conf.file, key, was, value, log)
             if not changed:
                 continue  # every key already read this value: nothing to restart for
             log.done.append(
@@ -7301,6 +7394,55 @@ class Applier:
                 f"{conf.file} at its next start"
             )
             log.conf_restart = True
+
+    def _record_conf_before(
+        self, manifest: Manifest, rel: str, key: str, was: str | None, value: str, log: _Log
+    ) -> None:
+        """Keep what a `restore` key read before this write, for Remove to put back (T753)."""
+        problem = module_answers.record_conf_before(self.server_dir, manifest, rel, key, was, value)
+        if problem:
+            log.skipped.append(
+                f"{module_answers.ANSWERS_FILE}: the {key} value from before {manifest.name} "
+                f"could not be saved ({problem}), so Remove will not put it back"
+            )
+
+    def _restore_conf(self, manifest: Manifest, log: _Log) -> None:
+        """Put back the shared conf keys this module's install changed, if still its own (T753).
+
+        Each `restore` key the install changed goes back to what the file held before,
+        but only while it still reads what the install wrote: a value the player set since
+        is theirs, and stays. A key the install added is taken out again.
+        """
+        recorded = module_answers.conf_before(self.server_dir, manifest)
+        for rel, keys in recorded.items():
+            target = self.server_dir / rel
+            for key, (was, wrote) in keys.items():
+                try:
+                    now = tuning.conf_value(target.read_text(encoding="utf-8"), key)
+                except (OSError, UnicodeDecodeError) as exc:
+                    log.skipped.append(
+                        f"conf {rel}: could not be read ({exc}), so {key} was not put back"
+                    )
+                    continue
+                if now != wrote.strip().strip('"'):
+                    log.skipped.append(
+                        f"conf {rel}: {key} was changed since {manifest.name} set it, so it is "
+                        "left as it is"
+                    )
+                    continue
+                if was is None:
+                    _drop_conf_key(target, key)
+                    log.done.append(f"take {key} out of {rel}: {manifest.name} had added it")
+                else:
+                    _set_conf_key(target, key, was)
+                    log.done.append(f"put back {key} = {was} in {rel}, as before {manifest.name}")
+                log.conf_restart = True
+        problem = module_answers.forget_conf_before(self.server_dir, manifest)
+        if problem:
+            log.skipped.append(
+                f"{module_answers.ANSWERS_FILE}: Yu'lon could not forget the values from before "
+                f"{manifest.name} ({problem})"
+            )
 
     def _set_an_earlier_conf_aside(
         self, manifest: Manifest, rel: str, target: Path, log: _Log
@@ -8831,6 +8973,7 @@ class Applier:
                 else ()
             ),
             world_stopped=self._world_read_stopped_for_a_conf_write(log),
+            rebuild_first=tuple(log.rebuild_first),
         )
         logger.info(
             f"{action} {manifest.id}: {len(report.done)} step(s), "
@@ -9305,6 +9448,31 @@ def _set_conf_key(path: Path, key: str, value: str) -> _KeyMode:
     sep = "" if text.endswith("\n") or not text else "\n"
     path.write_text(f"{text}{sep}{key} = {value}\n", encoding="utf-8", newline="\n")
     return "append"
+
+
+def _raw_conf_value(path: Path, key: str) -> str | None:
+    """The value of `key`'s first active line in `path`, as written (quotes kept), or None.
+
+    `tuning.conf_value()`'s rule for which line counts, without its quote stripping: this
+    is what goes back into the file on Remove (T753).
+    """
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith(("#", "[")):
+            continue
+        head, sep, tail = line.partition("=")
+        if sep and head.strip() == key:
+            return tail.strip()
+    return None
+
+
+def _drop_conf_key(path: Path, key: str) -> None:
+    """Take `key`'s first active line out of a worldserver-style conf (T753)."""
+    text = path.read_text(encoding="utf-8")
+    pattern = re.compile(rf"^[ \t]*{re.escape(key)}[ \t]*=.*(?:\r?\n|\Z)", re.MULTILINE)
+    new = pattern.sub("", text, count=1)
+    if new != text:
+        path.write_text(new, encoding="utf-8", newline="\n")
 
 
 def _rel(base: Path, path: Path) -> str:

@@ -84,12 +84,44 @@ def test_a_file_its_remove_step_declares_undone_is_not_named() -> None:
 
 
 def test_a_remove_file_that_does_not_undo_in_full_leaves_its_install_file_named() -> None:
-    """mod-level-one-mounts' "level twenty" file sets the mounts to 10 gold and riding to 10
-    gold; AzerothCore's stock is 1 gold and 4 gold, so it declares nothing and is named."""
-    m = wotlk_modules.store().load("mod", "lvl1-mounts")
-    assert apply_module._left_behind(m) == (
+    """mod-level-one-mounts' "level twenty" file alone sets the mounts to 10 gold and riding to
+    10 gold; AzerothCore's stock is 1 gold and 4 gold. Without the backups put back after it
+    (and so without `undoes`), the level-one file is named."""
+    shipped = wotlk_modules.store().load("mod", "lvl1-mounts")
+    bare = shipped.model_copy(
+        update={
+            "sql": tuple(
+                step.model_copy(update={"undoes": ()})
+                for step in shipped.sql
+                if step.when == "install" or step.path is not None
+            )
+        }
+    )
+    assert apply_module._left_behind(bare) == (
         "what level-one-mounts.sql wrote into the world database (tables or rows)",
     )
+
+
+def test_level_one_mounts_puts_back_the_values_it_backed_up_and_names_nothing() -> None:
+    """T763: like All Stackables, the mounts' and the riding trainers' own values are kept in
+    two tables before level-one-mounts.sql runs, and put back after the level-twenty revert."""
+    m = wotlk_modules.store().load("mod", "lvl1-mounts")
+    assert apply_module._left_behind(m) == ()
+    install = [s.statement or s.path for s in m.sql if s.when == "install"]
+    remove = [s.statement or s.path for s in m.sql if s.when == "remove"]
+    up = install.index("level-one-mounts.sql")
+    for table, source in (
+        ("yulon_lvl1_mounts_item_backup", "FROM item_template"),
+        ("yulon_lvl1_mounts_trainer_backup", "FROM npc_trainer"),
+    ):
+        filled = [i for i, s in enumerate(install) if f"INTO {table} (" in s and source in s]
+        assert filled and filled[0] < up, (table, install)
+        down = remove.index("level-twenty-mounts.sql")
+        restored = [
+            i for i, s in enumerate(remove) if s.startswith("UPDATE") and f"JOIN {table} b" in s
+        ]
+        dropped = [i for i, s in enumerate(remove) if s == f"DROP TABLE IF EXISTS {table};"]
+        assert restored and dropped and down < restored[0] < dropped[0], (table, remove)
 
 
 def test_a_then_file_is_named_and_declared_like_a_path() -> None:
@@ -147,7 +179,13 @@ def test_no_catalog_item_whose_remove_covers_its_install_says_anything_was_left(
         covered.append(m.id)
         sql_lines = [line for line in apply_module._left_behind(m) if "wrote into the" in line]
         assert sql_lines == [], (m.game, m.id, sql_lines)
-    assert {"portals-capitals", "hearthstone-cd", "npc-teleporter", "baby-mobs"} <= set(covered)
+    assert {
+        "portals-capitals",
+        "hearthstone-cd",
+        "npc-teleporter",
+        "baby-mobs",
+        "lvl1-mounts",
+    } <= set(covered)
 
 
 def test_undoes_must_name_an_install_file_on_its_database() -> None:

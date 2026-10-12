@@ -335,6 +335,165 @@ def record_settings(
     return _write_record(server_dir, change, f"the settings receipt for {key}")
 
 
+REBUILD_OWED = "rebuild_owed"
+"""The record's map of C++ modules installed since the last build: `<type>/<id>` -> entry (T750).
+
+The "Rebuild pending" chip was the view's memory alone, so an app restart forgot it, and
+nothing told an ALE script installed over a mod-ale that was never compiled that Stop and
+Start loads no Lua. An entry is `{"build": <stamp>, "never_built": <bool>}`: `build` is the
+build record's stamp when the module went in (`apply.built_stamp()`, `None` for none), and
+`never_built` whether its code is in no build yet (its first install, or one that never
+finished). A build that finished since settles it (`rebuilds_owed()`); a Remove drops it.
+"""
+
+
+def _owed_entries(server_dir: Path) -> dict[str, Any] | None:
+    """The raw `REBUILD_OWED` map, or None for no usable file or no map."""
+    path = server_dir / ANSWERS_FILE
+    try:
+        with path.open(encoding="utf-8-sig") as fh:
+            parsed = json.load(fh)
+    except (OSError, ValueError) as exc:
+        logger.debug(f"no usable rebuild records in {server_dir}: {exc}")
+        return None
+    entries = parsed.get(REBUILD_OWED) if isinstance(parsed, dict) else None
+    return entries if isinstance(entries, dict) else None
+
+
+def rebuilds_owed(server_dir: Path, build: str | None) -> dict[str, bool]:
+    """`<type>/<id>` -> `never_built`, for every recorded module no build has finished since.
+
+    `build` is the build record's stamp now. An entry is settled once there IS a record and
+    it is not the one the entry saw: a compile that finished wrote it anew. No record at all
+    settles nothing, because a Rebuild forgets it before it changes anything and one that
+    stopped part-way leaves none (`native.BUILT_FROM_FILE`). `{}` for no usable file.
+    """
+    entries = _owed_entries(server_dir) or {}
+    return {
+        key: entry.get("never_built") is True
+        for key, entry in entries.items()
+        if isinstance(key, str)
+        and isinstance(entry, dict)
+        and (build is None or entry.get("build") == build)
+    }
+
+
+def record_rebuild_owed(
+    server_dir: Path, manifest: Manifest, build: str | None, *, never_built: bool
+) -> str:
+    """Record that `manifest` was installed while the build stamped `build` was the last one.
+
+    An install still owed from before keeps its `never_built`: an Update of a module no
+    build has compiled yet is still in no build. Entries a build has settled are dropped in
+    the same write. `""` if written, else why not; the same careful write as
+    `record_answers()`.
+    """
+    key = _key(manifest)
+    owed = rebuilds_owed(server_dir, build)
+
+    def change(everything: dict[str, Any]) -> None:
+        entries = everything.get(REBUILD_OWED, {})
+        entries = dict(entries) if isinstance(entries, dict) else {}
+        kept = {k: v for k, v in entries.items() if k in owed}
+        kept[key] = {"build": build, "never_built": never_built or owed.get(key) is True}
+        everything[REBUILD_OWED] = kept
+
+    return _write_record(server_dir, change, f"the rebuild owed for {key}")
+
+
+def forget_rebuild_owed(server_dir: Path, manifest: Manifest, build: str | None) -> str:
+    """Drop `manifest`'s entry (a Remove) and any a build has settled; `""` with nothing to do."""
+    if _owed_entries(server_dir) is None:
+        return ""
+    key = _key(manifest)
+    owed = rebuilds_owed(server_dir, build)
+
+    def change(everything: dict[str, Any]) -> None:
+        entries = everything.get(REBUILD_OWED, {})
+        entries = dict(entries) if isinstance(entries, dict) else {}
+        everything[REBUILD_OWED] = {k: v for k, v in entries.items() if k in owed and k != key}
+
+    return _write_record(server_dir, change, f"the rebuild owed for {key}")
+
+
+CONF_BEFORE = "conf_before"
+"""The record's map of shared conf keys an install changed: `<type>/<id>` -> file -> key ->
+`{"was": <value before, or null for no line>, "set": <value written>}` (T753).
+
+Only for a `ConfKey` with `restore`: Individual Progression turns on two keys of the core's
+own worldserver.conf, and its Remove puts back what was there before, when the key still
+reads what the install wrote. A key the install found already at its value is not recorded,
+so a value the player had before stays. A later write keeps the first `was`.
+"""
+
+
+def conf_before(
+    server_dir: Path, manifest: Manifest
+) -> dict[str, dict[str, tuple[str | None, str]]]:
+    """`file -> key -> (was, set)` for `manifest`; `{}` for none or a file that cannot be read."""
+    path = server_dir / ANSWERS_FILE
+    try:
+        with path.open(encoding="utf-8-sig") as fh:
+            parsed = json.load(fh)
+    except (OSError, ValueError) as exc:
+        logger.debug(f"no usable conf records in {server_dir}: {exc}")
+        return {}
+    entries = parsed.get(CONF_BEFORE) if isinstance(parsed, dict) else None
+    files = entries.get(_key(manifest)) if isinstance(entries, dict) else None
+    out: dict[str, dict[str, tuple[str | None, str]]] = {}
+    for rel, keys in (files.items() if isinstance(files, dict) else ()):
+        if not (isinstance(rel, str) and isinstance(keys, dict)):
+            continue
+        for key, row in keys.items():
+            if not (isinstance(key, str) and isinstance(row, dict)):
+                continue
+            was, wrote = row.get("was"), row.get("set")
+            if isinstance(wrote, str) and (was is None or isinstance(was, str)):
+                out.setdefault(rel, {})[key] = (was, wrote)
+    return out
+
+
+def record_conf_before(
+    server_dir: Path, manifest: Manifest, rel: str, key: str, was: str | None, wrote: str
+) -> str:
+    """Record that this install changed `key` in `rel` from `was` to `wrote`; `""` if written.
+
+    An entry already there keeps its `was`: what the file held before the FIRST change.
+    """
+    module = _key(manifest)
+
+    def change(everything: dict[str, Any]) -> None:
+        entries = everything.get(CONF_BEFORE, {})
+        entries = dict(entries) if isinstance(entries, dict) else {}
+        files = entries.get(module, {})
+        files = dict(files) if isinstance(files, dict) else {}
+        keys = files.get(rel, {})
+        keys = dict(keys) if isinstance(keys, dict) else {}
+        before = keys.get(key)
+        first = before.get("was") if isinstance(before, dict) and "was" in before else was
+        keys[key] = {"was": first, "set": wrote}
+        files[rel] = keys
+        entries[module] = files
+        everything[CONF_BEFORE] = entries
+
+    return _write_record(server_dir, change, f"the {key} value from before {module}")
+
+
+def forget_conf_before(server_dir: Path, manifest: Manifest) -> str:
+    """Drop `manifest`'s conf record (a Remove); `""` if written or there was none."""
+    if not conf_before(server_dir, manifest):
+        return ""
+    module = _key(manifest)
+
+    def change(everything: dict[str, Any]) -> None:
+        entries = everything.get(CONF_BEFORE, {})
+        entries = dict(entries) if isinstance(entries, dict) else {}
+        entries.pop(module, None)
+        everything[CONF_BEFORE] = entries
+
+    return _write_record(server_dir, change, f"the conf values from before {module}")
+
+
 def forget_applied(server_dir: Path, manifest: Manifest) -> str:
     """Drop `manifest`'s `applied` entry and `pending` mark, running no SQL (T121 fix wave).
 
