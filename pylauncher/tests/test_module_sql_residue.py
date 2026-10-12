@@ -44,16 +44,17 @@ def test_battle_pass_remove_names_the_tables_its_remove_step_does_not_take_back(
     tmp_path: Path,
 ) -> None:
     """One remove step (the vendor NPC) no longer hides both install files, through the real
-    install and the real remove."""
+    install and the real remove, and they are named plainly: that step touches neither."""
     m = wotlk_modules.store().load("ale", "battlepass")
     applier = Applier(tmp_path, git=_FakeGit(_bp_files()), sql=_FakeSql())
     _have_requirements(tmp_path, m)
     applier.install(m)
     report = applier.remove(m)
-    world = [line for line in report.left_behind if "sql/battlepass_world.sql" in line]
-    chars = [line for line in report.left_behind if "sql/battlepass_characters.sql" in line]
-    assert len(world) == 1 and "world database" in world[0], report.left_behind
-    assert len(chars) == 1 and "characters database" in chars[0], report.left_behind
+    assert report.left_behind[1:] == (
+        "what sql/battlepass_world.sql wrote into the world database (tables or rows)",
+        "what sql/battlepass_characters.sql wrote into the characters database "
+        "(characters or tables)",
+    ), report.left_behind
 
 
 def test_a_statement_its_own_remove_step_takes_back_is_not_named(tmp_path: Path) -> None:
@@ -76,14 +77,99 @@ def test_city_bots_remove_names_its_accounts_characters_and_world_tables() -> No
     assert len(world) == 1 and "world database" in world[0], said
 
 
-def test_a_paired_undo_file_is_named_with_what_it_undid() -> None:
-    """An install file with a remove file on the same database is named, and so is the undo."""
+def test_a_file_its_remove_step_declares_undone_is_not_named() -> None:
+    """portals-capitals: the down file deletes every row the up file writes (`undoes`)."""
     m = wotlk_modules.store().load("mod", "portals-capitals")
-    said = apply_module._left_behind(m)
-    assert said == (
-        "what portals-in-all-capitals.up.sql wrote into the world database (tables or rows), "
-        "apart from what portals-in-all-capitals.down.sql undid",
-    ), said
+    assert apply_module._left_behind(m) == ()
+
+
+def test_a_remove_file_that_does_not_undo_in_full_leaves_its_install_file_named() -> None:
+    """mod-level-one-mounts' "level twenty" file sets the mounts to 10 gold and riding to 10
+    gold; AzerothCore's stock is 1 gold and 4 gold, so it declares nothing and is named."""
+    m = wotlk_modules.store().load("mod", "lvl1-mounts")
+    assert apply_module._left_behind(m) == (
+        "what level-one-mounts.sql wrote into the world database (tables or rows)",
+    )
+
+
+def test_a_then_file_is_named_and_declared_like_a_path() -> None:
+    """hearthstone-cd's chosen file runs as `then`; the reset declares both undone."""
+    shipped = wotlk_modules.store().load("mod", "hearthstone-cd")
+    assert apply_module._left_behind(shipped) == ()
+    bare = shipped.model_copy(
+        update={
+            "sql": tuple(
+                step.model_copy(update={"undoes": ()}) if step.when == "remove" else step
+                for step in shipped.sql
+            )
+        }
+    )
+    assert apply_module._left_behind(bare) == (
+        "what Hearthstone_30_Min.sql wrote into the world database (tables or rows)",
+        "what Hearthstone_{cooldown}.sql wrote into the world database (tables or rows)",
+    )
+
+
+def _catalog() -> list[Any]:
+    root = Path(apply_module.__file__).resolve().parent.parent / "manifests"
+    found = []
+    for path in sorted(root.glob("*/*/*.json")):
+        if path.name == "index.json":
+            continue
+        try:
+            found.append(parse_manifest(__import__("json").loads(path.read_text("utf-8"))))
+        except ValueError:
+            continue  # an index or another non-manifest file
+    return found
+
+
+def test_the_catalog_list_is_the_catalog() -> None:
+    """The walk below must see the manifests it is about, or it proves nothing."""
+    ids = {m.id for m in _catalog()}
+    assert {"portals-capitals", "hearthstone-cd", "npc-teleporter", "battlepass"} <= ids
+    assert len(ids) > 40
+
+
+def test_no_catalog_item_whose_remove_covers_its_install_says_anything_was_left() -> None:
+    """Over every shipped manifest: when the remove steps declare every install file undone
+    (and every install statement's database has a remove step), Remove names no SQL."""
+    covered = []
+    for m in _catalog():
+        undone = {(s.db, n) for s in m.sql for n in s.undoes}
+        removed = {s.db for s in m.sql if s.when == "remove"}
+        installs = [s for s in m.sql if s.when == "install"]
+        if not installs or not all(
+            (s.db, n) in undone for s in installs if s.path for n in (s.path, *s.then)
+        ):
+            continue
+        if not all(s.db in removed for s in installs if s.path is None):
+            continue
+        covered.append(m.id)
+        sql_lines = [line for line in apply_module._left_behind(m) if "wrote into the" in line]
+        assert sql_lines == [], (m.game, m.id, sql_lines)
+    assert {"portals-capitals", "hearthstone-cd", "npc-teleporter", "baby-mobs"} <= set(covered)
+
+
+def test_undoes_must_name_an_install_file_on_its_database() -> None:
+    base = {
+        "schema_version": 1,
+        "id": "x",
+        "name": "X",
+        "type": "mod",
+        "game": "wow-wotlk",
+    }
+    with pytest.raises(ValueError, match="no install step on the world database"):
+        parse_manifest(
+            {
+                **base,
+                "sql": [
+                    {"db": "characters", "path": "up.sql"},
+                    {"db": "world", "path": "down.sql", "when": "remove", "undoes": ["up.sql"]},
+                ],
+            }
+        )
+    with pytest.raises(ValueError, match="for a `when: remove` step"):
+        parse_manifest({**base, "sql": [{"db": "world", "path": "up.sql", "undoes": ["up.sql"]}]})
 
 
 def test_a_statement_mod_with_its_own_undo_names_nothing() -> None:
@@ -153,6 +239,26 @@ def test_remove_names_the_modules_own_uninstall_script_and_what_it_would_do(
         "would drop the table city_bot_poi and delete rows from smart_scripts, "
         "playercreateinfo_action and playercreateinfo"
     ], report.left_behind
+
+
+def test_a_read_that_fails_costs_the_sentence_and_never_the_remove(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_sql_files()` -> `Path.is_file()` re-raises PermissionError on 3.13; Remove has
+    already undone the deploys there, so it must still delete the clone and report."""
+    files = {"data/sql/uninstall/db-world/uninstall_mod_x.sql": CITY_BOTS_WORLD_UNINSTALL}
+    applier = Applier(tmp_path, git=_FakeGit(files), sql=_FakeSql(), remote_url=_Origins(OWNED_URL))
+    m = parse_manifest(UNINSTALL_ITEM)
+    applier.install(m)
+
+    def refuse(clone: Path, path: str) -> tuple[str, ...] | None:
+        raise PermissionError(13, "Permission denied", str(clone / path))
+
+    monkeypatch.setattr(apply_module, "_sql_files", refuse)
+    report = applier.remove(m)
+    assert not applier.clone_dir(m).exists()
+    assert not any("uninstall" in line for line in report.left_behind), report.left_behind
+    assert any(line.startswith("what data/sql/db-world") for line in report.left_behind)
 
 
 def test_a_delete_folder_counts_as_an_uninstall_script(tmp_path: Path) -> None:

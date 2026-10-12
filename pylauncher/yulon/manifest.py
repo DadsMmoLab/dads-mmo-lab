@@ -254,6 +254,15 @@ class SqlStep(_Strict):
             "leaves none applied. Single files (templates ok), never globs; direct only."
         ),
     )
+    undoes: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "On a remove step: the install files (each `path` or `then` name of an install "
+            "step on the same database, spelled the same, templates included) this remove "
+            "step and the ones beside it take back IN FULL. Remove's report does not name "
+            "them as left behind; declare one only after reading both files."
+        ),
+    )
     migration_module: str | None = Field(
         default=None,
         pattern=r"^[A-Za-z0-9_.-]{1,255}$",
@@ -300,6 +309,9 @@ class SqlStep(_Strict):
                 "SqlStep.migration_module needs one direct `path` file: no glob, no `then`, "
                 "no inline statement, no precondition"
             )
+        if self.undoes and self.when != "remove":
+            # T751 round 2: only a step Remove runs can take an install file back.
+            raise ValueError("SqlStep.undoes is for a `when: remove` step")
         if self.applied_by != "direct" and (self.precondition is not None or self.verify):
             raise ValueError(
                 "SqlStep.precondition/verify need `applied_by='direct'`: a db-import step is run "
@@ -809,6 +821,22 @@ class Manifest(_Strict):
             raise ValueError("type='keg' requires `source.sparse_path` (kegs live inside a repo)")
         if self.id in self.requires or self.id in self.conflicts_with:
             raise ValueError("an item cannot require or conflict with itself")
+        installs = {
+            (step.db, name)
+            for step in self.sql
+            if step.when == "install"
+            for name in (step.path, *step.then)
+            if name is not None
+        }
+        for step in self.sql:
+            for name in step.undoes:
+                if (step.db, name) not in installs:
+                    # T751 round 2: a declaration that names no install file would hide
+                    # nothing today and the wrong file after the next rename.
+                    raise ValueError(
+                        f"sql `undoes` names {name!r}, which no install step on the {step.db} "
+                        "database runs"
+                    )
         picked = {p.key for p in self.prompts if p.kind == "character" and p.follows is None}
         for prompt in self.prompts:
             if prompt.follows is not None and prompt.follows not in picked:

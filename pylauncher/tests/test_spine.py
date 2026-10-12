@@ -2856,11 +2856,11 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "a NOTE that nothing applies it. Decides no write and no refusal: a folder it cannot "
         "see is one the note leaves out, and nothing is applied either way"
     ),
-    ("apply.py", "_uninstall_scripts"): (
+    ("apply.py", "_uninstall_sentences"): (
         "T751. Globs a module's clone for its own uninstall SQL during Remove, before the clone "
-        "is deleted, to NAME each file in the report. It decides no write and runs nothing: an "
-        "OSError is logged and answers no sentence, which leaves the report as it was before "
-        "T751"
+        "is deleted, to NAME each file in the report. It decides no write and runs nothing: "
+        "its caller `_uninstall_scripts()` logs any OSError and answers no sentence, which "
+        "leaves the report as it was before T751 and the Remove going on"
     ),
     ("tuning.py", "backups_of"): (
         "lists the directory a conf file lives in to find the backups the Tuning tab has "

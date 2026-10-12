@@ -8860,38 +8860,37 @@ def _left_behind(
     well would name the file it had just deleted. `uninstall` is passed in for the
     same reason: `_uninstall_scripts()` read the clone this remove has since deleted.
 
-    The SQL half names EVERY install-time file, db-import ones included (T751): City
+    The SQL half names every install-time file, db-import ones included (T751): City
     Bots' 400 accounts and 400 characters are its db-import SQL, and until T751 one
     remove step anywhere in a manifest hid every install line, so Battle Pass's tables
-    went unnamed behind its vendor NPC's remove step. A file with a remove step on the
-    same database is still named, with that step's files as what was undone, because
-    nothing here can tell what part of it they undid. A path-less install statement on
-    a database the manifest also gives a remove step is the one thing left out: those
-    are this catalog's own statements, written together with their undo (the mob
-    modifiers, Bigger Stacks, Battle Pass's vendor NPC).
+    went unnamed behind its vendor NPC's remove step. What a manifest's own remove steps
+    take back IN FULL is declared on them (`SqlStep.undoes`, T751 round 2) after reading
+    both sides, and only those files are left out: the shape of a manifest cannot tell
+    a full undo from a partial one (mod-level-one-mounts' "level twenty" file puts the
+    mounts back at ten times their stock price). A path-less install statement on a
+    database the manifest also gives a remove step is left out too: those are this
+    catalog's own statements, written together with their undo (the mob modifiers,
+    Bigger Stacks, Battle Pass's vendor NPC).
     """
     out = [
         f"the server DBC files from {step.src} (in the server's data volume)"
         for step in manifest.server_dbc
     ]
     out += client
-    undo: dict[Db, list[SqlStep]] = {}
-    for step in manifest.sql:
-        if step.when == "remove":
-            undo.setdefault(step.db, []).append(step)
+    removed = {step.db for step in manifest.sql if step.when == "remove"}
+    undone = {(step.db, name) for step in manifest.sql for name in step.undoes}
     for step in manifest.sql:
         if step.when != "install":
             continue
-        undone = undo.get(step.db, [])
         if step.path is None:
-            if not undone:
+            if step.db not in removed:
                 out.append(f"what its SQL wrote into the {step.db} database")
             continue
-        line = f"what {step.path} wrote into the {step.db} database ({_WHAT_A_DB_HOLDS[step.db]})"
-        if undone:
-            named = [u.path for u in undone if u.path is not None]
-            line += f", apart from what {' and '.join(named) if named else 'its remove step'} undid"
-        out.append(line)
+        out += [
+            f"what {name} wrote into the {step.db} database ({_WHAT_A_DB_HOLDS[step.db]})"
+            for name in (step.path, *step.then)
+            if (step.db, name) not in undone
+        ]
     out += uninstall
     return tuple(out)
 
@@ -8932,13 +8931,23 @@ def _uninstall_scripts(manifest: Manifest, clone: Path) -> tuple[str, ...]:
     A file counts when it lies under `IMPORTER_SQL_ROOT` in a folder the updater never
     walks, `_UNINSTALL_WORDS` is in its path there, and no `sql` step of the manifest names
     it (a declared remove step has just been run).
+
+    Never raises (T751 round 2): `remove()` calls it after the deploys are undone and
+    before the clone is deleted, so an `OSError` anywhere in the reading (a listing, an
+    `is_file()` that re-raises `PermissionError` on 3.13, a step's own glob) would end the
+    Remove half done. It costs these sentences and nothing else.
     """
-    root = clone / IMPORTER_SQL_ROOT
     try:
-        found = sorted(p for p in root.rglob("*.sql") if p.is_file())
+        return _uninstall_sentences(manifest, clone)
     except OSError as exc:
         logger.warning(f"could not look for {manifest.id}'s uninstall SQL: {exc}")
         return ()
+
+
+def _uninstall_sentences(manifest: Manifest, clone: Path) -> tuple[str, ...]:
+    """`_uninstall_scripts()`'s reading, which may raise `OSError`."""
+    root = clone / IMPORTER_SQL_ROOT
+    found = sorted(p for p in root.rglob("*.sql") if p.is_file())
     declared = _declared_sql(manifest, clone)
     repo = manifest.source.repo if manifest.source is not None else None
     out: list[str] = []
@@ -8950,6 +8959,7 @@ def _uninstall_scripts(manifest: Manifest, clone: Path) -> tuple[str, ...]:
         try:
             text = _SQL_COMMENT.sub(" ", path.read_text(encoding="utf-8", errors="replace"))
         except OSError as exc:
+            # One unreadable file still gets its sentence, without what it would do.
             logger.warning(f"could not read {rel}: {exc}")
             text = ""
         does = [_uninstall_does(verb, pattern.findall(text)) for pattern, verb in _UNINSTALL_DOES]

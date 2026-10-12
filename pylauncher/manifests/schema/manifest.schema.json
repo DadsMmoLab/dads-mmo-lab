@@ -780,6 +780,15 @@
           "title": "Then",
           "type": "array"
         },
+        "undoes": {
+          "default": [],
+          "description": "On a remove step: the install files (each `path` or `then` name of an install step on the same database, spelled the same, templates included) this remove step and the ones beside it take back IN FULL. Remove's report does not name them as left behind; declare one only after reading both files.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Undoes",
+          "type": "array"
+        },
         "verify": {
           "default": [],
           "description": "Read after the step; an entry returning no row is a failure, by its own name.",
