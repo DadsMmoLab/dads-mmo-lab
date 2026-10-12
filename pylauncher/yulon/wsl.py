@@ -22,6 +22,7 @@ import json
 import re
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -188,6 +189,76 @@ def distro_state(distro: str) -> DistroState:
     if listed is None or distro not in listed:
         return "unknown"
     return "stopped"
+
+
+BOOT_TIMEOUT = 90.0
+"""How long `boot()` waits for a stopped distro to come up AND its Docker to answer (T775).
+
+Measured on yulon-win11, 2026-10-12, three stages after the first `wsl -d Ubuntu --exec ...`
+into a stopped distro: no answer in 5 s; 17 s later "Failed to start the systemd user
+session"; one second after that the distro was up but `/var/run/docker.sock` did not exist
+yet (dockerd still starting); only a press 100 s after the first worked."""
+
+_BOOT_RETRY_SECONDS = 2.0
+
+_NO_SUCH_PROGRAM = "execvpe("
+"""What wsl.exe says when `--exec` cannot find the program: no Docker CLI in the distro, which
+waiting does not fix."""
+
+
+def boot(
+    distro: str,
+    *,
+    cancel: threading.Event | None = None,
+    timeout: float | None = None,
+) -> bool:
+    """Bring a STOPPED `distro` up until its Docker answers; False if it did not in time (T775).
+
+    A stopped distro is booted by the first `wsl -d` command into it, and that boot (the VM,
+    systemd's user session, then dockerd) takes longer than the few seconds Docker questions
+    get: the first Start after a reboot or after WSL's idle timer failed with "Docker is not
+    answering". So the question that must be quick is asked of a distro whose Docker is up.
+
+    The probe is a Docker question (`docker version`), not a shell command: a distro that
+    runs `true` can still have no daemon, and a reservation asked then reads "Docker is down"
+    -- which lets the press go ahead WITHOUT a reservation. It is retried every 2 s while it
+    fails (user session starting, then no `docker.sock` yet).
+
+    Acts only when WSL SAID the distro is stopped (`distro_state()`): True without doing
+    anything for a running one, one WSL does not list (deleted, renamed), a listing that did
+    not answer, or a host without wsl.exe -- those fail as fast as before at the real call.
+    False when `timeout` (`BOOT_TIMEOUT`) ran out, `cancel` was set, a command timed out, wsl.exe
+    said the distro is gone, or the distro has no `docker` program. Never raises.
+    """
+    if distro_state(distro) != "stopped":
+        return True
+    prefix = platform.docker_prefix(distro)
+    if prefix is None:
+        return True
+    argv = [*prefix, "version", "--format", "{{.Server.Version}}"]
+    limit = BOOT_TIMEOUT if timeout is None else timeout
+    deadline = time.monotonic() + limit
+    logger.info(f"{distro} is stopped; waiting for it and its Docker before asking anything")
+    while True:
+        left = deadline - time.monotonic()
+        if left <= 0 or (cancel is not None and cancel.is_set()):
+            return False
+        if cancel is None:
+            done = runner.run(argv, timeout=left)
+        else:
+            done = runner.run_cancellable(argv, timeout=left, cancel=cancel)
+        if done.returncode == 0:
+            logger.info(f"{distro} is up and its Docker answers")
+            return True
+        said = f"{done.stdout}{done.stderr}".replace("\x00", "")
+        if (
+            done.returncode == _DISTRO_NOT_FOUND_RETURNCODE
+            or runner.timed_out(done)
+            or _NO_SUCH_PROGRAM in said
+        ):
+            return False
+        logger.info(f"{distro} is not answering yet ({done.returncode}); asking again")
+        time.sleep(min(_BOOT_RETRY_SECONDS, max(0.0, deadline - time.monotonic())))
 
 
 def is_running(distro: str) -> bool:

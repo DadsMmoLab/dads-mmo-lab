@@ -535,6 +535,9 @@ class Controller:
             press=forgetting.PRESS_START,
             spec=self.spec,
             wsl_distro=self.wsl_distro,
+            # T775: the app's give-up ends a wait for a stopped distro to boot. A Start has no
+            # Cancel button of its own yet; `stop_control.abandon` is the only event it can hear.
+            cancel=None if self.stop_control is None else self.stop_control.abandon,
         ):
             self.refuse_start()
             self.refuse_an_old_compose()

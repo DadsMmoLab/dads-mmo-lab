@@ -903,6 +903,7 @@ def _in_flight(
     press: str = forgetting.PRESS_START,
     spec: ContainerSpec | None = None,
     wsl_distro: str | None = None,
+    cancel: threading.Event | None = None,
 ) -> Iterator[None]:
     """Mark a lifecycle command for this server as running, unless the server is held.
 
@@ -938,6 +939,7 @@ def _in_flight(
                             press=press,
                             spec=spec,
                             wsl_distro=wsl_distro,
+                            cancel=cancel,
                             up_timeout=_STOP_RESERVE_TIMEOUT if stopping else None,
                         )
                     )
@@ -962,6 +964,7 @@ def lifecycle(
     press: str = "Restart the server",
     spec: ContainerSpec | None = None,
     wsl_distro: str | None = None,
+    cancel: threading.Event | None = None,
 ) -> contextlib.AbstractContextManager[None]:
     """One lifecycle command made of several: a restart, a recreate, a bot restart (T216).
 
@@ -972,10 +975,12 @@ def lifecycle(
     the composite, the mark lasts from its first step to its last; the marks
     nest, so the primitives inside run as before.
 
+    `cancel`: set, it ends the wait for a stopped WSL distro to boot (T775) and the reservation.
+
     Raises:
         ServerHeldError: the server is held, so not even the first step runs.
     """
-    return _in_flight(server_dir, press=press, spec=spec, wsl_distro=wsl_distro)
+    return _in_flight(server_dir, press=press, spec=spec, wsl_distro=wsl_distro, cancel=cancel)
 
 
 class MaintenanceLeaseTaken(RuntimeError, SaidByYulon):
@@ -9757,6 +9762,22 @@ def _new_reservation(
     ]
     claim: _Claim | None = None
     last: ClaimUnavailable | None = None
+    if wsl_distro is not None and not wsl.boot(
+        wsl_distro,
+        cancel=cancel,
+        timeout=None if budget_end is None else max(0.0, budget_end - time.monotonic()),
+    ):
+        # T775: the first command into a STOPPED distro boots it, and that takes longer than
+        # the seconds a reservation question gets; it was booted first, with a wait of its own,
+        # and its Docker never answered. NOT `moot`: asking on would read "Docker is down" and
+        # let the press go ahead with no reservation, into a daemon that is not there.
+        raise ServerReservationUnavailable(
+            forgetting.server_reservation_unavailable(
+                label,
+                f"The WSL distro {wsl_distro} was stopped and its Docker did not answer after "
+                "it was started; wait a moment and try again.",
+            )
+        )
     chain = _reservation_images(spec, images, wsl_distro, budget_end, avoid_images)
     waited_for_a_dying_one = False
     while True:
