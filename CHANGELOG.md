@@ -18,6 +18,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - The Maintenance tab lists the backups an earlier uninstall kept, so a reinstall can restore them.
 ### Fixed
 - **Return to the tested pin…** no longer refuses a move forward because upstream removed or changed older SQL files.
+- A Tortoise update no longer runs a database migration again because upstream changed it; it stops and names the file.
 - A Rebuild that waits for Repair no longer says the server comes back up, and counts only the steps it runs.
 - An update put back and left stopped no longer blames world tables or says the old build starts on its databases.
 - The Rebuild question before a Repair no longer promises that a build you may not have stays as it is.
