@@ -332,19 +332,23 @@ def no_rollback_confirmation(entry: CatalogEntry) -> str:
         f"If this server's images have lost their names on this machine{says}, the build its "
         "containers are running is kept as the rollback instead, found by its image. If there "
         "are no such containers either, there is no build to keep, and this compiles without a "
-        "rollback: a compile that fails or is stopped, or containers Docker will not replace, "
-        "leave the server as it is now; a new build that has replaced the containers and does "
-        "not come up cannot be put back, and the server stays down until a rebuild comes up."
+        "rollback: a compile that fails, or containers Docker will not replace, leave the "
+        "server as it is now; a compile you stop may still finish in Docker's background and "
+        "give this server's image names to the new build, which the next Start then runs; a "
+        "new build that has replaced the containers and does not come up cannot be put back, "
+        "and the server stays down until a rebuild comes up."
     )
 
 
 NO_ROLLBACK_KEPT = (
     "This install's images are not all in Docker under their tags, and no container of this "
     "install still holds a whole build, so there is no build to keep as a rollback: this rebuild "
-    "compiles without one, as its confirmation said. If the compile fails or is stopped, or "
-    "Docker will not replace the containers, they stay as they are now. If the new build "
-    "replaces them and its server does not come up, there is no build from before to put back, "
-    "and the server stays down until a rebuild comes up."
+    "compiles without one, as its confirmation said. If the compile fails, or Docker will not "
+    "replace the containers, they stay as they are now. If you stop the compile, Docker may "
+    "still finish it in the background and give this install's image names to the new build, "
+    "which the next Start then runs. If the new build replaces the containers and its server "
+    "does not come up, there is no build from before to put back, and the server stays down "
+    "until a rebuild comes up."
 )
 """What a Rebuild says when it goes ahead with the images gone (T170), before the compile.
 
@@ -352,7 +356,14 @@ The owner's decision of 2026-09-28 ("Repair + Rebuild both"): after a confirm,
 Rebuild compiles when the image is missing instead of refusing. The confirmation
 said it first (`installer.rebuild_confirmation()`); this is the same fact at the
 moment it applies, in the panel the rest of the press is read in, and it says
-what each failure leaves -- the three sentences below are those failures'."""
+what each failure leaves -- the sentences below are those failures'.
+
+T768 (T225): "If the compile fails or is stopped ... they stay as they are now" was not
+true of a stop. A stopped compile can still land in Docker's background and move the
+live tags (measured on Windows 11, `STOPPED_BUILD_FILE`), and with no `-rollback` name
+there is nothing for Start to compare them with, so nothing refuses the build that
+landed. No refusal is added: with no build from before, it would leave nothing runnable
+(the owner, 2026-09-28; the lead, T223). The sentence says it instead."""
 
 NO_ROLLBACK_NOT_BUILT = (
     "No build was kept as a rollback, because this install's images were not all in Docker. "
@@ -360,7 +371,19 @@ NO_ROLLBACK_NOT_BUILT = (
     "images are still not all there. Once the reason is fixed, press "
     f"{server_build_presses.under_server_build(server_build_presses.REBUILD)} again."
 )
-"""T170: a compile with no rollback that failed, or was stopped, before it finished."""
+"""T170: a compile with no rollback that failed, or was stopped, before it finished.
+
+For a stopped one, `NO_ROLLBACK_STOPPED_NOTE` follows (T768)."""
+
+NO_ROLLBACK_STOPPED_NOTE = (
+    "The compile was stopped, and Docker may still finish it in the background and give "
+    "this install's image names to the new build, which the next Start then runs."
+)
+"""Said after `NO_ROLLBACK_NOT_BUILT` when the compile was stopped, not failed (T768, T225).
+
+With a rollback kept, `STOPPED_BUILD_NOTE` says this and every Start compares the tags with
+the `-rollback` names. With none there is nothing to compare, so only the sentence is left;
+"its images are still not all there" is then true only until the build lands."""
 
 NO_ROLLBACK_UNTOUCHED = (
     "No build was kept as a rollback, because this install's images were not all in Docker. "
@@ -540,10 +563,12 @@ def rebuild_opening_note(
     as it is, and the clause says so.
 
     `held` (T743, W1): the import record stands (`_held_by_an_unfinished_import()`), so the
-    press removes the old servers' containers and starts nothing, and `rebuild()` runs no
-    `ready` stage. The live proof's held panel said both "stays stopped" and "waits for the
-    server to come back up ... DOWN ... until it reports ready"; held, the note says only
-    what the press does. `imports` is False then (the press applies no update).
+    press removes the old auth and world servers' containers and starts nothing, and
+    `rebuild()` runs no `ready` stage. The live proof's held panel said both "stays
+    stopped" and "waits for the server to come back up ... DOWN ... until it reports
+    ready"; held, the note says only what the press does. `imports` is False then (the
+    press applies no update). T768: the database's container is not removed
+    (`_remove_the_old_servers()`), and may be running, started to ask T658's record.
     """
     compiles = (
         "compiles the server again from the source and modules in the folder below, or, if the "
@@ -601,8 +626,9 @@ def rebuild_opening_note(
         return (
             "You can stop this at any time; stopping before the old servers are stopped leaves "
             f"the server you have now exactly as it is. This does {count} things and nothing "
-            f"else: {recipe}{overlay}it {compiles}, and it removes the old servers' containers, "
-            "stopping any that run and keeping every volume. It starts nothing, so the server "
+            f"else: {recipe}{overlay}it {compiles}, and it removes the containers of the old auth "
+            "and world servers, stopping any that run and keeping every volume; the database's "
+            "container is left running or stopped, as it is. It starts nothing, so the server "
             f"stays STOPPED. {online} {database}"
         )
     return (
@@ -2278,9 +2304,16 @@ saying whether there is a build."""
 _HELD_INSTEAD = (
     "this rebuild does less than said above: once the compile finishes your server is STOPPED "
     "and stays stopped. No copy of your databases is taken, no database update is applied and "
-    "the world is not started. Press Repair on the Server tab afterwards to finish the import, "
-    "then Start. It says so as it begins when it does this."
+    "the world is not started. If it fails after the compile, a build kept as the rollback is "
+    "put back and left stopped, not started again. Press Repair on the Server tab afterwards "
+    "to finish the import, then Start. It says so as it begins when it does this."
 )
+"""What the two may-hold questions say a held press does instead (T741).
+
+T768: the question's generic rollback paragraph above it ends "the server is started on it
+again", and a held press never does that: a failure after the compile puts the kept build
+back and `_restore_rollback()` leaves it stopped (`start_refusal()` refuses under the
+record). This paragraph is what overrides it, so it says so."""
 
 HELD_CONFIRMATION_IF_CUT_OFF = (
     "This server's last database import was cut off before it finished. If its databases hold "
@@ -2320,14 +2353,20 @@ whose tag had moved made a new container from the new image
 (.notes/gates/t741-compose-recreate-m910q-2026-10-12/)."""
 
 HELD_STOPPING = (
-    "Stopping the old servers, if any run, and removing their containers. The new build is not "
-    "started: the database import is unfinished."
+    "Stopping the old auth and world servers, if they run, and removing their containers; the "
+    "database's container is left running or stopped, as it is. The new build is not started: "
+    "the database import is unfinished."
 )
-"""`stage_recreate()`'s first line under the import record (T739)."""
+"""`stage_recreate()`'s first line under the import record (T739).
+
+T768: it said "the old servers", and `_remove_the_old_servers()` leaves the database's
+container, which may be running: `_held_by_an_unfinished_import()` starts it to ask T658's
+record, and `stop_servers()` leaves the database up."""
 
 HELD_REMOVED = (
-    "No container of the old servers is left now, and every volume is kept; Start creates "
-    "them from the new build once Repair has finished the import."
+    "No container of the old auth and world servers is left now, and every volume is kept; "
+    "the database's container is left as it was. Start makes those two servers from the new "
+    "build once Repair has finished the import."
 )
 """Said once a Rebuild under the import record removed the old servers' containers (T739).
 
@@ -2339,26 +2378,32 @@ the state the removal leaves, which is the same in both."""
 
 HELD_ROLLBACK_KEPT = (
     "This rebuild starts nothing: if it fails once the compile has finished, that build is put "
-    "back and left stopped, and once the rebuild has finished the rollback names are let go."
+    "back and left stopped. If the rebuild finishes, the build from before is not kept: the "
+    "new one is what Repair and Start use."
 )
 """What a held Rebuild's kept rollback is for, after "Kept the build you have now..." (T743).
 
 In place of "If the new build does not come up it is put back automatically" (W1): a held
 press never starts the new build, so nothing waits for it to come up. A failure after the
 compile is put back by `_restore_rollback()`, which asks `start_refusal()` and leaves it
-stopped under the record; a success lets the names go (T741)."""
+stopped under the record; a success lets the names go (T741).
+
+T768: "the rollback names are let go" was the press's own word for it; the line says what
+it means for the player."""
 
 HELD_NO_ROLLBACK_KEPT = (
     "This install's images are not all in Docker under their tags, and no container of this "
     "install still holds a whole build, so there is no build to keep as a rollback: this rebuild "
-    "compiles without one. It starts nothing: if the compile fails or is stopped, the server is "
-    "left as it is now."
+    "compiles without one. It starts nothing: if the compile fails, the server is left as it is "
+    "now. If you stop the compile, Docker may still finish it in the background and give this "
+    "install's image names to the new build, which Repair and Start then use."
 )
 """`NO_ROLLBACK_KEPT` for a held Rebuild (T743, W1).
 
 That one's "as its confirmation said" and "its server does not come up" are not true here:
 the held question says nothing of a gone build (`installer.rebuild_confirmation()` gives
-the record its own text), and a held press starts nothing."""
+the record its own text), and a held press starts nothing. T768: a stopped compile is
+T225's, as in `NO_ROLLBACK_KEPT`."""
 
 
 def held_rebuild_ending(name: str, server_dir: Path) -> str:
@@ -9934,6 +9979,9 @@ class StagedInstaller:
                 # T170: no rollback was kept, because there was no build to
                 # keep. Nothing was replaced, so nothing needed putting back.
                 message = f"{exc} {NO_ROLLBACK_NOT_BUILT}"
+                if self._build_exit == docker.CANCELLED_RETURNCODE:
+                    # T768 (T225): no `-rollback` name, so no record and no check at Start.
+                    message = f"{message} {NO_ROLLBACK_STOPPED_NOTE}"
                 self._record_error(server_dir, ctx.state, message)
                 raise carry_detail(exc, InstallerError(message)) from exc
             if isinstance(exc, WorldStoppedAfterReadyError):

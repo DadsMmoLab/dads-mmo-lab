@@ -24,6 +24,8 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A Lua script installed before ALE's first rebuild now says to rebuild first, also after Yu'lon restarts.
 - Individual Progression now turns on character settings and its item stats, and Remove puts the old values back.
 - Removing Level One Mounts now puts mount and riding prices back as they were, not at ten times the stock price.
+- A Rebuild that waits for Repair now says the database is left as it is, and a failed build goes back stopped.
+- A Rebuild with no build to keep now warns that a compile you stop may still finish, and Start then runs it.
 - Removing a module now names the accounts, characters and tables its SQL left in the databases.
 - Removing a module now names its own uninstall SQL and what it would delete, without running it.
 - A module added from a link or folder now reports the SQL the server applies, and says which SQL nothing applies.
