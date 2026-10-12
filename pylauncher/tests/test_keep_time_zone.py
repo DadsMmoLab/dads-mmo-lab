@@ -174,7 +174,7 @@ def test_the_channel_enable_press_keeps_a_hand_written_time_zone(tmp_path: Path)
 
 def test_a_zone_set_while_the_channel_was_on_survives_its_rollback(tmp_path: Path) -> None:
     """The backup is the file before the FIRST press, so it holds no zone set after it."""
-    _generate(tmp_path)
+    _installed_off(tmp_path)
     before = (tmp_path / OVERRIDE).read_text(encoding="utf-8")
     _press(tmp_path)
     server_time_zone.write(WOTLK, tmp_path, OSLO)
@@ -254,6 +254,17 @@ def _tab_set(server_dir: Path, entry: CatalogEntry = WOTLK, zone: str = OSLO) ->
     return (server_dir / OVERRIDE).read_text(encoding="utf-8")
 
 
+def _installed_off(server_dir: Path) -> str:
+    """A finished install with its channel OFF, as an install made before T723 left it.
+
+    A first install starts with its channel on (T723), so the off state is made the
+    way a person makes it: the install, then the Server tab's rollback.
+    """
+    _generate(server_dir)
+    assert _tab(server_dir).roll_back()
+    return (server_dir / OVERRIDE).read_text(encoding="utf-8")
+
+
 def test_a_repair_renders_the_file_the_tab_wrote(tmp_path: Path) -> None:
     _generate(tmp_path)
     tabbed = _tab_set(tmp_path)
@@ -319,7 +330,7 @@ def test_the_zone_the_count_and_the_channel_ride_a_repair_together(tmp_path: Pat
 
 
 def test_the_channel_on_and_off_again_keeps_a_zone_set_before_it(tmp_path: Path) -> None:
-    _generate(tmp_path)
+    _installed_off(tmp_path)
     tabbed = _tab_set(tmp_path)
     _press(tmp_path)
 

@@ -87,6 +87,17 @@ def _press(server_dir: Path) -> str:
     return (server_dir / OVERRIDE).read_text(encoding="utf-8")
 
 
+def _installed_off(server_dir: Path) -> str:
+    """A finished install with its channel OFF, as an install made before T723 left it.
+
+    A first install starts with its channel on (T723), so the off state is made the
+    way a person makes it: the install, then the Server tab's rollback.
+    """
+    _generate(server_dir)
+    assert _tab(server_dir).roll_back()
+    return (server_dir / OVERRIDE).read_text(encoding="utf-8")
+
+
 def _tab(server_dir: Path) -> channel_setup.InstallChannel:
     """The Server tab's own setup object: its `roll_back()` is the button."""
 
@@ -166,7 +177,7 @@ def test_the_channel_enable_press_keeps_the_players_bot_count(tmp_path: Path) ->
 
 
 def test_the_channel_on_and_off_again_leaves_the_bot_count_and_the_file(tmp_path: Path) -> None:
-    _generate(tmp_path)
+    _installed_off(tmp_path)
     bot_population.write(WOTLK, tmp_path, 60)
     before = (tmp_path / OVERRIDE).read_text(encoding="utf-8")
     _press(tmp_path)
@@ -201,7 +212,7 @@ def test_a_labelled_override_changed_after_enable_is_still_rolled_back(tmp_path:
     rendered with the pair off the file, and the rollback would then leave the
     channel stuck on (the cold review of T117, merging T102).
     """
-    _generate(tmp_path)
+    _installed_off(tmp_path)
     labelled = composegen.render(
         WOTLK,
         tmp_path,

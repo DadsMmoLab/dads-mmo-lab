@@ -73,6 +73,18 @@ def _press(server_dir: Path) -> str:
     return (server_dir / OVERRIDE).read_text(encoding="utf-8")
 
 
+def _installed_off(server_dir: Path) -> str:
+    """A finished install whose channel is OFF, as an install made before T723 left it.
+
+    A first install starts with its channel on (T723), so the off state is made
+    the way a person makes it: the install, then the Server tab's rollback. The
+    override that rollback restores is the install's own text, byte for byte.
+    """
+    _generate(server_dir)
+    assert _tab(server_dir).roll_back()
+    return (server_dir / OVERRIDE).read_text(encoding="utf-8")
+
+
 def _tab(server_dir: Path) -> channel_setup.InstallChannel:
     """The Server tab's own setup object: its `roll_back()` is the button."""
 
@@ -95,7 +107,7 @@ def _port_claim(server_dir: Path) -> str | None:
 
 
 def test_a_repair_keeps_a_live_channel_on(tmp_path: Path) -> None:
-    installed = _generate(tmp_path)
+    installed = _installed_off(tmp_path)
     pressed = _press(tmp_path)
     assert pressed != installed, "control: the press changed the override"
 
@@ -107,7 +119,7 @@ def test_a_repair_keeps_a_live_channel_on(tmp_path: Path) -> None:
 
 
 def test_a_rollback_after_a_repair_restores_the_installed_override(tmp_path: Path) -> None:
-    installed = _generate(tmp_path)
+    installed = _installed_off(tmp_path)
     _press(tmp_path)
     _generate(tmp_path)
 
@@ -120,14 +132,14 @@ def test_a_rollback_after_a_repair_restores_the_installed_override(tmp_path: Pat
 
 
 def test_a_repair_with_no_channel_writes_the_plain_override(tmp_path: Path) -> None:
-    installed = _generate(tmp_path)
+    installed = _installed_off(tmp_path)
     assert _generate(tmp_path) == installed
     for key in CHANNEL_KEYS:
         assert key not in installed
 
 
 def test_a_repair_after_a_rollback_leaves_the_channel_off(tmp_path: Path) -> None:
-    installed = _generate(tmp_path)
+    installed = _installed_off(tmp_path)
     _press(tmp_path)
     assert _tab(tmp_path).roll_back()
 
@@ -143,7 +155,7 @@ def test_a_rollback_that_left_the_file_alone_still_reads_as_off(tmp_path: Path) 
     user who pressed Roll back. The released port claim is the rollback's own
     record, and it is written by both of its arms.
     """
-    installed = _generate(tmp_path)
+    installed = _installed_off(tmp_path)
     _press(tmp_path)
     (tmp_path / OVERRIDE).write_text(installed, encoding="utf-8")  # the unfixed Repair
     assert _tab(tmp_path).roll_back()

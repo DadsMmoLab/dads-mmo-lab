@@ -14033,17 +14033,32 @@ class StagedInstaller:
         # install, and without it the override went back to the pre-channel
         # file: measured on yulon-ubuntu 2026-09-24, the Repair's own `up`
         # brought the world up with `AC_SOAP_ENABLED` gone and nothing on the
-        # channel's port. `None` on a first install (no press yet), which is
-        # `render()`'s own default.
+        # channel's port. `None` on a first install's first render (no press yet),
+        # which is `render()`'s own default; see the T723 note below.
         #
         # And the player's bot count rides over it (T117): the Bots box writes
         # Min/Max into this same file, and rendering the catalog's 500 again put
         # it back on every Repair and Update. Read off the file being replaced,
         # never probed; no usable pair in it leaves the catalog's number.
+        #
+        # A first install's channel starts on (T723), as the conf trees' keys do
+        # at install (T87). The record a press keeps is written first, from the
+        # override this render gives without the channel, and the second render
+        # then carries the channel the way every later regeneration does. Asked
+        # before anything is written, so a folder with an override (a Repair, an
+        # Update, an install that was turned off) is never switched on here.
         try:
+            switch_on = composegen.channel_starts_on(self.entry, ctx.server_dir)
             plan = self._render_compose(ctx.server_dir, ctx.secrets, label)
+            if switch_on:
+                composegen.record_channel_press(self.entry, ctx.server_dir, plan.override)
+                plan = self._render_compose(ctx.server_dir, ctx.secrets, label)
         except composegen.ComposeGenError as exc:
             raise InstallerError(str(exc)) from exc
+        except OSError as exc:
+            raise InstallerError(
+                f"the command channel could not be written into {ctx.server_dir}: {exc}"
+            ) from exc
         made = self._make_server_folders(ctx.server_dir)
         for path in made:
             yield f"Made {path.name}/ for the server to write into."
