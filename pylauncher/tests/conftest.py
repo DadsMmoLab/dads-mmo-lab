@@ -606,6 +606,8 @@ def _no_job_thread_runs_into_interpreter_teardown() -> Iterator[None]:
     ("QThread: Destroyed while thread '' is still running", rc 134): five files alone did it,
     and the full run passed only because a later test pumped the loop. `wait_all()` quits each
     thread directly. A job still busy past the bound is named here rather than in an abort.
+    Since T769 the fixture below joins each test's own threads at that test's end; this one
+    is left for what a module fixture started.
     """
     yield
     job = sys.modules.get("yulon.ui.widgets.job")
@@ -616,6 +618,62 @@ def _no_job_thread_runs_into_interpreter_teardown() -> Iterator[None]:
         raise RuntimeError(
             f"background jobs still running at the end of the run: {holder.still_running()}"
         )
+
+
+def _running_job_threads() -> list[tuple[Any, Any, Any]]:
+    """Every `(thread, worker, delivery)` `job.in_flight()` holds whose thread still runs.
+
+    Read through `sys.modules`, as the session fixture above does: a test that never
+    imported the job module cannot have started a job, and importing it here would load Qt
+    for every test.
+    """
+    job = sys.modules.get("yulon.ui.widgets.job")
+    holder = getattr(job, "_in_flight", None) if job is not None else None
+    if holder is None:
+        return []
+    return [pair for pair in holder._pairs if pair[0].isRunning()]
+
+
+def joining_the_job_threads_left_behind(bound_ms: int) -> Iterator[None]:
+    """The body of the fixture below: note what runs, yield to the test, join what it added.
+
+    A plain generator so `test_job_threads_left_behind.py` can drive the very code the
+    fixture runs, inside one test, with a bound of its own.
+    """
+    before = [thread for thread, _worker, _delivery in _running_job_threads()]
+    yield
+    left = [pair for pair in _running_job_threads() if not any(pair[0] is t for t in before)]
+    if not left:
+        return
+    job = sys.modules["yulon.ui.widgets.job"]
+    hung: list[str] = []
+    for thread, worker, _delivery in left:
+        thread.quit()
+        if not thread.wait(bound_ms):
+            hung.append(job.in_flight()._labels.get(id(thread)) or job.describe(worker))
+    if hung:
+        pytest.fail(
+            f"this test left background jobs running that did not finish within {bound_ms} ms "
+            f"of being told to quit (T769): {hung}. Join them in the test's own teardown."
+        )
+
+
+@pytest.fixture(autouse=True)
+def _job_threads_a_test_leaves_running_are_joined() -> Iterator[None]:
+    """Join, at its own end, every job thread a test started and left running (T769).
+
+    A view built with real job threads and never pumped leaves each job's thread in its event
+    loop: the `worker.done -> thread.quit` call is queued to the GUI thread and nothing
+    delivers it. Five files did that alone, and before T764 the run aborted after its
+    summary. The session fixture above joined them, but only at the end of the run, so a job
+    that HUNG was reported against no test, or against whichever ran last. Joined here
+    instead, the hang fails the test that started it. A thread the test merely did not pump
+    is joined and passes: the queued `quit` is all it was waiting for.
+
+    Threads already running when the test began (a module fixture's) are left to their
+    owner; the session fixture still joins whatever is left at the end of the run.
+    """
+    yield from joining_the_job_threads_left_behind(HANG_BOUND_MS)
 
 
 def process_events(ms: int = 50) -> None:

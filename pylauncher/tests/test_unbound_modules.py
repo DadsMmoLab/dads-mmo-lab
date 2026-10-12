@@ -20,6 +20,7 @@ from yulon.catalog.catalog import CatalogEntry, load_catalog
 from yulon.manifest import Manifest
 from yulon.manifest_store import ManifestStore
 from yulon.ui.controller_view import ControllerServices, ControllerView
+from yulon.ui.widgets.job import run_inline
 
 
 def entry(game: str) -> CatalogEntry:
@@ -110,7 +111,10 @@ def test_the_modules_tab_does_not_offer_ale_on_unbound_but_shows_its_folder(
     (tmp_path / "modules" / "mod-ale").mkdir(parents=True)
     unbound = entry("wow-unbound")
     view = ControllerView(
-        unbound, ControllerServices.for_entry(unbound, tmp_path), status_poll_ms=0
+        unbound,
+        ControllerServices.for_entry(unbound, tmp_path),
+        status_poll_ms=0,
+        job_runner=run_inline,
     )
     view.reload_modules()
     assert "mod-ale" not in _offered(view)
@@ -134,7 +138,12 @@ def test_an_ale_script_that_requires_mod_ale_is_still_installable_on_unbound(
 
 def test_wotlks_modules_tab_still_offers_ale(qapp: object, tmp_path: Path) -> None:
     wotlk = entry("wow-wotlk")
-    view = ControllerView(wotlk, ControllerServices.for_entry(wotlk, tmp_path), status_poll_ms=0)
+    view = ControllerView(
+        wotlk,
+        ControllerServices.for_entry(wotlk, tmp_path),
+        status_poll_ms=0,
+        job_runner=run_inline,
+    )
     view.reload_modules()
     assert "mod-ale" in _offered(view)
 

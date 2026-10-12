@@ -24,6 +24,7 @@ from yulon.ui import controller_view as view_module
 from yulon.ui.controller_view import ControllerView
 from yulon.ui.widgets import clean_up_dialog
 from yulon.ui.widgets.clean_up_dialog import CleanUpDialog
+from yulon.ui.widgets.job import run_inline
 
 
 def put(server: Path, *args: Any, **kwargs: Any) -> Path:
@@ -54,7 +55,7 @@ def make_view(
 ) -> ControllerView:
     (tmp_path / "sql_scripts" / "backups").mkdir(parents=True, exist_ok=True)
     services = dataclasses.replace(_services(ps, tmp_path, [], made), shelf=seam)
-    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=run_inline)
 
     def run_in_line(fn: Any, done: Any, failed: Any) -> None:
         try:

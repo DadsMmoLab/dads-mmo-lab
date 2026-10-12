@@ -170,8 +170,14 @@ def test_start_does_not_point_an_old_fork_install_at_a_rebuild_that_cannot_work(
 def _view_failed(qapp: object, tmp_path: Path, exc: Exception) -> Any:
     from tests.test_controller_view import _services
     from yulon.ui.controller_view import ControllerView
+    from yulon.ui.widgets.job import run_inline
 
-    view = ControllerView(TORTOISE, _services(_ImageDocker(), tmp_path, []), status_poll_ms=0)
+    view = ControllerView(
+        TORTOISE,
+        _services(_ImageDocker(), tmp_path, []),
+        status_poll_ms=0,
+        job_runner=run_inline,
+    )
     view._start_failed(exc)
     return view
 
@@ -383,10 +389,11 @@ def test_a_press_that_stops_first_is_refused_before_it_stops_anything(
 def _view(tmp_path: Path) -> Any:
     from tests.test_controller_view import _services
     from yulon.ui.controller_view import ControllerView
+    from yulon.ui.widgets.job import run_inline
 
     services = _services(_ImageDocker(), tmp_path, [])
     services.controller = Controller(SPEC, tmp_path)
-    return ControllerView(TORTOISE, services, status_poll_ms=0)
+    return ControllerView(TORTOISE, services, status_poll_ms=0, job_runner=run_inline)
 
 
 @pytest.mark.parametrize("press", ["_do_restart", "_do_recreate"])

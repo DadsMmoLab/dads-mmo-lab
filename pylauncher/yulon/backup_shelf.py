@@ -365,6 +365,8 @@ def _row(path: Path, name: str, kind: Kind, st: os.stat_result, game_id: str | N
     candidates = _candidates(rest) if kind != "gz" else [(None, rest)]
     usable, problem, game = False, None, None
     unchecked = False
+    # A read of the file failed: nothing read later (the head check below) can settle its name.
+    read_failed = False
     if kind == "partial":
         problem = "A backup that was cut short; it never became a copy that can be restored."
     elif kind == "gz":
@@ -377,7 +379,7 @@ def _row(path: Path, name: str, kind: Kind, st: os.stat_result, game_id: str | N
             # file "unusable". A read that failed proves nothing about it.
             problem = str(exc)
             if isinstance(exc.__cause__, OSError):
-                unchecked = True
+                unchecked = read_failed = True
                 problem = f"Yu'lon could not check this file just now ({exc.__cause__})."
         else:
             try:
@@ -400,7 +402,7 @@ def _row(path: Path, name: str, kind: Kind, st: os.stat_result, game_id: str | N
                 if isinstance(exc.__cause__, OSError):
                     # Cannot tell which reading is right: keep the first (label included) and
                     # hold the file back, rather than let a later reading drop its label.
-                    usable, unchecked = False, True
+                    usable, unchecked, read_failed = False, True, True
                     problem = f"Yu'lon could not check this file just now ({exc.__cause__})."
                     break
                 continue
@@ -408,10 +410,13 @@ def _row(path: Path, name: str, kind: Kind, st: os.stat_result, game_id: str | N
             break
     if usable and label in _LEFTOVER_LABELS:
         usable, problem = False, PACK_LEFTOVER
-    elif label in _LEFTOVER_LABELS and not maintenance.head_names(path, database):
+    elif (
+        label in _LEFTOVER_LABELS and not read_failed and not maintenance.head_names(path, database)
+    ):
         # Not verified, so no reading was confirmed above (T765): a cut-short copy of a
         # database really named `move_x` is not a pack's leftover of `x` unless its own USE
-        # line says so.
+        # line says so. Not after a failed read (T769): the head check reads the file again,
+        # and a read that fails answers "not named", which would drop the label kept above.
         label, database = candidates[-1]
     item = None
     if label is not None and label not in _FIXED_LABELS and label.startswith(_ITEM_LABEL_LEAD):

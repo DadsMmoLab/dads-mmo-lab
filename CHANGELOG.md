@@ -113,6 +113,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Rebuild refuses a source folder left off its build, and calls a folder an older pin only when git shows it is one.
 - A stopped rebuild's note that cannot be read now refuses Start until **Rebuild the server…** checks the image tags.
 - A cut-short backup of your own database whose name starts with move_ is no longer listed as a move leftover.
+- A move package's leftover that Yu'lon could not read for a moment is still named as one in the Backups list.
 - A download of an update that was stopped by force no longer leaves a hidden file in Downloads after the next update.
 - Stop, Restart or Quit during a WotLK or Unbound database import now records it, so Start offers **Repair** instead.
 - A TBC, Vanilla, Tortoise or Centurion install that did not finish installing no longer starts on a half-imported world.

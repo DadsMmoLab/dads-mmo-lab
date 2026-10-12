@@ -645,9 +645,12 @@ def test_the_repair_confirmation_says_what_is_cleared_and_that_a_copy_comes_firs
     from yulon import runner
     from yulon.controller import UNFINISHED_IMPORT_WROTE_DETAIL
     from yulon.ui.controller_view import ControllerView
+    from yulon.ui.widgets.job import run_inline
 
     monkeypatch.setattr(runner, "run", _Ps())
-    view = ControllerView(WOTLK, _services(_Ps(), tmp_path, []), status_poll_ms=0)
+    view = ControllerView(
+        WOTLK, _services(_Ps(), tmp_path, []), status_poll_ms=0, job_runner=run_inline
+    )
     view._import_state = docker.ImportState(
         "partial", f"{UNFINISHED_IMPORT_WROTE_DETAIL} (400 rows in acore_auth.account)"
     )

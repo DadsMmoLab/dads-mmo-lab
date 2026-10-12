@@ -1369,6 +1369,54 @@ def test_a_broken_move_leftover_whose_use_line_agrees_still_reads_as_one(server:
     assert "move package" in backup_shelf.describe(r, GAME)
 
 
+def test_a_move_leftover_that_cannot_be_read_just_now_keeps_its_move_label(
+    server: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A read that failed proves nothing (T769): the T765 head check reads the file again, and
+    a read error there answered "the head does not name it", which dropped the `move` reading."""
+    path = put(server, "20261012_090000", "acore_auth", label="move")
+    age(path)
+
+    def busy(_path: Path, _offset: int) -> bytes:
+        raise OSError("busy")
+
+    monkeypatch.setattr(maintenance, "_read_edge", busy)
+    r = row(shelf(server), path.name)
+    assert r.unchecked is True
+    assert (r.label, r.database) == ("move", "acore_auth")
+    assert "move package" in backup_shelf.describe(r, GAME)
+    assert r.kept_because
+
+
+def test_a_read_error_while_naming_a_move_leftovers_database_keeps_the_move_label(
+    server: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The file is whole, then the read naming its database fails: "keep the first (label
+    included)", as the reading loop says, and the head check must not undo that (T769)."""
+    path = put(server, "20261012_090000", "acore_auth", label="move")
+    age(path)
+    real_verify, real_edge = maintenance.verify_dump, maintenance._read_edge
+    failing: list[bool] = []
+
+    def verify(p: Path, database: str | None = None) -> int:
+        if database is not None:
+            failing.append(True)
+        return real_verify(p, database)
+
+    def edge(p: Path, offset: int) -> bytes:
+        if failing:
+            raise OSError("busy")
+        return real_edge(p, offset)
+
+    monkeypatch.setattr(maintenance, "verify_dump", verify)
+    monkeypatch.setattr(maintenance, "_read_edge", edge)
+    r = row(shelf(server), path.name)
+    assert failing, "the reading loop never asked for a database"
+    assert r.unchecked is True
+    assert (r.label, r.database) == ("move", "acore_auth")
+    assert "move package" in backup_shelf.describe(r, GAME)
+
+
 def test_a_use_line_above_no_banner_of_its_own_confirms_nothing(server: Path) -> None:
     """Only the file's own head counts (as for `verify_dump`): text that merely holds a USE line
     is not a pack's dump."""
