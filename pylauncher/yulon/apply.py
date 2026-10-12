@@ -698,7 +698,7 @@ def rebuild_first(item_name: str, needed: str) -> str:
     """The report line for an item installed over `needed` before its first build (T750)."""
     return (
         f"{item_name} does not run yet: {needed} is installed, but no worldserver build has "
-        f"finished since, so the server does not have it. Rebuild first: press "
+        f"finished since, so the server does not have it. Build the server first: press "
         f"{server_build_presses.under_server_build(server_build_presses.REBUILD)}. A Stop and "
         "a Start alone do not load it"
     )
