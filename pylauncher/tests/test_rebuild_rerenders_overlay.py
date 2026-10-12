@@ -32,6 +32,7 @@ from tests.test_rebuild_parks_a_finished_build import (
     CHANGED,
     REUSED,
     _parked_once,
+    a_parkable_install,
 )
 from yulon import docker, resources
 from yulon.catalog import build_context, composegen, native
@@ -386,3 +387,82 @@ def test_the_confirmation_names_the_overlay_for_every_native_game_without_readin
         assert "including anything you changed underneath it" in paragraph, paragraph
         assert "put back as it was" in paragraph, paragraph
     assert not (tmp_path / "absent").exists()
+
+
+def _stopped_and_landed(tmp_path: Path) -> tuple[Recorder, _Daemon, Path, bytes, bytes]:
+    """A press stopped mid-compile on a pre-T525 overlay, whose build then landed (T225).
+
+    The press is this version's, so it wrote the new overlay before F0, recorded that F0
+    for the stopped build and put the old overlay back. `rebuild()` settles the landed
+    build into a kept build (`_settle_stopped_build()` -> `_park_landed()`) AFTER the
+    point where round 2 read whether a kept build was recorded.
+    """
+    from tests.test_stop_mid_compile import _stopped_mid_compile
+
+    rec = Recorder(images=True)
+    server_dir = a_parkable_install(rec, tmp_path)
+    fresh, old = _before_t525(server_dir)
+    daemon = _daemon_for(server_dir)
+    _stopped_mid_compile(rec, daemon, server_dir)
+    assert native.read_stopped_build(server_dir) is not None
+    assert native.read_parked_build(server_dir) is None
+    assert _overlay(server_dir) == old
+    daemon.compiled()
+    return rec, daemon, server_dir, fresh, old
+
+
+def test_a_build_stopped_before_t740_that_landed_is_used_with_the_old_overlay(
+    tmp_path: Path,
+) -> None:
+    """Round 3 (re-review): the stopped press was an older Yu'lon's, F0 over the old file.
+
+    Simulated by giving the stopped build's record the fingerprint of the folder with the
+    old overlay in it. Its build becomes a kept build only inside `rebuild()`, so the
+    question "is a build kept?" has to be asked in the build stage, not before.
+    """
+    from tests.test_stop_mid_compile import _seams_of as _stop_seams_of
+
+    rec, daemon, server_dir, _fresh, old = _stopped_and_landed(tmp_path)
+    record_path = server_dir / native.STOPPED_BUILD_FILE
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    record["fingerprint"] = build_context.fingerprint(server_dir, refs=_refs(server_dir))
+    assert record["fingerprint"] is not None
+    record_path.write_text(json.dumps(record), encoding="utf-8")
+    said = list(
+        engine(rec, **_stop_seams_of(rec, daemon)).rebuild(InstallOptions(server_dir=server_dir))
+    )
+    assert "build" not in rec.calls, rec.calls
+    assert any(REUSED in line for line in said), said
+    assert _overlay(server_dir) == old
+
+
+def test_a_build_stopped_after_t740_that_landed_is_used_and_the_overlay_written(
+    tmp_path: Path,
+) -> None:
+    from tests.test_stop_mid_compile import _seams_of as _stop_seams_of
+
+    rec, daemon, server_dir, fresh, _old = _stopped_and_landed(tmp_path)
+    said = list(
+        engine(rec, **_stop_seams_of(rec, daemon)).rebuild(InstallOptions(server_dir=server_dir))
+    )
+    assert "build" not in rec.calls, rec.calls
+    assert any(REUSED in line for line in said), said
+    assert _overlay(server_dir) == fresh
+
+
+def test_the_overlay_left_line_is_said_only_once_the_kept_build_was_used(tmp_path: Path) -> None:
+    """Round 3 wording: a record that matches but whose images are gone is not used.
+
+    F0 matched with the old overlay, so the overlay was left as it is, but the kept
+    build's `-parked` names are gone, so the server is compiled; the line that says the
+    file was left for the kept build is not said.
+    """
+    rec, daemon, server_dir, _fresh, old = _kept_over_the_old_overlay(tmp_path)
+    for ref in _refs(server_dir):
+        daemon.names.pop(ref + native.PARKED_TAG_SUFFIX, None)
+    said = list(
+        engine(rec, **_seams_of(rec, daemon)).rebuild(InstallOptions(server_dir=server_dir))
+    )
+    assert "build" in rec.calls, rec.calls
+    assert native.OVERLAY_LEFT_FOR_THE_KEPT_BUILD not in said, said
+    assert _overlay(server_dir) == old

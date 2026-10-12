@@ -3211,6 +3211,13 @@ class _Parking:
     record were not touched, so it is still kept and nothing new is."""
 
 
+OVERLAY_LEFT_FOR_THE_KEPT_BUILD = (
+    f"The kept build was made with the {composegen.BUILD_FILE} in the folder now, so that file "
+    "is left as it is for now, and the next server build writes it again."
+)
+"""Said once a kept build was used with the build overlay as it is (T740 rounds 2 and 3)."""
+
+
 @dataclass(frozen=True)
 class _OverlayPlan:
     """The build overlay a rebuild writes before F0 (T740): the new text and the old bytes.
@@ -9658,18 +9665,25 @@ class StagedInstaller:
 
         def build(stage_ctx: StageContext) -> Iterator[str]:
             nonlocal built
-            if overlay is not None and not parked_before:
+            # T740 round 3 (re-review): asked HERE, not with the opening note, because
+            # `_settle_stopped_build()` ran in between and can make a kept build (T225).
+            keeps = overlay is not None and read_parked_build(server_dir) is not None
+            if overlay is not None and not keeps:
                 # T740: before F0, so the fingerprint and the compile read the same overlay.
                 yield from self._write_build_overlay(server_dir, overlay)
             compiled_from.update(source_heads(server_dir, self.entry.emulator.sources))
             # T224: F0, after `write-dockerfile` rendered the recipe this compiles.
             parking.fingerprint = self._seams.context_fingerprint(server_dir, refs=refs)
-            if overlay is not None and parked_before:
+            left = False
+            if overlay is not None and keeps:
                 # T740 round 2: a kept build is asked first, with the overlay as it is.
-                parking.fingerprint = yield from self._overlay_after_f0(
+                parking.fingerprint, left = yield from self._overlay_after_f0(
                     server_dir, refs, overlay, parking.fingerprint
                 )
             used = yield from self._use_or_clear_the_kept_build(server_dir, refs, kept, parking)
+            if used and left:
+                # Round 3: said once the kept build was used, not before its images were asked.
+                yield OVERLAY_LEFT_FOR_THE_KEPT_BUILD
             if used:
                 parking.after = parking.fingerprint
                 self._remember_built_prefix(server_dir)
@@ -12399,7 +12413,11 @@ class StagedInstaller:
         - a build whose files changed matches neither, and is compiled with the new file;
         - a match whose images Docker no longer holds is compiled with the file as it is,
           and the next press, with no record, writes it.
-        Without a record the overlay is written before F0, as in round 1.
+        Without a record the overlay is written before F0, as in round 1. Round 3 (the
+        re-review) moved the question "is a build kept?" into the build stage: round 2 asked
+        it before `_settle_stopped_build()`, which can turn a stopped build that landed into a
+        kept build (T225's `_park_landed()`), and a landed build stopped under an older
+        Yu'lon, fingerprinted over the old overlay, was then compiled again.
 
         None when the file already says what this version's template says, by the same
         test `composegen.write_build()` writes on (`composegen.build_is_current()`; round 2:
@@ -12440,8 +12458,12 @@ class StagedInstaller:
         refs: Sequence[str],
         overlay: _OverlayPlan,
         first: str | None,
-    ) -> Generator[str, None, str | None]:
+    ) -> Generator[str, None, tuple[str | None, bool]]:
         """With a kept build recorded: F0 as it stands, or the overlay written and F0 again.
+
+        Returns F0 and whether the overlay was left as it is for the kept build; round 3
+        moved the line that says so to after `_use_or_clear_the_kept_build()` used it
+        (`OVERLAY_LEFT_FOR_THE_KEPT_BUILD`).
 
         T740 round 2; `_plan_build_overlay()` gives the reason. A first F0 that matches the
         record keeps the overlay as it is, for `_use_or_clear_the_kept_build()`, which T224
@@ -12452,16 +12474,11 @@ class StagedInstaller:
         """
         record = read_parked_build(server_dir)
         if record is not None and first is not None and first == record.fingerprint:
-            yield (
-                f"The kept build was made with the {composegen.BUILD_FILE} in the folder now, "
-                "so that file is left as it is for now, and the next server build writes it "
-                "again."
-            )
-            return first
+            return first, True
         written = yield from self._write_build_overlay(server_dir, overlay)
         if not written:
-            return first
-        return self._seams.context_fingerprint(server_dir, refs=refs)
+            return first, False
+        return self._seams.context_fingerprint(server_dir, refs=refs), False
 
     def _write_build_overlay(
         self, server_dir: Path, overlay: _OverlayPlan
