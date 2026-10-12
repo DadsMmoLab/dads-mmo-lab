@@ -649,7 +649,9 @@ def joining_the_job_threads_left_behind(bound_ms: int) -> Iterator[None]:
     try:
         yield
     finally:
-        assert _HELD_BEFORE_THE_TEST.pop() is before
+        popped = _HELD_BEFORE_THE_TEST.pop()
+        if popped is not before:
+            raise AssertionError("the held-before stack is out of order")
     left = [pair for pair in _held_job_pairs() if not any(pair[0] is t for t in before)]
     # A thread joined directly (an exit join, `wait_all`) has ended with its answer still
     # queued to the GUI thread: it is held, not running, and still a leak (T771).
@@ -723,7 +725,8 @@ def take_every_held_answer() -> None:
     deadline = time.monotonic() + HANG_BOUND
     for delivery in ended:
         while not delivery.delivered:
-            assert time.monotonic() < deadline, "a joined job's answer never arrived"
+            if time.monotonic() >= deadline:
+                raise AssertionError("a joined job's answer never arrived")
             QCoreApplication.sendPostedEvents(delivery, 0)
             time.sleep(0.005)
 
