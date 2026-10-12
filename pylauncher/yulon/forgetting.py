@@ -313,7 +313,10 @@ def wsl_docker_unreachable(distro: str, why: str) -> str:
             "your user to the docker group in that distro, then open a new session and try again."
         )
     if why == "silent":
-        return f"Docker is not running in the WSL distro {distro}. Start it there, then try again."
+        return (
+            f"Docker is not running in the WSL distro {distro}. Start it there "
+            "(for example: sudo systemctl start docker), then try again."
+        )
     if why == "gone":
         return f"Windows says the WSL distro {distro} no longer exists."
     if why == "cancelled":

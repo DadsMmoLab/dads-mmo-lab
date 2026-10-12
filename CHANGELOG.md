@@ -18,7 +18,6 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - The Maintenance tab lists the backups an earlier uninstall kept, so a reinstall can restore them.
 ### Fixed
 - **Start** on a WSL server now waits for Docker to come up even when Windows already lists the distro as running.
-- When **Start** cannot reach Docker in a WSL distro, it names the cause: no Docker, Docker Desktop, or no permission.
 - The first **Start** on a WSL server whose distro is stopped now waits for the distro to boot instead of failing.
 - Installing or updating a module again on a server inside WSL no longer fails when Git for Windows is installed.
 - **Find in WSL…** no longer labels a running server stopped because its one-time setup containers have finished.
