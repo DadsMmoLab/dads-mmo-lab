@@ -2323,7 +2323,7 @@ def test_a_rollback_that_leaves_the_servers_stopped_never_says_they_run(box: Box
         f"be put back for the build from before this update: {stopped} If you took the backup "
         "offered before the update, it has them as they were (Restore on the Maintenance tab). "
         "The source folders were put back on the commits they were on, so what is on disk is "
-        "the build that was put back; it stays stopped until its world tables are in."
+        "the build that was put back; it stays stopped for the reason given above."
     )
     assert "running" not in str(failed.value)
     assert box.world.running is False

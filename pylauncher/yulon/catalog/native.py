@@ -480,6 +480,7 @@ def rebuild_opening_note(
     imports: bool = False,
     copies: bool = False,
     rewrites_overlay: bool = False,
+    held: bool = False,
 ) -> str:
     """What a rebuild costs and what it leaves alone, said before the first stage.
 
@@ -537,6 +538,12 @@ def rebuild_opening_note(
     install that needs nothing. With `parked` too, round 2 (cold review) made the write
     wait on the kept build: it is written only if that build cannot be used with the file
     as it is, and the clause says so.
+
+    `held` (T743, W1): the import record stands (`_held_by_an_unfinished_import()`), so the
+    press removes the old servers' containers and starts nothing, and `rebuild()` runs no
+    `ready` stage. The live proof's held panel said both "stays stopped" and "waits for the
+    server to come back up ... DOWN ... until it reports ready"; held, the note says only
+    what the press does. `imports` is False then (the press applies no update).
     """
     compiles = (
         "compiles the server again from the source and modules in the folder below, or, if the "
@@ -567,7 +574,9 @@ def rebuild_opening_note(
         if rewrites_overlay
         else ""
     )
-    count = ("three", "four", "five", "six")[bool(recipe) + bool(overlay) + bool(sql)]
+    count = ("two", "three", "four", "five", "six")[
+        (0 if held else 1) + bool(recipe) + bool(overlay) + bool(sql)
+    ]
     database = (
         "It does not rewrite your settings, and your database is changed only by those "
         "updates: AzerothCore's own importer applies each one once, and again only if its file "
@@ -583,6 +592,19 @@ def rebuild_opening_note(
         "characters, accounts and the module SQL already applied are not read or written by "
         "this."
     )
+    online = (
+        "It fetches no new source code, though Docker may go online while it builds: to ask "
+        "Docker Hub about the base image the build starts from, and to download system "
+        "packages its cache no longer holds."
+    )
+    if held:
+        return (
+            "You can stop this at any time; stopping before the old servers are stopped leaves "
+            f"the server you have now exactly as it is. This does {count} things and nothing "
+            f"else: {recipe}{overlay}it {compiles}, and it removes the old servers' containers, "
+            "stopping any that run and keeping every volume. It starts nothing, so the server "
+            f"stays STOPPED. {online} {database}"
+        )
     return (
         "You can stop this at any time; stopping before the containers are replaced leaves the "
         f"server you have now exactly as it is. This does {count} things "
@@ -2243,10 +2265,15 @@ HELD_CONFIRMATION = (
     "This server's first database import did not finish, so this rebuild only compiles: once "
     "the compile finishes your server is STOPPED and stays stopped. It applies no database "
     "update and does not start the world, and your databases are not touched. Press Repair on "
-    "the Server tab afterwards to finish the import, then Start. If the compile fails, the "
-    "build you have now stays as it is."
+    "the Server tab afterwards to finish the import, then Start. If the compile fails, your "
+    "server is left as it is now."
 )
-"""The Rebuild question's middle under the import record from empty (T739)."""
+"""The Rebuild question's middle under the import record from empty (T739).
+
+T743 (W4): its last sentence promised "the build you have now stays as it is", which the
+live proof showed to a server whose build was gone (T741's loop). The question reads no
+image (it is composed on the GUI thread), so it says what a failed compile leaves without
+saying whether there is a build."""
 
 _HELD_INSTEAD = (
     "this rebuild does less than said above: once the compile finishes your server is STOPPED "
@@ -2293,15 +2320,45 @@ whose tag had moved made a new container from the new image
 (.notes/gates/t741-compose-recreate-m910q-2026-10-12/)."""
 
 HELD_STOPPING = (
-    "Stopping the servers. The new build is not started: the database import is unfinished."
+    "Stopping the old servers, if any run, and removing their containers. The new build is not "
+    "started: the database import is unfinished."
 )
 """`stage_recreate()`'s first line under the import record (T739)."""
 
 HELD_REMOVED = (
-    "The old servers' containers were removed, keeping every volume; Start creates them from "
-    "the new build once Repair has finished the import."
+    "No container of the old servers is left now, and every volume is kept; Start creates "
+    "them from the new build once Repair has finished the import."
 )
-"""Said once a Rebuild under the import record removed the old servers' containers (T739)."""
+"""Said once a Rebuild under the import record removed the old servers' containers (T739).
+
+T743 (W2): it said "The old servers' containers were removed" also where there were none
+(the live proof's gone build). `compose rm --stop --force` exits 0 for a service with no
+container (`docker.compose_remove_service()`), so the press cannot tell the two apart from
+the removal, and asking first would be one more Docker question for one word: it says
+the state the removal leaves, which is the same in both."""
+
+HELD_ROLLBACK_KEPT = (
+    "This rebuild starts nothing: if it fails once the compile has finished, that build is put "
+    "back and left stopped, and once the rebuild has finished the rollback names are let go."
+)
+"""What a held Rebuild's kept rollback is for, after "Kept the build you have now..." (T743).
+
+In place of "If the new build does not come up it is put back automatically" (W1): a held
+press never starts the new build, so nothing waits for it to come up. A failure after the
+compile is put back by `_restore_rollback()`, which asks `start_refusal()` and leaves it
+stopped under the record; a success lets the names go (T741)."""
+
+HELD_NO_ROLLBACK_KEPT = (
+    "This install's images are not all in Docker under their tags, and no container of this "
+    "install still holds a whole build, so there is no build to keep as a rollback: this rebuild "
+    "compiles without one. It starts nothing: if the compile fails or is stopped, the server is "
+    "left as it is now."
+)
+"""`NO_ROLLBACK_KEPT` for a held Rebuild (T743, W1).
+
+That one's "as its confirmation said" and "its server does not come up" are not true here:
+the held question says nothing of a gone build (`installer.rebuild_confirmation()` gives
+the record its own text), and a held press starts nothing."""
 
 
 def held_rebuild_ending(name: str, server_dir: Path) -> str:
@@ -3247,9 +3304,14 @@ ROLLBACK_LEFT_STOPPED_DATABASE = (
 
 SOURCES_PUT_BACK_STOPPED_NOTE = (
     "The source folders were put back on the commits they were on, so what is on disk is the "
-    "build that was put back; it stays stopped until its world tables are in."
+    "build that was put back; it stays stopped for the reason given above."
 )
-"""`SOURCES_PUT_BACK_NOTE` for a press whose rollback left the servers stopped (T179)."""
+"""`SOURCES_PUT_BACK_NOTE` for a press whose rollback left the servers stopped (T179).
+
+T743 (W3): it ended "until its world tables are in", TrinityCore's reason (T179), and was
+said on AzerothCore too, where the reason was an unfinished import (T739's live proof).
+Every `ServersLeftStopped` this note follows already says why (`_restore_rollback()`'s
+`refused` or `stay`, or Docker that did not answer), so the note points at it."""
 
 SOURCES_PUT_BACK_NOT_STOPPED_NOTE = (
     "The source folders were put back on the commits they were on, so what is on disk is the "
@@ -3423,6 +3485,10 @@ def copy_put_back_database(
     because a build is rolled back only before its ready banner; a build that
     stops after it is KEPT (`WorldStoppedAfterReadyError`, T71), and its copy is
     not put back.
+
+    T743 (W3): "so the old build starts on the databases it knows" was said also where the
+    rollback then left the old build STOPPED (an unfinished import's record, T739's live
+    proof), so the clause says what the databases are, not that anything starts on them.
     """
     names = put.restored
     kept = (
@@ -3433,14 +3499,14 @@ def copy_put_back_database(
     )
     said = (
         f"{_listed(names)} were replaced with the copy taken before the database updates ran: "
-        "the tables added since were dropped and the copy was loaded over the rest, so the old "
-        "build starts on the databases it knows. The new build never reported ready, so nobody "
+        "the tables added since were dropped and the copy was loaded over the rest, so they are "
+        "the databases the old build knows. The new build never reported ready, so nobody "
         f"played on it{kept}."
         if rebuild
         else f"Its source folders were put back first, then {_listed(names)} were replaced with "
         "the copy taken just before the new build started: the tables the new build added were "
-        "dropped and the copy was loaded over the rest, so the old build starts on the "
-        f"databases it knows. The new build never reported ready, so nobody played on it{kept}."
+        "dropped and the copy was loaded over the rest, so they are the databases the old build "
+        f"knows. The new build never reported ready, so nobody played on it{kept}."
     )
     if not_copied:
         said += (
@@ -9612,6 +9678,7 @@ class StagedInstaller:
             imports=imports,
             copies=bool(own_copy is not None and own_copy.names),
             rewrites_overlay=overlay is not None,
+            held=held is not None,
         )
         if held is not None:
             yield f"{held} {HELD_OPENING}"
@@ -9766,6 +9833,10 @@ class StagedInstaller:
             replace(stage, run=wrappers.pop(stage.name)) if stage.name in wrappers else stage
             for stage in planned
         )
+        if held is not None:
+            # T743 (W1): a held press starts nothing, so it has no `ready` stage to count:
+            # the panel said "Step 3 of 3 (100%): ready" for one it skipped.
+            stages = tuple(stage for stage in stages if stage.name != "ready")
         if wrappers:
             # `stage_named()`'s refusal covers a family with no `build` at all;
             # this covers the other half -- a tuple carrying one under another
@@ -9792,7 +9863,9 @@ class StagedInstaller:
         # T225 (live): a build an earlier Stop left running may have landed since.
         yield from self._settle_stopped_build(server_dir, refs)
         hold = read_stopped_build(server_dir) is not None
-        kept = yield from self._keep_rollback(ctx, refs, missing_ok=missing_images_ok)
+        kept = yield from self._keep_rollback(
+            ctx, refs, missing_ok=missing_images_ok, held=held is not None
+        )
         try:
             state = yield from self._staged(stages, ctx)
         except InstallerError as exc:
@@ -11434,7 +11507,12 @@ class StagedInstaller:
         write_state(server_dir, replace(fresh, refused_updates=pairs))
 
     def _keep_rollback(
-        self, ctx: StageContext, refs: Sequence[str], *, missing_ok: bool = False
+        self,
+        ctx: StageContext,
+        refs: Sequence[str],
+        *,
+        missing_ok: bool = False,
+        held: bool = False,
     ) -> Generator[str, None, tuple[str, ...]]:
         """Give every image the compile will overwrite its `-rollback` name, or say why not.
 
@@ -11470,6 +11548,10 @@ class StagedInstaller:
 
         Returns the rollback names kept -- empty only when `missing_ok` found
         no whole build to keep.
+
+        `held` (T743): the press starts nothing (`_held_by_an_unfinished_import()`), so
+        what it says the rollback is for is `HELD_ROLLBACK_KEPT` / `HELD_NO_ROLLBACK_KEPT`,
+        never a new build that does not come up.
         """
         present = self._seams.images_built(refs)
         if present is None:
@@ -11487,7 +11569,7 @@ class StagedInstaller:
         sources = {ref: ref for ref in refs} if present else self._old_build_by_id(ctx, refs)
         if sources is None and missing_ok:
             logger.info(f"rebuild of {self.entry.id}: no build to keep as a rollback (T170)")
-            yield NO_ROLLBACK_KEPT
+            yield HELD_NO_ROLLBACK_KEPT if held else NO_ROLLBACK_KEPT
             return ()
         if sources is None:
             raise InstallerError(
@@ -11523,10 +11605,14 @@ class StagedInstaller:
         )
         if by_id:
             logger.info(f"rebuild of {self.entry.id}: rollback kept by image id for {by_id}")
+        after = (
+            HELD_ROLLBACK_KEPT
+            if held
+            else "If the new build does not come up it is put back automatically."
+        )
         yield (
             f"Kept the build you have now as a rollback ({len(kept)} images tagged "
-            f"{ROLLBACK_TAG_SUFFIX}).{found} If the new build does not come up it is put back "
-            f"automatically."
+            f"{ROLLBACK_TAG_SUFFIX}).{found} {after}"
         )
         return tuple(kept)
 
