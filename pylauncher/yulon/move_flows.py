@@ -285,8 +285,8 @@ def _refuse_if_unsafe(world: MoveWorld) -> None:
 def refuse_over_a_running_load(world: MoveWorld) -> None:
     """Refuse (T730) when a restore load another Yu'lon left running still writes here.
 
-    Asked just before a move stops this server: `docker.held_reason()`'s answer from the
-    restore record, so the stop cannot cut the load off. Never raises anything else.
+    Asked just before a move stops this server: `docker.orphaned_restore_reason()`'s answer
+    from the restore record, so the stop cannot cut the load off. Never raises anything else.
     """
     said = docker.orphaned_restore_reason(world.server_dir)
     if said is not None:
