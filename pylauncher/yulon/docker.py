@@ -7117,6 +7117,20 @@ def build_staged(
     lines are what `_check_run()` and `base_image_unreachable()` read. A Stop
     between two calls starts no further one.
 
+    **One exception: a call whose BuildKit session died is made once more
+    (T733).** A service's first build on its folder sends its whole context,
+    because a new folder is a new buildx node: 1.5 GB for the world and auth
+    servers and 2.4 GB for db-import on WotLK, almost all of it the `.git` the
+    compile bind-mounts. On yulon-win11 that took 8 minutes, and Docker Desktop
+    froze during db-import's send. BuildKit's session check (`SESSION_DIED`)
+    failed through the freeze and the Rebuild was over. A send that dies keeps
+    nothing (measured on m910q and on the box), so without a retry the next
+    press is just as cold. The second try runs on the same folder, so a send
+    that does finish is kept for every later Rebuild. It is made only once, and
+    never after a Stop; if it also fails, its run is the answer.
+    `.notes/tickets/T733-windows-rebuild-context-timeout-on-big-server-folder.md`
+    holds the measurements.
+
     Unbounded on purpose (rust-prior-art §1: probes are bounded, builds are
     not). Returns the run rather than raising, so the caller can tell a
     cancellation from a failure.
@@ -7166,7 +7180,8 @@ def build_staged(
             f"build_staged(): `docker {' '.join([*argv, service])}` in {server_dir}, "
             f"BUILDX_CONFIG={config}, on the {context} context's own builder"
         )
-        run = run_attached(
+        build_it = functools.partial(
+            run_attached,
             [*argv, service],
             server_dir,
             wsl_distro=wsl_distro,
@@ -7175,10 +7190,44 @@ def build_staged(
             merge_stderr=True,
             env=env,
         )
+        run = build_it()
+        if _session_died(run) and not (cancel is not None and cancel.is_set()):
+            said = session_died_line(service)
+            logger.warning(f"build_staged(): {said}")
+            with contextlib.suppress(Exception):  # run_attached()'s rule: a dead sink is dropped
+                if sink is not None:
+                    sink(said)
+            run = build_it()
         if run.returncode != 0:
             return run
         tail.extend(run.tail)
     return AttachedRun(0, tuple(tail))
+
+
+SESSION_DIED = "session healthcheck failed fatally"
+"""BuildKit's words when the build's session with the docker client died (T733).
+
+The session carries the build context from the client to the daemon. Docker
+Desktop's VM log on yulon-win11 (2026-10-12) shows the daemon pinging it with a
+15 s timeout and giving up after the pings failed through a five-minute freeze
+of Docker Desktop. A session that dies after the context is sent costs nothing
+(the same night's worldserver compile went on and passed); one that dies while
+the context is sent fails the build, and that send is not kept.
+"""
+
+
+def _session_died(run: AttachedRun) -> bool:
+    """Whether this failed build call failed because BuildKit's session died (T733)."""
+    return run.returncode != 0 and any(SESSION_DIED in line for line in run.tail)
+
+
+def session_died_line(service: str) -> str:
+    """What the build panel is told when one service is built a second time (T733)."""
+    return (
+        f"Docker lost touch with the build of {service} while the server folder was "
+        f'being sent to it ("{SESSION_DIED}"), so {service} is built once more. The '
+        "folder is sent again from the start, which can take several minutes."
+    )
 
 
 BUILDER_PROBE_TIMEOUT = 30.0

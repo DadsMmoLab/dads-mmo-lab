@@ -3696,6 +3696,122 @@ def test_a_failed_service_ends_the_build_with_its_own_status_and_lines(
     assert "#1 building ac-worldserver" in lines_seen
 
 
+def _session_dies(state: Path, service: str, times: int) -> None:
+    """The fake's next `times` builds of `service` end as a dead BuildKit session (T733)."""
+    (state / f"session-dies-{service}").write_text(str(times), encoding="utf-8")
+
+
+def test_a_service_whose_build_session_died_is_built_once_more_on_its_own_folder(
+    build_cli: Path, tmp_path: Path
+) -> None:
+    """T733: a Docker that froze while the context was sent costs one more try, not the press.
+
+    On yulon-win11 (2026-10-12) Docker Desktop froze for about five minutes while
+    db-import's first 2.4 GB context was being sent; BuildKit's 15 s session check
+    failed through it and compose exited 1 with "session healthcheck failed
+    fatally". A send that dies keeps nothing, and the Rebuild was over. The same
+    call again, on the SAME buildx folder (a new folder would be a new node and a
+    cold send for good), builds past it; the services after it are then built as
+    usual, and the panel is told why one service is built twice.
+    """
+    _session_dies(build_cli, "ac-db-import", 1)
+    lines_seen: list[str] = []
+    run = docker.build_staged(
+        _server_with(tmp_path, WOTLK_OVERLAY), THREE_FILES, sink=lines_seen.append
+    )
+    assert run.returncode == 0, run.tail
+    assert [line.split()[-1] for line in _build_lines(build_cli)] == [
+        "ac-worldserver",
+        "ac-authserver",
+        "ac-db-import",
+        "ac-db-import",
+        "ac-client-data-init",
+    ]
+    configs = [Path(config) for config, _, _ in build_env(build_cli)]
+    assert configs[2] == configs[3]
+    assert configs[2].name == "ac-db-import"
+    told = [line for line in lines_seen if line.startswith("Docker lost")]
+    assert len(told) == 1, lines_seen
+    assert "ac-db-import" in told[0]
+
+
+def test_a_build_session_that_dies_twice_ends_the_build_with_the_second_tries_lines(
+    build_cli: Path, tmp_path: Path
+) -> None:
+    """One more try, not a loop (T733): a Docker that keeps dropping the session fails as before.
+
+    Each try sends the whole context again (a dead send keeps nothing, measured on
+    m910q and on yulon-win11), so a third would only make the player wait another
+    send for the same answer. The second try's status and lines are the build's
+    answer, and no later service is started.
+    """
+    _session_dies(build_cli, "ac-db-import", 2)
+    run = docker.build_staged(_server_with(tmp_path, WOTLK_OVERLAY), THREE_FILES)
+    assert run.returncode == 1
+    assert any("session healthcheck failed fatally" in line for line in run.tail)
+    assert [line.split()[-1] for line in _build_lines(build_cli)] == [
+        "ac-worldserver",
+        "ac-authserver",
+        "ac-db-import",
+        "ac-db-import",
+    ]
+
+
+def test_a_build_that_passed_is_never_built_again_whatever_its_lines_say(
+    build_cli: Path, tmp_path: Path
+) -> None:
+    """Only a FAILED call is tried again (T733): a session that died after the send costs nothing.
+
+    The worldserver compile on yulon-win11 lost its session at 23:58Z and passed;
+    building such a service again would only repeat a finished build.
+    """
+    (build_cli / "session-dies-late-ac-worldserver").write_text("", encoding="utf-8")
+    run = docker.build_staged(_server_with(tmp_path, WOTLK_OVERLAY), THREE_FILES)
+    assert run.returncode == 0, run.tail
+    assert [line.split()[-1] for line in _build_lines(build_cli)] == list(WOTLK_SERVICES)
+
+
+def test_a_panel_that_refuses_the_retry_line_does_not_stop_the_retry(
+    build_cli: Path, tmp_path: Path
+) -> None:
+    """`run_attached()`'s rule for a dead sink holds for Yu'lon's own line too (T733).
+
+    A panel closed while db-import's session died must not turn the second try
+    into an exception that ends the Rebuild.
+    """
+
+    def sink(line: str) -> None:
+        if line.startswith("Docker lost"):
+            raise RuntimeError("the panel is gone")
+
+    _session_dies(build_cli, "ac-db-import", 1)
+    run = docker.build_staged(_server_with(tmp_path, WOTLK_OVERLAY), THREE_FILES, sink=sink)
+    assert run.returncode == 0, run.tail
+    assert [line.split()[-1] for line in _build_lines(build_cli)].count("ac-db-import") == 2
+
+
+def test_a_stop_that_ends_a_dead_session_is_not_tried_again(
+    build_cli: Path, tmp_path: Path
+) -> None:
+    """A Stop is the player's answer: a session that died under it is not built again (T733)."""
+    cancel = threading.Event()
+
+    def sink(line: str) -> None:
+        if "session healthcheck failed fatally" in line:
+            cancel.set()
+
+    _session_dies(build_cli, "ac-db-import", 1)
+    run = docker.build_staged(
+        _server_with(tmp_path, WOTLK_OVERLAY), THREE_FILES, sink=sink, cancel=cancel
+    )
+    assert run.returncode != 0
+    assert [line.split()[-1] for line in _build_lines(build_cli)] == [
+        "ac-worldserver",
+        "ac-authserver",
+        "ac-db-import",
+    ]
+
+
 def test_a_wsl_build_sends_each_buildx_config_across_as_a_path(
     build_cli: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

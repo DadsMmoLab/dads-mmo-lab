@@ -21,7 +21,11 @@ and leaves the container created, as a daemon that cannot start it does.
 `BUILDX_CONFIG`, `WSLENV` and `FAKE_DOCKER_INHERITED` (`build_env()`; the last
 is a variable a test sets in its own environment, to see the child inherit
 it), and exits 17 for a service named by a `fail-build-<service>` file in the
-state folder. It records `BUILDX_BUILDER` too (`build_builders()`, T413), and
+state folder. A `session-dies-<service>` file holding a count N makes the next N
+builds of that service end the way a build ends when BuildKit's session dies
+while the context is sent (T733): compose's own lines and exit 1; a
+`session-dies-late-<service>` file prints those words in a build that passes.
+It records `BUILDX_BUILDER` too (`build_builders()`, T413), and
 `buildx inspect` names the builder a plain build would use (`buildx-current`
 holds "<name> <driver>"; the default is the context's own `default`, driver
 `docker`) or, with `buildx-inspect-fails`, refuses. Since T527 `context show`
@@ -312,6 +316,31 @@ if args[:1] == ["compose"] and "build" in args:
     if (state / f"fail-build-{{target}}").exists():
         sys.stderr.write(f"ERROR: failed to solve: target {{target}}: exit code 2\\n")
         sys.exit(17)
+    # T733: BuildKit's session dies while the context is being sent, for as many calls
+    # as `session-dies-<service>` says; each one spends one. The lines and the exit 1
+    # are compose's own on yulon-win11, 2026-10-12 (Docker Desktop, db-import).
+    dies = state / f"session-dies-{{target}}"
+    if dies.exists() and int(dies.read_text(encoding="utf-8") or "0") > 0:
+        dies.write_text(str(int(dies.read_text(encoding="utf-8")) - 1), encoding="utf-8")
+        for line in (
+            "#5 transferring context: 1.80GB 516.2s done",
+            "#5 ERROR: session healthcheck failed fatally: context deadline exceeded",
+            "------",
+            " > [internal] load build context:",
+            "------",
+            "failed to solve: DeadlineExceeded: session healthcheck failed fatally: "
+            "context deadline exceeded",
+            "",
+            "View build details: docker-desktop://dashboard/build/default/default/na7htz81",
+        ):
+            sys.stderr.write(line + "\\n")
+        sys.exit(1)
+    if (state / f"session-dies-late-{{target}}").exists():
+        # The session dies after the context is in, and the build passes anyway: on
+        # yulon-win11 the worldserver compile did exactly that (23:58Z, 2026-10-11).
+        sys.stderr.write(
+            "#17 WARNING: session healthcheck failed fatally: context deadline exceeded\\n"
+        )
     sys.exit(0)
 if args[:1] == ["logs"]:
     # `docker logs [--tail N] <name>`: the container's stdout on stdout and its
