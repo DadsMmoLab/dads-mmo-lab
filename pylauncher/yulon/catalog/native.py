@@ -10631,7 +10631,8 @@ class StagedInstaller:
                             logger.warning(warned)
                     if warned:
                         yield warned
-                    yield self._moved_line(source, dest, old)
+                    stood = earlier[dest].head if dest in earlier else None
+                    yield self._moved_line(source, dest, old, stood)
                 self._check_cancel(cancel)
                 # T179: the family reads what the move brought (TrinityCore's SQL
                 # snapshot) and may refuse it, while every source can still go back
@@ -11124,11 +11125,19 @@ class StagedInstaller:
             plan.append((source, dest, off.get(dest, sha)))
         return tuple(plan)
 
-    def _moved_line(self, source: EmulatorSource, dest: Path, old: str) -> str:
-        """What one source's move is reported as: the two shas, or that nothing moved."""
+    def _moved_line(
+        self, source: EmulatorSource, dest: Path, old: str, stood: str | None = None
+    ) -> str:
+        """What one source's move is reported as: the two shas, or that nothing moved.
+
+        `stood` is the commit a folder an earlier press left off its build stood on (T758):
+        `old` is then its build's commit, and a move onto that is a move all the same.
+        """
         new = self._seams.head_sha(dest)
         if new is None:
             return f"{source.repo} was updated; git would not say what it is on now."
+        if new == old and stood and stood != new:
+            return f"{source.repo}: {stood[:7]} -> {new[:7]}, the commit its build was made from."
         if new == old:
             return f"{source.repo} was already on {new[:7]}; nothing moved."
         return f"{source.repo}: {old[:7]} -> {new[:7]}."
@@ -12219,6 +12228,11 @@ class StagedInstaller:
         (`_park()`'s write order), so the build stage may use it; a partial one is not.
         Every moved tag then goes back onto its `-rollback` name. A tag Docker will not
         move back raises with the record kept, so Start stays refused.
+
+        An unreadable record is written again as a readable one naming the press's refs
+        once each has been asked about and none is left moved (T760 round 2): the press
+        has just proved the tags, and a press that then fails must leave a record later
+        Starts can check with Docker, not one that refuses every Start for good.
         """
         record = read_stopped_build(server_dir)
         if record is None:
@@ -12233,6 +12247,7 @@ class StagedInstaller:
             # Kept until this press succeeds (scoped re-review): the solve may still
             # be running, and a press that fails must leave the Start check armed.
             logger.info(f"rebuild of {self.entry.id}: the stopped build has not landed")
+            self._reread_stopped_build(server_dir, refs, record)
             return
         # The lead's belt (scoped re-review): no tag moves under a running server
         # (T158's order), and "could not say" is not "down".
@@ -12264,6 +12279,7 @@ class StagedInstaller:
                     f"{server_build_presses.under_server_build(server_build_presses.REBUILD)} "
                     f"again once Docker answers."
                 )
+        self._reread_stopped_build(server_dir, refs, record)
         yield (
             "A rebuild stopped earlier finished in Docker's background and moved this server's "
             "image tags onto its build, which never started. The tags are back on the build "
@@ -12275,6 +12291,24 @@ class StagedInstaller:
                 else "the finished build is not kept."
             )
         )
+
+    def _reread_stopped_build(
+        self, server_dir: Path, refs: Sequence[str], record: StoppedBuild
+    ) -> None:
+        """Write an unreadable stopped-build record again, readable, naming `refs` (T760 r2).
+
+        Only once every ref of the press was asked about and none is left moved. The
+        fingerprint is None: nothing says what the stopped press compiled, so no landed
+        build is ever kept from it. A write that fails leaves the unreadable record, which
+        refuses Start: closed, as before.
+        """
+        if record.readable:
+            return
+        wrote = remember_stopped_build(
+            server_dir, StoppedBuild(tuple(refs), None, int(time.time()))
+        )
+        if wrote:
+            logger.warning(f"rebuild of {self.entry.id}: {wrote}")
 
     def _park_landed(
         self,

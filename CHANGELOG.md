@@ -108,11 +108,9 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Uninstall is refused while a restore is running or did not finish, so a reinstall never starts on half-written data.
 - Rebuild and update no longer start a server whose database import never finished; it stays stopped for **Repair**.
 - The bots' restart on a Tortoise server no longer touches its database while another Yu'lon is working on it.
-- A failed update or **Return to the tested pin…** puts a folder left off its build back on it before restarting the old build.
-- **Rebuild the server…** now refuses a source folder a failed first update left off its build, instead of compiling it.
-- An update or **Return to the tested pin…** is no longer refused by the Lua scripts note while a folder is off its build.
-- Rebuild no longer calls a source folder an older pin unless git shows it is one.
-- Start is refused, naming **Rebuild the server…**, when the note about a stopped rebuild cannot be read.
+- Update and Return put a folder left off its build back on it, and the Lua scripts note no longer blocks them then.
+- Rebuild refuses a source folder left off its build, and calls a folder an older pin only when git shows it is one.
+- A stopped rebuild's note that cannot be read now refuses Start until **Rebuild the server…** checks the image tags.
 
 ### Changed
 - The Server tab's **Play** now starts the game; **Launcher…** opens the launcher. The tray's **Play** offers to start a stopped server.

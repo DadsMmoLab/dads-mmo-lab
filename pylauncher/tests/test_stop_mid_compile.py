@@ -754,19 +754,46 @@ def test_the_controllers_start_is_refused_by_an_unreadable_record(
     assert str(refused.value) == UNREADABLE
 
 
-def test_a_rebuild_settles_a_landed_build_whose_record_cannot_be_read(tmp_path: Path) -> None:
-    """T760: the press checks every ref of its own, so the tags go back on the build the
-    server ran, and the failed press keeps the (unreadable) record: Start stays refused."""
+@pytest.mark.parametrize("landed", [True, False], ids=["landed", "not-landed"])
+def test_a_failed_rebuild_over_an_unreadable_record_leaves_the_old_build_startable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, landed: bool
+) -> None:
+    """T760 round 2: the press checks every ref of its own and puts the tags back on the
+    build the server ran. Its compile then fails: the record it keeps is a readable one
+    naming those refs, so Start asks Docker, finds the tags clean, and starts the old build
+    -- as after a failed Rebuild over a readable record, never "press Rebuild" for good."""
     rec, daemon, server_dir = _recorded(tmp_path)
     (server_dir / native.STOPPED_BUILD_FILE).write_text("", encoding="utf-8")
-    daemon.compiled()
+    if landed:
+        daemon.compiled()
     rec.build_result = docker.AttachedRun(1, ("cc1plus: error",))
     with pytest.raises(InstallerError) as failed:
         list(engine(rec, **_seams_of(rec, daemon)).rebuild(InstallOptions(server_dir=server_dir)))
     assert all(daemon.names[ref] == "before" for ref in _refs(server_dir)), daemon.names
     assert sorted(daemon.transient()) == _rollback_names(server_dir), daemon.transient()
-    assert (server_dir / native.STOPPED_BUILD_FILE).is_file()
-    assert native.folder_start_refusal(server_dir, daemon.image_id) == UNREADABLE, failed.value
+    record = native.read_stopped_build(server_dir)
+    assert record is not None and record.readable, failed.value
+    assert sorted(record.refs) == sorted(_refs(server_dir)) and record.fingerprint is None
+    _controller_with(monkeypatch, server_dir, daemon.image_id).refuse_start()  # not refused
+    # And the check stays armed: a stopped build that lands later still refuses Start.
+    daemon.compiled()
+    assert native.folder_start_refusal(server_dir, daemon.image_id) == LANDED
+
+
+def test_a_rebuild_that_cannot_put_the_tags_back_keeps_the_unreadable_record(
+    tmp_path: Path,
+) -> None:
+    """Closed until the tags are proved: Docker refuses to move one back, nothing is rewritten."""
+    rec, daemon, server_dir = _recorded(tmp_path)
+    (server_dir / native.STOPPED_BUILD_FILE).write_text("", encoding="utf-8")
+    daemon.compiled()
+    with pytest.raises(InstallerError):
+        list(
+            engine(rec, **_seams_of(rec, daemon, tag_image=lambda src, dst: "refused")).rebuild(
+                InstallOptions(server_dir=server_dir)
+            )
+        )
+    assert native.folder_start_refusal(server_dir, daemon.image_id) == UNREADABLE
 
 
 def test_a_rebuild_that_succeeds_forgets_an_unreadable_record(tmp_path: Path) -> None:

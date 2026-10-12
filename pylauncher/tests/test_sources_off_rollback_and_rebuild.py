@@ -204,3 +204,20 @@ def test_the_scripts_record_alone_still_refuses_an_update(tmp_path: Path) -> Non
 
     assert str(refused.value).startswith(native.SCRIPTS_NOT_BACK_REFUSAL)
     assert not [call for call in rec.calls if call.startswith("clone:")], rec.calls
+
+
+def test_a_return_onto_the_builds_own_commit_says_the_folder_moved(tmp_path: Path) -> None:
+    """Round 2: the pin is the commit the build came from, the folder stood elsewhere."""
+    rec, server_dir = ready_to_update(tmp_path)
+    heads_follow_the_recorder(rec)
+    pin = CORE.rev
+    assert pin is not None
+    core = server_dir / CORE.dest
+    rec.heads[core] = STRAY
+    (core / ".git" / "HEAD").write_text(STRAY + "\n")
+    assert native.remember_sources_off(server_dir, [(CORE.repo, core, pin)]) == ""
+
+    said = list(engine(rec).update_to_latest(InstallOptions(server_dir=server_dir), to_pin=True))
+
+    assert f"{CORE.repo}: {STRAY[:7]} -> {pin[:7]}, the commit its build was made from." in said
+    assert f"{CORE.repo} was already on {pin[:7]}; nothing moved." not in said
