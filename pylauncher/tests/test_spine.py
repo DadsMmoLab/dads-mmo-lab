@@ -2845,10 +2845,22 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "manifest will name; decides no write, and a conf it cannot see is simply one "
         "Applier._conf() never activates"
     ),
-    ("module_source.py", "_sql_steps"): (
-        "lists a derived module's data/sql/ to map each database directory to a deferred "
-        "db-import step; its emptiness verdict is deliberate and is NOT a refusal - a module "
-        "that brought no SQL is normal, the same argument apply.py::_pending_sql already makes"
+    ("module_source.py", "_sql_folders"): (
+        "lists a derived module's data/sql/ for the folders `_sql_steps()` maps to deferred "
+        "db-import steps by the updater's own rule (T752); its emptiness verdict is deliberate "
+        "and is NOT a refusal - a module that brought no SQL is normal, the same argument "
+        "apply.py::_pending_sql already makes"
+    ),
+    ("module_source.py", "_unapplied"): (
+        "T752. Globs one data/sql/ folder the updater never opens for any .sql file, to write "
+        "a NOTE that nothing applies it. Decides no write and no refusal: a folder it cannot "
+        "see is one the note leaves out, and nothing is applied either way"
+    ),
+    ("apply.py", "_uninstall_scripts"): (
+        "T751. Globs a module's clone for its own uninstall SQL during Remove, before the clone "
+        "is deleted, to NAME each file in the report. It decides no write and runs nothing: an "
+        "OSError is logged and answers no sentence, which leaves the report as it was before "
+        "T751"
     ),
     ("tuning.py", "backups_of"): (
         "lists the directory a conf file lives in to find the backups the Tuning tab has "

@@ -316,7 +316,10 @@ def test_complete_finds_every_conf_dist_and_maps_it_to_the_modules_conf_dir(
 def test_complete_maps_each_sql_directory_to_its_database_and_ignores_the_rest(
     tmp_path: Path,
 ) -> None:
-    """`sql_dbdir_target` (`RUST modmgr.rs:2625-2633`), both spellings, verbatim.
+    """The updater's own folder rule (`apply.updater_folder_dbs()`, T752), not a list of its own.
+
+    `playerbots/` gets no step since T752: the core updater never opens it, so a step for it
+    stayed "pending" through every press of Apply module SQL. `db-foo` matches no database.
 
     The glob is recursive where the shipped manifests' is flat: a derivation cannot
     know whether the author used `base/`/`updates/` subfolders, and what the glob
@@ -335,7 +338,6 @@ def test_complete_maps_each_sql_directory_to_its_database_and_ignores_the_rest(
         ("auth", "data/sql/db-auth/**/*.sql", "db-import", "install"),
         ("world", "data/sql/db-world/**/*.sql", "db-import", "install"),
         ("characters", "data/sql/db_characters/**/*.sql", "db-import", "install"),
-        ("playerbots", "data/sql/playerbots/**/*.sql", "db-import", "install"),
     ]
 
 

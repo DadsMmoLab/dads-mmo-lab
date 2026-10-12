@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import decimal
 import errno
+import fnmatch
 import hashlib
 import json
 import os
@@ -2709,6 +2710,8 @@ class _Log:
     """A Remove's lines for the `folders` it left because they hold the player's files (T587)."""
     kept_database: list[str] = field(default_factory=list)
     """A Remove's line naming the backup taken before the database changes it kept (T596)."""
+    uninstall_sql: list[str] = field(default_factory=list)
+    """A Remove's lines for the module's own uninstall SQL, read before the clone went (T751)."""
     # T130. Set by `_sql()` when the running-world guard's own reading was an
     # explicit "not running"; see `ApplyReport.world_stopped`.
     world_stopped: bool = False
@@ -5115,6 +5118,8 @@ class Applier:
         self._check_hold()
         self._unclient(manifest, clone, log)
         if clone.exists():
+            # T751, before the `rmtree` below: the module's own uninstall SQL is in the clone.
+            log.uninstall_sql.extend(_uninstall_scripts(manifest, clone))
             # T49: not `shutil.rmtree`. Git writes packs read-only on Windows and
             # a bare rmtree stops at the first one, having already deleted an
             # unknown part of the checkout. Reported from a real install:
@@ -8815,7 +8820,11 @@ class Applier:
                 # The backup's name last, after the database changes it was taken
                 # before (T596 live check: first, it read as the thing left behind).
                 (
-                    *_left_behind(manifest, (*log.client_left_behind, *log.kept_folders)),
+                    *_left_behind(
+                        manifest,
+                        (*log.client_left_behind, *log.kept_folders),
+                        tuple(log.uninstall_sql),
+                    ),
                     *log.kept_database,
                 )
                 if action == "remove"
@@ -8834,7 +8843,9 @@ class Applier:
 # --------------------------------------------------------------- functions
 
 
-def _left_behind(manifest: Manifest, client: tuple[str, ...] = ()) -> tuple[str, ...]:
+def _left_behind(
+    manifest: Manifest, client: tuple[str, ...] = (), uninstall: tuple[str, ...] = ()
+) -> tuple[str, ...]:
     """The steps `remove()` did not take back (see `ApplyReport.left_behind`).
 
     The server DBC and SQL halves are read off the MANIFEST, because the rows and
@@ -8846,20 +8857,153 @@ def _left_behind(manifest: Manifest, client: tuple[str, ...] = ()) -> tuple[str,
     such a record: `_unclient()` has just been through every `client` step with
     the receipts the install wrote, deleted what it could show was its own, and
     written a sentence for each one it did not. Reading `manifest.client` here as
-    well would name the file it had just deleted.
+    well would name the file it had just deleted. `uninstall` is passed in for the
+    same reason: `_uninstall_scripts()` read the clone this remove has since deleted.
+
+    The SQL half names EVERY install-time file, db-import ones included (T751): City
+    Bots' 400 accounts and 400 characters are its db-import SQL, and until T751 one
+    remove step anywhere in a manifest hid every install line, so Battle Pass's tables
+    went unnamed behind its vendor NPC's remove step. A file with a remove step on the
+    same database is still named, with that step's files as what was undone, because
+    nothing here can tell what part of it they undid. A path-less install statement on
+    a database the manifest also gives a remove step is the one thing left out: those
+    are this catalog's own statements, written together with their undo (the mob
+    modifiers, Bigger Stacks, Battle Pass's vendor NPC).
     """
     out = [
         f"the server DBC files from {step.src} (in the server's data volume)"
         for step in manifest.server_dbc
     ]
     out += client
-    if not any(step.when == "remove" for step in manifest.sql):
-        out += [
-            f"what {step.path or 'its SQL'} wrote into the {step.db} database"
-            for step in manifest.sql
-            if step.when == "install" and step.applied_by == "direct"
-        ]
+    undo: dict[Db, list[SqlStep]] = {}
+    for step in manifest.sql:
+        if step.when == "remove":
+            undo.setdefault(step.db, []).append(step)
+    for step in manifest.sql:
+        if step.when != "install":
+            continue
+        undone = undo.get(step.db, [])
+        if step.path is None:
+            if not undone:
+                out.append(f"what its SQL wrote into the {step.db} database")
+            continue
+        line = f"what {step.path} wrote into the {step.db} database ({_WHAT_A_DB_HOLDS[step.db]})"
+        if undone:
+            named = [u.path for u in undone if u.path is not None]
+            line += f", apart from what {' and '.join(named) if named else 'its remove step'} undid"
+        out.append(line)
+    out += uninstall
     return tuple(out)
+
+
+_WHAT_A_DB_HOLDS: dict[Db, str] = {
+    "auth": "accounts or tables",
+    "characters": "characters or tables",
+    "world": "tables or rows",
+    "playerbots": "tables or rows",
+    "ale": "tables or rows",
+}
+"""What a module's SQL can have put in each database, in the words a Remove report uses (T751)."""
+
+_UNINSTALL_WORDS = re.compile(r"uninstall|delete|remove", re.IGNORECASE)
+"""What marks a module's own uninstall SQL: City Bots' `data/sql/uninstall/`, mod-1v1-arena's
+`data/sql/delete/1v1_delete.sql`. Only asked of files the updater never applies, so an
+update named `..._remove_duplicates.sql` is never taken for one."""
+
+_UNINSTALL_DOES = (
+    (re.compile(r"\bDROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?`?(\w+)`?", re.IGNORECASE), "drop"),
+    (re.compile(r"\bTRUNCATE\s+(?:TABLE\s+)?`?(\w+)`?", re.IGNORECASE), "empty"),
+    (re.compile(r"\bDELETE\s+FROM\s+`?(\w+)`?", re.IGNORECASE), "delete rows from"),
+    (re.compile(r"\bUPDATE\s+`?(\w+)`?\s+SET\b", re.IGNORECASE), "change rows in"),
+)
+_SQL_COMMENT = re.compile(r"(?:--|#)[^\n]*|/\*.*?\*/", re.DOTALL)
+_UNINSTALL_MAX_TABLES = 6
+"""How many tables one verb names before the rest are counted: a report line, not a listing."""
+
+
+def _uninstall_scripts(manifest: Manifest, clone: Path) -> tuple[str, ...]:
+    """A sentence for each uninstall SQL file the module ships and nothing ran (T751).
+
+    Named, never run: such a script deletes rows and drops tables, its author wrote it for
+    a person to read first, and Remove has no backup to put any of it back. Read here, at
+    the remove, because the clone it is in is deleted a few steps later; the sentence
+    names the repository so the file can still be found.
+
+    A file counts when it lies under `IMPORTER_SQL_ROOT` in a folder the updater never
+    walks, `_UNINSTALL_WORDS` is in its path there, and no `sql` step of the manifest names
+    it (a declared remove step has just been run).
+    """
+    root = clone / IMPORTER_SQL_ROOT
+    try:
+        found = sorted(p for p in root.rglob("*.sql") if p.is_file())
+    except OSError as exc:
+        logger.warning(f"could not look for {manifest.id}'s uninstall SQL: {exc}")
+        return ()
+    declared = _declared_sql(manifest, clone)
+    repo = manifest.source.repo if manifest.source is not None else None
+    out: list[str] = []
+    for path in found:
+        rel = path.relative_to(clone).as_posix()
+        below = rel[len(IMPORTER_SQL_ROOT) :]
+        if updater_walks(rel) or not _UNINSTALL_WORDS.search(below) or declared(rel):
+            continue
+        try:
+            text = _SQL_COMMENT.sub(" ", path.read_text(encoding="utf-8", errors="replace"))
+        except OSError as exc:
+            logger.warning(f"could not read {rel}: {exc}")
+            text = ""
+        does = [_uninstall_does(verb, pattern.findall(text)) for pattern, verb in _UNINSTALL_DOES]
+        does = [d for d in does if d]
+        folders = below.split("/")[:-1]
+        target = next(
+            (db for part in folders for db in (*IMPORTER_DB_NAMES, "playerbots") if db in part),
+            None,
+        )
+        where = f"against the {target} database " if target else ""
+        what = f"{where}it would {_and(does)}" if does else "read it before running it by hand"
+        source = f" (in {repo})" if repo else ""
+        out.append(
+            f"the module's own uninstall SQL {rel}{source}, which Yu'lon did not run: {what}"
+        )
+    return tuple(out)
+
+
+def _declared_sql(manifest: Manifest, clone: Path) -> Callable[[str], bool]:
+    """Does any `sql` step of `manifest` name the clone-relative file? (`_uninstall_scripts()`)
+
+    The files are resolved by `_sql_files()`, the resolver every other reader of a step's
+    path uses; a path with a `{key}` in it (which that resolver will not render) is matched
+    with each field as a wildcard instead.
+    """
+    named: set[str] = set()
+    patterns: list[str] = []
+    for step in manifest.sql:
+        if step.path is None:
+            continue
+        files = _sql_files(clone, step.path)
+        if files is None:
+            patterns.append(re.sub(r"\{[^}]*\}", "*", step.path))
+        else:
+            named.update(files)
+    return lambda rel: rel in named or any(fnmatch.fnmatchcase(rel, p) for p in patterns)
+
+
+def _uninstall_does(verb: str, found: Sequence[str]) -> str:
+    """`drop the tables a and b`, `delete rows from c`; empty when `found` is."""
+    tables = list(dict.fromkeys(found))
+    if not tables:
+        return ""
+    shown = tables[:_UNINSTALL_MAX_TABLES]
+    if len(tables) > len(shown):
+        shown.append(f"{len(tables) - len(shown)} more")
+    if verb == "drop":
+        verb = "drop the table" if len(tables) == 1 else "drop the tables"
+    return f"{verb} {_and(shown)}"
+
+
+def _and(items: Sequence[str]) -> str:
+    """`a`, `a and b`, `a, b and c`."""
+    return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1]
 
 
 def _sql_files(clone: Path, path: str) -> tuple[str, ...] | None:
@@ -10089,7 +10233,7 @@ the ROOT and not the answer: what the updater opens under it is the folders
 `updater_walks()` names, and nothing else.
 """
 
-IMPORTER_DB_NAMES = ("auth", "characters", "world")
+IMPORTER_DB_NAMES: tuple[Db, ...] = ("auth", "characters", "world")
 """What the core updater looks for in the name of each folder under `IMPORTER_SQL_ROOT`.
 
 **A folder whose name CONTAINS one is walked, recursively; no other is.** `DBUpdater`
@@ -10127,13 +10271,25 @@ followed by pressing the button it named.
 """
 
 
+def updater_folder_dbs(folder: str) -> tuple[Db, ...]:
+    """The databases whose updater walks a folder called `folder` under `IMPORTER_SQL_ROOT`.
+
+    The one rule (T752): `updater_walks()` asks it, and so does a custom module's
+    derivation (`module_source._sql_steps()`), which had its own fixed list until then.
+    Every pool whose name the folder's name contains, in `IMPORTER_DB_NAMES` order, because
+    each `DBUpdater` pass makes the same `find()` on its own name; empty for every folder the
+    updater never opens (`playerbots`, `dev`, `uninstall`, ...).
+    """
+    return tuple(name for name in IMPORTER_DB_NAMES if name in folder)
+
+
 def updater_walks(path: str) -> bool:
     """Is clone-relative `path` in a folder the core updater walks (`IMPORTER_DB_NAMES`)?"""
     parts = PurePosixPath(path).parts
     return (
         len(parts) >= 4
         and "/".join(parts[:2]) + "/" == IMPORTER_SQL_ROOT
-        and any(name in parts[2] for name in IMPORTER_DB_NAMES)
+        and bool(updater_folder_dbs(parts[2]))
     )
 
 

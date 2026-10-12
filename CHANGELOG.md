@@ -17,6 +17,9 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 
 - The Maintenance tab lists the backups an earlier uninstall kept, so a reinstall can restore them.
 ### Fixed
+- Removing a module now names the accounts, characters and tables its SQL left in the databases.
+- Removing a module now names its own uninstall SQL and what it would delete, without running it.
+- A module added from a link or folder now reports the SQL the server applies, and says which SQL nothing applies.
 - A server build now waits for Docker and tries once more when Docker stops answering during it.
 - Rebuilding a WotLK server from an older Yu'lon no longer sends its whole source to Docker again for the login server.
 - The command channel now proves itself once the world is up, and **Turn on the command channel** gives its tries back.
