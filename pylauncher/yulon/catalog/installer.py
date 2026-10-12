@@ -641,6 +641,18 @@ def rebuild_confirmation(entry: CatalogEntry, server_dir: Path, *, kept_build: b
         and imports
         and docker.import_record_is_from_empty(server_dir, entry.containers.db_import or "")
     )
+    # T741: where the press MAY hold and the question cannot know, it says when. T658's kill
+    # record holds unless the databases hold accounts or characters, which only the press
+    # asks; a server inside WSL has its record unread (T133), so either record may stand.
+    may_hold = ""
+    if imports and not kept_build:
+        may_hold = f"{native.HELD_CONFIRMATION_IF_UNREAD}\n\n"
+    elif (
+        imports
+        and docker.one_shot_ended_marker(server_dir, entry.containers.db_import or "").is_file()
+    ):
+        # The record from empty never reaches the question below: `held` has its own.
+        may_hold = f"{native.HELD_CONFIRMATION_IF_CUT_OFF}\n\n"
     database = (
         "Before it starts, Yu'lon copies your databases, then applies the database updates "
         "the server and its modules carry that are not applied yet, with AzerothCore's own "
@@ -680,6 +692,7 @@ def rebuild_confirmation(entry: CatalogEntry, server_dir: Path, *, kept_build: b
         f"Your server will be STOPPED and its containers replaced once the compile finishes, "
         f"and it will be down until it reports ready. {database}\n\n"
         f"The build you have now is kept as a rollback while this runs. {rollback}\n\n"
+        f"{may_hold}"
         f"{native.no_rollback_confirmation(entry)}\n\n"
         f"Say no and nothing happens at all — the server you have now keeps running, exactly "
         f"as it is."

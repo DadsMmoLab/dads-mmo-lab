@@ -238,6 +238,8 @@ class Recorder:
     answer `docker image inspect` does."""
     image_ids: dict[str, str | None] = field(default_factory=dict)
     """T225: what `image_id` answers for these names instead (a tag a stopped build moved)."""
+    remove_service_refused: set[str] = field(default_factory=set)
+    """T741: services whose `compose rm --stop --force` Docker refuses (recorded, then raised)."""
 
     world_output: native.WorldOutput = native.WorldOutput(
         text="mangosd loading\nready...\nAvg Diff: 15ms\nWorld server is up and running",
@@ -1079,9 +1081,7 @@ class Recorder:
                 f"stop-world:{','.join(containers)}"
             ),
             # T739: a Rebuild under an unfinished import removes its old servers' containers.
-            remove_service=lambda server_dir, service, **_kw: self.calls.append(
-                f"remove_service:{service}"
-            ),
+            remove_service=self.remove_service,
         )
         # T170's two, bound after construction like an override, the two
         # readings a test states through `folder_projects`/`project_images`.
@@ -1148,6 +1148,12 @@ class Recorder:
         if self.start_error is not None:
             raise self.start_error
         return True
+
+    def remove_service(self, server_dir: Path, service: str, **_kw: object) -> None:
+        """`docker.compose_remove_service()`: recorded; refused for `remove_service_refused`."""
+        self.calls.append(f"remove_service:{service}")
+        if service in self.remove_service_refused:
+            raise docker.DockerCommandError(f"compose rm {service} exited 1: daemon refused")
 
     def tag_image(self, src: str, dst: str) -> str:
         """`docker.tag_image()`: recorded as `tag:<src>-><dst>`, refused as `tag_problem`."""

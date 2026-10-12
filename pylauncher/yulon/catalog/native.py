@@ -2232,6 +2232,50 @@ HELD_CONFIRMATION = (
 )
 """The Rebuild question's middle under the import record from empty (T739)."""
 
+_HELD_INSTEAD = (
+    "this rebuild does less than said above: once the compile finishes your server is STOPPED "
+    "and stays stopped. No copy of your databases is taken, no database update is applied and "
+    "the world is not started. Press Repair on the Server tab afterwards to finish the import, "
+    "then Start. It says so as it begins when it does this."
+)
+
+HELD_CONFIRMATION_IF_CUT_OFF = (
+    "This server's last database import was cut off before it finished. If its databases hold "
+    f"no accounts or characters, or cannot be read, {_HELD_INSTEAD}"
+)
+"""The Rebuild question's added paragraph under T658's kill record (T741).
+
+The press holds unless the databases read `populated` (`unfinished_import_refusal(strict=
+True)`), which the question cannot ask: it runs on the GUI thread, and the database may have
+to be started to answer (`_held_by_an_unfinished_import()`). So it says the condition."""
+
+HELD_CONFIRMATION_IF_UNREAD = (
+    "If this server's last database import did not finish (Yu'lon does not look for that here, "
+    "for a server inside WSL), and that import was one Yu'lon started on empty or cleared "
+    "databases, or the databases hold no accounts or characters, or cannot be read, "
+    f"{_HELD_INSTEAD}"
+)
+"""The same for a server inside WSL, whose record is not read for the question (T741).
+
+Reading it would go through `\\\\wsl.localhost` and boot a stopped distro (T133) on the GUI
+thread. The two records' rules in one sentence: the record from empty always holds; the
+kill record holds unless the databases read `populated`."""
+
+HELD_NO_ROLLBACK = (
+    "No build was kept as a rollback, because this install's images were not all in Docker. "
+    "This rebuild started nothing, and the tags now name the new build: a Start makes any "
+    "server container left from the build before it again from the new one, as Docker Compose "
+    "does for a container whose image changed. Press Repair on the Server tab to finish the "
+    "import, then Start."
+)
+"""A held Rebuild with no rollback that failed after its servers' stop began (T741).
+
+In place of `NO_ROLLBACK_BUILT`, whose "the containers now run the new build" is false of a
+press that starts nothing. Compose's recreate was measured on m910q, 2026-10-12, Compose 2.10.0
+(`platform.COMPOSE_OLDEST_WORKING`) and 5.6.0: `up -d --no-deps <svc>` on a stopped container
+whose tag had moved made a new container from the new image
+(.notes/gates/t741-compose-recreate-m910q-2026-10-12/)."""
+
 HELD_STOPPING = (
     "Stopping the servers. The new build is not started: the database import is unfinished."
 )
@@ -9290,11 +9334,17 @@ class StagedInstaller:
     ) -> Iterator[str]:
         """Remove the stopped old build's server containers, the database's left (T739).
 
-        A Rebuild under an unfinished import starts nothing, and a plain Start does not
-        replace a container whose image only changed under its tag (`staged_up_argv()`), so
-        the Start after Repair would run the OLD servers. Removed, they are created from
-        the new images by that Start (`start_staged()` creates what is missing). The
-        database container stays: Repair starts it and reads it. No volume is touched.
+        A Rebuild under an unfinished import starts nothing. T739 removed them because it
+        took a plain Start not to replace a container whose image only changed under its tag
+        (`staged_up_argv()`'s docstring: not recorded then). T741 measured it on m910q,
+        2026-10-12, Compose 2.10.0 and 5.6.0: `up -d --no-deps <svc>` on a stopped container
+        whose tag had moved made a new container from the new image, and Repair's attached
+        `up --no-deps --exit-code-from <svc> <svc>` did the same for the one-shot
+        (.notes/gates/t741-compose-recreate-m910q-2026-10-12/). So the removal is kept as the
+        press's own word that the old servers are gone, not as the only thing standing
+        between a Start and the old build: a removal refused part-way leaves containers the
+        next Start makes again from the new images (`HELD_NO_ROLLBACK`). The database
+        container stays: Repair starts it and reads it. No volume is touched.
         """
         database = spec.service_for(spec.db)
         for service in (s for s in spec.compose_services() if s != database):
@@ -9303,7 +9353,7 @@ class StagedInstaller:
             except docker.DockerCommandError as exc:
                 raise InstallerError(
                     f"The new build is made, but the old server container {service} could not "
-                    f"be removed, so a later Start could run the old one: {exc}"
+                    f"be removed: {exc}"
                 ) from exc
         yield HELD_REMOVED
 
@@ -9760,6 +9810,10 @@ class StagedInstaller:
                 if mixed.scripts:
                     # T602: the servers were stopped for the lay and nothing was replaced.
                     message = f"{failure} {NO_ROLLBACK_SCRIPTS_MIXED}{mixed.not_saved_note()}"
+                elif held is not None and touched:
+                    # T741: a held press starts nothing, so "the containers now run the new
+                    # build" is false of it. The record still refuses Start until Repair.
+                    message = f"{failure} {HELD_NO_ROLLBACK}"
                 else:
                     message = f"{failure} {NO_ROLLBACK_BUILT if touched else NO_ROLLBACK_UNTOUCHED}"
                 self._record_error(server_dir, ctx.state, message)
@@ -9897,6 +9951,14 @@ class StagedInstaller:
                     "from before it was kept, because its images were not all there (T170)"
                 )
             raise
+        # T741: a held press (`held`) lets them go here too, before its new build ever ran,
+        # and on purpose. Only this press reads them back (`_restore_rollback()`); no Start,
+        # Repair or menu entry puts a `-rollback` name back on the tags. And the Repair the held
+        # press names next clears what the unfinished import wrote and imports again with the
+        # NEW importer (measured to recreate on the moved tag, `_remove_the_old_servers()`), so
+        # the old build would start on databases no rollback pairs it with: a rollback puts
+        # back the databases the old build ran on (T217, T706), and under the record those
+        # never finished. A new build that fails its first Start is rebuilt, as after any press.
         yield from self._release(kept)
         # T225: only a press that succeeded settles a stopped build's record.
         stuck = self._forget_the_stopped_build(server_dir)
