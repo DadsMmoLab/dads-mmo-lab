@@ -222,6 +222,12 @@ MODULE_SURFACE_AFTER_7_2 = {
     "platform_names",
     "provision_lines",
     "unsupported_platform_message",
+    # T755, added deliberately: the record says an install never finished its import,
+    # and the Start and "Use existing…" sentences that refuse it.
+    "IMPORT_STAGE",
+    "unfinished_import",
+    "unfinished_import_adopt_refusal",
+    "unfinished_import_start_refusal",
     # what it imports, which is the other half of the evidence: the bash engine
     # needed `os`, `re`, `secrets`, `shutil`, `subprocess`, `sys`, `deque` and
     # `Mapping`, and none of them may come back unnoticed either.
@@ -255,6 +261,8 @@ MODULE_SURFACE_AFTER_7_2 = {
     "Collection",
     # T568. `InstallEngine.reserved()` returns a context manager.
     "AbstractContextManager",
+    # T755. The Start refusal names the "Remove from Yu'lon…" button by its constant.
+    "forgetting",
     "get_logger",
 }
 

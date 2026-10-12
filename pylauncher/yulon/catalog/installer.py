@@ -34,7 +34,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Protocol
 
-from yulon import docker, platform, resources, runner
+from yulon import docker, forgetting, platform, resources, runner
 from yulon.after_stop import StopSaid, TrueAfterStop
 from yulon.catalog import composegen
 from yulon.catalog.catalog import CatalogEntry, EmulatorSource
@@ -713,6 +713,77 @@ def rebuild_confirmation(entry: CatalogEntry, server_dir: Path, *, kept_build: b
     )
 
 
+IMPORT_STAGE = "import"
+"""The stage name every family records once its database import is verified (T755)."""
+
+
+def unfinished_import(entry: CatalogEntry, server_dir: Path) -> Path | None:
+    """The install record, when it says `entry`'s install never finished its import (T755).
+
+    For a game with no import service only: CMaNGOS (TBC, Vanilla, Tortoise) and
+    Centurion. An AzerothCore server has T658/T678's import record and Start's
+    probe; these had nothing, and their login tables read `present` once the auth
+    part of the SQL plan ran, long before the world content. So an install stopped
+    during `import` and taken with "Use existing…" started on a half-imported world.
+
+    The record's `completed` list is what says so: `import` goes into it only after
+    the plan verified (`_run_one()` writes it after the stage), and it is never
+    taken out again. A folder with no record, one that cannot be read, or another
+    game's, answers None: the refusal is for what Yu'lon itself recorded.
+    """
+    if entry.container_spec().import_service:
+        return None
+    # Local imports: `native` and the families import this module (see the top).
+    from yulon.catalog import native
+    from yulon.catalog.families import family_for
+
+    try:
+        family = family_for(entry)
+    except InstallerError:
+        return None
+    # The class's pinned tuple (each family's tests hold `stage_names() == STAGE_NAMES`
+    # for these two), read without building an engine; the base class declares none.
+    stages: tuple[str, ...] = getattr(family, "STAGE_NAMES", ())
+    if IMPORT_STAGE not in stages:
+        return None
+    claim = native.read_claim(server_dir, valid=stages)
+    state = claim.state
+    if claim.ownership is not native.Ownership.OWNED or state is None:
+        return None
+    if state.game_id != entry.id or state.has(IMPORT_STAGE):
+        return None
+    return server_dir / native.STATE_FILE
+
+
+def unfinished_import_start_refusal(entry: CatalogEntry, server_dir: Path) -> str | None:
+    """Start's sentence for `unfinished_import()`, or None (T755)."""
+    record = unfinished_import(entry, server_dir)
+    if record is None:
+        return None
+    return (
+        f"{entry.name} was not started: its install was stopped before the database import "
+        f"finished ({record} does not list the import as done), so its world is only partly "
+        f'in the database. Press "{forgetting.BUTTON_LABEL}" (it keeps the folder, the database '
+        f"and the images), then press Install on the {entry.name} tile in the Catalog and choose "
+        f"{server_dir}: the install carries on from the import, and clears what the stopped one "
+        "half-wrote first."
+    )
+
+
+def unfinished_import_adopt_refusal(entry: CatalogEntry, server_dir: Path) -> str | None:
+    """The sentence "Use existing…" refuses with for `unfinished_import()`, or None (T755)."""
+    record = unfinished_import(entry, server_dir)
+    if record is None:
+        return None
+    return (
+        f"The install in {server_dir} was stopped before its database import finished "
+        f"({record} does not list the import as done), so its world is only partly in the "
+        f'database and "Use existing…" will not take it. Press Install on this tile and '
+        f"choose {server_dir}: the install carries on from the import, and clears what the "
+        "stopped one half-wrote first."
+    )
+
+
 def cancelled_install_message(entry: CatalogEntry, server_dir: Path) -> str:
     """What Stop actually did, what it did not, and which button to press next.
 
@@ -963,7 +1034,10 @@ def cancelled_install_message(entry: CatalogEntry, server_dir: Path) -> str:
     # that have to agree with it — the "If it had not" opener and the remedy —
     # cannot drift from it. They did: `adoptable` alone gated the delete, and
     # `adoptable` alone is true in this branch too.
-    promised_nothing_lost = adoptable is not None and bool(ours)
+    # T755: a CMaNGOS or Centurion install whose record does not list `import` would be
+    # adopted on a half-imported world, so "Use existing…" refuses it and is not offered.
+    import_unfinished = unfinished_import(entry, server_dir) is not None
+    promised_nothing_lost = adoptable is not None and bool(ours) and not import_unfinished
 
     if promised_nothing_lost:
         parts.append(
@@ -971,6 +1045,12 @@ def cancelled_install_message(entry: CatalogEntry, server_dir: Path) -> str:
             f'had already finished the server may be built and even running: press "Use '
             f'existing…", choose {server_dir}, and the app will manage it from a tab — nothing '
             "is lost."
+        )
+    elif ours and import_unfinished:
+        parts.append(
+            f"The compose files this app writes are there ({', '.join(ours)}), but {record} "
+            "shows the database import had not finished, so the world is only partly in the "
+            f'database and "Use existing…" will not take {server_dir}.'
         )
     elif ours:
         parts.append(

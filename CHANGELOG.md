@@ -114,6 +114,8 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A stopped rebuild's note that cannot be read now refuses Start until **Rebuild the server…** checks the image tags.
 - A cut-short backup of your own database whose name starts with move_ is no longer listed as a move leftover.
 - A download of an update that was stopped by force no longer leaves a hidden file in Downloads after the next update.
+- Stop, Restart or Quit during a WotLK or Unbound database import now records it, so Start offers **Repair** instead.
+- A TBC, Vanilla, Tortoise or Centurion install stopped during its import is no longer adopted or started half-made.
 
 ### Changed
 - The Server tab's **Play** now starts the game; **Launcher…** opens the launcher. The tray's **Play** offers to start a stopped server.

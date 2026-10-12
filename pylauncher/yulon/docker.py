@@ -2375,6 +2375,8 @@ def remove_staged(
     # And no grace helps a CMaNGOS world that is still loading: it drops the
     # SIGTERM, so it is waited for first (T158). It is always this install's
     # container here -- the census above refused anything else.
+    # T754: a running importer is ended, and recorded, before `down` ends it unrecorded.
+    _end_the_import_first(spec, server_dir, wsl_distro=wsl_distro)
     if spec.world in before:
         heard = wait_for_the_world_to_load(spec, control, wsl_distro=wsl_distro)
         # T384: and saves, watched, before `down` and its fixed grace reach it.
@@ -3870,6 +3872,25 @@ def end_one_shot(
         time.sleep(_ONE_SHOT_POLL_SECONDS)
 
 
+def _end_the_import_first(
+    spec: ContainerSpec, server_dir: Path, *, wsl_distro: str | None = None
+) -> None:
+    """End this install's running database import, recorded, before a stop ends it (T754).
+
+    `compose stop`/`down` end every service of the project, the importer too, and
+    write nothing: a server started by hand runs its importer for ~10 minutes, and
+    AzerothCore's half-imported schemas then read `imported`, so the next Start ran
+    on them. `end_one_shot(record_ended=True)` writes T658's record before its kill,
+    and only when it finds one running; an import that finished leaves none. One
+    that could not be ended is logged and the stop goes on: the stop ends it anyway.
+    """
+    if not spec.import_service:
+        return
+    left = end_one_shot(spec.import_service, server_dir, wsl_distro=wsl_distro, record_ended=True)
+    if left is not None:
+        logger.warning(f"the database import could not be ended before the stop: {left.reason}")
+
+
 _MYSQL_ERROR = re.compile(r"^ERROR \d+ \([0-9A-Z]+\)")
 """The mysql client's own error line: `ERROR 1064 (42000) at line 2: You have an error ...`."""
 _IMPORTER_APPLYING = re.compile(r"Applying update\b")
@@ -5356,6 +5377,9 @@ def stop_staged(
     # After the census, so a refusal is never kept waiting for a load; before
     # the command, because a CMaNGOS world signalled mid-load drops the SIGTERM
     # and sits out the whole grace to a SIGKILL (T158).
+    # T754: a running importer is ended, and recorded, before `compose stop` ends it
+    # unrecorded (a server started by hand runs its import for ~10 minutes).
+    _end_the_import_first(spec, server_dir, wsl_distro=wsl_distro)
     if spec.world in before.ours:
         heard = wait_for_the_world_to_load(spec, control, wsl_distro=wsl_distro)
         # T384: the world alone first, waited for while it saves. The fixed grace below

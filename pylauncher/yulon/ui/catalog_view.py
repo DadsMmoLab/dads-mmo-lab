@@ -43,6 +43,7 @@ from yulon.catalog.installer import (
     compose_file,
     default_server_dir,
     platform_names,
+    unfinished_import_adopt_refusal,
     unsupported_platform_message,
 )
 from yulon.catalog.preflight import CANNOT_INSTALL_YET
@@ -900,6 +901,12 @@ class CatalogView(QWidget):
         folder_problem = self._dir_problem(server_dir)
         if folder_problem is not None:
             show_warning(self, "That folder will not work", folder_problem)
+            return False
+        # T755: a CMaNGOS or Centurion install stopped during its import would start on a
+        # half-imported world; its own record says so, and the Install press finishes it.
+        unfinished = unfinished_import_adopt_refusal(entry, server_dir)
+        if unfinished is not None:
+            show_warning(self, "That install did not finish", unfinished)
             return False
         client_dir: Path | None = None
         if entry.install.requires_client_dir:

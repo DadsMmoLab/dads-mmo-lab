@@ -34,7 +34,7 @@ from yulon import (
     server_build_gone,
     wsl,
 )
-from yulon.catalog import composegen, native, preflight, time_zone, world_data
+from yulon.catalog import composegen, installer, native, preflight, time_zone, world_data
 from yulon.catalog.catalog import CatalogEntry, load_catalog
 from yulon.log import get_logger
 from yulon.said import SaidByYulon
@@ -864,6 +864,9 @@ class Controller:
                     if not unavailable.moot:
                         raise
                     logger.warning(f"stopping {folder} unreserved: {unavailable}")
+            # T754: a database import that server runs is ended, and recorded in ITS
+            # folder, before the stop below ends it unrecorded.
+            self._end_their_imports(to_stop)
             # The catalogue's specs, so a blocker that is another game's world is
             # waited for if it is still loading (T158): a server started a minute
             # ago is the likeliest one to be holding the ports.
@@ -882,6 +885,34 @@ class Controller:
                     f"the hold that kept {self.wsl_distro} open for {to_stop} may still be in place"
                 )
         return to_stop
+
+    def _end_their_imports(self, containers: list[str]) -> None:
+        """End each running database import among `containers`, recorded in its folder (T754).
+
+        `docker.stop_containers()` ends an importer with `docker stop` and writes
+        nothing, so the other server's next Start ran on half-imported schemas that
+        read `imported`. `end_one_shot(record_ended=True)` writes T658's record into
+        the folder compose stamped on the importer, where that server's own tab reads
+        it, and only for one it finds running: `containers` lists exited ones too.
+        Its compose names the container after the service (`ac-db-import`), which is
+        how one is told among `containers`. Never raises; a folder this host cannot
+        see is logged and the stop goes on.
+        """
+        importers = {spec.import_service for spec in _catalog_specs() if spec.import_service}
+        for name in containers:
+            if name not in importers:
+                continue
+            try:
+                working = docker.container_working_dir(name, wsl_distro=self.wsl_distro)
+            except docker.DockerCommandError:
+                working = None
+            folder = self._visible_folder(working)
+            if folder is None:
+                logger.warning(f"no folder this host can see for {name} ({working!r}); unrecorded")
+                continue
+            left = docker.end_one_shot(name, folder, wsl_distro=self.wsl_distro, record_ended=True)
+            if left is not None:
+                logger.warning(f"{name} could not be ended before the stop: {left.reason}")
 
     def _servers_in_the_way(self, containers: list[str]) -> dict[Path, str]:
         """The server folders (by compose working dir) of `containers`, each with one container.
@@ -945,6 +976,13 @@ class Controller:
             # T217 (a), the owner's decision of 2026-10-05: a source folder a failed
             # update could not put back refuses every start (`native.SOURCES_OFF_FILE`).
             reason = native.sources_off_refusal(self.server_dir)
+        if not reason:
+            # T755: a CMaNGOS or Centurion install stopped before its import finished
+            # ("Use existing…" took it before that refused), whose login tables read
+            # `present` over a half-imported world.
+            entry = self.entry or _entry_for(self.spec)
+            if entry is not None:
+                reason = installer.unfinished_import_start_refusal(entry, self.server_dir)
         if not reason and self.start_guard is not None:
             reason = self.start_guard()
         if reason:
