@@ -4809,7 +4809,7 @@ def test_docker_commands_for_a_wsl_install_go_through_that_distro(
     monkeypatch.setattr(docker.platform, "_which", lambda name, path=None: "wsl.exe")
 
     docker._docker(["ps"], wsl_distro="dml-arch")
-    assert seen[0][:5] == ["wsl.exe", "-d", "dml-arch", "--", "docker"]
+    assert seen[0][:5] == ["wsl.exe", "-d", "dml-arch", "--exec", "docker"]
     assert seen[0][-1] == "ps"
 
 
@@ -4837,12 +4837,13 @@ def test_a_wsl_install_sends_its_directory_as_a_distro_path_not_a_windows_cwd(
     cmd = seen[0]["cmd"]
     assert "--cd" in cmd, f"the distro path never reached the command: {cmd}"
     assert cmd[cmd.index("--cd") + 1] == "/home/dml/games/srv"
-    # WHERE it sits is the whole of the bug this caught. Everything after `--`
-    # is the command line for the distro's shell, so a `--cd` placed there
-    # reaches bash, which answers "--: invalid option". The first version of
-    # this test asserted only that the flag was present, and passed a command
-    # that could not run; a live run against a real distro found it.
-    assert cmd.index("--cd") < cmd.index("--"), f"--cd landed after the separator: {cmd}"
+    # WHERE it sits is the whole of the bug this caught. Everything after the
+    # separator is the command, so a `--cd` placed there reached bash, which
+    # answered "--: invalid option". The first version of this test asserted
+    # only that the flag was present, and passed a command that could not run;
+    # a live run against a real distro found it. The separator is `--exec`
+    # since T744.
+    assert cmd.index("--cd") < cmd.index("--exec"), f"--cd landed after the separator: {cmd}"
     assert seen[0]["cwd"] is None, "a UNC path was handed to the process as its cwd"
 
 
@@ -5266,7 +5267,13 @@ def _wsl_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         docker.platform,
         "docker_prefix",
-        lambda wsl_distro=None, *, inside=None: ("wsl.exe", "-d", str(wsl_distro), "--", "docker"),
+        lambda wsl_distro=None, *, inside=None: (
+            "wsl.exe",
+            "-d",
+            str(wsl_distro),
+            "--exec",
+            "docker",
+        ),
     )
 
 
@@ -6162,7 +6169,7 @@ def test_a_wsl_resident_database_is_asked_of_that_distros_docker(
         "wsl.exe",
         "-d",
         "dml-arch",
-        "--",
+        "--exec",
         "docker",
         "exec",
         "-i",
@@ -6578,7 +6585,7 @@ def test_a_wsl_resident_database_is_queried_through_that_distros_docker(
     monkeypatch.delenv("WSLENV", raising=False)
     docker.sql_query("db", "mariadb", "hunter2", "realmd", "SELECT 1", wsl_distro="dml-arch")
     spawned = _FakePopen.instances[-1]
-    assert spawned.command[:5] == ["wsl.exe", "-d", "dml-arch", "--", "docker"]
+    assert spawned.command[:5] == ["wsl.exe", "-d", "dml-arch", "--exec", "docker"]
     assert spawned.env is not None
     assert spawned.env["MYSQL_PWD"] == "hunter2"
     assert "MYSQL_PWD" in spawned.env["WSLENV"].split(":")

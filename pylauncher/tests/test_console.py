@@ -132,7 +132,7 @@ def reachable_distro(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         console.platform,
         "wsl_prefix",
-        lambda wsl_distro, inside=None: ("wsl.exe", "-d", wsl_distro, "--"),
+        lambda wsl_distro, inside=None: ("wsl.exe", "-d", wsl_distro, "--exec"),
     )
 
 
@@ -213,7 +213,7 @@ def test_a_wsl_console_allocates_its_pty_inside_the_distro(reachable_distro: Non
     ~/.docker/config.json would otherwise change it out from under us.
     """
     _reply, proc = _distro_send()
-    assert proc.argv[1:4] == ["-d", "dml-arch", "--"], proc.argv
+    assert proc.argv[1:4] == ["-d", "dml-arch", "--exec"], proc.argv
     assert proc.argv[4] == "script"
     assert proc.argv[5] == "-qec"
     assert proc.argv[7] == "/dev/null"
@@ -509,7 +509,7 @@ def test_attach_argv_reaches_the_distros_own_docker(monkeypatch: pytest.MonkeyPa
     """The GM console attaches to a container, and it must be the right daemon's."""
     monkeypatch.setattr(console.platform, "_which", lambda name, path=None: "wsl.exe")
     argv = console.attach_argv("ac-worldserver", wsl_distro="dml-arch")
-    assert argv[:5] == ["wsl.exe", "-d", "dml-arch", "--", "docker"]
+    assert argv[:5] == ["wsl.exe", "-d", "dml-arch", "--exec", "docker"]
     assert argv[-1] == "ac-worldserver"
     assert "--sig-proxy=false" in argv
 

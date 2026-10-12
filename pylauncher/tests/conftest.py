@@ -1348,7 +1348,7 @@ DOCKER_ARGV0S = ("docker", "docker.exe", "wsl", "wsl.exe")
 r"""Every argv[0] `docker._docker()` can produce, so the guard below knows one when it sees one.
 
 `platform.docker_prefix()` answers `["docker"]`, an absolute
-`...\resources\bin\docker.exe`, or `["wsl", "-d", <distro>, "--", "docker"]`.
+`...\resources\bin\docker.exe`, or `["wsl", "-d", <distro>, "--exec", "docker"]`.
 The guard matches on the BASENAME, so the pinned Windows path is caught too.
 """
 

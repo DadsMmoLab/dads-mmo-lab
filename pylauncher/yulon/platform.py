@@ -1415,7 +1415,7 @@ def docker_prefix(
     this machine's own PATH:
 
         docker_prefix(None)       -> ("docker",)
-        docker_prefix("dml-arch") -> ("wsl", "-d", "dml-arch", "--", "docker")
+        docker_prefix("dml-arch") -> ("wsl", "-d", "dml-arch", "--exec", "docker")
 
     Callers splice it in front of their arguments, which is why the 21 lifecycle
     call sites behind `docker._docker()` need no change: they never named the
@@ -1436,15 +1436,15 @@ def docker_prefix(
     prefix = wsl_prefix(wsl_distro, inside=inside)
     if prefix is None:
         return None
-    # `docker` unqualified on purpose: it is resolved by the distro's own PATH,
-    # by its own shell, where this process's PATH means nothing.
+    # `docker` unqualified on purpose: `--exec` looks it up on the distro's own
+    # PATH, where this process's PATH means nothing.
     return (*prefix, "docker")
 
 
 def wsl_prefix(wsl_distro: str, *, inside: str | None = None) -> tuple[str, ...] | None:
     """The argv that runs ANY command inside `wsl_distro`, or None without wsl.exe.
 
-        wsl_prefix("dml-arch") -> ("wsl", "-d", "dml-arch", "--")
+        wsl_prefix("dml-arch") -> ("wsl", "-d", "dml-arch", "--exec")
 
     Split out of `docker_prefix()` because docker is no longer the only thing
     the app runs in there. The worldserver console needs a pseudo-terminal that
@@ -1452,19 +1452,26 @@ def wsl_prefix(wsl_distro: str, *, inside: str | None = None) -> tuple[str, ...]
     (`console.distro_attach_argv()`). That command is not `docker <args>`, so it
     cannot use a prefix ending in `docker`.
 
-    `--cd` is an argument to wsl.exe and MUST precede the `--` separator:
-    everything after `--` is the command line handed to the distro's shell, so
-    a `--cd` placed there arrives at bash, which answers "--: invalid option".
-    Measured against a real distro, which is the only reason this is right -
-    the first version put it after the separator, and the unit test, which
-    asserted only that `--cd` was present, passed a command that could not run.
+    `--exec`, not `--` (T744): after `--` wsl.exe hands the command line to the
+    distro's shell, which expands `$1`, `$f` and `$(...)` and strips backslashes
+    before the command starts. Measured 2026-10-12 through the real wsl.exe: the
+    Tortoise update listing reached its container as `[ -e "" ]`, the DBC copy as
+    `cat > ".yulon-part"`, and My Party's `$(grep ...)` ran on the distro, not in
+    the container. `--exec` starts the program with the argv as given, the way
+    the `wsl.py` holds and `git.distro_owner()` already did.
+
+    `--cd` is an argument to wsl.exe and MUST precede the separator: a `--cd`
+    placed after it arrives at the command itself. Measured against a real
+    distro with `--`, which is the only reason this is right - the first
+    version put it after the separator, and the unit test, which asserted only
+    that `--cd` was present, passed a command that could not run.
     """
     launcher = _which(WSL_PROGRAM)
     if launcher is None:
         logger.debug(f"no {WSL_PROGRAM} on this host; cannot reach {wsl_distro!r}")
         return None
     location = ("--cd", inside) if inside else ()
-    return (launcher, "-d", wsl_distro, *location, "--")
+    return (launcher, "-d", wsl_distro, *location, "--exec")
 
 
 def wsl_env(extra: dict[str, str] | None = None, *, paths: Collection[str] = ()) -> dict[str, str]:

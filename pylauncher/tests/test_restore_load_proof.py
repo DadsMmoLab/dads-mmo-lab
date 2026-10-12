@@ -310,25 +310,32 @@ def test_the_in_container_wrapper_needs_no_windows_quoting(stub: Path) -> None:
     assert line == f'sh -c "{script}"'
 
 
-def test_a_server_in_a_wsl_distro_keeps_the_plain_load(
+def test_a_server_in_a_wsl_distro_gets_the_proof_too(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`wsl -- docker ...` hands the line to the distro's shell, which would expand the
-    wrapper's `$1` for itself: there the load stays as it was, and the tab stays cautious."""
+    """T744: the distro's docker is started with `wsl --exec`, so no distro shell expands the
+    wrapper's `$1` on the way and a WSL load prints its ending like any other.
+
+    Until T744 the prefix ended `--`, the distro's shell rewrote the script, and the WSL load
+    was left plain. `test_wsl_exec_route.py` holds that the argv reaches docker word for word.
+    """
     seen: list[list[str]] = []
 
     def fake_run(argv: list[str], watch: Any, **_kw: Any) -> Any:
         seen.append(argv)
         return __import__("subprocess").CompletedProcess(argv, 0, b"", b"")
 
-    monkeypatch.setattr(maintenance.platform, "docker_prefix", lambda d: ["wsl", "--", "docker"])
+    monkeypatch.setattr(maintenance.platform, "_which", lambda name, path=None: "wsl.exe")
     monkeypatch.setattr(maintenance, "mysql_client", lambda *a, **k: "mysql")
     monkeypatch.setattr(maintenance, "mysql_env", lambda *a, **k: {})
     monkeypatch.setattr(maintenance, "_run_reporting_pid", fake_run)
     mysql = DockerMysql(DB, "pw", wsl_distro="dml-arch")
     with maintenance.recording_load_pid(lambda pid: None, output_dir=tmp_path, proof="p1"):
         mysql.load_from(a_backup_of(tmp_path, "acore_world").open("rb"))
-    assert "sh" not in seen[0], seen[0]
+    argv = seen[0]
+    assert argv[:5] == ["wsl.exe", "-d", "dml-arch", "--exec", "docker"], argv
+    at = argv.index("sh")
+    assert argv[at : at + 5] == ["sh", "-c", maintenance._LOAD_PROOF_SCRIPT, "sh", "p1"], argv
 
 
 def test_a_record_whose_leftover_cannot_be_read_is_never_put_down(

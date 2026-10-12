@@ -1431,7 +1431,7 @@ def test_backup_runs_mysqldump_in_the_distro_and_announces_the_password(
     mysql.dump_into("acore_auth", io.BytesIO())
 
     argv = seen["argv"]
-    assert argv[:5] == ["wsl.exe", "-d", "dml-arch", "--", "docker"]
+    assert argv[:5] == ["wsl.exe", "-d", "dml-arch", "--exec", "docker"]
     assert not any("hunter2" in part for part in argv), f"password in argv: {argv}"
     env = seen["env"]
     assert env.get("MYSQL_PWD") == "hunter2"

@@ -4078,7 +4078,7 @@ def test_the_maintenance_tab_asks_the_distro_s_docker_what_is_running(
 
     def fake_prefix(wsl_distro: str | None = None, *, inside: str | None = None) -> tuple[str, ...]:
         asked.append(wsl_distro)
-        return ("wsl.exe", "-d", str(wsl_distro), "--", "docker")
+        return ("wsl.exe", "-d", str(wsl_distro), "--exec", "docker")
 
     monkeypatch.setattr(docker.platform, "docker_prefix", fake_prefix)
     monkeypatch.setattr(

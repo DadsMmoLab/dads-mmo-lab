@@ -539,11 +539,10 @@ class DockerMysql:
         # reads nothing, and an idle open stdin is one more thing to get wrong.
         interactive = ["-i"] if (input_text is not None or stdin is not None) else []
         watch = _LOAD_PID_SINK.get() if report_pid else None
-        if watch is not None and watch.proof and self.wsl_distro is None:
+        if watch is not None and watch.proof:
             # T710: mysql runs under `sh`, which prints how it ended into the load's output
-            # file. Not for a server in a WSL distro: `wsl -- docker ...` hands the line to the
-            # distro's shell, which would expand the script's `$1` for itself; there the load
-            # stays as it was and an orphaned one stays "cannot tell".
+            # file. A server in a WSL distro too since T744: its docker is started with
+            # `wsl --exec`, so no distro shell expands the script's `$1` on the way.
             command = ["sh", "-c", _LOAD_PROOF_SCRIPT, "sh", watch.proof, *command]
         argv = [
             *prefix,

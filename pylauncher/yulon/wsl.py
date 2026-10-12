@@ -526,8 +526,8 @@ def release_script(*keys: str) -> str:
 def _exec_argv(distro: str, script: str) -> list[str] | None:
     """`wsl -d <distro> --exec sh -c <script>`, or None without wsl.exe.
 
-    `--exec` and not the `--` of `platform.wsl_prefix()`: after `--` wsl.exe
-    hands the joined command line to the distro's login shell, which would
+    `--exec`, as `platform.wsl_prefix()` ends too since T744: after a bare `--`
+    wsl.exe hands the joined command line to the distro's shell, which would
     expand the script's `$$` and `$(...)` for itself before `sh` ever saw them.
     """
     launcher = platform._which(platform.WSL_PROGRAM)

@@ -142,7 +142,7 @@ def test_daemon_ready_asks_the_distros_docker(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(runner, "run", run)
     assert docker.daemon_ready(wsl_distro=DISTRO) is True
     [argv] = seen
-    assert argv[:4] == ["wsl", "-d", DISTRO, "--"] and argv[4:6] == ["docker", "info"]
+    assert argv[:4] == ["wsl", "-d", DISTRO, "--exec"] and argv[4:6] == ["docker", "info"]
 
 
 # -- containerised git inside the distro ----------------------------------------------
@@ -170,7 +170,7 @@ def test_git_in_a_distro_runs_on_the_distros_docker_with_the_linux_path_and_the_
     made, seen = _git_in(monkeypatch)
     dest = Path(UNC_SERVER + "\\src\\mangos-classic")
     argv = made._argv(made._launcher(), dest, ["rev-parse", "HEAD"], writes=False)
-    assert argv[:5] == ["wsl", "-d", DISTRO, "--", "docker"]
+    assert argv[:5] == ["wsl", "-d", DISTRO, "--exec", "docker"]
     assert "-v" in argv
     assert argv[argv.index("-v") + 1] == "/home/pk/wow-vanilla/src/mangos-classic:/git:ro"
     assert argv[argv.index("--user") + 1] == "1000:1000"
@@ -527,7 +527,7 @@ class _Distro:
 
     def answer(self, cmd: list[str]) -> subprocess.CompletedProcess[str]:
         self.calls.append(cmd)
-        inner = cmd[cmd.index("--") + 1 :] if "--" in cmd else cmd
+        inner = cmd[cmd.index("--exec") + 1 :] if "--exec" in cmd else cmd
         if cmd[3:5] == ["--exec", "stat"]:
             return subprocess.CompletedProcess(cmd, 0, "1000:1000\n", "")
         text = " ".join(inner)

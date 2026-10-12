@@ -366,8 +366,8 @@ def _docker(
     """
     # A Windows process cannot cd into a distro, so for a WSL install the
     # location rides in the argv instead - `wsl --cd`, positioned by
-    # `docker_prefix()` because only it knows the flag belongs before the `--`
-    # separator. `--cd` rather than compose's `--project-directory`, because
+    # `docker_prefix()` because only it knows the flag belongs before the
+    # `--exec` that starts docker. `--cd` rather than compose's `--project-directory`, because
     # this function runs every docker subcommand and only compose understands
     # the latter.
     try:

@@ -263,7 +263,7 @@ def test_a_wsl_install_copies_through_its_own_distro_from_its_linux_path(
     server_dir = Path("\\\\wsl.localhost\\dml-arch\\home\\pk\\wow-server-playerbots")
     clone_root = tmp_path / "clone"
     volume = _volume(tmp_path)
-    wsl = ("wsl", "-d", "dml-arch", "--cd", "/home/pk/wow-server-playerbots", "--", "docker")
+    wsl = ("wsl", "-d", "dml-arch", "--cd", "/home/pk/wow-server-playerbots", "--exec", "docker")
     calls, prefixes = _compose_run_double(monkeypatch, volume, prefix=wsl)
     monkeypatch.setattr(docker, "world_running", lambda *_a, **_k: False)
     services = ControllerServices.for_wotlk(WOTLK, server_dir, None, "dml-arch")

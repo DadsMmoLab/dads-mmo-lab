@@ -1312,16 +1312,17 @@ def test_docker_prefix_routes_through_wsl_for_a_distro(monkeypatch: pytest.Monke
     """A server inside a distro is reached by its own docker, not Docker Desktop's.
 
     Measured against a real WSL-resident server (2026-08-26): `wsl -d dml-arch
-    -- docker compose ps` returns rc=0 and the running container, and exit codes
-    propagate faithfully - which is what makes this substitution safe for the 21
-    lifecycle call sites that read them.
+    -- docker compose ps` returned rc=0 and the running container, and exit codes
+    propagated faithfully - which is what made this substitution safe for the 21
+    lifecycle call sites that read them. `--exec` rather than `--` since T744, so
+    the distro's shell no longer rewrites a script on its way to docker.
     """
     monkeypatch.setattr(platform, "_which", lambda name, path=None: "C:\\Windows\\wsl.exe")
     assert platform.docker_prefix("dml-arch") == (
         "C:\\Windows\\wsl.exe",
         "-d",
         "dml-arch",
-        "--",
+        "--exec",
         "docker",
     )
 
