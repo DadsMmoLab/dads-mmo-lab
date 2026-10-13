@@ -15,6 +15,7 @@ from yulon.catalog import native
 from yulon.catalog.catalog import load_catalog
 
 _ENTRY = load_catalog().get("wow-wotlk")
+ENTRY = _ENTRY
 _NATIVE = _ENTRY.install.native
 if _NATIVE is None:  # pragma: no cover - a catalog this broken fails everywhere
     raise RuntimeError("wow-wotlk has no install.native block, so nothing can install or manage it")

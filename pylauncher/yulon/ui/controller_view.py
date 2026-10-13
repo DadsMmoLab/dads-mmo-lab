@@ -3628,12 +3628,12 @@ def _for_wotlk(
     # for this tab, the Catalog tab and the CLI. `wsl_distro=` because that
     # function builds its own two seams and they address a daemon too.
     #
-    # Its password is `fixed_db_password(entry)` and NOT the file read above,
-    # which is right and is not an oversight: a gate is built only for an entry
-    # that names an import service, wow-wotlk is the only one, and its plan is
-    # `fixed`. The reverse substitution — this function's `sql`/`mysql`/applier
-    # taking the fixed value — is the closed bug `_db_password()` describes.
-    probe, reset = install_wiring.import_gate_for(entry, wsl_distro=wsl_distro)
+    # Its password is this folder's own (T748: a new WotLK or Unbound install
+    # generates one), read when the database is first asked, so a tab built for a
+    # server inside a stopped distro does not start it.
+    probe, reset = install_wiring.import_gate_for(
+        entry, server_dir=server_dir, wsl_distro=wsl_distro
+    )
     # 8.1a. Both are WotLK's alone for now: the counts need per-tree facts the
     # catalog only carries for this entry, and 8.1b, 8.1c and 8.1d gate their
     # own. The SAME recorder object is the controller's pre-stop hook and the

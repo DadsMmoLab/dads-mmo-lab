@@ -57,7 +57,9 @@ def test_wotlk_entry_matches_the_controller_spec() -> None:
     wotlk = load_catalog().get("wow-wotlk")
     assert wotlk.container_spec() == docker_ctl.SPEC
     assert wotlk.has_manifests is True
-    assert wotlk.install.password == PasswordPlan(mode="fixed", value="password")
+    assert wotlk.install.password == PasswordPlan(
+        mode="generated", file=".db_password", prefix="wotlk-", legacy="password"
+    )
     assert wotlk.emulator.sources[0].url == (
         "https://github.com/mod-playerbots/azerothcore-wotlk.git"
     )
@@ -434,7 +436,7 @@ def test_db_password_prefers_a_fixed_one_then_the_generated_file(tmp_path: Path)
     catalog = load_catalog()
 
     wotlk = catalog.get("wow-wotlk").install
-    assert wotlk.db_password(tmp_path) == "password", "a fixed password wins outright"
+    assert wotlk.db_password(tmp_path) == "password", "no record of a new install: published (T748)"
 
     tbc = catalog.get("wow-tbc").install
     assert tbc.password.file, "wow-tbc is expected to generate its password"
@@ -469,7 +471,9 @@ def test_every_entry_says_how_its_password_comes_to_exist() -> None:
     entry say both or neither; the model refuses that.
     """
     catalog = load_catalog()
-    assert catalog.get("wow-wotlk").install.password == PasswordPlan(mode="fixed", value="password")
+    assert catalog.get("wow-wotlk").install.password == PasswordPlan(
+        mode="generated", file=".db_password", prefix="wotlk-", legacy="password"
+    )
     generated = (("wow-tbc", "tbc-"), ("wow-vanilla", "vanilla-"), ("wow-tortoise", "tortoise-"))
     for game_id, prefix in generated:
         plan = catalog.get(game_id).install.password
@@ -646,69 +650,44 @@ def test_ready_markers_are_literal_unless_the_entry_says_regex() -> None:
         ReadyMarkers(world="")
 
 
-def test_a_game_with_a_one_shot_import_service_must_carry_a_fixed_password() -> None:
+def test_a_game_with_a_one_shot_import_service_asks_its_database_with_the_folders_password(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The invariant that keeps the import gate and the Server tab on one password.
 
-
-
-    `install_wiring.import_gate_for()` builds the probe pair from
-
-    `fixed_db_password(entry)` - the CATALOGUE's value - because it has no
-
-    `server_dir` to read a generated file from. `ControllerServices.for_wotlk()`
-
-    builds everything else from `entry.install.db_password(server_dir)`, which
-
-    does read that file. Today the two agree, and only because the one entry
-
-    that names a `db_import` container is wow-wotlk, whose plan is `fixed`.
-
-
-
-    An entry that named an import service AND generated its password would send
-
-    the probe to the database as root with the literal "password" while every
-
-    other control used the real one. The symptom is not a silent Repair offer:
-
-    `repair.import_state()` cannot read the schemas, answers `unreadable`, and
-
-    the spine turns that into a hard `InstallerError` - so the install fails at
-
-    the import stage with a message about the database being unreadable, which
-
-    is a confusing way to say "wrong password".
-
-
-
-    If you are reading this because the test went red, you added such an entry.
-
-    Either give it `"mode": "fixed"`, or teach `import_gate_for()` to be handed
-
-    a password by a caller that holds a `server_dir` (a contract change - see
-
-    the 7.1 interface contract's `install_wiring` block). Do NOT make
-
-    `for_wotlk()` use the fixed password: that is the closed bug this pair of
-
-    seams exists to keep closed.
-
+    `ControllerServices.for_wotlk()` builds its SQL seams from
+    `entry.install.db_password(server_dir)`. The import gate used to be built from the
+    catalogue's fixed value instead, which was right only while every game with an import
+    service had a fixed password. Since T748 WotLK and Unbound generate one per install, so
+    the gate is handed the folder (`import_gate_for(entry, server_dir=...)`) and must ask with
+    THAT folder's password, or a new install's probe answers "unreadable" for a healthy
+    database.
     """
+    from yulon import install_wiring
+    from yulon.controller_wow_wotlk import repair as wotlk_repair
 
-    generated = [
-        entry.id
-        for entry in load_catalog().games
-        if entry.containers.db_import and entry.install.password.mode != "fixed"
-    ]
+    seen: list[str] = []
 
-    assert not generated, (
-        "these name a one-shot import service but generate their password, so the "
-        f"import gate would authenticate with the catalogue's fixed value: {generated}"
-    )
+    def fake_import_state(sql: object, _mysql: object, _health: object) -> object:
+        password = sql.root_password  # type: ignore[attr-defined]
+        seen.append(password() if callable(password) else password)
+        return object()
 
-    assert any(
-        entry.containers.db_import for entry in load_catalog().games
-    ), "no entry names an import service at all, so this test would pass on an empty catalog"
+    monkeypatch.setattr(wotlk_repair, "import_state", fake_import_state)
+    with_import = [entry for entry in load_catalog().games if entry.containers.db_import]
+    assert with_import, "no entry names an import service, so this test would pass on nothing"
+    for entry in with_import:
+        folder = tmp_path / entry.id
+        folder.mkdir()
+        plan = entry.install.password
+        expected = plan.value if plan.mode == "fixed" else f"{plan.prefix}0123456789abcdef"
+        if plan.file:
+            (folder / plan.file).write_text(f"{expected}\n", encoding="utf-8")
+        probe, _reset = install_wiring.import_gate_for(entry, server_dir=folder)
+        assert probe is not None, entry.id
+        seen.clear()
+        probe()
+        assert seen == [expected], entry.id
 
 
 def test_wotlk_is_installable_on_all_three_platforms() -> None:

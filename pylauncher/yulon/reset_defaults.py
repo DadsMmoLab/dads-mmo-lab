@@ -423,6 +423,10 @@ def _password(entry: CatalogEntry, server_dir: Path, seams: Seams) -> str | None
     try:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
+        # An install made before generated passwords keeps the one it was made with (T748).
+        legacy = entry.install.legacy_password(server_dir)
+        if legacy is not None:
+            return legacy
         kept = dbsecret.recall(
             entry.id, composegen.install_id(server_dir, platform_id=seams.platform_id)
         )

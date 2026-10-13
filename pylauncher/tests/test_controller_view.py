@@ -4592,14 +4592,17 @@ def test_for_wotlk_takes_its_import_gate_from_install_wiring(
     def reset_sentinel() -> tuple[str, ...]:
         return ()
 
-    def fake_gate(entry: CatalogEntry, *, wsl_distro: str | None = None) -> tuple[object, object]:
-        gate_calls.append((entry.id, wsl_distro))
+    def fake_gate(
+        entry: CatalogEntry, *, server_dir: Path | None = None, wsl_distro: str | None = None
+    ) -> tuple[object, object]:
+        gate_calls.append((entry.id, server_dir, wsl_distro))
         return probe_sentinel, reset_sentinel
 
     monkeypatch.setattr(controller_view_module.install_wiring, "import_gate_for", fake_gate)
 
     services = ControllerServices.for_wotlk(WOTLK, tmp_path, None, "dml-arch")
-    assert gate_calls == [(WOTLK.id, "dml-arch")], gate_calls
+    # The folder travels too (T748): the probe asks with that folder's own password.
+    assert gate_calls == [(WOTLK.id, tmp_path, "dml-arch")], gate_calls
     assert services.controller.import_probe is probe_sentinel
     assert services.controller.reset_unfinished is reset_sentinel
 

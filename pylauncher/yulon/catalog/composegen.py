@@ -537,8 +537,8 @@ def _slug(text: str) -> str:
 class ComposePlan:
     """The three files' text plus the `.env` keys this install needs on top of them.
 
-    `dotenv` is empty for a fixed-password game (WotLK): the catalog's value is
-    the base file's interpolation default and needs no `.env`. For a
+    `dotenv` is empty for a fixed-password game (none ships one since T748): the
+    catalog's value is the base file's interpolation default and needs no `.env`. For a
     generated-password game it carries exactly `DB_ROOT_PASSWORD`, which
     `write_plan()` merges into `.env` through `write_dotenv()` — the one writer
     of that file — so the secret is never in a compose file git can see. A
@@ -628,6 +628,11 @@ def render(
         password = db_password
     elif plan.mode == "fixed" and plan.value:
         password = plan.value
+    elif (legacy := entry.install.legacy_password(server_dir)) is not None:
+        # T748: a folder that is not provably a new install (its record predates generated
+        # passwords, or it has none) keeps the password it has always had. A new install's
+        # record says so, and it still has to be given its own.
+        password = legacy
     else:
         raise ComposeGenError(
             f"{entry.name} generates its database password per install, and none was given "
@@ -1762,7 +1767,13 @@ def write_plan(
         if _write_one(path, text, replaceable=name in replaceable):
             written.append(path)
     if plan.dotenv:
-        written.append(write_dotenv(server_dir, plan.dotenv))
+        # Reported only when the bytes change: `write_plan()` answers `()` for a second run over
+        # the same plan, and a generated plan's `.env` is part of that (T748).
+        env = server_dir / DOTENV_FILE
+        before = env.read_bytes() if env.is_file() else None
+        write_dotenv(server_dir, plan.dotenv)
+        if env.read_bytes() != before:
+            written.append(env)
     return tuple(written)
 
 

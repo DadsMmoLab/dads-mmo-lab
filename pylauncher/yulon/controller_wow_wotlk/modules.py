@@ -309,7 +309,7 @@ def applier(
     sql: SqlRunner | None = None,
     client_dir: Path | None = None,
     dbc: DbcCopier | None = None,
-    db_root_password: str = DEFAULT_DB_ROOT_PASSWORD,
+    db_root_password: str | None = None,
     db_container: str = docker_ctl.SPEC.db,
 ) -> Applier:
     """An `Applier` for the AzerothCore install at `server_dir`.
@@ -338,7 +338,12 @@ def applier(
     """
     runner: SqlRunner | None = sql
     if runner is None:
-        runner = DockerSql(db_container, db_root_password, client=docker_ctl.DB_CLIENT)
+        # This folder's own password (T748); the published default only for an install that
+        # has none on record, which is what `db_password()` answers for it.
+        password = db_root_password
+        if password is None:
+            password = docker_ctl.ENTRY.install.db_password(server_dir) or DEFAULT_DB_ROOT_PASSWORD
+        runner = DockerSql(db_container, password, client=docker_ctl.DB_CLIENT)
     return Applier(
         server_dir,
         git=git,

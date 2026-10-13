@@ -666,6 +666,8 @@ def test_an_override_with_mixed_labels_is_refused_and_nothing_is_written(
     assert labelled in text
     mixed = text.replace(labelled, labelled + "      - ./extra:/azerothcore/extra\n")
     override.write_text(mixed, encoding="utf-8")
+    env = server_dir / ".env"
+    env_before = env.read_bytes() if env.exists() else None
 
     with pytest.raises(setup.EnableRefused, match="label"):
         setup.enable(
@@ -674,4 +676,4 @@ def test_an_override_with_mixed_labels_is_refused_and_nothing_is_written(
 
     assert override.read_text(encoding="utf-8") == mixed
     assert not override.with_name(override.name + setup.BACKUP_SUFFIX).exists()
-    assert not (server_dir / ".env").exists()
+    assert (env.read_bytes() if env.exists() else None) == env_before

@@ -29,7 +29,7 @@ from tests.support_native import engine as native_engine
 from yulon import docker, install_wiring, platform
 from yulon import log as log_module
 from yulon.apply import DockerSql
-from yulon.catalog.catalog import CatalogEntry, load_catalog
+from yulon.catalog.catalog import CatalogEntry, PasswordPlan, load_catalog
 from yulon.catalog.installer import InstallEngine, InstallerError, InstallOptions
 from yulon.controller_wow_wotlk import repair as wotlk_repair
 from yulon.controller_wow_wotlk.maintenance import DockerMysql
@@ -62,15 +62,16 @@ def _without_import_service(entry: CatalogEntry) -> CatalogEntry:
 
 def test_the_fixed_password_is_the_entry_value_or_the_acore_default() -> None:
     assert install_wiring.DEFAULT_DB_ROOT_PASSWORD == "password"
-    assert install_wiring.fixed_db_password(WOTLK) == WOTLK.install.password.value
-    blank = WOTLK.model_copy(
+    fixed = WOTLK.model_copy(
         update={
             "install": WOTLK.install.model_copy(
-                update={"password": WOTLK.install.password.model_copy(update={"value": None})}
+                update={"password": PasswordPlan(mode="fixed", value="published-1")}
             )
         }
     )
-    assert install_wiring.fixed_db_password(blank) == "password"
+    assert install_wiring.fixed_db_password(fixed) == "published-1"
+    # A generated plan (WotLK's since T748) has no value: the published default.
+    assert install_wiring.fixed_db_password(WOTLK) == "password"
 
 
 def test_the_import_gate_exists_only_for_a_one_shot_import_service() -> None:

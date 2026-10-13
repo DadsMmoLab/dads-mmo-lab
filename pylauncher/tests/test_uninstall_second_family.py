@@ -109,10 +109,10 @@ def test_the_cmangos_folder_holds_the_only_key_to_the_volume_a_ticked_purge_keep
     ), "the folder held the only copy of the password that volume was created with"
 
     wotlk = entry_for(WOTLK)
-    assert wotlk.install.password.mode == "fixed"
+    assert wotlk.install.password.legacy == "password"
     assert (
         wotlk.install.db_password(tmp_path / "never-existed") == "password"
-    ), "on the gated family the key is in the catalog, so deleting the folder costs nothing"
+    ), "a WotLK folder with no record of a new install has the published key (T748)"
 
 
 def test_the_reinstall_a_ticked_purge_promises_is_refused_on_the_cmangos_tree(

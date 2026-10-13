@@ -16,6 +16,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ### New
 
 - The Maintenance tab lists the backups an earlier uninstall kept, so a reinstall can restore them.
+- New WoW WotLK and Unbound servers get a database password of their own; older servers keep theirs.
 ### Fixed
 - **Start** on a WSL server now waits for Docker to come up even when Windows already lists the distro as running.
 - The first **Start** on a WSL server whose distro is stopped now waits for the distro to boot instead of failing.

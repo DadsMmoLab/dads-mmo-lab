@@ -559,3 +559,58 @@ def test_a_shallow_checkout_asks_github_how_far_the_packed_commit_is() -> None:
     )
     assert asked == [("mod-playerbots/azerothcore-wotlk", WOTLK.emulator.sources[0].rev, CORE)]
     assert (got[0].pin, got[0].ahead) == (CORE, 0)  # behind the pin: the catch-up reading
+
+
+def test_an_old_wotlk_password_is_a_published_word_and_does_not_refuse_the_pack(
+    tmp_path: Path,
+) -> None:
+    """T748: an install made before generated passwords has `password`, a published word.
+
+    A conf that merely says the word is not a leaked secret, so the pack goes through, as it
+    does for a fixed password. A generated value found in a file still refuses (above).
+    """
+    server = wotlk_server(tmp_path)
+    (server / "env" / "dist" / "etc" / "worldserver.conf").write_bytes(
+        b"Rate.XP.Kill = 3\nMyNote = password\n"
+    )
+    facts(server, secret_password="password")  # the published value an old folder carries
+
+
+@pytest.mark.parametrize("new_install", [True, False], ids=["new-install", "old-install"])
+def test_a_wotlk_conf_moved_in_takes_the_password_of_the_install_it_lands_in(
+    tmp_path: Path, new_install: bool
+) -> None:
+    """T748: a moved server's confs never carry the old computer's password, and on this
+    computer they take the password of the install they land in: a NEW WotLK install's own
+    generated value, or `password` for an install made before generated passwords. The
+    package holds neither `.db_password` nor `.env`, as for the four other games."""
+    from yulon.catalog import composegen, native
+    from yulon.catalog.catalog import RECORD_GENERATED
+    from yulon.support import redact
+
+    old_computer = b'LoginDatabaseInfo = "ac-database;3306;root;password;acore_auth"\n'
+    packed = redact.database_info_passwords_replaced(
+        old_computer.decode(), move_server.PASSWORD_PLACEHOLDER
+    ).encode()
+    assert b";password;" not in packed
+
+    here = tmp_path / "wotlk"
+    here.mkdir()
+    native.write_state(
+        here,
+        native.InstallState(
+            game_id=WOTLK.id,
+            install_id=composegen.install_id(here, platform_id=lambda: "linux"),
+            family="azerothcore",
+            completed=("clone-core", "generate-compose"),
+            db_password=RECORD_GENERATED if new_install else "",
+        ),
+    )
+    generated = "wotlk-" + "00112233" + "445566ff"
+    if new_install:
+        (here / ".db_password").write_text(generated + "\n", encoding="utf-8")
+
+    laid = move_server.lay_conf(packed, None, (), WOTLK.install.db_password(here))
+
+    expected = generated if new_install else "password"
+    assert laid == f'LoginDatabaseInfo = "ac-database;3306;root;{expected};acore_auth"\n'.encode()

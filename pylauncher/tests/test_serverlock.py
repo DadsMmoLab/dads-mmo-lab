@@ -39,7 +39,7 @@ from tests.test_winacl import BUILT_IN_ADMINISTRATOR, PROFILE_DEFAULT, SDDL_ALIA
 from yulon import docker, platform, runner, serverlock, winacl
 from yulon.catalog import native
 from yulon.catalog.catalog import CatalogEntry, load_catalog
-from yulon.catalog.families import cmangos, conf
+from yulon.catalog.families import conf
 from yulon.catalog.installer import InstallerError
 from yulon.ui import controller_view as controller_view_module
 from yulon.ui.controller_view import REPAIR_FILES_LABEL, ControllerServices, ControllerView
@@ -382,7 +382,7 @@ def _watch_secrets(
         monkeypatch.setattr(module, name, watched)
 
     wrap(platform, "write_private_atomically")
-    wrap(cmangos, "_write_secret")
+    wrap(native, "write_secret")  # the spine's since T748 (was `cmangos._write_secret`)
     wrap(conf, "_write")
     return seen
 
