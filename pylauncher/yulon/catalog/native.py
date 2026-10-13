@@ -15722,6 +15722,17 @@ class StagedInstaller:
           nothing is sent, and the line says which file says so and how to undo
           it. A server whose loopback was never chosen has no such file and
           falls through to the four below, which is §41's other half;
+        * the owner CHOSE an address of this computer (T674: a Tailscale or other
+          VPN address) — nothing is detected, and that address is what the row is
+          written to. It replaces what the row holds, column by column, so a row
+          that holds another reachable address is NOT left alone; a row that holds
+          exactly that address is left alone, and the line says so. If this
+          computer no longer holds the address (Tailscale off, or it changed), one
+          `Warning:` line is printed; when the Windows address list could not be read,
+          that line says so instead. The address is still written, because it is the
+          owner's choice. A recorded address that `networking.chosen_ipv4()`
+          refuses reads as no choice at all, so it falls through to the detected
+          address;
         * no address — `REALM_ADDRESS_UNKNOWN`, and no SQL is attempted at all.
           A guess would be worse than the default, and a refusal would be a lie
           about what happened;
@@ -15734,7 +15745,9 @@ class StagedInstaller:
           other machines can reach this server", which was the opposite of what
           had just happened (review, 2026-09-03). The question that matters is
           whether the row can be reached from another machine at all, which is
-          exactly what `networking.advertisable()` already answers;
+          exactly what `networking.advertisable()` already answers. This applies
+          only when no address was chosen: a chosen address is compared with the
+          row by equality instead, as the owner's-choice bullet above says;
         * the UPDATE failed — said, with what the database answered, plus where
           to fix it by hand. The install stays successful;
         * it worked — said, naming the address, because the address is what the
@@ -15744,15 +15757,45 @@ class StagedInstaller:
         if chosen is not None and chosen.mode == "loopback":
             yield loopback_chosen_on_purpose(chosen)
             return
-        address = self._detected_lan_ip()
+        recorded = chosen.address if chosen is not None else None
+        if recorded is not None:
+            # T674: the owner chose an address of this computer (a VPN's, say). It is the one
+            # written, and nothing is detected, so a reinstall does not send the LAN address back.
+            address: str | None = recorded
+            held = networking.holds_here(recorded)
+            if held is None:
+                # The Windows address list could not be read: that is not an answer about this
+                # address, so the line says so (T674 round 3, item 2). The address is still written.
+                yield (
+                    "Warning: the Windows address list could not be read, so it is not known "
+                    f"whether {recorded} is still one of this computer's addresses. It is "
+                    "advertised anyway, because it is the address you chose."
+                )
+            elif not held:
+                yield (
+                    f"Warning: {recorded} is not one of this computer's addresses any more (is "
+                    "Tailscale off, or did the address change?). It is advertised anyway, because "
+                    "it is the address you chose."
+                )
+        else:
+            address = self._detected_lan_ip()
         if address is None:
             yield REALM_ADDRESS_UNKNOWN
             return
         stored = self._stored_realm_row(ctx)
-        # EVERY column the UPDATE would write must already be reachable. One
-        # loopback among them still leaves a client that is sent to its own
-        # machine, so `all()` and not `any()`.
-        if stored is not None and all(networking.advertisable(value) for value in stored):
+        if recorded is not None:
+            # The owner's choice replaces what the row holds, column by column; the row is left
+            # alone only when it already holds exactly that address.
+            if stored is not None and all(value == recorded for value in stored):
+                yield (
+                    f"The realm already advertises {recorded}, the address you chose, so its row "
+                    "was left exactly as it is."
+                )
+                return
+        elif stored is not None and all(networking.advertisable(value) for value in stored):
+            # EVERY column the UPDATE would write must already be reachable. One
+            # loopback among them still leaves a client that is sent to its own
+            # machine, so `all()` and not `any()`.
             shown = ", ".join(dict.fromkeys(stored))
             yield (
                 f"The realm already advertises {shown}, which other machines can reach, so its "

@@ -3372,6 +3372,13 @@ class NetworkPlan:
     identical "did not apply" lines.
     """
 
+    chosen_address: str | None = None
+    """The address the owner chose to advertise on this network, if they chose one (T674).
+
+    None for every plan that detected its address. `apply()` remembers it, and only once the
+    realm row has been written.
+    """
+
     @property
     def ready(self) -> bool:
         """False if something essential (the LAN IP, or the public IP for internet) is missing.
@@ -3452,6 +3459,53 @@ def _can_bind(ip: str) -> bool:
     except OSError:
         return False
     return True
+
+
+def holds_here(address: str, *, under_wsl: bool | None = None) -> bool | None:
+    """Whether this computer holds `address`, asked the way a realm on it is reached (T674).
+
+    Under WSL the question is the WSL listing (`platform.local_ipv4_listing()` with `wsl=True`),
+    which has two sides. A WINDOWS adapter's address is reached through the Windows forwarder, and
+    a bind inside the VM does not answer for it (WSL's NAT mode does not give the VM those
+    addresses; measured on this laptop: Errno 99), so it is held when the Windows side lists it.
+    A VPN interface inside the VM (a Tailscale or WireGuard installed in the distro: the VM's own
+    tailnet node, which peers reach directly) is listed as side `wsl`, and its address is held
+    when a bind inside the VM succeeds (lead ruling, round 3). The VM's NAT eth0 is not listed, so
+    it is never held. Everywhere else the OS answers for itself with a bind, `_can_bind()`.
+
+    `None` means the question could not be answered (T674 round 3): under WSL the Windows listing
+    could not be read and the VM does not hold the address either. An unreadable listing is not an
+    empty one, so a caller says the list could not be read rather than that the address is absent.
+    """
+    wsl = platform.in_wsl() if under_wsl is None else under_wsl
+    if not wsl:
+        return _can_bind(address)
+    listing = platform.local_ipv4_listing(wsl=True)
+    sides = {offered.side for offered in listing.addresses if offered.address == address}
+    if "windows" in sides:
+        return True
+    if "wsl" in sides and _can_bind(address):
+        return True
+    return None if listing.windows_unreadable else False
+
+
+def _forwarder_address(lan: str | None, *, backend: str, in_wsl: bool) -> str | None:
+    """The address a `netsh` portproxy forwards from for `lan`, or None if no rule is built (T674).
+
+    Off WSL that is `lan` under the `netsh` backend: this Windows machine's own address. Under WSL
+    the forwarder runs on Windows, and Windows can listen only on an address it holds, so the
+    Windows side of the listing must name `lan`. A VM-side VPN address (the distro's own tailnet
+    node) is not one, and a rule for it could never listen (round 3, item 1).
+    """
+    if not lan:
+        return None
+    if not in_wsl:
+        return lan if backend == "netsh" else None
+    windows_lists = any(
+        offered.side == "windows" and offered.address == lan
+        for offered in platform.local_ipv4_listing(wsl=True).addresses
+    )
+    return lan if windows_lists else None
 
 
 def _own_names() -> tuple[str, ...]:
@@ -3578,6 +3632,62 @@ def advertisable(address: str | None) -> str | None:
     return candidate
 
 
+def chosen_ipv4(address: str | None) -> str | None:
+    """`address` if an owner may CHOOSE it as the realm address, else None (T674 round 3).
+
+    Narrower than `advertisable()`, which also passes names and IPv6 because a detector or an
+    internet-mode address may be one. A chosen or recorded address must be a plain IPv4 address
+    (the realm row of every family holds one) and not the loopback, the unspecified address or a
+    link-local one. Parsing it with `ipaddress.IPv4Address` is the point: `0:0:0:0:0:0:0:1`,
+    `::ffff:127.0.0.1` and `fe80::1` are loopback or link-local spellings `advertisable()` lets
+    through, and off WSL `_can_bind()` would bind them.
+    """
+    usable = advertisable(address)
+    if usable is None:
+        return None
+    try:
+        parsed = ipaddress.IPv4Address(usable)
+    except ValueError:
+        return None
+    if parsed.is_loopback or parsed.is_unspecified or parsed.is_link_local:
+        return None
+    return usable
+
+
+def _chosen_for_the_realm(
+    address: str, *, can_bind: Callable[[str], bool | None]
+) -> tuple[str | None, str | None]:
+    """The address a chosen realm may advertise, or None and the sentence that says why not (T674).
+
+    Two refusals, and each is needed. `chosen_ipv4()` refuses the loopback however it is
+    spelled (IPv6 and IPv4-mapped too): a chosen `127.0.0.1` is the §35 outage. `can_bind`
+    refuses an address that no interface of this computer owns, because a friend sent to it
+    reaches some other machine. When `can_bind` cannot tell (None: the Windows listing could not
+    be read) the refusal says that, and not that the address is not this computer's.
+    """
+    usable = chosen_ipv4(address)
+    if usable is None:
+        return None, (
+            f"{address.strip()!r} cannot be advertised as the realm address. Only a plain IPv4 "
+            "address of this computer can (such as 192.168.1.20 or a Tailscale 100.x address), "
+            "and not a loopback (127.x), link-local (169.254.x) or 0.0.0.0 one. Choose one of "
+            "this computer's own addresses."
+        )
+    held = can_bind(usable)
+    if held is None:
+        return None, (
+            "The Windows address list could not be read (Windows interop may be off, or the query "
+            f"timed out), so {usable} cannot be checked against this computer's addresses and "
+            "cannot be advertised as the realm address yet. Try again."
+        )
+    if not held:
+        return None, (
+            f"{usable} is not an address of this computer, so it cannot be advertised as the "
+            "realm address. Choose one of this computer's own addresses."
+        )
+    return usable, None
+
+
 @dataclass(frozen=True)
 class NetworkIntent:
     """A mode somebody CHOSE for one install, and when they chose it.
@@ -3590,10 +3700,19 @@ class NetworkIntent:
     `recorded_unix` is carried so the sentence the install prints can say WHEN
     the choice was made. A reader with a file full of one word and no date
     cannot tell a decision from a leftover.
+
+    `address` is set only for a `lan` choice the owner made from an address
+    of this computer that is not the detected LAN address (T674: a Tailscale or
+    other VPN address, say). The closing realm step writes it in place of the
+    detected one, and over a row that holds another address (see
+    `catalog.native.StagedInstaller._advertise_realm()`), so a reinstall does not
+    put the LAN address back. None means "the detected address", which is every
+    choice made before T674.
     """
 
     mode: Mode
     recorded_unix: int = 0
+    address: str | None = None
 
 
 def read_network_intent(server_dir: Path) -> NetworkIntent | None:
@@ -3627,11 +3746,22 @@ def read_network_intent(server_dir: Path) -> NetworkIntent | None:
         logger.debug(f"{path} names a mode this build does not know: {mode!r}")
         return None
     recorded = parsed.get("recorded_unix")
-    return NetworkIntent(mode=mode, recorded_unix=recorded if isinstance(recorded, int) else 0)
+    chosen = parsed.get("address")
+    # An address is honoured only for `lan`, and only if it passes the guard a chosen address
+    # passes (`chosen_ipv4()`). A damaged one reads as no address, so the detected path is taken.
+    address = chosen_ipv4(chosen) if mode == "lan" and isinstance(chosen, str) else None
+    return NetworkIntent(
+        mode=mode,
+        recorded_unix=recorded if isinstance(recorded, int) else 0,
+        address=address,
+    )
 
 
-def record_network_intent(server_dir: Path, mode: Mode) -> str:
+def record_network_intent(server_dir: Path, mode: Mode, address: str | None = None) -> str:
     """Remember that `mode` was applied to this install; `""` if it was written, else why not.
+
+    `address` is written only when it is given, so a choice without one leaves the file exactly
+    as every earlier build wrote it (T674).
 
     The LAST APPLIED mode and not just the loopback, because the way back is
     the same button: a store that only ever remembered `loopback` would be a
@@ -3651,7 +3781,9 @@ def record_network_intent(server_dir: Path, mode: Mode) -> str:
     """
     path = server_dir / INTENT_FILE
     tmp = path.with_name(path.name + ".new")
-    payload = {"mode": mode, "recorded_unix": int(time.time())}
+    payload: dict[str, object] = {"mode": mode, "recorded_unix": int(time.time())}
+    if address is not None:
+        payload["address"] = address
     try:
         server_dir.mkdir(parents=True, exist_ok=True)
         tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8", newline="\n")
@@ -3762,6 +3894,8 @@ def plan(
     *,
     lan_ip: str | None = None,
     public_ip: str | None = None,
+    chosen_address: str | None = None,
+    can_bind: Callable[[str], bool | None] | None = None,
     bindings: Mapping[int, str] | None = None,
     firewall: platform.FirewallBackend | None = None,
     steamos: bool | None = None,
@@ -3843,7 +3977,19 @@ def plan(
     functions themselves, because the real default is a probe BOUND to that
     authority and a bare function reference cannot carry it. Passing any of
     them replaces both the probe and its authority, which is what a test wants.
+
+    `chosen_address` is the T674 path: an address of this computer that the owner picked to
+    advertise in place of the detected LAN address (a Tailscale or other VPN address, say). It
+    is for `lan` mode only and cannot be combined with `lan_ip`. It is refused unless
+    `chosen_ipv4()` passes it and `can_bind` (default `holds_here()`: this computer's own
+    addresses, read from the listing under WSL) agrees,
+    and a refusal lands in `refusals` and `warnings`, leaving the plan not `ready`.
     """
+    if chosen_address is not None:
+        if mode != "lan":
+            raise ValueError("a chosen address is advertised in lan mode only")
+        if lan_ip is not None:
+            raise ValueError("pass chosen_address or lan_ip, not both")
     ports = (entry.ports.auth, entry.ports.world)
     backend = firewall if firewall is not None else platform.detect_firewall()
     # Read at most once, and only if a default seam is actually reached. A ufw
@@ -3879,7 +4025,12 @@ def plan(
     )
     on_steamos = steamos if steamos is not None else platform.is_steamos()
     in_wsl = wsl if wsl is not None else platform.in_wsl()
-    lan = lan_ip if lan_ip is not None else detect_lan()
+    chosen_refusal: str | None = None
+    if chosen_address is not None:
+        guard = can_bind if can_bind is not None else (lambda ip: holds_here(ip, under_wsl=in_wsl))
+        lan, chosen_refusal = _chosen_for_the_realm(chosen_address, can_bind=guard)
+    else:
+        lan = lan_ip if lan_ip is not None else detect_lan()
     public = public_ip
     probe: platform.PublicIpResult | None = None
     if mode == "internet" and public is None:
@@ -4103,12 +4254,15 @@ def plan(
     if bindings:
         loopback = [p for p in ports if bindings.get(p, "").startswith("127.")]
         if loopback:
+            # A rule is built only for an address the forwarder can listen on, and the stopgap
+            # sentence is printed only when one is (T674 round 3, item 1).
+            forward_from = _forwarder_address(lan, backend=backend, in_wsl=in_wsl)
             warnings.append(
                 f"ports {loopback} are published on 127.0.0.1, not 0.0.0.0 — other machines "
                 "cannot reach them. Fix the compose port bindings"
                 + (
                     " (a WSL2 portproxy is added as a stopgap)."
-                    if in_wsl or backend == "netsh"
+                    if forward_from is not None
                     else (
                         " On Docker Desktop for Mac a loopback binding you did not ask for "
                         "usually means its port-binding setting is local-only; change it back "
@@ -4119,8 +4273,8 @@ def plan(
                     )
                 )
             )
-            if (in_wsl or backend == "netsh") and lan:
-                proxy_cmds = platform.portproxy_commands(lan, loopback)
+            if forward_from is not None:
+                proxy_cmds = platform.portproxy_commands(forward_from, loopback)
 
     sql: str | None = None
     client_realmlist: str | None = None
@@ -4135,7 +4289,11 @@ def plan(
         client_realmlist = realmlist_value(LOOPBACK_ADDRESS, entry.ports.auth)
         warnings.append(ONLY_THIS_COMPUTER)
     elif lan is None:
-        warnings.append("could not determine this machine's LAN IP — is it on a network?")
+        if chosen_refusal is not None:
+            refusals.append(chosen_refusal)
+            warnings.append(chosen_refusal)
+        else:
+            warnings.append("could not determine this machine's LAN IP — is it on a network?")
     elif mode == "lan":
         sql = realmlist_sql(entry, lan, lan)
         client_realmlist = realmlist_value(lan, entry.ports.auth)
@@ -4222,6 +4380,7 @@ def plan(
         firewalld_daemon=firewalld_daemon,
         firewalld_zones=firewalld_zones,
         probed_elevated=bool(authority and authority[0]),
+        chosen_address=lan if chosen_address is not None else None,
     )
 
 
@@ -4380,7 +4539,9 @@ def apply(
                 done.append(f"realmlist → {network_plan.client_realmlist}")
                 restart = True
                 if server_dir is not None:
-                    unwritten = record_network_intent(server_dir, network_plan.mode)
+                    unwritten = record_network_intent(
+                        server_dir, network_plan.mode, network_plan.chosen_address
+                    )
                     if unwritten:
                         skipped.append(
                             f"the chosen mode ({network_plan.mode}) could not be remembered "

@@ -4359,3 +4359,201 @@ def test_a_real_run_writes_those_two_shapes_and_no_marker_ever_carries_a_prefix(
     assert {log_lines.parse(line).kind for line in steps} == {"stage"}
     assert {log_lines.parse(line).kind for line in markers} == {"marker"}
     assert [log_lines.parse(line).text for line in steps + markers] == steps + markers
+
+
+def test_the_install_advertises_the_address_the_owner_chose_on_a_vpn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A chosen VPN address survives an install; the detected LAN address does not return (T674).
+
+    The intent file is written in the shape `record_network_intent()` gives it when a chosen
+    address is recorded. Against code that ignores that key, the closing step detects the LAN
+    address and writes it, which is the assertion that fails. The machine is faked whole (not WSL,
+    the address binds, no program runs), so the warning's absence is asserted, not host-dependent.
+    """
+    monkeypatch.setattr(platform, "in_wsl", lambda: False)
+    monkeypatch.setattr(networking, "_can_bind", lambda ip: True)
+
+    def no_program(argv: list[str], *_a: object, **_k: object) -> object:
+        raise AssertionError(f"the test ran {argv[0]} on this machine")
+
+    monkeypatch.setattr(runner, "run", no_program)
+    server = tmp_path / "wow"
+    server.mkdir()
+    (server / networking.INTENT_FILE).write_text(
+        '{"mode": "lan", "address": "100.64.0.10", "recorded_unix": 1}\n', encoding="utf-8"
+    )
+    rec = Recorder(realm_row=f"{native.INSTALL_REALM_HOST}\t{native.INSTALL_REALM_HOST}\n")
+    asked: list[str] = []
+
+    def detect() -> str:
+        asked.append("the LAN address was detected")
+        return "192.168.1.25"
+
+    said = _advertising(rec, server, lan_ip=detect)
+    assert asked == [], "a LAN address was detected although the owner chose one"
+    assert _statements(rec) == [networking.realmlist_sql(ENTRY, "100.64.0.10", "100.64.0.10")]
+    assert [line for line in said if "now advertises 100.64.0.10" in line], said
+    assert not [line for line in said if line.startswith("Warning:")], said
+
+
+def _recorded_address(server: Path, address: str) -> None:
+    (server / networking.INTENT_FILE).write_text(
+        f'{{"mode": "lan", "address": "{address}", "recorded_unix": 1}}\n', encoding="utf-8"
+    )
+
+
+@pytest.mark.parametrize(
+    "token", ["0:0:0:0:0:0:0:1", "::ffff:127.0.0.1", "fe80::1", "fd7a:115c:a1e0::1", "foo"]
+)
+def test_a_recorded_token_that_is_not_a_usable_ipv4_is_never_written(
+    token: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T674 round 3: the recorded path refuses what the chosen path refuses. The token reads as no
+    choice, so the detected LAN address is what the closing step writes, and the token never is."""
+    monkeypatch.setattr(platform, "in_wsl", lambda: False)
+    monkeypatch.setattr(networking, "_can_bind", lambda ip: True)
+    server = tmp_path / "wow"
+    server.mkdir()
+    _recorded_address(server, token)
+    rec = Recorder(realm_row=f"{native.INSTALL_REALM_HOST}\t{native.INSTALL_REALM_HOST}\n")
+    _advertising(rec, server, lan_ip=lambda: "192.168.1.25")
+    statements = _statements(rec)
+    assert not [sql for sql in statements if token in sql], statements
+    assert statements == [networking.realmlist_sql(ENTRY, "192.168.1.25", "192.168.1.25")]
+
+
+def test_under_wsl_a_recorded_tailscale_address_the_vm_holds_gets_no_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Lead ruling, T674 round 3: a Tailscale inside the WSL distro is the VM's own tailnet node.
+    Its address is held when the VM binds it, so no false "no longer held" warning is printed."""
+
+    def listings(argv: list[str], *_a: object, **_k: object) -> subprocess.CompletedProcess[str]:
+        out = (
+            "Wi-Fi 2|192.168.1.210\n"
+            if argv[0] == "powershell.exe"
+            else "2: eth0    inet 172.24.144.5/20 scope global eth0\n"
+            "3: tailscale0    inet 100.86.248.75/32 scope global tailscale0\n"
+        )
+        return subprocess.CompletedProcess(argv, 0, out, "")
+
+    monkeypatch.setattr(platform, "in_wsl", lambda: True)
+    monkeypatch.setattr(runner, "run", listings)
+    monkeypatch.setattr(networking, "_can_bind", lambda ip: ip == "100.86.248.75")
+    server = tmp_path / "wow"
+    server.mkdir()
+    _recorded_address(server, "100.86.248.75")
+    rec = Recorder(realm_row="192.168.1.210\t192.168.1.210\n")
+    said = _advertising(rec, server, lan_ip=lambda: "192.168.1.210")
+    assert not [line for line in said if line.startswith("Warning:")], said
+    assert _statements(rec) == [networking.realmlist_sql(ENTRY, "100.86.248.75", "100.86.248.75")]
+
+
+def test_a_recorded_address_when_the_windows_listing_cannot_be_read_says_so_and_is_still_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T674 round 3, item 2. Interop off is "the list could not be read", not "not this computer's".
+
+    The warning names the unreadable list and the address is written anyway, as it always was.
+    The VM's own listing is empty and `_can_bind` answers False, so nothing here is held by a bind.
+    """
+    monkeypatch.setattr(platform, "in_wsl", lambda: True)
+    monkeypatch.setattr(networking, "_can_bind", lambda ip: False)
+
+    def no_windows(argv: list[str], *_a: object, **_k: object) -> subprocess.CompletedProcess[str]:
+        if argv[0] == "powershell.exe":
+            raise FileNotFoundError(argv[0])
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(runner, "run", no_windows)
+    server = tmp_path / "wow"
+    server.mkdir()
+    _recorded_address(server, "100.72.215.6")
+    rec = Recorder(realm_row="192.168.1.210\t192.168.1.210\n")
+    said = _advertising(rec, server, lan_ip=lambda: "192.168.1.210")
+    warnings = [line for line in said if line.startswith("Warning:")]
+    assert len(warnings) == 1 and "could not be read" in warnings[0], said
+    assert "not one of this computer" not in warnings[0], said
+    assert _statements(rec) == [networking.realmlist_sql(ENTRY, "100.72.215.6", "100.72.215.6")]
+
+
+def test_a_recorded_address_replaces_a_lan_row_from_an_earlier_install(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Route (b): a recorded address that differs from the row is written over it (T674 round 2).
+
+    The row holds the LAN address an earlier install wrote and the owner has since recorded a
+    Tailscale address. Round 1 left any reachable row alone, so the recorded choice never took
+    effect, and the line said the LAN address was reachable.
+    """
+    monkeypatch.setattr(platform, "in_wsl", lambda: False)
+    monkeypatch.setattr(networking, "_can_bind", lambda ip: True)
+    server = tmp_path / "wow"
+    server.mkdir()
+    _recorded_address(server, "100.64.0.10")
+    rec = Recorder(realm_row="192.168.1.25\t192.168.1.25\n")
+    said = _advertising(rec, server, lan_ip=lambda: "192.168.1.25")
+    assert _statements(rec) == [networking.realmlist_sql(ENTRY, "100.64.0.10", "100.64.0.10")]
+    assert [line for line in said if "now advertises 100.64.0.10" in line], said
+    assert not [line for line in said if line.startswith("Warning:")], said
+
+
+def test_a_recorded_address_is_written_when_only_its_local_column_differs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The address column matches the choice but `localAddress` does not, so the row changes."""
+    monkeypatch.setattr(platform, "in_wsl", lambda: False)
+    monkeypatch.setattr(networking, "_can_bind", lambda ip: True)
+    server = tmp_path / "wow"
+    server.mkdir()
+    _recorded_address(server, "100.64.0.10")
+    rec = Recorder(realm_row="100.64.0.10\t192.168.1.25\n")
+    said = _advertising(rec, server, lan_ip=lambda: "192.168.1.25")
+    assert _statements(rec) == [networking.realmlist_sql(ENTRY, "100.64.0.10", "100.64.0.10")]
+    assert not [line for line in said if line.startswith("Warning:")], said
+
+
+def test_a_recorded_address_the_row_already_holds_is_left_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(platform, "in_wsl", lambda: False)
+    monkeypatch.setattr(networking, "_can_bind", lambda ip: True)
+    server = tmp_path / "wow"
+    server.mkdir()
+    _recorded_address(server, "100.64.0.10")
+    rec = Recorder(realm_row="100.64.0.10\t100.64.0.10\n")
+    said = _advertising(rec, server, lan_ip=lambda: "192.168.1.25")
+    assert _statements(rec) == []
+    assert [line for line in said if "already advertises 100.64.0.10" in line], said
+    assert not [line for line in said if line.startswith("Warning:")], said
+
+
+def test_a_recorded_address_this_computer_no_longer_holds_is_warned_about_and_still_advertised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One plain warning line; the address is still written, because it is the owner's choice."""
+    monkeypatch.setattr(platform, "in_wsl", lambda: False)
+    monkeypatch.setattr(networking, "_can_bind", lambda ip: False)
+    server = tmp_path / "wow"
+    server.mkdir()
+    _recorded_address(server, "100.64.0.10")
+    rec = Recorder(realm_row="192.168.1.25\t192.168.1.25\n")
+    said = _advertising(rec, server, lan_ip=lambda: "192.168.1.25")
+    warnings = [line for line in said if line.startswith("Warning:")]
+    assert len(warnings) == 1 and "100.64.0.10" in warnings[0], said
+    assert _statements(rec) == [networking.realmlist_sql(ENTRY, "100.64.0.10", "100.64.0.10")]
+
+
+def test_a_recorded_address_this_computer_still_holds_gets_no_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(platform, "in_wsl", lambda: False)
+    monkeypatch.setattr(networking, "_can_bind", lambda ip: True)
+    server = tmp_path / "wow"
+    server.mkdir()
+    _recorded_address(server, "100.64.0.10")
+    rec = Recorder(realm_row="192.168.1.25\t192.168.1.25\n")
+    said = _advertising(rec, server, lan_ip=lambda: "192.168.1.25")
+    assert not [line for line in said if line.startswith("Warning:")], said
+    assert _statements(rec) == [networking.realmlist_sql(ENTRY, "100.64.0.10", "100.64.0.10")]
