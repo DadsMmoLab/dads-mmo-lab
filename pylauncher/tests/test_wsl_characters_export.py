@@ -1229,6 +1229,36 @@ def test_a_password_holding_a_nul_is_refused_not_a_traceback(tmp_path: Path) -> 
     assert list(out.iterdir()) == []
 
 
+@pytest.mark.parametrize(
+    ("env_text", "prompt_word"),
+    [("", "Database root password"), ("MYSQL_ROOT_PASSWORD=wrong-pw\n", "")],
+    ids=["first-prompt", "retry-prompt"],
+)
+def test_a_typed_password_holding_a_nul_is_refused_not_a_traceback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    env_text: str,
+    prompt_word: str,
+) -> None:
+    # Ctrl-@ or Ctrl-Space at a Linux terminal types NUL, which no environment can carry.
+    script = _script()
+    server, out = _prepare(tmp_path, monkeypatch, env_text=env_text, fixture={"password": "pw"})
+    monkeypatch.setattr(sys, "stdin", types.SimpleNamespace(isatty=lambda: True))
+    asked: list[str] = []
+
+    def typed(prompt: str = "") -> str:
+        asked.append(prompt)
+        return "a\0b"
+
+    monkeypatch.setattr(script, "getpass", types.SimpleNamespace(getpass=typed))
+    assert script.main(["--server-dir", str(server), "--out", str(out)]) == 2
+    err = capsys.readouterr().err
+    assert len(asked) == 1 and prompt_word in asked[0]
+    assert "typed password holds a NUL character" in err and "server folder" not in err
+    assert list(out.iterdir()) == []
+
+
 def test_a_dash_default_applies_only_when_the_variable_is_unset(tmp_path: Path) -> None:
     compose = STOCK_COMPOSE.replace(":-password", "-password")
     unset, _s, _o, _l = _run(
@@ -1288,7 +1318,7 @@ def test_the_readme_says_to_stop_only_the_game_servers() -> None:
     assert "docker compose stop ac-worldserver ac-authserver" in section
     assert "database running" in section
     assert "in the server folder (the one with `docker-compose.yml`)" in section
-    assert "`DOCKER_DB_ROOT_PASSWORD` exported in your shell is not read" in section
+    assert "Variables exported in your shell are not read" in section
 
 
 def test_host_mode_names_another_game_by_its_compose_file(tmp_path: Path) -> None:

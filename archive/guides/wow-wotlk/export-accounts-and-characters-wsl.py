@@ -170,6 +170,11 @@ REFUSED_PASSWORD = (
     "root password (its .env or compose file) and run this again."
 )
 NO_TYPED_PASSWORD = "No password was typed, so nothing was packed."
+NUL_TYPED_PASSWORD = (
+    "The typed password holds a NUL character (Ctrl-@ or Ctrl-Space types one), which no "
+    "program can be handed, so nothing was packed. Run this again and type the password "
+    "without it."
+)
 NUL_PASSWORD = (
     "The database root password in the server folder holds a NUL character (a \\0 escape), "
     "which no program can be handed, so nothing was packed. Fix it in the .env or compose "
@@ -535,6 +540,8 @@ def _typed_password(prompt: str) -> str:
     typed = getpass.getpass(prompt)
     if not typed:
         raise Refusal(NO_TYPED_PASSWORD)
+    if "\0" in typed:
+        raise Refusal(NUL_TYPED_PASSWORD)
     return typed
 
 
