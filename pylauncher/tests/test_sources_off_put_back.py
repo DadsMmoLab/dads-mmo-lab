@@ -186,6 +186,7 @@ def test_after_the_put_back_rebuild_is_no_longer_refused_for_the_folder(tmp_path
     rec.heads[server_dir] = built  # the Recorder's own head answer, as git now gives it
 
     assert made.rebuild_refusal_before_asking(server_dir) is None
+    assert not (server_dir / native.WRITE_BACK_OWED_FILE).exists(), "a whole press clears it"
     assert native.owed_start_refusal(server_dir) == native.REBUILD_OWED_REFUSAL, "Start waits"
     made._refuse_unless_rebuildable(server_dir)  # the compose files are this app's again
     list(made.rebuild(InstallOptions(server_dir=server_dir)))
@@ -268,7 +269,11 @@ def test_a_folder_git_will_not_put_back_keeps_its_row_and_the_others_are_cleared
     assert [row.dest for row in native.sources_still_off(server_dir)] == [elsewhere]
     assert [row.built for row in native.sources_still_off(server_dir)] == [missing]
     assert any("could NOT be put back" in line for line in said), said
-    assert any(f"checkout --detach --force {missing}" in line for line in said), said
+    failed = [line for line in said if "could NOT be put back" in line]
+    # Round 4: a player line names no command (T248); the press stays offered, so it is the way.
+    assert not any("git -C" in line or "checkout" in line for line in failed), failed
+    assert PUT_BACK in failed[0] and "again" in failed[0], failed
+    assert "support file" in failed[0], failed
     assert native.sources_off_refusal(server_dir) is not None
 
 
@@ -388,12 +393,26 @@ def test_a_failed_patch_write_is_completed_by_pressing_again(tmp_path: Path) -> 
     assert failed, first
     assert PUT_BACK in failed[0] and "again" in failed[0], failed[0]
     assert not any(f"Press {REBUILD}" in line for line in first), first
+    # Round 4: the record is cleared and the compose files are this app's again, so only the
+    # write-back marker says the patch is owed: the press is offered, and Rebuild refuses.
+    assert (server_dir / native.WRITE_BACK_OWED_FILE).exists()
+    assert native.put_the_folders_back_offered(server_dir) is True
+    refused = made.rebuild_refusal_before_asking(server_dir)
+    assert refused is not None and PUT_BACK in refused, refused
+    rec.images = True
+    rec.heads[server_dir] = built
+    with pytest.raises(InstallerError, match=PUT_BACK):
+        list(made.rebuild(InstallOptions(server_dir=server_dir)))
+    assert "build" not in rec.calls, rec.calls
 
     second = list(made.put_the_folders_back(InstallOptions(server_dir=server_dir)))
 
     assert calls == ["compose", "patch", "patch"], calls
     assert not [line for line in second if "could not" in line], second
     assert any(f"Press {REBUILD}" in line for line in second), second
+    assert not (server_dir / native.WRITE_BACK_OWED_FILE).exists()
+    assert native.put_the_folders_back_offered(server_dir) is False
+    assert made.rebuild_refusal_before_asking(server_dir) is None
 
 
 def test_a_folder_is_keyed_the_same_whichever_wsl_share_spelling_names_it() -> None:
@@ -469,6 +488,8 @@ def test_a_lost_reservation_after_the_first_checkout_stops_before_the_write_back
 
     assert native.read_head_file(server_dir) == built
     assert calls == [], "a lost reservation does not start the write-back"
+    assert (server_dir / native.WRITE_BACK_OWED_FILE).exists(), "round 4: the marker stays"
+    assert native.put_the_folders_back_offered(server_dir) is True
     assert any("Stopped before the app's own files" in line for line in first), first
 
     second = list(made.put_the_folders_back(InstallOptions(server_dir=server_dir)))
@@ -580,3 +601,70 @@ def test_the_press_is_not_offered_without_an_install_record(tmp_path: Path) -> N
     (server_dir / native.STATE_FILE).unlink()
 
     assert native.put_the_folders_back_offered(server_dir) is False
+
+
+def test_a_crash_after_the_checkout_leaves_the_press_offered_and_rebuild_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 4: the record is gone and the base compose is this app's, yet the write-back is owed.
+
+    A family whose patched source is a sub-checkout under the server folder: its checkout never
+    puts upstream's compose file over this app's, so only the marker can say the patch is owed.
+    """
+    rec, server_dir, built, _stray = _off_core(tmp_path)
+    marked = {
+        name: (server_dir / name).read_text(encoding="utf-8") for name in composegen.COMPOSE_FILES
+    }
+    made = _press_engine(rec)
+    real_put = native.put_sources_off_back
+
+    def put_then_crash(folder_server: Path, off: Any) -> Any:
+        real_put(folder_server, off)
+        raise KeyboardInterrupt("the power went")
+
+    monkeypatch.setattr(native, "put_sources_off_back", put_then_crash)
+    with pytest.raises(KeyboardInterrupt):
+        list(made.put_the_folders_back(InstallOptions(server_dir=server_dir)))
+    for name, text in marked.items():
+        (server_dir / name).write_text(text, encoding="utf-8")
+    assert not native.sources_still_off(server_dir), "the record is forgotten on read"
+    assert not native._base_compose_not_ours(server_dir)
+
+    assert native.put_the_folders_back_offered(server_dir) is True
+    rec.heads[server_dir] = built
+    refused = made.rebuild_refusal_before_asking(server_dir)
+    assert refused is not None and PUT_BACK in refused, refused
+
+
+def test_a_marker_that_cannot_be_written_refuses_the_press_before_any_folder_moves(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rec, server_dir, built, stray = _off_core(tmp_path)
+
+    def cannot(server: Path) -> str:
+        return "the disk is full"
+
+    monkeypatch.setattr(native, "owe_write_back", cannot)
+
+    with pytest.raises(InstallerError, match="the disk is full"):
+        list(_press_engine(rec).put_the_folders_back(InstallOptions(server_dir=server_dir)))
+
+    assert native.read_head_file(server_dir) == stray
+    assert {row.built for row in native.sources_still_off(server_dir)} == {built}
+
+
+def test_a_folder_git_will_not_put_back_keeps_the_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rec, server_dir, built, _stray = _off_core(tmp_path)
+
+    def refuses(folder_server: Path, off: Any) -> Any:
+        return tuple(
+            native.FolderPutBack(row.repo, row.dest, row.built, row.head, "git said no")
+            for row in off
+        )
+
+    monkeypatch.setattr(native, "put_sources_off_back", refuses)
+    list(_press_engine(rec).put_the_folders_back(InstallOptions(server_dir=server_dir)))
+
+    assert (server_dir / native.WRITE_BACK_OWED_FILE).exists()
