@@ -503,6 +503,7 @@ SEAMS: dict[str, tuple[str, str]] = {
     "repair_database": ("lower", "an engine press (native.py reserves)"),
     "corrections": ("lower", "an engine press (native.py reserves)"),
     "update_to_latest": ("lower", "an engine press (native.py reserves)"),
+    "put_the_folders_back": ("lower", "an engine press (native.py reserves)"),
     "adopt": ("lower", "an engine press (native.py reserves)"),
     "client_dir": ("outside", "the game client's folder"),
     "play_client_dir": ("outside", "the game client's folder"),

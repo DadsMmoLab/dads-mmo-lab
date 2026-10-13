@@ -2330,6 +2330,11 @@ class ControllerServices:
     `native.LatestRoute` for why the way BACK must not be able to arrive without
     the way forward.
     """
+    put_the_folders_back: native.PutFoldersBackRoute | None = None
+    """T786's "Put the folders back…" for this install; None where there is no engine for it.
+
+    `install_wiring.put_the_folders_back_for_app()`. The entry is shown exactly when
+    `offered()` says so, and the press runs the engine's, which holds the reservation."""
 
     adopt: native.AdoptRoute | None = None
     """Record these databases as a finished import, on the person's word; None when it cannot.
@@ -3429,6 +3434,10 @@ def _assemble(
         # and the WSL distro whose daemon `native.Seams` cannot address) and
         # that module is where the rebuild's identical refusal already lives.
         update_to_latest=install_wiring.update_to_latest_for_app(
+            entry, server_dir, wsl_distro=wsl_distro
+        ),
+        # T786: the press T766 built, in the same menu; the engine holds its reservation.
+        put_the_folders_back=install_wiring.put_the_folders_back_for_app(
             entry, server_dir, wsl_distro=wsl_distro
         ),
         # T94. HERE for the rebuild's reason: the file set and how each default
@@ -5241,6 +5250,9 @@ a multi-hour compile of code nobody has tested.
 
 RETURN_TO_PIN_BUTTON_LABEL = server_build_presses.RETURN_TO_PIN
 """The way back off an untested commit, shown only once there is one to go back from."""
+
+PUT_THE_FOLDERS_BACK_BUTTON_LABEL = server_build_presses.PUT_THE_FOLDERS_BACK
+"""T766's press, in the same menu (T786); shown while `put_the_folders_back_offered()` is True."""
 
 
 class UpdateChoice(enum.Enum):
@@ -10827,6 +10839,7 @@ class ControllerView(QWidget):
             # greys "Server build ▾" itself (`_set_server_build_button`, T89).
             self.update_to_latest_action.setEnabled(False)
             self.return_to_pin_action.setEnabled(False)
+            self.put_the_folders_back_action.setEnabled(False)
             # And the updates press, for the importer's reason above rather than
             # for symmetry: it reaches the same `import` stage against the same
             # databases, so one while another action is live is two writers.
@@ -10953,6 +10966,7 @@ class ControllerView(QWidget):
             # this runs.
             self._set_update_buttons()
             self._refresh_source_version()
+            self._refresh_put_the_folders_back()
             # And the count, which the update route drops when it moves a
             # source: re-asked here so the line does not outlive the press.
             self._refresh_upstream_news()
@@ -17483,12 +17497,21 @@ class ControllerView(QWidget):
         self._maintenance_failed(exc, MAINTENANCE_BACKUP_FAILED)
         self._settle_shelf_buttons()
 
+    def _give_back_the_backup_button(self) -> None:
+        """Back up is live again after a job, unless the database password is unknown (T785 note).
+
+        A job finishing used to hand the button back whatever `_grey_for_the_database()` had
+        said; it is still grey while `services.db_refusal` is set, with its reason intact.
+        """
+        if self.services.db_refusal is None:
+            self.backup_button.setEnabled(True)
+
     @Slot(object)
     def _backup_done(self, result: object) -> None:
         self._backup_running = False
         retain = self._retain_after_backup
         self._retain_after_backup = False
-        self.backup_button.setEnabled(True)
+        self._give_back_the_backup_button()
         stop_note = None
         if isinstance(result, _BackedUpWithNote):
             stop_note = result.note
@@ -17879,7 +17902,7 @@ class ControllerView(QWidget):
         in Details. Any other failure is not: the Restore box says `said`, and the
         raw text goes in Details. Both reach the app log through `action_failed`.
         """
-        self.backup_button.setEnabled(True)
+        self._give_back_the_backup_button()
         if not self.restore_button.isEnabled():
             # A plan or a restore that failed: a fresh plan is what Restore waits for.
             set_enabled_why(self.restore_button, self._restore_waits_for())
@@ -18046,6 +18069,18 @@ class ControllerView(QWidget):
             "undo anything the newer server wrote into your databases."
         )
         self.return_to_pin_action.setVisible(False)
+        # T786: T766's press, the way out of the Start and Rebuild refusals that name it. Hidden
+        # until the engine says the press is offered (`_refresh_put_the_folders_back()`).
+        self._put_back_offered = False
+        self.put_the_folders_back_action = self.server_build_menu.addAction(
+            PUT_THE_FOLDERS_BACK_BUTTON_LABEL
+        )
+        self.put_the_folders_back_action.triggered.connect(self.put_the_folders_back)
+        self.put_the_folders_back_action.setToolTip(
+            "Put the source folders back on the build they were made from and write this app's "
+            "own files back. Asks first; compiles nothing, and the server must be stopped."
+        )
+        self.put_the_folders_back_action.setVisible(False)
         self.server_build_button.setMenu(self.server_build_menu)
         # The button greys when every entry it SHOWS is dead, and only then, so
         # the bar still says "nothing here can act" without a press -- one of
@@ -18255,6 +18290,7 @@ class ControllerView(QWidget):
         # the app opens, which is what lets an install that was updated in an
         # earlier session say so without anybody pressing anything.
         self._refresh_source_version()
+        self._refresh_put_the_folders_back()
         # T124's count, off the GUI thread: the cached reading on every open
         # but the day's first, which asks GitHub.
         self._refresh_upstream_news()
@@ -20235,6 +20271,34 @@ class ControllerView(QWidget):
         offered = self.services.update_to_latest is not None and not self._backup_before_update
         self.update_to_latest_action.setEnabled(offered)
         self.return_to_pin_action.setEnabled(offered)
+        self.put_the_folders_back_action.setEnabled(
+            self._put_back_offered and not self._backup_before_update
+        )
+
+    def _refresh_put_the_folders_back(self) -> None:
+        """Show "Put the folders back…" exactly when the engine offers it, and read it again (T786).
+
+        The one condition is `route.offered()` (`native.put_the_folders_back_offered()`): files
+        only, so it is affordable on the GUI thread as `_refresh_source_version()` is, and it
+        never raises; a reading that did is taken as not offered, because a press shown over
+        a folder nobody could read is the worse mistake. Called on the tab's first draw and
+        after every job, so a Rebuild, an Update, a Return to the pin or this press itself
+        moves the entry. Never enabled while a job or a backup runs.
+        """
+        route = self.services.put_the_folders_back
+        offered = False
+        if route is not None and not self._waits_for_the_distro(
+            "folders to put back", self._refresh_put_the_folders_back
+        ):
+            try:
+                offered = route.offered()
+            except OSError as exc:
+                logger.warning(f"could not read whether {self.entry.id} owes a put-back: {exc}")
+        self._put_back_offered = offered
+        self.put_the_folders_back_action.setVisible(offered)
+        self.put_the_folders_back_action.setEnabled(
+            offered and not self._busy and not self._backup_before_update
+        )
 
     @Slot()
     def _set_server_build_button(self) -> None:
@@ -20467,6 +20531,7 @@ class ControllerView(QWidget):
         set_enabled_why(self.backup_button, wait_for("the backup before the update"))
         self.update_to_latest_action.setEnabled(False)
         self.return_to_pin_action.setEnabled(False)
+        self.put_the_folders_back_action.setEnabled(False)
         self.maintenance_report.setPlainText(
             "Backing up before the update… this can take minutes on a full world."
         )
@@ -20492,7 +20557,7 @@ class ControllerView(QWidget):
         # lock, and a lock still held while its own handler blocks on a dialog
         # would refuse the very press that dialog is asking for.
         self._backup_before_update = False
-        self.backup_button.setEnabled(True)
+        self._give_back_the_backup_button()
         self._set_update_buttons()
         report = result.report if isinstance(result, _BackedUpWithNote) else result
         if not isinstance(report, wotlk_maintenance.BackupReport):
@@ -20524,7 +20589,7 @@ class ControllerView(QWidget):
         # What the database said rides on `detail` (T194 R1): folded, and logged.
         detail = getattr(exc, "detail", "")
         self._backup_before_update = False
-        self.backup_button.setEnabled(True)
+        self._give_back_the_backup_button()
         self._set_update_buttons()
         self.maintenance_report.setPlainText(message)
         self.maintenance_details.set_text(detail)
@@ -20611,6 +20676,37 @@ class ControllerView(QWidget):
         return self.rebuild_log.run(
             lambda: self._watch_for_load_wait(self._noting_kept_sources(route.to_pin(cancel))),
             title=f"Returning {self.entry.name} to the tested commit",
+            cancel=cancel,
+            record_as=self._run_record_kind(),
+        )
+
+    @Slot()
+    def put_the_folders_back(self) -> bool:
+        """Ask, then run the engine's "Put the folders back…" in the build panel (T786).
+
+        False if nothing ran.
+
+        The engine holds the server's reservation and refuses a running world with its own
+        remedy; both arrive as the panel's FAILED line and `action_failed`, and nothing has
+        moved. This takes no reservation of its own (a second one would refuse the first), and
+        it compiles nothing, so `_rebuild_owed` is left as it is. It does move the sources, so
+        the finish drops what the move made stale and reads the server files again.
+        """
+        route = self.services.put_the_folders_back
+        if route is None or self._update_route_busy():
+            return False
+        if not ask_yes_no(
+            self, f"Put the folders of {self.entry.name} back?", route.confirmation()
+        ):
+            logger.info(f"put the folders back of {self.entry.id} declined at the question")
+            return False
+        cancel = self._rebuild_cancel()
+        self._rebuild_is_compile = False
+        self._rebuild_moves_sources = True
+        self._update_sources_kept = False
+        return self.rebuild_log.run(
+            lambda: route.press(cancel),
+            title=f"Putting the folders of {self.entry.name} back",
             cancel=cancel,
             record_as=self._run_record_kind(),
         )

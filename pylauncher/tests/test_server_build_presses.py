@@ -9,7 +9,7 @@ too, which is accepted: a log line that names a press by a name it does not
 have misleads whoever reads the bug report the same way -- and holds two rules
 over them:
 
-1. The four labels are spelled in ONE file, `yulon/server_build_presses.py`.
+1. The five labels are spelled in ONE file, `yulon/server_build_presses.py`.
    Anywhere else they are built from its constants, so a rename moves every
    sentence that names the press along with the press.
 2. No string carries a shorthand for a press in place of its label: the old
@@ -43,6 +43,7 @@ LABELS = (
     cv.REBUILD_BUTTON_LABEL,
     cv.UPDATE_TO_LATEST_BUTTON_LABEL,
     cv.RETURN_TO_PIN_BUTTON_LABEL,
+    cv.PUT_THE_FOLDERS_BACK_BUTTON_LABEL,
 )
 FIELD = "{…}"
 STALE = re.compile(

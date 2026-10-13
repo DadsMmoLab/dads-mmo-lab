@@ -1476,6 +1476,43 @@ def return_to_pin_confirmation(
     )
 
 
+def put_the_folders_back_confirmation(entry: CatalogEntry, server_dir: Path) -> str:
+    """The question asked before "Put the folders back…" runs (T786), in player words.
+
+    What the engine's press does (`StagedInstaller.put_the_folders_back()`), no more: each
+    source folder the record names goes back on the commit its build was made from, this
+    app's own compose files are written again if that replaced them, and the carried patch is
+    written again. It compiles nothing and does not touch the databases, and it needs the
+    server stopped; the engine refuses a running world itself and moves nothing.
+    """
+    return (
+        f"Put the source folders of {entry.name} in {server_dir} back on the commits its build "
+        "was made from?\n\n"
+        "This puts every folder that is off its build back on it, writes this app's own compose "
+        "files again if that replaced them, and writes the carried patch again. Nothing is "
+        "compiled and your databases are not touched; a folder with changes of your own is left "
+        "as it is, and this says so. The server must be stopped: if it is running, nothing is "
+        "moved, and this says to stop it first. Say no and nothing happens at all."
+    )
+
+
+@dataclass(frozen=True)
+class PutFoldersBackRoute:
+    """The three parts of the "Put the folders back…" control, wired so they cannot arrive apart.
+
+    `LatestRoute`'s argument: a tab holding a `press` without the `confirmation` runs a move of
+    somebody's folders behind a dialog nobody wrote, and one holding neither `offered` could not
+    tell when to show the entry. `None` for the whole route hides the entry (T786).
+    """
+
+    offered: Callable[[], bool]
+    """`put_the_folders_back_offered()` for this install: a file reading, no daemon."""
+    confirmation: Callable[[], str]
+    """The question's text for this install. Pure."""
+    press: Callable[[threading.Event | None], Iterator[str]]
+    """Cancel in, lines out: `RebuildSource`'s shape. The engine holds the reservation."""
+
+
 def commits_past_pin(rev: SourceRev) -> str:
     """One source's version line: what it was built from, and how far that is past the pin.
 

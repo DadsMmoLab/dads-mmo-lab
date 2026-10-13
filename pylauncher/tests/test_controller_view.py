@@ -18583,6 +18583,7 @@ def test_the_three_server_build_presses_are_one_menu_and_each_reaches_its_own_sl
         view.rebuild_action,
         view.update_to_latest_action,
         view.return_to_pin_action,
+        view.put_the_folders_back_action,  # T786: hidden here, nothing is off its build
     ]
     assert view.server_build_menu.toolTipsVisible(), "the menu hides its entries' tooltips"
     for action in view.server_build_menu.actions():
@@ -18616,10 +18617,15 @@ def test_the_server_build_button_greys_only_when_every_press_it_offers_is_dead(
     assert view.server_build_button.isEnabled() is True
 
     view._set_busy(True)
-    assert [a.isEnabled() for a in view.server_build_menu.actions()] == [False, False, False]
+    assert [a.isEnabled() for a in view.server_build_menu.actions()] == [False] * 4
     assert view.server_build_button.isEnabled() is False, "a job is running and it is live"
     view._set_busy(False)
-    assert [a.isEnabled() for a in view.server_build_menu.actions()] == [True, True, True]
+    assert [a.isEnabled() for a in view.server_build_menu.actions()] == [
+        True,
+        True,
+        True,
+        False,
+    ]  # T786: the fourth entry is hidden
     assert view.server_build_button.isEnabled() is True, "the job ended and it stayed grey"
 
     # No rebuild wiring and no route: Rebuild is the one entry shown, and dead.

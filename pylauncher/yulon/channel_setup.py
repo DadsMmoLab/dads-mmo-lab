@@ -65,7 +65,7 @@ from typing import Any, TypeVar, cast
 
 from yulon import bot_population, commands, docker, platform, playerbots_keys, soap, winacl
 from yulon.catalog import bot_count, composegen, time_zone
-from yulon.catalog.catalog import CatalogEntry, ConfPatch
+from yulon.catalog.catalog import CatalogEntry, ConfPatch, DbPasswordUnknown
 from yulon.catalog.families import conf
 from yulon.log import get_logger
 from yulon.said import SaidByYulon
@@ -1443,10 +1443,18 @@ class InstallChannel:
 
     def _password(self) -> str | None:
         """The install's database password: the one handed over (a reader is read now), else this
-        folder's own (T748: a generated WotLK install has no published value to fall back to)."""
+        folder's own (T748: a generated WotLK install has no published value to fall back to).
+
+        The folder's own is asked as `known_db_password()` (T785 note), so a password nobody can
+        know is a `DbPasswordUnknown` in player words and never `None` handed on to be guessed
+        at. `enable()` reports that sentence; the readers below treat it as "cannot tell".
+
+        Raises:
+            DbPasswordUnknown: nothing was handed over and the folder cannot say.
+        """
         given = self._db_password
         if given is None:
-            return self.entry.install.db_password(self.server_dir)
+            return self.entry.install.known_db_password(self.server_dir)
         return given() if callable(given) else given
 
     def _from_disk(self) -> State:
@@ -1894,6 +1902,9 @@ class InstallChannel:
                 )
         except ServerHeldElsewhere as held:
             raise EnableRefused(str(held)) from held
+        except DbPasswordUnknown as unknown:
+            # Nothing was written: the password is read before `enable()` writes anything.
+            raise EnableRefused(str(unknown)) from unknown
         self._rearm("Turn on", waiting_too=True)
         return done
 
