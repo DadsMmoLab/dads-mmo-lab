@@ -3075,6 +3075,26 @@ SOURCES_MIXED_REBUILD = (
 )
 """The last sentence of `SOURCES_MIXED_NOTE`: what the player does next."""
 
+SOURCES_MIXED_PUT_BACK_THEN_REBUILD = (
+    "Its image tags are mixed, so it must be rebuilt before it can start, and Start is refused "
+    "until it is. Yu'lon's own files were not all written back into the source folders, so "
+    "a rebuild is refused until they are: press "
+    f"{server_build_presses.under_server_build(server_build_presses.PUT_THE_FOLDERS_BACK)} "
+    "first, then "
+    f"{server_build_presses.under_server_build(server_build_presses.REBUILD)}, which compiles "
+    "every image from those commits."
+)
+"""`SOURCES_MIXED_REBUILD` while `WRITE_BACK_OWED_FILE` is there (T783 round 2): Rebuild refuses
+on that record, so the put-back press is named first."""
+
+
+def mixed_rebuild_sentence(server_dir: Path) -> str:
+    """What a mixed-tags note tells the player to press: Rebuild, or the put-back first (T783)."""
+    if write_back_owed(server_dir):
+        return SOURCES_MIXED_PUT_BACK_THEN_REBUILD
+    return SOURCES_MIXED_REBUILD
+
+
 SOURCES_MIXED_NOTE = f"{SOURCES_MIXED_BACK} {SOURCES_MIXED_REBUILD}"
 """Appended when the rollback left the tags MIXED (`RollbackNotDone.mixed`, fix rounds 1-2).
 
@@ -3090,11 +3110,14 @@ MIXED_UNTOUCHED = (
 """What a mixed-tags note adds when no container was replaced (fix round 3)."""
 
 
-def mixed_note(touched: bool) -> str:
-    """`SOURCES_MIXED_NOTE`, saying the old build still runs when no container was replaced."""
+def mixed_note(touched: bool, rebuild: str = SOURCES_MIXED_REBUILD) -> str:
+    """`SOURCES_MIXED_NOTE`, saying the old build still runs when no container was replaced.
+
+    `rebuild` is the closing sentence, `mixed_rebuild_sentence()`'s answer (T783 round 2).
+    """
     if touched:
-        return SOURCES_MIXED_NOTE
-    return f"{SOURCES_MIXED_BACK} {MIXED_UNTOUCHED} {SOURCES_MIXED_REBUILD}"
+        return f"{SOURCES_MIXED_BACK} {rebuild}"
+    return f"{SOURCES_MIXED_BACK} {MIXED_UNTOUCHED} {rebuild}"
 
 
 START_REFUSED_FILE = ".yulon-start-refused.json"
@@ -3871,9 +3894,11 @@ WRITE_BACK_OWED_FILE = ".yulon-write-back-owed.json"
 
 Written by `put_the_folders_back()` before its first checkout, and removed only once both
 halves of its write-back succeeded with every folder back. A lost reservation, a failed half
-or a crash leaves it. Read by `put_the_folders_back_offered()`, so the press is offered again,
-and by Rebuild (`write_back_owed_refusal()`), which refuses while it is there: the checkout
-put upstream's source over the carried patch, and Rebuild does not write the patch.
+or a crash leaves it. The Update route's rollback (`_restore_the_folder()`) writes and removes
+its own the same way, and a whole Update removes any (T783). Read by
+`put_the_folders_back_offered()`, so the press is offered again, and by Rebuild
+(`write_back_owed_refusal()`), which refuses while it is there: the checkout put upstream's
+source over the carried patch, and Rebuild does not write the patch.
 
 A file of its own, not a row in `SOURCES_OFF_FILE`: that record is forgotten as soon as its
 folders read as back (`sources_still_off()`), which is the moment this one starts to matter,
@@ -3911,13 +3936,29 @@ def write_back_owed(server_dir: Path) -> bool:
     return True
 
 
-def forget_write_back_owed(server_dir: Path) -> None:
-    """Remove `WRITE_BACK_OWED_FILE`; a failure is logged, never raised (it then stays owed)."""
+def forget_write_back_owed(server_dir: Path) -> str:
+    """Remove `WRITE_BACK_OWED_FILE`. "" once gone, else why not; never raises (T783).
+
+    A record that would not go stays owed: Rebuild still refuses on it, so a caller must not
+    send the player to Rebuild then, and says that "Put the folders back…" is still offered.
+    """
     path = server_dir / WRITE_BACK_OWED_FILE
     try:
         path.unlink(missing_ok=True)
     except OSError as exc:
         logger.warning(f"could not remove {path}: {exc}")
+        return f"{path} could not be removed ({exc})"
+    return ""
+
+
+def write_back_record_stuck(why: str) -> str:
+    """The sentence for a whole write-back whose record would not go (T783 item 4)."""
+    put_back = server_build_presses.under_server_build(server_build_presses.PUT_THE_FOLDERS_BACK)
+    return (
+        f"Yu'lon's own files were written back, but {why}, so a rebuild stays refused and "
+        f"{put_back} is still offered. Once the reason is fixed, press it again: it finds "
+        "nothing left to move and removes the record."
+    )
 
 
 def write_back_owed_refusal(server_dir: Path) -> str | None:
@@ -11181,10 +11222,13 @@ class StagedInstaller:
                         database = f" {not_back}"
                     if copy.put is not None:
                         database = f" {copy_back_with_the_sources(copy.put)}"
+                    # T783 round 2: a write-back the rollback could not finish leaves its
+                    # record, and Rebuild refuses on it, so the note names the put-back first.
+                    rebuild = mixed_rebuild_sentence(server_dir)
                     sources = (
-                        mixed_note(exc.touched)
+                        mixed_note(exc.touched, rebuild)
                         if not failed
-                        else f"{SOURCES_NOT_ALL_BACK_NOTE} {SOURCES_MIXED_REBUILD}"
+                        else f"{SOURCES_NOT_ALL_BACK_NOTE} {rebuild}"
                     )
                     raise carry_detail(
                         exc,
@@ -11292,6 +11336,15 @@ class StagedInstaller:
                 # T217: nor is the copy put back -- that needs a yield and a restore.
                 work.settle()
                 raise
+            # T783: a whole Update -- the new build compiled, started and recorded (`landed` in
+            # `rebuild()`) -- wrote this app's compose files and patch into the folders it moved,
+            # so nothing is owed, whatever an earlier press left. Here and not after the patch
+            # step: a compile or start failure after it rolls the folders back, and that
+            # rollback's write-back can fail. Before `after_update()`, whose failure leaves the
+            # build and its sources as they are. A half-way Update never gets here.
+            stuck = forget_write_back_owed(server_dir)
+            if stuck:
+                yield write_back_record_stuck(stuck)
             landed = (
                 "the commit this app was tested against" if to_pin else "the newest upstream code"
             )
@@ -11563,6 +11616,22 @@ class StagedInstaller:
         Returns the sources that would not go back (T217), and remembers them in
         `SOURCES_OFF_FILE` so every start is refused until they are back.
         """
+        # T783: the checkout below puts upstream's files over this app's, as the put-back press's
+        # does, so the record that the write-back is owed is written first (T766 round 4's
+        # spec), and only this rollback's own record is removed, once its write-back is whole:
+        # one an earlier press left stays until that press, or a whole Update, finishes.
+        ours = bool(moved) and not write_back_owed(server_dir)
+        if ours:
+            unwritten = owe_write_back(server_dir)
+            if unwritten:
+                # Not a refusal, unlike the press: the folders are ahead of the build that runs,
+                # and leaving them there is worse than a record that could not be written.
+                ours = False
+                logger.warning(f"the rollback goes on without its record: {unwritten}")
+                yield (
+                    f"{unwritten}, so if the source folders are put back but Yu'lon's own files "
+                    "are not written into them again, nothing will refuse a rebuild for it."
+                )
         failed = yield from self._put_sources_back(moved)
         # T680 (L12): the rows the move wrote for these folders give way to what is true
         # now -- a row for each folder that would not go back, none for one that did --
@@ -11655,6 +11724,12 @@ class StagedInstaller:
                 f"reason is fixed, press {server_build_presses.under_server_build(press)} "
                 "again: it writes the patch before it compiles."
             )
+        else:
+            # T783: whole -- every folder back, the compose files and the patch written.
+            if ours and not failed:
+                stuck = forget_write_back_owed(server_dir)
+                if stuck:
+                    yield write_back_record_stuck(stuck)
         yield from lay_the_scripts()
         return failed
 
@@ -11837,7 +11912,11 @@ class StagedInstaller:
                 f"{put_back} again once the reason above is fixed."
             )
         elif whole:
-            forget_write_back_owed(server_dir)
+            stuck = forget_write_back_owed(server_dir)
+            if stuck:
+                # T783: Rebuild still refuses on the record, so it is not the press named here.
+                yield write_back_record_stuck(stuck)
+                return
             rebuild = server_build_presses.under_server_build(server_build_presses.REBUILD)
             yield f"Press {rebuild}: it compiles the folders as they stand."
 

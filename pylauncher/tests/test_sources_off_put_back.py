@@ -415,6 +415,51 @@ def test_a_failed_patch_write_is_completed_by_pressing_again(tmp_path: Path) -> 
     assert made.rebuild_refusal_before_asking(server_dir) is None
 
 
+def test_a_record_that_will_not_go_does_not_send_the_player_to_a_refused_rebuild(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T783 item 4: the write-back is whole but its record stays, so Rebuild still refuses."""
+    rec, server_dir, built, _stray = _off_core(tmp_path)
+    made = _press_engine(rec)
+    unlink = Path.unlink
+
+    def stuck(self: Path, missing_ok: bool = False) -> None:
+        if self.name == native.WRITE_BACK_OWED_FILE:
+            raise PermissionError(13, "Permission denied", str(self))
+        unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", stuck)
+
+    said = list(made.put_the_folders_back(InstallOptions(server_dir=server_dir)))
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+    assert (server_dir / native.WRITE_BACK_OWED_FILE).exists(), "the ground: it would not go"
+    rec.heads[server_dir] = built
+    refused = made.rebuild_refusal_before_asking(server_dir)
+    assert refused is not None and PUT_BACK in refused, refused
+    assert not any(f"Press {REBUILD}" in line for line in said), said
+    last = said[-1]
+    assert PUT_BACK in last and "still offered" in last, last
+    assert native.WRITE_BACK_OWED_FILE in last, last
+    assert native.put_the_folders_back_offered(server_dir) is True
+
+
+def test_forgetting_the_record_says_why_it_could_not(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert native.owe_write_back(tmp_path) == ""
+    assert native.forget_write_back_owed(tmp_path) == ""
+    assert not (tmp_path / native.WRITE_BACK_OWED_FILE).exists()
+    assert native.owe_write_back(tmp_path) == ""
+
+    def stuck(self: Path, missing_ok: bool = False) -> None:
+        raise PermissionError(13, "Permission denied", str(self))
+
+    monkeypatch.setattr(Path, "unlink", stuck)
+    why = native.forget_write_back_owed(tmp_path)
+    assert native.WRITE_BACK_OWED_FILE in why and "Permission denied" in why, why
+
+
 def test_a_folder_is_keyed_the_same_whichever_wsl_share_spelling_names_it() -> None:
     server = Path(r"\\wsl$\Ubuntu\home\pk\wow")
     shared = Path(r"\\wsl.localhost\Ubuntu\home\pk\wow")

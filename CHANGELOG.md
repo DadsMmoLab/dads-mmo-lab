@@ -20,6 +20,8 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - New WoW WotLK and Unbound servers get a database password of their own; older servers keep theirs.
 ### Fixed
 - A server whose database password cannot be found now greys the accounts, backup and module buttons and says why.
+- A finished update no longer leaves **Rebuild** refused over files a failed **Put the folders back…** left.
+- A failed update that leaves its patch out names **Put the folders back…** under **Server build ▾** on the Modules tab.
 - **Start** on a WSL server now waits for Docker to come up even when Windows already lists the distro as running.
 - The first **Start** on a WSL server whose distro is stopped now waits for the distro to boot instead of failing.
 - Installing or updating a module again on a server inside WSL no longer fails when Git for Windows is installed.
