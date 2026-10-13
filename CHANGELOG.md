@@ -135,6 +135,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - City Bots' install and database updates are refused, naming the accounts, when a real account uses a bot's account number.
 - Check for module updates works on a PC without Git installed.
 - A crash while the command channel is switched on no longer leaves a cut-off copy of your server's settings.
+- A full disk or a crash while the command channel is switched on or off no longer cuts off your server's settings.
 
 ### Changed
 - On an older WotLK install, the first Rebuild sends the whole server to Docker once (about 5 GB); later ones are quick.

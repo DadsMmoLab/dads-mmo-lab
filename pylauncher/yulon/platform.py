@@ -6480,6 +6480,10 @@ def write_private_atomically(path: Path, data: bytes) -> None:
     that is at least as strict (`old & 0o600`): a 0400 file stays 0400, and a
     0664 one comes back 0600. On Windows the mode is not enforced (see
     `families.conf._write`), so this is a POSIX guarantee.
+
+    The bytes are synced before the rename and the folder after it (T790), so a
+    power cut leaves the new file or the old one, never an empty file where the
+    old one was. The folder sync is best effort, as `composegen._replace_whole`'s is.
     """
     try:
         old = path.stat().st_mode & 0o777
@@ -6492,8 +6496,31 @@ def write_private_atomically(path: Path, data: bytes) -> None:
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, PRIVATE_MODE)
         with os.fdopen(fd, "wb") as handle:
             handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
         os.chmod(tmp, mode)
         os.replace(tmp, path)  # atomic on POSIX and on Windows
     except OSError:
         tmp.unlink(missing_ok=True)
         raise
+    _fsync_folder(path.parent)
+
+
+def _fsync_folder(folder: Path) -> None:
+    """Make the rename into `folder` survive a power cut, where POSIX lets this app ask.
+
+    A rename is an entry in its folder, and after a power cut the old file can come
+    back until the folder itself is synced. Windows cannot open a folder and is not
+    asked. This runs after the rename, so a refusal is a warning: the new file is
+    already in place, and reporting the write as failed would be untrue.
+    """
+    if os.name == "nt":
+        return
+    try:
+        fd = os.open(folder, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError as exc:
+        logger.warning(f"could not fsync {folder} after writing a private file in it: {exc}")

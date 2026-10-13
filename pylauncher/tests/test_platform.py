@@ -6,6 +6,7 @@ import errno
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -1996,3 +1997,93 @@ def test_bind_tcp_always_lets_the_probe_socket_go(raises: bool) -> None:
 
     platform.bind_tcp("127.0.0.1", 3306, make_socket=lambda *_a: Probe(), windows=True)
     assert closed == [True]
+
+
+# -- write_private_atomically() (T790) -----------------------------------
+
+
+def test_a_private_file_is_synced_before_its_rename_and_its_folder_after(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T790: the bytes and the new entry are on disk before the old file is gone (POSIX).
+
+    `.env` and the channel's conf copy hold the database password. A rename whose
+    bytes never reached the disk leaves an empty file where the old one was after a
+    power cut, so the file is synced before the rename and the folder after it. A
+    folder cannot be opened on Windows, and is not asked there.
+    """
+    target = tmp_path / ".env"
+    target.write_bytes(b"OLD=1\n")
+    order: list[str] = []
+    real_fsync = os.fsync
+    real_replace = os.replace
+
+    def recording_fsync(fd: int) -> None:
+        order.append("folder" if stat.S_ISDIR(os.fstat(fd).st_mode) else "file")
+        real_fsync(fd)
+
+    def recording_replace(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
+        order.append("replace")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, "fsync", recording_fsync)
+    monkeypatch.setattr(os, "replace", recording_replace)
+
+    platform.write_private_atomically(target, b"NEW=2\n")
+
+    assert target.read_bytes() == b"NEW=2\n"
+    assert order == (["file", "replace"] if os.name == "nt" else ["file", "replace", "folder"])
+
+
+def test_a_private_write_whose_file_cannot_be_synced_leaves_the_old_file_and_no_temporary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T790: a refused sync is a failed write, and the old file is what is left.
+
+    The sync comes before the rename, so the refusal raises before the old file is
+    touched, and the temporary file goes the way every other failure's does.
+    """
+    target = tmp_path / ".env"
+    target.write_bytes(b"OLD=1\n")
+    real_fsync = os.fsync
+
+    def refusing_file(fd: int) -> None:
+        if not stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError(errno.EIO, "Input/output error")
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", refusing_file)
+
+    with pytest.raises(OSError, match="Input/output error"):
+        platform.write_private_atomically(target, b"NEW=2\n")
+
+    assert target.read_bytes() == b"OLD=1\n"
+    assert sorted(p.name for p in tmp_path.iterdir()) == [".env"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows cannot open a folder to sync it")
+def test_a_folder_refusing_its_sync_after_the_rename_does_not_fail_the_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T790: the new file is already in place by then, so the write is not reported as failed.
+
+    The folder's sync is asked for, and a refusal is a warning: saying the write
+    failed when the rename has happened would be untrue.
+    """
+    target = tmp_path / ".env"
+    target.write_bytes(b"OLD=1\n")
+    folder_syncs: list[int] = []
+    real_fsync = os.fsync
+
+    def refusing_folder(fd: int) -> None:
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            folder_syncs.append(fd)
+            raise OSError(errno.EIO, "Input/output error")
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", refusing_folder)
+
+    platform.write_private_atomically(target, b"NEW=2\n")
+
+    assert target.read_bytes() == b"NEW=2\n"
+    assert len(folder_syncs) == 1
