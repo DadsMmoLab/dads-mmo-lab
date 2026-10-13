@@ -303,8 +303,10 @@ def record_channel_press(entry: CatalogEntry, server_dir: Path, before: str) -> 
     backup = target.with_name(target.name + CHANNEL_BACKUP_SUFFIX)
     if not backup.exists():
         # As `enable()` does: the record of the override before ANY channel is the first
-        # one kept, so a leftover one from an earlier press is never replaced.
-        backup.write_text(before, encoding="utf-8", newline="\n")
+        # one kept, so a leftover one from an earlier press is never replaced. It goes
+        # through the compose files' own writer, so it is whole or absent, never a cut-off
+        # copy that a rollback would restore (T780).
+        _replace_whole(backup, before)
     write_dotenv(server_dir, {CHANNEL_PORT_VAR: f"127.0.0.1:{operations.port}"})
 
 

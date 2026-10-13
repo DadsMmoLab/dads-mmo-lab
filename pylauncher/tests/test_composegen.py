@@ -694,6 +694,33 @@ def test_a_disk_that_fills_during_write_plan_leaves_the_old_file_whole(
         assert base.stat().st_mode & 0o777 == 0o640
 
 
+def test_a_channel_backup_that_fills_the_disk_is_not_left_cut_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T780: a full disk while the command channel's backup is written leaves no backup.
+
+    `<override>.before-channel` is what a rollback puts back over the live override, so
+    a copy cut short there is a broken override waiting for the next rollback. It is
+    written beside its place and renamed in only when whole: a write that fails part-way
+    raises, leaves no backup, and leaves no temporary file behind.
+    """
+    server_dir = tmp_path / "wow"
+    server_dir.mkdir()
+    composegen.write_plan(render(server_dir), server_dir)
+    override = server_dir / composegen.OVERRIDE_FILE
+    backup = override.with_name(override.name + composegen.CHANNEL_BACKUP_SUFFIX)
+    before = override.read_text(encoding="utf-8")
+    listing = sorted(p.name for p in server_dir.iterdir())
+    calls = _disk_fills_half_way(monkeypatch)
+
+    with pytest.raises(OSError, match="No space left"):
+        composegen.record_channel_press(ENTRY, server_dir, before)
+
+    assert len(calls) >= 2, "the fill never reached a second write"
+    assert not backup.exists(), "a cut-off backup was left"
+    assert sorted(p.name for p in server_dir.iterdir()) == listing, "a temp file was left"
+
+
 def test_write_plan_keeps_a_files_mode_and_gives_a_new_one_the_usual_mode(tmp_path: Path) -> None:
     """The replaced file keeps its own mode; a file that was not there gets 0644."""
     server_dir = tmp_path / "wow"
