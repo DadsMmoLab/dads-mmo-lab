@@ -97,6 +97,7 @@ from yulon import (
     update_failure,
 )
 from yulon.after_stop import PutBackAfterStop, TrueAfterStop, withdraw_stop
+from yulon.apply import module_git
 from yulon.catalog import (
     bot_count,
     build_context,
@@ -3808,6 +3809,73 @@ def forget_sources_off(server_dir: Path) -> None:
         logger.warning(f"could not remove {path}: {exc}")
 
 
+WRITE_BACK_OWED_FILE = ".yulon-write-back-owed.json"
+""""Put the folders back…" moved a folder and has not yet written this app's own files back (T766).
+
+Written by `put_the_folders_back()` before its first checkout, and removed only once both
+halves of its write-back succeeded with every folder back. A lost reservation, a failed half
+or a crash leaves it. Read by `put_the_folders_back_offered()`, so the press is offered again,
+and by Rebuild (`write_back_owed_refusal()`), which refuses while it is there: the checkout
+put upstream's source over the carried patch, and Rebuild does not write the patch.
+
+A file of its own, not a row in `SOURCES_OFF_FILE`: that record is forgotten as soon as its
+folders read as back (`sources_still_off()`), which is the moment this one starts to matter,
+and the Start refusal reads it. `{"version": 1}`.
+"""
+
+
+def owe_write_back(server_dir: Path) -> str:
+    """Write `WRITE_BACK_OWED_FILE`, whole or not at all. "" once written, else why not."""
+    path = server_dir / WRITE_BACK_OWED_FILE
+    staged = path.with_name(path.name + ".yulon-new")
+    try:
+        staged.write_text(json.dumps({"version": 1}) + "\n", encoding="utf-8")
+        os.replace(staged, path)
+    except OSError as exc:
+        try:
+            staged.unlink(missing_ok=True)
+        except OSError as also:
+            logger.warning(f"could not remove {staged}: {also}")
+        return f"{path} could not be written ({exc})"
+    return ""
+
+
+def write_back_owed(server_dir: Path) -> bool:
+    """Whether `WRITE_BACK_OWED_FILE` is there. A folder that cannot be asked reads as owed."""
+    try:
+        (server_dir / WRITE_BACK_OWED_FILE).stat()
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        logger.warning(
+            f"could not tell whether {server_dir / WRITE_BACK_OWED_FILE} is there: {exc}"
+        )
+        return True
+    return True
+
+
+def forget_write_back_owed(server_dir: Path) -> None:
+    """Remove `WRITE_BACK_OWED_FILE`; a failure is logged, never raised (it then stays owed)."""
+    path = server_dir / WRITE_BACK_OWED_FILE
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        logger.warning(f"could not remove {path}: {exc}")
+
+
+def write_back_owed_refusal(server_dir: Path) -> str | None:
+    """Why no Rebuild may compile while `WRITE_BACK_OWED_FILE` is there; else None (T766)."""
+    if not write_back_owed(server_dir):
+        return None
+    put_back = server_build_presses.under_server_build(server_build_presses.PUT_THE_FOLDERS_BACK)
+    return (
+        f"The source folders in {server_dir} were put back on their builds, but Yu'lon's own "
+        "files (its compose files and the source patch it carries) were not all written back "
+        "into them, and a rebuild would compile the source without that patch. Press "
+        f"{put_back}: it finishes that. Nothing was changed."
+    )
+
+
 BUILT_FROM_FILE = ".yulon-built-from.json"
 """The commit each source's RUNNING build was compiled from (T589).
 
@@ -4446,6 +4514,141 @@ def sources_off_refusal(server_dir: Path) -> str | None:
         f"database updates in {'that folder' if one else 'those folders'}, so the server is not "
         f"started: press {back}, or put the {'folder' if one else 'folders'} back with "
         f"{'this command' if one else 'these commands'} and press {rebuild}:\n{commands}"
+    )
+
+
+@dataclass(frozen=True)
+class FolderPutBack:
+    """What "Put the folders back" did to one folder `SOURCES_OFF_FILE` names (T766)."""
+
+    repo: str
+    dest: Path
+    built: str
+    """The commit the folder is put back on: the one its build was made from."""
+    was: str | None
+    """The commit it stood on before (`SourceOff.head`); None when git would not say."""
+    why: str | None = None
+    """None once the folder is on `built`; else what git said when it would not check it out."""
+
+
+def _folder_key(server_dir: Path, dest: Path) -> str:
+    """A folder's spelling in `app_written_paths()`: its `source.dest`, relative to the server.
+
+    Both paths are read the way `platform.wsl_location()` reads a WSL share: the Linux path inside
+    the distro, whichever share spelling names it. A server reached by another spelling than the
+    one its record was written with still keys its own files, so they are not reported as the
+    player's edits (T766 round 2).
+    """
+    here, base = _share_free(dest), _share_free(server_dir)
+    try:
+        return PurePosixPath(here).relative_to(base).as_posix()
+    except ValueError:
+        return here
+
+
+def _share_free(path: Path) -> str:
+    """`path` without its WSL share spelling: the Linux path inside the distro, else the path."""
+    found = platform.wsl_location(path)
+    return found[1] if found is not None else path.as_posix()
+
+
+def folders_put_back_refusal(
+    server_dir: Path, off: Sequence[SourceOff], ignoring: Mapping[str, tuple[str, ...]]
+) -> str | None:
+    """Why no folder may be put back yet, or None. Asked of every folder first (T766).
+
+    `checkout --force` throws away each change a folder has against its commit, so a folder with
+    changes of the player's own is refused, by name, and no folder is moved: not the clean ones
+    either, so the press is one decision. `ignoring` is the app's own files (the compose files, a
+    family's carried patch), which the put-back writes again. A folder git cannot be asked about
+    is refused, never taken for clean.
+    """
+    folder_git = module_git(server_dir)
+    sentences: list[str] = []
+    for row in off:
+        edits = folder_git.local_edits(
+            row.dest, ignoring.get(_folder_key(server_dir, row.dest), ())
+        )
+        if edits is None:
+            sentences.append(
+                f"Yu'lon could not ask git what is changed in {row.dest}, so it cannot tell "
+                "whether that folder has changes of your own."
+            )
+        elif edits:
+            sentences.append(
+                f"{row.dest} has changes of your own in it ({_named(edits)}). Putting it back on "
+                f"{row.built[:7]} would throw them away. Copy them somewhere safe and put the "
+                "files back as git has them, then press this again."
+            )
+    if not sentences:
+        return None
+    return " ".join(sentences) + " Nothing was changed."
+
+
+def put_sources_off_back(server_dir: Path, off: Sequence[SourceOff]) -> tuple[FolderPutBack, ...]:
+    """Check out each folder `off` names on its build's commit. Never raises for git (T766).
+
+    What the printed command does, through the module's own git (`apply.module_git()`, so a WSL
+    server's folder is reached through its distro): `restore_rev()`, a `checkout --detach --force`
+    with NO fetch -- the commit is already in the folder's object store, and a network fault may
+    be why the folder is off. Last record first, as the update's rollback puts its sources back. A
+    checkout git refuses is a row with `why`, and the folder is left as it stood.
+    """
+    folder_git = module_git(server_dir)
+    done: list[FolderPutBack] = []
+    for row in reversed(off):
+        why: str | None = None
+        try:
+            folder_git.restore_rev(row.dest, row.built)
+        except (git.GitError, OSError) as exc:
+            logger.warning(f"could not put {row.dest} back on {row.built}: {exc}")
+            why = str(exc)
+        done.append(FolderPutBack(row.repo, row.dest, row.built, row.head, why))
+    return tuple(done)
+
+
+def _reservation_lost(cancel: threading.Event | None) -> bool:
+    """Whether the press's reservation was lost, as against the player's own Stop (T766 round 3).
+
+    `_end_on_loss()` sets the press's cancel when another Yu'lon takes the reservation, and records
+    the loss on it; a player's Stop sets the cancel alone.
+    """
+    lost = getattr(cancel, "reservation_lost", None)
+    return bool(lost is not None and lost.is_set())
+
+
+def _base_compose_not_ours(server_dir: Path) -> bool:
+    """Whether the base compose file is missing or not this app's own (T766 round 3).
+
+    The one compose file a folder's checkout puts upstream's copy over, and the one Rebuild
+    refuses to build from (`_refuse_unless_rebuildable()`). A missing override or build file is
+    not a checkout's doing: "Repair server files" answers it, not this press.
+    """
+    return composegen.BASE_FILE not in generated_compose_files(server_dir)
+
+
+def put_the_folders_back_offered(server_dir: Path) -> bool:
+    """Whether the Modules tab offers "Put the folders back…" for `server_dir` (T766 round 3).
+
+    The one reading the press's menu entry is enabled on, so the entry and the engine cannot
+    disagree. True exactly when the server has an install record (`STATE_FILE`) AND any of:
+    a press's write-back is still owed (`WRITE_BACK_OWED_FILE`, round 4: a failed half, a lost
+    reservation or a crash after a checkout); a folder `SOURCES_OFF_FILE` names is still off
+    its build (`sources_still_off()`); or the base compose file is not this app's own
+    (`_base_compose_not_ours()`, a backstop for a marker an older press never wrote).
+
+    Not asked: whether the world server runs. That needs Docker, which the GUI thread does not
+    ask; the press refuses a running world itself, naming Stop. Reads files only; never raises.
+    """
+    try:
+        if not (server_dir / STATE_FILE).is_file():
+            return False
+    except OSError:
+        return False
+    return (
+        write_back_owed(server_dir)
+        or bool(sources_still_off(server_dir))
+        or _base_compose_not_ours(server_dir)
     )
 
 
@@ -9713,6 +9916,10 @@ class StagedInstaller:
             retired = server_build_gone.rebuild_refusal(self.entry, server_dir)
             if retired is not None:
                 raise InstallerError(retired)
+            # T766 round 4: a put-back's write-back is owed, so the carried patch may be missing.
+            owed_write_back = write_back_owed_refusal(server_dir)
+            if owed_write_back is not None:
+                raise InstallerError(owed_write_back)
         if servers_down is None or not servers_down.finishes_start_refusal:
             # T179: a rebuild ends in a start, and this press does not finish what
             # refuses one (the update route's `servers_down` does, when it says so).
@@ -11396,6 +11603,151 @@ class StagedInstaller:
             yield f"{source.repo} was put back on {old[:7]}."
         return failed
 
+    @_reserving(server_build_presses.PUT_THE_FOLDERS_BACK)
+    def put_the_folders_back(
+        self, options: InstallOptions | None = None, *, cancel: threading.Event | None = None
+    ) -> Iterator[str]:
+        """Engine of "Put the folders back" (T766): each folder the record names, on its build.
+
+        One of the ways out the Start and Rebuild refusals name, besides "Return to the tested
+        pin". It does what the printed `git checkout --detach --force` does for each folder
+        (`put_sources_off_back()`), then what the update's rollback does after its own put-back:
+        the checkout puts upstream's copies over this app's compose files and carried patch, and
+        Rebuild refuses the compose files it did not write, and does not write the patch before it
+        compiles. Rebuild lays the Lua scripts itself, from the folder as it stands.
+
+        The press holds the server's reservation, as every writing press does (`_reserving`,
+        T568). Refused before anything changes, as `InstallerError`: when there is no install
+        record (Rebuild refuses that too), when the world server is running (the write-back
+        rewrites files a running server uses), and when `folders_put_back_refusal()` refuses. A
+        folder git will not check out is a line, not an error: it stays in the record, and Rebuild
+        stays refused for it.
+
+        A player's Stop is honoured only before any folder moves. Once one has, the write-back is
+        owed whatever the player asks: the record is cleared by then, so nothing on disk would say
+        it is owed. Only a lost reservation ends the press before the write-back, and it is asked
+        once, before the compose half: a loss during the compose rewrite still runs the patch half,
+        finishing what was started. `WRITE_BACK_OWED_FILE` is written before the first checkout
+        and removed only after a whole write-back with every folder back (round 4). The patch half
+        runs on every press (an applied fix is left alone); the compose files are written when a
+        folder moved, or when the base file is missing or is not this app's own. A half that fails
+        says to press this again. The Modules tab offers the press on
+        `put_the_folders_back_offered()`.
+        """
+        options = options or InstallOptions()
+        server_dir = self.server_dir(options)
+        client_dir = options.client_dir
+        state = read_state(server_dir, valid=self.stage_names())
+        if state is None:
+            raise InstallerError(
+                f"{server_dir} has no {STATE_FILE}, so Yu'lon has no record of building a server "
+                "there and cannot put its folders back. Nothing was changed."
+            )
+        put_back = server_build_presses.under_server_build(
+            server_build_presses.PUT_THE_FOLDERS_BACK
+        )
+        self._refuse_writes_into_a_running_world(
+            server_build_presses.PUT_THE_FOLDERS_BACK,
+            remedy=(
+                f"Press Stop on the Server tab, then press {put_back} again. "
+                "Nothing was put back."
+            ),
+        )
+        off = sources_still_off(server_dir)
+        done: tuple[FolderPutBack, ...] = ()
+        if off:
+            refusal = folders_put_back_refusal(server_dir, off, self.app_written_paths(server_dir))
+            if refusal is not None:
+                raise InstallerError(refusal)
+            if cancel is not None and cancel.is_set():
+                yield (
+                    "Stopped before any folder moved. Nothing was changed; press "
+                    f"{put_back} again."
+                )
+                return
+            # Round 4: before the first folder moves, so a crash, a lost reservation or a failed
+            # half leaves a record that the write-back is owed. No record, no move.
+            unwritten = owe_write_back(server_dir)
+            if unwritten:
+                raise InstallerError(
+                    f"{unwritten}, and without it a press that did not finish would leave nothing "
+                    "saying this app's own files are owed. Nothing was changed."
+                )
+            done = put_sources_off_back(server_dir, off)
+            for put in done:
+                if put.why is None:
+                    was = f", from {put.was[:7]}" if put.was else ""
+                    yield f"{put.repo} was put back on {put.built[:7]}{was}."
+                else:
+                    # T248: the line names no command; the press stays offered, so it is the way.
+                    logger.warning(
+                        f"could not put {put.dest} back on {put.built}: {put.why}. By hand: "
+                        f"git -C {put.dest} checkout --detach --force {put.built}"
+                    )
+                    yield (
+                        f"{put.repo} in {put.dest} could NOT be put back on {put.built[:7]}: "
+                        "git refused. It is still off its build, so a rebuild stays refused "
+                        f"for it. Press {put_back} again; if it fails again, send the support "
+                        "file."
+                    )
+            back = {put.dest: put.built for put in done if put.why is None}
+            if back:
+                warned = rewrite_sources_off(server_dir, back, [])
+                if warned:
+                    yield warned
+        else:
+            yield "Every source folder is already on the commit its build was made from."
+        whole = True
+        moved = any(put.why is None for put in done)
+        if not off or moved:
+            # Once a folder has moved, the player's Stop waits for this write-back (T766 round 3):
+            # only a lost reservation ends the press here, and the next press finishes the rest.
+            if _reservation_lost(cancel):
+                yield (
+                    "Stopped before the app's own files were written back into the folders. "
+                    f"Press {put_back} again to finish."
+                )
+                return
+            opts = InstallOptions(server_dir=server_dir, client_dir=client_dir)
+            # With no folder off, the compose files are written only when the base file is missing
+            # or is not this app's own, the condition Rebuild refuses on. A marked override with a
+            # player's line in it is left alone (T173).
+            if moved or _base_compose_not_ours(server_dir):
+                try:
+                    yield from self._rewrite_what_we_own(server_dir, opts, state)
+                except (InstallerError, OSError) as exc:
+                    whole = False
+                    logger.warning(
+                        f"could not put this app's own files back into {server_dir}: {exc}"
+                    )
+                    yield (
+                        "The folders are back on their builds, but Yu'lon's own compose files "
+                        f"could not be written into them again ({exc}), so "
+                        f"{composegen.BASE_FILE} is the repository's own. "
+                        f"{compose_back_advice(server_dir)} Once the reason is fixed, press "
+                        f"{put_back} again: it writes them again."
+                    )
+            try:
+                yield from self.apply_carried_patches(server_dir)
+            except (InstallerError, OSError) as exc:
+                whole = False
+                logger.warning(f"could not put the carried patch back into {server_dir}: {exc}")
+                yield (
+                    "The folders are back on their builds, but the source patch Yu'lon carries "
+                    f"could not be written into them again ({exc}). A rebuild would compile the "
+                    "source without it, so do not press it. Once the reason is fixed, press "
+                    f"{put_back} again: it writes the patch again before anything compiles."
+                )
+        if any(put.why is not None for put in done):
+            yield (
+                "A rebuild stays refused until every folder is back on its build: press "
+                f"{put_back} again once the reason above is fixed."
+            )
+        elif whole:
+            forget_write_back_owed(server_dir)
+            rebuild = server_build_presses.under_server_build(server_build_presses.REBUILD)
+            yield f"Press {rebuild}: it compiles the folders as they stand."
+
     def _rebuild_import_work(self, copy: _UpdateCopy) -> ServersDownWork:
         """A plain Rebuild's window when its family imports (T706, round 2 the owner's copy).
 
@@ -13020,6 +13372,9 @@ class StagedInstaller:
         retired = server_build_gone.rebuild_refusal(self.entry, server_dir)
         if retired is not None:
             return retired
+        owed_write_back = write_back_owed_refusal(server_dir)
+        if owed_write_back is not None:
+            return owed_write_back
         clash = self._modules_that_take_the_cores_names(server_dir)
         if clash is not None:
             return clash

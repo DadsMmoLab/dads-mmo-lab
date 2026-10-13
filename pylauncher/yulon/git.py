@@ -1929,13 +1929,16 @@ class RunnerGit:
         unless the only modified tracked files are ones this app wrote
         (`app_written_paths()`), and the caller writes those again immediately
         afterwards. It is not a general-purpose checkout, and a caller must make
-        its own check first. There are two. T64's route has the one above.
+        its own check first. There are three. T64's route has the one above.
         `Applier.put_back()` (T557) refuses unless the clone is clean apart from
         this app's own files (`_reset_cost(history=False)`) and its HEAD is still
         the update's `to`, re-read from the record or from a reflog that shows no
         hand commit (`last_update()`). (`_pin_args()`'s update
         checkout is `--force` too, since T166, and is no second caller of this:
         it replaces a `reset --hard` that discarded the same things.)
+        `native.folders_put_back_refusal()` (T766, "Put the folders back") is the third: it
+        refuses a folder with changes of the player's own, or one git cannot be asked about,
+        and asks every folder before any of them is checked out.
 
         It does not swallow a failure. A restore that did not happen leaves the
         source tree ahead of the image that was built from it, and the caller's
