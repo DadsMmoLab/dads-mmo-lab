@@ -789,13 +789,14 @@ def _listing(do: RunCmd, argv: list[str], parse: _PairParser) -> tuple[tuple[str
 class LocalListing(NamedTuple):
     """What `local_ipv4_listing()` read (T674 round 3).
 
-    `addresses` is the offer list. `windows_unreadable` is True when the PowerShell listing could
-    not be run or exited non-zero (interop off, a timeout, a failure). An address missing from an
-    unreadable listing may still be this computer's, and nobody has asked the Windows side.
+    `addresses` is the offer list. `listing_unreadable` is True when the PowerShell listing could
+    not be run or exited non-zero (interop off, a timeout, a failure): natively that is the whole
+    listing, under WSL the Windows side. An address missing from an unreadable listing may still be
+    this computer's, and nobody has asked the Windows side.
     """
 
     addresses: tuple[LocalAddress, ...]
-    windows_unreadable: bool = False
+    listing_unreadable: bool = False
 
 
 def local_ipv4_addresses(
@@ -815,7 +816,7 @@ def local_ipv4_addresses(
     link-local (169.254/16) addresses are dropped, and Docker's bridges are left out. One entry per
     address: the Windows side's when the same address is on both sides (mirrored WSL). A listing
     that cannot be read answers nothing, and nothing is guessed in its place; `local_ipv4_listing()`
-    says whether the Windows side could be read at all.
+    says whether the PowerShell listing could be read at all.
     """
     return local_ipv4_listing(run, system=system, wsl=wsl).addresses
 
@@ -848,12 +849,12 @@ def local_ipv4_listing(
     else:
         sources = [("here", ip_listing, _parse_ip_addr)]
     found: dict[str, LocalAddress] = {}
-    windows_unreadable = False
+    listing_unreadable = False
     for side, argv, parse in sources:
         pairs = _listing(do, argv, parse)
         if pairs is None:
             if argv == powershell:
-                windows_unreadable = True
+                listing_unreadable = True
             continue
         for interface, text in pairs:
             try:
@@ -867,7 +868,7 @@ def local_ipv4_listing(
             kept = found.get(text)
             if kept is None or (side == "windows" and kept.side != "windows"):
                 found[text] = LocalAddress(interface, text, _vpn_like(interface, ip), side)
-    return LocalListing(tuple(found.values()), windows_unreadable)
+    return LocalListing(tuple(found.values()), listing_unreadable)
 
 
 DOCKER_BLOCK_QUERY = (

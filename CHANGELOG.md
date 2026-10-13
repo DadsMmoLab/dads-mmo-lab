@@ -135,6 +135,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A new version is offered only after its tests pass, and the Windows and Mac builds are now tested on their own systems.
 - Install and error messages say "Docker" and "world server" in plain words, and the first install line is shorter.
 - A new WotLK or Unbound server starts with its command channel on, so the app can prove it without a button press.
+- A WSL server's port warning says when the Windows address list could not be read, and still adds the forward.
 
 ## v0.9.16-Public — 2026-10-10
 

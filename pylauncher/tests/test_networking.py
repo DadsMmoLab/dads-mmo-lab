@@ -7641,6 +7641,108 @@ def test_under_wsl_a_readable_listing_without_the_address_still_says_it_is_not_t
     assert "could not be read" not in p.refusals[0], p.refusals
 
 
+@pytest.mark.parametrize("how", ["interop-off", "timed-out", "exit-1"])
+def test_under_wsl_an_unreadable_windows_list_keeps_the_stopgap_for_the_detected_address(
+    how: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T784 (a). No address chosen, loopback ports, and the Windows list cannot be read.
+
+    Before T674 the stopgap went to the detected LAN address whatever the Windows side said.
+    T674 dropped it when the list was unreadable. It is built again, and the warning says the
+    Windows address list could not be read, so nothing was checked against it.
+    """
+    monkeypatch.setattr(platform, "in_wsl", lambda: True)
+    monkeypatch.setattr(runner, "run", _windows_cannot_be_asked(how))
+
+    def no_bind(ip: str) -> bool:
+        raise AssertionError(f"{ip} was bound inside the VM")
+
+    monkeypatch.setattr(networking, "_can_bind", no_bind)
+    p = networking.plan(
+        WOTLK,
+        "lan",
+        wsl=True,
+        firewall="none",
+        steamos=False,
+        detect_lan=lambda: LAN_ADDRESS,
+        bindings=LOOPBACK_BOTH,
+    )
+    expected = platform.portproxy_commands(LAN_ADDRESS, (WOTLK.ports.auth, WOTLK.ports.world))
+    assert p.portproxy_commands == tuple(tuple(c) for c in expected), p.portproxy_commands
+    assert [w for w in p.warnings if "the Windows address list could not be read" in w], p.warnings
+
+
+def test_under_wsl_a_chosen_address_the_unreadable_list_cannot_confirm_gets_no_portproxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T784 (a), the other side: the fallback is for the detected address only.
+
+    `100.86.248.75` is on the VM's tailscale0: a bind inside the VM holds it and no Windows
+    adapter lists it. With the Windows list unreadable no rule may be built for it, because
+    Windows could never listen on it.
+    """
+    monkeypatch.setattr(platform, "in_wsl", lambda: True)
+    monkeypatch.setattr(runner, "run", _windows_cannot_be_asked("timed-out"))
+    monkeypatch.setattr(networking, "_can_bind", lambda ip: ip == "100.86.248.75")
+    p = networking.plan(
+        WOTLK,
+        "lan",
+        chosen_address="100.86.248.75",
+        wsl=True,
+        firewall="none",
+        steamos=False,
+        detect_lan=lambda: LAN_ADDRESS,
+        bindings=LOOPBACK_BOTH,
+    )
+    assert p.ready and p.refusals == (), p.refusals
+    assert p.portproxy_commands == (), p.portproxy_commands
+    assert not [w for w in p.warnings if "stopgap" in w], p.warnings
+
+
+def test_under_wsl_a_plan_reads_the_windows_listing_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """T784 (b). The chosen address's guard and the portproxy forwarder ask the same listing.
+
+    Each PowerShell read can take 8 s, so a plan reads the Windows list once and both questions
+    are answered from that one reading.
+    """
+    monkeypatch.setattr(platform, "in_wsl", lambda: True)
+    seen: list[list[str]] = []
+    monkeypatch.setattr(runner, "run", _wsl_both_sides(seen))
+
+    def no_bind(ip: str) -> bool:
+        raise AssertionError(f"{ip} was bound inside the VM")
+
+    monkeypatch.setattr(networking, "_can_bind", no_bind)
+    p = networking.plan(
+        WOTLK,
+        "lan",
+        chosen_address="100.72.215.6",
+        wsl=True,
+        firewall="none",
+        steamos=False,
+        detect_lan=lambda: LAN_ADDRESS,
+        bindings=LOOPBACK_BOTH,
+    )
+    assert p.ready and p.refusals == (), p.refusals
+    assert [argv[0] for argv in seen].count("powershell.exe") == 1, seen
+    expected = platform.portproxy_commands("100.72.215.6", (WOTLK.ports.auth, WOTLK.ports.world))
+    assert p.portproxy_commands == tuple(tuple(c) for c in expected), p.portproxy_commands
+
+
+def test_a_listing_says_when_powershell_could_not_be_read_on_native_windows_too() -> None:
+    """T784 (c). Natively the one PowerShell listing is the whole listing, so the flag is set."""
+
+    def failing(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, 1, "", "exit 1")
+
+    native = platform.local_ipv4_listing(run=failing, system="windows", wsl=False)
+    assert native.addresses == () and native.listing_unreadable is True, native
+    under_wsl = platform.local_ipv4_listing(
+        run=_windows_cannot_be_asked("timed-out"), system="linux", wsl=True
+    )
+    assert under_wsl.listing_unreadable is True, under_wsl
+
+
 def test_under_wsl_an_address_on_both_sides_is_listed_once_and_the_windows_entry_is_kept() -> None:
     """Item 3. Mirrored WSL can show one address on both sides: the offer list has one entry for
     it, the Windows side's, and the VM's other VPN interface is still offered."""
