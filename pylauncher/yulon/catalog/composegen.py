@@ -2058,7 +2058,8 @@ def _dotenv_refusal(key: str, why: str) -> DotenvSecretError:
         f"The {key} line in this server's {DOTENV_FILE} {why}, so Yu'lon cannot tell which "
         "password the database has. Put the password the database "
         f"really uses between single quotes on that line, like {key}='your password': "
-        "Docker and Yu'lon both read a single-quoted value exactly as written."
+        "Docker and Yu'lon both read a single-quoted value exactly as written (a ' in it "
+        "is written \\')."
     )
 
 

@@ -807,3 +807,77 @@ def test_render_replaces_a_new_installs_env_line_it_cannot_read(tmp_path: Path) 
         platform_id=lambda: "linux",
     )
     assert plan.dotenv == {"DB_ROOT_PASSWORD": GENERATED}
+
+
+# -- round 4: a reader never turns "not knowable" into the published password ----------
+
+
+def _unknowable(server_dir: Path, case: str) -> str:
+    """A folder whose password no reader can know, and the words its refusal must carry."""
+    if case == "old-env-docker-reads-otherwise":
+        an_old_folder(server_dir)
+        (server_dir / ".env").write_text("DB_ROOT_PASSWORD=pa$word\n", encoding="utf-8")
+        return "single quotes"
+    a_record(server_dir, generated=True)
+    (server_dir / ".db_password").write_text("", encoding="utf-8")
+    return ".db_password"
+
+
+UNKNOWABLE = ["old-env-docker-reads-otherwise", "new-blank-file-no-env-line"]
+
+
+@pytest.mark.parametrize("case", UNKNOWABLE)
+def test_module_sql_with_no_runner_refuses_a_password_it_cannot_know(
+    tmp_path: Path, case: str
+) -> None:
+    """Round 4 (T748 review): `modules.applier()` used to log in as root with `password` when
+    `db_password()` answered None, which only ever ends in "Access denied"."""
+    from yulon.apply import ApplyRefusal
+    from yulon.controller_wow_wotlk import modules
+
+    words = _unknowable(tmp_path, case)
+    with pytest.raises(ApplyRefusal) as refusal:
+        modules.applier(tmp_path, world_running=lambda: False)
+    assert words in str(refusal.value)
+
+
+@pytest.mark.parametrize("case", UNKNOWABLE)
+def test_the_update_snapshot_refuses_a_password_it_cannot_know(tmp_path: Path, case: str) -> None:
+    """Round 4: the update's database copy builds no `DockerMysql` holding `password`."""
+    from yulon import install_wiring
+    from yulon.controller_wow_wotlk import maintenance
+
+    words = _unknowable(tmp_path, case)
+    snapshot = install_wiring._MaintenanceSnapshot(ENTRY, wsl_distro=None)
+    with pytest.raises(maintenance.MaintenanceError) as refusal:
+        snapshot._mysql(tmp_path)
+    assert words in str(refusal.value)
+
+
+def test_a_reader_takes_a_new_installs_password_from_env_when_its_file_is_gone(
+    tmp_path: Path,
+) -> None:
+    """The `.env` line `generate-compose` wrote is the same value: a reader takes it (and never
+    writes; putting the file back is the engine's job)."""
+    from yulon.controller_wow_wotlk import modules
+
+    a_record(tmp_path, generated=True)
+    (tmp_path / ".env").write_text(f"DB_ROOT_PASSWORD={GENERATED}\n", encoding="utf-8")
+    applier = modules.applier(tmp_path, world_running=lambda: False)
+    assert applier.sql is not None
+    assert applier.sql.root_password == GENERATED
+    assert not (tmp_path / ".db_password").exists()
+
+
+def test_an_old_folders_blank_password_file_reads_as_missing(tmp_path: Path) -> None:
+    """A blank `.db_password` is a missing one for every reader, as for the engine (round 3)."""
+    an_old_folder(tmp_path)
+    (tmp_path / ".db_password").write_text("\n", encoding="utf-8")
+    assert ENTRY.install.db_password(tmp_path) == DEFAULT_DB_ROOT_PASSWORD
+
+
+def test_the_refusal_says_how_to_write_a_quote_inside_single_quotes(tmp_path: Path) -> None:
+    (tmp_path / ".env").write_text("DB_ROOT_PASSWORD=pa$word\n", encoding="utf-8")
+    with pytest.raises(composegen.DotenvSecretError) as refusal:
+        composegen.dotenv_secret(tmp_path, "DB_ROOT_PASSWORD")
+    assert "\\'" in str(refusal.value)

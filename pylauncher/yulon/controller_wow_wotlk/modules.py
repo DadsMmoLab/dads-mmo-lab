@@ -21,6 +21,7 @@ from typing import Protocol
 from yulon import docker, module_source, platform, resources
 from yulon.apply import (
     Applier,
+    ApplyRefusal,
     ApplyReport,
     ComposeDbc,
     CountingGit,
@@ -39,6 +40,7 @@ from yulon.apply import (
 )
 from yulon.apply import module_updates as apply_updates
 from yulon.apply import refresh_module_updates as refresh_cached
+from yulon.catalog.catalog import DbPasswordUnknown
 from yulon.catalog.upstream import github_slug
 from yulon.controller_wow_wotlk import docker_ctl
 from yulon.git import BehindReader, Git
@@ -338,11 +340,15 @@ def applier(
     """
     runner: SqlRunner | None = sql
     if runner is None:
-        # This folder's own password (T748); the published default only for an install that
-        # has none on record, which is what `db_password()` answers for it.
+        # This folder's own password (T748): an install made before generated passwords is
+        # answered its published one by `db_password()` itself, and a password no reader can
+        # know is a refusal, never that default (round 4).
         password = db_root_password
         if password is None:
-            password = docker_ctl.ENTRY.install.db_password(server_dir) or DEFAULT_DB_ROOT_PASSWORD
+            try:
+                password = docker_ctl.ENTRY.install.known_db_password(server_dir)
+            except DbPasswordUnknown as exc:
+                raise ApplyRefusal(str(exc)) from exc
         runner = DockerSql(db_container, password, client=docker_ctl.DB_CLIENT)
     return Applier(
         server_dir,

@@ -106,6 +106,10 @@ def record_says_generated(server_dir: Path) -> bool:
     return isinstance(parsed, dict) and parsed.get(RECORD_PASSWORD_KEY) == RECORD_GENERATED
 
 
+class DbPasswordUnknown(RuntimeError):
+    """A reader cannot know an install's database password (T748 round 4); the text says why."""
+
+
 class PasswordPlan(_Strict):
     """How this game's database root password comes to exist (phase7-decisions "Password").
 
@@ -1994,8 +1998,40 @@ class Install(_Strict):
                 # it used to escape this handler and crash the caller rather
                 # than being reported as "not knowable from here".
                 return None
-            return text.strip() or None
+            # Blank is missing, as for the engine: a write cut short (T748 round 4).
+            return text.strip() or self._legacy_or_unknown(server_dir)
         return None
+
+    def known_db_password(self, server_dir: Path) -> str:
+        """`db_password()`, else the `.env` line, else a refusal. Never the published default.
+
+        For a reader that is about to log in as root (module SQL, the update's database copy):
+        None from `db_password()` means "not knowable", and `password` handed on in its place
+        only ever ends in "Access denied" (T748 round 4). A new install whose file is gone
+        still has the value `generate-compose` wrote into `.env`, which is read and never
+        written back here (that is the engine's `resolve_secrets()`).
+
+        Raises:
+            DbPasswordUnknown: in player words; for a `.env` value compose reads otherwise,
+                `composegen.dotenv_secret()`'s own.
+        """
+        from yulon.catalog import composegen  # noqa: PLC0415 - composegen imports this module
+
+        known = self.db_password(server_dir)
+        if known is not None:
+            return known
+        try:
+            recovered = composegen.dotenv_secret(server_dir, "DB_ROOT_PASSWORD")
+        except composegen.DotenvSecretError as exc:
+            raise DbPasswordUnknown(str(exc)) from exc
+        if recovered:
+            return recovered
+        file = self.password.file or "the password file"
+        raise DbPasswordUnknown(
+            f"This server's {file} is missing, empty or cannot be read, and its .env does not "
+            "hold the database password either, so Yu'lon cannot know it and tried none. "
+            f"Put {file} back from a backup of this server folder if you have one."
+        )
 
     def _legacy_or_unknown(self, server_dir: Path) -> str | None:
         """`legacy_password()`, or None when its `.env` value is one compose reads otherwise.

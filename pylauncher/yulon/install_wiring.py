@@ -38,7 +38,7 @@ from yulon.catalog import upstream
 # `native` in a walrus (`entry.install.native`), and a module of the same name
 # imported at the top of the file is exactly the kind of shadow that type-checks
 # in one function and not in the other.
-from yulon.catalog.catalog import CatalogEntry, load_catalog
+from yulon.catalog.catalog import CatalogEntry, DbPasswordUnknown, load_catalog
 from yulon.catalog.families import azerothcore, trinitycore
 from yulon.catalog.installer import (
     DEFAULT_INSTALLERS_ROOT,
@@ -245,7 +245,11 @@ class _MaintenanceSnapshot:
     def _mysql(self, server_dir: Path) -> wotlk_maintenance.DockerMysql:
         from yulon.controller_wow_wotlk import maintenance
 
-        password = self.entry.install.db_password(server_dir) or fixed_db_password(self.entry)
+        try:
+            # Never the published default in place of an unknowable one (T748 round 4).
+            password = self.entry.install.known_db_password(server_dir)
+        except DbPasswordUnknown as exc:
+            raise maintenance.MaintenanceError(str(exc)) from exc
         client = native.db.client if (native := self.entry.install.native) is not None else None
         return maintenance.DockerMysql(
             self.entry.container_spec().db, password, wsl_distro=self.wsl_distro, client=client
