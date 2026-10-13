@@ -14850,7 +14850,9 @@ def test_the_server_cloned_rows_update_chip_runs_the_server_update(
     pump_until(lambda: len(spy.presses) == 1, "the chip started the server update")
     # The job it started runs on the panel's thread: let it end here (T771).
     wait_for_panel(view.rebuild_log)
-    row.hide()
+    # The job's end rebuilt the rows and deleted the cards `row` was taken from
+    # (T781): hide the row the panel draws now.
+    view.modules_panel.row("mod-playerbots").hide()
 
     assert len(boxes) == 1, "the update started without its confirmation"
     assert per_module == [], "the chip reached the per-module applier"
