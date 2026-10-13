@@ -4450,6 +4450,34 @@ def test_under_wsl_a_recorded_tailscale_address_the_vm_holds_gets_no_warning(
     assert _statements(rec) == [networking.realmlist_sql(ENTRY, "100.86.248.75", "100.86.248.75")]
 
 
+def test_a_recorded_address_when_the_windows_listing_cannot_be_read_says_so_and_is_still_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T674 round 3, item 2. Interop off is "the list could not be read", not "not this computer's".
+
+    The warning names the unreadable list and the address is written anyway, as it always was.
+    The VM's own listing is empty and `_can_bind` answers False, so nothing here is held by a bind.
+    """
+    monkeypatch.setattr(platform, "in_wsl", lambda: True)
+    monkeypatch.setattr(networking, "_can_bind", lambda ip: False)
+
+    def no_windows(argv: list[str], *_a: object, **_k: object) -> subprocess.CompletedProcess[str]:
+        if argv[0] == "powershell.exe":
+            raise FileNotFoundError(argv[0])
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(runner, "run", no_windows)
+    server = tmp_path / "wow"
+    server.mkdir()
+    _recorded_address(server, "100.72.215.6")
+    rec = Recorder(realm_row="192.168.1.210\t192.168.1.210\n")
+    said = _advertising(rec, server, lan_ip=lambda: "192.168.1.210")
+    warnings = [line for line in said if line.startswith("Warning:")]
+    assert len(warnings) == 1 and "could not be read" in warnings[0], said
+    assert "not one of this computer" not in warnings[0], said
+    assert _statements(rec) == [networking.realmlist_sql(ENTRY, "100.72.215.6", "100.72.215.6")]
+
+
 def test_a_recorded_address_replaces_a_lan_row_from_an_earlier_install(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -4460,6 +4488,7 @@ def test_a_recorded_address_replaces_a_lan_row_from_an_earlier_install(
     effect, and the line said the LAN address was reachable.
     """
     monkeypatch.setattr(platform, "in_wsl", lambda: False)
+    monkeypatch.setattr(networking, "_can_bind", lambda ip: True)
     server = tmp_path / "wow"
     server.mkdir()
     _recorded_address(server, "100.64.0.10")
@@ -4467,6 +4496,7 @@ def test_a_recorded_address_replaces_a_lan_row_from_an_earlier_install(
     said = _advertising(rec, server, lan_ip=lambda: "192.168.1.25")
     assert _statements(rec) == [networking.realmlist_sql(ENTRY, "100.64.0.10", "100.64.0.10")]
     assert [line for line in said if "now advertises 100.64.0.10" in line], said
+    assert not [line for line in said if line.startswith("Warning:")], said
 
 
 def test_a_recorded_address_is_written_when_only_its_local_column_differs(
@@ -4474,18 +4504,21 @@ def test_a_recorded_address_is_written_when_only_its_local_column_differs(
 ) -> None:
     """The address column matches the choice but `localAddress` does not, so the row changes."""
     monkeypatch.setattr(platform, "in_wsl", lambda: False)
+    monkeypatch.setattr(networking, "_can_bind", lambda ip: True)
     server = tmp_path / "wow"
     server.mkdir()
     _recorded_address(server, "100.64.0.10")
     rec = Recorder(realm_row="100.64.0.10\t192.168.1.25\n")
-    _advertising(rec, server, lan_ip=lambda: "192.168.1.25")
+    said = _advertising(rec, server, lan_ip=lambda: "192.168.1.25")
     assert _statements(rec) == [networking.realmlist_sql(ENTRY, "100.64.0.10", "100.64.0.10")]
+    assert not [line for line in said if line.startswith("Warning:")], said
 
 
 def test_a_recorded_address_the_row_already_holds_is_left_alone(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(platform, "in_wsl", lambda: False)
+    monkeypatch.setattr(networking, "_can_bind", lambda ip: True)
     server = tmp_path / "wow"
     server.mkdir()
     _recorded_address(server, "100.64.0.10")
@@ -4493,6 +4526,7 @@ def test_a_recorded_address_the_row_already_holds_is_left_alone(
     said = _advertising(rec, server, lan_ip=lambda: "192.168.1.25")
     assert _statements(rec) == []
     assert [line for line in said if "already advertises 100.64.0.10" in line], said
+    assert not [line for line in said if line.startswith("Warning:")], said
 
 
 def test_a_recorded_address_this_computer_no_longer_holds_is_warned_about_and_still_advertised(

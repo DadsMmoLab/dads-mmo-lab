@@ -3461,10 +3461,10 @@ def _can_bind(ip: str) -> bool:
     return True
 
 
-def holds_here(address: str, *, under_wsl: bool | None = None) -> bool:
+def holds_here(address: str, *, under_wsl: bool | None = None) -> bool | None:
     """Whether this computer holds `address`, asked the way a realm on it is reached (T674).
 
-    Under WSL the question is the WSL listing (`platform.local_ipv4_addresses()` with `wsl=True`),
+    Under WSL the question is the WSL listing (`platform.local_ipv4_listing()` with `wsl=True`),
     which has two sides. A WINDOWS adapter's address is reached through the Windows forwarder, and
     a bind inside the VM does not answer for it (WSL's NAT mode does not give the VM those
     addresses; measured on this laptop: Errno 99), so it is held when the Windows side lists it.
@@ -3472,18 +3472,40 @@ def holds_here(address: str, *, under_wsl: bool | None = None) -> bool:
     tailnet node, which peers reach directly) is listed as side `wsl`, and its address is held
     when a bind inside the VM succeeds (lead ruling, round 3). The VM's NAT eth0 is not listed, so
     it is never held. Everywhere else the OS answers for itself with a bind, `_can_bind()`.
+
+    `None` means the question could not be answered (T674 round 3): under WSL the Windows listing
+    could not be read and the VM does not hold the address either. An unreadable listing is not an
+    empty one, so a caller says the list could not be read rather than that the address is absent.
     """
     wsl = platform.in_wsl() if under_wsl is None else under_wsl
     if not wsl:
         return _can_bind(address)
-    sides = {
-        offered.side
-        for offered in platform.local_ipv4_addresses(wsl=True)
-        if offered.address == address
-    }
+    listing = platform.local_ipv4_listing(wsl=True)
+    sides = {offered.side for offered in listing.addresses if offered.address == address}
     if "windows" in sides:
         return True
-    return "wsl" in sides and _can_bind(address)
+    if "wsl" in sides and _can_bind(address):
+        return True
+    return None if listing.windows_unreadable else False
+
+
+def _forwarder_address(lan: str | None, *, backend: str, in_wsl: bool) -> str | None:
+    """The address a `netsh` portproxy forwards from for `lan`, or None if no rule is built (T674).
+
+    Off WSL that is `lan` under the `netsh` backend: this Windows machine's own address. Under WSL
+    the forwarder runs on Windows, and Windows can listen only on an address it holds, so the
+    Windows side of the listing must name `lan`. A VM-side VPN address (the distro's own tailnet
+    node) is not one, and a rule for it could never listen (round 3, item 1).
+    """
+    if not lan:
+        return None
+    if not in_wsl:
+        return lan if backend == "netsh" else None
+    windows_lists = any(
+        offered.side == "windows" and offered.address == lan
+        for offered in platform.local_ipv4_listing(wsl=True).addresses
+    )
+    return lan if windows_lists else None
 
 
 def _own_names() -> tuple[str, ...]:
@@ -3633,14 +3655,15 @@ def chosen_ipv4(address: str | None) -> str | None:
 
 
 def _chosen_for_the_realm(
-    address: str, *, can_bind: Callable[[str], bool]
+    address: str, *, can_bind: Callable[[str], bool | None]
 ) -> tuple[str | None, str | None]:
     """The address a chosen realm may advertise, or None and the sentence that says why not (T674).
 
     Two refusals, and each is needed. `chosen_ipv4()` refuses the loopback however it is
     spelled (IPv6 and IPv4-mapped too): a chosen `127.0.0.1` is the §35 outage. `can_bind`
     refuses an address that no interface of this computer owns, because a friend sent to it
-    reaches some other machine.
+    reaches some other machine. When `can_bind` cannot tell (None: the Windows listing could not
+    be read) the refusal says that, and not that the address is not this computer's.
     """
     usable = chosen_ipv4(address)
     if usable is None:
@@ -3650,7 +3673,14 @@ def _chosen_for_the_realm(
             "and not a loopback (127.x), link-local (169.254.x) or 0.0.0.0 one. Choose one of "
             "this computer's own addresses."
         )
-    if not can_bind(usable):
+    held = can_bind(usable)
+    if held is None:
+        return None, (
+            "The Windows address list could not be read (Windows interop may be off, or the query "
+            f"timed out), so {usable} cannot be checked against this computer's addresses and "
+            "cannot be advertised as the realm address yet. Try again."
+        )
+    if not held:
         return None, (
             f"{usable} is not an address of this computer, so it cannot be advertised as the "
             "realm address. Choose one of this computer's own addresses."
@@ -3865,7 +3895,7 @@ def plan(
     lan_ip: str | None = None,
     public_ip: str | None = None,
     chosen_address: str | None = None,
-    can_bind: Callable[[str], bool] | None = None,
+    can_bind: Callable[[str], bool | None] | None = None,
     bindings: Mapping[int, str] | None = None,
     firewall: platform.FirewallBackend | None = None,
     steamos: bool | None = None,
@@ -4224,12 +4254,15 @@ def plan(
     if bindings:
         loopback = [p for p in ports if bindings.get(p, "").startswith("127.")]
         if loopback:
+            # A rule is built only for an address the forwarder can listen on, and the stopgap
+            # sentence is printed only when one is (T674 round 3, item 1).
+            forward_from = _forwarder_address(lan, backend=backend, in_wsl=in_wsl)
             warnings.append(
                 f"ports {loopback} are published on 127.0.0.1, not 0.0.0.0 — other machines "
                 "cannot reach them. Fix the compose port bindings"
                 + (
                     " (a WSL2 portproxy is added as a stopgap)."
-                    if in_wsl or backend == "netsh"
+                    if forward_from is not None
                     else (
                         " On Docker Desktop for Mac a loopback binding you did not ask for "
                         "usually means its port-binding setting is local-only; change it back "
@@ -4240,8 +4273,8 @@ def plan(
                     )
                 )
             )
-            if (in_wsl or backend == "netsh") and lan:
-                proxy_cmds = platform.portproxy_commands(lan, loopback)
+            if forward_from is not None:
+                proxy_cmds = platform.portproxy_commands(forward_from, loopback)
 
     sql: str | None = None
     client_realmlist: str | None = None

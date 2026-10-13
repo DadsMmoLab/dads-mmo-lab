@@ -7347,7 +7347,9 @@ def test_under_wsl_every_listed_address_passes_the_real_guard(
     Windows adapters' addresses in NAT mode (measured on this laptop: Errno 99), so every address
     the choice list offered was refused.
     """
-    monkeypatch.setattr(platform, "local_ipv4_addresses", lambda *a, **k: WSL_LISTING)
+    monkeypatch.setattr(
+        platform, "local_ipv4_listing", lambda *a, **k: platform.LocalListing(WSL_LISTING)
+    )
     p = networking.plan(
         WOTLK,
         "lan",
@@ -7363,7 +7365,9 @@ def test_under_wsl_every_listed_address_passes_the_real_guard(
 
 
 def test_under_wsl_an_address_nobody_lists_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(platform, "local_ipv4_addresses", lambda *a, **k: WSL_LISTING)
+    monkeypatch.setattr(
+        platform, "local_ipv4_listing", lambda *a, **k: platform.LocalListing(WSL_LISTING)
+    )
     p = networking.plan(
         WOTLK,
         "lan",
@@ -7380,7 +7384,9 @@ def test_under_wsl_an_address_nobody_lists_is_refused(monkeypatch: pytest.Monkey
 def test_holds_here_under_wsl_reads_the_listing_and_never_binds_in_the_vm(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(platform, "local_ipv4_addresses", lambda *a, **k: WSL_LISTING)
+    monkeypatch.setattr(
+        platform, "local_ipv4_listing", lambda *a, **k: platform.LocalListing(WSL_LISTING)
+    )
 
     def no_bind(ip: str) -> bool:
         raise AssertionError(f"{ip} was bound inside the VM")
@@ -7488,3 +7494,174 @@ def test_under_wsl_a_plan_accepts_the_vms_tailscale_address(
     )
     assert p.ready and p.refusals == (), p.refusals
     assert p.realmlist_sql == networking.realmlist_sql(WOTLK, "100.86.248.75", "100.86.248.75")
+
+
+# -- T674 round 3 nice-to-haves: the portproxy, an unreadable listing, one entry per address ---
+
+LOOPBACK_BOTH: dict[int, str] = {WOTLK.ports.auth: "127.0.0.1", WOTLK.ports.world: "127.0.0.1"}
+
+
+def _windows_cannot_be_asked(how: str) -> Callable[..., subprocess.CompletedProcess[str]]:
+    """The WSL machine's programs, with the Windows listing failing the way it can.
+
+    `interop-off` cannot start `powershell.exe`, `timed-out` is the runner's own answer for a
+    timeout, and `exit-1` is any other non-zero exit. The VM's `ip` listing answers as usual.
+    """
+
+    def by_program(argv: list[str], *_a: object, **_k: object) -> subprocess.CompletedProcess[str]:
+        if argv[0] != "powershell.exe":
+            return subprocess.CompletedProcess(argv, 0, WSL_VM_OUT, "")
+        if how == "interop-off":
+            raise FileNotFoundError(argv[0])
+        if how == "timed-out":
+            return subprocess.CompletedProcess(
+                argv, runner.TIMED_OUT_RETURNCODE, "", "timed out after 8.0s"
+            )
+        return subprocess.CompletedProcess(argv, 1, "", "exit 1")
+
+    return by_program
+
+
+def _wsl_answers(windows: str, vm: str) -> Callable[..., subprocess.CompletedProcess[str]]:
+    """The WSL machine's two listings, as given: the Windows one and the VM's `ip` one."""
+
+    def by_program(argv: list[str], *_a: object, **_k: object) -> subprocess.CompletedProcess[str]:
+        out = windows if argv[0] == "powershell.exe" else vm
+        return subprocess.CompletedProcess(argv, 0, out, "")
+
+    return by_program
+
+
+def test_under_wsl_a_chosen_address_on_the_vms_side_gets_no_portproxy_and_no_stopgap_sentence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A VM-side address is not one Windows can listen on, so no `netsh` rule is built for it.
+
+    `100.86.248.75` is on the VM's tailscale0 (side `wsl`). Round 3 built
+    `listenaddress=100.86.248.75` for it, a rule that can never listen, and the warning promised
+    a stopgap that was not there. The loopback warning itself stays: the ports are still on
+    127.0.0.1 and must be fixed.
+    """
+    monkeypatch.setattr(platform, "in_wsl", lambda: True)
+    monkeypatch.setattr(runner, "run", _wsl_both_sides([]))
+    monkeypatch.setattr(networking, "_can_bind", lambda ip: ip == "100.86.248.75")
+    p = networking.plan(
+        WOTLK,
+        "lan",
+        chosen_address="100.86.248.75",
+        wsl=True,
+        firewall="none",
+        steamos=False,
+        detect_lan=lambda: LAN_ADDRESS,
+        bindings=LOOPBACK_BOTH,
+    )
+    assert p.ready and p.refusals == (), p.refusals
+    assert p.portproxy_commands == (), p.portproxy_commands
+    assert [w for w in p.warnings if "127.0.0.1" in w], p.warnings
+    assert not [w for w in p.warnings if "stopgap" in w], p.warnings
+
+
+def test_under_wsl_a_chosen_address_on_the_windows_side_gets_its_portproxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other side of item 1: a Windows adapter's address is listened on by the forwarder."""
+    monkeypatch.setattr(platform, "in_wsl", lambda: True)
+    monkeypatch.setattr(runner, "run", _wsl_both_sides([]))
+
+    def no_bind(ip: str) -> bool:
+        raise AssertionError(f"{ip} was bound inside the VM")
+
+    monkeypatch.setattr(networking, "_can_bind", no_bind)
+    p = networking.plan(
+        WOTLK,
+        "lan",
+        chosen_address="100.72.215.6",
+        wsl=True,
+        firewall="none",
+        steamos=False,
+        detect_lan=lambda: LAN_ADDRESS,
+        bindings=LOOPBACK_BOTH,
+    )
+    assert p.ready and p.refusals == (), p.refusals
+    expected = platform.portproxy_commands("100.72.215.6", (WOTLK.ports.auth, WOTLK.ports.world))
+    assert p.portproxy_commands == tuple(tuple(c) for c in expected), p.portproxy_commands
+    assert [w for w in p.warnings if "a WSL2 portproxy is added as a stopgap" in w], p.warnings
+
+
+@pytest.mark.parametrize("how", ["interop-off", "timed-out", "exit-1"])
+def test_under_wsl_a_windows_listing_that_cannot_be_read_does_not_say_the_address_is_absent(
+    how: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Item 2. Interop off, a timeout and a non-zero exit all leave the Windows list UNKNOWN.
+
+    The guard answers None, and the refusal says the Windows address list could not be read. It
+    does not say the address is not this computer's: nobody has asked the Windows side.
+    """
+    monkeypatch.setattr(platform, "in_wsl", lambda: True)
+    monkeypatch.setattr(runner, "run", _windows_cannot_be_asked(how))
+
+    def no_bind(ip: str) -> bool:
+        raise AssertionError(f"{ip} was bound inside the VM")
+
+    monkeypatch.setattr(networking, "_can_bind", no_bind)
+    assert networking.holds_here("100.72.215.6", under_wsl=True) is None
+    p = networking.plan(
+        WOTLK,
+        "lan",
+        chosen_address="100.72.215.6",
+        wsl=True,
+        firewall="none",
+        steamos=False,
+        detect_lan=lambda: LAN_ADDRESS,
+    )
+    assert p.ready is False and p.realmlist_sql is None
+    assert p.refusals and "could not be read" in p.refusals[0], p.refusals
+    assert "is not an address of this computer" not in p.refusals[0], p.refusals
+
+
+def test_under_wsl_a_readable_listing_without_the_address_still_says_it_is_not_this_computers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Item 2, the other side: a readable listing that lacks the address is an answer."""
+    monkeypatch.setattr(platform, "in_wsl", lambda: True)
+    monkeypatch.setattr(runner, "run", _wsl_both_sides([]))
+    monkeypatch.setattr(networking, "_can_bind", lambda ip: False)
+    assert networking.holds_here("100.64.9.9", under_wsl=True) is False
+    p = networking.plan(
+        WOTLK,
+        "lan",
+        chosen_address="100.64.9.9",
+        wsl=True,
+        firewall="none",
+        steamos=False,
+        detect_lan=lambda: LAN_ADDRESS,
+    )
+    assert p.ready is False
+    assert p.refusals and "is not an address of this computer" in p.refusals[0], p.refusals
+    assert "could not be read" not in p.refusals[0], p.refusals
+
+
+def test_under_wsl_an_address_on_both_sides_is_listed_once_and_the_windows_entry_is_kept() -> None:
+    """Item 3. Mirrored WSL can show one address on both sides: the offer list has one entry for
+    it, the Windows side's, and the VM's other VPN interface is still offered."""
+    windows = "Tailscale|100.72.215.6\nWi-Fi 2|192.168.1.210\n"
+    vm = (
+        "3: tailscale0    inet 100.72.215.6/32 scope global tailscale0\n"
+        "5: wg0    inet 10.9.0.2/24 scope global wg0\n"
+    )
+    found = platform.local_ipv4_addresses(run=_wsl_answers(windows, vm), system="linux", wsl=True)
+    assert [(a.side, a.interface, a.address) for a in found] == [
+        ("windows", "Tailscale", "100.72.215.6"),
+        ("windows", "Wi-Fi 2", "192.168.1.210"),
+        ("wsl", "wg0", "10.9.0.2"),
+    ], found
+
+
+@pytest.mark.parametrize(
+    "name", ["VirtualBox Host-Only Network", "VirtualBox Host-Only Network #2"]
+)
+def test_the_windows_listing_leaves_out_virtualbox_host_only_adapters(name: str) -> None:
+    """Item 4. VirtualBox's host-only adapter reaches only this computer's own VMs."""
+    out = f"{name}|192.168.56.1\nEthernet|192.168.1.5\n"
+    found = platform.local_ipv4_addresses(run=_listing_answer(out), system="windows", wsl=False)
+    assert {(a.interface, a.address) for a in found} == {("Ethernet", "192.168.1.5")}, found

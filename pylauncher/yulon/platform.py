@@ -30,7 +30,7 @@ from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from ipaddress import IPv4Address, IPv4Network
 from pathlib import Path, PureWindowsPath
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, NamedTuple, Protocol
 
 from yulon import runner
 from yulon.log import get_logger
@@ -748,10 +748,11 @@ _HOST_ONLY_ADAPTER_PREFIXES = (
     "vEthernet (WSL",
     "vEthernet (Default Switch)",
     "VMware Network Adapter",
+    "VirtualBox Host-Only Network",
 )
 """Windows adapters that only reach this computer's own VMs (WSL's, Hyper-V's Default Switch,
-VMware's host-only and NAT ones), so no friend reaches their addresses (T674 round 3). A Hyper-V
-external switch (`vEthernet (<name>)`) is the real LAN and stays."""
+VMware's and VirtualBox's host-only and NAT ones), so no friend reaches their addresses (T674
+round 3). A Hyper-V external switch (`vEthernet (<name>)`) is the real LAN and stays."""
 
 
 def _parse_powershell_addresses(text: str) -> tuple[tuple[str, str], ...]:
@@ -770,15 +771,31 @@ def _parse_powershell_addresses(text: str) -> tuple[tuple[str, str], ...]:
 _PairParser = Callable[[str], tuple[tuple[str, str], ...]]
 
 
-def _listing(do: RunCmd, argv: list[str], parse: _PairParser) -> tuple[tuple[str, str], ...]:
-    """What one listing command says, or () if it cannot be run or exits non-zero."""
+def _listing(do: RunCmd, argv: list[str], parse: _PairParser) -> tuple[tuple[str, str], ...] | None:
+    """What one listing command says, or None if it cannot be run or exits non-zero.
+
+    None and () are different answers (T674 round 3): an empty listing was read and holds
+    nothing, while an unreadable one says nothing about what this computer holds.
+    """
     try:
         proc = do(argv)
     except OSError:
-        return ()
+        return None
     if proc.returncode != 0:
-        return ()
+        return None
     return parse(proc.stdout)
+
+
+class LocalListing(NamedTuple):
+    """What `local_ipv4_listing()` read (T674 round 3).
+
+    `addresses` is the offer list. `windows_unreadable` is True when the PowerShell listing could
+    not be run or exited non-zero (interop off, a timeout, a failure). An address missing from an
+    unreadable listing may still be this computer's, and nobody has asked the Windows side.
+    """
+
+    addresses: tuple[LocalAddress, ...]
+    windows_unreadable: bool = False
 
 
 def local_ipv4_addresses(
@@ -795,9 +812,21 @@ def local_ipv4_addresses(
     WSL is reached on through the Windows forwarder, plus the VM's VPN interfaces (`LocalSide`);
     the VM's NAT eth0 is left out. The choice list and `networking.holds_here()` both read this
     listing under WSL, so the guard accepts what is offered, and refuses the VM's eth0. Loopback and
-    link-local (169.254/16) addresses are dropped, and Docker's bridges are left out. A listing
-    that cannot be read answers nothing, and nothing is guessed in its place.
+    link-local (169.254/16) addresses are dropped, and Docker's bridges are left out. One entry per
+    address: the Windows side's when the same address is on both sides (mirrored WSL). A listing
+    that cannot be read answers nothing, and nothing is guessed in its place; `local_ipv4_listing()`
+    says whether the Windows side could be read at all.
     """
+    return local_ipv4_listing(run, system=system, wsl=wsl).addresses
+
+
+def local_ipv4_listing(
+    run: RunCmd | None = None,
+    *,
+    system: PlatformId | None = None,
+    wsl: bool | None = None,
+) -> LocalListing:
+    """The listing `local_ipv4_addresses()` answers, and whether its Windows side was readable."""
     do: RunCmd = run if run is not None else (lambda argv: runner.run(argv, timeout=8.0))
     where = detect() if system is None else system
     under_wsl = in_wsl() if wsl is None else wsl
@@ -818,20 +847,27 @@ def local_ipv4_addresses(
         sources = [("here", ["ifconfig"], _parse_ifconfig)]
     else:
         sources = [("here", ip_listing, _parse_ip_addr)]
-    found: dict[tuple[LocalSide, str, str], LocalAddress] = {}
+    found: dict[str, LocalAddress] = {}
+    windows_unreadable = False
     for side, argv, parse in sources:
-        for interface, text in _listing(do, argv, parse):
+        pairs = _listing(do, argv, parse)
+        if pairs is None:
+            if argv == powershell:
+                windows_unreadable = True
+            continue
+        for interface, text in pairs:
             try:
                 ip = IPv4Address(text)
             except ValueError:
                 continue
             if ip.is_loopback or ip.is_link_local or ip.is_unspecified:
                 continue
-            found.setdefault(
-                (side, interface, text),
-                LocalAddress(interface, text, _vpn_like(interface, ip), side),
-            )
-    return tuple(found.values())
+            # One entry per address (T674 round 3). Mirrored WSL can show an address on both
+            # sides; the Windows side's entry is the one kept, whichever side was read first.
+            kept = found.get(text)
+            if kept is None or (side == "windows" and kept.side != "windows"):
+                found[text] = LocalAddress(interface, text, _vpn_like(interface, ip), side)
+    return LocalListing(tuple(found.values()), windows_unreadable)
 
 
 DOCKER_BLOCK_QUERY = (

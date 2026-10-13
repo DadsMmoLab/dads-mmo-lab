@@ -15728,8 +15728,9 @@ class StagedInstaller:
           that holds another reachable address is NOT left alone; a row that holds
           exactly that address is left alone, and the line says so. If this
           computer no longer holds the address (Tailscale off, or it changed), one
-          `Warning:` line is printed and the address is still written, because it
-          is the owner's choice. A recorded address that `networking.chosen_ipv4()`
+          `Warning:` line is printed; when the Windows address list could not be read,
+          that line says so instead. The address is still written, because it is the
+          owner's choice. A recorded address that `networking.chosen_ipv4()`
           refuses reads as no choice at all, so it falls through to the detected
           address;
         * no address — `REALM_ADDRESS_UNKNOWN`, and no SQL is attempted at all.
@@ -15761,7 +15762,16 @@ class StagedInstaller:
             # T674: the owner chose an address of this computer (a VPN's, say). It is the one
             # written, and nothing is detected, so a reinstall does not send the LAN address back.
             address: str | None = recorded
-            if not networking.holds_here(recorded):
+            held = networking.holds_here(recorded)
+            if held is None:
+                # The Windows address list could not be read: that is not an answer about this
+                # address, so the line says so (T674 round 3, item 2). The address is still written.
+                yield (
+                    "Warning: the Windows address list could not be read, so it is not known "
+                    f"whether {recorded} is still one of this computer's addresses. It is "
+                    "advertised anyway, because it is the address you chose."
+                )
+            elif not held:
                 yield (
                     f"Warning: {recorded} is not one of this computer's addresses any more (is "
                     "Tailscale off, or did the address change?). It is advertised anyway, because "
