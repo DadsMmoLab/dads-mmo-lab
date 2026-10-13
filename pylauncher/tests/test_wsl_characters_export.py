@@ -1278,6 +1278,44 @@ def test_a_dash_default_applies_only_when_the_variable_is_unset(tmp_path: Path) 
     assert list(out.iterdir()) == []
 
 
+RENDERED_WOTLK = Path(__file__).resolve().parent / "data" / "wotlk-rendered" / "docker-compose.yml"
+"""What Yu'lon renders for a WotLK server: its root password is `${DB_ROOT_PASSWORD:?...}`."""
+RENDERED_PASSWORD = "wotlk-0123456789abcdef"
+
+
+def test_the_rendered_wotlk_compose_takes_its_password_from_the_env_file(tmp_path: Path) -> None:
+    process, _server, _out, _log = _run(
+        tmp_path,
+        env_text=f"DB_ROOT_PASSWORD={RENDERED_PASSWORD}\n",
+        compose={"docker-compose.yml": RENDERED_WOTLK.read_text(encoding="utf-8")},
+        fixture={"password": RENDERED_PASSWORD},
+    )
+    assert process.returncode == 0, process.stderr
+
+
+@pytest.mark.parametrize("env_text", ["", "DB_ROOT_PASSWORD=\n"])
+def test_a_required_variable_without_a_value_is_refused_in_plain_words(
+    tmp_path: Path, env_text: str
+) -> None:
+    process, _server, out, _log = _run(
+        tmp_path,
+        env_text=env_text,
+        compose={"docker-compose.yml": RENDERED_WOTLK.read_text(encoding="utf-8")},
+        fixture={"password": RENDERED_PASSWORD},
+    )
+    assert process.returncode == 2, process.stderr
+    assert "DB_ROOT_PASSWORD" in process.stderr and "Traceback" not in process.stderr
+    assert list(out.iterdir()) == []
+
+
+def test_a_question_mark_takes_an_empty_value_as_set_and_refuses_an_unset_one() -> None:
+    script = _script()
+    form = "${DB_ROOT_PASSWORD?Yu'lon .env is missing}"
+    assert script._expand(form, {"DB_ROOT_PASSWORD": ""}) == ""
+    with pytest.raises(script.Refusal, match="DB_ROOT_PASSWORD"):
+        script._expand(form, {})
+
+
 def test_a_running_server_is_told_to_stop_only_the_game_servers(tmp_path: Path) -> None:
     process, _server, _out, _log = _run(
         tmp_path,

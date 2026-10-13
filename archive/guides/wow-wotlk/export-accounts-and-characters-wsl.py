@@ -342,8 +342,9 @@ _ESCAPED = {
 def _expand(value: str, known: Mapping[str, str]) -> str:
     """Compose's variable substitution: `$$` is one `$`; `$NAME` and `${NAME}`; and the forms
     `${NAME:-d}` (unset or empty), `${NAME-d}` (unset), `${NAME:+d}` (set and not empty),
-    `${NAME+d}` (set). A default is itself expanded. `known` holds final values: they are
-    pasted as they are and never read again."""
+    `${NAME+d}` (set), and `${NAME:?msg}` / `${NAME?msg}`, which refuse when NAME is missing
+    (`:?` also when it is empty). A default is itself expanded. `known` holds final values:
+    they are pasted as they are and never read again."""
     out: list[str] = []
     index = 0
     while index < len(value):
@@ -393,6 +394,13 @@ def _closing_brace(value: str, start: int) -> int:
     return -1
 
 
+def _required_missing(name: str) -> str:
+    return (
+        f"The server folder's .env lacks a value for {name}, which the compose file requires. "
+        f"Put {name} in the server folder's .env, then run this again. Nothing was packed."
+    )
+
+
 def _substitute(name: str, rest: str, known: Mapping[str, str]) -> str:
     current = known.get(name)
     for operator in (":-", "-", ":+", "+", ":?", "?"):
@@ -404,6 +412,8 @@ def _substitute(name: str, rest: str, known: Mapping[str, str]) -> str:
                 return operand if missing else str(current)
             if operator.endswith("+"):
                 return "" if missing else operand
+            if missing and operator.endswith("?"):
+                raise Refusal(_required_missing(name))
             return "" if missing else str(current)
     return current or ""
 
