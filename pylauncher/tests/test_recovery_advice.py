@@ -39,8 +39,10 @@ from __future__ import annotations
 
 import errno
 import os
+import re
 import threading
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -119,6 +121,28 @@ class _DiskThatFills:
 
     def __getattr__(self, name: str) -> Any:
         return getattr(os, name)
+
+
+@contextmanager
+def _unclaimed(server_dir: Path, *, press: str, **_kw: Any) -> Iterator[None]:
+    """A reservation asked for and granted as nothing: no docker, nothing held."""
+    yield None
+
+
+def _the_write_back_is_finished_first(rec: Recorder, server_dir: Path) -> None:
+    """T783: a rollback whose write-back failed leaves its record, and Rebuild names the press.
+
+    Its patch half never ran either (the compose half failed first), so a Rebuild here would
+    compile the source without the patch it carries. "Put the folders back…" writes both.
+    """
+    rec.calls.clear()
+    put_back = server_build_presses.PUT_THE_FOLDERS_BACK
+    with pytest.raises(InstallerError, match=re.escape(put_back)):
+        list(engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
+    assert "build" not in rec.calls, rec.calls
+    pressed = engine(rec, server_claim=_unclaimed, world_running=lambda container: False)
+    said = list(pressed.put_the_folders_back(InstallOptions(server_dir=server_dir)))
+    assert not (server_dir / native.WRITE_BACK_OWED_FILE).exists(), said
 
 
 def _wotlk_ready(tmp_path: Path) -> tuple[Recorder, Path]:
@@ -279,6 +303,7 @@ def test_a_failed_update_is_mended_by_repair_then_recreate_and_rebuild_works(
     assert (removed, started) == ([1], [1]), "the banner's Recreate did not recreate"
     assert view.compose_banner.isHidden(), "the banner outlived the recreate"
 
+    _the_write_back_is_finished_first(rec, server_dir)
     rec.calls.clear()
     _, raised = _said(install_wiring.rebuild_for_app(ENTRY, server_dir)(None))
     assert raised is None, raised
@@ -312,6 +337,7 @@ def test_on_a_wsl_server_the_advice_names_the_repair_in_the_distro_and_that_mend
     assert route is not None and route.check().state == "upstream"
     route.repair()
     assert route.check().state == "current"
+    _the_write_back_is_finished_first(rec, server_dir)
     rec.calls.clear()
     _, raised = _said(engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
     assert raised is None and "build" in rec.calls, raised
@@ -501,12 +527,13 @@ def test_a_patch_that_could_not_be_written_back_names_the_same_press_and_it_reco
     edits get the repository's unpatched bytes back, and are then read-only,
     so `apply_carried_patches()` cannot write them.
 
-    Rebuild, pressed on that state, does not refuse -- it compiles, with the
-    extractor source unpatched. That is why the advice may not name it. The
-    install would not do either: `patch-sources` refuses a tree whose build it
-    would skip. What does recover is the press that failed, pressed again: it
-    writes the patch before its compile, and writes it again when it puts the
-    sources back.
+    Rebuild, pressed on that state, compiled the extractor source unpatched until
+    T783: the rollback now writes the write-back record (`WRITE_BACK_OWED_FILE`)
+    before it moves a folder, so Rebuild refuses, naming "Put the folders back…".
+    The advice still may not name Rebuild. The install would not do either:
+    `patch-sources` refuses a tree whose build it would skip. What does recover
+    is the press that failed, pressed again: it writes the patch before its
+    compile, and writes it again when it puts the sources back.
     """
     rec = Recorder()
     server_dir = tmp_path / "tbc"
@@ -552,10 +579,11 @@ def test_a_patch_that_could_not_be_written_back_names_the_same_press_and_it_reco
     rec.build_result = AttachedRun(0, ("built",))
     rec.calls.clear()
     _, raised = _said(tbc_engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
-    assert raised is None and "build" in rec.calls
-    assert {
-        path: path.read_bytes() for path in patched
-    } == unpatched, "Rebuild wrote the patch -- then it would be a recovery after all"
+    put_back = server_build_presses.PUT_THE_FOLDERS_BACK
+    assert raised is not None and put_back in str(raised), raised
+    assert "build" not in rec.calls, "T783: Rebuild compiled the source without its patch"
+    assert {path: path.read_bytes() for path in patched} == unpatched
+    assert (server_dir / native.WRITE_BACK_OWED_FILE).exists()
 
     # The press again: the fetch lays the repository's unpatched bytes, as a
     # real `reset --hard` does, and the press patches them before it compiles.
@@ -565,6 +593,7 @@ def test_a_patch_that_could_not_be_written_back_names_the_same_press_and_it_reco
     _, raised = _said(stopped.update_to_latest(InstallOptions(server_dir=server_dir)))
     assert raised is None, raised
     assert {path: path.read_bytes() for path in patched} == patched_bytes
+    assert not (server_dir / native.WRITE_BACK_OWED_FILE).exists(), "a whole Update removes it"
 
 
 def test_a_tbc_update_that_fails_puts_the_sources_back_and_never_writes_its_compose_files(
