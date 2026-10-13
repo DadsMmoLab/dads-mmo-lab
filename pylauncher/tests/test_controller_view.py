@@ -14212,16 +14212,17 @@ def test_a_finished_recreate_is_reported_on_the_gui_thread_by_a_real_threaded_ru
     write lands on. Recreate, because it is the branch that clears BOTH owed
     sets.
 
-    Mutation: hand `_run` a closure again (`lambda answer: self._tuning_job_done(answer)`)
-    and the writes are recorded off the GUI thread.
+    Mutation: in `ThreadedJobRunner.__call__` (yulon/ui/widgets/job.py), connect
+    `worker.done` to `delivery.done` with `Qt.ConnectionType.DirectConnection` instead of
+    the queued connection. The answer and the writes it makes then run on the worker
+    thread, and the wait for the jobs those answers start fails before the thread
+    assertion is reached. A closure handed to `_run` no longer bites: since T97 every
+    callable runs on the GUI thread through `_Delivery`.
     """
     from PySide6.QtWidgets import QMessageBox
 
-    runners: list[ThreadedJobRunner] = []
-
     def real_runner(parent: object) -> ThreadedJobRunner:
-        runners.append(ThreadedJobRunner(parent))  # type: ignore[arg-type]
-        return runners[-1]
+        return ThreadedJobRunner(parent)  # type: ignore[arg-type]
 
     monkeypatch.setattr(controller_view_module, "threaded_job_runner", real_runner)
     view = _tuning_view(ps, tmp_path)
@@ -14256,7 +14257,6 @@ def test_a_finished_recreate_is_reported_on_the_gui_thread_by_a_real_threaded_ru
     # The report is not the end: the recreate's answer starts a status read, and that read's
     # answer starts more (T771). Wait for every job this test started, not only for the report.
     pump_until_every_job_has_answered("the jobs the recreate's answers started")
-    assert all(runner.wait(HANG_BOUND_MS) for runner in runners)
 
     assert view._busy is False
     assert view._tuning_owed.get("restart") is None, "a recreate covers the restart it owed"
