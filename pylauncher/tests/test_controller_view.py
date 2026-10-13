@@ -29,7 +29,7 @@ from tests.conftest import (
     HANG_BOUND_MS,
     process_events,
     pump_until,
-    take_every_held_answer,
+    pump_until_every_job_has_answered,
     three_way_only,
     wait_for_panel,
 )
@@ -14253,8 +14253,10 @@ def test_a_finished_recreate_is_reported_on_the_gui_thread_by_a_real_threaded_ru
         lambda: view.tuning_report.toPlainText() == "recreate: the server was started.",
         "the recreate's report",
     )
+    # The report is not the end: the recreate's answer starts a status read, and that read's
+    # answer starts more (T771). Wait for every job this test started, not only for the report.
+    pump_until_every_job_has_answered("the jobs the recreate's answers started")
     assert all(runner.wait(HANG_BOUND_MS) for runner in runners)
-    take_every_held_answer()  # joined directly: take the answers still queued (T771)
 
     assert view._busy is False
     assert view._tuning_owed.get("restart") is None, "a recreate covers the restart it owed"

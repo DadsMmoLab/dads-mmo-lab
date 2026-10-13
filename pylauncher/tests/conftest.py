@@ -731,6 +731,27 @@ def take_every_held_answer() -> None:
             time.sleep(0.005)
 
 
+def pump_until_every_job_has_answered(what: str) -> None:
+    """Pump the GUI loop until every job this test started has ended and its answer is taken.
+
+    The guard above fails a test that leaves one of these unanswered (T771). An answer can
+    start more jobs: a status read asked again when the one before was superseded, and that
+    answer asks about the import, and so on. So each check looks at what is held NOW, and a
+    job that a delivery starts is waited for as well. Bounded as every wait here (`pump_until`),
+    and it says what it was waiting for when the bound runs out.
+    """
+    before = _HELD_BEFORE_THE_TEST[-1] if _HELD_BEFORE_THE_TEST else []
+
+    def settled() -> bool:
+        return all(
+            not thread.isRunning() and (delivery is None or delivery.delivered)
+            for thread, _worker, delivery in _held_job_pairs()
+            if not any(thread is t for t in before)
+        )
+
+    pump_until(settled, what)
+
+
 def process_events(ms: int = 50) -> None:
     """Pump the Qt event loop for `ms` milliseconds (lets queued signals deliver)."""
     from PySide6.QtCore import QCoreApplication, QDeadlineTimer, QEventLoop
