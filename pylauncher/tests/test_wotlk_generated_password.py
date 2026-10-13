@@ -426,6 +426,50 @@ def test_the_import_probe_reads_the_password_of_the_folder_it_is_given(
     assert seen == [GENERATED]
 
 
+def test_the_folder_import_probe_answers_a_new_install_from_its_env_line_when_the_file_is_gone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T785: `.db_password` is gone, `.env` still holds the line `generate-compose` wrote. The
+    probe is answered with it, not refused as "not knowable"."""
+    from yulon import install_wiring
+    from yulon.controller_wow_wotlk import repair as wotlk_repair
+
+    a_record(tmp_path, generated=True)
+    (tmp_path / ".env").write_text(f"DB_ROOT_PASSWORD={GENERATED}\n", encoding="utf-8")
+    seen: list[str] = []
+
+    def fake_import_state(sql: object, mysql: object, _health: object) -> object:
+        password = getattr(sql, "root_password", "?")
+        seen.append(str(password() if callable(password) else password))
+        return object()
+
+    monkeypatch.setattr(wotlk_repair, "import_state", fake_import_state)
+    probe, _reset = install_wiring.import_gate_for(ENTRY, server_dir=tmp_path)
+    assert probe is not None
+    probe()
+    assert seen == [GENERATED]
+
+
+def test_the_folder_import_probe_refuses_an_env_line_compose_reads_otherwise(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T785: the T748 round-3 text reaches the probe's answer, not a generic "not knowable"."""
+    from yulon import install_wiring
+    from yulon.catalog.catalog import DbPasswordUnknown
+    from yulon.controller_wow_wotlk import repair as wotlk_repair
+
+    a_record(tmp_path, generated=True)
+    (tmp_path / ".env").write_text("DB_ROOT_PASSWORD=has$dollar\n", encoding="utf-8")
+    with pytest.raises(DbPasswordUnknown) as unknown:
+        ENTRY.install.known_db_password(tmp_path)
+    monkeypatch.setattr(wotlk_repair, "import_state", lambda sql, mysql, _h: sql.root_password())
+    probe, _reset = install_wiring.import_gate_for(ENTRY, server_dir=tmp_path)
+    assert probe is not None
+    state = probe()
+    assert state.state == "unreadable"
+    assert str(unknown.value) in state.detail, state.detail
+
+
 def test_reset_defaults_reads_an_old_folders_published_password(tmp_path: Path) -> None:
     """Reset server settings to default writes the password into the confs. An old folder's
     is `password`."""

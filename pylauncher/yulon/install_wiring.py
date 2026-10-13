@@ -176,14 +176,12 @@ def import_gate_for(
         def password() -> str:
             # The folder's own password (T748), read when the database is first asked, so a
             # tab built for a server inside a stopped WSL distro does not start it (T133).
-            known = entry.install.db_password(folder)
-            if known is None:
-                raise _PasswordUnknown(
-                    f"this install's database password is not knowable: "
-                    f"{entry.install.password.file} could not be read in {folder}, so its "
-                    "databases cannot be asked what state they are in"
-                )
-            return known
+            # `known_db_password()`: the file, else the `.env` line a new install was given,
+            # else a refusal in player words (T785) -- never the published default.
+            try:
+                return entry.install.known_db_password(folder)
+            except DbPasswordUnknown as exc:
+                raise _PasswordUnknown(str(exc)) from exc
 
     # `client=` on BOTH. This function is entry-driven -- it builds the import
     # gate for whichever game is being installed, not for WotLK -- so an
@@ -210,7 +208,7 @@ def import_gate_for(
         try:
             return wotlk_repair.reset_unfinished(sql, mysql, everything=everything, seeded=seeded)
         except _PasswordUnknown as exc:
-            raise InstallerError(f"Nothing was dropped: {exc}.") from exc
+            raise InstallerError(f"Nothing was dropped: {str(exc).rstrip('.')}.") from exc
 
     return probe, reset
 
@@ -408,7 +406,6 @@ def installer_for_app(
     daemon this process reaches, and Yu'lon does not install into a distro
     (`pyplan/wsl-resident-servers.md` §7).
     """
-    probe, reset = import_gate_for(entry, wsl_distro=wsl_distro)
     copy = database_snapshot_for(entry, wsl_distro=wsl_distro)
     modules = importer_modules_for(entry)
 
@@ -416,7 +413,8 @@ def installer_for_app(
         server_dir: Path,
     ) -> tuple[docker.ImportProbe | None, docker.ResetUnfinished | None]:
         # The engine asks with the folder it is working on, so the password is that folder's
-        # (T748). `probe`/`reset` above remain for a caller that has no folder.
+        # (T748). There is no engine-wide pair: one with no folder could only ask with the
+        # published `password`, which a new install does not have (T785).
         return import_gate_for(entry, server_dir=server_dir, wsl_distro=wsl_distro)
 
     if wsl_distro is None:
@@ -424,8 +422,6 @@ def installer_for_app(
             entry,
             platform_id=platform_id,
             installers_root=installers_root,
-            import_probe=probe,
-            reset_unfinished=reset,
             database_snapshot=copy,
             importer_modules=modules,
             import_gate=folder_gate,
@@ -433,8 +429,6 @@ def installer_for_app(
     return installer_for(
         entry,
         installers_root=installers_root,
-        import_probe=probe,
-        reset_unfinished=reset,
         seams=Seams.in_wsl(wsl_distro),
         database_snapshot=copy,
         importer_modules=modules,

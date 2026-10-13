@@ -34,7 +34,7 @@ from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, S
 from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path, PurePosixPath
-from typing import Any, NamedTuple, Protocol, TypeVar, assert_never, cast
+from typing import Any, NamedTuple, NoReturn, Protocol, TypeVar, assert_never, cast
 
 import shiboken6
 from PySide6.QtCore import QEvent, QObject, QPoint, QSize, Qt, QTimer, QUrl, Signal, Slot
@@ -133,7 +133,7 @@ from yulon.apply import (
     required_prompts,
 )
 from yulon.catalog import bot_dashboard, composegen, native, preflight, time_zone, upstream
-from yulon.catalog.catalog import CatalogEntry, Client, ClientPack, ConfigWtf
+from yulon.catalog.catalog import CatalogEntry, Client, ClientPack, ConfigWtf, DbPasswordUnknown
 from yulon.catalog.families import azerothcore, clientdir, decisions, mmaps, trinitycore
 from yulon.catalog.installer import (
     InstallerError,
@@ -1949,6 +1949,14 @@ class ControllerServices:
     write, on the job's thread; the account and character writes take it inside their own seams.
     `None` (a harness) holds nothing.
     """
+    db_refusal: str | None = None
+    """Why nothing on this tab may touch the database, in player words, or None (T785).
+
+    Set when `Install.known_db_password()` cannot answer for this folder: its password file
+    is gone and its `.env` has no line either, or the line is one Docker reads otherwise.
+    Start and Stop need no database and stay; the view greys what does need it, with this
+    as the reason, and every database seam refuses with it instead of trying `password`.
+    """
     shelf: backup_shelf.Seam | None = None
     """This install's backups folder as the tab lists, deletes from and cleans up (T604).
 
@@ -2496,7 +2504,13 @@ class ControllerServices:
                 _with_the_ready_wait(
                     _with_take_back(
                         _knowing_its_server_sources(
-                            factory(entry, server_dir, client_dir, wsl_distro), entry
+                            _with_the_database_refusal(
+                                factory(entry, server_dir, client_dir, wsl_distro),
+                                entry,
+                                server_dir,
+                                wsl_distro=wsl_distro,
+                            ),
+                            entry,
                         )
                     ),
                     entry,
@@ -2506,7 +2520,13 @@ class ControllerServices:
                 client_dir,
             )
         services = _knowing_its_server_sources(
-            factory(entry, server_dir, play_client_dir, wsl_distro), entry
+            _with_the_database_refusal(
+                factory(entry, server_dir, play_client_dir, wsl_distro),
+                entry,
+                server_dir,
+                wsl_distro=wsl_distro,
+            ),
+            entry,
         )
         origins = _originals_of(play_client_dir, client_dir)
         if services.applier is not None:
@@ -2804,24 +2824,26 @@ def forget_record(game: str, server_dir: Path) -> Callable[[], None]:
 def _db_password(
     entry: CatalogEntry, server_dir: Path, *, wsl_distro: str | None = None
 ) -> apply_module.RootPassword:
-    """This install's database root password, with the last-resort default.
+    """This install's database root password: its value, or a reader that refuses (T785).
 
     The entry may carry the password, or name a file the installer generated it
-    into; `db_password()` knows both. The three CMaNGOS games generate one, so
-    before it was read they authenticated as root with the literal "password" -
-    Start and Stop need no database, which is why it surfaced later, on Create
-    account and Backup. The default stays as a last resort so an install whose
-    password file has gone missing still gets a tab that can start and stop,
-    rather than no tab at all.
+    into; `Install.known_db_password()` knows both, and the `.env` line a new install
+    was given when its file is gone (T748 round 4). When none of them can answer, the
+    answer is NOT the published default: a login with it only ends in "Access denied"
+    (or, on a server that does use it, in a login nobody chose). The tab is still
+    built, because Start and Stop need no database and no tab at all is worse, and
+    every database seam is handed a reader that raises `DbPasswordUnknown` in player
+    words when it is first asked. `ControllerServices.db_refusal` carries the same
+    words so the view greys what needs the database.
 
     **A server inside a WSL distro gets a reader, not the value (T133).** Every
     tab is built when the app opens, and reading `.db_password` under
     `\\\\wsl.localhost\\` then started a stopped distro. Nothing needs the password
     before something talks to the database, which starts the distro anyway, so
     the file is read at that first use (`apply.mysql_env()`), and kept once a
-    read has found it: a first read that fell back to the default (the distro's
-    share not reachable yet, the file briefly missing) is asked again the next
-    time rather than remembered (T133 review).
+    read has found it: a first read that could not know it (the distro's share
+    not reachable yet, the file briefly missing) is asked again the next time
+    rather than remembered (T133 review).
     """
     if wsl_distro is None:
         return _read_db_password(entry, server_dir)
@@ -2829,39 +2851,90 @@ def _db_password(
 
     def read_when_asked() -> str:
         if not found:
-            password = entry.install.db_password(server_dir)
-            if password is None:
-                return _password_unknown(entry, server_dir)
-            found.append(password)
+            found.append(entry.install.known_db_password(server_dir))
         return found[0]
 
     return read_when_asked
 
 
-def _read_db_password(entry: CatalogEntry, server_dir: Path) -> str:
-    """`_db_password()`'s reading: the entry's password, or the default with a warning."""
-    password = entry.install.db_password(server_dir)
-    if password is not None:
-        return password
-    return _password_unknown(entry, server_dir)
+def _read_db_password(entry: CatalogEntry, server_dir: Path) -> apply_module.RootPassword:
+    """`_db_password()`'s reading: the password, or a reader that refuses with the reason."""
+    try:
+        return entry.install.known_db_password(server_dir)
+    except DbPasswordUnknown as exc:
+        return _password_unknown(entry, server_dir, exc)
 
 
-def _password_unknown(entry: CatalogEntry, server_dir: Path) -> str:
-    """The last-resort default, said in the log when a generated password could not be read."""
-    # `db_password()` says None when the entry NAMES a password file and that
-    # file cannot be read - which is not the same as "use the default", and
-    # silently defaulting here would rebuild the bug this seam exists to close.
-    # The tab is still built, because Start and Stop need no database and no tab
-    # at all is worse; but the reason every SQL-backed control is about to fail
-    # is written down once, here, instead of arriving as "access denied" six
-    # clicks later.
-    if entry.install.password.mode == "generated":
-        logger.warning(
-            f"{entry.id}: cannot read {entry.install.password.file} in "
-            f"{server_dir}, so the database password is unknown - accounts, backup "
-            f"and restore will fail until that file is restored"
-        )
-    return wotlk_modules.DEFAULT_DB_ROOT_PASSWORD
+def _password_unknown(
+    entry: CatalogEntry, server_dir: Path, why: DbPasswordUnknown
+) -> Callable[[], str]:
+    """A reader that refuses with `why`, after saying in the log that the password is unknown."""
+    # Not "use the default": `known_db_password()` says no when the entry NAMES a
+    # password file that cannot be read (and its `.env` has no line either), which is
+    # not the same as "use the default", and silently defaulting here would rebuild
+    # the bug this seam exists to close (T785). The reason every database-backed
+    # control is about to refuse is written down once, here, instead of arriving as
+    # "access denied" six clicks later.
+    logger.warning(
+        f"{entry.id}: the database password is unknown in {server_dir}, so accounts, "
+        f"backup, restore and module SQL refuse until it is restored: {why}"
+    )
+
+    def refuse() -> str:
+        raise DbPasswordUnknown(str(why))
+
+    return refuse
+
+
+def _database_refusal(
+    entry: CatalogEntry, server_dir: Path, *, wsl_distro: str | None
+) -> str | None:
+    """Why the database controls cannot work on this tab, or None.
+
+    None for a server inside a WSL distro: nothing may read its folder until something
+    talks to the database (T133), so its refusal arrives from the seam when it is
+    first asked.
+    """
+    if wsl_distro is not None:
+        return None
+    try:
+        entry.install.known_db_password(server_dir)
+    except DbPasswordUnknown as exc:
+        return str(exc)
+    return None
+
+
+def _with_the_database_refusal(
+    services: ControllerServices,
+    entry: CatalogEntry,
+    server_dir: Path,
+    *,
+    wsl_distro: str | None,
+) -> ControllerServices:
+    """`services` that say, and keep to, "the database password is unknown" (T785).
+
+    In `for_entry()` rather than in each game's factory so no game can be left with a
+    control that logs in anyway. The seams a factory built over the refusing reader
+    already refuse when asked; the three below are replaced so that the refusal is the
+    first thing they say, ahead of whatever Docker would be asked on the way there.
+    """
+    refusal = _database_refusal(entry, server_dir, wsl_distro=wsl_distro)
+    if refusal is None:
+        return services
+
+    def refuse_maintenance(*_args: object, **_kwargs: object) -> NoReturn:
+        raise wotlk_maintenance.MaintenanceError(refusal)
+
+    def refuse_account(*_args: object, **_kwargs: object) -> NoReturn:
+        raise DbPasswordUnknown(refusal)
+
+    return replace(
+        services,
+        db_refusal=refusal,
+        backup=refuse_maintenance,
+        restore=refuse_maintenance,
+        create_account=refuse_account,
+    )
 
 
 def _db_client(entry: CatalogEntry) -> str | None:
@@ -8643,6 +8716,8 @@ class ControllerView(QWidget):
         self._build_modules_tab()
         self._build_tuning_tab()
         self._build_networking_tab()
+        # T785: after every tab exists, before anything reads from one.
+        self._grey_for_the_database()
 
         # T106: asked once now, whether or not this tab polls -- it reads files
         # and asks no daemon.
@@ -10828,7 +10903,7 @@ class ControllerView(QWidget):
             # with no import service has no route, and re-enabling it here
             # would hand the three CMaNGOS games a live button the moment any
             # action of theirs finished.
-            self.module_sql_button.setEnabled(self.services.module_sql is not None)
+            self.module_sql_button.setEnabled(self._module_sql_available())
             # Back to what this install can do, never unconditionally: a game
             # with no store or no applier must not be handed live row buttons by
             # a job of its own finishing, and neither must a row the ROW itself
@@ -15551,6 +15626,10 @@ class ControllerView(QWidget):
         the only way to make the FIRST one anywhere — SOAP needs an account
         before it will authenticate, so it cannot bootstrap itself.
         """
+        if (refusal := self.services.db_refusal) is not None:
+            self.account_report.setText(refusal)
+            self.action_failed.emit(refusal)
+            return
         name = self.account_name.text().strip()
         password = self.account_password.text()
         if not name or not password:
@@ -16971,6 +17050,8 @@ class ControllerView(QWidget):
         Or the backups not listed yet, because they wait for a stopped WSL
         distro (T194 F9): "Pick a backup" over a list nobody has read is untrue.
         """
+        if self.services.db_refusal is not None:
+            return self.services.db_refusal
         if "backups" in self._waiting_on_distro:
             return RESTORE_WAITS_FOR_DISTRO
         if self._shelf_reading:
@@ -17383,6 +17464,9 @@ class ControllerView(QWidget):
 
     @Slot()
     def back_up(self) -> None:
+        if (refusal := self.services.db_refusal) is not None:
+            self.maintenance_report.setPlainText(refusal)
+            return
         if self._refused_during_bot_rebuild():
             return
         set_enabled_why(self.backup_button, wait_for("the backup"))
@@ -17437,6 +17521,9 @@ class ControllerView(QWidget):
 
     @Slot()
     def show_restore_plan(self) -> None:
+        if (refusal := self.services.db_refusal) is not None:
+            self.maintenance_report.setPlainText(refusal)
+            return
         path = self._selected_backup()
         if path is None:
             self.maintenance_report.setPlainText("Select a backup first.")
@@ -17710,6 +17797,9 @@ class ControllerView(QWidget):
 
     @Slot()
     def run_restore(self) -> None:
+        if (refusal := self.services.db_refusal) is not None:
+            self.maintenance_report.setPlainText(refusal)
+            return
         plan = self._restore_plan
         if plan is None:
             # Belt and braces: the button is disabled without a plan, but a
@@ -17794,7 +17884,12 @@ class ControllerView(QWidget):
             # A plan or a restore that failed: a fresh plan is what Restore waits for.
             set_enabled_why(self.restore_button, self._restore_waits_for())
         ours = isinstance(
-            exc, (wotlk_maintenance.MaintenanceError, tortoise_poolreset.PoolResetError)
+            exc,
+            (
+                wotlk_maintenance.MaintenanceError,
+                tortoise_poolreset.PoolResetError,
+                DbPasswordUnknown,
+            ),
         )
         detail = getattr(exc, "detail", "") if ours else str(exc)
         # Either write takes the last Details down (`maintenance_report.textChanged`).
@@ -18193,9 +18288,10 @@ class ControllerView(QWidget):
         # The gate that used to grey two toolbar buttons now greys every row's
         # own press: there is no other control left for it to act on.
         self.modules_panel.set_enabled_actions(self._module_actions_allowed())
-        self.module_sql_button.setEnabled(self.services.module_sql is not None)
+        self.module_sql_button.setEnabled(self._module_sql_available())
         self.module_sql_button.setToolTip(
-            MODULE_SQL_TIP if self.services.module_sql is not None else MODULE_SQL_NO_IMPORTER
+            self.services.db_refusal
+            or (MODULE_SQL_TIP if self.services.module_sql is not None else MODULE_SQL_NO_IMPORTER)
         )
         self.module_updates_button.setEnabled(self.services.module_updates is not None)
         self.module_updates_button.setToolTip(
@@ -18261,6 +18357,49 @@ class ControllerView(QWidget):
         return (
             self.services.store is not None and self.services.applier is not None and not self._busy
         )
+
+    @staticmethod
+    def _module_needs_the_database(manifest: Manifest) -> bool:
+        """Whether installing, updating or removing `manifest` runs SQL as root (T785).
+
+        Direct steps only: a `db-import` step is applied by the importer on its next start, with
+        the password compose already holds, and a module of files and conf keys touches no
+        database at all.
+        """
+        return any(step.applied_by == "direct" for step in manifest.sql)
+
+    def _module_sql_available(self) -> bool:
+        """Whether Apply module SQL may be pressed: a route, and a database password to ask with."""
+        return self.services.module_sql is not None and self.services.db_refusal is None
+
+    def _grey_for_the_database(self) -> None:
+        """T785: grey every control that needs the database when its password cannot be known.
+
+        Start and Stop need no database and are left alone. Each grey press carries the
+        refusal as its reason (tooltip, and the tab's reason line), and the place its
+        result would have appeared says it too. The handlers repeat the refusal for a
+        press that arrives by another road (a menu, a shortcut), so this is the sight of
+        it and not the only guard.
+        """
+        refusal = self.services.db_refusal
+        if refusal is None:
+            return
+        for press in (
+            self.create_account_button,
+            self.set_password_button,
+            self.set_gm_button,
+            self.delete_account_button,
+            self.refresh_accounts_button,
+        ):
+            set_enabled_why(press, refusal, self.account_reasons)
+        self.account_report.setText(refusal)
+        # Not the module rows: a module that only copies files or sets a conf key needs no
+        # database (`_module_needs_the_database()`); one that runs SQL is refused at its press.
+        for press in (self.backup_button, self.plan_restore_button, self.restore_button):
+            set_enabled_why(press, refusal, self.restore_reasons)
+        self.maintenance_report.setPlainText(refusal)
+        self.module_sql_button.setEnabled(False)
+        self.module_sql_button.setToolTip(refusal)
 
     def _installed_clones(self) -> Mapping[str, frozenset[str]] | None:
         """What is in this install's clone folders per family, or `None` for no reader.
@@ -18691,6 +18830,18 @@ class ControllerView(QWidget):
             self.module_report.setPlainText(UNCATALOGUED_PRESS)
             return
         if manifest is None or applier is None:
+            return
+        if (refusal := self.services.db_refusal) is not None and (
+            self._module_needs_the_database(manifest)
+        ):
+            # T785: its SQL would log in with a password nobody can know. Nothing is run, so
+            # no half of the module is applied: the files of a module whose SQL then failed
+            # would be on disk for a database that never got its rows.
+            self._module_pending = None
+            self.module_report.setPlainText(
+                f"{action} {manifest.id}: not started — {refusal} "
+                "Nothing on this machine was changed."
+            )
             return
         row = self.modules_panel.selected_row()
         if (
@@ -19895,6 +20046,9 @@ class ControllerView(QWidget):
         route = self.services.module_sql
         if route is None:
             return
+        if (refusal := self.services.db_refusal) is not None:
+            self.module_report.setPlainText(refusal)
+            return
         # One call, not a second copy: `_set_busy(True)` is what locks this
         # button as well as the Server tab's, so the two cannot drift into
         # disagreeing about whether an importer is running.
@@ -19931,7 +20085,7 @@ class ControllerView(QWidget):
         self._set_busy(False)
         self._module_sql_running = False
         self._module_pending = None
-        self.module_sql_button.setEnabled(self.services.module_sql is not None)
+        self.module_sql_button.setEnabled(self._module_sql_available())
         # Deliberately not "N modules applied". This tab cannot count that: the
         # importer applies a FILE at a time and says so itself, and a module
         # whose SQL was already in `updates` is a module that correctly gets
@@ -19956,7 +20110,7 @@ class ControllerView(QWidget):
         self._set_busy(False)
         self._module_sql_running = False
         self._module_pending = None
-        self.module_sql_button.setEnabled(self.services.module_sql is not None)
+        self.module_sql_button.setEnabled(self._module_sql_available())
         # The refusal verbatim and under whatever the importer had already
         # printed, because a run that got part-way is a different situation
         # from one that never started and only its own output can tell them

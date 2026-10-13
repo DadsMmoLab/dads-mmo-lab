@@ -548,6 +548,7 @@ SEAMS: dict[str, tuple[str, str]] = {
         "lower",
         "an Applier install/remove: the tab's applier, or Centurion's add-on-only one, holds",
     ),
+    "db_refusal": ("reads", "a sentence"),
     "shelf": (
         "held",
         "tests.test_backup_shelf.test_another_yulon_holding_the_server_refuses_before_the_lease",
