@@ -31,9 +31,9 @@ from yulon.apply import (
     LedgerReader,
     ModuleUpdate,
     SqlRunner,
+    _default_git,
     applied_updates,
     failed_updates,
-    module_git,
     module_sql_plan,
     module_sql_report,
     read_ledger,
@@ -434,7 +434,9 @@ def module_updates(
     press, each against what its manifest follows, and keeps each row a day.
     """
     # T772: the distro's git for a server inside WSL, whose checkouts host git refuses.
-    reader: BehindReader = git if git is not None else module_git(server_dir)
+    # T789: and the container where the PC has no git at all -- host git unconditionally
+    # failed this press with a raw [WinError 2]. `_default_git()` is Install's choice (T58).
+    reader: BehindReader = git if git is not None else _default_git(server_dir)  # type: ignore[assignment]
     branches, releases = _follows(user_game)
     return apply_updates(server_dir, git=reader, branches=branches, releases=releases)
 

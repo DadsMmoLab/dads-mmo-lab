@@ -132,6 +132,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A TBC, Vanilla, Tortoise or Centurion install that did not finish installing no longer starts on a half-imported world.
 - A leftover database copy from a move keeps its name when its first lines cannot be read for a moment.
 - City Bots' install and database updates are refused, naming the accounts, when a real account uses a bot's account number.
+- Check for module updates works on a PC without Git installed.
 
 ### Changed
 - On an older WotLK install, the first Rebuild sends the whole server to Docker once (about 5 GB); later ones are quick.
