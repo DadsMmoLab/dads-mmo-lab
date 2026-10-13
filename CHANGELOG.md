@@ -20,7 +20,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - New WoW WotLK and Unbound servers get a database password of their own; older servers keep theirs.
 - **Server build ▾** on the Modules tab has **Put the folders back…**, which puts the source folders back on their build.
 ### Fixed
-- **Remove** on City Bots now clears its bot marks and roster, so a new account on its numbers is not a bot.
+- **Remove** on City Bots now takes back its roster and bot account marks.
 - A server whose database password cannot be found now greys the accounts, backup and module buttons and says why.
 - A finished update no longer leaves **Rebuild** refused over files a failed **Put the folders back…** left.
 - A failed update that leaves its patch out names **Put the folders back…** under **Server build ▾** on the Modules tab.

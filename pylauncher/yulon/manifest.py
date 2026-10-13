@@ -263,6 +263,14 @@ class SqlStep(_Strict):
             "them as left behind; declare one only after reading both files."
         ),
     )
+    stands_in_for: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "On a remove step: the module's own uninstall files (clone-relative, single files) "
+            "whose work this step does instead. Remove's report does not name them as SQL "
+            "Yu'lon did not run, so nobody is sent to run them by hand."
+        ),
+    )
     migration_module: str | None = Field(
         default=None,
         pattern=r"^[A-Za-z0-9_.-]{1,255}$",
@@ -312,6 +320,11 @@ class SqlStep(_Strict):
         if self.undoes and self.when != "remove":
             # T751 round 2: only a step Remove runs can take an install file back.
             raise ValueError("SqlStep.undoes is for a `when: remove` step")
+        if self.stands_in_for and self.when != "remove":
+            # T788: only a step Remove runs can do an uninstall file's work.
+            raise ValueError("SqlStep.stands_in_for is for a `when: remove` step")
+        if any(_glob_chars(name) for name in self.stands_in_for):
+            raise ValueError("SqlStep.stands_in_for names single files, never a glob")
         if self.applied_by != "direct" and (self.precondition is not None or self.verify):
             raise ValueError(
                 "SqlStep.precondition/verify need `applied_by='direct'`: a db-import step is run "

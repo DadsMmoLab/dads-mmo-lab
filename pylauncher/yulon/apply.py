@@ -9196,6 +9196,8 @@ def _declared_sql(manifest: Manifest, clone: Path) -> Callable[[str], bool]:
     named: set[str] = set()
     patterns: list[str] = []
     for step in manifest.sql:
+        # T788: a remove step that does an uninstall file's work names it; that file is handled.
+        named.update(step.stands_in_for)
         if step.path is None:
             continue
         files = _sql_files(clone, step.path)

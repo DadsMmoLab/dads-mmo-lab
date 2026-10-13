@@ -654,13 +654,17 @@ def _playerbots_db() -> Any:
 
 
 def test_the_take_back_clears_only_the_roster_s_marks_and_spares_every_other_row() -> None:
-    """The shipped statement, run: only type-3 marks in 12001-12400 go, to 0 (not a bot)."""
+    """The shipped statement, run: only type-3 marks in 12001-12400 go, as rows (T788 review).
+
+    Gone, never set to 0: mod-playerbots counts a type-0 row as an unassigned random-bot
+    account and creates bots for it at every start; a missing row reads as not a bot.
+    """
     con = _playerbots_db()
     # MySQL's START TRANSACTION is sqlite's BEGIN; the rest is run as shipped.
     con.executescript(_remove_step().statement.replace("START TRANSACTION", "BEGIN"))
 
     types = dict(con.execute("SELECT account_id, account_type FROM playerbots_account_type"))
-    assert types == {12001: 0, 12400: 0, 12005: 0, 12010: 2, 11999: 3, 12401: 3, 500: 1}
+    assert types == {12010: 2, 11999: 3, 12401: 3, 500: 1}
     bots = sorted(row[0] for row in con.execute("SELECT bot FROM playerbots_random_bots"))
     assert bots == [500, 9000002, 9000401]
     tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -672,3 +676,39 @@ def test_the_take_back_is_declared_as_undoing_the_roster_file() -> None:
     assert step.db == "playerbots" and step.applied_by == "direct"
     assert step.undoes == (ROSTER_REL,)
     assert step.precondition is not None and "information_schema" in step.precondition.query
+
+
+def test_the_remove_report_does_not_send_anyone_to_run_upstream_s_playerbots_uninstall(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The take-back stands in for upstream's playerbots uninstall file, which sets type 0.
+
+    Named as "not run", it would invite a player to run it by hand. The world one is still
+    named: nothing of Yu'lon's does its work.
+    """
+    server_dir, applier, _ = _install_press(tmp_path, monkeypatch)
+    manifest = _city_bots_manifest()
+    applier.install(manifest)
+    uninstall = server_dir / "modules" / "mod-city-bots" / "data" / "sql" / "uninstall"
+    for db_dir, text in (
+        ("playerbots", "UPDATE `playerbots_account_type` SET `account_type` = 0;"),
+        ("db-world", "DROP TABLE IF EXISTS `city_bot_poi`;"),
+    ):
+        (uninstall / db_dir).mkdir(parents=True)
+        (uninstall / db_dir / "uninstall_mod_city_bots.sql").write_text(text, encoding="utf-8")
+
+    report = applier.remove(manifest)
+
+    named = [line for line in report.left_behind if "uninstall_mod_city_bots.sql" in line]
+    assert len(named) == 1 and "uninstall/db-world/" in named[0], report.left_behind
+
+
+def test_stands_in_for_is_only_for_a_remove_step() -> None:
+    from pydantic import ValidationError
+
+    from yulon.manifest import SqlStep
+
+    with pytest.raises(ValidationError, match="stands_in_for"):
+        SqlStep(db="world", statement="SELECT 1", stands_in_for=("a.sql",))
+    with pytest.raises(ValidationError, match="stands_in_for"):
+        SqlStep(db="world", statement="SELECT 1", when="remove", stands_in_for=("u/*.sql",))

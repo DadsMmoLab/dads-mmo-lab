@@ -764,6 +764,15 @@
           "default": null,
           "description": "Must return a row or this step is skipped, unrun, with `missing` said."
         },
+        "stands_in_for": {
+          "default": [],
+          "description": "On a remove step: the module's own uninstall files (clone-relative, single files) whose work this step does instead. Remove's report does not name them as SQL Yu'lon did not run, so nobody is sent to run them by hand.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Stands In For",
+          "type": "array"
+        },
         "statement": {
           "anyOf": [
             {
