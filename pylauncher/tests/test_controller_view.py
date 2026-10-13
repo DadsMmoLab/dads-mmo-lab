@@ -4356,6 +4356,21 @@ def test_for_wotlk_defaults_to_no_distro(qapp: object, tmp_path: Path) -> None:
     assert ControllerServices.for_wotlk(entry, tmp_path).controller.wsl_distro is None
 
 
+def _with_its_password(entry: CatalogEntry, folder: Path) -> Path:
+    """`folder` as an install of `entry` leaves it: the password file a generated plan names.
+
+    T785: a folder without one is an install whose database password nobody can know, and the
+    tab refuses that instead of trying `password`; the tests here that mean an ordinary
+    install say so.
+    """
+    folder.mkdir(parents=True, exist_ok=True)
+    if entry.install.password.file:
+        (folder / entry.install.password.file).write_text(
+            "test-password-1a2b3c\n", encoding="utf-8"
+        )
+    return folder
+
+
 def test_a_cmangos_install_s_account_path_addresses_its_own_schema(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -4376,7 +4391,7 @@ def test_a_cmangos_install_s_account_path_addresses_its_own_schema(
         return subprocess.CompletedProcess(argv, 0, "" if len(seen) == 1 else "1", "")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
-    services = ControllerServices.for_wotlk(tortoise, tmp_path, None)
+    services = ControllerServices.for_wotlk(tortoise, _with_its_password(tortoise, tmp_path), None)
     services.create_account("bob", "hunter2", 0)
 
     assert seen, "nothing was sent to mysql at all"
@@ -4407,7 +4422,9 @@ def test_a_cmangos_backup_reaches_that_game_s_own_maintenance_binding(
     )
 
     with pytest.raises(MaintenanceError) as err:
-        ControllerServices.for_entry(tortoise, tmp_path, None).backup()
+        ControllerServices.for_entry(
+            tortoise, _with_its_password(tortoise, tmp_path), None
+        ).backup()
 
     assert "tortoise-db" in str(err.value), str(err.value)
     assert "ac-database" not in str(err.value), "the backup censused AzerothCore's containers"
@@ -4496,7 +4513,9 @@ def test_a_tortoise_account_is_created_with_that_core_s_own_scheme(
         return AccountResult(username="BOB", account_id=1, created=True, gm_level=0)
 
     monkeypatch.setattr(tortoise_accounts, "_create_account", fake_create)
-    ControllerServices.for_entry(tortoise, tmp_path, None).create_account("bob", "pw", 0)
+    ControllerServices.for_entry(
+        tortoise, _with_its_password(tortoise, tmp_path), None
+    ).create_account("bob", "pw", 0)
     assert seen.get("scheme") == "mangos_sha", seen
 
 
@@ -4682,6 +4701,193 @@ def test_a_password_file_that_cannot_be_read_still_opens_the_tab_and_says_why(
         tortoise.id in message and str(tortoise.install.password.file) in message
         for message in said
     ), said
+
+
+# ------------------------- T785: a database password nobody can know is a refusal, not `password`
+
+
+def _wotlk_install_made_after_t748(
+    tmp_path: Path, *, file: str | None = None, env: str | None = None
+) -> Path:
+    """A NEW WotLK folder: its record says "generated", plus whichever copies of the secret."""
+    from tests.test_wotlk_generated_password import a_record
+
+    server = tmp_path / "wotlk-new"
+    a_record(server, generated=True)
+    if file is not None:
+        (server / ".db_password").write_text(file + "\n", encoding="utf-8")
+    if env is not None:
+        (server / ".env").write_text(f"DB_ROOT_PASSWORD={env}\n", encoding="utf-8")
+    return server
+
+
+class _SeenPasswords:
+    """Every root password a `DockerSql`/`DockerMysql` is built with, and every MYSQL_PWD sent."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.built: list[object] = []
+        self.sent: list[str] = []
+        real_sql = controller_view_module.DockerSql
+        real_mysql = controller_view_module.wotlk_maintenance.DockerMysql
+
+        def sql(container: str, password: object, **kwargs: object) -> DockerSql:
+            self.built.append(password)
+            return real_sql(container, password, **kwargs)  # type: ignore[arg-type]
+
+        def mysql(container: str, password: object, **kwargs: object) -> DockerMysql:
+            self.built.append(password)
+            return real_mysql(container, password, **kwargs)  # type: ignore[arg-type]
+
+        def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            env = kwargs.get("env")
+            if isinstance(env, dict) and "MYSQL_PWD" in env:
+                self.sent.append(env["MYSQL_PWD"])
+            return subprocess.CompletedProcess(argv, 0, "" if len(self.sent) < 2 else "1", "")
+
+        monkeypatch.setattr(controller_view_module, "DockerSql", sql)
+        monkeypatch.setattr(controller_view_module.wotlk_maintenance, "DockerMysql", mysql)
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+    def literal_default_was_built(self) -> bool:
+        return "password" in [p for p in self.built if isinstance(p, str)]
+
+
+def test_a_new_server_whose_password_is_unknowable_opens_with_its_database_controls_off(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T785: no `.db_password` and no `.env` line. Start and Stop stay, the database controls
+    are greyed saying why, and nothing ever logs in with the published `password`."""
+    from yulon.ui.widgets.reasons import reason_of
+
+    server = _wotlk_install_made_after_t748(tmp_path)
+    seen = _SeenPasswords(monkeypatch)
+    services = ControllerServices.for_entry(WOTLK, server)
+    refusal = services.db_refusal
+    assert refusal is not None and ".db_password" in refusal, refusal
+
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    ps.names = ""
+    view.refresh_status()
+
+    assert view.start_button.isEnabled(), "Start needs no database"
+    for press in (
+        view.create_account_button,
+        view.backup_button,
+        view.restore_button,
+        view.module_sql_button,
+    ):
+        assert not press.isEnabled(), press.text()
+    assert reason_of(view.create_account_button) == refusal
+    assert reason_of(view.backup_button) == refusal
+    assert refusal in view.restore_reasons.text()
+    assert refusal in view.account_reasons.text()
+    # The module rows stay: a module of files and conf keys needs no database. A module that
+    # runs SQL as root is refused at its press (next test).
+    assert view._module_actions_allowed()
+    assert view._module_needs_the_database(modules.store().load("module", "mod-arac"))
+    assert not view._module_needs_the_database(modules.store().load("module", "mod-aoe-loot"))
+    assert not seen.literal_default_was_built(), seen.built
+    assert seen.sent == [], "something reached mysql"
+
+
+def test_a_press_that_gets_past_the_greyed_database_controls_shows_the_refusal_and_runs_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same controls reached another way (a menu, a shortcut, a re-enable): each says the
+    refusal where its result goes. Module apply (install) does not run."""
+    server = _wotlk_install_made_after_t748(tmp_path)
+    seen = _SeenPasswords(monkeypatch)
+    services = ControllerServices.for_entry(WOTLK, server)
+    refusal = services.db_refusal
+    assert refusal is not None
+    ran: list[str] = []
+    monkeypatch.setattr(Applier, "install", lambda self, *a, **k: ran.append("install"))
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    view.account_name.setText("bob")
+    view.account_password.setText("hunter2hunter2")
+    view.create_account()
+    assert refusal in view.account_report.text()
+
+    view.back_up()
+    assert refusal in view.maintenance_report.toPlainText()
+
+    view.module_report.setPlainText("")
+    _select_module(view, "mod-arac")
+    view._module_action("install")
+    assert refusal in view.module_report.toPlainText()
+    assert ran == [], "the module apply ran"
+
+    view.module_report.setPlainText("")
+    view.apply_module_sql()
+    assert refusal in view.module_report.toPlainText()
+
+    assert not seen.literal_default_was_built(), seen.built
+    assert seen.sent == [], "something reached mysql"
+
+
+def test_the_seams_of_an_unknowable_password_refuse_with_its_words_and_never_log_in(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yulon.catalog.catalog import DbPasswordUnknown
+    from yulon.controller_wow_wotlk.maintenance import MaintenanceError
+
+    server = _wotlk_install_made_after_t748(tmp_path)
+    seen = _SeenPasswords(monkeypatch)
+    services = ControllerServices.for_entry(WOTLK, server)
+
+    with pytest.raises(DbPasswordUnknown):
+        services.create_account("bob", "hunter2hunter2", 0)
+    with pytest.raises(MaintenanceError, match=".db_password"):
+        services.backup()
+    for built in seen.built:
+        assert callable(built), "a literal password was handed to a database seam"
+        # The tab's seams raise the catalog's refusal; the import probe's says it as its own.
+        with pytest.raises(
+            (DbPasswordUnknown, controller_view_module.install_wiring._PasswordUnknown)
+        ):
+            built()
+    assert seen.sent == []
+
+
+def test_a_new_server_whose_env_holds_the_password_keeps_every_database_control(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T785: `.db_password` gone but `.env` holds the line `generate-compose` wrote: the value is
+    used, and the controls are as they always were."""
+    server = _wotlk_install_made_after_t748(tmp_path, env="wotlk-from-the-env-file")
+    seen = _SeenPasswords(monkeypatch)
+    services = ControllerServices.for_entry(WOTLK, server)
+    assert services.db_refusal is None
+
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    ps.names = ""
+    view.refresh_status()
+    for press in (view.create_account_button, view.backup_button, view.module_sql_button):
+        assert press.isEnabled(), press.text()
+    assert view._module_actions_allowed()
+
+    services.create_account("bob", "hunter2hunter2", 0)
+    assert seen.sent and set(seen.sent) == {"wotlk-from-the-env-file"}, seen.sent
+    assert not seen.literal_default_was_built(), seen.built
+
+
+def test_an_old_server_with_no_password_file_keeps_the_published_password(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T785, unchanged: a folder whose record predates generated passwords keeps `password`."""
+    from tests.test_wotlk_generated_password import an_old_folder
+
+    server = tmp_path / "wotlk-old"
+    an_old_folder(server)
+    seen = _SeenPasswords(monkeypatch)
+    services = ControllerServices.for_entry(WOTLK, server)
+    assert services.db_refusal is None
+
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    assert view.create_account_button.isEnabled() and view.backup_button.isEnabled()
+    services.create_account("bob", "hunter2hunter2", 0)
+    assert set(seen.sent) == {"password"}, seen.sent
 
 
 def test_both_db_seams_for_wotlk_builds_are_bound_to_the_distro_they_live_in(
@@ -4923,7 +5129,9 @@ def test_each_game_s_account_form_addresses_its_own_schema_with_its_own_client(
             return subprocess.CompletedProcess(argv, 0, "" if len(__seen) == 1 else "1", "")
 
         monkeypatch.setattr(subprocess, "run", fake_run)
-        services = ControllerServices.for_entry(entry, tmp_path / entry.id)
+        services = ControllerServices.for_entry(
+            entry, _with_its_password(entry, tmp_path / entry.id)
+        )
         try:
             services.create_account("bob", "hunter2", 0)
         except AccountError:
@@ -6982,7 +7190,7 @@ def test_each_game_browses_bots_in_its_own_schemas_and_names_no_registry_it_lack
             return subprocess.CompletedProcess(list(argv), 0, "0\t0\t0", "")
 
         monkeypatch.setattr(apply_module.subprocess, "run", fake_run)
-        server_dir = tmp_path / entry.id
+        server_dir = _with_its_password(entry, tmp_path / entry.id)
         (server_dir / "etc").mkdir(parents=True, exist_ok=True)
         services = ControllerServices.for_entry(entry, server_dir)
         assert services.bots is not None, f"{entry.id} has no Bots tab"
@@ -9131,8 +9339,7 @@ def _cmangos_stack(
         "_mysql",
         lambda self, db, *, stdin=None, statement=None, extra=(): stack.mysql(db, statement),
     )
-    server_dir = tmp_path / game
-    server_dir.mkdir()
+    server_dir = _with_its_password(entry, tmp_path / game)
     services = ControllerServices.for_entry(entry, server_dir)
     assert services.applier is not None
     path = Path(__file__).resolve().parents[1] / "manifests" / game / "mods" / "all-stackables.json"
@@ -24191,8 +24398,7 @@ def test_without_a_ready_to_play_client_the_wiring_is_what_it_was(
     """
     monkeypatch.setattr(controller_view_module.platform, "detect", lambda: "linux")
     entry = _factory_entry(game)
-    server_dir = tmp_path / "srv"
-    server_dir.mkdir()
+    server_dir = _with_its_password(entry, tmp_path / "srv")
     original = _a_client(tmp_path / "WoW")
 
     before = controller_view_module._FACTORIES[game](entry, server_dir, original, None)

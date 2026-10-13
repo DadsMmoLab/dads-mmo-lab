@@ -200,12 +200,16 @@ def test_installer_for_app_hands_the_gate_to_the_dispatcher(
 
     install_wiring.installer_for_app(WOTLK, platform_id=lambda: "linux", installers_root=tmp_path)
     assert kwargs_seen[-1]["installers_root"] == tmp_path
-    assert kwargs_seen[-1]["import_probe"] is not None
-    assert kwargs_seen[-1]["reset_unfinished"] is not None
+    # T785: only the folder's gate. An engine-wide pair had no folder to ask for, so it could
+    # only ever hold the published `password`, which a new install does not have.
+    assert "import_probe" not in kwargs_seen[-1] and "reset_unfinished" not in kwargs_seen[-1]
+    gate = kwargs_seen[-1]["import_gate"]
+    assert callable(gate)
+    probe, reset = gate(tmp_path)
+    assert probe is not None and reset is not None
 
     install_wiring.installer_for_app(_without_import_service(WOTLK), platform_id=lambda: "linux")
-    assert kwargs_seen[-1]["import_probe"] is None
-    assert kwargs_seen[-1]["reset_unfinished"] is None
+    assert kwargs_seen[-1]["import_gate"](tmp_path) == (None, None)  # type: ignore[operator]
 
 
 def test_main_streams_the_engine_and_maps_failures_to_exit_codes(

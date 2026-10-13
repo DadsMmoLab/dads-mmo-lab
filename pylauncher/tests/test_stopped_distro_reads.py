@@ -738,7 +738,9 @@ def test_a_password_that_could_not_be_read_is_asked_again_rather_than_kept_as_th
     with contextlib.suppress(Exception):
         services.create_account("bob", "pw12", 0)
     first = set(seen)
-    assert first and "generated-0123456789" not in first, "the missing file was read somehow"
+    # T785: a password that cannot be known is refused, not replaced by the published one, so
+    # nothing was sent at all (and the file that was missing was not read somehow).
+    assert not first, f"something logged in without a password: {first}"
     password_file.write_text("generated-0123456789\n", encoding="utf-8")
     seen.clear()
     with contextlib.suppress(Exception):
