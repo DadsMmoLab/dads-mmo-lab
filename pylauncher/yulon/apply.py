@@ -3527,9 +3527,10 @@ class Applier:
     ) -> None:
         self.server_dir = server_dir
         # T787: a question one game's factory asks of the database before a manifest's
-        # direct SQL is sent (City Bots: no real account on a bot's account number). Called
-        # with the database up and nothing written; it raises `ApplyRefusal` to stop the
-        # press. Absent, nothing is asked: this module never knows which game it serves.
+        # direct SQL is sent (City Bots: no real account on a bot's account number), on an
+        # Install or a Configure and never on a Remove (T788). Called with the database up
+        # and nothing written; it raises `ApplyRefusal` to stop the press. Absent, nothing
+        # is asked: this module never knows which game it serves.
         self._before_direct_sql = before_direct_sql
         # T596 (E2): the backup an outside item's SQL is preceded by. Absent, no
         # press takes one, which is every applier but Tortoise's.
@@ -6706,8 +6707,11 @@ class Applier:
                 log.world_stopped = True
         # T787. With the database up (the start above, which stops nothing afterwards) and
         # before the backup or any statement: the factory's own refusal, if it has one.
+        # Never on a Remove (T788): its SQL takes rows back, and a refusal there would keep
+        # the very marks the check exists to keep off a real account.
         if (
-            self._before_direct_sql is not None
+            when != "remove"
+            and self._before_direct_sql is not None
             and self.sql is not None
             and any(step.when == when and step.applied_by == "direct" for step in manifest.sql)
         ):
@@ -9192,6 +9196,8 @@ def _declared_sql(manifest: Manifest, clone: Path) -> Callable[[str], bool]:
     named: set[str] = set()
     patterns: list[str] = []
     for step in manifest.sql:
+        # T788: a remove step that does an uninstall file's work names it; that file is handled.
+        named.update(step.stands_in_for)
         if step.path is None:
             continue
         files = _sql_files(clone, step.path)

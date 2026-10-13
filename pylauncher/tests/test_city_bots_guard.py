@@ -547,3 +547,168 @@ def test_the_install_press_asks_the_server_whose_database_the_applier_writes(
     assert built["container"] == unbound.container_spec().db
     assert built["password"] == "ub-pw"
     assert built["schemas"] == unbound.schema_map()
+
+
+# ------------------------------------------------------------- the module Remove press (T788)
+
+ROSTER_REL = "data/sql/playerbots/updates/" + ROSTER_FILE
+
+
+def _remove_step() -> Any:
+    """The shipped manifest's one remove step: City Bots' playerbots take-back."""
+    (step,) = [s for s in _city_bots_manifest().sql if s.when == "remove"]
+    return step
+
+
+def test_remove_takes_back_the_roster_and_the_bot_account_types(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Install, then Remove: the roster's take-back is sent to playerbots, once (T788)."""
+    _, applier, db = _install_press(tmp_path, monkeypatch)
+    manifest = _city_bots_manifest()
+    applier.install(manifest)
+    sent = len(db.statements)
+
+    report = applier.remove(manifest)
+
+    assert db.statements[sent:] == [("playerbots", _remove_step().statement)]
+    assert db.files == [("playerbots", ROSTER_FILE)]  # the install's, and no other file
+    assert not [line for line in report.left_behind if ROSTER_FILE in line], report.left_behind
+
+
+def test_remove_with_a_real_account_on_a_bot_id_is_not_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The T787 check guards the roster's WRITE; Remove's take-back is never held back by it.
+
+    A real account on 12005 is the case T788 is about: its type-3 mark is what must go.
+    """
+    _, applier, db = _install_press(tmp_path, monkeypatch)
+    manifest = _city_bots_manifest()
+    applier.install(manifest)
+    asked = len(FakeSql.asked)
+    FakeSql.answer = "12005\tAnna\n"
+
+    applier.remove(manifest)
+
+    assert len(FakeSql.asked) == asked, FakeSql.asked  # the account check was not asked
+    assert [db_name for db_name, _ in db.statements] == ["playerbots"]
+    assert not (tmp_path / "wow" / "modules" / "mod-city-bots").exists()
+
+
+def test_remove_into_a_running_world_is_refused_with_nothing_sent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same running-world refusal as every other direct SQL press; the clone stays."""
+    _, applier, db = _install_press(tmp_path, monkeypatch)
+    manifest = _city_bots_manifest()
+    applier.install(manifest)
+    db.world = True
+
+    with pytest.raises(ApplyRefusal, match="world server is running"):
+        applier.remove(manifest)
+
+    assert db.statements == []
+    assert (tmp_path / "wow" / "modules" / "mod-city-bots").is_dir()
+
+
+def test_remove_without_mod_playerbots_tables_skips_the_take_back_and_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No tables, no rows: an install held back by its precondition wrote nothing to undo."""
+    _, applier, db = _install_press(tmp_path, monkeypatch)
+    manifest = _city_bots_manifest()
+    applier.install(manifest)
+    db.answers["information_schema"] = ""
+
+    report = applier.remove(manifest)
+
+    assert db.statements == []
+    assert [line for line in report.skipped if "citizen_roster" in line], report.skipped
+    assert not (tmp_path / "wow" / "modules" / "mod-city-bots").exists()
+
+
+def _playerbots_db() -> Any:
+    """An in-memory stand-in for acore_playerbots, with a real account's rows in the range."""
+    import sqlite3
+
+    con = sqlite3.connect(":memory:")
+    con.executescript(
+        "CREATE TABLE playerbots_account_type (account_id INT PRIMARY KEY, account_type INT,"
+        " assignment_date TEXT);"
+        "CREATE TABLE playerbots_random_bots (owner INT, bot INT, event TEXT, value INT);"
+        "CREATE TABLE citizen_roster (guid INT PRIMARY KEY, account_id INT);"
+        "CREATE TABLE playerbots_other (id INT);"
+        "INSERT INTO playerbots_other VALUES (1);"
+        "INSERT INTO citizen_roster VALUES (9000001, 12001), (9000400, 12400);"
+        # 12001 and 12400: the roster's own marks. 12005: a real account the roster typed 3.
+        # 12010: a real account mod-playerbots itself typed addclass (2), not the roster's.
+        # 11999 and 12401: outside the range, whatever their type.
+        "INSERT INTO playerbots_account_type VALUES (12001, 3, 'x'), (12400, 3, 'x'),"
+        " (12005, 3, 'x'), (12010, 2, 'x'), (11999, 3, 'x'), (12401, 3, 'x'), (500, 1, 'x');"
+        "INSERT INTO playerbots_random_bots VALUES (0, 9000001, 'citizen', 1),"
+        " (0, 9000400, 'add', 1), (0, 9000002, 'some_other_event', 1), (0, 500, 'add', 1),"
+        " (0, 9000401, 'add', 1);"
+    )
+    return con
+
+
+def test_the_take_back_clears_only_the_roster_s_marks_and_spares_every_other_row() -> None:
+    """The shipped statement, run: only type-3 marks in 12001-12400 go, as rows (T788 review).
+
+    Gone, never set to 0: mod-playerbots counts a type-0 row as an unassigned random-bot
+    account and creates bots for it at every start; a missing row reads as not a bot.
+    """
+    con = _playerbots_db()
+    # MySQL's START TRANSACTION is sqlite's BEGIN; the rest is run as shipped.
+    con.executescript(_remove_step().statement.replace("START TRANSACTION", "BEGIN"))
+
+    types = dict(con.execute("SELECT account_id, account_type FROM playerbots_account_type"))
+    assert types == {12010: 2, 11999: 3, 12401: 3, 500: 1}
+    bots = sorted(row[0] for row in con.execute("SELECT bot FROM playerbots_random_bots"))
+    assert bots == [500, 9000002, 9000401]
+    tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert "citizen_roster" not in tables and "playerbots_other" in tables
+
+
+def test_the_take_back_is_declared_as_undoing_the_roster_file() -> None:
+    step = _remove_step()
+    assert step.db == "playerbots" and step.applied_by == "direct"
+    assert step.undoes == (ROSTER_REL,)
+    assert step.precondition is not None and "information_schema" in step.precondition.query
+
+
+def test_the_remove_report_does_not_send_anyone_to_run_upstream_s_playerbots_uninstall(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The take-back stands in for upstream's playerbots uninstall file, which sets type 0.
+
+    Named as "not run", it would invite a player to run it by hand. The world one is still
+    named: nothing of Yu'lon's does its work.
+    """
+    server_dir, applier, _ = _install_press(tmp_path, monkeypatch)
+    manifest = _city_bots_manifest()
+    applier.install(manifest)
+    uninstall = server_dir / "modules" / "mod-city-bots" / "data" / "sql" / "uninstall"
+    for db_dir, text in (
+        ("playerbots", "UPDATE `playerbots_account_type` SET `account_type` = 0;"),
+        ("db-world", "DROP TABLE IF EXISTS `city_bot_poi`;"),
+    ):
+        (uninstall / db_dir).mkdir(parents=True)
+        (uninstall / db_dir / "uninstall_mod_city_bots.sql").write_text(text, encoding="utf-8")
+
+    report = applier.remove(manifest)
+
+    named = [line for line in report.left_behind if "uninstall_mod_city_bots.sql" in line]
+    assert len(named) == 1 and "uninstall/db-world/" in named[0], report.left_behind
+
+
+def test_stands_in_for_is_only_for_a_remove_step() -> None:
+    from pydantic import ValidationError
+
+    from yulon.manifest import SqlStep
+
+    with pytest.raises(ValidationError, match="stands_in_for"):
+        SqlStep(db="world", statement="SELECT 1", stands_in_for=("a.sql",))
+    with pytest.raises(ValidationError, match="stands_in_for"):
+        SqlStep(db="world", statement="SELECT 1", when="remove", stands_in_for=("u/*.sql",))
