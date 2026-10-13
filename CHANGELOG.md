@@ -128,7 +128,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Stop, Restart or Quit during a WotLK or Unbound database import now records it, so Start offers **Repair** instead.
 - A TBC, Vanilla, Tortoise or Centurion install that did not finish installing no longer starts on a half-imported world.
 - A leftover database copy from a move keeps its name when its first lines cannot be read for a moment.
-- City Bots' database updates are now refused, naming the accounts, when a real account uses a bot's account number.
+- City Bots' install and database updates are refused, naming the accounts, when a real account uses a bot's account number.
 
 ### Changed
 - On an older WotLK install, the first Rebuild sends the whole server to Docker once (about 5 GB); later ones are quick.

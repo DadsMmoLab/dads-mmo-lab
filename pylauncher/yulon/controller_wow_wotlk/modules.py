@@ -359,7 +359,49 @@ def applier(
         world_running=world_running,
         start_database=start_database,
         hold_server=hold_server,
+        before_direct_sql=_no_bot_accounts_in_the_roster_s_way(server_dir, db_container),
     )
+
+
+def _no_bot_accounts_in_the_roster_s_way(
+    server_dir: Path, db_container: str
+) -> Callable[[Manifest], None]:
+    """The City Bots Install press's check before `citizen_roster.sql` is sent (T787).
+
+    The roster writes `playerbots_account_type` for 12001-12400, so a real account on one of
+    those numbers would be typed a bot. T779's check, asked by the `Applier` with the
+    database up; every other module is asked nothing. The server is the catalog entry whose
+    database container this applier writes to (container names are handed out once,
+    `Catalog._every_container_name_is_handed_out_once`), so its password is that entry's
+    `known_db_password()`, never the published default (T748).
+    """
+
+    def check(manifest: Manifest) -> None:
+        if manifest.id != city_bots_guard.MODULE:
+            return
+        try:
+            entry = next(
+                (e for e in load_catalog().games if e.container_spec().db == db_container),
+                None,
+            )
+            if entry is None:
+                raise ApplyRefusal(
+                    "Yu'lon could not tell which server's database "
+                    f"{db_container} is, so it could not check City Bots' account numbers "
+                    "and nothing was applied."
+                )
+            city_bots_guard.refuse_before_the_roster(entry, server_dir)
+        except city_bots_guard.CityBotsAccountRefusal as exc:
+            raise ApplyRefusal(str(exc)) from exc
+        except ApplyRefusal:
+            raise
+        except Exception as exc:  # boundary: an unreadable catalog is a refusal, never a pass
+            raise ApplyRefusal(
+                "Yu'lon could not check whether real accounts sit on City Bots' account "
+                f"numbers, so nothing was applied. {exc}"
+            ) from exc
+
+    return check
 
 
 def module_updates(
@@ -567,6 +609,11 @@ def apply_module_sql(
             )
         except city_bots_guard.CityBotsAccountRefusal as exc:
             raise docker.DockerRefusal(str(exc)) from exc
+        except Exception as exc:  # boundary: the catalog unreadable is a refusal, not a crash
+            raise docker.DockerRefusal(
+                "Yu'lon could not check whether real accounts sit on City Bots' account "
+                f"numbers, so nothing was applied. {exc}"
+            ) from exc
 
     try:
         run = docker.apply_module_sql(
