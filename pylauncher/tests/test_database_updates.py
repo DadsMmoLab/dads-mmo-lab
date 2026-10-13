@@ -84,6 +84,13 @@ def gated(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(CmangosInstaller, "_gate", gate, raising=True)
 
 
+def an_installed_folder(server_dir: Path) -> None:
+    """The folder of an installed server: with the `.db_password` its install wrote, which a
+    database press reads and never mints (T748 round 2)."""
+    server_dir.mkdir()
+    native.write_secret(server_dir / ".db_password", "tbc-0123456789abcdef")
+
+
 def a_world_that_is(answer: bool | None) -> object:
     """The `world_running` seam, answering the same thing however often it is asked."""
 
@@ -248,7 +255,7 @@ def test_an_updates_press_says_the_truthful_note_once_and_never_the_installs(
     `cancel_note=` alongside it, and `cancel_note=""` back in its place.
     """
     server_dir = tmp_path / "srv"
-    server_dir.mkdir()
+    an_installed_folder(server_dir)
     rec = ready_to_import(IMPORTED_OLDER_PLAN)
     engine = engine_with_sql(rerun_plan(), rec, world_running=a_world_that_is(False))
     said = list(engine.update_databases(InstallOptions(server_dir=server_dir)))
@@ -280,7 +287,7 @@ def test_a_stop_between_rerunnable_runs_says_nothing_is_cleared(tmp_path: Path) 
     own default and brings `IMPORT_CANCEL_NOTE` back into the raised error.
     """
     server_dir = tmp_path / "srv"
-    server_dir.mkdir()
+    an_installed_folder(server_dir)
     stop = threading.Event()
     rec = ready_to_import(IMPORTED_OLDER_PLAN)
     inner = rec.exec_stdin
@@ -328,7 +335,7 @@ def test_the_press_runs_only_the_phases_the_plan_declares_rerunnable(tmp_path: P
     press reaching `_import`'s ordinary import path.
     """
     server_dir = tmp_path / "srv"
-    server_dir.mkdir()
+    an_installed_folder(server_dir)
     rec = ready_to_import(IMPORTED_OLDER_PLAN)
     engine = engine_with_sql(rerun_plan(), rec, world_running=a_world_that_is(False))
     said = list(engine.update_databases(InstallOptions(server_dir=server_dir)))
@@ -349,7 +356,7 @@ def test_the_press_starts_the_database_and_never_the_world(tmp_path: Path) -> No
     added to it.
     """
     server_dir = tmp_path / "srv"
-    server_dir.mkdir()
+    an_installed_folder(server_dir)
     rec = ready_to_import(IMPORTED_OLDER_PLAN)
     rec.db_started = False
     engine = engine_with_sql(rerun_plan(), rec, world_running=a_world_that_is(False))
@@ -372,7 +379,7 @@ def test_a_press_while_the_world_is_up_applies_no_sql(tmp_path: Path) -> None:
     Catches the guard deleted, and the whole press starting before it is asked.
     """
     server_dir = tmp_path / "srv"
-    server_dir.mkdir()
+    an_installed_folder(server_dir)
     rec = ready_to_import(IMPORTED_OLDER_PLAN)
     engine = engine_with_sql(rerun_plan(), rec, world_running=a_world_that_is(True))
     with pytest.raises(InstallerError) as raised:
@@ -402,7 +409,7 @@ def test_a_press_that_cannot_tell_whether_the_world_is_up_applies_no_sql(tmp_pat
     dropped from the remedy.
     """
     server_dir = tmp_path / "srv"
-    server_dir.mkdir()
+    an_installed_folder(server_dir)
     rec = ready_to_import(IMPORTED_OLDER_PLAN)
     engine = engine_with_sql(rerun_plan(), rec, world_running=a_world_that_is(None))
     with pytest.raises(InstallerError) as raised:
@@ -428,7 +435,7 @@ def test_a_world_started_while_the_database_came_up_is_refused_before_the_first_
     statements go into a live world's tables).
     """
     server_dir = tmp_path / "srv"
-    server_dir.mkdir()
+    an_installed_folder(server_dir)
     rec = ready_to_import(IMPORTED_OLDER_PLAN)
     rec.db_started = False
     seam, asked = worlds(False, True)
@@ -451,7 +458,7 @@ def test_a_seam_that_raises_is_read_as_could_not_tell(tmp_path: Path) -> None:
     Catches the `try`/`except` around the reading removed.
     """
     server_dir = tmp_path / "srv"
-    server_dir.mkdir()
+    an_installed_folder(server_dir)
 
     def angry(container: str) -> bool | None:
         raise RuntimeError("the daemon is not there")
@@ -479,7 +486,7 @@ def test_a_clone_that_never_had_the_directory_refuses_naming_the_pattern(tmp_pat
     list instead.
     """
     server_dir = tmp_path / "srv"
-    server_dir.mkdir()
+    an_installed_folder(server_dir)
     engine = engine_with_sql(file_plan(), Recorder())
     with pytest.raises(InstallerError) as raised:
         engine.update_confirmation(InstallOptions(server_dir=server_dir))
@@ -531,7 +538,7 @@ def test_a_press_against_databases_that_are_not_a_finished_import_applies_nothin
     precondition widened to `state != "unreadable"` or to any single arm.
     """
     server_dir = tmp_path / "srv"
-    server_dir.mkdir()
+    an_installed_folder(server_dir)
     rec = ready_to_import(NOT_FINISHED[named])
     engine = engine_with_sql(rerun_plan(), rec, world_running=a_world_that_is(False))
     with pytest.raises(InstallerError) as raised:
@@ -558,7 +565,7 @@ def test_a_press_against_databases_that_read_as_finished_applies_the_flagged_pha
     Catches the predicate narrowed to `state == "imported"`.
     """
     server_dir = tmp_path / "srv"
-    server_dir.mkdir()
+    an_installed_folder(server_dir)
     rec = ready_to_import(finished)
     engine = engine_with_sql(rerun_plan(), rec, world_running=a_world_that_is(False))
     said = list(engine.update_databases(InstallOptions(server_dir=server_dir)))
@@ -580,7 +587,7 @@ def test_the_press_asks_the_databases_exactly_once(tmp_path: Path) -> None:
     probes again), and a precondition added in `_guard_then` on top of this one.
     """
     server_dir = tmp_path / "srv"
-    server_dir.mkdir()
+    an_installed_folder(server_dir)
     rec = ready_to_import(IMPORTED_OLDER_PLAN)
     engine = engine_with_sql(rerun_plan(), rec, world_running=a_world_that_is(False))
     list(engine.update_databases(InstallOptions(server_dir=server_dir)))
@@ -623,7 +630,7 @@ def test_the_confirmation_names_every_file_the_press_will_stream(tmp_path: Path)
     the unflagged phase's own files leaking into the list.
     """
     server_dir = tmp_path / "srv"
-    server_dir.mkdir()
+    an_installed_folder(server_dir)
     files_on_disk(server_dir, "src/updates/0002_second.sql", "src/updates/0001_first.sql")
     engine = engine_with_sql(file_plan(), Recorder())
     said = engine.update_confirmation(InstallOptions(server_dir=server_dir))
@@ -650,7 +657,7 @@ def test_the_confirmation_says_the_marker_is_unchanged_and_the_world_must_be_sto
     Catches either clause dropped from the confirmation.
     """
     server_dir = tmp_path / "srv"
-    server_dir.mkdir()
+    an_installed_folder(server_dir)
     files_on_disk(server_dir, "src/updates/0001_first.sql")
     said = engine_with_sql(file_plan(), Recorder()).update_confirmation(
         InstallOptions(server_dir=server_dir)
@@ -674,7 +681,7 @@ def test_the_confirmation_says_a_file_can_be_refused_and_the_press_stops_there(
     is skipped.
     """
     server_dir = tmp_path / "srv"
-    server_dir.mkdir()
+    an_installed_folder(server_dir)
     files_on_disk(server_dir, "src/updates/0001_first.sql")
     said = engine_with_sql(file_plan(), Recorder()).update_confirmation(
         InstallOptions(server_dir=server_dir)
@@ -772,7 +779,7 @@ def test_a_tuple_with_no_import_stage_to_guard_refuses_before_anything_runs(
     Catches the `if not guarded:` block deleted.
     """
     server_dir = tmp_path / "srv"
-    server_dir.mkdir()
+    an_installed_folder(server_dir)
     rec = ready_to_import(IMPORTED_OLDER_PLAN)
     engine = engine_with_sql(rerun_plan(), rec, world_running=a_world_that_is(False))
     monkeypatch.setattr(type(engine), "update_stages", lambda self: (self.stage_named("start-db"),))
@@ -798,7 +805,7 @@ def test_a_press_can_be_stopped_before_it_reaches_the_first_statement(tmp_path: 
     built with `cancel=None` on the context.
     """
     server_dir = tmp_path / "srv"
-    server_dir.mkdir()
+    an_installed_folder(server_dir)
     rec = ready_to_import(IMPORTED_OLDER_PLAN)
     stop = threading.Event()
     stop.set()
@@ -930,7 +937,7 @@ def test_the_adopt_confirmation_names_the_row_it_will_write(tmp_path: Path) -> N
     spelling), and a dialog that names the table but not where it goes.
     """
     server_dir = tmp_path / "srv"
-    server_dir.mkdir()
+    an_installed_folder(server_dir)
     plan = rerun_plan()
     engine = adoptable(plan, Recorder())
     said = engine.adopt_confirmation(InstallOptions(server_dir=server_dir))
@@ -958,7 +965,7 @@ def test_the_adopt_confirmation_says_the_consequence_in_the_owners_own_words(
     Catches the sentence reworded, softened, or dropped from the dialog.
     """
     server_dir = tmp_path / "srv"
-    server_dir.mkdir()
+    an_installed_folder(server_dir)
     said = adoptable(rerun_plan(), Recorder()).adopt_confirmation(
         InstallOptions(server_dir=server_dir)
     )
@@ -978,7 +985,7 @@ def test_the_adopt_confirmation_lists_every_database_the_row_is_a_claim_about(
     Catches the list read off `plan.create`.
     """
     server_dir = tmp_path / "srv"
-    server_dir.mkdir()
+    an_installed_folder(server_dir)
     said = adoptable(rerun_plan(), Recorder()).adopt_confirmation(
         InstallOptions(server_dir=server_dir)
     )
@@ -1004,7 +1011,7 @@ def test_the_adopt_confirmation_says_the_world_must_be_stopped_and_the_database_
     Catches either clause dropped.
     """
     server_dir = tmp_path / "srv"
-    server_dir.mkdir()
+    an_installed_folder(server_dir)
     said = adoptable(rerun_plan(), Recorder()).adopt_confirmation(
         InstallOptions(server_dir=server_dir)
     )
@@ -1030,7 +1037,7 @@ def test_an_adopt_press_writes_the_marker_statement_and_nothing_else(tmp_path: P
     `create_schemas()` reached.
     """
     server_dir = tmp_path / "srv"
-    server_dir.mkdir()
+    an_installed_folder(server_dir)
     rec = ready_to_import(POPULATED_NO_MARKER, MARKER_PRESENT)
     rec.db_started = False
     engine, _ = a_press(rec)
@@ -1067,7 +1074,7 @@ def test_an_adopt_press_reads_the_databases_again_and_reports_them_as_imported(
     status), and the report line that names the updates button removed.
     """
     server_dir = tmp_path / "srv"
-    server_dir.mkdir()
+    an_installed_folder(server_dir)
     rec = ready_to_import(POPULATED_NO_MARKER, MARKER_PRESENT)
     rec.db_started = False
     engine, _ = a_press(rec)
@@ -1086,7 +1093,7 @@ def test_an_adopt_press_refuses_when_the_row_does_not_read_back(tmp_path: Path) 
     Catches the re-probe read and discarded.
     """
     server_dir = tmp_path / "srv"
-    server_dir.mkdir()
+    an_installed_folder(server_dir)
     rec = ready_to_import(POPULATED_NO_MARKER, POPULATED_NO_MARKER)
     rec.db_started = False
     engine, _ = a_press(rec)
@@ -1105,7 +1112,7 @@ def test_an_adopt_press_never_starts_the_world(tmp_path: Path) -> None:
     Catches `up` added to `adopt_stages()`.
     """
     server_dir = tmp_path / "srv"
-    server_dir.mkdir()
+    an_installed_folder(server_dir)
     rec = ready_to_import(POPULATED_NO_MARKER, MARKER_PRESENT)
     rec.db_started = False
     engine, _ = a_press(rec)
@@ -1149,7 +1156,7 @@ def test_a_database_this_press_started_is_stopped_again(tmp_path: Path) -> None:
     (`stop_staged`) rather than the one container this press started.
     """
     server_dir = tmp_path / "srv"
-    server_dir.mkdir()
+    an_installed_folder(server_dir)
     rec = ready_to_import(POPULATED_NO_MARKER, MARKER_PRESENT)
     rec.db_started = False
     engine, stopped = a_press(rec, db_up=False)
@@ -1167,7 +1174,7 @@ def test_a_database_that_was_already_up_is_left_up(tmp_path: Path) -> None:
     Catches the stop made unconditional.
     """
     server_dir = tmp_path / "srv"
-    server_dir.mkdir()
+    an_installed_folder(server_dir)
     rec = ready_to_import(POPULATED_NO_MARKER, MARKER_PRESENT)
     engine, stopped = a_press(rec, db_up=True)
     said = list(engine.adopt_as_imported(InstallOptions(server_dir=server_dir)))
@@ -1187,7 +1194,7 @@ def test_a_database_whose_state_could_not_be_read_is_left_exactly_as_it_was(
     Catches the reading taken as a bool.
     """
     server_dir = tmp_path / "srv"
-    server_dir.mkdir()
+    an_installed_folder(server_dir)
     rec = ready_to_import(POPULATED_NO_MARKER, MARKER_PRESENT)
     engine, stopped = a_press(rec, db_up=None)
     list(engine.adopt_as_imported(InstallOptions(server_dir=server_dir)))
@@ -1206,7 +1213,7 @@ def test_a_database_this_press_started_goes_back_down_after_a_refusal_too(
     Catches the stop moved onto the success path only.
     """
     server_dir = tmp_path / "srv"
-    server_dir.mkdir()
+    an_installed_folder(server_dir)
     rec = ready_to_import(NOT_POPULATED["partial"])
     rec.db_started = False
     engine, stopped = a_press(rec, db_up=False)
@@ -1230,7 +1237,7 @@ def test_an_adopt_press_while_the_world_is_up_writes_nothing(tmp_path: Path) -> 
     guard not reached from this press at all.
     """
     server_dir = tmp_path / "srv"
-    server_dir.mkdir()
+    an_installed_folder(server_dir)
     rec = ready_to_import(POPULATED_NO_MARKER)
     engine, _ = a_press(rec, world=True)
     with pytest.raises(InstallerError) as raised:
@@ -1254,7 +1261,7 @@ def test_an_adopt_press_that_cannot_tell_whether_the_world_is_up_writes_nothing(
     clause dropped.
     """
     server_dir = tmp_path / "srv"
-    server_dir.mkdir()
+    an_installed_folder(server_dir)
     rec = ready_to_import(POPULATED_NO_MARKER)
     engine, _ = a_press(rec, world=None)
     with pytest.raises(InstallerError) as raised:
@@ -1278,7 +1285,7 @@ def test_a_world_started_while_the_database_came_up_is_refused_before_the_row(
     adopt stage).
     """
     server_dir = tmp_path / "srv"
-    server_dir.mkdir()
+    an_installed_folder(server_dir)
     rec = ready_to_import(POPULATED_NO_MARKER)
     rec.db_started = False
     seam, asked = worlds(False, True)
@@ -1311,7 +1318,7 @@ def test_a_world_started_at_the_pre_write_line_is_refused_before_the_row(
     Catches the third reading deleted (the write goes out on the stale readings).
     """
     server_dir = tmp_path / "srv"
-    server_dir.mkdir()
+    an_installed_folder(server_dir)
     rec = ready_to_import(POPULATED_NO_MARKER)
     seam, asked = worlds(False, False, True)
     stop_db, _ = stopper()
@@ -1346,7 +1353,7 @@ def test_an_adopt_press_over_databases_that_already_carry_the_marker_refuses(
     that writes a second row over a marker that is already there.
     """
     server_dir = tmp_path / "srv"
-    server_dir.mkdir()
+    an_installed_folder(server_dir)
     rec = ready_to_import(MARKER_PRESENT)
     rec.db_started = False
     engine, _ = a_press(rec)
@@ -1373,7 +1380,7 @@ def test_an_adopt_press_over_databases_that_are_not_populated_refuses(
     remedy telling the user to install.
     """
     server_dir = tmp_path / "srv"
-    server_dir.mkdir()
+    an_installed_folder(server_dir)
     rec = ready_to_import(NOT_POPULATED[named])
     rec.db_started = False
     engine, _ = a_press(rec)
@@ -1401,7 +1408,7 @@ def test_an_adopt_press_refuses_when_the_plan_names_something_that_is_not_there(
     Catches the gap check dropped, and a gap reported without saying what it is.
     """
     server_dir = tmp_path / "srv"
-    server_dir.mkdir()
+    an_installed_folder(server_dir)
     rec = ready_to_import(POPULATED_NO_MARKER)
     rec.db_started = False
     engine, _ = a_press(rec, gaps=("tw_logon.account is not there",))
@@ -1424,7 +1431,7 @@ def test_a_gate_that_cannot_be_asked_which_tables_are_there_refuses(tmp_path: Pa
     escaping as a bare `DockerCommandError` rather than as a sentence.
     """
     server_dir = tmp_path / "srv"
-    server_dir.mkdir()
+    an_installed_folder(server_dir)
     rec = ready_to_import(POPULATED_NO_MARKER)
     rec.db_started = False
 
@@ -1458,7 +1465,7 @@ def test_a_marker_the_client_refuses_is_the_sentence_the_user_reads(tmp_path: Pa
     goes on to re-probe and report success after a failed write.
     """
     server_dir = tmp_path / "srv"
-    server_dir.mkdir()
+    an_installed_folder(server_dir)
     rec = ready_to_import(POPULATED_NO_MARKER, MARKER_PRESENT)
     rec.db_started = False
     rec.failing_sql = sqlplan.MARKER_TABLE
@@ -1503,7 +1510,7 @@ def test_a_family_with_no_marker_to_write_refuses_rather_than_writing_one(
     """
     assert native.CallableGate(lambda: MARKER_PRESENT, None).adoption_gaps() != ()
     server_dir = tmp_path / "wotlk"
-    server_dir.mkdir()
+    an_installed_folder(server_dir)
     engine = installer_for(WOTLK)
     assert engine.marker_row() is None
     with pytest.raises(InstallerError) as raised:
@@ -1529,7 +1536,7 @@ def test_an_adopt_press_can_be_stopped_before_it_reaches_the_row(tmp_path: Path)
     that drops the event rather than putting it on the context.
     """
     server_dir = tmp_path / "srv"
-    server_dir.mkdir()
+    an_installed_folder(server_dir)
     rec = ready_to_import(POPULATED_NO_MARKER)
     stop = threading.Event()
     stop.set()
@@ -1556,6 +1563,7 @@ def test_adopt_state_passes_the_gates_answer_through(
     """
     rec = ready_to_import(answer)
     engine, _ = a_press(rec)
+    an_installed_folder(tmp_path / "srv")
     assert engine.adopt_state(InstallOptions(server_dir=tmp_path / "srv")) == answer
 
 
@@ -1576,6 +1584,7 @@ def test_adopt_state_answers_unreadable_when_the_probe_raises(tmp_path: Path) ->
     stop_db, _ = stopper()
     engine = adoptable(rerun_plan(), rec, world_running=a_world_that_is(False), stop_db=stop_db)
     engine._test_gate = native.CallableGate(angry, rec.reset, lambda: ())  # type: ignore[attr-defined]
+    an_installed_folder(tmp_path / "srv")
     state = engine.adopt_state(InstallOptions(server_dir=tmp_path / "srv"))
     assert state.state == "unreadable"
     assert "the daemon is not there" in state.detail
@@ -1679,7 +1688,7 @@ def test_the_updates_button_reaches_an_install_this_press_adopted(tmp_path: Path
     `information_schema` reading cannot then see.
     """
     server_dir = tmp_path / "srv"
-    server_dir.mkdir()
+    an_installed_folder(server_dir)
     plan = rerun_plan()
     rec = Recorder()
     rec.db_started = True

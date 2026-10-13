@@ -50,6 +50,7 @@ from yulon.catalog.catalog import (
     CmangosData,
     NativeInstall,
     TrinityCoreData,
+    record_says_generated,
 )
 from yulon.log import get_logger
 
@@ -620,6 +621,8 @@ def render(
             spliced into YAML, the entry generates its password and none was
             given, a template names `{{DB_PASSWORD}}` in generated mode, or the
             entry declares `containers.services` (see `_container_prefix()`).
+        DotenvSecretError: an install made before generated passwords sets a
+            `DB_ROOT_PASSWORD` in its `.env` that compose reads otherwise (`dotenv_secret()`).
     """
     native = _native_of(entry)
     templates = templates_root / native.templates
@@ -641,7 +644,7 @@ def render(
     generated = plan.mode == "generated"
     # A value this folder's `.env` already hands compose stays out of the compose text and is
     # not rewritten (below), so compose has been reading it as written all along.
-    kept = generated and dotenv_secret(server_dir, "DB_ROOT_PASSWORD") == password
+    kept = generated and _env_hands_compose(entry, server_dir, password)
     if not (kept and plan.legacy is not None):
         # T748 round 2: the one exception is an install made before generated passwords
         # (WotLK, Unbound) keeping its own `.env` value, which reaches no conf or SQL text.
@@ -2030,23 +2033,86 @@ def dotenv_value(server_dir: Path, key: str) -> str | None:
     return found
 
 
-def dotenv_secret(server_dir: Path, key: str) -> str | None:
-    """`dotenv_value()` unquoted the way compose-go reads it, for a value handed to mysql.
+def _env_hands_compose(entry: CatalogEntry, server_dir: Path, password: str) -> bool:
+    """Whether this folder's `.env` already hands compose `password` as `DB_ROOT_PASSWORD`.
 
-    `"…"` loses its quotes and its `\\` `\"` escapes, `'…'` is taken literally inside its
-    quotes, and an unquoted value ends at a ` #` comment. `$` is left as written: Yu'lon never
-    writes one, and a reader that guessed compose's interpolation would guess wrong more often
-    than a user who typed one. T748 round 2: an old WotLK install's own `DB_ROOT_PASSWORD`.
+    A line compose would read otherwise (`DotenvSecretError`) is no for a new install, whose
+    `.db_password` value then replaces it. For an install made before generated passwords
+    (T748) that line is the only record of its database's password, so the refusal stands
+    and the line is never rewritten under it.
+    """
+    try:
+        return dotenv_secret(server_dir, "DB_ROOT_PASSWORD") == password
+    except DotenvSecretError:
+        if entry.install.password.legacy is not None and not record_says_generated(server_dir):
+            raise
+        return False
+
+
+class DotenvSecretError(ComposeGenError):
+    """A `.env` password Yu'lon cannot read the way Docker Compose does (T748 round 3)."""
+
+
+def _dotenv_refusal(key: str, why: str) -> DotenvSecretError:
+    return DotenvSecretError(
+        f"The {key} line in this server's {DOTENV_FILE} {why}, so Yu'lon cannot tell which "
+        "password the database has. Put the password the database "
+        f"really uses between single quotes on that line, like {key}='your password': "
+        "Docker and Yu'lon both read a single-quoted value exactly as written."
+    )
+
+
+def dotenv_secret(server_dir: Path, key: str) -> str | None:
+    """`dotenv_value()` read as compose-go's dotenv parser reads it, for a value handed to mysql.
+
+    T748 round 3, against compose-go's `dotenv/parser.go`: an unquoted value ends at ` #` (a
+    space; a tab before `#` is not a comment) and loses trailing whitespace; a quoted one ends
+    at its first unescaped closing quote, where `\\<that quote>` is the quote itself and any
+    other backslash stays; after that only blanks and a `#` comment may follow on its line.
+    A single-quoted value is then taken as written. Compose goes on to expand `$` variables
+    in unquoted and double-quoted values, and escape sequences (`\\n`, `\\t`, octal, `\\$` ...)
+    in double-quoted ones; this does not guess at either. A value that needs them, or that
+    the parser would not read as one value, raises `DotenvSecretError`, whose text tells
+    the player to single-quote it, which compose-go reads literally.
+
+    Raises:
+        DotenvSecretError: the value holds `$`, a double-quoted escape other than `\\"` and
+            `\\\\`, text after its closing quote, or a quote never closed on its line.
     """
     raw = dotenv_value(server_dir, key)
     if raw is None:
         return None
-    if len(raw) >= 2 and raw[0] == raw[-1] == "'":
-        return raw[1:-1]
-    if len(raw) >= 2 and raw[0] == raw[-1] == '"':
-        return re.sub(r'\\(["\\])', r"\1", raw[1:-1])
-    comment = re.search(r"\s#", raw)
-    return raw[: comment.start()].rstrip() if comment else raw
+    if not raw.startswith(("'", '"')):
+        value = raw.split(" #", 1)[0].rstrip()
+        if "$" in value:
+            raise _dotenv_refusal(key, "holds a $, which Docker reads as the start of a variable")
+        return value
+    quote = raw[0]
+    chars: list[str] = []
+    escaped = False
+    for index in range(1, len(raw)):
+        char = raw[index]
+        if char == quote and not escaped:
+            rest = raw[index + 1 :].lstrip()
+            if rest and not rest.startswith("#"):
+                raise _dotenv_refusal(key, "has more text after its closing quote")
+            break
+        if escaped and char != quote:
+            chars.append("\\")
+        escaped = char == "\\" and not escaped
+        if not escaped:
+            chars.append(char)
+    else:
+        raise _dotenv_refusal(key, "opens a quote it never closes")
+    value = "".join(chars)
+    if quote == "'":
+        return value
+    if "$" in value:
+        raise _dotenv_refusal(key, "holds a $, which Docker reads as the start of a variable")
+    parts = value.split("\\\\")
+    if any("\\" in part for part in parts):
+        raise _dotenv_refusal(key, "holds a backslash, which Docker reads as an escape")
+    return "\\".join(parts)
 
 
 def write_dotenv(server_dir: Path, additions: Mapping[str, str]) -> Path:

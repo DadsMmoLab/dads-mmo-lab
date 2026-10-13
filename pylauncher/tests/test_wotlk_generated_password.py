@@ -627,30 +627,92 @@ def test_no_caller_but_the_install_can_mint_a_password(tmp_path: Path) -> None:
     assert not (server_dir / ".db_password").exists()
 
 
-@pytest.mark.parametrize(
-    ("line", "value"),
-    [
-        ('DB_ROOT_PASSWORD="my pass;word"', "my pass;word"),
-        ("DB_ROOT_PASSWORD='it''s{x}'", "it''s{x}"),
-        ("DB_ROOT_PASSWORD=pa$s#1 # my note", "pa$s#1"),
-    ],
-    ids=["double-quoted", "single-quoted", "dollar-and-hash"],
-)
-def test_an_old_installs_own_env_password_is_read_as_compose_reads_it(
-    tmp_path: Path, line: str, value: str
+# -- round 3: the old install's .env line as compose reads it (cold review 2026-10-13) -----
+
+READ_AS_COMPOSE = [
+    ('"my pass;word"', "my pass;word"),
+    ('"a\\"b\\\\c"', 'a"b\\c'),
+    ("'pa$word'", "pa$word"),
+    ("'pa$s#1' # my note", "pa$s#1"),
+    ("'it\\'s'", "it's"),
+    ("pass;1 # my note", "pass;1"),
+    ("pa\t#1", "pa\t#1"),
+]
+"""`.env` value text -> what compose-go's dotenv parser hands the database for it."""
+
+READ_AS_COMPOSE_IDS = [
+    "double-quoted",
+    "double-quoted-escapes",
+    "single-quoted-dollar",
+    "single-quoted-then-comment",
+    "single-quoted-escaped-quote",
+    "unquoted-space-comment",
+    "unquoted-tab-hash-is-not-a-comment",
+]
+
+DOCKER_READS_OTHERWISE = [
+    "pa$s#1 # my note",
+    "pa$$word",
+    '"pa$word"',
+    '"pa\\nword"',
+    "'it''s'",
+    "'never closed",
+]
+"""Values compose expands (`$`, escapes) or cannot read as one value: Yu'lon refuses them."""
+
+DOCKER_READS_OTHERWISE_IDS = [
+    "unquoted-dollar-and-hash",
+    "unquoted-double-dollar",
+    "double-quoted-dollar",
+    "double-quoted-escape",
+    "text-after-the-closing-quote",
+    "unterminated-quote",
+]
+
+
+@pytest.mark.parametrize(("text", "value"), READ_AS_COMPOSE, ids=READ_AS_COMPOSE_IDS)
+def test_dotenv_secret_reads_a_value_as_compose_go_does(
+    tmp_path: Path, text: str, value: str
 ) -> None:
-    """Round 2 (T748 review): an old install's own `DB_ROOT_PASSWORD` only goes into `.env`,
-    never compose text, so an Update renders whatever it holds, leaves the line as written,
-    and every reader gets it unquoted, as compose hands it to the database."""
-    server_dir = tmp_path / "wow"
-    rec = Recorder(images=False)
+    """compose-go's dotenv parser (parser.go): unquoted ends at " #" (a space, never a tab),
+    double quotes take `\\"` and `\\\\`, single quotes take everything but `\\'` as written."""
+    (tmp_path / ".env").write_text(f"DB_ROOT_PASSWORD={text}\n", encoding="utf-8")
+    assert composegen.dotenv_secret(tmp_path, "DB_ROOT_PASSWORD") == value
+
+
+@pytest.mark.parametrize("text", DOCKER_READS_OTHERWISE, ids=DOCKER_READS_OTHERWISE_IDS)
+def test_dotenv_secret_refuses_a_value_compose_would_expand(tmp_path: Path, text: str) -> None:
+    """Never a guess at compose's `$` expansion: `pa$$word` reaches MySQL as `pa$word`, and
+    `pa$s#1 # my note` as `pa#1`."""
+    (tmp_path / ".env").write_text(f"DB_ROOT_PASSWORD={text}\n", encoding="utf-8")
+    with pytest.raises(composegen.DotenvSecretError) as refusal:
+        composegen.dotenv_secret(tmp_path, "DB_ROOT_PASSWORD")
+    message = str(refusal.value)
+    assert "single quotes" in message
+    assert text not in message, "the password itself is never echoed"
+
+
+def _an_old_install_with_env(rec: Recorder, server_dir: Path, text: str) -> bytes:
+    """An install whose record predates T748, its `.db_password` gone, `.env` setting `text`."""
     install(rec, server_dir)
     record = json.loads((server_dir / native.STATE_FILE).read_text(encoding="utf-8"))
     record.pop("db_password")
     (server_dir / native.STATE_FILE).write_text(json.dumps(record), encoding="utf-8")
     (server_dir / ".db_password").unlink()
-    (server_dir / ".env").write_text(f"OTHER=1\n{line}\n", encoding="utf-8")
-    env_before = (server_dir / ".env").read_bytes()
+    (server_dir / ".env").write_text(f"OTHER=1\nDB_ROOT_PASSWORD={text}\n", encoding="utf-8")
+    return (server_dir / ".env").read_bytes()
+
+
+@pytest.mark.parametrize(("text", "value"), READ_AS_COMPOSE, ids=READ_AS_COMPOSE_IDS)
+def test_an_old_installs_own_env_password_is_read_as_compose_reads_it(
+    tmp_path: Path, text: str, value: str
+) -> None:
+    """Round 2 (T748 review): an old install's own `DB_ROOT_PASSWORD` only goes into `.env`,
+    never compose text, so an Update renders whatever it holds, leaves the line as written,
+    and every reader gets the value compose hands the database."""
+    server_dir = tmp_path / "wow"
+    rec = Recorder(images=False)
+    env_before = _an_old_install_with_env(rec, server_dir, text)
 
     _update(rec, server_dir)
 
@@ -659,3 +721,89 @@ def test_an_old_installs_own_env_password_is_read_as_compose_reads_it(
     assert load_catalog().get("wow-wotlk").install.db_password(server_dir) == value
     assert engine(rec).resolve_secrets(server_dir).db_password == value
     assert value not in (server_dir / "docker-compose.yml").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("text", DOCKER_READS_OTHERWISE, ids=DOCKER_READS_OTHERWISE_IDS)
+def test_an_old_installs_env_password_docker_reads_otherwise_is_refused(
+    tmp_path: Path, text: str
+) -> None:
+    """Round 3 (T748 review): the database has compose's reading of the line, so a raw read
+    would hand every Yu'lon reader a password MySQL refuses. The Update refuses in player
+    words, changes nothing, and the readers answer "not knowable" rather than a guess."""
+    server_dir = tmp_path / "wow"
+    rec = Recorder(images=False)
+    env_before = _an_old_install_with_env(rec, server_dir, text)
+    compose_before = (server_dir / "docker-compose.yml").read_bytes()
+
+    with pytest.raises(native.InstallerError) as refusal:
+        _update(rec, server_dir)
+
+    assert "single quotes" in str(refusal.value)
+    assert (server_dir / ".env").read_bytes() == env_before
+    assert not (server_dir / ".db_password").exists()
+    assert (server_dir / "docker-compose.yml").read_bytes() == compose_before
+    assert load_catalog().get("wow-wotlk").install.db_password(server_dir) is None
+    with pytest.raises(native.InstallerError):
+        engine(rec).resolve_secrets(server_dir)
+    from yulon import reset_defaults
+
+    assert reset_defaults._password(ENTRY, server_dir, platform_seams_for_tests()) is None
+
+
+# -- round 3: an empty .db_password is a missing one (cold review 2026-10-13) -----------
+
+
+@pytest.mark.parametrize("blank", ["", "\n", "  \n"], ids=["empty", "newline", "spaces"])
+def test_an_empty_password_file_is_written_back_from_env(tmp_path: Path, blank: str) -> None:
+    """`write_secret` truncates in place, so a crash mid-write leaves an empty file. It must
+    not beat the intact `.env`: the read treats it as gone and puts the value back."""
+    server_dir = tmp_path / "wow"
+    rec = Recorder(images=False)
+    install(rec, server_dir)
+    real = (server_dir / ".db_password").read_text(encoding="utf-8").strip()
+    (server_dir / ".db_password").write_text(blank, encoding="utf-8")
+
+    assert engine(rec).resolve_secrets(server_dir).db_password == real
+    assert (server_dir / ".db_password").read_text(encoding="utf-8") == real + "\n"
+
+
+def test_the_password_stage_does_not_keep_an_empty_file(tmp_path: Path) -> None:
+    """The `db-password` stage writes the resolved value over an empty file rather than
+    "keeping" a file that holds no password."""
+    server_dir = tmp_path / "wow"
+    a_record(server_dir, generated=True, completed=())
+    (server_dir / ".db_password").write_text("", encoding="utf-8")
+    rec = Recorder()
+    eng = engine(rec)
+    list(db_password_stage(eng).run(stage_context(server_dir)))
+    assert (server_dir / ".db_password").read_text(encoding="utf-8") == GENERATED + "\n"
+
+
+def test_render_never_rewrites_an_old_installs_env_line_it_cannot_read(tmp_path: Path) -> None:
+    """A caller that names a password (`channel_setup`'s `db_password=`) must not get an old
+    install's unreadable `.env` line replaced: that line is its database's only record."""
+    an_old_folder(tmp_path)
+    (tmp_path / ".env").write_text("DB_ROOT_PASSWORD=pa$$word\n", encoding="utf-8")
+    with pytest.raises(composegen.DotenvSecretError):
+        composegen.render(
+            ENTRY,
+            tmp_path,
+            templates_root=resources.installers_dir(),
+            db_password=DEFAULT_DB_ROOT_PASSWORD,
+            platform_id=lambda: "linux",
+        )
+
+
+def test_render_replaces_a_new_installs_env_line_it_cannot_read(tmp_path: Path) -> None:
+    """A new install's `.db_password` is its record, so a hand-edited `.env` line compose
+    would read otherwise is written over with it, as any other stale line is."""
+    a_record(tmp_path, generated=True)
+    (tmp_path / ".env").write_text("DB_ROOT_PASSWORD=pa$$word\n", encoding="utf-8")
+    plan = composegen.render(
+        ENTRY,
+        tmp_path,
+        templates_root=resources.installers_dir(),
+        db_password=GENERATED,
+        platform_id=lambda: "linux",
+    )
+    assert plan.dotenv == {"DB_ROOT_PASSWORD": GENERATED}

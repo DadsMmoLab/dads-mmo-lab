@@ -164,6 +164,17 @@ SECRET_FILE_MODE = 0o600
 """Owner-only, set by `os.open` at creation: the mode a generated secret file is born with."""
 
 
+def _blank_file(path: Path) -> bool:
+    """Whether `path` reads as nothing but whitespace: a `write_secret` cut short (T748 round 3).
+
+    A file that cannot be read is not called blank: `resolve_secrets()` refused it already.
+    """
+    try:
+        return not path.read_text(encoding="utf-8").strip()
+    except (OSError, ValueError):
+        return False
+
+
 def write_secret(path: Path, value: str) -> None:
     """Write the password, asking for `SECRET_FILE_MODE` at creation. One trailing newline.
 
@@ -13754,62 +13765,70 @@ class StagedInstaller:
             )
         path = server_dir / plan.file
         try:
-            return Secrets(path.read_text(encoding="utf-8").strip())
+            written = path.read_text(encoding="utf-8").strip()
         except FileNotFoundError:
-            # T748: an install whose own record predates generated passwords keeps the
-            # password it was made with, and nothing is minted for it.
-            if plan.legacy is not None and self._made_before_generated(server_dir, state):
-                return Secrets(self._legacy_value(server_dir, plan.legacy))
-            recovered = composegen.dotenv_secret(server_dir, "DB_ROOT_PASSWORD")
-            if recovered:
-                # Round 2 (T748 review): `.env` holds the same value `generate-compose` wrote
-                # from this file, and it is the last copy the database's password has. Put the
-                # file back from it; never mint over it.
-                if restore:
-                    try:
-                        write_secret(path, recovered)
-                    except OSError as exc:
-                        raise InstallerError(
-                            f"{path} is gone and could not be written back ({exc}). "
-                            "Nothing was changed."
-                        ) from exc
-                    logger.info(f"{path} was gone; wrote it back from this install's .env")
-                return Secrets(recovered)
-            kept = dbsecret.recall(self.entry.id, self._install_id(server_dir))
-            if kept is not None:
-                logger.info(
-                    f"{path} is gone; using the password Yu'lon kept for {kept.volume} "
-                    "when this install was removed"
-                )
-                return Secrets(kept.password)
-            if (
-                plan.legacy is not None
-                and not self._past_password_stage(server_dir, state)
-                and self._kept_volume_exists(server_dir)
-            ):
-                # A database this folder's earlier install left behind with no copy of its
-                # password: an install removed before generated passwords kept none, because
-                # its password was the published one (T748). That is the password it opens
-                # with; the `db-password` stage writes it down.
-                logger.info(
-                    f"{self._db_volume(server_dir)} was kept with no copy of its password; "
-                    "using the published one an install made before generated passwords had"
-                )
-                return Secrets(self._legacy_value(server_dir, plan.legacy))
-            if not mint:
-                # Only the install's own `run()` may make a password: anywhere else a fresh
-                # value would be handed to a database that was made with another (T748 round 2).
-                raise InstallerError(
-                    f"{path} is gone, and this install's database was made with the password "
-                    "that file held. Yu'lon has no other copy of it, so nothing was changed. "
-                    f"Put {plan.file} back from a backup of this server folder if you have one."
-                ) from None
-            return Secrets(f"{plan.prefix}{token_hex(8)}")
+            written = ""
         except OSError as exc:
             raise InstallerError(
                 f"{path} exists but could not be read ({exc}), so this install cannot know its "
                 "own database password. Nothing was started."
             ) from exc
+        if written:
+            return Secrets(written)
+        # Gone, or blank: `write_secret` truncates in place, so a write cut short leaves an
+        # empty file, and it must not stand in for the copy `.env` still has (T748 round 3).
+        try:
+            # T748: an install whose own record predates generated passwords keeps the
+            # password it was made with, and nothing is minted for it.
+            if plan.legacy is not None and self._made_before_generated(server_dir, state):
+                return Secrets(self._legacy_value(server_dir, plan.legacy))
+            recovered = composegen.dotenv_secret(server_dir, "DB_ROOT_PASSWORD")
+        except composegen.DotenvSecretError as exc:
+            raise InstallerError(str(exc)) from exc
+        if recovered:
+            # Round 2 (T748 review): `.env` holds the same value `generate-compose` wrote
+            # from this file, and it is the last copy the database's password has. Put the
+            # file back from it; never mint over it.
+            if restore:
+                try:
+                    write_secret(path, recovered)
+                except OSError as exc:
+                    raise InstallerError(
+                        f"{path} is gone and could not be written back ({exc}). "
+                        "Nothing was changed."
+                    ) from exc
+                logger.info(f"{path} was gone or empty; wrote it back from this install's .env")
+            return Secrets(recovered)
+        kept = dbsecret.recall(self.entry.id, self._install_id(server_dir))
+        if kept is not None:
+            logger.info(
+                f"{path} is gone; using the password Yu'lon kept for {kept.volume} "
+                "when this install was removed"
+            )
+            return Secrets(kept.password)
+        if (
+            plan.legacy is not None
+            and not self._past_password_stage(server_dir, state)
+            and self._kept_volume_exists(server_dir)
+        ):
+            # A database this folder's earlier install left behind with no copy of its
+            # password: an install removed before generated passwords kept none, because
+            # its password was the published one (T748). That is the password it opens
+            # with; the `db-password` stage writes it down.
+            logger.info(
+                f"{self._db_volume(server_dir)} was kept with no copy of its password; "
+                "using the published one an install made before generated passwords had"
+            )
+            return Secrets(self._legacy_value(server_dir, plan.legacy))
+        if not mint:
+            # Only the install's own `run()` may make a password: anywhere else a fresh
+            # value would be handed to a database that was made with another (T748 round 2).
+            raise InstallerError(
+                f"{path} is gone, and this install's database was made with the password "
+                "that file held. Yu'lon has no other copy of it, so nothing was changed. "
+                f"Put {plan.file} back from a backup of this server folder if you have one."
+            ) from None
+        return Secrets(f"{plan.prefix}{token_hex(8)}")
 
     @staticmethod
     def _made_before_generated(server_dir: Path, state: InstallState | None) -> bool:
@@ -13897,7 +13916,7 @@ class StagedInstaller:
                 f"but names no file to keep it in. {CATALOG_ERROR_TAIL}"
             )
         path = ctx.server_dir / plan.file
-        if path.is_file():
+        if path.is_file() and not _blank_file(path):
             yield f"The database password is already in {plan.file}; keeping it."
             return
         if plan.legacy is not None and ctx.state.db_password != RECORD_GENERATED:

@@ -424,7 +424,11 @@ def _password(entry: CatalogEntry, server_dir: Path, seams: Seams) -> str | None
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         # An install made before generated passwords keeps the one it was made with (T748).
-        legacy = entry.install.legacy_password(server_dir)
+        try:
+            legacy = entry.install.legacy_password(server_dir)
+        except composegen.DotenvSecretError:
+            # Its `.env` line is one compose reads otherwise: not knowable (T748 round 3).
+            return None
         if legacy is not None:
             return legacy
         kept = dbsecret.recall(

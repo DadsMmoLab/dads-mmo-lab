@@ -1974,7 +1974,8 @@ class Install(_Strict):
         A `fixed` plan answers its value. A `generated` plan answers what its file holds.
         With no file, a folder whose record predates generated passwords answers its
         `legacy_password()`, and a new install whose file is gone answers None. None also
-        means the entry names a file that cannot be read, which is deliberately not the same
+        means the entry names a file that cannot be read, or an old folder's `.env` sets a value
+        compose reads otherwise (`legacy_password()`), which is deliberately not the same
         answer as a guess: a caller decides what to do about it rather than being handed one.
         """
         if self.password.mode == "fixed":
@@ -1986,7 +1987,7 @@ class Install(_Strict):
             try:
                 text = (server_dir / self.password.file).read_text(encoding="utf-8")
             except FileNotFoundError:
-                return self.legacy_password(server_dir)
+                return self._legacy_or_unknown(server_dir)
             except (OSError, ValueError):
                 # ValueError covers UnicodeDecodeError, which is what a file
                 # written in another encoding raises - it is not an OSError, so
@@ -1995,6 +1996,19 @@ class Install(_Strict):
                 return None
             return text.strip() or None
         return None
+
+    def _legacy_or_unknown(self, server_dir: Path) -> str | None:
+        """`legacy_password()`, or None when its `.env` value is one compose reads otherwise.
+
+        `db_password()`'s None is "not knowable from here", and a guess at compose's reading
+        of that line is the wrong password for every reader (T748 round 3).
+        """
+        from yulon.catalog import composegen  # noqa: PLC0415 - composegen imports this module
+
+        try:
+            return self.legacy_password(server_dir)
+        except composegen.DotenvSecretError:
+            return None
 
     def legacy_password(self, server_dir: Path) -> str | None:
         """The password an install made before generated passwords has, if `server_dir` is one.
@@ -2006,6 +2020,10 @@ class Install(_Strict):
         before it has a password. An old folder whose own `.env` already sets
         `DB_ROOT_PASSWORD` keeps that value, the one compose has been using; otherwise it keeps
         the published `legacy`. Nothing is written here.
+
+        Raises:
+            composegen.DotenvSecretError: that `.env` value is one compose reads otherwise
+                (a `$`, an escape), so which password the database has is not knowable here.
         """
         legacy = self.password.legacy
         if legacy is None or record_says_generated(server_dir):
