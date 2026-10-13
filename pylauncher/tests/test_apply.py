@@ -5596,6 +5596,8 @@ def test_the_shipped_manifests_this_guard_stands_in_front_of() -> None:
     its file, and on Remove creates, puts back and drops both around upstream's revert.
     69 after its review round 2: five Remove steps put an install from before the backups back to
     the pinned core's stock prices (four item groups, one trainer row).
+    70 after T788: City Bots' Remove takes its roster and account-type marks back out of
+    `playerbots`.
 
     Catches `WORLD_HELD_DBS` narrowed and the `applied_by` default flipped to
     `db-import`: either would empty this guard's blast radius without a word,
@@ -5616,7 +5618,7 @@ def test_the_shipped_manifests_this_guard_stands_in_front_of() -> None:
             games.add(path.parent.parent.name)
 
     assert (steps, len(files), sorted(games)) == (
-        69,
+        70,
         19,
         ["wow-tbc", "wow-tortoise", "wow-vanilla", "wow-wotlk"],
     )
@@ -7499,13 +7501,14 @@ def test_the_shipped_city_bots_manifest_imports_only_the_roster_itself() -> None
     """
     manifest = _shipped(CITY_BOTS_ID)
 
-    assert [(s.db, s.applied_by) for s in manifest.sql] == [
-        ("auth", "db-import"),
-        ("characters", "db-import"),
-        ("world", "db-import"),
-        ("playerbots", "direct"),
+    assert [(s.db, s.applied_by, s.when) for s in manifest.sql] == [
+        ("auth", "db-import", "install"),
+        ("characters", "db-import", "install"),
+        ("world", "db-import", "install"),
+        ("playerbots", "direct", "install"),
+        ("playerbots", "direct", "remove"),  # T788: the roster's take-back
     ]
-    roster = manifest.sql[-1]
+    roster = manifest.sql[3]
     assert roster.path == ROSTER_REL
     assert roster.when == "install"
     assert roster.precondition is not None and len(roster.verify) == 2
