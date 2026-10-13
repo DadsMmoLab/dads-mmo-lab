@@ -231,6 +231,82 @@ def channel_is_on(server_dir: Path) -> bool:
     return dotenv_value(server_dir, CHANNEL_PORT_VAR) != CHANNEL_PORT_RELEASED
 
 
+def channel_start_refusal(
+    entry: CatalogEntry, server_dir: Path, *, first_install: bool
+) -> str | None:
+    """Why a first install must leave its command channel alone, or `None` (T723).
+
+    The one thing that refuses is a `DOCKER_SOAP_EXTERNAL_PORT` line already in the
+    folder's `.env`: the host port claim is already set (by a press, a rollback's
+    released `127.0.0.1:0`, a hand edit, or an earlier run of this install), and the
+    install does not overwrite what is there. It asks nothing of the override or of
+    any backup file: the decision to switch on is the press's (`first_install`), never the folder's
+    contents, because a folder with files missing looks like a first install to the
+    disk and is not one.
+    """
+    if not first_install or not _channel_on_env_route(entry):
+        return None
+    claim = dotenv_value(server_dir, CHANNEL_PORT_VAR)
+    if claim is None:
+        return None
+    return (
+        f"The command channel was left as it is: {CHANNEL_PORT_VAR} is already set in .env "
+        f"({claim}), so this install did not change it."
+    )
+
+
+def _channel_on_env_route(entry: CatalogEntry) -> bool:
+    operations = entry.operations
+    return operations is not None and bool(operations.enable_env)
+
+
+def channel_starts_on(entry: CatalogEntry, server_dir: Path, *, first_install: bool) -> bool:
+    """Whether this install's first render switches its channel on (T723).
+
+    Two things decide it, and neither is a file being missing. The press says it is
+    an install run (`first_install`, set by the Install button and the install
+    harness, and by nothing else: Update, Repair, Reset and a move never set it).
+    And the entry's channel is an environment route (`operations.enable_env`, WotLK
+    and Unbound). The owner decided on 2026-10-12 that such an install starts on,
+    the way the conf-file trees' keys are written at install (T87), so the first
+    boot binds the channel and nothing is pressed.
+
+    The one exception is `channel_start_refusal()`: a `DOCKER_SOAP_EXTERNAL_PORT`
+    line already in `.env` is the user's, and is left alone. An install into a folder
+    that already has an override is still an install, so it switches on too, unless
+    that line is there (a press or a rollback always leaves it).
+    """
+    return (
+        first_install
+        and _channel_on_env_route(entry)
+        and channel_start_refusal(entry, server_dir, first_install=first_install) is None
+    )
+
+
+def record_channel_press(entry: CatalogEntry, server_dir: Path, before: str) -> None:
+    """Keep the record a channel press keeps, for a channel that starts on (T723).
+
+    The two writes `channel_setup.enable()` makes on its first press, in the same
+    order: the override as it was before the channel (`before`), then the host
+    port claim on loopback. With both there `channel_is_on()` is true, so every
+    writer of the override renders the channel's environment (T101), and a
+    rollback restores `before` and releases the port, as it does after a press.
+
+    The claim goes through `write_dotenv()`, the one writer of `.env` that keeps
+    it owner-only, because that file holds the database root password.
+    """
+    operations = entry.operations
+    if operations is None or operations.port is None:
+        raise ComposeGenError(f"{entry.id} has no command channel port to claim")
+    target = server_dir / OVERRIDE_FILE
+    backup = target.with_name(target.name + CHANNEL_BACKUP_SUFFIX)
+    if not backup.exists():
+        # As `enable()` does: the record of the override before ANY channel is the first
+        # one kept, so a leftover one from an earlier press is never replaced.
+        backup.write_text(before, encoding="utf-8", newline="\n")
+    write_dotenv(server_dir, {CHANNEL_PORT_VAR: f"127.0.0.1:{operations.port}"})
+
+
 def channel_world_env(entry: CatalogEntry, server_dir: Path) -> dict[str, str] | None:
     """The environment a REGENERATED override carries: `None` unless a channel press is live.
 
@@ -243,6 +319,9 @@ def channel_world_env(entry: CatalogEntry, server_dir: Path) -> dict[str, str] |
     T101 the stage rendered without it, so a Repair on WotLK wrote the
     pre-channel override back and its own `up` brought the world up with SOAP
     off (yulon-ubuntu, 2026-09-24).
+
+    A first install's channel is live from its first render on, because
+    `record_channel_press()` writes its record before the second render (T723).
 
     A channel switched on through `enable_conf` (the CMaNGOS trees) has nothing
     here: its keys are in `mangosd.conf`, which no regeneration rewrites.

@@ -1198,7 +1198,11 @@ def main(argv: list[str] | None = None) -> int:
     except KeyError:
         sys.stderr.write(f"unknown game {args.game!r}\n")
         return 2
-    options = InstallOptions(server_dir=args.server_dir, client_dir=args.client_dir)
+    # The harness runs an install the way the Install button does, so it is a first install
+    # too (T723). Nothing else in this file runs `run()`.
+    options = InstallOptions(
+        server_dir=args.server_dir, client_dir=args.client_dir, first_install=True
+    )
     # One event per run, as the Catalog tab makes one per install. It is the
     # only seam that stops a bridge worker whose consumer has gone: a `run()`
     # given no event leaves `_pump()`'s worker running on abandonment

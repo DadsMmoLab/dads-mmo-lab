@@ -1113,7 +1113,9 @@ class CatalogView(QWidget):
             # settings or data in, and then the tile could no longer bring the server in.
             show_information(self, "A move that did not finish", _unfinished_move(server_dir))
             return False
-        return self._run_install(entry, server_dir, client_dir, self._make_installer(entry))
+        return self._run_install(
+            entry, server_dir, client_dir, self._make_installer(entry), first_install=True
+        )
 
     def _ask_folders(self, entry: CatalogEntry) -> tuple[Path, Path | None] | None:
         """The server folder (the suggestion, or a pick) and, where needed, the client folder."""
@@ -1201,6 +1203,7 @@ class CatalogView(QWidget):
             client_dir,
             installer,
             title=f"Bringing {entry.name} from another computer",
+            first_install=False,
         )
 
     def _run_install(
@@ -1211,8 +1214,14 @@ class CatalogView(QWidget):
         installer: InstallEngine,
         *,
         title: str | None = None,
+        first_install: bool,
     ) -> bool:
-        options = InstallOptions(server_dir=server_dir, client_dir=client_dir)
+        # `first_install` is the caller's word, never a default (T723): the Install button
+        # says True and may switch a WotLK or Unbound command channel on at install; the move
+        # ("Bring from another computer") says False, so the server it fills stays as sent.
+        options = InstallOptions(
+            server_dir=server_dir, client_dir=client_dir, first_install=first_install
+        )
         # No synchronous preflight here: `run()` re-preflights on the worker
         # thread, and preflight can mean full Docker provisioning — minutes of
         # work that used to freeze the window (review finding, 2026-08-21).

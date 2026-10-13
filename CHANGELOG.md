@@ -133,6 +133,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - **Battle Pass** no longer asks for its vendor's creature entry: the vendor it creates is always the one it uses.
 - A new version is offered only after its tests pass, and the Windows and Mac builds are now tested on their own systems.
 - Install and error messages say "Docker" and "world server" in plain words, and the first install line is shorter.
+- A new WotLK or Unbound server starts with its command channel on, so the app can prove it without a button press.
 
 ## v0.9.16-Public — 2026-10-10
 

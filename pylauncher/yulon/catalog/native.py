@@ -5516,6 +5516,15 @@ class StageContext:
     learned to read this field still takes the older route, which refuses
     anything that does not read as a finished import (cold review, round 1).
     """
+    first_install: bool = False
+    """The press was an install run: the Install button or the harness (`InstallOptions`).
+
+    Read by `stage_generate_compose()` alone, and only to decide whether a WotLK or
+    Unbound command channel starts on (T723). The disk cannot tell an install from a
+    folder with files missing, so the press says so; a reinstall over an existing
+    folder sets it too. Every other context leaves it False: Update, Rebuild, Reset and
+    a move ("Bring from another computer") never switch a channel on at install.
+    """
 
 
 @dataclass(frozen=True)
@@ -8246,6 +8255,7 @@ class StagedInstaller:
             cancel=cancel,
             secrets=self.resolve_secrets(server_dir),
             installing=True,
+            first_install=opts.first_install,
         )
 
         # The failure record for anything in here is written by `_staged()`,
@@ -14388,17 +14398,47 @@ class StagedInstaller:
         # install, and without it the override went back to the pre-channel
         # file: measured on yulon-ubuntu 2026-09-24, the Repair's own `up`
         # brought the world up with `AC_SOAP_ENABLED` gone and nothing on the
-        # channel's port. `None` on a first install (no press yet), which is
-        # `render()`'s own default.
+        # channel's port. `None` on a first install's first render (no press yet),
+        # which is `render()`'s own default; see the T723 note below.
         #
         # And the player's bot count rides over it (T117): the Bots box writes
         # Min/Max into this same file, and rendering the catalog's 500 again put
         # it back on every Repair and Update. Read off the file being replaced,
         # never probed; no usable pair in it leaves the catalog's number.
+        #
+        # A first install's channel starts on (T723), as the conf trees' keys do
+        # at install (T87). The record a press keeps is written first, from the
+        # override this render gives without the channel, and the second render
+        # then carries the channel the way every later regeneration does. Asked
+        # before anything is written. Only an install run may ask (`ctx.first_install`,
+        # set by the Install button and the install harness and by nothing else); what
+        # is or is not on the disk never decides it, because a folder with files missing
+        # looks like a first install and is not one. The one thing read from the disk is
+        # a refusal: a port line already in `.env` is the user's and is left alone
+        # (T723 round 2).
         try:
+            refusal = composegen.channel_start_refusal(
+                self.entry, ctx.server_dir, first_install=ctx.first_install
+            )
+            switch_on = composegen.channel_starts_on(
+                self.entry, ctx.server_dir, first_install=ctx.first_install
+            )
             plan = self._render_compose(ctx.server_dir, ctx.secrets, label)
+            if switch_on:
+                try:
+                    composegen.record_channel_press(self.entry, ctx.server_dir, plan.override)
+                except OSError as exc:
+                    # Only the channel's own two writes are worded as the channel's: an
+                    # OSError from a render surfaces as it did before this change.
+                    raise InstallerError(
+                        f"the command channel could not be written into {ctx.server_dir}: {exc}"
+                    ) from exc
+                plan = self._render_compose(ctx.server_dir, ctx.secrets, label)
         except composegen.ComposeGenError as exc:
             raise InstallerError(str(exc)) from exc
+        if refusal is not None:
+            logger.info(refusal)
+            yield refusal
         made = self._make_server_folders(ctx.server_dir)
         for path in made:
             yield f"Made {path.name}/ for the server to write into."

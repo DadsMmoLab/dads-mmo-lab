@@ -96,6 +96,39 @@ def test_a_yes_to_the_plan_runs_its_engine_in_the_suggested_folder(
     assert len(mover.engines) == 1
 
 
+def test_the_move_runs_its_engine_with_no_first_install_flag(qapp: object, tmp_path: Path) -> None:
+    """T723: only the Install button may switch a channel on at install; the move must not."""
+    mover = Mover(tmp_path)
+    built, _ = view(tmp_path, mover)
+    assert built.bring_from_another_computer(WOTLK) is True
+    wait_for_panel(built._log)
+    assert [opts.first_install for opts in mover.engines[0].ran_with] == [False]
+
+
+def test_the_install_button_runs_its_engine_as_a_first_install(
+    qapp: object, tmp_path: Path
+) -> None:
+    """T723: the Install button is the press that says this is an install run."""
+    made: list[_FakeInstaller] = []
+
+    def factory(entry: object) -> _FakeInstaller:
+        made.append(_FakeInstaller(entry, ["building"]))  # type: ignore[arg-type]
+        return made[-1]
+
+    built = CatalogView(
+        CATALOG,
+        factory,  # type: ignore[arg-type]
+        LogPanel(),
+        pick_dir=lambda _p, _t, _s: tmp_path / "client",
+        ask_suggestion=lambda _p, _g, _s: True,
+        home=tmp_path,
+        platform_id=lambda: "linux",
+    )
+    assert built.start_install(WOTLK) is True
+    wait_for_panel(built._log)
+    assert [opts.first_install for opts in made[-1].ran_with] == [True]
+
+
 def test_a_no_runs_nothing(qapp: object, tmp_path: Path) -> None:
     mover = Mover(tmp_path)
     built, _ = view(tmp_path, mover, yes=False)

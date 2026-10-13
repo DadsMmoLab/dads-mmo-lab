@@ -449,11 +449,13 @@ def test_a_live_channel_press_is_reapplied_so_a_reset_never_turns_soap_off(
 
 
 def test_after_the_channel_is_rolled_back_the_default_has_no_channel_env(tmp_path: Path) -> None:
-    installed = _wotlk_stack(tmp_path)
+    _wotlk_stack(tmp_path)
     channel_setup.enable(
         WOTLK, tmp_path, templates_root=resources.installers_dir(), world_running=False
     )
     channel_setup.roll_back(WOTLK, tmp_path)
+    installed = (tmp_path / OVERRIDE).read_bytes()
+    assert b"AC_SOAP_ENABLED" not in installed
     assert not reset_defaults.channel_is_on(tmp_path)
     texts, _ = reset_defaults.default_texts(WOTLK, tmp_path, [OVERRIDE], seams=_seams())
     assert texts[OVERRIDE].encode("utf-8") == installed
