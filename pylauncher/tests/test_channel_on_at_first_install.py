@@ -35,7 +35,7 @@ from yulon import channel_setup, resources
 from yulon.catalog import composegen, native
 from yulon.catalog.catalog import load_catalog
 from yulon.catalog.families.azerothcore import AzerothCoreInstaller
-from yulon.catalog.installer import InstallOptions
+from yulon.catalog.installer import InstallerError, InstallOptions
 
 CATALOG = load_catalog()
 WOTLK = CATALOG.get("wow-wotlk")
@@ -322,7 +322,56 @@ def test_an_env_with_the_users_own_port_line_is_left_alone(tmp_path: Path) -> No
     assert (tmp_path / composegen.DOTENV_FILE).read_bytes() == env_before
     assert not (tmp_path / BACKUP).exists()
     assert not composegen.channel_is_on(tmp_path)
-    assert any(channel_setup.HOST_PORT_VAR in line and "left as it is" in line for line in said)
+    refusal = next(line for line in said if channel_setup.HOST_PORT_VAR in line)
+    assert "left as it is" in refusal
+    assert "already set" in refusal
+    assert "chosen" not in refusal, "Yu'lon itself may have written the line, not the player"
+
+
+def test_a_claim_written_changes_only_one_env_line(tmp_path: Path) -> None:
+    """The user's other .env lines and comments stay byte for byte.
+
+    What follows them is `write_dotenv()`'s one appended block (the shared writer the press
+    uses too): a blank line, its comment, and the single port line.
+    """
+    original = "# my notes\nDOCKER_DB_EXTERNAL_PORT=3307\n\n# keep this\nOTHER=a b  \n"
+    (tmp_path / composegen.DOTENV_FILE).write_bytes(original.encode("utf-8"))
+
+    _generate(WOTLK, tmp_path, first_install=True)
+
+    after = (tmp_path / composegen.DOTENV_FILE).read_text(encoding="utf-8")
+    port = f"{channel_setup.HOST_PORT_VAR}=127.0.0.1:7878"
+    assert after == original + "\n# Written by Yu'lon's install engine.\n" + port + "\n"
+    assert after.count(channel_setup.HOST_PORT_VAR) == 1
+
+
+@pytest.mark.parametrize("first_install", [False, True], ids=["update", "install"])
+def test_an_oserror_while_rendering_is_not_called_a_channel_write_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, first_install: bool
+) -> None:
+    """Only the channel's own write is worded as the channel's; a render fault is as before."""
+    engine = _engine(WOTLK)
+
+    def unreadable(*_args: object) -> object:
+        raise PermissionError("the override cannot be read")
+
+    monkeypatch.setattr(engine, "_render_compose", unreadable)
+
+    with pytest.raises(OSError, match="the override cannot be read") as caught:
+        list(engine.stage_generate_compose(_context(WOTLK, tmp_path, first_install=first_install)))
+    assert not isinstance(caught.value, InstallerError)
+
+
+def test_a_failed_channel_write_is_worded_as_the_channels(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def refused(*_args: object) -> None:
+        raise PermissionError("no write")
+
+    monkeypatch.setattr(composegen, "record_channel_press", refused)
+
+    with pytest.raises(InstallerError, match="command channel could not be written"):
+        list(_engine(WOTLK).stage_generate_compose(_context(WOTLK, tmp_path, first_install=True)))
 
 
 def test_a_non_install_path_with_every_file_missing_does_not_switch_on(tmp_path: Path) -> None:

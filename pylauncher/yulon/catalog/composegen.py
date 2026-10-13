@@ -237,10 +237,10 @@ def channel_start_refusal(
     """Why a first install must leave its command channel alone, or `None` (T723).
 
     The one thing that refuses is a `DOCKER_SOAP_EXTERNAL_PORT` line already in the
-    folder's `.env`: somebody chose the host port claim (a press, a rollback's
-    released `127.0.0.1:0`, or a hand edit), and the install does not overwrite what
-    the user set. It asks nothing of the override or of any backup file: the
-    decision to switch on is the press's (`first_install`), never the folder's
+    folder's `.env`: the host port claim is already set (by a press, a rollback's
+    released `127.0.0.1:0`, a hand edit, or an earlier run of this install), and the
+    install does not overwrite what is there. It asks nothing of the override or of
+    any backup file: the decision to switch on is the press's (`first_install`), never the folder's
     contents, because a folder with files missing looks like a first install to the
     disk and is not one.
     """
@@ -250,8 +250,8 @@ def channel_start_refusal(
     if claim is None:
         return None
     return (
-        f"The command channel was left as it is: .env already has {CHANNEL_PORT_VAR}={claim}, "
-        "a setting that was chosen before this install."
+        f"The command channel was left as it is: {CHANNEL_PORT_VAR} is already set in .env "
+        f"({claim}), so this install did not change it."
     )
 
 

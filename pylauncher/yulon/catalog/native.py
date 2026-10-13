@@ -5314,13 +5314,13 @@ class StageContext:
     anything that does not read as a finished import (cold review, round 1).
     """
     first_install: bool = False
-    """The press was the FIRST install of its folder (`InstallOptions.first_install`).
+    """The press was an install run: the Install button or the harness (`InstallOptions`).
 
     Read by `stage_generate_compose()` alone, and only to decide whether a WotLK or
-    Unbound command channel starts on (T723). The disk cannot tell a first install
-    from a folder whose override was deleted later, so the press that made the folder
-    has to say so. Every other context leaves it False: Update, Rebuild, Reset and a
-    move ("Bring from another computer") never switch a channel on at install.
+    Unbound command channel starts on (T723). The disk cannot tell an install from a
+    folder with files missing, so the press says so; a reinstall over an existing
+    folder sets it too. Every other context leaves it False: Update, Rebuild, Reset and
+    a move ("Bring from another computer") never switch a channel on at install.
     """
 
 
@@ -14070,14 +14070,17 @@ class StagedInstaller:
             )
             plan = self._render_compose(ctx.server_dir, ctx.secrets, label)
             if switch_on:
-                composegen.record_channel_press(self.entry, ctx.server_dir, plan.override)
+                try:
+                    composegen.record_channel_press(self.entry, ctx.server_dir, plan.override)
+                except OSError as exc:
+                    # Only the channel's own two writes are worded as the channel's: an
+                    # OSError from a render surfaces as it did before this change.
+                    raise InstallerError(
+                        f"the command channel could not be written into {ctx.server_dir}: {exc}"
+                    ) from exc
                 plan = self._render_compose(ctx.server_dir, ctx.secrets, label)
         except composegen.ComposeGenError as exc:
             raise InstallerError(str(exc)) from exc
-        except OSError as exc:
-            raise InstallerError(
-                f"the command channel could not be written into {ctx.server_dir}: {exc}"
-            ) from exc
         if refusal is not None:
             logger.info(refusal)
             yield refusal
