@@ -7034,6 +7034,29 @@ def test_apply_module_sql_runs_the_importer_with_the_modules_on_disk(
     ] in calls, calls
 
 
+def test_apply_module_sql_before_run_comes_after_the_database_is_up_and_before_the_importer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """T779: `before_run` is the last word; a raise from it leaves the importer unstarted."""
+    (tmp_path / "modules" / "mod-city-bots").mkdir(parents=True)
+    calls: list[list[str]] = []
+    _repair_doubles(monkeypatch, calls, running=set())
+
+    def refuse() -> None:
+        calls.append(["before_run"])
+        raise docker.DockerRefusal("an account is in the way")
+
+    with pytest.raises(docker.DockerRefusal, match="in the way"):
+        docker.apply_module_sql(SPEC, tmp_path, before_run=refuse)
+
+    assert ["before_run"] in calls
+    assert not any(c[:3] == ["docker", "compose", "run"] for c in calls), calls
+    started = [
+        i for i, c in enumerate(calls) if c[:5] == ["docker", "compose", "up", "-d", "--no-deps"]
+    ]
+    assert started and started[0] < calls.index(["before_run"]), calls
+
+
 def test_apply_module_sql_refuses_an_importer_that_cannot_see_the_modules_folder(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

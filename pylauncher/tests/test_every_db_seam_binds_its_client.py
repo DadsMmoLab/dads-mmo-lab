@@ -67,7 +67,7 @@ over somebody's populated server, and the original audit did not look at it.
 
 PACKAGE = Path(__file__).resolve().parent.parent / "yulon"
 
-EXPECTED_SITES = 21
+EXPECTED_SITES = 22
 """Exactly how many seam constructions exist today.
 
 19 since T179 Task 5: `controller_wow_centurion.accounts.sql_for` and

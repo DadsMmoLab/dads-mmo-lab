@@ -18,7 +18,7 @@ from datetime import date
 from pathlib import Path
 from typing import Protocol
 
-from yulon import docker, module_source, platform, resources
+from yulon import city_bots_guard, docker, module_source, platform, resources
 from yulon.apply import (
     Applier,
     ApplyRefusal,
@@ -40,7 +40,7 @@ from yulon.apply import (
 )
 from yulon.apply import module_updates as apply_updates
 from yulon.apply import refresh_module_updates as refresh_cached
-from yulon.catalog.catalog import DbPasswordUnknown
+from yulon.catalog.catalog import DbPasswordUnknown, load_catalog
 from yulon.catalog.upstream import github_slug
 from yulon.controller_wow_wotlk import docker_ctl
 from yulon.git import BehindReader, Git
@@ -557,6 +557,17 @@ def apply_module_sql(
         seen.append(line)
         say(line)
 
+    def no_bot_accounts_in_the_way() -> None:
+        # T779: asked once the importer's own refusals are passed and the database is up.
+        if not city_bots_guard.city_bots_on(server_dir, plan.allowed):
+            return
+        try:
+            city_bots_guard.refuse_if_accounts_in_the_way(
+                load_catalog().get(user_game), server_dir, plan.allowed
+            )
+        except city_bots_guard.CityBotsAccountRefusal as exc:
+            raise docker.DockerRefusal(str(exc)) from exc
+
     try:
         run = docker.apply_module_sql(
             spec,
@@ -564,6 +575,7 @@ def apply_module_sql(
             output=collect,
             modules=plan.allowed,
             wsl_distro=wsl_distro,
+            before_run=no_bot_accounts_in_the_way,
         )
     except docker.DockerCommandError as refused:
         for line in module_sql_report(

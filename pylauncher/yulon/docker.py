@@ -3547,6 +3547,7 @@ def apply_module_sql(
     db_timeout: float = _DB_HEALTHY_TIMEOUT_SECONDS,
     modules: str | None = None,
     wsl_distro: str | None = None,
+    before_run: Callable[[], None] | None = None,
 ) -> AttachedRun:
     """Run the one-shot importer for the modules on disk. The route nothing else takes.
 
@@ -3595,6 +3596,12 @@ def apply_module_sql(
     measurement). The three meanings of the value, `""` among them, are on
     `ALL_MODULES`; nothing is validated here, because upstream's own reading is
     the only one that counts.
+
+    `before_run` (T779) is called once every refusal above has passed and the
+    database is up, immediately before the importer starts. It raises to stop
+    the run with nothing applied: the per-module checks that need the database
+    (City Bots' account ids) cannot be asked earlier, and cannot be asked by
+    this function, which knows no module and no password.
 
     Raises:
         DockerCommandError: any of the refusals above, the database never became
@@ -3671,6 +3678,10 @@ def apply_module_sql(
     )
 
     allowed = allowed_modules(server_dir) if modules is None else modules
+    if before_run is not None:
+        # T779: the caller's last word, with every refusal above passed and the database up,
+        # and before the importer starts. A raise here means nothing was applied.
+        before_run()
     logger.warning(f"apply_module_sql(): running {service} for modules: {allowed!r}")
     run = run_one_shot(
         service, server_dir, allowed_modules=allowed, wsl_distro=wsl_distro, sink=output

@@ -32,7 +32,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import ClassVar
 
-from yulon import ale_playerbots, docker, git, networking, server_build_presses
+from yulon import ale_playerbots, city_bots_guard, docker, git, networking, server_build_presses
 from yulon.catalog import snapshot
 from yulon.catalog.catalog import AzerothCoreData, CatalogEntry, EmulatorSource
 from yulon.catalog.families import carried, scriptdeploy
@@ -693,6 +693,7 @@ class AzerothCoreInstaller(StagedInstaller):
         allowed = (
             self._importer_modules(ctx.server_dir) if self._importer_modules is not None else None
         )
+        self._refuse_bot_accounts_in_the_way(ctx.server_dir, allowed)
         run = yield from self._pump(
             lambda sink: self._seams.one_shot(
                 service, ctx.server_dir, sink=sink, cancel=None, allowed_modules=allowed
@@ -708,6 +709,21 @@ class AzerothCoreInstaller(StagedInstaller):
                 "build started."
             )
         yield "The database updates are in."
+
+    def _refuse_bot_accounts_in_the_way(self, server_dir: Path, allowed: str | None) -> None:
+        """Before an importer run that carries City Bots' SQL: no real account on a bot's id (T779).
+
+        The Modules tab's button asks the same question in `docker.apply_module_sql()`. Here the
+        database is up and the servers are down; `allowed` None is the compose file's default,
+        which is every module in the folder. Raises `InstallerError` in the player's words, with
+        nothing applied.
+        """
+        try:
+            city_bots_guard.refuse_if_accounts_in_the_way(
+                self.entry, server_dir, docker.ALL_MODULES if allowed is None else allowed
+            )
+        except city_bots_guard.CityBotsAccountRefusal as exc:
+            raise InstallerError(str(exc)) from exc
 
     def before_rebuild(
         self, server_dir: Path, route: str, press: str = server_build_presses.REBUILD
@@ -1063,6 +1079,7 @@ class AzerothCoreInstaller(StagedInstaller):
                 if self._importer_modules is not None
                 else None
             )
+            self._refuse_bot_accounts_in_the_way(ctx.server_dir, allowed)
             run = yield from self._pump(
                 lambda sink: self._seams.one_shot(
                     service, ctx.server_dir, sink=sink, cancel=None, allowed_modules=allowed
