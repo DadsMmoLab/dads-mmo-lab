@@ -1293,14 +1293,25 @@ def test_the_rendered_wotlk_compose_takes_its_password_from_the_env_file(tmp_pat
     assert process.returncode == 0, process.stderr
 
 
-@pytest.mark.parametrize("env_text", ["", "DB_ROOT_PASSWORD=\n"])
-def test_a_required_variable_without_a_value_is_refused_in_plain_words(
-    tmp_path: Path, env_text: str
+REQUIRED_CASES = [("", False), ("DB_ROOT_PASSWORD=\n", False), ("", True)]
+"""(The .env text, whether the compose file says `${DB_ROOT_PASSWORD?...}` rather than `:?`): each
+leaves the root password without a value."""
+
+
+def _rendered(question: bool = False) -> str:
+    """The rendered WotLK compose, or the same file with `?` in place of every `:?`."""
+    text = RENDERED_WOTLK.read_text(encoding="utf-8")
+    return text.replace("${DB_ROOT_PASSWORD:?", "${DB_ROOT_PASSWORD?") if question else text
+
+
+@pytest.mark.parametrize(("env_text", "question"), REQUIRED_CASES)
+def test_a_required_variable_without_a_value_is_refused_by_name_without_a_terminal(
+    tmp_path: Path, env_text: str, question: bool
 ) -> None:
     process, _server, out, _log = _run(
         tmp_path,
         env_text=env_text,
-        compose={"docker-compose.yml": RENDERED_WOTLK.read_text(encoding="utf-8")},
+        compose={"docker-compose.yml": _rendered(question)},
         fixture={"password": RENDERED_PASSWORD},
     )
     assert process.returncode == 2, process.stderr
@@ -1308,12 +1319,37 @@ def test_a_required_variable_without_a_value_is_refused_in_plain_words(
     assert list(out.iterdir()) == []
 
 
-def test_a_question_mark_takes_an_empty_value_as_set_and_refuses_an_unset_one() -> None:
+@pytest.mark.parametrize(("env_text", "question"), REQUIRED_CASES)
+def test_a_required_variable_without_a_value_is_asked_for_at_a_terminal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, env_text: str, question: bool
+) -> None:
+    script = _script()
+    server, out = _prepare(
+        tmp_path, monkeypatch, env_text=env_text, fixture={"password": RENDERED_PASSWORD}
+    )
+    (server / "docker-compose.yml").write_text(_rendered(question), encoding="utf-8")
+    monkeypatch.setattr(sys, "stdin", types.SimpleNamespace(isatty=lambda: True))
+    asked: list[str] = []
+
+    def typed(prompt: str = "") -> str:
+        asked.append(prompt)
+        return RENDERED_PASSWORD
+
+    monkeypatch.setattr(script, "getpass", types.SimpleNamespace(getpass=typed))
+    dest, _counts = script.pack(server, out, False)
+    assert len(asked) == 1 and "The compose file needs DB_ROOT_PASSWORD" in asked[0]
+    assert dest.exists()
+
+
+def test_a_question_mark_takes_an_empty_value_as_set() -> None:
     script = _script()
     form = "${DB_ROOT_PASSWORD?Yu'lon .env is missing}"
     assert script._expand(form, {"DB_ROOT_PASSWORD": ""}) == ""
-    with pytest.raises(script.Refusal, match="DB_ROOT_PASSWORD"):
-        script._expand(form, {})
+
+
+def test_an_unused_default_is_not_expanded() -> None:
+    script = _script()
+    assert script._expand("${A:-${B?unused}}", {"A": "a"}) == "a"
 
 
 def test_a_running_server_is_told_to_stop_only_the_game_servers(tmp_path: Path) -> None:

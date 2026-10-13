@@ -121,6 +121,15 @@ class Refusal(Exception):
     """A reason the script stops, in a sentence a player can act on. Nothing was packed."""
 
 
+class RequiredUnset(Exception):
+    """A `${NAME:?msg}` or `${NAME?msg}` whose NAME the server folder does not set (for `:?`,
+    one set to nothing). The value it sits in is not available, as compose would not render it."""
+
+    def __init__(self, name: str) -> None:
+        super().__init__(name)
+        self.name = name
+
+
 @dataclass
 class Access:
     """How this distro reaches the server's database: its container, or the MySQL client."""
@@ -342,9 +351,9 @@ _ESCAPED = {
 def _expand(value: str, known: Mapping[str, str]) -> str:
     """Compose's variable substitution: `$$` is one `$`; `$NAME` and `${NAME}`; and the forms
     `${NAME:-d}` (unset or empty), `${NAME-d}` (unset), `${NAME:+d}` (set and not empty),
-    `${NAME+d}` (set), and `${NAME:?msg}` / `${NAME?msg}`, which refuse when NAME is missing
-    (`:?` also when it is empty). A default is itself expanded. `known` holds final values:
-    they are pasted as they are and never read again."""
+    `${NAME+d}` (set), and `${NAME:?msg}` / `${NAME?msg}`, which raise RequiredUnset when NAME
+    is missing (`:?` also when it is empty). A default is expanded only when it is used. `known`
+    holds final values: they are pasted as they are and never read again."""
     out: list[str] = []
     index = 0
     while index < len(value):
@@ -405,15 +414,14 @@ def _substitute(name: str, rest: str, known: Mapping[str, str]) -> str:
     current = known.get(name)
     for operator in (":-", "-", ":+", "+", ":?", "?"):
         if rest.startswith(operator):
-            operand = _expand(rest[len(operator) :], known)
             empty_counts = operator.startswith(":")
             missing = current is None or (empty_counts and current == "")
+            if operator.endswith("?") and missing:
+                raise RequiredUnset(name)
             if operator.endswith("-"):
-                return operand if missing else str(current)
+                return _expand(rest[len(operator) :], known) if missing else str(current)
             if operator.endswith("+"):
-                return "" if missing else operand
-            if missing and operator.endswith("?"):
-                raise Refusal(_required_missing(name))
+                return "" if missing else _expand(rest[len(operator) :], known)
             return "" if missing else str(current)
     return current or ""
 
@@ -480,7 +488,8 @@ def _dotenv_value(raw: str, known: Mapping[str, str]) -> str:
 
 def _dotenv(text: str) -> dict[str, str]:
     """The `.env` file as a map of final values. Later lines see earlier ones; the last
-    setting of a key wins."""
+    setting of a key wins. A line whose value needs a variable the file does not set has no
+    value, so its key counts as unset."""
     found: dict[str, str] = {}
     for raw_line in text.splitlines():
         line = raw_line.strip()
@@ -489,7 +498,10 @@ def _dotenv(text: str) -> dict[str, str]:
         line = re.sub(r"^export\s+", "", line)
         match = _ASSIGNMENT.match(line)
         if match is not None:
-            found[match.group(1)] = _dotenv_value(match.group(2), found)
+            try:
+                found[match.group(1)] = _dotenv_value(match.group(2), found)
+            except RequiredUnset:
+                found.pop(match.group(1), None)
     return found
 
 
@@ -513,10 +525,11 @@ def _compose_assignments(text: str) -> dict[str, str]:
     return found
 
 
-def _found_password(server_dir: Path | None) -> str | None:
-    """The first root password the server's own files name, in the order compose would use them."""
+def _found_password(server_dir: Path | None) -> tuple[str | None, str | None]:
+    """The first root password the server's own files name, in the order compose would use
+    them; and, when a compose file needs a variable the .env does not set, that variable."""
     if server_dir is None:
-        return None
+        return None, None
     try:
         env_file = _dotenv(
             (server_dir / ".env").read_text(encoding="utf-8", errors="replace")
@@ -524,6 +537,7 @@ def _found_password(server_dir: Path | None) -> str | None:
     except OSError:
         env_file = {}
     candidates: list[str] = []
+    unset: str | None = None
     for path in sorted(server_dir.glob("*compose*.y*ml")):
         try:
             declared = _compose_assignments(
@@ -531,11 +545,13 @@ def _found_password(server_dir: Path | None) -> str | None:
             )
         except OSError:
             continue
-        candidates += [
-            _expand(declared[key], env_file)
-            for key in PASSWORD_VARIABLES
-            if key in declared
-        ]
+        for key in PASSWORD_VARIABLES:
+            if key not in declared:
+                continue
+            try:
+                candidates.append(_expand(declared[key], env_file))
+            except RequiredUnset as required:
+                unset = unset or required.name
     candidates += [env_file[key] for key in PASSWORD_VARIABLES if key in env_file]
     try:
         candidates.append(
@@ -543,7 +559,16 @@ def _found_password(server_dir: Path | None) -> str | None:
         )
     except (OSError, ValueError):
         pass
-    return next((found for found in candidates if found), None)
+    return next((found for found in candidates if found), None), unset
+
+
+def _ask_prompt(unset: str | None) -> str:
+    """The line the password is asked for with; when a compose file needed a variable the .env
+    does not set, the line says which one."""
+    prompt = "Database root password (typed, not shown): "
+    if unset is None:
+        return prompt
+    return f"The compose file needs {unset} and the .env does not set it.\n{prompt}"
 
 
 def _typed_password(prompt: str) -> str:
@@ -998,14 +1023,14 @@ def pack(
 ) -> tuple[Path, tuple[int, int, int, int]]:
     started = time.time()
     access = _choose_access(server_dir, stopped_flag, host, port)
-    found = _found_password(server_dir)
+    found, unset = _found_password(server_dir)
     typed = found is None
     if found is not None and "\0" in found:
         raise Refusal(NUL_PASSWORD)
     if found is None:
         if not sys.stdin.isatty():
-            raise Refusal(NO_PASSWORD)
-        found = _typed_password("Database root password (typed, not shown): ")
+            raise Refusal(NO_PASSWORD if unset is None else _required_missing(unset))
+        found = _typed_password(_ask_prompt(unset))
     access.env = {**os.environ, "MYSQL_PWD": found}
     try:
         databases = _databases(access)
