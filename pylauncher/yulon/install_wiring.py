@@ -38,7 +38,7 @@ from yulon.catalog import upstream
 # `native` in a walrus (`entry.install.native`), and a module of the same name
 # imported at the top of the file is exactly the kind of shadow that type-checks
 # in one function and not in the other.
-from yulon.catalog.catalog import CatalogEntry, load_catalog
+from yulon.catalog.catalog import CatalogEntry, DbPasswordUnknown, load_catalog
 from yulon.catalog.families import azerothcore, trinitycore
 from yulon.catalog.installer import (
     DEFAULT_INSTALLERS_ROOT,
@@ -95,6 +95,7 @@ from yulon.said import with_details
 from yulon.ui import lines
 
 if TYPE_CHECKING:
+    from yulon.apply import RootPassword
     from yulon.controller_wow_wotlk import maintenance as wotlk_maintenance
 
 logger = get_logger(__name__)
@@ -106,15 +107,13 @@ fixed value (moved from `controller_wow_wotlk.modules`, which re-exports it)."""
 
 
 def fixed_db_password(entry: CatalogEntry) -> str:
-    """The password the app's own DB clients use for `entry`: its fixed value, else the default.
+    """The published password the app falls back to for `entry` when it knows no folder.
 
-    A `generated` plan has no value, and the fallback is the one both callers
-    already carried. That is correct for every consumer this module has — the
-    AzerothCore probe pair — because only a fixed-password entry names a
-    one-shot import service. It is NOT a general "what is this install's
-    password": a caller that holds a `server_dir` must ask
-    `entry.install.db_password(server_dir)`, which reads the file a generated
-    plan wrote, and 7.3's `MarkerGate` reads that same file.
+    A `generated` plan has no value, so the fallback is the published one (WotLK's
+    `password`, which is also what an install made before generated passwords has).
+    It is NOT "this install's password": a caller that holds a `server_dir` must ask
+    `entry.install.db_password(server_dir)`, which reads the record a new install
+    wrote or answers the published value for an old folder (T748).
     """
     return entry.install.password.value or DEFAULT_DB_ROOT_PASSWORD
 
@@ -122,6 +121,7 @@ def fixed_db_password(entry: CatalogEntry) -> str:
 def import_gate_for(
     entry: CatalogEntry,
     *,
+    server_dir: Path | None = None,
     wsl_distro: str | None = None,
 ) -> tuple[docker.ImportProbe | None, docker.ResetUnfinished | None]:
     """The AzerothCore probe/reset pair for `entry`, or `(None, None)`.
@@ -147,10 +147,12 @@ def import_gate_for(
     tab and the CLI install locally; the Server tab knows the distro of an
     existing install and passes it.
 
-    The password is deliberately the FIXED one and not a file read: this
-    function has no `server_dir`, and it is only ever built for an entry that
-    names an import service — wow-wotlk, whose plan is `fixed`. A game that
-    generates its password can never reach the line.
+    With a `server_dir` the password is that folder's own (`db_password()`), so a
+    new install's probe asks with the password its database was created with (T748).
+    Without one, the published fallback is used: correct for an old folder and not
+    for a new one, which is why the engine passes the folder and the Server tab
+    passes its own (`ui/controller_view.py`). The folder's password is read when the
+    database is first asked, not here. A game with no import service never reaches the line.
 
     `apply` and the two controller modules are imported inside the function on
     purpose: `controller_wow_wotlk.modules` imports THIS module at module scope
@@ -165,7 +167,24 @@ def import_gate_for(
     from yulon.controller_wow_wotlk import maintenance as wotlk_maintenance
     from yulon.controller_wow_wotlk import repair as wotlk_repair
 
-    password = fixed_db_password(entry)
+    password: RootPassword
+    if server_dir is None:
+        password = fixed_db_password(entry)
+    else:
+        folder = server_dir
+
+        def password() -> str:
+            # The folder's own password (T748), read when the database is first asked, so a
+            # tab built for a server inside a stopped WSL distro does not start it (T133).
+            known = entry.install.db_password(folder)
+            if known is None:
+                raise _PasswordUnknown(
+                    f"this install's database password is not knowable: "
+                    f"{entry.install.password.file} could not be read in {folder}, so its "
+                    "databases cannot be asked what state they are in"
+                )
+            return known
+
     # `client=` on BOTH. This function is entry-driven -- it builds the import
     # gate for whichever game is being installed, not for WotLK -- so an
     # unbound seam here falls back to `mysql` on the three CMaNGOS games, which
@@ -180,14 +199,24 @@ def import_gate_for(
     mysql = wotlk_maintenance.DockerMysql(spec.db, password, wsl_distro=wsl_distro, client=client)
 
     def probe() -> docker.ImportState:
-        return wotlk_repair.import_state(
-            sql, mysql, lambda: docker.health(spec.db, wsl_distro=wsl_distro)
-        )
+        try:
+            return wotlk_repair.import_state(
+                sql, mysql, lambda: docker.health(spec.db, wsl_distro=wsl_distro)
+            )
+        except _PasswordUnknown as exc:
+            return docker.ImportState("unreadable", str(exc))
 
     def reset(*, everything: bool = False, seeded: bool = False) -> tuple[str, ...]:
-        return wotlk_repair.reset_unfinished(sql, mysql, everything=everything, seeded=seeded)
+        try:
+            return wotlk_repair.reset_unfinished(sql, mysql, everything=everything, seeded=seeded)
+        except _PasswordUnknown as exc:
+            raise InstallerError(f"Nothing was dropped: {exc}.") from exc
 
     return probe, reset
+
+
+class _PasswordUnknown(InstallerError):
+    """A folder's import gate was asked, and that folder's password cannot be read (T748)."""
 
 
 SNAPSHOT_LEASE_REASON = (
@@ -216,7 +245,11 @@ class _MaintenanceSnapshot:
     def _mysql(self, server_dir: Path) -> wotlk_maintenance.DockerMysql:
         from yulon.controller_wow_wotlk import maintenance
 
-        password = self.entry.install.db_password(server_dir) or fixed_db_password(self.entry)
+        try:
+            # Never the published default in place of an unknowable one (T748 round 4).
+            password = self.entry.install.known_db_password(server_dir)
+        except DbPasswordUnknown as exc:
+            raise maintenance.MaintenanceError(str(exc)) from exc
         client = native.db.client if (native := self.entry.install.native) is not None else None
         return maintenance.DockerMysql(
             self.entry.container_spec().db, password, wsl_distro=self.wsl_distro, client=client
@@ -378,6 +411,14 @@ def installer_for_app(
     probe, reset = import_gate_for(entry, wsl_distro=wsl_distro)
     copy = database_snapshot_for(entry, wsl_distro=wsl_distro)
     modules = importer_modules_for(entry)
+
+    def folder_gate(
+        server_dir: Path,
+    ) -> tuple[docker.ImportProbe | None, docker.ResetUnfinished | None]:
+        # The engine asks with the folder it is working on, so the password is that folder's
+        # (T748). `probe`/`reset` above remain for a caller that has no folder.
+        return import_gate_for(entry, server_dir=server_dir, wsl_distro=wsl_distro)
+
     if wsl_distro is None:
         return installer_for(
             entry,
@@ -387,6 +428,7 @@ def installer_for_app(
             reset_unfinished=reset,
             database_snapshot=copy,
             importer_modules=modules,
+            import_gate=folder_gate,
         )
     return installer_for(
         entry,
@@ -396,6 +438,7 @@ def installer_for_app(
         seams=Seams.in_wsl(wsl_distro),
         database_snapshot=copy,
         importer_modules=modules,
+        import_gate=folder_gate,
     )
 
 

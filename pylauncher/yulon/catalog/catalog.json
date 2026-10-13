@@ -35,8 +35,10 @@
         ],
         "default_server_dir": "yulon-wotlk",
         "password": {
-          "mode": "fixed",
-          "value": "password"
+          "mode": "generated",
+          "file": ".db_password",
+          "prefix": "wotlk-",
+          "legacy": "password"
         },
         "native": {
           "family": "azerothcore",
@@ -2470,8 +2472,10 @@
         ],
         "default_server_dir": "yulon-unbound",
         "password": {
-          "mode": "fixed",
-          "value": "password"
+          "mode": "generated",
+          "file": ".db_password",
+          "prefix": "unbound-",
+          "legacy": "password"
         },
         "native": {
           "family": "azerothcore",

@@ -21,6 +21,7 @@ from typing import Protocol
 from yulon import docker, module_source, platform, resources
 from yulon.apply import (
     Applier,
+    ApplyRefusal,
     ApplyReport,
     ComposeDbc,
     CountingGit,
@@ -39,6 +40,7 @@ from yulon.apply import (
 )
 from yulon.apply import module_updates as apply_updates
 from yulon.apply import refresh_module_updates as refresh_cached
+from yulon.catalog.catalog import DbPasswordUnknown
 from yulon.catalog.upstream import github_slug
 from yulon.controller_wow_wotlk import docker_ctl
 from yulon.git import BehindReader, Git
@@ -309,7 +311,7 @@ def applier(
     sql: SqlRunner | None = None,
     client_dir: Path | None = None,
     dbc: DbcCopier | None = None,
-    db_root_password: str = DEFAULT_DB_ROOT_PASSWORD,
+    db_root_password: str | None = None,
     db_container: str = docker_ctl.SPEC.db,
 ) -> Applier:
     """An `Applier` for the AzerothCore install at `server_dir`.
@@ -338,7 +340,16 @@ def applier(
     """
     runner: SqlRunner | None = sql
     if runner is None:
-        runner = DockerSql(db_container, db_root_password, client=docker_ctl.DB_CLIENT)
+        # This folder's own password (T748): an install made before generated passwords is
+        # answered its published one by `db_password()` itself, and a password no reader can
+        # know is a refusal, never that default (round 4).
+        password = db_root_password
+        if password is None:
+            try:
+                password = docker_ctl.ENTRY.install.known_db_password(server_dir)
+            except DbPasswordUnknown as exc:
+                raise ApplyRefusal(str(exc)) from exc
+        runner = DockerSql(db_container, password, client=docker_ctl.DB_CLIENT)
     return Applier(
         server_dir,
         git=git,

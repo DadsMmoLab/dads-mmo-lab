@@ -21,7 +21,7 @@ import pytest
 
 from yulon import dbsecret, docker, logsnap, platform, purge
 from yulon.catalog import composegen, native
-from yulon.catalog.catalog import load_catalog
+from yulon.catalog.catalog import CatalogEntry, load_catalog
 from yulon.catalog.families.cmangos import CmangosInstaller
 from yulon.controller_wow_wotlk import docker_ctl
 from yulon.ownership import Ownership
@@ -994,14 +994,17 @@ def test_a_fixed_password_install_keeps_no_copy_of_a_password_the_catalog_carrie
 ) -> None:
     """The gated family, and the reason the gate could not have found this bug.
 
-    `wow-wotlk` is `fixed`: the value is in `catalog.json`, so the folder never
-    held the only copy and there is nothing for a purge to rescue. Copying it
-    into the config directory anyway would spread a secret for no reason and
-    make the ticked path look tested on a family where it is trivially true.
+    A game whose password is `fixed` keeps the value in `catalog.json`, so the folder never
+    holds the only copy and there is nothing for a purge to rescue. Copying it into the config
+    directory anyway would spread a secret for no reason. No shipped entry is fixed since T748
+    (WotLK generates its password), so the rule is asked of a WotLK entry made fixed.
     """
-    rec = _recorder(tmp_path)
-    report = rec.uninstaller().run(keep_characters=True)
-    assert report.kept_volumes and report.secret_kept is None
+    data = load_catalog().get("wow-wotlk").model_dump(mode="json")
+    data["install"]["password"] = {"mode": "fixed", "value": "password"}
+    fixed = CatalogEntry.model_validate(data)
+    server_dir = tmp_path / "wowserver"
+    server_dir.mkdir()
+    assert dbsecret.at_risk(fixed.install, server_dir) == dbsecret.AtRisk()
     assert not (platform.config_dir() / dbsecret.DIR_NAME).exists()
 
 

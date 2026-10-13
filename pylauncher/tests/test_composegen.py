@@ -604,7 +604,7 @@ def test_write_plan_replaces_only_the_files_the_caller_proved_replaceable(
     written = composegen.write_plan(
         render(server_dir), server_dir, replaceable=(composegen.BASE_FILE,)
     )
-    assert len(written) == 3
+    assert len(written) == 4, written  # the three files and `.env` (T748)
     assert (
         (server_dir / composegen.BASE_FILE)
         .read_text(encoding="utf-8")
@@ -631,6 +631,7 @@ def test_write_plan_rewrites_its_own_files_and_leaves_identical_ones_alone(tmp_p
         composegen.BASE_FILE,
         composegen.OVERRIDE_FILE,
         composegen.BUILD_FILE,
+        composegen.DOTENV_FILE,  # WotLK's password reaches compose through it (T748)
     }
     assert composegen.write_plan(plan, server_dir) == ()  # idempotent by content
     # Every generated file carries the marker, which is the whole rewrite rule.
@@ -1465,11 +1466,15 @@ def test_a_generated_password_template_may_not_mention_the_password_token(tmp_pa
         )
 
 
-def test_a_fixed_password_still_lands_in_the_base_file_and_not_in_env(tmp_path: Path) -> None:
-    """WotLK is unchanged: the fixed value is the interpolation default, `.env` stays untouched."""
+def test_an_old_wotlk_folder_hands_compose_its_published_password_through_env(
+    tmp_path: Path,
+) -> None:
+    """T748: WotLK's compose text names no password at all, not even as a default. A folder
+    with no record of a new install renders the published one, and only into `.env`."""
     plan = render(tmp_path / "wow")
-    assert plan.dotenv == {}
-    assert "${DB_ROOT_PASSWORD:-password}" in plan.base
+    assert plan.dotenv == {"DB_ROOT_PASSWORD": "password"}
+    assert "${DB_ROOT_PASSWORD:?Yu'lon .env is missing}" in plan.base
+    assert "${DB_ROOT_PASSWORD:-" not in plan.base
 
 
 # -- A16: the committed byte snapshot ------------------------------------------
@@ -1522,7 +1527,8 @@ def test_the_wotlk_render_reproduces_the_committed_snapshot_byte_for_byte() -> N
             composegen.install_id(LINUX_SERVER_DIR, platform_id=lambda: "linux") == LINUX_INSTALL_ID
         )
     assert f"name: yulon-wow-wotlk-{LINUX_INSTALL_ID}\n" in texts[composegen.BASE_FILE]
-    assert "${DB_ROOT_PASSWORD:-password}" in texts[composegen.BASE_FILE]
+    assert "${DB_ROOT_PASSWORD:?Yu'lon .env is missing}" in texts[composegen.BASE_FILE]
+    assert "${DB_ROOT_PASSWORD:-" not in texts[composegen.BASE_FILE]
     assert ":z" not in texts[composegen.BASE_FILE]
 
 

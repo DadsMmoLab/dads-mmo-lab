@@ -437,7 +437,9 @@ def gather_server_facts(
             f"{move.SETTINGS_MAX_BYTES // 1024**2} MB and {move.SETTINGS_MAX_FILES} files). Take "
             f"out Lua scripts the server does not need, then pack again. {_NOT_PACKED}"
         )
-    if secret_password:
+    # An install made before generated passwords has the published `legacy` word, and finding
+    # that word in a file proves nothing (T748), as a fixed published password never did.
+    if secret_password and secret_password != entry.install.password.legacy:
         needle = secret_password.encode("utf-8")
         for packed in files:
             if needle in packed.data:

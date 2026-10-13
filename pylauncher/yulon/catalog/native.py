@@ -109,12 +109,16 @@ from yulon.catalog import (
     world_data,
 )
 from yulon.catalog.catalog import (
+    INSTALL_RECORD,
+    RECORD_GENERATED,
+    RECORD_PASSWORD_KEY,
     CatalogEntry,
     EmulatorSource,
     NativeInstall,
     ReadyMarkers,
     SqlPhase,
     SqlPlan,
+    record_says_generated,
 )
 from yulon.catalog.git_head import read_head_file
 from yulon.catalog.installer import (
@@ -149,7 +153,60 @@ from yulon.ui import lines
 
 logger = get_logger(__name__)
 
-STATE_FILE = ".yulon-install.json"
+STATE_FILE = INSTALL_RECORD
+
+DB_DATA_VOLUME = "db-data"
+"""The database volume a family's compose file names, relative to the compose project."""
+
+CATALOG_ERROR_TAIL = "That is a catalog error in the app, not something to fix on this machine."
+
+SECRET_FILE_MODE = 0o600
+"""Owner-only, set by `os.open` at creation: the mode a generated secret file is born with."""
+
+
+def _blank_file(path: Path) -> bool:
+    """Whether `path` reads as nothing but whitespace: a `write_secret` cut short (T748 round 3).
+
+    A file that cannot be read is not called blank: `resolve_secrets()` refused it already.
+    """
+    try:
+        return not path.read_text(encoding="utf-8").strip()
+    except (OSError, ValueError):
+        return False
+
+
+def write_secret(path: Path, value: str) -> None:
+    """Write the password, asking for `SECRET_FILE_MODE` at creation. One trailing newline.
+
+    The newline is a contract: `resolve_secrets()` reads this file back with
+    `.strip()` (A8), and a file the user opened in Notepad and saved gets one
+    whether we write it or not.
+
+    **What the mode buys, measured rather than assumed** (a Windows laptop,
+    Windows 11 26200, CPython 3.13.14, 2026-09-01): on POSIX the mode is
+    applied by `open(2)` itself, so the file is owner-only from its first byte
+    and never has a window at 0644. On Windows it does nothing at all — the
+    file lands at `st_mode 0o666`, byte-identical to a plain `open(path, "w")`,
+    and `icacls` shows only the ACEs inherited from the parent folder; under a
+    folder granting `BUILTIN\\Users:(RX)` the secret is readable by every local
+    account. A following `os.chmod(path, 0o600)` changes neither, so no
+    rearrangement of these two calls buys anything there.
+
+    So this is a POSIX guarantee and a Windows no-op, and the sentence the
+    stage yields does not promise otherwise.
+    `test_the_secret_file_is_owner_only_on_posix_and_only_inherits_the_folder_acl_on_windows`
+    pins both halves; the Windows half goes red if that ever changes.
+
+    **Windows: the folder, not the file (T174).** No DACL is set on this file:
+    the install locks the whole server folder to this account before each
+    stage (`serverlock.py`), and the file, created in it with no security
+    attributes of its own, inherits that. So `icacls` on it still shows only
+    inherited entries, and they are the owner-only ones on a locked folder.
+    """
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, SECRET_FILE_MODE)
+    with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(value + "\n")
+
 
 ERROR_RUN_INSTALL = "install"
 """`InstallState.error_run` for a failure of `run()`, the install (T207)."""
@@ -4962,6 +5019,17 @@ class InstallState:
     by an update that lands. ADDITIVE, for `source_revs`' reason.
     """
 
+    db_password: str = ""
+    """`RECORD_GENERATED` when this record was made for a fresh folder whose password is generated.
+
+    T748. Written once, by the guard's fresh record, before the folder holds anything else, so
+    a new install says so before it has a `.db_password` or a database. Empty in every record
+    written before T748, and that is how a WotLK or Unbound install made with the published
+    password is told apart from a new one whose file has gone missing: from its own record,
+    never from a missing file. Never set on an existing record, so an old install is never
+    promoted to a generated one. ADDITIVE, for `source_revs`' reason.
+    """
+
     def rev_for(self, repo: str) -> SourceRev | None:
         """This install's record for `repo`, or None if it has none."""
         return next((rev for rev in self.source_revs if rev.repo == repo), None)
@@ -5141,6 +5209,7 @@ def _parse_state(server_dir: Path, *, valid: Sequence[str]) -> InstallState | No
         unknown=unknown,
         source_revs=_parse_source_revs(parsed.get("source_revs"), path),
         refused_updates=_parse_refused(parsed.get("refused_updates")),
+        db_password=secret if isinstance(secret := parsed.get(RECORD_PASSWORD_KEY), str) else "",
     )
 
 
@@ -5250,6 +5319,10 @@ def write_state(server_dir: Path, state: InstallState) -> None:
         payload["source_revs"] = {rev.repo: _rev_record(rev) for rev in state.source_revs}
     if state.refused_updates:
         payload["refused_updates"] = dict(state.refused_updates)
+    if state.db_password:
+        # T748: only on a record made for a new install, so every other file is byte for byte
+        # what it was.
+        payload[RECORD_PASSWORD_KEY] = state.db_password
     if state.last_error and state.error_run:
         # T207: only beside a failure, so a file with none is byte for byte as before.
         payload["error_run"] = state.error_run
@@ -7797,6 +7870,10 @@ def early_refusal(entry: CatalogEntry, server_dir: Path) -> str | None:
     )
 
 
+ImportGateFor = Callable[[Path], tuple[docker.ImportProbe | None, docker.ResetUnfinished | None]]
+"""The import probe and reset for one server folder (T748). See `StagedInstaller._gate_for`."""
+
+
 class StagedInstaller:
     """Abstract spine: everything an install needs that is not about one emulator.
 
@@ -7831,6 +7908,7 @@ class StagedInstaller:
         seams: Seams | None = None,
         database_snapshot: snapshot.DatabaseSnapshot | None = None,
         importer_modules: Callable[[Path], str] | None = None,
+        import_gate: ImportGateFor | None = None,
     ) -> None:
         self.entry = entry
         self.installers_root = (
@@ -7838,6 +7916,9 @@ class StagedInstaller:
         )
         self._probe = import_probe
         self._reset = reset_unfinished
+        # T748: the probe and reset for ONE folder, for an engine whose password is that
+        # folder's own. Preferred over the two above wherever a folder is in hand.
+        self._folder_gate = import_gate
         self._seams = seams if seams is not None else Seams()
         # T217: the update route's copy of the databases its new build can change,
         # supplied by the caller for `import_probe`'s reason (`install_wiring`).
@@ -8068,7 +8149,8 @@ class StagedInstaller:
         if docker.import_record_is_from_empty(server_dir, service):
             logger.warning(f"no start in {server_dir}: {UNFINISHED_IMPORT_REFUSAL}")
             return UNFINISHED_IMPORT_REFUSAL
-        state = self._probe() if self._probe is not None else None
+        probe, _reset = self._gate_for(server_dir)
+        state = probe() if probe is not None else None
         ended = state is not None and state.state in ("imported", "partial")
         if ended or (strict and (state is None or state.state != "populated")):
             logger.warning(f"no start in {server_dir}: {ENDED_IMPORT_REFUSAL} ({state})")
@@ -8091,10 +8173,11 @@ class StagedInstaller:
         if not service or not docker.one_shot_ended_marker(server_dir, service).is_file():
             return None, False
         started = False
+        probe, _reset = self._gate_for(server_dir)
         if (
             not docker.import_record_is_from_empty(server_dir, service)
-            and self._probe is not None
-            and self._probe().state == "unreadable"
+            and probe is not None
+            and probe().state == "unreadable"
         ):
             try:
                 # `docker.start_database()` answers True only when it had to start it.
@@ -8253,7 +8336,7 @@ class StagedInstaller:
             client_dir=opts.client_dir,
             state=state,
             cancel=cancel,
-            secrets=self.resolve_secrets(server_dir),
+            secrets=self.resolve_secrets(server_dir, state, mint=True),
             installing=True,
             first_install=opts.first_install,
         )
@@ -13599,6 +13682,19 @@ class StagedInstaller:
         write_state(ctx.server_dir, recorded)
         return recorded
 
+    def _gate_for(
+        self, server_dir: Path
+    ) -> tuple[docker.ImportProbe | None, docker.ResetUnfinished | None]:
+        """The import probe and reset that answer for THIS folder (T748).
+
+        The folder's gate when one was injected, else the engine-wide pair. The probe asks
+        the database with the password of `server_dir`, so an engine that serves more than
+        one folder must not answer with another folder's.
+        """
+        if self._folder_gate is not None:
+            return self._folder_gate(server_dir)
+        return self._probe, self._reset
+
     def _install_id(self, server_dir: Path) -> str:
         """This install's id, always through the engine's own `platform_id` seam.
 
@@ -13614,15 +13710,29 @@ class StagedInstaller:
             return ask(server_dir)
         return composegen.install_id(server_dir, platform_id=self._seams.platform_id)
 
-    def resolve_secrets(self, server_dir: Path) -> Secrets:
+    def resolve_secrets(
+        self,
+        server_dir: Path,
+        state: InstallState | None = None,
+        *,
+        mint: bool = False,
+        restore: bool = True,
+    ) -> Secrets:
         """The database password this install uses, decided before stage 1.
 
-        `fixed` is the catalog value (WotLK's `password` — a contract with
-        backup, console and every guide). `generated` reads the file a previous
-        run persisted (written with a trailing newline, read with `.strip()`),
-        else mints `<prefix><16 hex>`; persisting it is the family's
-        `db-password` stage (7.3), not this method's job, so a preflight
-        refusal after this point leaves no secret on disk.
+        `fixed` is the catalog value. `generated` reads the file a previous run
+        persisted (written with a trailing newline, read with `.strip()`). With
+        no file, a folder that holds an install made before generated passwords
+        keeps that install's `legacy_password()` (T748: WotLK's published
+        `password`, or the `DB_ROOT_PASSWORD` its own `.env` sets); a fresh
+        folder mints `<prefix><16 hex>`, and only with `mint=True`, which only the
+        install's own `run()` passes. Every other caller is refused rather than handed a
+        value no database knows, after one recovery: a `.env` that still sets
+        `DB_ROOT_PASSWORD` holds the value `generate-compose` wrote from this file, so the
+        file is written back from it (`restore=False` reads it without writing, for a
+        check). T748 round 2. Persisting a minted value is the
+        family's `db-password` stage (7.3), not this method's job, so a
+        preflight refusal after this point leaves no secret on disk.
 
         A file that is already there is taken AS WRITTEN. `prefix` decorates a
         value this app mints; it is not a shape an existing password has to
@@ -13655,21 +13765,268 @@ class StagedInstaller:
             )
         path = server_dir / plan.file
         try:
-            return Secrets(path.read_text(encoding="utf-8").strip())
+            written = path.read_text(encoding="utf-8").strip()
         except FileNotFoundError:
-            kept = dbsecret.recall(self.entry.id, self._install_id(server_dir))
-            if kept is not None:
-                logger.info(
-                    f"{path} is gone; using the password Yu'lon kept for {kept.volume} "
-                    "when this install was removed"
-                )
-                return Secrets(kept.password)
-            return Secrets(f"{plan.prefix}{token_hex(8)}")
+            written = ""
         except OSError as exc:
             raise InstallerError(
                 f"{path} exists but could not be read ({exc}), so this install cannot know its "
                 "own database password. Nothing was started."
             ) from exc
+        if written:
+            return Secrets(written)
+        # Gone, or blank: `write_secret` truncates in place, so a write cut short leaves an
+        # empty file, and it must not stand in for the copy `.env` still has (T748 round 3).
+        try:
+            # T748: an install whose own record predates generated passwords keeps the
+            # password it was made with, and nothing is minted for it.
+            if plan.legacy is not None and self._made_before_generated(server_dir, state):
+                return Secrets(self._legacy_value(server_dir, plan.legacy))
+            recovered = composegen.dotenv_secret(server_dir, "DB_ROOT_PASSWORD")
+        except composegen.DotenvSecretError as exc:
+            raise InstallerError(str(exc)) from exc
+        if recovered:
+            # Round 2 (T748 review): `.env` holds the same value `generate-compose` wrote
+            # from this file, and it is the last copy the database's password has. Put the
+            # file back from it; never mint over it.
+            if restore:
+                try:
+                    write_secret(path, recovered)
+                except OSError as exc:
+                    raise InstallerError(
+                        f"{path} is gone and could not be written back ({exc}). "
+                        "Nothing was changed."
+                    ) from exc
+                logger.info(f"{path} was gone or empty; wrote it back from this install's .env")
+            return Secrets(recovered)
+        kept = dbsecret.recall(self.entry.id, self._install_id(server_dir))
+        if kept is not None:
+            logger.info(
+                f"{path} is gone; using the password Yu'lon kept for {kept.volume} "
+                "when this install was removed"
+            )
+            return Secrets(kept.password)
+        if (
+            plan.legacy is not None
+            and not self._past_password_stage(server_dir, state)
+            and self._kept_volume_exists(server_dir)
+        ):
+            # A database this folder's earlier install left behind with no copy of its
+            # password: an install removed before generated passwords kept none, because
+            # its password was the published one (T748). That is the password it opens
+            # with; the `db-password` stage writes it down.
+            logger.info(
+                f"{self._db_volume(server_dir)} was kept with no copy of its password; "
+                "using the published one an install made before generated passwords had"
+            )
+            return Secrets(self._legacy_value(server_dir, plan.legacy))
+        if not mint:
+            # Only the install's own `run()` may make a password: anywhere else a fresh
+            # value would be handed to a database that was made with another (T748 round 2).
+            raise InstallerError(
+                f"{path} is gone, and this install's database was made with the password "
+                "that file held. Yu'lon has no other copy of it, so nothing was changed. "
+                f"Put {plan.file} back from a backup of this server folder if you have one."
+            ) from None
+        return Secrets(f"{plan.prefix}{token_hex(8)}")
+
+    @staticmethod
+    def _made_before_generated(server_dir: Path, state: InstallState | None) -> bool:
+        """Whether `server_dir` is not provably a new install, by its own record (T748).
+
+        The record decides, never a missing file: a new install's record says
+        `RECORD_GENERATED` from the moment the folder is claimed. `state` is the record the
+        install run is about to write, for the one fresh folder the spine claims late (a
+        checkout, `_claim_before_writing()`); every other caller passes none and the record
+        on disk answers. A folder with no record at all (adopted where it is) keeps the
+        published password, as every reader answers for it.
+        """
+        if state is not None and state.db_password == RECORD_GENERATED:
+            return False
+        return not record_says_generated(server_dir)
+
+    def _past_password_stage(self, server_dir: Path, state: InstallState | None) -> bool:
+        """Whether this install's record shows a stage after `db-password` done (T748).
+
+        Such an install wrote its own `.db_password` before its database existed, so a
+        database beside it with the file gone is that install's, made with the generated
+        value, never one kept from an install made before generated passwords. Only a record
+        that has not got that far may take a kept database for an old one. `state` is the
+        record the run holds; without one, the record on disk answers.
+        """
+        record = state if state is not None else read_state(server_dir, valid=self.stage_names())
+        if record is None:
+            return False
+        names = self.stage_names()
+        later = set(names[names.index("db-password") + 1 :]) if "db-password" in names else set()
+        return any(stage in later for stage in record.completed)
+
+    @staticmethod
+    def _legacy_value(server_dir: Path, legacy: str) -> str:
+        """An old folder's password: what its own `.env` sets, else the published `legacy`."""
+        return composegen.dotenv_secret(server_dir, "DB_ROOT_PASSWORD") or legacy
+
+    def _kept_volume_exists(self, server_dir: Path) -> bool:
+        """Whether this folder's database volume exists; False when Docker will not say.
+
+        False is the safe side: the minted value then meets `db-password`'s own volume check,
+        which raises Docker's refusal in full rather than this guess.
+        """
+        try:
+            return self._seams.volume_exists(self._db_volume(server_dir))
+        except docker.DockerCommandError:
+            return False
+
+    def _db_password(self, ctx: StageContext) -> Iterator[str]:
+        """Persist the generated secret, or refuse to replace one the database already has.
+
+        The spine resolved `ctx.secrets` before the stages ran — reading the
+        file when it exists, minting `prefix + token_hex(8)` otherwise — so
+        this stage's job is narrow: the evidence is the FILE (never recorded in
+        the state file), and a missing file next to an existing `db-data`
+        volume is a refusal. That volume was initialised with the password the
+        file held; writing a new one would leave every later stage unable to
+        log in, and the scripts' answer to that (wipe the volume silently) is
+        exactly what the design rejects.
+
+        Three outcomes, kept apart by `docker.volume_exists()`, which raises
+        rather than guessing: the volume exists (refuse), no such volume (safe
+        to write), Docker would not say (refuse). Collapsing the third into the
+        second is the destructive edit, and it is the one that looks like
+        robustness.
+
+        The refusal names `docker volume rm` rather than a button. Checked
+        2026-09-01: the Server tab's only removal action is "Stop and remove
+        containers…", `docker.remove_staged()` passes no `-v` on purpose, and
+        its own armed warning tells the user the volume is kept — so nothing in
+        this app deletes a named volume, and sending the user there would send
+        them round a loop that ends at this same message.
+        """
+        plan = self.entry.install.password
+        if plan.mode != "generated":
+            yield "This server uses a fixed database password; nothing to write."
+            return
+        if plan.file is None:
+            # `PasswordPlan`'s validator refuses this shape and `resolve_secrets()`
+            # refuses it again before stage 1; this keeps the type honest, and says
+            # which defect it is rather than reporting a broken catalog as a design
+            # choice the user should go looking for.
+            raise InstallerError(
+                f"{self.entry.name}'s catalog entry says its database password is generated "
+                f"but names no file to keep it in. {CATALOG_ERROR_TAIL}"
+            )
+        path = ctx.server_dir / plan.file
+        if path.is_file() and not _blank_file(path):
+            yield f"The database password is already in {plan.file}; keeping it."
+            return
+        if plan.legacy is not None and ctx.state.db_password != RECORD_GENERATED:
+            # An install whose record predates generated passwords (T748): it keeps the
+            # password its database was created with, and nothing is written for it.
+            yield (
+                f"This install was made before generated passwords, so it keeps the password it "
+                f"has. Nothing was written to {plan.file}."
+            )
+            return
+        volume = self._db_volume(ctx.server_dir)
+        try:
+            exists = self._seams.volume_exists(volume)
+        except docker.DockerCommandError as exc:
+            # `DockerCliMissingError` subclasses this and lands here too, on
+            # purpose: preflight already refused a machine with no Docker, the
+            # outcome is identical (nothing is written), and `exc` carries that
+            # error's own install-Docker help verbatim, which is the actionable
+            # half. This module raises no such error of its own — deliberately
+            # not spelling the constant, because `test_platform.py`'s
+            # `test_the_missing_cli_help_names_every_module_that_raises_it`
+            # finds raisers by searching module TEXT for the name, so a mention
+            # here would be read as a raise.
+            raise InstallerError(
+                f"Docker would not say whether the database volume {volume} exists ({exc}), so "
+                "this install cannot prove a new password is safe to write. Nothing was written."
+            ) from exc
+        if exists and self._is_the_copy_this_volume_was_made_with(ctx, volume):
+            try:
+                write_secret(path, ctx.secrets.db_password)
+            except OSError as exc:
+                raise InstallerError(f"{path} could not be written: {exc}") from exc
+            yield (
+                f"Put this install's database password back into {plan.file} from the copy "
+                f"Yu'lon kept when the folder was removed. The database in {volume} is the one "
+                "your characters are in. Back that file up."
+            )
+            return
+        if (
+            exists
+            and plan.legacy is not None
+            and not self._past_password_stage(ctx.server_dir, ctx.state)
+            and ctx.secrets.db_password == self._legacy_value(ctx.server_dir, plan.legacy)
+        ):
+            # T748: a database kept from an install made before generated passwords, which kept
+            # no copy because its password was the published one. `resolve_secrets()` chose that
+            # password for it; writing it down makes this folder a record like any other.
+            try:
+                write_secret(path, ctx.secrets.db_password)
+            except OSError as exc:
+                raise InstallerError(f"{path} could not be written: {exc}") from exc
+            yield (
+                f"The database in {volume} was kept from an install made before generated "
+                f"passwords, so it keeps the password it has. Wrote that to {plan.file}."
+            )
+            return
+        if exists:
+            raise InstallerError(
+                f"{path} is gone, but this install's database volume {volume} still exists and "
+                "was created with the password that file held. A new password would lock this "
+                f"install out of its own database, so nothing was written. Put {plan.file} back "
+                "if you have a copy of it. If it is lost, that database cannot be opened again. "
+                "This deletes it, and every character in it, so this install can start over "
+                "(removing the containers does not):\n"
+                f"docker volume rm {volume}"
+            )
+        try:
+            write_secret(path, ctx.secrets.db_password)
+        except OSError as exc:
+            raise InstallerError(f"{path} could not be written: {exc}") from exc
+        yield (
+            f"Wrote this install's database password to {plan.file}. Back that file up: the "
+            f"database in {volume} cannot be opened without it."
+        )
+
+    def _is_the_copy_this_volume_was_made_with(self, ctx: StageContext, volume: str) -> bool:
+        """Is the secret in hand the one Yu'lon kept when it deleted this install's folder?
+
+        The narrow exception to the refusal above, and it is narrow in three
+        ways rather than one, because a wrong `True` here writes a password
+        into a file the rest of the install then believes:
+
+        * there has to BE a copy, filed under this game and this folder's
+          install id — the pair a reinstall to the same folder recomputes;
+        * the copy has to name THIS volume. Two installs of one game keep two
+          copies, and a value from the wrong one locks this database out
+          exactly as a minted password would, while looking like a recovery;
+        * it has to be the value the spine actually resolved. `resolve_secrets()`
+          reads the FILE first and only falls back to the copy, so a
+          `.db_password` that reappeared between the two reads wins — and if the
+          two disagree, the one the database was created with is not knowable
+          from here and the refusal is the honest answer.
+
+        A stale copy for a volume that no longer exists never reaches this
+        method: it is only asked when the volume DOES exist.
+        """
+        kept = dbsecret.recall(self.entry.id, self._install_id(ctx.server_dir))
+        if kept is None:
+            return False
+        return kept.volume == volume and kept.password == ctx.secrets.db_password
+
+    def _db_volume(self, server_dir: Path) -> str:
+        """`<compose project>_<volume key>` — what `docker volume ls` shows for this install."""
+        project = composegen.project_name(
+            self.entry.id,
+            server_dir,
+            platform_id=self._seams.platform_id,
+            install_id=self._install_id(server_dir),
+        )
+        return f"{project}_{DB_DATA_VOLUME}"
 
     def _native(self) -> NativeInstall:
         """The entry's `install.native` block; preflight has already refused its absence."""
@@ -13702,7 +14059,7 @@ class StagedInstaller:
                 f"install but was handed to the {self.family} engine. That is a bug in the "
                 "app, not something to fix on this machine."
             )
-        if self.entry.containers.db_import and self._probe is None:
+        if self.entry.containers.db_import and self._probe is None and self._folder_gate is None:
             # An installer that cannot ask what state the databases are in
             # cannot know whether its own import finished, and an installer
             # with no reset seam would strand exactly the interrupted install a
@@ -14019,8 +14376,16 @@ class StagedInstaller:
                     f"({', '.join(sorted(leftovers)[:5])}). Nothing was written. Pick an empty "
                     "folder, or remove that one yourself if you no longer want it."
                 )
-        return existing or InstallState(
-            game_id=self.entry.id, install_id=install_id, family=self.family
+        if existing is not None:
+            return existing
+        # A fresh record says how this install's password comes to exist (T748), so a reader
+        # never has to guess it from a file that may have gone missing.
+        generated = self.entry.install.password.mode == "generated"
+        return InstallState(
+            game_id=self.entry.id,
+            install_id=install_id,
+            family=self.family,
+            db_password=RECORD_GENERATED if generated else "",
         )
 
     def _refuse_foreign_containers(self, server_dir: Path, install_id: str) -> None:
@@ -14717,7 +15082,9 @@ class StagedInstaller:
         if label is None:
             label = self._bind_label(server_dir)
         try:
-            fresh = self._render_compose(server_dir, self.resolve_secrets(server_dir), label).base
+            fresh = self._render_compose(
+                server_dir, self.resolve_secrets(server_dir, restore=False), label
+            ).base
         except (composegen.ComposeGenError, InstallerError) as exc:
             return (
                 ComposeCheck(
@@ -14979,7 +15346,9 @@ class StagedInstaller:
         if label is None:
             label = self._bind_label(server_dir)
         try:
-            fresh = self._render_compose(server_dir, self.resolve_secrets(server_dir), label).base
+            fresh = self._render_compose(
+                server_dir, self.resolve_secrets(server_dir, restore=False), label
+            ).base
         except (composegen.ComposeGenError, InstallerError) as exc:
             return (
                 ComposeCheck(

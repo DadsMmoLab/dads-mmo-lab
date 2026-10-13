@@ -2150,6 +2150,7 @@ def test_wotlk_stage_names_are_the_historical_tuple() -> None:
     assert AzerothCoreInstaller.STAGE_NAMES == (
         "clone-core",
         "clone-modules",
+        "db-password",
         "generate-compose",
         "build",
         "client-data",

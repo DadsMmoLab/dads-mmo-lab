@@ -601,8 +601,12 @@ def an_engine(the_plan: SqlPlan, db: _Mariadb, *, world: bool | None = False) ->
 
 
 def folder(tmp_path: Path) -> InstallOptions:
+    """An installed server's folder: it holds the `.db_password` every install writes, which
+    a database press reads and never mints (T748 round 2)."""
     server_dir = tmp_path / "srv"
     server_dir.mkdir(exist_ok=True)
+    if not (server_dir / ".db_password").exists():
+        native.write_secret(server_dir / ".db_password", "tbc-0123456789abcdef")
     return InstallOptions(server_dir=server_dir)
 
 

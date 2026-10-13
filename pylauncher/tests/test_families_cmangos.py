@@ -1243,10 +1243,12 @@ def functions_spending(tail_name: str) -> set[str]:
     is what is looked for, so the mentions inside docstrings — `_data()`'s, and
     the constants' own — are not counted; only code that spends it is.
     """
-    tree = ast.parse(inspect.getsource(cmangos))
+    # And the spine's: `_db_password` moved there from this family when WotLK and Unbound
+    # began generating their passwords too (T748), and it is still this family's stage.
     return {
         node.name
-        for node in ast.walk(tree)
+        for module in (cmangos, native)
+        for node in ast.walk(ast.parse(inspect.getsource(module)))
         if isinstance(node, ast.FunctionDef)
         for inner in ast.walk(node)
         if isinstance(inner, ast.Name) and inner.id == tail_name
@@ -3060,12 +3062,16 @@ def test_the_live_volume_refusal_names_a_way_to_delete_the_volume_the_server_tab
     assert "Server tab" not in said
     assert "volume, which is kept" in inspect.getsource(controller_view)
 
-    own_file = Path(inspect.getsourcefile(CmangosInstaller) or "").resolve()
+    # The refusal's own text lives where `_db_password` does: the spine since T748.
+    own_files = {
+        Path(inspect.getsourcefile(module) or "").resolve()
+        for module in (CmangosInstaller, native.StagedInstaller)
+    }
     offenders = [
         f"{path.name}: {kind} {spelling}"
         for path in app_modules()
         for kind, spelling in volume_deleting_spellings(path.read_text(encoding="utf-8"))
-        if not (kind == "text" and path.resolve() == own_file)
+        if not (kind == "text" and path.resolve() in own_files)
         if path.name not in THE_UNINSTALL
     ]
     assert offenders == [], offenders

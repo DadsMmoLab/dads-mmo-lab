@@ -447,7 +447,10 @@ def enable(
         # The player's bot count, off the file this replaces (T117): the press
         # rendered the catalog's 500 until then.
         world_env=bot_count.world_env(entry, server_dir, _world_env(entry, operations.enable_env)),
-        db_password=db_password,
+        # The folder's own password unless the caller names one (T748).
+        db_password=(
+            db_password if db_password is not None else entry.install.db_password(server_dir)
+        ),
         bind_label=bind_label,
     )
     if plan.override == before:
@@ -1439,8 +1442,11 @@ class InstallChannel:
         return cast(_C, held)
 
     def _password(self) -> str | None:
-        """The install's database password, read now if it was handed over as a reader."""
+        """The install's database password: the one handed over (a reader is read now), else this
+        folder's own (T748: a generated WotLK install has no published value to fall back to)."""
         given = self._db_password
+        if given is None:
+            return self.entry.install.db_password(self.server_dir)
         return given() if callable(given) else given
 
     def _from_disk(self) -> State:

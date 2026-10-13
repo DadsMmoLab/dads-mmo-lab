@@ -319,7 +319,11 @@ def test_an_env_with_the_users_own_port_line_is_left_alone(tmp_path: Path) -> No
 
     override = (tmp_path / OVERRIDE).read_text(encoding="utf-8")
     assert "AC_SOAP_ENABLED" not in override
-    assert (tmp_path / composegen.DOTENV_FILE).read_bytes() == env_before
+    # The user's lines are kept byte for byte; the one line added is the database password
+    # every generated-password install keeps in `.env` (T748), never a SOAP setting.
+    env_after = (tmp_path / composegen.DOTENV_FILE).read_bytes()
+    assert env_after.startswith(env_before)
+    assert _added_keys(env_before, env_after) == ["DB_ROOT_PASSWORD"]
     assert not (tmp_path / BACKUP).exists()
     assert not composegen.channel_is_on(tmp_path)
     refusal = next(line for line in said if channel_setup.HOST_PORT_VAR in line)
@@ -341,8 +345,19 @@ def test_a_claim_written_changes_only_one_env_line(tmp_path: Path) -> None:
 
     after = (tmp_path / composegen.DOTENV_FILE).read_text(encoding="utf-8")
     port = f"{channel_setup.HOST_PORT_VAR}=127.0.0.1:7878"
-    assert after == original + "\n# Written by Yu'lon's install engine.\n" + port + "\n"
+    assert after.startswith(original)
+    assert f"\n{port}\n" in after
     assert after.count(channel_setup.HOST_PORT_VAR) == 1
+    # Besides the port, the one other line is the database password every generated-password
+    # install keeps in `.env` (T748).
+    added = _added_keys(original.encode(), after.encode())
+    assert sorted(added) == sorted([channel_setup.HOST_PORT_VAR, "DB_ROOT_PASSWORD"])
+
+
+def _added_keys(before: bytes, after: bytes) -> list[str]:
+    """The setting names `after` adds to `before`, comments and blank lines left out."""
+    tail = after[len(before) :].decode("utf-8").splitlines()
+    return [line.split("=", 1)[0] for line in tail if line.strip() and not line.startswith("#")]
 
 
 @pytest.mark.parametrize("first_install", [False, True], ids=["update", "install"])

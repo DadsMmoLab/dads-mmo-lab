@@ -1392,6 +1392,7 @@ def installer_for(
     seams: native.Seams | None = None,
     database_snapshot: snapshot.DatabaseSnapshot | None = None,
     importer_modules: Callable[[Path], str] | None = None,
+    import_gate: native.ImportGateFor | None = None,
 ) -> InstallEngine:
     """The engine that installs `entry`. The only place that decides.
 
@@ -1458,4 +1459,5 @@ def installer_for(
         seams=seams if seams is not None else native.Seams(platform_id=platform_id),
         database_snapshot=database_snapshot,
         importer_modules=importer_modules,
+        import_gate=import_gate,
     )

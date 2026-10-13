@@ -118,13 +118,18 @@ def test_it_has_its_own_containers_ports_and_soap() -> None:
     assert entry.install.native.image_prefix == "yulon.local/ac-unbound-"
 
 
-def test_its_database_password_plan_is_the_fixed_one_the_import_gate_reads() -> None:
-    """`import_gate_for` reads `fixed_db_password`; a generated plan would give the check the
-    wrong password (T552's cold review)."""
+def test_its_database_password_plan_is_generated_like_wotlks_and_the_gate_reads_the_folder(
+    tmp_path: Path,
+) -> None:
+    """T748: Unbound generates its password per install like WotLK, keeping WotLK's published
+    one for an install made before; the import gate is handed the folder it asks about."""
     entry = unbound()
-    assert entry.install.password.mode == "fixed"
+    wotlk = load_catalog().get("wow-wotlk").install.password
+    plan = entry.install.password
+    assert (plan.mode, plan.file, plan.prefix) == ("generated", ".db_password", "unbound-")
+    assert plan.legacy == wotlk.legacy == "password"
     assert fixed_db_password(entry) == fixed_db_password(load_catalog().get("wow-wotlk"))
-    probe, reset = import_gate_for(entry)
+    probe, reset = import_gate_for(entry, server_dir=tmp_path)
     assert probe is not None and reset is not None
 
 

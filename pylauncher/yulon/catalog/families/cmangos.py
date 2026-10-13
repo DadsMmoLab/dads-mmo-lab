@@ -75,8 +75,9 @@ from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import ClassVar, cast
 
-from yulon import core_modules, dbsecret, docker, git, platform, server_build_presses, tuning
+from yulon import core_modules, docker, git, platform, server_build_presses, tuning
 from yulon.catalog import bot_count, bot_dashboard, composegen, snapshot
+from yulon.catalog import native as native_secret
 from yulon.catalog.catalog import (
     CmangosData,
     ConfPatchTable,
@@ -315,7 +316,7 @@ INSERT_IGNORE = re.compile(rb"^([ \t]*)INSERT INTO", re.MULTILINE)
 the runtime stage): its database hash is the rewritten copy's, so both spellings are asked."""
 
 
-CATALOG_ERROR_TAIL = "That is a catalog error in the app, not something to fix on this machine."
+CATALOG_ERROR_TAIL = native_secret.CATALOG_ERROR_TAIL
 """The one sentence every refusal here about a malformed catalog entry ends in.
 
 Three refusals said it in two spellings until 2026-09-01 — two "a catalog
@@ -376,7 +377,7 @@ ETC_DIR = composegen.SERVER_CONF_DIR
 `composegen`'s name since T169: a render reads the confs there, to bind the
 folder they name, and composegen cannot import this module."""
 
-DB_DATA_VOLUME = "db-data"
+DB_DATA_VOLUME = native_secret.DB_DATA_VOLUME
 """The named volume key in `catalog/installers/shared/cmangos/base.yml.tmpl`.
 
 Compose names the volume `<project>_<key>`; `db-password` asks the daemon
@@ -384,7 +385,7 @@ about exactly that name. `test_families_cmangos.py` reads all three constants
 back out of that template so the two cannot drift apart silently.
 """
 
-SECRET_FILE_MODE = 0o600
+SECRET_FILE_MODE = native_secret.SECRET_FILE_MODE
 """The mode `db-password` creates `.db_password` with: the password itself is in it.
 
 **Deliberately not `conf.CONF_MODE`, which is the same number for a different
@@ -399,7 +400,7 @@ widening silent and invisible; two constants naming each other is the cheaper
 half of that trade.
 
 What the number actually buys is not the same on every platform this app ships
-to — see `_write_secret`, which measured it.
+to — see `native.write_secret`, which measured it.
 """
 
 
@@ -2205,131 +2206,6 @@ class CmangosInstaller(StagedInstaller):
             "and every character in it."
         )
 
-    def _db_password(self, ctx: StageContext) -> Iterator[str]:
-        """Persist the generated secret, or refuse to replace one the database already has.
-
-        The spine resolved `ctx.secrets` before the stages ran — reading the
-        file when it exists, minting `prefix + token_hex(8)` otherwise — so
-        this stage's job is narrow: the evidence is the FILE (never recorded in
-        the state file), and a missing file next to an existing `db-data`
-        volume is a refusal. That volume was initialised with the password the
-        file held; writing a new one would leave every later stage unable to
-        log in, and the scripts' answer to that (wipe the volume silently) is
-        exactly what the design rejects.
-
-        Three outcomes, kept apart by `docker.volume_exists()`, which raises
-        rather than guessing: the volume exists (refuse), no such volume (safe
-        to write), Docker would not say (refuse). Collapsing the third into the
-        second is the destructive edit, and it is the one that looks like
-        robustness.
-
-        The refusal names `docker volume rm` rather than a button. Checked
-        2026-09-01: the Server tab's only removal action is "Stop and remove
-        containers…", `docker.remove_staged()` passes no `-v` on purpose, and
-        its own armed warning tells the user the volume is kept — so nothing in
-        this app deletes a named volume, and sending the user there would send
-        them round a loop that ends at this same message.
-        """
-        plan = self.entry.install.password
-        if plan.mode != "generated":
-            yield "This server uses a fixed database password; nothing to write."
-            return
-        if plan.file is None:
-            # `PasswordPlan`'s validator refuses this shape and `resolve_secrets()`
-            # refuses it again before stage 1; this keeps the type honest, and says
-            # which defect it is rather than reporting a broken catalog as a design
-            # choice the user should go looking for.
-            raise InstallerError(
-                f"{self.entry.name}'s catalog entry says its database password is generated "
-                f"but names no file to keep it in. {CATALOG_ERROR_TAIL}"
-            )
-        path = ctx.server_dir / plan.file
-        if path.is_file():
-            yield f"The database password is already in {plan.file}; keeping it."
-            return
-        volume = self._db_volume(ctx.server_dir)
-        try:
-            exists = self._seams.volume_exists(volume)
-        except docker.DockerCommandError as exc:
-            # `DockerCliMissingError` subclasses this and lands here too, on
-            # purpose: preflight already refused a machine with no Docker, the
-            # outcome is identical (nothing is written), and `exc` carries that
-            # error's own install-Docker help verbatim, which is the actionable
-            # half. This module raises no such error of its own — deliberately
-            # not spelling the constant, because `test_platform.py`'s
-            # `test_the_missing_cli_help_names_every_module_that_raises_it`
-            # finds raisers by searching module TEXT for the name, so a mention
-            # here would be read as a raise.
-            raise InstallerError(
-                f"Docker would not say whether the database volume {volume} exists ({exc}), so "
-                "this install cannot prove a new password is safe to write. Nothing was written."
-            ) from exc
-        if exists and self._is_the_copy_this_volume_was_made_with(ctx, volume):
-            try:
-                _write_secret(path, ctx.secrets.db_password)
-            except OSError as exc:
-                raise InstallerError(f"{path} could not be written: {exc}") from exc
-            yield (
-                f"Put this install's database password back into {plan.file} from the copy "
-                f"Yu'lon kept when the folder was removed. The database in {volume} is the one "
-                "your characters are in. Back that file up."
-            )
-            return
-        if exists:
-            raise InstallerError(
-                f"{path} is gone, but this install's database volume {volume} still exists and "
-                "was created with the password that file held. A new password would lock this "
-                f"install out of its own database, so nothing was written. Put {plan.file} back "
-                "if you have a copy of it. If it is lost, that database cannot be opened again. "
-                "This deletes it, and every character in it, so this install can start over "
-                "(removing the containers does not):\n"
-                f"docker volume rm {volume}"
-            )
-        try:
-            _write_secret(path, ctx.secrets.db_password)
-        except OSError as exc:
-            raise InstallerError(f"{path} could not be written: {exc}") from exc
-        yield (
-            f"Wrote this install's database password to {plan.file}. Back that file up: the "
-            f"database in {volume} cannot be opened without it."
-        )
-
-    def _is_the_copy_this_volume_was_made_with(self, ctx: StageContext, volume: str) -> bool:
-        """Is the secret in hand the one Yu'lon kept when it deleted this install's folder?
-
-        The narrow exception to the refusal above, and it is narrow in three
-        ways rather than one, because a wrong `True` here writes a password
-        into a file the rest of the install then believes:
-
-        * there has to BE a copy, filed under this game and this folder's
-          install id — the pair a reinstall to the same folder recomputes;
-        * the copy has to name THIS volume. Two installs of one game keep two
-          copies, and a value from the wrong one locks this database out
-          exactly as a minted password would, while looking like a recovery;
-        * it has to be the value the spine actually resolved. `resolve_secrets()`
-          reads the FILE first and only falls back to the copy, so a
-          `.db_password` that reappeared between the two reads wins — and if the
-          two disagree, the one the database was created with is not knowable
-          from here and the refusal is the honest answer.
-
-        A stale copy for a volume that no longer exists never reaches this
-        method: it is only asked when the volume DOES exist.
-        """
-        kept = dbsecret.recall(self.entry.id, self._install_id(ctx.server_dir))
-        if kept is None:
-            return False
-        return kept.volume == volume and kept.password == ctx.secrets.db_password
-
-    def _db_volume(self, server_dir: Path) -> str:
-        """`<compose project>_<volume key>` — what `docker volume ls` shows for this install."""
-        project = composegen.project_name(
-            self.entry.id,
-            server_dir,
-            platform_id=self._seams.platform_id,
-            install_id=self._install_id(server_dir),
-        )
-        return f"{project}_{DB_DATA_VOLUME}"
-
     def _password_origin_note(self, ctx: StageContext) -> str:
         """Where this install's database password came from — the half `render()` cannot know.
 
@@ -2823,7 +2699,7 @@ class CmangosInstaller(StagedInstaller):
 
         The password reaches these files because the emulator reads files, and
         `conf.CONF_MODE` is what that costs. What the mode buys is not the same
-        everywhere — see `_write_secret` below, which measured the same
+        everywhere — see `native.write_secret`, which measured the same
         question for `.db_password` — and `conf.py`'s constant carries the
         other half: `0o600` is correct only while the images run as root. No
         line this stage yields carries the value.
@@ -4794,36 +4670,3 @@ class _Remembering:
         a reading taken before a stage that could have changed the answer.
         """
         return self.inner.adoption_gaps()
-
-
-def _write_secret(path: Path, value: str) -> None:
-    """Write the password, asking for `SECRET_FILE_MODE` at creation. One trailing newline.
-
-    The newline is a contract: `resolve_secrets()` reads this file back with
-    `.strip()` (A8), and a file the user opened in Notepad and saved gets one
-    whether we write it or not.
-
-    **What the mode buys, measured rather than assumed** (a Windows laptop,
-    Windows 11 26200, CPython 3.13.14, 2026-09-01): on POSIX the mode is
-    applied by `open(2)` itself, so the file is owner-only from its first byte
-    and never has a window at 0644. On Windows it does nothing at all — the
-    file lands at `st_mode 0o666`, byte-identical to a plain `open(path, "w")`,
-    and `icacls` shows only the ACEs inherited from the parent folder; under a
-    folder granting `BUILTIN\\Users:(RX)` the secret is readable by every local
-    account. A following `os.chmod(path, 0o600)` changes neither, so no
-    rearrangement of these two calls buys anything there.
-
-    So this is a POSIX guarantee and a Windows no-op, and the sentence the
-    stage yields does not promise otherwise.
-    `test_the_secret_file_is_owner_only_on_posix_and_only_inherits_the_folder_acl_on_windows`
-    pins both halves; the Windows half goes red if that ever changes.
-
-    **Windows: the folder, not the file (T174).** No DACL is set on this file:
-    the install locks the whole server folder to this account before each
-    stage (`serverlock.py`), and the file, created in it with no security
-    attributes of its own, inherits that. So `icacls` on it still shows only
-    inherited entries, and they are the owner-only ones on a locked folder.
-    """
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, SECRET_FILE_MODE)
-    with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
-        fh.write(value + "\n")

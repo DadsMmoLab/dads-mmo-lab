@@ -89,6 +89,7 @@ from yulon.catalog.installer import (
 )
 from yulon.catalog.native import (
     IMPORT_STAGE_CANCEL_NOTE,
+    ImportGateFor,
     InstallState,
     PressCancel,
     Seams,
@@ -355,6 +356,7 @@ class TrinityCoreInstaller(CmangosInstaller):
         mmaps_runner: mmaps.Runner | None = None,
         database_snapshot: DatabaseSnapshot | None = None,
         importer_modules: Callable[[Path], str] | None = None,
+        import_gate: ImportGateFor | None = None,
     ) -> None:
         """The spine's constructor, plus the Docker seam of the movement-map job (Task 4).
 
@@ -371,6 +373,7 @@ class TrinityCoreInstaller(CmangosInstaller):
             seams=seams,
             database_snapshot=database_snapshot,
             importer_modules=importer_modules,
+            import_gate=import_gate,
         )
         self._mmaps_runner = (
             mmaps_runner

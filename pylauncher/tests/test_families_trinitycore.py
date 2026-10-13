@@ -529,7 +529,7 @@ def known_password(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         native.StagedInstaller,
         "resolve_secrets",
-        lambda self, server_dir: native.Secrets(db_password=DB_PASSWORD),
+        lambda self, server_dir, state=None, **_: native.Secrets(db_password=DB_PASSWORD),
     )
 
 
