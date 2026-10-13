@@ -170,6 +170,11 @@ REFUSED_PASSWORD = (
     "root password (its .env or compose file) and run this again."
 )
 NO_TYPED_PASSWORD = "No password was typed, so nothing was packed."
+NUL_PASSWORD = (
+    "The database root password in the server folder holds a NUL character (a \\0 escape), "
+    "which no program can be handed, so nothing was packed. Fix it in the .env or compose "
+    "file and run this again."
+)
 RETRY_PROMPT = (
     "The password in the server folder was refused. "
     "Database root password (typed, not shown): "
@@ -252,8 +257,9 @@ def _choose_access(
                 if inspect.stdout.strip() != "true":
                     raise Refusal(
                         f"The server's database container {CONTAINERS['db']} is stopped, so "
-                        "there is nothing to read. Start only the database "
-                        f"(docker compose start {CONTAINERS['db']}) and keep the world and auth "
+                        "there is nothing to read. Start only the database: in the "
+                        "server folder (the one with docker-compose.yml) run "
+                        f"docker compose start {CONTAINERS['db']}, and keep the world and auth "
                         "servers stopped, then run this again. Nothing was packed."
                     )
                 for name in STOPPED_CONTAINERS:
@@ -271,10 +277,12 @@ def _choose_access(
                     )
                     if state.returncode == 0 and state.stdout.strip() == "true":
                         raise Refusal(
-                            "The server is running. Stop only the game servers "
-                            f"(docker compose stop {CONTAINERS['world']} {CONTAINERS['auth']}) "
-                            "and leave the database running, so the copies agree, then run this "
-                            "again. Nothing was packed."
+                            "The server is running. Stop only the game servers: in the "
+                            "server folder (the one with docker-compose.yml) run "
+                            "docker compose stop "
+                            f"{CONTAINERS['world']} {CONTAINERS['auth']}, and leave the database "
+                            "running, so the copies agree, then run this again. Nothing was "
+                            "packed."
                         )
                 return Access(mode="docker", container=CONTAINERS["db"])
             listed = subprocess.run(
@@ -312,7 +320,7 @@ def _choose_access(
 
 
 _VARIABLE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-_ESCAPE = re.compile(r"\\(?:[abcfnrtv$\"\\]|0\d{0,3})")
+_ESCAPE = re.compile(r"\\(?:[abcfnrtv$\"\\]|0[0-9]{0,3})")
 _ESCAPED = {
     "a": "\a",
     "b": "\b",
@@ -404,8 +412,17 @@ def _expand_escapes(text: str) -> str:
         if escape == "$":
             return "$$"
         if escape[0] == "0":
+            # compose-go rewrites `\0NNN` to `\NNN` for Go's strconv.UnquoteChar, which
+            # takes exactly three octal digits worth at most 255; when it refuses, the
+            # rewritten text stays as it is.
             digits = escape[1:]
-            return chr(int(digits, 8) & 0xFF) if digits else "\0"
+            if (
+                len(digits) == 3
+                and set(digits) <= set("01234567")
+                and int(digits, 8) <= 255
+            ):
+                return chr(int(digits, 8))
+            return "\\" + digits
         return _ESCAPED[escape]
 
     return _ESCAPE.sub(one, text)
@@ -966,6 +983,8 @@ def pack(
     access = _choose_access(server_dir, stopped_flag, host, port)
     found = _found_password(server_dir)
     typed = found is None
+    if found is not None and "\0" in found:
+        raise Refusal(NUL_PASSWORD)
     if found is None:
         if not sys.stdin.isatty():
             raise Refusal(NO_PASSWORD)

@@ -1023,7 +1023,9 @@ def test_the_other_games_the_script_names_match_the_catalog() -> None:
 
 def test_a_port_out_of_range_is_refused(tmp_path: Path) -> None:
     process, _server, out, _log = _run(
-        tmp_path, tools=("mysql", "mysqldump"), args=("--server-stopped", "--port", "70000")
+        tmp_path,
+        tools=("mysql", "mysqldump"),
+        args=("--server-stopped", "--port", "70000"),
     )
     assert process.returncode == 2
     assert "between 1 and 65535" in process.stderr
@@ -1053,7 +1055,9 @@ def test_an_io_error_while_dumping_is_said_in_plain_words(
 def test_a_password_with_equals_signs_is_read_whole(tmp_path: Path) -> None:
     secret = "ab=cd==e"
     process, _server, _out, _log = _run(
-        tmp_path, env_text=f"MYSQL_ROOT_PASSWORD={secret}\n", fixture={"password": secret}
+        tmp_path,
+        env_text=f"MYSQL_ROOT_PASSWORD={secret}\n",
+        fixture={"password": secret},
     )
     assert process.returncode == 0, process.stderr
 
@@ -1185,6 +1189,20 @@ def test_the_readme_says_how_to_fetch_the_script_and_which_python_it_needs() -> 
         ("DOCKER_DB_ROOT_PASSWORD=a#b", "a#b"),
         ("DOCKER_DB_ROOT_PASSWORD=a b # note", "a b"),
         ("DOCKER_DB_ROOT_PASSWORD=${BASE:-x}1\nBASE=ignored-later", "x1"),
+        # Round 4: compose-go rewrites `\0NNN` to `\NNN` and hands it to Go's
+        # strconv.UnquoteChar, which needs exactly three octal digits worth at most 255;
+        # when it refuses, the REWRITTEN text stays (parser.go expandEscapes).
+        ('DOCKER_DB_ROOT_PASSWORD="ab\\08c"', "ab\\8c"),
+        ('DOCKER_DB_ROOT_PASSWORD="a\\0b"', "a\\b"),
+        ('DOCKER_DB_ROOT_PASSWORD="x\\012y"', "x\\12y"),
+        ('DOCKER_DB_ROOT_PASSWORD="x\\0777y"', "x\\777y"),
+        ('DOCKER_DB_ROOT_PASSWORD="x\\0128y"', "x\\128y"),
+        ('DOCKER_DB_ROOT_PASSWORD="x\\0101y"', "xAy"),
+        ('DOCKER_DB_ROOT_PASSWORD="x\\0\u0663y"', "x\\\u0663y"),
+        # An unquoted value takes no escapes: the backslash stays, and `$word` (unset)
+        # is substituted away as compose's template does.
+        ("DOCKER_DB_ROOT_PASSWORD=pa\\nss", "pa\\nss"),
+        ("DOCKER_DB_ROOT_PASSWORD=pa\\$word", "pa\\"),
     ],
 )
 def test_the_stock_compose_layout_gets_the_env_value_in_its_final_form(
@@ -1197,6 +1215,18 @@ def test_the_stock_compose_layout_gets_the_env_value_in_its_final_form(
         fixture={"password": secret},
     )
     assert process.returncode == 0, (env_line, process.stderr)
+
+
+def test_a_password_holding_a_nul_is_refused_not_a_traceback(tmp_path: Path) -> None:
+    # `\0000` is a valid octal escape worth NUL, which no environment can carry.
+    process, _server, out, _log = _run(
+        tmp_path,
+        env_text='DOCKER_DB_ROOT_PASSWORD="a\\0000b"\n',
+        compose={"docker-compose.yml": STOCK_COMPOSE},
+    )
+    assert process.returncode == 2, process.stderr
+    assert "NUL character" in process.stderr and "Traceback" not in process.stderr
+    assert list(out.iterdir()) == []
 
 
 def test_a_dash_default_applies_only_when_the_variable_is_unset(tmp_path: Path) -> None:
@@ -1222,24 +1252,34 @@ def test_a_running_server_is_told_to_stop_only_the_game_servers(tmp_path: Path) 
     process, _server, _out, _log = _run(
         tmp_path,
         fixture={
-            "containers": {"ac-database": True, "ac-authserver": True, "ac-worldserver": False}
+            "containers": {
+                "ac-database": True,
+                "ac-authserver": True,
+                "ac-worldserver": False,
+            }
         },
     )
     assert process.returncode == 2
     assert "docker compose stop ac-worldserver ac-authserver" in process.stderr
     assert "leave the database running" in process.stderr
+    assert "in the server folder (the one with docker-compose.yml)" in process.stderr
 
 
 def test_a_stopped_database_is_told_to_start_only_the_database(tmp_path: Path) -> None:
     process, _server, _out, _log = _run(
         tmp_path,
         fixture={
-            "containers": {"ac-database": False, "ac-authserver": False, "ac-worldserver": False}
+            "containers": {
+                "ac-database": False,
+                "ac-authserver": False,
+                "ac-worldserver": False,
+            }
         },
     )
     assert process.returncode == 2
     assert "docker compose start ac-database" in process.stderr
     assert "world and auth servers stopped" in process.stderr
+    assert "in the server folder (the one with docker-compose.yml)" in process.stderr
 
 
 def test_the_readme_says_to_stop_only_the_game_servers() -> None:
@@ -1247,12 +1287,17 @@ def test_the_readme_says_to_stop_only_the_game_servers() -> None:
     section = readme[readme.index("export-accounts-and-characters-wsl.py") :]
     assert "docker compose stop ac-worldserver ac-authserver" in section
     assert "database running" in section
+    assert "in the server folder (the one with `docker-compose.yml`)" in section
+    assert "`DOCKER_DB_ROOT_PASSWORD` exported in your shell is not read" in section
 
 
 def test_host_mode_names_another_game_by_its_compose_file(tmp_path: Path) -> None:
     compose = {"docker-compose.yml": "services:\n  db:\n    container_name: tbc-db\n"}
     process, _server, out, _log = _run(
-        tmp_path, tools=("mysql", "mysqldump"), args=("--server-stopped",), compose=compose
+        tmp_path,
+        tools=("mysql", "mysqldump"),
+        args=("--server-stopped",),
+        compose=compose,
     )
     assert process.returncode == 2
     assert "WoW TBC, not WoW WotLK" in process.stderr

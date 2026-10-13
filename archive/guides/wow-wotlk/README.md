@@ -137,7 +137,7 @@ For a WotLK server inside a WSL distro that was built by the DML Launcher or the
    cd ~
    curl -O https://raw.githubusercontent.com/DadsMmoLab/dads-mmo-lab/Yulon/archive/guides/wow-wotlk/export-accounts-and-characters-wsl.py
    ```
-2. Stop only the game servers and leave the database running (`docker compose stop ac-worldserver ac-authserver`), then run it with the server's folder: `python3 export-accounts-and-characters-wsl.py --server-dir <server folder>`. It finds the database password in the folder's `.env` or compose file, or asks you for it.
+2. Stop only the game servers and leave the database running: in the server folder (the one with `docker-compose.yml`) run `docker compose stop ac-worldserver ac-authserver`. Then run it with the server's folder: `python3 export-accounts-and-characters-wsl.py --server-dir <server folder>`. It finds the database password in the folder's `.env` or compose file, or asks you for it. A `DOCKER_DB_ROOT_PASSWORD` exported in your shell is not read: the script goes by the folder's files alone, and asks you when the password they give is missing or refused.
 3. On the new computer, open a fresh WotLK server in Yu'lon and choose **Bring in accounts and characters…** on its Maintenance tab.
 
 The file holds every account's login verifier, so keep it private. `--out <folder>` picks where the file goes. With only the MySQL client installed and no Docker, add `--server-stopped`, and `--port` when the database is not on 3306.
