@@ -3523,8 +3523,14 @@ class Applier:
         compare_commits: Callable[[str, str, str], upstream.Comparison | None] | None = None,
         client_origins: Sequence[Path] = (),
         sql_backup: SqlBackup | None = None,
+        before_direct_sql: Callable[[Manifest], None] | None = None,
     ) -> None:
         self.server_dir = server_dir
+        # T787: a question one game's factory asks of the database before a manifest's
+        # direct SQL is sent (City Bots: no real account on a bot's account number). Called
+        # with the database up and nothing written; it raises `ApplyRefusal` to stop the
+        # press. Absent, nothing is asked: this module never knows which game it serves.
+        self._before_direct_sql = before_direct_sql
         # T596 (E2): the backup an outside item's SQL is preceded by. Absent, no
         # press takes one, which is every applier but Tortoise's.
         self.sql_backup = sql_backup
@@ -6698,6 +6704,14 @@ class Applier:
             # than rows written under a live world.
             if self._refuse_direct_sql_into_a_running_world(manifest, when):
                 log.world_stopped = True
+        # T787. With the database up (the start above, which stops nothing afterwards) and
+        # before the backup or any statement: the factory's own refusal, if it has one.
+        if (
+            self._before_direct_sql is not None
+            and self.sql is not None
+            and any(step.when == when and step.applied_by == "direct" for step in manifest.sql)
+        ):
+            self._before_direct_sql(manifest)
         # T596. With the database up and before anything is sent: which ledgered
         # files the server already has, then the backup of what is left to write.
         ledgered = self._already_in_the_ledger(manifest, migrations)

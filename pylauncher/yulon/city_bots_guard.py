@@ -100,6 +100,19 @@ def refuse_if_accounts_in_the_way(entry: CatalogEntry, server_dir: Path, allowed
     """
     if not city_bots_on(server_dir, allowed):
         return
+    refuse_before_the_roster(entry, server_dir)
+
+
+def refuse_before_the_roster(entry: CatalogEntry, server_dir: Path) -> None:
+    """The same check for the module's Install press, which needs no importer reach (T787).
+
+    The press itself runs `citizen_roster.sql`, which writes `playerbots_account_type` for
+    every id in the range: a real account there would be typed a bot. Asked once the
+    database is up, before that file is sent.
+
+    Raises:
+        CityBotsAccountRefusal: as `refuse_if_accounts_in_the_way()`.
+    """
     reader = _reader(entry, server_dir)
     try:
         rows = reader.query("auth", _QUERY)
@@ -111,19 +124,40 @@ def refuse_if_accounts_in_the_way(entry: CatalogEntry, server_dir: Path, allowed
     clashing = _parse(rows)
     if not clashing:
         return
-    shown = ", ".join(f'account {number} "{name}"' for number, name in clashing[:_SHOWN])
-    more = len(clashing) - _SHOWN
-    if more > 0:
-        shown += f" and {more} more"
-    logger.warning(f"City Bots SQL refused, accounts in the way: {shown}")
-    raise CityBotsAccountRefusal(
+    in_range = [row for row in clashing if FIRST_ACCOUNT_ID <= row[0] <= LAST_ACCOUNT_ID]
+    named_like_bots = [row for row in clashing if row not in in_range]
+    logger.warning(f"City Bots SQL refused, accounts in the way: {_named(clashing)}")
+    said = [
         f"City Bots keeps its 400 bots on account numbers {FIRST_ACCOUNT_ID}-{LAST_ACCOUNT_ID}, "
-        f"named {NAME_PREFIX}{FIRST_ACCOUNT_ID} to {NAME_PREFIX}{LAST_ACCOUNT_ID}, and "
-        f"this server has accounts in the way: {shown}. Applying its SQL would put a bot's "
-        "character on a real player's list, and a bot logging in would kick that player. "
+        f"named {NAME_PREFIX}{FIRST_ACCOUNT_ID} to {NAME_PREFIX}{LAST_ACCOUNT_ID}."
+    ]
+    if in_range:
+        said.append(
+            f"This server has accounts on those numbers: {_named(in_range)}. Applying its SQL "
+            "would put a bot's character on a real player's list, and a bot logging in would "
+            "kick that player."
+        )
+    if named_like_bots:
+        said.append(
+            f"This server also has accounts named like those bots on other numbers: "
+            f"{_named(named_like_bots)}. City Bots creates its bot accounts under exactly "
+            "those names, so a bot's account would collide with such an account on the "
+            "username."
+        )
+    said.append(
         "Nothing was applied. Move those players to other accounts, or remove those "
         "accounts, then try again."
     )
+    raise CityBotsAccountRefusal(" ".join(said))
+
+
+def _named(rows: list[tuple[int, str]]) -> str:
+    """`account <id> "<name>"`, the first `_SHOWN` of them, and how many more."""
+    shown = ", ".join(f'account {number} "{name}"' for number, name in rows[:_SHOWN])
+    more = len(rows) - _SHOWN
+    if more > 0:
+        shown += f" and {more} more"
+    return shown
 
 
 def _parse(rows: str) -> list[tuple[int, str]]:
