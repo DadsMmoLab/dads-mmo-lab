@@ -15,15 +15,18 @@ start Phase 7 already proved, and there is nothing running to interrupt.
 from __future__ import annotations
 
 import errno
+import io
 import os
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from yulon import channel_setup as setup
 from yulon import platform, resources
 from yulon.catalog.catalog import load_catalog
-from yulon.catalog.composegen import BASE_FILE, BUILD_FILE, OVERRIDE_FILE
+from yulon.catalog.composegen import BASE_FILE, BUILD_FILE, COMPOSE_TEMP_PREFIX, OVERRIDE_FILE
+from yulon.catalog.installer import InstallerError
 
 WOTLK = load_catalog().get("wow-wotlk")
 TBC = load_catalog().get("wow-tbc")
@@ -532,6 +535,200 @@ def test_a_conf_backup_that_cannot_be_renamed_into_place_leaves_the_conf_as_it_w
     assert not backup.exists()
     assert conf.read_text(encoding="utf-8") == CONF_BEFORE
     assert sorted(p.name for p in conf.parent.iterdir()) == listing, "a temp file was left"
+
+
+# -- T790: a live write that the disk fills part-way -------------------------
+
+
+def _temporaries_under(folder: Path) -> list[str]:
+    """Every temporary file a write under `folder` could have left behind (T790)."""
+    return sorted(
+        p.name for p in folder.rglob("*") if "yulon-tmp" in p.name or "yulon-new" in p.name
+    )
+
+
+def _the_disk_fills_half_way_on(monkeypatch: pytest.MonkeyPatch, live: Path) -> list[str]:
+    """A disk that fills part-way through a write to `live`, or to the temporary file beside it.
+
+    The first half of the bytes really lands, and then ENOSPC is raised: what a
+    truncating `write_text()` met on a full disk, and what a write to a temporary
+    file meets too. Both routes are cut. A handle from `io.open()` covers
+    `Path.write_text()` and `os.fdopen()`; a bare `os.write()` on a descriptor covers
+    the compose writer. A descriptor is named where `os.open()` made it, which
+    `tempfile.mkstemp()` calls as well. Every other file is written as it is.
+
+    Returns the list each cut is recorded in, so a test can show the fault was reached.
+    """
+    names: dict[int, str] = {}
+    cut: list[str] = []
+    real_io_open, real_os_open = io.open, os.open
+    real_os_write, real_os_close = os.write, os.close
+
+    def watched(name: str) -> bool:
+        return (
+            name == live.name
+            or name == f"{live.name}.yulon-new"
+            or name.startswith(f".{live.name}{COMPOSE_TEMP_PREFIX}")
+        )
+
+    def full_disk() -> OSError:
+        return OSError(errno.ENOSPC, "No space left on device")
+
+    def recording_os_open(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+        fd = real_os_open(path, flags, *args, **kwargs)
+        names[fd] = Path(os.fspath(path)).name
+        return fd
+
+    def forgetting_os_close(fd: int) -> None:
+        names.pop(fd, None)
+        real_os_close(fd)
+
+    def filling_os_write(fd: int, data: bytes | memoryview) -> int:
+        if watched(names.get(fd, "")):
+            cut.append(names[fd])
+            real_os_write(fd, bytes(data)[: len(data) // 2])
+            raise full_disk()
+        return real_os_write(fd, data)
+
+    class Filling:
+        """A file object that lands half of each write, then raises ENOSPC."""
+
+        def __init__(self, handle: Any, name: str) -> None:
+            self._handle = handle
+            self._name = name
+
+        def __enter__(self) -> Filling:
+            return self
+
+        def __exit__(self, *exc_info: Any) -> bool | None:
+            return self._handle.__exit__(*exc_info)
+
+        def write(self, data: Any) -> int:
+            cut.append(self._name)
+            self._handle.write(data[: len(data) // 2])
+            self._handle.flush()
+            raise full_disk()
+
+        def __getattr__(self, attr: str) -> Any:
+            return getattr(self._handle, attr)
+
+    def filling_io_open(file: Any, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
+        name = names.get(file, "") if isinstance(file, int) else Path(os.fspath(file)).name
+        handle = real_io_open(file, mode, *args, **kwargs)
+        if any(flag in mode for flag in "wax+") and watched(name):
+            return Filling(handle, name)
+        return handle
+
+    monkeypatch.setattr(os, "open", recording_os_open)
+    monkeypatch.setattr(os, "close", forgetting_os_close)
+    monkeypatch.setattr(os, "write", filling_os_write)
+    monkeypatch.setattr(io, "open", filling_io_open)
+    return cut
+
+
+def test_a_channel_override_that_fills_the_disk_during_the_press_is_left_whole(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T790: the press writes the override whole, or leaves it as the press found it.
+
+    A truncating `write_text()` into a disk that fills part-way leaves half a compose
+    file where the override was, and the next start reads that. Written beside it and
+    renamed in only once whole, the override is what it was. The backup, written just
+    before, is whole too: it is what a rollback puts back.
+    """
+    server_dir = _installed(tmp_path)
+    override = server_dir / OVERRIDE_FILE
+    backup = override.with_name(override.name + setup.BACKUP_SUFFIX)
+    before = override.read_text(encoding="utf-8")
+    cut = _the_disk_fills_half_way_on(monkeypatch, override)
+
+    with pytest.raises(OSError, match="No space left"):
+        setup.enable(
+            WOTLK, server_dir, templates_root=resources.installers_dir(), world_running=False
+        )
+
+    assert cut, "the disk never filled on the override"
+    assert override.read_text(encoding="utf-8") == before
+    assert backup.read_text(encoding="utf-8") == before
+    assert _temporaries_under(server_dir) == []
+
+
+def test_a_rollback_that_fills_the_disk_leaves_the_override_as_the_press_left_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T790: a rollback that cannot write the override leaves it whole, with its backup.
+
+    The backup is kept until the rollback has finished, so the rollback that failed
+    here can simply be run again.
+    """
+    server_dir = _installed(tmp_path)
+    setup.enable(WOTLK, server_dir, templates_root=resources.installers_dir(), world_running=False)
+    override = server_dir / OVERRIDE_FILE
+    backup = override.with_name(override.name + setup.BACKUP_SUFFIX)
+    pressed = override.read_text(encoding="utf-8")
+    cut = _the_disk_fills_half_way_on(monkeypatch, override)
+
+    with pytest.raises(OSError, match="No space left"):
+        setup.roll_back(WOTLK, server_dir)
+
+    assert cut, "the disk never filled on the override"
+    assert override.read_text(encoding="utf-8") == pressed
+    assert backup.is_file()
+    assert _temporaries_under(server_dir) == []
+
+
+def test_a_conf_that_fills_the_disk_during_the_press_is_left_whole(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T790: the press writes the CMaNGOS conf whole, or leaves it as the press found it.
+
+    The world reads this file on the way up, and a cut-off one boots with every setting
+    past the cut at its compiled default, looking healthy the whole time. Refused here,
+    the press stops before the override is touched. The conf family's writer raises
+    `InstallerError`, not `OSError`, so either is accepted.
+    """
+    server_dir = _cmangos_installed(tmp_path)
+    conf = _conf_of(server_dir)
+    cut = _the_disk_fills_half_way_on(monkeypatch, conf)
+
+    with pytest.raises((OSError, InstallerError), match="No space left"):
+        setup.enable(
+            TBC,
+            server_dir,
+            templates_root=resources.installers_dir(),
+            world_running=False,
+            db_password="pw",
+        )
+
+    assert cut, "the disk never filled on the conf"
+    assert conf.read_text(encoding="utf-8") == CONF_BEFORE
+    assert _temporaries_under(server_dir) == []
+
+
+def test_a_rollback_that_fills_the_disk_leaves_the_conf_as_the_press_left_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T790: a rollback that cannot write the conf back leaves it whole, with its copy."""
+    server_dir = _cmangos_installed(tmp_path)
+    setup.enable(
+        TBC,
+        server_dir,
+        templates_root=resources.installers_dir(),
+        world_running=False,
+        db_password="pw",
+    )
+    conf = _conf_of(server_dir)
+    backup = conf.with_name(conf.name + setup.BACKUP_SUFFIX)
+    pressed = conf.read_text(encoding="utf-8")
+    cut = _the_disk_fills_half_way_on(monkeypatch, conf)
+
+    with pytest.raises((OSError, InstallerError), match="No space left"):
+        setup.roll_back(TBC, server_dir)
+
+    assert cut, "the disk never filled on the conf"
+    assert conf.read_text(encoding="utf-8") == pressed
+    assert backup.is_file()
+    assert _temporaries_under(server_dir) == []
 
 
 def test_the_rollback_gives_the_conf_back_as_well_as_the_port(tmp_path: Path) -> None:

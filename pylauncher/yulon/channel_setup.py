@@ -465,7 +465,8 @@ def enable(
             f"the server's time zone file could not be copied ({exc}), so the command channel "
             "was not turned on and the override was not written."
         ) from exc
-    target.write_text(plan.override, encoding="utf-8", newline="\n")
+    # The compose files' own writer: whole, or the file is left as it was (T790).
+    composegen._replace_whole(target, plan.override)
     logger.info(f"wrote {entry.id}'s command channel into {target}")
     return Enabled(path=target, changed=True)
 
@@ -506,7 +507,9 @@ def _write_the_conf(entry: CatalogEntry, server_dir: Path) -> bool:
     if after == before:
         logger.info(f"{entry.id}'s channel keys were already in {target.name}")
         return False
-    target.write_text(after, encoding="utf-8", newline="\n")
+    # The conf family's writer: whole, or left as it was, and it keeps the conf's own mode
+    # (the owner-only one an install gives it, or whatever the file has) (T790).
+    conf.replace_file(target, after)
     logger.info(f"wrote {entry.id}'s command channel into {target}")
     return True
 
@@ -545,7 +548,8 @@ def _restore_the_conf(entry: CatalogEntry, server_dir: Path) -> bool:
     if drop:
         after = _without_keys(after, drop)
     if after != now:
-        target.write_text(after, encoding="utf-8", newline="\n")
+        # The same writer as the press's: whole, or left as it was, and its mode kept (T790).
+        conf.replace_file(target, after)
     logger.info(f"put {entry.id}'s own keys in {target.name} back where the press found them")
     return True
 
@@ -624,10 +628,10 @@ def roll_back(entry: CatalogEntry, server_dir: Path, *, expected: str | None = N
         )
         composegen.write_dotenv(server_dir, {HOST_PORT_VAR: RELEASED_HOST_PORT})
         return True
-    target.write_text(
-        _keep_the_bot_count(entry, now, backup.read_text(encoding="utf-8")),
-        encoding="utf-8",
-        newline="\n",
+    # Whole, or the override is left as the press left it, so the backup can simply be
+    # restored again (T790).
+    composegen._replace_whole(
+        target, _keep_the_bot_count(entry, now, backup.read_text(encoding="utf-8"))
     )
     # The `.env` before the unlink, and the unlink last. An interruption then
     # leaves the backup on disk with the override already restored, and running
