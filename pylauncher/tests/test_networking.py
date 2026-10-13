@@ -7055,6 +7055,39 @@ def test_a_chosen_loopback_is_refused_and_writes_no_row() -> None:
     assert p.refusals[0] in p.warnings
 
 
+NOT_A_USABLE_IPV4 = (
+    "0:0:0:0:0:0:0:1",
+    "::1",
+    "::ffff:127.0.0.1",
+    "fe80::1",
+    # A Tailscale IPv6 address: not a loopback, so only the IPv4 parse refuses it. No 3.3.5-era
+    # client reads an IPv6 realm address.
+    "fd7a:115c:a1e0::1",
+    "foo",
+    "169.254.7.7",
+    "0.0.0.0",
+)
+
+
+@pytest.mark.parametrize("token", NOT_A_USABLE_IPV4)
+def test_a_chosen_address_that_is_not_a_usable_ipv4_is_refused_whatever_binds(token: str) -> None:
+    """T674 round 3: an IPv6 loopback spelling, an IPv4-mapped loopback, link-local, the
+    unspecified address and a name are refused before any bind is asked, so a host that binds
+    IPv6 (every non-WSL one) cannot let them through to the realm row."""
+    p = networking.plan(
+        WOTLK,
+        "lan",
+        chosen_address=token,
+        can_bind=lambda ip: True,
+        detect_lan=lambda: LAN_ADDRESS,
+        firewall="none",
+        steamos=False,
+        wsl=False,
+    )
+    assert p.ready is False and p.realmlist_sql is None and p.chosen_address is None
+    assert p.refusals and token in p.refusals[0] and "IPv4" in p.refusals[0], p.refusals
+
+
 def test_a_chosen_address_this_computer_does_not_hold_is_refused() -> None:
     """An address no interface of this computer owns cannot be reached through it."""
     p = networking.plan(
@@ -7126,6 +7159,14 @@ def test_the_intent_remembers_a_chosen_address_and_reads_it_back(tmp_path: Path)
     [
         '{"mode": "lan", "address": "127.0.0.1", "recorded_unix": 1}',
         '{"mode": "lan", "address": "1.2.3.4; DROP", "recorded_unix": 1}',
+        # T674 round 3: only a plain IPv4 address of a usable kind is honoured.
+        '{"mode": "lan", "address": "0:0:0:0:0:0:0:1", "recorded_unix": 1}',
+        '{"mode": "lan", "address": "::ffff:127.0.0.1", "recorded_unix": 1}',
+        '{"mode": "lan", "address": "fe80::1", "recorded_unix": 1}',
+        '{"mode": "lan", "address": "fd7a:115c:a1e0::1", "recorded_unix": 1}',
+        '{"mode": "lan", "address": "foo", "recorded_unix": 1}',
+        '{"mode": "lan", "address": "169.254.7.7", "recorded_unix": 1}',
+        '{"mode": "lan", "address": "0.0.0.0", "recorded_unix": 1}',
         '{"mode": "lan", "address": 42, "recorded_unix": 1}',
         '{"mode": "loopback", "address": "100.64.0.10", "recorded_unix": 1}',
     ],
@@ -7225,8 +7266,22 @@ def test_the_windows_listing_tags_the_tailnet_adapter_and_skips_loopback_and_api
     assert {(a.interface, a.address, a.vpn) for a in found} == {
         ("Ethernet", "192.168.1.5", False),
         ("Tailscale", "100.64.0.10", True),
-        ("vEthernet (WSL)", "172.24.144.1", False),
     }
+
+
+def test_the_windows_listing_leaves_out_host_only_adapters() -> None:
+    """T674 round 3: WSL's, Hyper-V's Default Switch and VMware's host-only adapters reach no
+    friend, so they are not offered. A Hyper-V EXTERNAL switch is the real LAN, and stays."""
+    out = (
+        "vEthernet (WSL)|172.24.144.1\n"
+        "vEthernet (WSL (Hyper-V firewall))|172.25.96.1\n"
+        "vEthernet (Default Switch)|172.20.0.1\n"
+        "VMware Network Adapter VMnet1|192.168.56.1\n"
+        "VMware Network Adapter VMnet8|192.168.80.1\n"
+        "vEthernet (External)|192.168.1.6\n"
+    )
+    found = platform.local_ipv4_addresses(run=_listing_answer(out), system="windows", wsl=False)
+    assert {(a.interface, a.address) for a in found} == {("vEthernet (External)", "192.168.1.6")}
 
 
 def test_under_wsl_the_adapters_are_the_windows_ones() -> None:
@@ -7276,6 +7331,9 @@ WSL_WINDOWS_OUT = "Tailscale|100.72.215.6\nWi-Fi 2|192.168.1.210\n"
 WSL_VM_OUT = (
     "2: eth0    inet 172.24.144.5/20 brd 172.24.159.255 scope global eth0\n"
     "3: tailscale0    inet 100.86.248.75/32 scope global tailscale0\n"
+    "4: docker0    inet 172.17.0.1/16 brd 172.17.255.255 scope global docker0\n"
+    "5: wg0    inet 10.9.0.2/24 scope global wg0\n"
+    "6: eth1    inet 100.70.1.1/32 scope global eth1\n"
 )
 
 
@@ -7355,27 +7413,28 @@ def _wsl_both_sides(seen: list[list[str]]) -> Callable[..., subprocess.Completed
     return by_program
 
 
-def test_under_wsl_the_listing_is_the_windows_side_only_and_the_vm_is_never_read() -> None:
-    """Round 2 must-fix 1: a WSL server's realm address is a Windows-side address.
+def test_under_wsl_the_listing_is_the_windows_side_plus_the_vms_vpn_interfaces() -> None:
+    """Round 2 must-fix 1, narrowed by the lead's round-3 ruling.
 
-    A bind inside the WSL VM of a Windows adapter's address fails (measured: Errno 99), and the
-    VM's own interfaces (eth0, a Tailscale inside WSL) are not what the Windows forwarder serves,
-    so the VM's interfaces are neither offered nor read.
+    A WSL server is reached on a Windows adapter's address through the Windows forwarder, so the
+    Windows side is listed. A Tailscale (or WireGuard) installed INSIDE the distro gives the VM a
+    tailnet node of its own, which peers reach directly, so the VM's VPN-like interfaces are
+    listed too, as side `wsl`. The VM's NAT eth0 and Docker's bridges are not.
     """
     seen: list[list[str]] = []
     found = platform.local_ipv4_addresses(run=_wsl_both_sides(seen), system="linux", wsl=True)
-    assert [argv[0] for argv in seen] == ["powershell.exe"]
+    assert sorted(argv[0] for argv in seen) == ["ip", "powershell.exe"]
     assert {(a.side, a.interface, a.address, a.vpn) for a in found} == {
         ("windows", "Tailscale", "100.72.215.6", True),
         ("windows", "Wi-Fi 2", "192.168.1.210", False),
+        ("wsl", "tailscale0", "100.86.248.75", True),
+        ("wsl", "wg0", "10.9.0.2", True),
+        ("wsl", "eth1", "100.70.1.1", True),
     }
 
 
-@pytest.mark.parametrize("vm_only", ["172.24.144.5", "100.86.248.75"])
-def test_holds_here_under_wsl_refuses_an_address_only_the_vm_holds(
-    vm_only: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The real listing, with only the programs it runs faked; the guard reads the Windows side.
+def test_holds_here_under_wsl_refuses_the_vms_nat_address(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The real listing, with only the programs it runs faked.
 
     `in_wsl()` answers False here on purpose: `holds_here(under_wsl=True)` must ask for the WSL
     listing itself, not leave the listing to guess on a machine (CI) that is not WSL.
@@ -7388,6 +7447,44 @@ def test_holds_here_under_wsl_refuses_an_address_only_the_vm_holds(
         raise AssertionError(f"{ip} was bound inside the VM")
 
     monkeypatch.setattr(networking, "_can_bind", no_bind)
-    assert networking.holds_here(vm_only, under_wsl=True) is False
+    assert networking.holds_here("172.24.144.5", under_wsl=True) is False
+    assert networking.holds_here("172.17.0.1", under_wsl=True) is False
+    # A Windows-side address is accepted from the listing, never by a bind in the VM.
     assert networking.holds_here("100.72.215.6", under_wsl=True) is True
-    assert all(argv[0] == "powershell.exe" for argv in seen), seen
+    assert "powershell.exe" in [argv[0] for argv in seen], seen
+
+
+@pytest.mark.parametrize("binds", [True, False])
+def test_holds_here_under_wsl_binds_the_vms_own_vpn_address(
+    binds: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A VM-side VPN address is checked with a bind inside the VM, where it lives (lead ruling)."""
+    monkeypatch.setattr(runner, "run", _wsl_both_sides([]))
+    monkeypatch.setattr(platform, "in_wsl", lambda: False)
+    asked: list[str] = []
+
+    def bind(ip: str) -> bool:
+        asked.append(ip)
+        return binds
+
+    monkeypatch.setattr(networking, "_can_bind", bind)
+    assert networking.holds_here("100.86.248.75", under_wsl=True) is binds
+    assert asked == ["100.86.248.75"]
+
+
+def test_under_wsl_a_plan_accepts_the_vms_tailscale_address(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(runner, "run", _wsl_both_sides([]))
+    monkeypatch.setattr(networking, "_can_bind", lambda ip: ip == "100.86.248.75")
+    p = networking.plan(
+        WOTLK,
+        "lan",
+        chosen_address="100.86.248.75",
+        wsl=True,
+        firewall="none",
+        steamos=False,
+        detect_lan=lambda: LAN_ADDRESS,
+    )
+    assert p.ready and p.refusals == (), p.refusals
+    assert p.realmlist_sql == networking.realmlist_sql(WOTLK, "100.86.248.75", "100.86.248.75")

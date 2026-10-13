@@ -15729,7 +15729,7 @@ class StagedInstaller:
           exactly that address is left alone, and the line says so. If this
           computer no longer holds the address (Tailscale off, or it changed), one
           `Warning:` line is printed and the address is still written, because it
-          is the owner's choice. A recorded address that `networking.advertisable()`
+          is the owner's choice. A recorded address that `networking.chosen_ipv4()`
           refuses reads as no choice at all, so it falls through to the detected
           address;
         * no address — `REALM_ADDRESS_UNKNOWN`, and no SQL is attempted at all.

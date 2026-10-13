@@ -656,12 +656,13 @@ ADDRESS_LISTING_QUERY = (
 """Every IPv4 address Windows holds, one `interface|address` line each. A read, and a read only."""
 
 
-LocalSide = Literal["here", "windows"]
-"""Which side an address is on (T674 round 2).
+LocalSide = Literal["here", "windows", "wsl"]
+"""Which side an address is on (T674).
 
-`here` is every machine that is not WSL, the computer itself. Under WSL it is always `windows`: the
-Windows host, whose adapters a server running in WSL is reached on through the Windows forwarder.
-The WSL VM's own interfaces are never listed.
+`here` is every machine that is not WSL, the computer itself. Under WSL, `windows` is the Windows
+host, whose adapters a server running in WSL is reached on through the Windows forwarder, and
+`wsl` is a VPN interface inside the VM (a Tailscale or WireGuard installed in the distro, the VM's
+own tailnet node). The VM's NAT eth0 is never listed (lead ruling, round 3).
 """
 
 
@@ -711,6 +712,24 @@ def _parse_ip_addr(text: str) -> tuple[tuple[str, str], ...]:
     return tuple(pairs)
 
 
+_VM_VPN_PREFIXES = ("tailscale", "wg")
+
+
+def _parse_vm_vpn_addresses(text: str) -> tuple[tuple[str, str], ...]:
+    """The VPN-like pairs of the WSL VM's `ip` listing: a `tailscale*` or `wg*` interface, or an
+    address in 100.64.0.0/10 (lead ruling, T674 round 3). Anything else in the VM, its NAT eth0
+    first of all, is not an address a friend reaches."""
+    pairs: list[tuple[str, str]] = []
+    for name, text_address in _parse_ip_addr(text):
+        try:
+            on_tailnet = IPv4Address(text_address) in _CGNAT
+        except ValueError:
+            continue
+        if name.startswith(_VM_VPN_PREFIXES) or on_tailnet:
+            pairs.append((name, text_address))
+    return tuple(pairs)
+
+
 def _parse_ifconfig(text: str) -> tuple[tuple[str, str], ...]:
     """(interface, address) for each `inet` line under an interface header of `ifconfig`."""
     pairs: list[tuple[str, str]] = []
@@ -725,11 +744,24 @@ def _parse_ifconfig(text: str) -> tuple[tuple[str, str], ...]:
     return tuple(pairs)
 
 
+_HOST_ONLY_ADAPTER_PREFIXES = (
+    "vEthernet (WSL",
+    "vEthernet (Default Switch)",
+    "VMware Network Adapter",
+)
+"""Windows adapters that only reach this computer's own VMs (WSL's, Hyper-V's Default Switch,
+VMware's host-only and NAT ones), so no friend reaches their addresses (T674 round 3). A Hyper-V
+external switch (`vEthernet (<name>)`) is the real LAN and stays."""
+
+
 def _parse_powershell_addresses(text: str) -> tuple[tuple[str, str], ...]:
-    """(interface, address) for each `interface|address` line of `ADDRESS_LISTING_QUERY`."""
+    """(interface, address) for each `interface|address` line of `ADDRESS_LISTING_QUERY`,
+    host-only adapters left out."""
     pairs: list[tuple[str, str]] = []
     for line in text.splitlines():
         name, sep, address = line.rpartition("|")
+        if name.strip().startswith(_HOST_ONLY_ADAPTER_PREFIXES):
+            continue
         if sep and name.strip() and address.strip():
             pairs.append((name.strip(), address.strip()))
     return tuple(pairs)
@@ -759,10 +791,10 @@ def local_ipv4_addresses(
 
     Not what `detect_lan_ip()` answers. That is the address of the default route, and a Tailscale
     or other VPN interface is never the default route, so the address a friend on that network has
-    to type exists only in this listing. Under WSL it is the Windows adapters only, which a server
-    in WSL is reached on through the Windows forwarder; the VM's own interfaces are never read. The
-    choice list and `networking.holds_here()` both read this listing under WSL, so every address
-    offered is one the guard accepts, and an address only the VM holds is neither. Loopback and
+    to type exists only in this listing. Under WSL it is the Windows adapters, which a server in
+    WSL is reached on through the Windows forwarder, plus the VM's VPN interfaces (`LocalSide`);
+    the VM's NAT eth0 is left out. The choice list and `networking.holds_here()` both read this
+    listing under WSL, so the guard accepts what is offered, and refuses the VM's eth0. Loopback and
     link-local (169.254/16) addresses are dropped, and Docker's bridges are left out. A listing
     that cannot be read answers nothing, and nothing is guessed in its place.
     """
@@ -773,10 +805,13 @@ def local_ipv4_addresses(
     ip_listing = ["ip", "-4", "-o", "addr", "show"]
     sources: list[tuple[LocalSide, list[str], _PairParser]]
     if under_wsl:
-        # The Windows side only. A server in WSL is reached through the Windows forwarder on a
-        # Windows adapter's address; the VM's own interfaces (eth0, a Tailscale inside WSL) are
-        # not what a friend reaches, so they are neither offered nor accepted (T674 round 2).
-        sources = [("windows", powershell, _parse_powershell_addresses)]
+        # The Windows side, which a server in WSL is reached on through the Windows forwarder,
+        # plus the VM's VPN interfaces only (`_parse_vm_vpn_addresses`): a Tailscale inside the
+        # distro is a tailnet node peers reach directly. The VM's NAT eth0 is no use to a friend.
+        sources = [
+            ("windows", powershell, _parse_powershell_addresses),
+            ("wsl", ip_listing, _parse_vm_vpn_addresses),
+        ]
     elif where == "windows":
         sources = [("here", powershell, _parse_powershell_addresses)]
     elif where == "macos":

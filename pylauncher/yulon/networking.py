@@ -3462,21 +3462,28 @@ def _can_bind(ip: str) -> bool:
 
 
 def holds_here(address: str, *, under_wsl: bool | None = None) -> bool:
-    """Whether this computer holds `address`, asked the way a realm on it is reached (T674 round 2).
+    """Whether this computer holds `address`, asked the way a realm on it is reached (T674).
 
-    Under WSL the question is the WINDOWS address listing (`platform.local_ipv4_addresses()` with
-    `wsl=True`), never the VM's interfaces. A Windows adapter's address is reached through the
-    Windows forwarder, and a bind inside the VM does not answer for it: WSL's NAT mode does not
-    give the VM those addresses (measured on this laptop: Errno 99), and an address only the VM
-    holds is not one a friend reaches. Everywhere else the OS answers for itself with a bind,
-    which is what `_can_bind()` asks. Under WSL the choice list and this check read the same
-    listing, so every address the list offers is accepted here.
+    Under WSL the question is the WSL listing (`platform.local_ipv4_addresses()` with `wsl=True`),
+    which has two sides. A WINDOWS adapter's address is reached through the Windows forwarder, and
+    a bind inside the VM does not answer for it (WSL's NAT mode does not give the VM those
+    addresses; measured on this laptop: Errno 99), so it is held when the Windows side lists it.
+    A VPN interface inside the VM (a Tailscale or WireGuard installed in the distro: the VM's own
+    tailnet node, which peers reach directly) is listed as side `wsl`, and its address is held
+    when a bind inside the VM succeeds (lead ruling, round 3). The VM's NAT eth0 is not listed, so
+    it is never held. Everywhere else the OS answers for itself with a bind, `_can_bind()`.
     """
     wsl = platform.in_wsl() if under_wsl is None else under_wsl
-    if wsl:
-        listed = platform.local_ipv4_addresses(wsl=True)
-        return address in {offered.address for offered in listed}
-    return _can_bind(address)
+    if not wsl:
+        return _can_bind(address)
+    sides = {
+        offered.side
+        for offered in platform.local_ipv4_addresses(wsl=True)
+        if offered.address == address
+    }
+    if "windows" in sides:
+        return True
+    return "wsl" in sides and _can_bind(address)
 
 
 def _own_names() -> tuple[str, ...]:
@@ -3603,20 +3610,45 @@ def advertisable(address: str | None) -> str | None:
     return candidate
 
 
+def chosen_ipv4(address: str | None) -> str | None:
+    """`address` if an owner may CHOOSE it as the realm address, else None (T674 round 3).
+
+    Narrower than `advertisable()`, which also passes names and IPv6 because a detector or an
+    internet-mode address may be one. A chosen or recorded address must be a plain IPv4 address
+    (the realm row of every family holds one) and not the loopback, the unspecified address or a
+    link-local one. Parsing it with `ipaddress.IPv4Address` is the point: `0:0:0:0:0:0:0:1`,
+    `::ffff:127.0.0.1` and `fe80::1` are loopback or link-local spellings `advertisable()` lets
+    through, and off WSL `_can_bind()` would bind them.
+    """
+    usable = advertisable(address)
+    if usable is None:
+        return None
+    try:
+        parsed = ipaddress.IPv4Address(usable)
+    except ValueError:
+        return None
+    if parsed.is_loopback or parsed.is_unspecified or parsed.is_link_local:
+        return None
+    return usable
+
+
 def _chosen_for_the_realm(
     address: str, *, can_bind: Callable[[str], bool]
 ) -> tuple[str | None, str | None]:
     """The address a chosen realm may advertise, or None and the sentence that says why not (T674).
 
-    Two refusals, and each is needed. `advertisable()` refuses the loopback however it
-    arrives: a chosen `127.0.0.1` is the §35 outage. `can_bind` refuses an address that no
-    interface of this computer owns, because a friend sent to it reaches some other machine.
+    Two refusals, and each is needed. `chosen_ipv4()` refuses the loopback however it is
+    spelled (IPv6 and IPv4-mapped too): a chosen `127.0.0.1` is the §35 outage. `can_bind`
+    refuses an address that no interface of this computer owns, because a friend sent to it
+    reaches some other machine.
     """
-    usable = advertisable(address)
+    usable = chosen_ipv4(address)
     if usable is None:
         return None, (
-            f"{address.strip()!r} cannot be advertised as the realm address: it is a loopback "
-            "address, or not an address at all. Choose one of this computer's own addresses."
+            f"{address.strip()!r} cannot be advertised as the realm address. Only a plain IPv4 "
+            "address of this computer can (such as 192.168.1.20 or a Tailscale 100.x address), "
+            "and not a loopback (127.x), link-local (169.254.x) or 0.0.0.0 one. Choose one of "
+            "this computer's own addresses."
         )
     if not can_bind(usable):
         return None, (
@@ -3685,9 +3717,9 @@ def read_network_intent(server_dir: Path) -> NetworkIntent | None:
         return None
     recorded = parsed.get("recorded_unix")
     chosen = parsed.get("address")
-    # An address is honoured only for `lan`, and only if it passes the same guard the detected
-    # addresses pass. A damaged one reads as no address, so the detected path is taken (T674).
-    address = advertisable(chosen) if mode == "lan" and isinstance(chosen, str) else None
+    # An address is honoured only for `lan`, and only if it passes the guard a chosen address
+    # passes (`chosen_ipv4()`). A damaged one reads as no address, so the detected path is taken.
+    address = chosen_ipv4(chosen) if mode == "lan" and isinstance(chosen, str) else None
     return NetworkIntent(
         mode=mode,
         recorded_unix=recorded if isinstance(recorded, int) else 0,
@@ -3919,7 +3951,7 @@ def plan(
     `chosen_address` is the T674 path: an address of this computer that the owner picked to
     advertise in place of the detected LAN address (a Tailscale or other VPN address, say). It
     is for `lan` mode only and cannot be combined with `lan_ip`. It is refused unless
-    `advertisable()` passes it and `can_bind` (default `holds_here()`: this computer's own
+    `chosen_ipv4()` passes it and `can_bind` (default `holds_here()`: this computer's own
     addresses, read from the listing under WSL) agrees,
     and a refusal lands in `refusals` and `warnings`, leaving the plan not `ready`.
     """

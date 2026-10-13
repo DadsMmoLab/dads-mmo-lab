@@ -4361,13 +4361,23 @@ def test_a_real_run_writes_those_two_shapes_and_no_marker_ever_carries_a_prefix(
     assert [log_lines.parse(line).text for line in steps + markers] == steps + markers
 
 
-def test_the_install_advertises_the_address_the_owner_chose_on_a_vpn(tmp_path: Path) -> None:
+def test_the_install_advertises_the_address_the_owner_chose_on_a_vpn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A chosen VPN address survives an install; the detected LAN address does not return (T674).
 
     The intent file is written in the shape `record_network_intent()` gives it when a chosen
     address is recorded. Against code that ignores that key, the closing step detects the LAN
-    address and writes it, which is the assertion that fails.
+    address and writes it, which is the assertion that fails. The machine is faked whole (not WSL,
+    the address binds, no program runs), so the warning's absence is asserted, not host-dependent.
     """
+    monkeypatch.setattr(platform, "in_wsl", lambda: False)
+    monkeypatch.setattr(networking, "_can_bind", lambda ip: True)
+
+    def no_program(argv: list[str], *_a: object, **_k: object) -> object:
+        raise AssertionError(f"the test ran {argv[0]} on this machine")
+
+    monkeypatch.setattr(runner, "run", no_program)
     server = tmp_path / "wow"
     server.mkdir()
     (server / networking.INTENT_FILE).write_text(
@@ -4384,12 +4394,60 @@ def test_the_install_advertises_the_address_the_owner_chose_on_a_vpn(tmp_path: P
     assert asked == [], "a LAN address was detected although the owner chose one"
     assert _statements(rec) == [networking.realmlist_sql(ENTRY, "100.64.0.10", "100.64.0.10")]
     assert [line for line in said if "now advertises 100.64.0.10" in line], said
+    assert not [line for line in said if line.startswith("Warning:")], said
 
 
 def _recorded_address(server: Path, address: str) -> None:
     (server / networking.INTENT_FILE).write_text(
         f'{{"mode": "lan", "address": "{address}", "recorded_unix": 1}}\n', encoding="utf-8"
     )
+
+
+@pytest.mark.parametrize(
+    "token", ["0:0:0:0:0:0:0:1", "::ffff:127.0.0.1", "fe80::1", "fd7a:115c:a1e0::1", "foo"]
+)
+def test_a_recorded_token_that_is_not_a_usable_ipv4_is_never_written(
+    token: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T674 round 3: the recorded path refuses what the chosen path refuses. The token reads as no
+    choice, so the detected LAN address is what the closing step writes, and the token never is."""
+    monkeypatch.setattr(platform, "in_wsl", lambda: False)
+    monkeypatch.setattr(networking, "_can_bind", lambda ip: True)
+    server = tmp_path / "wow"
+    server.mkdir()
+    _recorded_address(server, token)
+    rec = Recorder(realm_row=f"{native.INSTALL_REALM_HOST}\t{native.INSTALL_REALM_HOST}\n")
+    _advertising(rec, server, lan_ip=lambda: "192.168.1.25")
+    statements = _statements(rec)
+    assert not [sql for sql in statements if token in sql], statements
+    assert statements == [networking.realmlist_sql(ENTRY, "192.168.1.25", "192.168.1.25")]
+
+
+def test_under_wsl_a_recorded_tailscale_address_the_vm_holds_gets_no_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Lead ruling, T674 round 3: a Tailscale inside the WSL distro is the VM's own tailnet node.
+    Its address is held when the VM binds it, so no false "no longer held" warning is printed."""
+
+    def listings(argv: list[str], *_a: object, **_k: object) -> subprocess.CompletedProcess[str]:
+        out = (
+            "Wi-Fi 2|192.168.1.210\n"
+            if argv[0] == "powershell.exe"
+            else "2: eth0    inet 172.24.144.5/20 scope global eth0\n"
+            "3: tailscale0    inet 100.86.248.75/32 scope global tailscale0\n"
+        )
+        return subprocess.CompletedProcess(argv, 0, out, "")
+
+    monkeypatch.setattr(platform, "in_wsl", lambda: True)
+    monkeypatch.setattr(runner, "run", listings)
+    monkeypatch.setattr(networking, "_can_bind", lambda ip: ip == "100.86.248.75")
+    server = tmp_path / "wow"
+    server.mkdir()
+    _recorded_address(server, "100.86.248.75")
+    rec = Recorder(realm_row="192.168.1.210\t192.168.1.210\n")
+    said = _advertising(rec, server, lan_ip=lambda: "192.168.1.210")
+    assert not [line for line in said if line.startswith("Warning:")], said
+    assert _statements(rec) == [networking.realmlist_sql(ENTRY, "100.86.248.75", "100.86.248.75")]
 
 
 def test_a_recorded_address_replaces_a_lan_row_from_an_earlier_install(
