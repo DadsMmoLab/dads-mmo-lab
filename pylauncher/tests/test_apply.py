@@ -4109,6 +4109,42 @@ def test_the_check_asks_github_by_default(tmp_path: Path, monkeypatch: pytest.Mo
     assert [r.behind for r in rows] == [50]
 
 
+def test_a_pc_without_git_counts_the_wotlk_check_through_the_container(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A PC with no Git counts the WotLK press through the container, not host git (T789).
+
+    The Modules tab's press hands `module_updates()` no seam, and its default was
+    `RunnerGit()`. On a machine with no git.exe the count's `git fetch` raised
+    `[WinError 2]`, and the view showed that raw. T58 moved Install and the Tortoise count
+    to `_default_git()`, which picks the container where there is no host git; this press
+    takes the same seam.
+    """
+    from yulon.controller_wow_wotlk import modules as wotlk_modules
+
+    clone = _one_module(tmp_path)
+    monkeypatch.setattr(apply_module, "git_available", lambda: False)
+    asked: list[Path] = []
+
+    class _ContainerStandIn:
+        def counted_behind(
+            self, dest: Path, branch: str | None, *, release: bool = False
+        ) -> git_module.Counted:
+            asked.append(dest)
+            return git_module.Counted(7)
+
+    def _host_git_that_is_not_installed(*args: object, **kwargs: object) -> None:
+        raise FileNotFoundError(2, "The system cannot find the file specified")
+
+    monkeypatch.setattr(apply_module, "ContainerGit", _ContainerStandIn)
+    monkeypatch.setattr(git_module.RunnerGit, "counted_behind", _host_git_that_is_not_installed)
+
+    rows = wotlk_modules.module_updates(tmp_path)
+
+    assert asked == [clone], asked
+    assert [r.behind for r in rows] == [7]
+
+
 def test_the_tortoise_check_asks_github_for_its_uncounted_addon(tmp_path: Path) -> None:
     """Tortoise's own press (`cached_module_updates`) settles an uncounted clone the same way."""
     from yulon.controller_wow_tortoise import modules as tortoise_modules

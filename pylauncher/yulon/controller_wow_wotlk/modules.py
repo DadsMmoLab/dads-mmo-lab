@@ -30,6 +30,7 @@ from yulon.apply import (
     LedgerReader,
     ModuleUpdate,
     SqlRunner,
+    _default_git,
     applied_updates,
     failed_updates,
     module_sql_plan,
@@ -40,7 +41,7 @@ from yulon.apply import module_updates as apply_updates
 from yulon.apply import refresh_module_updates as refresh_cached
 from yulon.catalog.upstream import github_slug
 from yulon.controller_wow_wotlk import docker_ctl
-from yulon.git import BehindReader, Git, RunnerGit
+from yulon.git import BehindReader, Git
 
 # Explicit re-export (the `as` form is what mypy's --no-implicit-reexport asks for):
 # the value lives in `install_wiring` since 7.1, and this name stays so no importer moves twice.
@@ -379,7 +380,10 @@ def module_updates(
     client addons in `sql_scripts/clones/` behind the same "Check for updates"
     press, each against what its manifest follows, and keeps each row a day.
     """
-    reader: BehindReader = git if git is not None else RunnerGit()
+    # T789: this press used host git unconditionally, so a PC without Git failed with a raw
+    # [WinError 2]. Install has used `_default_git()` since T58: host git where it runs,
+    # the container where it does not.
+    reader: BehindReader = git if git is not None else _default_git(server_dir)  # type: ignore[assignment]
     branches, releases = _follows(user_game)
     return apply_updates(server_dir, git=reader, branches=branches, releases=releases)
 
