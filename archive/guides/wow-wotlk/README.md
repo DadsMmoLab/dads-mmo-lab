@@ -127,6 +127,23 @@ A quick one-page reference for creating player accounts. Useful to bookmark and 
 
 ## 🛠️ Scripts & Tools
 
+### `export-accounts-and-characters-wsl.py` — Pack Accounts and Characters from WSL
+**Platform: Windows (WSL2)**
+
+For a WotLK server inside a WSL distro that was built by the DML Launcher or the old bash installer. It packs the server's accounts and characters into one private file, and nothing else: no world database, no config files, no modules.
+
+1. Inside the distro, get the script once. It needs Python 3.10 or newer (check with `python3 --version`):
+   ```
+   cd ~
+   curl -O https://raw.githubusercontent.com/DadsMmoLab/dads-mmo-lab/Yulon/archive/guides/wow-wotlk/export-accounts-and-characters-wsl.py
+   ```
+2. Stop only the game servers and leave the database running (`docker compose stop ac-worldserver ac-authserver`), then run it with the server's folder: `python3 export-accounts-and-characters-wsl.py --server-dir <server folder>`. It finds the database password in the folder's `.env` or compose file, or asks you for it.
+3. On the new computer, open a fresh WotLK server in Yu'lon and choose **Bring in accounts and characters…** on its Maintenance tab.
+
+The file holds every account's login verifier, so keep it private. `--out <folder>` picks where the file goes. With only the MySQL client installed and no Docker, add `--server-stopped`, and `--port` when the database is not on 3306.
+
+---
+
 ### `install-wow-wotlk.sh` — Automated Installer
 **Platform: Steam Deck**
 
