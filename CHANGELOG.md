@@ -18,6 +18,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - The Maintenance tab lists the backups an earlier uninstall kept, so a reinstall can restore them.
 - A WotLK server inside WSL can have its accounts and characters packed for a move, with a script in the WoW guides.
 - New WoW WotLK and Unbound servers get a database password of their own; older servers keep theirs.
+- **Server build ▾** on the Modules tab has **Put the folders back…**, which puts the source folders back on their build.
 ### Fixed
 - A server whose database password cannot be found now greys the accounts, backup and module buttons and says why.
 - **Start** on a WSL server now waits for Docker to come up even when Windows already lists the distro as running.

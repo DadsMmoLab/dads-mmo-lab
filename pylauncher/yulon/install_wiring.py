@@ -60,6 +60,7 @@ from yulon.catalog.native import (
     CorrectionRoute,
     KeptBuildRoute,
     LatestRoute,
+    PutFoldersBackRoute,
     RewrittenHistory,
     Seams,
     SourceVersion,
@@ -71,6 +72,8 @@ from yulon.catalog.native import (
     moved_pin_confirmation,
     moved_pins,
     parked_build_note,
+    put_the_folders_back_confirmation,
+    put_the_folders_back_offered,
     read_state,
     return_to_pin_confirmation,
     rewritten_line,
@@ -912,6 +915,48 @@ def update_to_latest_for_app(
         source_version=version,
         upstream_news=news,
     )
+
+
+def put_the_folders_back_for_app(
+    entry: CatalogEntry,
+    server_dir: Path,
+    *,
+    wsl_distro: str | None = None,
+    engine: Callable[[], InstallEngine] | None = None,
+) -> PutFoldersBackRoute | None:
+    """The "Put the folders back…" control for this install, or None where it has no engine (T786).
+
+    Only a native install has the press (`StagedInstaller.put_the_folders_back()`); for any
+    other entry the menu entry does not exist. `offered` is the engine's own reading
+    (`put_the_folders_back_offered()`, files only), and a server inside a WSL distro that is
+    stopped, or whose folder is in another distro, answers False rather than boot or read it.
+
+    The engine is built per press (`engine`, for a test's seams; else `installer_for_app()`),
+    for `rebuild_for_app()`'s reason. The press holds the server's reservation itself, so the
+    tab takes none.
+    """
+    if entry.install.native is None:
+        return None
+
+    def offered() -> bool:
+        if not _in_the_distro(server_dir, wsl_distro) or _distro_down(wsl_distro):
+            return False
+        return put_the_folders_back_offered(server_dir)
+
+    def confirmation() -> str:
+        return put_the_folders_back_confirmation(entry, server_dir)
+
+    def press(cancel: threading.Event | None = None) -> Iterator[str]:
+        if wsl_distro is not None:
+            _refuse_unless_in_the_distro(server_dir, wsl_distro)
+        made = engine() if engine is not None else installer_for_app(entry, wsl_distro=wsl_distro)
+        if not isinstance(made, StagedInstaller):
+            raise InstallerError(
+                f"{entry.name} has no folders to put back here. Nothing was changed."
+            )
+        yield from made.put_the_folders_back(InstallOptions(server_dir=server_dir), cancel=cancel)
+
+    return PutFoldersBackRoute(offered=offered, confirmation=confirmation, press=press)
 
 
 ReextractPress = Callable[..., Iterator[str]]

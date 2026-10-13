@@ -132,9 +132,11 @@ def test_every_install_and_rebuild_run_is_recorded_and_the_console_is_not() -> N
     The sixth `rebuild_log` run is T129's corrections press, on the same panel as the updates one;
     the seventh is T179's Server-tab presses (Re-extract map data, Finish the world update), which
     share one runner; the eighth is T377's Repair the database; the ninth is T658's Update Docker
-    Compose.
+    Compose; the tenth is T786's Put the folders back.
     """
     ui = Path(catalog_view.__file__).parent
     calls = _panel_runs(ui / "catalog_view.py") + _panel_runs(ui / "controller_view.py")
-    expected = [("self._log", True), ("self.console_log", False)] + [("self.rebuild_log", True)] * 9
+    expected = [("self._log", True), ("self.console_log", False)] + [
+        ("self.rebuild_log", True)
+    ] * 10
     assert sorted(calls) == sorted(expected), calls
