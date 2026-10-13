@@ -3461,7 +3461,9 @@ def _can_bind(ip: str) -> bool:
     return True
 
 
-def holds_here(address: str, *, under_wsl: bool | None = None) -> bool | None:
+def holds_here(
+    address: str, *, under_wsl: bool | None = None, listing: platform.LocalListing | None = None
+) -> bool | None:
     """Whether this computer holds `address`, asked the way a realm on it is reached (T674).
 
     Under WSL the question is the WSL listing (`platform.local_ipv4_listing()` with `wsl=True`),
@@ -3476,34 +3478,53 @@ def holds_here(address: str, *, under_wsl: bool | None = None) -> bool | None:
     `None` means the question could not be answered (T674 round 3): under WSL the Windows listing
     could not be read and the VM does not hold the address either. An unreadable listing is not an
     empty one, so a caller says the list could not be read rather than that the address is absent.
+
+    `listing` is the WSL listing a caller has already read (T784 b): a plan reads it once and asks
+    every question from that one reading. It is read here when none is passed.
     """
     wsl = platform.in_wsl() if under_wsl is None else under_wsl
     if not wsl:
         return _can_bind(address)
-    listing = platform.local_ipv4_listing(wsl=True)
+    if listing is None:
+        listing = platform.local_ipv4_listing(wsl=True)
     sides = {offered.side for offered in listing.addresses if offered.address == address}
     if "windows" in sides:
         return True
     if "wsl" in sides and _can_bind(address):
         return True
-    return None if listing.windows_unreadable else False
+    return None if listing.listing_unreadable else False
 
 
-def _forwarder_address(lan: str | None, *, backend: str, in_wsl: bool) -> str | None:
+def _forwarder_address(
+    lan: str | None,
+    *,
+    backend: str,
+    in_wsl: bool,
+    listing: platform.LocalListing | None = None,
+    chosen: bool = False,
+) -> str | None:
     """The address a `netsh` portproxy forwards from for `lan`, or None if no rule is built (T674).
 
     Off WSL that is `lan` under the `netsh` backend: this Windows machine's own address. Under WSL
     the forwarder runs on Windows, and Windows can listen only on an address it holds, so the
     Windows side of the listing must name `lan`. A VM-side VPN address (the distro's own tailnet
     node) is not one, and a rule for it could never listen (round 3, item 1).
+
+    T784 (a): when the Windows list could not be read and `lan` is the detected address (`chosen`
+    False), the rule is built anyway, as it was before T674, and the warning says the list could
+    not be read. A chosen address is never built without the Windows list naming it. `listing` is
+    the WSL listing the caller read (T784 b); it is read here when none is passed.
     """
     if not lan:
         return None
     if not in_wsl:
         return lan if backend == "netsh" else None
+    if listing is None:
+        listing = platform.local_ipv4_listing(wsl=True)
+    if listing.listing_unreadable and not chosen:
+        return lan
     windows_lists = any(
-        offered.side == "windows" and offered.address == lan
-        for offered in platform.local_ipv4_listing(wsl=True).addresses
+        offered.side == "windows" and offered.address == lan for offered in listing.addresses
     )
     return lan if windows_lists else None
 
@@ -4025,9 +4046,24 @@ def plan(
     )
     on_steamos = steamos if steamos is not None else platform.is_steamos()
     in_wsl = wsl if wsl is not None else platform.in_wsl()
+    # The WSL listing is read at most once per plan (T784 b), and only when a question reaches it:
+    # the chosen address's guard and the portproxy forwarder ask the same listing.
+    read_listing: list[platform.LocalListing] = []
+
+    def wsl_listing() -> platform.LocalListing | None:
+        if not in_wsl:
+            return None
+        if not read_listing:
+            read_listing.append(platform.local_ipv4_listing(wsl=True))
+        return read_listing[0]
+
     chosen_refusal: str | None = None
     if chosen_address is not None:
-        guard = can_bind if can_bind is not None else (lambda ip: holds_here(ip, under_wsl=in_wsl))
+        guard = (
+            can_bind
+            if can_bind is not None
+            else (lambda ip: holds_here(ip, under_wsl=in_wsl, listing=wsl_listing()))
+        )
         lan, chosen_refusal = _chosen_for_the_realm(chosen_address, can_bind=guard)
     else:
         lan = lan_ip if lan_ip is not None else detect_lan()
@@ -4256,12 +4292,29 @@ def plan(
         if loopback:
             # A rule is built only for an address the forwarder can listen on, and the stopgap
             # sentence is printed only when one is (T674 round 3, item 1).
-            forward_from = _forwarder_address(lan, backend=backend, in_wsl=in_wsl)
+            listing = wsl_listing()
+            forward_from = _forwarder_address(
+                lan,
+                backend=backend,
+                in_wsl=in_wsl,
+                listing=listing,
+                chosen=chosen_address is not None,
+            )
+            # T784 (a): a rule for the detected address built without the Windows list says so.
+            unverified = (
+                listing is not None and listing.listing_unreadable and chosen_address is None
+            )
+            proxy_note = (
+                " (a WSL2 portproxy is added as a stopgap for the detected LAN address, "
+                "because the Windows address list could not be read)."
+                if unverified
+                else " (a WSL2 portproxy is added as a stopgap)."
+            )
             warnings.append(
                 f"ports {loopback} are published on 127.0.0.1, not 0.0.0.0 — other machines "
                 "cannot reach them. Fix the compose port bindings"
                 + (
-                    " (a WSL2 portproxy is added as a stopgap)."
+                    proxy_note
                     if forward_from is not None
                     else (
                         " On Docker Desktop for Mac a loopback binding you did not ask for "
