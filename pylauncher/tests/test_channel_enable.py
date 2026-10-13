@@ -14,6 +14,8 @@ start Phase 7 already proved, and there is nothing running to interrupt.
 
 from __future__ import annotations
 
+import errno
+import os
 from pathlib import Path
 
 import pytest
@@ -252,6 +254,49 @@ def test_a_second_press_does_not_overwrite_the_backup_of_the_original(
     assert (server_dir / OVERRIDE_FILE).read_text(encoding="utf-8") == original
 
 
+def _the_rename_onto(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+    """`os.replace` as a full disk refuses it: a rename onto `name` raises, every other is real.
+
+    A backup is written whole beside itself and renamed into place, so the rename is
+    the step a full disk or a crash lands on (T780).
+    """
+    real = os.replace
+
+    def refusing(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
+        if Path(dst).name == name:
+            raise OSError(errno.ENOSPC, "No space left on device")
+        real(src, dst)
+
+    monkeypatch.setattr(os, "replace", refusing)
+
+
+def test_a_backup_that_cannot_be_renamed_into_place_leaves_no_backup_and_changes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T780: the backup is renamed into place only once it is whole, or the press stops.
+
+    A rollback puts the backup back over the override. Written in place and cut short,
+    it would be a broken override that the next rollback restores, so a press whose
+    backup cannot be renamed into place writes nothing else, and leaves no backup or
+    temporary file behind.
+    """
+    server_dir = _installed(tmp_path)
+    override = server_dir / OVERRIDE_FILE
+    backup = override.with_name(override.name + setup.BACKUP_SUFFIX)
+    before = override.read_text(encoding="utf-8")
+    listing = sorted(p.name for p in server_dir.iterdir())
+    _the_rename_onto(monkeypatch, backup.name)
+
+    with pytest.raises(OSError, match="No space left"):
+        setup.enable(
+            WOTLK, server_dir, templates_root=resources.installers_dir(), world_running=False
+        )
+
+    assert not backup.exists()
+    assert override.read_text(encoding="utf-8") == before
+    assert sorted(p.name for p in server_dir.iterdir()) == listing, "a temp file was left"
+
+
 def test_a_start_failure_that_names_our_port_is_told_apart_from_one_that_does_not() -> None:
     """The predicate that decides whether a rollback is even relevant.
 
@@ -459,6 +504,34 @@ def test_the_conf_is_backed_up_once_by_the_first_press(tmp_path: Path) -> None:
 
     assert backup.read_text(encoding="utf-8") == CONF_BEFORE
     assert "SOAP.Enabled = 1" in conf.read_text(encoding="utf-8")
+
+
+def test_a_conf_backup_that_cannot_be_renamed_into_place_leaves_the_conf_as_it_was(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T780: the conf's copy is written whole or not at all, as the override's is.
+
+    It is the copy a rollback patches the SOAP keys back from. Refused at its rename,
+    the press stops before it touches the conf, and leaves no copy or temporary file.
+    """
+    server_dir = _cmangos_installed(tmp_path)
+    conf = _conf_of(server_dir)
+    backup = conf.with_name(conf.name + setup.BACKUP_SUFFIX)
+    listing = sorted(p.name for p in conf.parent.iterdir())
+    _the_rename_onto(monkeypatch, backup.name)
+
+    with pytest.raises(OSError, match="No space left"):
+        setup.enable(
+            TBC,
+            server_dir,
+            templates_root=resources.installers_dir(),
+            world_running=False,
+            db_password="pw",
+        )
+
+    assert not backup.exists()
+    assert conf.read_text(encoding="utf-8") == CONF_BEFORE
+    assert sorted(p.name for p in conf.parent.iterdir()) == listing, "a temp file was left"
 
 
 def test_the_rollback_gives_the_conf_back_as_well_as_the_port(tmp_path: Path) -> None:

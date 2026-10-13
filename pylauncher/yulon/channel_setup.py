@@ -433,7 +433,8 @@ def enable(
     # the channel's own configuration, and a rollback would then restore a file
     # with the channel still in it.
     if not backup.exists():
-        backup.write_text(before, encoding="utf-8", newline="\n")
+        # The compose files' own writer: whole or absent, never a cut-off copy (T780).
+        composegen._replace_whole(backup, before)
     # The claim is written even though it equals the compose default, because a
     # default cannot be given back: the base file publishes SOAP at
     # `127.0.0.1:7878` through `${DOCKER_SOAP_EXTERNAL_PORT:-127.0.0.1:7878}`,
@@ -498,7 +499,9 @@ def _write_the_conf(entry: CatalogEntry, server_dir: Path) -> bool:
     before = target.read_text(encoding="utf-8")
     backup = target.with_name(target.name + BACKUP_SUFFIX)
     if not backup.exists():
-        backup.write_text(before, encoding="utf-8", newline="\n")
+        # Owner-only, as the conf is: this copy holds the same database password, and it
+        # is renamed into place only once whole (T780).
+        platform.write_private_atomically(backup, before.encode("utf-8"))
     after = conf.patch(before, ConfPatch(keys=dict(operations.enable_conf.keys)), tokens={})
     if after == before:
         logger.info(f"{entry.id}'s channel keys were already in {target.name}")
