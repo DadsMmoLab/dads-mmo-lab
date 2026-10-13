@@ -705,7 +705,12 @@ install whose `.db_password` is gone has no knowable password: readers answer No
 CMaNGOS refusal applies. A database volume kept with no copy of its password (an install removed
 before T748) opens with `password`, and the reinstall writes that down, but only while the
 record has not got past `db-password`: a record that has is a new install whose own file went
-missing, and it gets the refusal. The compose text names
+missing, and it gets the refusal. Round 2 (cold review): only the install's own `run()` may
+mint (`resolve_secrets(mint=True)`); every other caller (Update, Rebuild, checks) recovers a
+missing `.db_password` from the `.env` `DB_ROOT_PASSWORD` line and writes it back, or refuses
+when neither is there. An old install's own `.env` value is read as compose reads it
+(unquoted), is left as written, and skips the compose-scalar check, since it reaches no
+compose, conf or SQL text. The compose text names
 `${DB_ROOT_PASSWORD:?…}` only, so an old folder's compose text changes when the app next renders
 it and its `.env` gains `DB_ROOT_PASSWORD=password`; its password does not change.
 

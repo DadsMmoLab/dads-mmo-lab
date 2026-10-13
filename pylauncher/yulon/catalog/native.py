@@ -8325,7 +8325,7 @@ class StagedInstaller:
             client_dir=opts.client_dir,
             state=state,
             cancel=cancel,
-            secrets=self.resolve_secrets(server_dir, state),
+            secrets=self.resolve_secrets(server_dir, state, mint=True),
             installing=True,
             first_install=opts.first_install,
         )
@@ -13699,7 +13699,14 @@ class StagedInstaller:
             return ask(server_dir)
         return composegen.install_id(server_dir, platform_id=self._seams.platform_id)
 
-    def resolve_secrets(self, server_dir: Path, state: InstallState | None = None) -> Secrets:
+    def resolve_secrets(
+        self,
+        server_dir: Path,
+        state: InstallState | None = None,
+        *,
+        mint: bool = False,
+        restore: bool = True,
+    ) -> Secrets:
         """The database password this install uses, decided before stage 1.
 
         `fixed` is the catalog value. `generated` reads the file a previous run
@@ -13707,7 +13714,12 @@ class StagedInstaller:
         no file, a folder that holds an install made before generated passwords
         keeps that install's `legacy_password()` (T748: WotLK's published
         `password`, or the `DB_ROOT_PASSWORD` its own `.env` sets); a fresh
-        folder mints `<prefix><16 hex>`. Persisting a minted value is the
+        folder mints `<prefix><16 hex>`, and only with `mint=True`, which only the
+        install's own `run()` passes. Every other caller is refused rather than handed a
+        value no database knows, after one recovery: a `.env` that still sets
+        `DB_ROOT_PASSWORD` holds the value `generate-compose` wrote from this file, so the
+        file is written back from it (`restore=False` reads it without writing, for a
+        check). T748 round 2. Persisting a minted value is the
         family's `db-password` stage (7.3), not this method's job, so a
         preflight refusal after this point leaves no secret on disk.
 
@@ -13748,6 +13760,21 @@ class StagedInstaller:
             # password it was made with, and nothing is minted for it.
             if plan.legacy is not None and self._made_before_generated(server_dir, state):
                 return Secrets(self._legacy_value(server_dir, plan.legacy))
+            recovered = composegen.dotenv_secret(server_dir, "DB_ROOT_PASSWORD")
+            if recovered:
+                # Round 2 (T748 review): `.env` holds the same value `generate-compose` wrote
+                # from this file, and it is the last copy the database's password has. Put the
+                # file back from it; never mint over it.
+                if restore:
+                    try:
+                        write_secret(path, recovered)
+                    except OSError as exc:
+                        raise InstallerError(
+                            f"{path} is gone and could not be written back ({exc}). "
+                            "Nothing was changed."
+                        ) from exc
+                    logger.info(f"{path} was gone; wrote it back from this install's .env")
+                return Secrets(recovered)
             kept = dbsecret.recall(self.entry.id, self._install_id(server_dir))
             if kept is not None:
                 logger.info(
@@ -13769,6 +13796,14 @@ class StagedInstaller:
                     "using the published one an install made before generated passwords had"
                 )
                 return Secrets(self._legacy_value(server_dir, plan.legacy))
+            if not mint:
+                # Only the install's own `run()` may make a password: anywhere else a fresh
+                # value would be handed to a database that was made with another (T748 round 2).
+                raise InstallerError(
+                    f"{path} is gone, and this install's database was made with the password "
+                    "that file held. Yu'lon has no other copy of it, so nothing was changed. "
+                    f"Put {plan.file} back from a backup of this server folder if you have one."
+                ) from None
             return Secrets(f"{plan.prefix}{token_hex(8)}")
         except OSError as exc:
             raise InstallerError(
@@ -13810,7 +13845,7 @@ class StagedInstaller:
     @staticmethod
     def _legacy_value(server_dir: Path, legacy: str) -> str:
         """An old folder's password: what its own `.env` sets, else the published `legacy`."""
-        return composegen.dotenv_value(server_dir, "DB_ROOT_PASSWORD") or legacy
+        return composegen.dotenv_secret(server_dir, "DB_ROOT_PASSWORD") or legacy
 
     def _kept_volume_exists(self, server_dir: Path) -> bool:
         """Whether this folder's database volume exists; False when Docker will not say.
@@ -15028,7 +15063,9 @@ class StagedInstaller:
         if label is None:
             label = self._bind_label(server_dir)
         try:
-            fresh = self._render_compose(server_dir, self.resolve_secrets(server_dir), label).base
+            fresh = self._render_compose(
+                server_dir, self.resolve_secrets(server_dir, restore=False), label
+            ).base
         except (composegen.ComposeGenError, InstallerError) as exc:
             return (
                 ComposeCheck(
@@ -15290,7 +15327,9 @@ class StagedInstaller:
         if label is None:
             label = self._bind_label(server_dir)
         try:
-            fresh = self._render_compose(server_dir, self.resolve_secrets(server_dir), label).base
+            fresh = self._render_compose(
+                server_dir, self.resolve_secrets(server_dir, restore=False), label
+            ).base
         except (composegen.ComposeGenError, InstallerError) as exc:
             return (
                 ComposeCheck(

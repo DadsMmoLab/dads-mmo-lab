@@ -638,8 +638,14 @@ def render(
             f"{entry.name} generates its database password per install, and none was given "
             "to render its compose files with."
         )
-    _refuse_unsafe(password, "the database root password")
     generated = plan.mode == "generated"
+    # A value this folder's `.env` already hands compose stays out of the compose text and is
+    # not rewritten (below), so compose has been reading it as written all along.
+    kept = generated and dotenv_secret(server_dir, "DB_ROOT_PASSWORD") == password
+    if not (kept and plan.legacy is not None):
+        # T748 round 2: the one exception is an install made before generated passwords
+        # (WotLK, Unbound) keeping its own `.env` value, which reaches no conf or SQL text.
+        _refuse_unsafe(password, "the database root password")
     template_names = ("base.yml.tmpl", "override.yml.tmpl", "build.yml.tmpl")
     texts = {name: _read_template(templates / name) for name in template_names}
     if generated:
@@ -749,7 +755,10 @@ def render(
             f"the time zone could not be written into the override: {exc}"
         ) from exc
     build = _fill_build(entry, texts["build.yml.tmpl"])
-    return ComposePlan(base, override, build, {"DB_ROOT_PASSWORD": password} if generated else {})
+    # A `.env` that already hands compose this password keeps its line as written: rewriting a
+    # quoted or commented value unquoted would change what compose reads (T748 round 2).
+    dotenv = {"DB_ROOT_PASSWORD": password} if generated and not kept else {}
+    return ComposePlan(base, override, build, dotenv)
 
 
 def render_build(entry: CatalogEntry, *, templates_root: Path) -> str:
@@ -2019,6 +2028,25 @@ def dotenv_value(server_dir: Path, key: str) -> str | None:
         if stripped[: split.start()].strip() == key:
             found = stripped[split.end() :].strip()
     return found
+
+
+def dotenv_secret(server_dir: Path, key: str) -> str | None:
+    """`dotenv_value()` unquoted the way compose-go reads it, for a value handed to mysql.
+
+    `"…"` loses its quotes and its `\\` `\"` escapes, `'…'` is taken literally inside its
+    quotes, and an unquoted value ends at a ` #` comment. `$` is left as written: Yu'lon never
+    writes one, and a reader that guessed compose's interpolation would guess wrong more often
+    than a user who typed one. T748 round 2: an old WotLK install's own `DB_ROOT_PASSWORD`.
+    """
+    raw = dotenv_value(server_dir, key)
+    if raw is None:
+        return None
+    if len(raw) >= 2 and raw[0] == raw[-1] == "'":
+        return raw[1:-1]
+    if len(raw) >= 2 and raw[0] == raw[-1] == '"':
+        return re.sub(r'\\(["\\])', r"\1", raw[1:-1])
+    comment = re.search(r"\s#", raw)
+    return raw[: comment.start()].rstrip() if comment else raw
 
 
 def write_dotenv(server_dir: Path, additions: Mapping[str, str]) -> Path:

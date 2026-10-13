@@ -1365,7 +1365,7 @@ def test_a_new_wotlk_folder_mints_its_password_and_an_old_one_keeps_the_publishe
     state = native.InstallState(
         game_id=ENTRY.id, install_id="x", family="azerothcore", db_password="generated"
     )
-    fresh = engine.resolve_secrets(new, state).db_password
+    fresh = engine.resolve_secrets(new, state, mint=True).db_password
     assert fresh.startswith("wotlk-") and len(fresh) == len("wotlk-") + 16, fresh
     old = tmp_path / "old"
     native.write_state(old, replace(state, db_password=""))
@@ -1379,7 +1379,7 @@ def test_a_generated_password_is_read_from_its_file_or_minted_with_the_prefix(
     plan = TBC.install.password
     assert plan.mode == "generated" and plan.file is not None
     installer = AzerothCoreInstaller(TBC, seams=Recorder().seams())
-    minted = installer.resolve_secrets(tmp_path).db_password
+    minted = installer.resolve_secrets(tmp_path, mint=True).db_password  # the install run
     assert minted.startswith(plan.prefix) and len(minted) == len(plan.prefix) + 16
     assert re.fullmatch(r"[0-9a-f]{16}", minted[len(plan.prefix) :])
     (tmp_path / plan.file).write_text("tbc-kept\n", encoding="utf-8")

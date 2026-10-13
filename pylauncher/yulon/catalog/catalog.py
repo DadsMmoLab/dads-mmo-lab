@@ -2012,7 +2012,7 @@ class Install(_Strict):
             return None
         from yulon.catalog import composegen  # noqa: PLC0415 - composegen imports this module
 
-        return composegen.dotenv_value(server_dir, "DB_ROOT_PASSWORD") or legacy
+        return composegen.dotenv_secret(server_dir, "DB_ROOT_PASSWORD") or legacy
 
     platforms: tuple[PlatformId, ...] = Field(
         default=("linux",),

@@ -238,7 +238,9 @@ def test_a_new_install_past_its_password_stage_never_falls_back_to_the_published
     rec = Recorder()
     rec.volumes.add(db_volume(server_dir))
     eng = engine(rec)
-    secret = eng.resolve_secrets(server_dir).db_password
+    with pytest.raises(native.InstallerError):
+        eng.resolve_secrets(server_dir)  # outside the install: refused, never minted
+    secret = eng.resolve_secrets(server_dir, mint=True).db_password  # the install's own run
     assert secret != DEFAULT_DB_ROOT_PASSWORD
     with pytest.raises(native.InstallerError):
         list(db_password_stage(eng).run(stage_context(server_dir, secret=secret)))
@@ -562,3 +564,98 @@ def test_the_support_redactor_masks_a_new_wotlk_password_it_was_never_told(prefi
     value = prefix + "0f1e2d3c4b5a6978"
     line = f"Cannot connect: ac-database;3306;root;{value};acore_auth and later {value}"
     assert value not in Redactor.build([]).redact(line)
+
+
+# -- round 2: no mint outside the install, recovery from .env (cold review 2026-10-13) ------
+
+
+def _update(rec: Recorder, server_dir: Path) -> list[str]:
+    """Update to latest's put-back of this app's own files: `_rewrite_what_we_own()`."""
+    from yulon.catalog.installer import InstallOptions
+
+    state = native.read_state(server_dir, valid=engine(rec).stage_names())
+    assert state is not None
+    options = InstallOptions(server_dir=server_dir)
+    return list(engine(rec)._rewrite_what_we_own(server_dir, options, state))
+
+
+def test_an_update_with_the_password_file_gone_restores_it_from_env(tmp_path: Path) -> None:
+    """The `.env` line is the last copy of the password the database was made with: an
+    Update writes `.db_password` back from it and never mints a new one over it."""
+    server_dir = tmp_path / "wow"
+    rec = Recorder(images=False)
+    install(rec, server_dir)
+    real = (server_dir / ".db_password").read_text(encoding="utf-8").strip()
+    (server_dir / ".db_password").unlink()
+    env_before = (server_dir / ".env").read_bytes()
+
+    _update(rec, server_dir)
+
+    assert (server_dir / ".db_password").read_text(encoding="utf-8") == real + "\n"
+    assert (server_dir / ".env").read_bytes() == env_before
+    if os.name == "posix":
+        assert stat.S_IMODE((server_dir / ".db_password").stat().st_mode) == 0o600
+
+
+def test_an_update_with_the_file_and_the_env_line_gone_is_refused_and_writes_nothing(
+    tmp_path: Path,
+) -> None:
+    server_dir = tmp_path / "wow"
+    rec = Recorder(images=False)
+    install(rec, server_dir)
+    (server_dir / ".db_password").unlink()
+    (server_dir / ".env").write_text("OTHER=1\n", encoding="utf-8")
+    compose_before = (server_dir / "docker-compose.yml").read_bytes()
+
+    with pytest.raises(native.InstallerError) as refusal:
+        _update(rec, server_dir)
+
+    assert ".db_password" in str(refusal.value)
+    assert "docker" not in str(refusal.value), "player words, no command"
+    assert not (server_dir / ".db_password").exists()
+    assert (server_dir / ".env").read_text(encoding="utf-8") == "OTHER=1\n"
+    assert (server_dir / "docker-compose.yml").read_bytes() == compose_before
+
+
+def test_no_caller_but_the_install_can_mint_a_password(tmp_path: Path) -> None:
+    """A new install's folder with neither the file nor the `.env` line: every reader outside
+    `run()` refuses instead of handing back a fresh value nobody's database knows."""
+    server_dir = tmp_path / "wow"
+    a_record(server_dir, generated=True)
+    with pytest.raises(native.InstallerError):
+        engine(Recorder()).resolve_secrets(server_dir)
+    assert not (server_dir / ".db_password").exists()
+
+
+@pytest.mark.parametrize(
+    ("line", "value"),
+    [
+        ('DB_ROOT_PASSWORD="my pass;word"', "my pass;word"),
+        ("DB_ROOT_PASSWORD='it''s{x}'", "it''s{x}"),
+        ("DB_ROOT_PASSWORD=pa$s#1 # my note", "pa$s#1"),
+    ],
+    ids=["double-quoted", "single-quoted", "dollar-and-hash"],
+)
+def test_an_old_installs_own_env_password_is_read_as_compose_reads_it(
+    tmp_path: Path, line: str, value: str
+) -> None:
+    """Round 2 (T748 review): an old install's own `DB_ROOT_PASSWORD` only goes into `.env`,
+    never compose text, so an Update renders whatever it holds, leaves the line as written,
+    and every reader gets it unquoted, as compose hands it to the database."""
+    server_dir = tmp_path / "wow"
+    rec = Recorder(images=False)
+    install(rec, server_dir)
+    record = json.loads((server_dir / native.STATE_FILE).read_text(encoding="utf-8"))
+    record.pop("db_password")
+    (server_dir / native.STATE_FILE).write_text(json.dumps(record), encoding="utf-8")
+    (server_dir / ".db_password").unlink()
+    (server_dir / ".env").write_text(f"OTHER=1\n{line}\n", encoding="utf-8")
+    env_before = (server_dir / ".env").read_bytes()
+
+    _update(rec, server_dir)
+
+    assert (server_dir / ".env").read_bytes() == env_before
+    assert not (server_dir / ".db_password").exists()
+    assert load_catalog().get("wow-wotlk").install.db_password(server_dir) == value
+    assert engine(rec).resolve_secrets(server_dir).db_password == value
+    assert value not in (server_dir / "docker-compose.yml").read_text(encoding="utf-8")
