@@ -6475,44 +6475,51 @@ def write_private_atomically(path: Path, data: bytes) -> None:
     write WIDENED a 0600 `.env` to world-readable. Measured on yulon-ubuntu:
     `~/t120`'s `.env` was 0664.
 
-    The temp file is created 0600 by `os.open(O_CREAT | O_EXCL)`, so it is
-    private from the first byte. It then takes the old file's mode only where
+    The temp file is created 0600 by `tempfile.mkstemp()`, so it is private from
+    the first byte. It then takes the old file's mode only where
     that is at least as strict (`old & 0o600`): a 0400 file stays 0400, and a
     0664 one comes back 0600. On Windows the mode is not enforced (see
     `families.conf._write`), so this is a POSIX guarantee.
 
     The bytes are synced before the rename and the folder after it (T790), so a
     power cut leaves the new file or the old one, never an empty file where the
-    old one was. The folder sync is best effort, as `composegen._replace_whole`'s is.
+    old one was. The folder sync is `fsync_folder()`, best effort, as the compose
+    writer's is.
+
+    The temp is this call's own (T791): a name `tempfile.mkstemp` makes beside
+    `path`, never a fixed `<name>.yulon-new` that a second writer of the same file
+    would share. Any failure removes it, not only an `OSError`, because it holds
+    the file's bytes -- the database password -- and must not stay beside `path`.
     """
     try:
         old = path.stat().st_mode & 0o777
     except FileNotFoundError:
         old = None
     mode = PRIVATE_MODE if old is None else old & PRIVATE_MODE
-    tmp = path.with_name(path.name + ".yulon-new")
-    tmp.unlink(missing_ok=True)
+    fd, name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.yulon-tmp-")
+    tmp = Path(name)
     try:
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, PRIVATE_MODE)
         with os.fdopen(fd, "wb") as handle:
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
         os.chmod(tmp, mode)
         os.replace(tmp, path)  # atomic on POSIX and on Windows
-    except OSError:
+    except BaseException:
         tmp.unlink(missing_ok=True)
         raise
-    _fsync_folder(path.parent)
+    fsync_folder(path.parent)
 
 
-def _fsync_folder(folder: Path) -> None:
-    """Make the rename into `folder` survive a power cut, where POSIX lets this app ask.
+def fsync_folder(folder: Path) -> None:
+    """Make a rename into `folder` survive a power cut, where POSIX lets this app ask.
 
     A rename is an entry in its folder, and after a power cut the old file can come
     back until the folder itself is synced. Windows cannot open a folder and is not
     asked. This runs after the rename, so a refusal is a warning: the new file is
-    already in place, and reporting the write as failed would be untrue.
+    already in place, and reporting the write as failed would be untrue. The one
+    folder sync for the private-file writer, the conf writer and the compose writer
+    (T791).
     """
     if os.name == "nt":
         return
@@ -6523,4 +6530,4 @@ def _fsync_folder(folder: Path) -> None:
         finally:
             os.close(fd)
     except OSError as exc:
-        logger.warning(f"could not fsync {folder} after writing a private file in it: {exc}")
+        logger.warning(f"could not fsync {folder} after a rename into it: {exc}")

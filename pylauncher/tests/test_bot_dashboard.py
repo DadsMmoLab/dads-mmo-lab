@@ -964,7 +964,7 @@ def test_the_private_writer_never_widens_and_keeps_a_stricter_mode(tmp_path: Pat
         os.umask(old)
     assert stat.S_IMODE(new.stat().st_mode) == 0o600
     assert stat.S_IMODE(strict.stat().st_mode) == 0o400 and strict.read_bytes() == b"A=2\n"
-    assert not list(tmp_path.glob("*.yulon-new"))
+    assert not list(tmp_path.glob("*.yulon-tmp-*"))
 
 
 def _on(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, _Docker, botdash.Dashboard]:

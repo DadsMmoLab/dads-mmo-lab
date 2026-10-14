@@ -565,11 +565,8 @@ def _the_disk_fills_half_way_on(monkeypatch: pytest.MonkeyPatch, live: Path) -> 
     real_os_write, real_os_close = os.write, os.close
 
     def watched(name: str) -> bool:
-        return (
-            name == live.name
-            or name == f"{live.name}.yulon-new"
-            or name.startswith(f".{live.name}{COMPOSE_TEMP_PREFIX}")
-        )
+        # The conf writer's temp is `.<name>.yulon-tmp-*` too (T791), as the compose writer's is.
+        return name == live.name or name.startswith(f".{live.name}{COMPOSE_TEMP_PREFIX}")
 
     def full_disk() -> OSError:
         return OSError(errno.ENOSPC, "No space left on device")

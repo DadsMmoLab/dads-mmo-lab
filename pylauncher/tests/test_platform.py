@@ -2087,3 +2087,130 @@ def test_a_folder_refusing_its_sync_after_the_rename_does_not_fail_the_write(
 
     assert target.read_bytes() == b"NEW=2\n"
     assert len(folder_syncs) == 1
+
+
+# -- write_private_atomically(): a temp of its own (T791) ----------------
+
+
+class _OsWithTurns:
+    """`platform`'s `os` for a two-writer test: each rename waits for its turn (T163's shape).
+
+    Every writer has written its temp before any rename lands, and the renames then
+    land one after another in `order`. Everything but `replace` is the real `os`.
+    """
+
+    def __init__(self, order: list[str], published: dict[str, bytes], path: Path) -> None:
+        self.order = order
+        self.published = published
+        self.path = path
+        self.arrived = threading.Barrier(len(order), timeout=10)
+        self.turn = threading.Condition()
+        self.next = 0
+        self.name = os.name
+
+    def replace(self, src: object, dst: object) -> None:
+        me = threading.current_thread().name
+        self.arrived.wait()
+        with self.turn:
+            assert self.turn.wait_for(lambda: self.order[self.next] == me, timeout=10)
+            try:
+                os.replace(src, dst)  # type: ignore[arg-type]
+                self.published[me] = self.path.read_bytes()
+            finally:
+                self.next += 1
+                self.turn.notify_all()
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(os, name)
+
+
+def test_two_writers_of_one_private_file_each_publish_their_own_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T791: a fixed temp name let one writer's clean-up or create take another's temp.
+
+    Both temps are written before either rename lands (A's first). With the one name
+    `<name>.yulon-new`, B's clean-up removed A's temp and made its own under the same
+    name, so A's rename published B's bytes, or failed on a temp that was gone. Each
+    writer's own temp is renamed over the file, and the file ends as one writer's bytes.
+    """
+    target = tmp_path / ".env"
+    target.write_bytes(b"OLD=1\n")
+    texts = {"A": b"A=1\n" * 500, "B": b"B=2\n" * 700}
+    published: dict[str, bytes] = {}
+    monkeypatch.setattr(platform, "os", _OsWithTurns(["A", "B"], published, target))
+    raised: dict[str, BaseException] = {}
+
+    def write(name: str) -> None:
+        try:
+            platform.write_private_atomically(target, texts[name])
+        except BaseException as exc:  # noqa: BLE001 - recorded and asserted on below
+            raised[name] = exc
+
+    writers = [threading.Thread(target=write, args=(n,), name=n) for n in ("A", "B")]
+    for writer in writers:
+        writer.start()
+    for writer in writers:
+        writer.join(timeout=20)
+
+    assert raised == {}, f"a writer failed: {raised}"
+    assert published.get("A") == texts["A"], "A's rename published another file"
+    assert published.get("B") == texts["B"], "B's rename published another file"
+    assert target.read_bytes() in texts.values()
+    assert sorted(p.name for p in tmp_path.iterdir()) == [".env"]
+
+
+def test_a_file_already_named_like_the_old_temp_is_left_alone(tmp_path: Path) -> None:
+    """T791: a file that only has the old temp name is never written through or deleted."""
+    target = tmp_path / ".env"
+    target.write_bytes(b"OLD=1\n")
+    stale = tmp_path / ".env.yulon-new"
+    stale.write_bytes(b"an older attempt's temp\n")
+
+    platform.write_private_atomically(target, b"NEW=2\n")
+
+    assert target.read_bytes() == b"NEW=2\n"
+    assert stale.read_bytes() == b"an older attempt's temp\n"
+
+
+def test_an_unexpected_failure_while_writing_a_private_file_leaves_no_temporary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T791: the temp goes on every failure, not only an `OSError` (it holds the password).
+
+    The clean-up caught `OSError` only, so an unexpected error in the middle of the
+    write left a copy of `.env`, with the database root password in it, beside it.
+    """
+    target = tmp_path / ".env"
+    target.write_bytes(b"OLD=1\n")
+
+    def unexpected(fd: int) -> None:
+        raise RuntimeError("an unexpected failure")
+
+    monkeypatch.setattr(os, "fsync", unexpected)
+
+    with pytest.raises(RuntimeError, match="an unexpected failure"):
+        platform.write_private_atomically(target, b"NEW=2\n")
+
+    assert target.read_bytes() == b"OLD=1\n"
+    assert sorted(p.name for p in tmp_path.iterdir()) == [".env"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the POSIX mode is a no-op on Windows")
+def test_a_private_file_keeps_a_stricter_mode_and_a_wider_one_comes_back_owner_only(
+    tmp_path: Path,
+) -> None:
+    """T791: the temp is created owner-only and given the old mode only where that is stricter."""
+    wide = tmp_path / ".env"
+    wide.write_bytes(b"A=0\n")
+    wide.chmod(0o664)
+    strict = tmp_path / "strict.env"
+    strict.write_bytes(b"A=0\n")
+    strict.chmod(0o400)
+
+    platform.write_private_atomically(wide, b"A=1\n")
+    platform.write_private_atomically(strict, b"A=2\n")
+
+    assert stat.S_IMODE(wide.stat().st_mode) == 0o600
+    assert stat.S_IMODE(strict.stat().st_mode) == 0o400
+    assert wide.read_bytes() == b"A=1\n" and strict.read_bytes() == b"A=2\n"

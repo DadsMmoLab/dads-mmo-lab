@@ -832,7 +832,8 @@ def test_the_folder_is_fsynced_after_the_rename_on_posix(
     """Codex round 3: the rename is durable only once the directory entry is on disk."""
     path = tmp_path / composegen.BASE_FILE
     spy = _OsWithTurns(["MainThread"], {}, path)
-    monkeypatch.setattr(composegen, "os", spy)
+    # T791: the folder sync is `platform.fsync_folder()`, the one shared helper.
+    monkeypatch.setattr(platform, "os", spy)
     composegen._replace_whole(path, "services: {}\n")
     assert spy.dir_fsyncs == [str(tmp_path)]
 
@@ -844,7 +845,7 @@ def test_on_windows_the_folder_is_not_opened_to_be_fsynced(
     path = tmp_path / composegen.BASE_FILE
     spy = _OsWithTurns(["MainThread"], {}, path)
     spy.name = "nt"
-    monkeypatch.setattr(composegen, "os", spy)
+    monkeypatch.setattr(platform, "os", spy)
     composegen._replace_whole(path, "services: {}\n")
     assert path.read_text(encoding="utf-8") == "services: {}\n"
     assert spy.dir_fsyncs == []
