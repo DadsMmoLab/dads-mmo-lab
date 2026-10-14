@@ -1443,7 +1443,7 @@ def test_pin_project_name_never_truncates_the_env_on_a_write_failure(
     monkeypatch.setattr(docker.platform.os, "fdopen", boom)
     assert docker.pin_project_name(tmp_path) is None
     assert env.read_text(encoding="utf-8") == "DB_ROOT_PASSWORD=hunter2\n"
-    assert not list(tmp_path.glob("*.yulon-new")), "the temp file is cleaned up"
+    assert not list(tmp_path.glob("*.yulon-tmp-*")), "the temp file is cleaned up"
 
 
 def test_pin_project_name_leaves_non_utf8_bytes_alone(

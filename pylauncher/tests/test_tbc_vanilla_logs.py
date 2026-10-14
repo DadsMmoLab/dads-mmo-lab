@@ -272,6 +272,7 @@ def test_the_repair_sets_the_one_key_binds_the_folder_and_backs_the_confs_up(
     assert sorted(done.confs) == sorted(b for p in paths.values() for b in conf_backups(p))
     assert route.check().state == "current"
     assert not list(server_dir.rglob("*.yulon-new")), "a temp file was left behind"
+    assert not list(server_dir.rglob("*.yulon-tmp-*")), "a conf's temp file was left behind"
 
 
 def test_a_crlf_conf_keeps_its_endings(tmp_path: Path) -> None:

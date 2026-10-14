@@ -62,10 +62,12 @@ import os
 import re
 import shutil
 import stat
+import tempfile
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Protocol
 
+from yulon import platform
 from yulon.catalog.catalog import ConfPatch, ConfPatchTable
 from yulon.catalog.composegen import ComposeGenError, fill
 from yulon.catalog.installer import InstallerError
@@ -110,8 +112,12 @@ different volume from `%TEMP%`. Named with a leading dot and the app's own name 
 interrupted run leaves something a person can recognise and delete.
 """
 
-_TEMP_SUFFIX = ".yulon-new"
-"""Suffix of the file `_write` renames over a conf, so a conf is never half-written."""
+_TEMP_PREFIX = ".yulon-tmp-"
+"""Fragment of the temp file name `_write` makes beside a conf: `.<name>.yulon-tmp-XXXXXXXX` (T791).
+
+One name per write, from `tempfile.mkstemp`, never a fixed one: with one name two
+writers of the same conf shared a temp, and each one's open file was the other's.
+"""
 
 
 def template_of(name: str, patch: ConfPatch) -> str:
@@ -496,6 +502,10 @@ def _write(path: Path, text: str, *, mode: int = CONF_MODE) -> None:
     server reads the surviving half, silently takes defaults for everything past the cut,
     and boots looking healthy.
 
+    The temp is this write's own (`_TEMP_PREFIX`, from `mkstemp`, T791), and its bytes are
+    synced before the rename and the folder after it (T790), so a power cut leaves the old
+    conf or the new one, never an empty file where the old one was.
+
     The rename is within `path`'s own directory so it is atomic, and the mode is asked
     for at CREATION rather than set afterwards. `newline=""` for the same reason `_read`
     has it: text mode on Windows would turn every `\\n` into `\\r\\n` and convert an LF
@@ -541,13 +551,18 @@ def _write(path: Path, text: str, *, mode: int = CONF_MODE) -> None:
     line above. Reporting one of those as "the conf could not be written" would dress a
     seam bug up as a bad file, which is the mistake this project is briefed against.
     """
-    tmp = path.with_name(f"{path.name}{_TEMP_SUFFIX}")
+    tmp: Path | None = None
     try:
-        # `os.open` with the mode, not `open()` then `chmod`: on POSIX the latter
-        # leaves the password at the umask default until the chmod lands.
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, CONF_MODE)
+        # A temp of this write's own, created owner-only by `mkstemp`: the mode is
+        # set in the creating syscall, never by `open()` then `chmod`, which leaves
+        # the password at the umask default until the chmod lands.
+        fd, name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}{_TEMP_PREFIX}")
+        tmp = Path(name)
         with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
             fh.write(text)
+            fh.flush()
+            # The new bytes are on disk before the rename can make them the conf (T790's rule).
+            os.fsync(fh.fileno())
         if mode != CONF_MODE:
             # `replace_file`'s kept mode, set only once the text is whole: the
             # file had that mode before, so nothing is widened past it. Always
@@ -561,8 +576,12 @@ def _write(path: Path, text: str, *, mode: int = CONF_MODE) -> None:
             f"{path} could not be written ({exc}), so it was left as it was."
         ) from exc
     finally:
-        if tmp.exists():
+        # Every failure, not only the ones above: the temp holds the conf's bytes.
+        if tmp is not None and tmp.exists():
             try:
                 tmp.unlink()
             except OSError as exc:  # pragma: no cover - a stray temp file is not fatal
                 logger.warning(f"could not remove {tmp}: {exc}")
+    # The folder after the rename, so the new entry survives a power cut (T790's rule).
+    # A refusal is logged by `platform.fsync_folder`, not raised: the conf is in place.
+    platform.fsync_folder(path.parent)

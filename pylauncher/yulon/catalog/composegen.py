@@ -1905,7 +1905,7 @@ def _replace_whole(path: Path, text: str) -> None:
             pass
         temp.unlink(missing_ok=True)
         raise
-    _fsync_folder(path.parent)
+    platform.fsync_folder(path.parent)
 
 
 REPLACE_BACKOFF = (0.05, 0.1, 0.2, 0.4)
@@ -1955,25 +1955,6 @@ def _replace_when_free(temp: Path, path: Path) -> None:
                     f"Close that program and press again. ({exc})"
                 ) from exc
             _sleep(wait)
-
-
-def _fsync_folder(folder: Path) -> None:
-    """Put the folder's entries on disk: the rename above is not durable until they are.
-
-    POSIX only; Windows cannot open a directory. After the rename, so a
-    failure here is a warning and not a raise: the new file is already in
-    place, and reporting the write as failed would be untrue.
-    """
-    if os.name == "nt":
-        return
-    try:
-        fd = os.open(folder, os.O_RDONLY)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-    except OSError as exc:
-        logger.warning(f"could not fsync {folder} after replacing a compose file in it: {exc}")
 
 
 def merge_dotenv(existing: str, additions: Mapping[str, str]) -> str:
