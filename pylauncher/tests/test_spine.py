@@ -2709,7 +2709,7 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "- so an unreadable folder is treated as occupied rather than empty: a false refusal "
         "costs a message, a false pass costs a build that dies at the linker an hour in"
     ),
-    ("party.py", "deploy"): (
+    ("party.py", "_bundle"): (
         "lists the app's OWN bundled `lua/` tree to find the bridge families in it, not "
         "anything of the user's, and the folder it goes on to write is created by the same "
         "call - so no emptiness verdict about somebody's directory is reached. Its OSError is "

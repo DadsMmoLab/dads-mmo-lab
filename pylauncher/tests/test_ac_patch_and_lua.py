@@ -341,6 +341,33 @@ def test_the_lua_lands_before_the_world_first_starts(tmp_path: Path, installers:
     assert f"Laid {LAID}." in said, said
 
 
+def test_the_install_lays_my_partys_bridge_where_the_engine_is_cloned(
+    tmp_path: Path, installers: Path
+) -> None:
+    """T792: WoW Unbound builds `modules/mod-ale` in, and its install is the only press that
+    would put the bridge scripts beside it before the first start."""
+    from yulon import party
+
+    rec = Recorder(images=False)
+    server_dir = tmp_path / "server"
+    laying = lay_tree(server_dir)
+
+    def clone(dest: Path) -> None:
+        laying(dest)
+        if dest == server_dir:
+            (server_dir / "modules" / "mod-ale").mkdir(parents=True, exist_ok=True)
+
+    rec.on_clone = clone
+    rec.query_answer = "1\n"
+    made = make(scratch_entry(**FULL), rec, installers)
+
+    said = list(made.run(InstallOptions(server_dir=server_dir)))
+
+    laid = sorted(p.name for p in party.dest_dir(server_dir).glob("dml_*.lua"))
+    assert laid == sorted(party.BRIDGE_SCRIPTS), said
+    assert marker_index(said, "lua-and-sql") < marker_index(said, "up")
+
+
 def test_the_sql_check_is_asked_of_the_world_schema_read_only(
     tmp_path: Path, installers: Path
 ) -> None:

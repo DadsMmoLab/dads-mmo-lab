@@ -13,11 +13,16 @@ as "a bot arrived", which is what "My Party works" used to mean (2026-08-20).
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from PySide6.QtCore import Qt
 
 from yulon import party
 from yulon.ui.widgets.job import run_inline
 from yulon.ui.widgets.party_panel import (
+    DEPLOY_IDLE,
+    DEPLOYED_CHANGED,
+    DEPLOYED_UNCHANGED,
     DISMISS_ALL_CANCELLED,
     DISMISS_ALL_IDLE,
     DISMISS_ALL_MOVED,
@@ -60,7 +65,10 @@ class _StubParty:
         named: party.NamedAddition | None = None,
         plan: party.AccountLink | None = None,
         link: party.AccountLink | None = None,
+        deploy: party.Deployment | BaseException | None = None,
     ) -> None:
+        self.deploy = deploy or party.Deployment(True, ("dml_botadd.lua",))
+        self.deploys = 0
         self.state_result = state or party.PartyState(True, "", READY_CHECKS)
         self.addition = addition or party.Addition(
             True, True, "Jilsur", True, True, "Jilsur joined the party, geared and specced."
@@ -90,6 +98,18 @@ class _StubParty:
     def state(self, master: str) -> party.PartyState:
         self.asked.append(master)
         return self.state_result
+
+    def deploy_bridge(self) -> party.Deployment:
+        self.deploys += 1
+        if isinstance(self.deploy, BaseException):
+            raise self.deploy
+        # Copying the scripts mends the first blocker, as the real seam's next reading would.
+        self.state_result = party.PartyState(
+            False,
+            "the server could not be asked whether the bridge is there.",
+            (party.Precondition("deployed", True, ""),),
+        )
+        return self.deploy
 
     def specs(self, klass: str) -> tuple[str, ...]:
         return self.spec_lists.get(klass, ())
@@ -1133,3 +1153,128 @@ def test_the_cap_line_is_the_seams_sentence_and_not_the_panels_arithmetic(
     panel.show_candidates()
 
     assert panel.candidate_note.text() == note
+
+
+# -- T792: Set up My Party --------------------------------------------------
+
+NOT_DEPLOYED = "the bridge scripts are not in the server folder yet."
+
+
+def _undeployed() -> party.PartyState:
+    checks = (
+        party.Precondition("engine_cloned", True, ""),
+        party.Precondition("deployed", False, NOT_DEPLOYED),
+    )
+    return party.PartyState(False, NOT_DEPLOYED, checks, deploy_blocked=True)
+
+
+def test_set_up_my_party_is_offered_only_while_the_scripts_are_what_stops_it(
+    qapp: object,
+) -> None:
+    other = party.PartyState(
+        False, "the world server is not running.", (party.Precondition("world_running", False, ""),)
+    )
+    stub = _StubParty(state=other)
+    panel = _panel(stub)
+    panel.character.setText("Pakka")
+    assert panel.deploy_button.isHidden(), "hidden before any reading"
+    assert panel.deploy_button.text() == DEPLOY_IDLE
+
+    panel.refresh_party()
+    assert panel.deploy_button.isHidden(), "no cure for a stopped world"
+
+    stub.state_result = _undeployed()
+    panel.refresh_party()
+    assert not panel.deploy_button.isHidden()
+
+    stub.state_result = party.PartyState(True, "", READY_CHECKS)
+    panel.refresh_party()
+    assert panel.deploy_button.isHidden(), "gone once nothing stops My Party"
+
+
+def test_pressing_it_deploys_says_a_restart_is_owed_and_reads_the_checks_again(
+    qapp: object,
+) -> None:
+    stub = _StubParty(state=_undeployed())
+    panel = _panel(stub)
+    panel.character.setText("Pakka")
+    panel.refresh_party()
+    reads = len(stub.asked)
+
+    panel.deploy_button.click()
+
+    assert stub.deploys == 1
+    assert panel.report.text() == DEPLOYED_CHANGED
+    assert "restart" in panel.report.text().lower()
+    assert len(stub.asked) == reads + 1, "the preconditions were read again"
+    assert panel.deploy_button.isHidden(), "the new reading no longer blames the scripts"
+    assert panel.summary.text() == "the server could not be asked whether the bridge is there."
+
+
+def test_pressing_it_needs_no_character(qapp: object) -> None:
+    stub = _StubParty(state=_undeployed())
+    panel = _panel(stub)
+
+    panel.deploy_bridge()
+
+    assert stub.deploys == 1
+    assert panel.report.text() == DEPLOYED_CHANGED
+
+
+def test_a_deploy_that_changed_nothing_says_so(qapp: object) -> None:
+    stub = _StubParty(state=_undeployed(), deploy=party.Deployment(False, ("dml_botadd.lua",)))
+    panel = _panel(stub)
+    panel.character.setText("Pakka")
+
+    panel.deploy_bridge()
+
+    assert panel.report.text() == DEPLOYED_UNCHANGED
+
+
+def test_nothing_to_deploy_is_shown_in_the_apps_own_wording(qapp: object) -> None:
+    refusal = party.NothingToDeploy(party._nothing(Path("/bundle/lua")))
+    stub = _StubParty(state=_undeployed(), deploy=refusal)
+    panel = _panel(stub)
+    panel.character.setText("Pakka")
+
+    panel.deploy_bridge()
+
+    assert panel.report.text() == str(refusal)
+    assert "no bridge scripts were found" in panel.report.text()
+    assert len(stub.asked) == 0, "a failed deploy is not followed by a read"
+    assert panel.deploy_button.isEnabled(), "and the panel is usable again"
+
+
+def test_a_second_press_is_refused_while_the_deploy_is_in_flight(qapp: object) -> None:
+    jobs: list[object] = []
+
+    def held(work: object, on_done: object, on_failed: object) -> None:
+        jobs.append(work)
+
+    stub = _StubParty(state=_undeployed())
+    panel = PartyPanel(stub, jobs=held, read_now=False)  # type: ignore[arg-type]
+
+    panel.deploy_bridge()
+    panel.deploy_bridge()
+
+    assert len(jobs) == 1
+    assert not panel.deploy_button.isEnabled()
+
+
+def test_a_script_the_player_changed_is_named_beside_the_deploy_line(qapp: object) -> None:
+    stub = _StubParty(
+        state=_undeployed(),
+        deploy=party.Deployment(False, ("dml_a.lua", "dml_b.lua"), ("dml_a.lua",)),
+    )
+    panel = _panel(stub)
+
+    panel.deploy_bridge()
+
+    assert panel.report.text().startswith(DEPLOYED_UNCHANGED)
+    assert "dml_a.lua was changed on this machine" in panel.report.text()
+
+
+def test_the_deploy_line_says_how_the_engine_loads_the_scripts(qapp: object) -> None:
+    for line in (DEPLOYED_CHANGED, DEPLOYED_UNCHANGED):
+        assert "restarts" in line and ".reload ale" in line
+        assert "needed" not in line

@@ -32,7 +32,15 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import ClassVar
 
-from yulon import ale_playerbots, city_bots_guard, docker, git, networking, server_build_presses
+from yulon import (
+    ale_playerbots,
+    city_bots_guard,
+    docker,
+    git,
+    networking,
+    party,
+    server_build_presses,
+)
 from yulon.catalog import snapshot
 from yulon.catalog.catalog import AzerothCoreData, CatalogEntry, EmulatorSource
 from yulon.catalog.families import carried, scriptdeploy
@@ -561,6 +569,7 @@ class AzerothCoreInstaller(StagedInstaller):
                 self.entry.name,
             )
         yield from scriptdeploy.lay(ctx.server_dir, block.lua_scripts)
+        yield from self.lay_party_bridge(ctx.server_dir)
 
     def _carried(self, server_dir: Path, *, quiet: bool) -> Iterator[str]:
         """Write the carried patches; what an update and a rebuild need before the compile."""
@@ -623,9 +632,14 @@ class AzerothCoreInstaller(StagedInstaller):
         """Does this install have Lua scripts to lay, or lay again, or remove (T562)?
 
         True for an entry with `lua_scripts`, and for one that dropped them while the
-        record of what an earlier press laid is still there.
+        record of what an earlier press laid is still there. Also for a server with the Lua
+        engine cloned (T792): My Party's bridge scripts are laid in the same window.
         """
-        return bool(self._block().lua_scripts) or scriptdeploy.record_path(server_dir).exists()
+        return (
+            bool(self._block().lua_scripts)
+            or scriptdeploy.record_path(server_dir).exists()
+            or party.engine_cloned(server_dir)
+        )
 
     def lay_scripts(self, server_dir: Path, *, quiet: bool) -> Iterator[str]:
         """Lay the entry's Lua scripts from the checkout as it stands now (T562).
@@ -636,6 +650,25 @@ class AzerothCoreInstaller(StagedInstaller):
         the old binary. A rollback calls this again from the put-back sources.
         """
         yield from scriptdeploy.lay(server_dir, self._block().lua_scripts, quiet=quiet)
+
+    def lay_party_bridge(self, server_dir: Path) -> Iterator[str]:
+        """My Party's bridge scripts, for a server that has `modules/mod-ale` (T792).
+
+        WotLK gets the engine from the Modules tab and WoW Unbound builds it in; both read the
+        same script folder, so one call serves both. A rebuild, an update and a return reach it
+        through `stage_recreate()`, the fresh install through `_lua_and_sql()`. A failure is a
+        line and the press goes on: `party.lay_bridge()` does not raise.
+        """
+        laid = party.lay_bridge(server_dir)
+        if isinstance(laid, str):
+            yield laid
+            return
+        if laid is None:
+            return
+        if laid.changed:
+            yield "My Party's bridge scripts are in the server folder."
+        if laid.kept:
+            yield party.kept_sentence(laid.kept)
 
     def imports_with_the_servers_down(self) -> bool:
         """True for an entry whose databases are imported by a compose one-shot (T706)."""

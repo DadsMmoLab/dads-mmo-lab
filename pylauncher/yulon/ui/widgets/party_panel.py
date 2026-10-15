@@ -27,12 +27,19 @@ Left out deliberately, each with the seam gap that decides it:
   sentence. T26 added a picker of a different kind beside it -- the characters
   this server would let that master ADD (`InstallParty.candidates`) -- which is
   a list of other people's characters and not a list of the master's own.
-* **No "Enable My Party" / bridge deploy button.** `party.deploy()` exists and
-  `InstallParty` does not expose it, so there is nothing to press through this
-  seam. The panel shows WHICH precondition is unmet instead, which is the half
-  that tells a person what to do -- and the prior art's own note is that a deploy
-  button is how this feature last reported success for a no-op
-  (`rust-main:crates/dml-wow/src/bridge.rs:56-70`).
+* **A bridge deploy button, added by T792 (2026-10-15).** This entry used to say there was
+  none, because `party.deploy()` was not on the seam and the prior art's own note is that a
+  deploy button is how this feature last reported success for a no-op
+  (`rust-main:crates/dml-wow/src/bridge.rs:56-70`). Both halves of that reason are gone:
+  `deploy()` raises `NothingToDeploy` rather than report an empty copy, and the seam has
+  `deploy_bridge()`. It was needed because nothing else put the scripts in the server
+  folder: every player's panel stopped at "the bridge scripts are not in the server folder
+  yet." The Lua engine's install and every rebuild now lay them on their own, and
+  **Set up My Party** does it on demand. It is shown only while that is the first unmet
+  precondition (`PartyState.deploy_blocked`), says a world restart (or a reload in the game)
+  loads them when anything was copied, and reads the preconditions again; it is no cure for
+  a stopped world or an engine that is not built in, and it is not shown for those. A script
+  the player changed is left alone and named.
 * **No presets.** `party.py` has no preset store and the prior art's is a
   directory of files under `~/.dml` (`90-main.sh:4152-4230`), which is a feature
   rather than a control.
@@ -87,6 +94,7 @@ from PySide6.QtWidgets import (
 
 from yulon import party
 from yulon.log import get_logger
+from yulon.said import SaidByYulon
 from yulon.ui.widgets.job import JobRunner
 
 logger = get_logger(__name__)
@@ -149,6 +157,25 @@ class PartySeam(Protocol):
 
     def link_account(self, master: str, account: str) -> party.AccountLink: ...
 
+    def deploy_bridge(self) -> party.Deployment: ...
+
+
+DEPLOY_IDLE = "Set up My Party"
+"""The button that puts the bridge scripts into the server folder (T792). Shown only while
+the first unmet precondition is the scripts being missing or partly there."""
+
+DEPLOYING = "Putting the bridge scripts into the server folder."
+
+DEPLOYED_CHANGED = (
+    "The bridge scripts are in the server folder. The Lua engine loads them when the world "
+    "server restarts, or on .reload ale in the game. The checks below show what is left."
+)
+
+DEPLOYED_UNCHANGED = (
+    "The bridge scripts were already in the server folder, so nothing was copied. If My Party "
+    "still does not answer, the Lua engine loads them when the world server restarts, or on "
+    ".reload ale in the game."
+)
 
 DISMISS_NOTHING = "Dismiss"
 """What the dismiss button says with no bot chosen, and it is disabled saying it.
@@ -424,6 +451,10 @@ class PartyPanel(QWidget):
 
         self.check_list = QListWidget(self)
         self.check_list.setMinimumHeight(60)
+        # T792. Hidden until a reading says the scripts are what stops My Party.
+        self.deploy_button = QPushButton(DEPLOY_IDLE, self)
+        self.deploy_button.clicked.connect(self.deploy_bridge)
+        self.deploy_button.setVisible(False)
         self.summary = QLabel("", self)
         self.summary.setWordWrap(True)
         self.summary.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -494,6 +525,7 @@ class PartyPanel(QWidget):
         needs.setObjectName("section-title")
         box.addWidget(needs)
         box.addWidget(self.check_list, 1)
+        box.addWidget(self.deploy_button)
         box.addWidget(self.report)
         self._member_chosen(-1)
         self._candidate_chosen(-1)
@@ -622,6 +654,10 @@ class PartyPanel(QWidget):
         # and the checks, and a `Working…` left standing over them is a panel
         # that looks like it is still asking.
         self._clear_report = note is not None
+        self._read_state(master, note)
+
+    def _read_state(self, master: str, note: str | None) -> None:
+        """Start the read of `master`'s group, or of the preconditions alone for an empty name."""
         self._start(note)
         # The master travels WITH the answer. The rows a person confirms have to
         # be attributable to a character, and reading `self.character` again in
@@ -665,6 +701,7 @@ class PartyPanel(QWidget):
         self._drawn_for = ""
         self._member_chosen(-1)
         self.check_list.clear()
+        self.deploy_button.setVisible(state.deploy_blocked)
         for check in state.checks:
             self.check_list.addItem("ok " + check.name if check.met else f"not yet: {check.name}")
             if not check.met:
@@ -733,6 +770,51 @@ class PartyPanel(QWidget):
         self.report.setText(addition.sentence)
         self._read(note=None)
         self.party_changed.emit()
+
+    # -- T792: the bridge scripts --------------------------------------------
+
+    @Slot()
+    def deploy_bridge(self) -> None:
+        """Put the bridge scripts into the server folder, off the GUI thread.
+
+        Needs no character: the scripts belong to the server, not to a party. The
+        seam raises where it could not copy (`party.NothingToDeploy`, a refused
+        folder, another Yu'lon holding the server), and `_deploy_failed` says it in
+        the seam's own words.
+        """
+        if self._busy:
+            return
+        self._stand_down("")
+        self._start(DEPLOYING)
+        self._jobs(self._seam.deploy_bridge, self._deployed, self._deploy_failed)
+
+    @Slot(object)
+    def _deployed(self, result: object) -> None:
+        """Say what was copied and how the engine loads it, then read the checks again.
+
+        Read again rather than assumed: the next unmet precondition is the server's own
+        answer, and copying files is not the same as the bridge answering.
+        """
+        deployed = cast(party.Deployment, result)
+        self._done()
+        said = DEPLOYED_CHANGED if deployed.changed else DEPLOYED_UNCHANGED
+        if deployed.kept:
+            said = f"{said} {party.kept_sentence(deployed.kept)}"
+        self.report.setText(said)
+        self._clear_report = False
+        self._read_state(self.character.text().strip(), None)
+
+    @Slot(object)
+    def _deploy_failed(self, exc: object) -> None:
+        """A deploy that did not copy: the seam's sentence, and the panel stays usable."""
+        self._done()
+        logger.warning(f"My Party could not deploy the bridge: {type(exc).__name__}: {exc}")
+        if isinstance(exc, party.NothingToDeploy | SaidByYulon):
+            self.report.setText(str(exc))
+        else:
+            self.report.setText(
+                f"The bridge scripts could not be put into the server folder: {exc}"
+            )
 
     # -- T26: the named character, and the account link ----------------------
 
@@ -1157,3 +1239,4 @@ class PartyPanel(QWidget):
         self.add_named_button.setEnabled(on and self._chosen_candidate() is not None)
         self.link_button.setEnabled(on)
         self.link_name.setEnabled(on)
+        self.deploy_button.setEnabled(on)

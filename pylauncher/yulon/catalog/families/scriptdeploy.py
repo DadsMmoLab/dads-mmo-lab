@@ -197,6 +197,15 @@ def _publish(target: Path, data: bytes) -> None:
         tmp.unlink(missing_ok=True)
 
 
+def publish(target: Path, data: bytes) -> None:
+    """Write `data` at `target` whole, plain bytes at `SCRIPT_MODE` (T792, for My Party's bridge).
+
+    `_publish`, for a caller that keeps a record of its own: a temp sibling, then a rename, a
+    planted link never written through, and no mode or label carried over from a source file.
+    """
+    _publish(target, data)
+
+
 def _through_a_link(server_dir: Path, target: Path) -> Path | None:
     """The first folder between the server dir and `target` that is a link, if any.
 

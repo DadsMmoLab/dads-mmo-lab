@@ -412,6 +412,8 @@ class MyPartySeam(Protocol):
 
     def link_account(self, master: str, account: str) -> party.AccountLink: ...
 
+    def deploy_bridge(self) -> party.Deployment: ...
+
 
 class Uninstall(Protocol):
     """What the Uninstall control needs (8.9a): a plan, and a run that takes the checkbox.

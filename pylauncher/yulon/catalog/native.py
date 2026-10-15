@@ -8079,6 +8079,18 @@ class StagedInstaller:
         """
         return iter(())
 
+    def lay_party_bridge(self, server_dir: Path) -> Iterator[str]:
+        """Put My Party's bridge scripts into a server that has the Lua engine (T792).
+
+        Called by `stage_recreate()` once the old world has stopped and before the new one
+        starts (after `lay_scripts()`, on the routes that stop first: every AzerothCore
+        press, since `lays_scripts_with_the_servers_down()` is true for it), and by the
+        install's own `lua-and-sql` stage. Nothing on the spine; the AzerothCore family
+        overrides it. **It never raises**: a deploy that failed is a line, and the My Party
+        tab names it and offers **Set up My Party**; a rebuild must not fail on it.
+        """
+        return iter(())
+
     def imports_with_the_servers_down(self) -> bool:
         """Does a plain Rebuild run this family's database importer before the new build (T706)?
 
@@ -9842,6 +9854,11 @@ class StagedInstaller:
             yield from self.lay_scripts(
                 ctx.server_dir, quiet=servers_down is None or servers_down.lays_quietly
             )
+            # T792: and My Party's bridge scripts, in the same window and for the same reason
+            # (the engine can load them into a running world on `.reload ale` or
+            # `ALE.AutoReload`). A line, never a raise. A rollback does not come here: the
+            # build it puts back has had its scripts since before the press.
+            yield from self.lay_party_bridge(ctx.server_dir)
             if servers_down is not None:
                 yield from servers_down.forward(ctx)
 

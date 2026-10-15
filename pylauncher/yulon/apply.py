@@ -52,6 +52,7 @@ from yulon import (
     module_answers,
     module_deploys,
     module_moves,
+    party,
     platform,
     play_client,
     rmtree,
@@ -4169,6 +4170,7 @@ class Applier:
             self._deploy(manifest, clone, log, first=first)
             self._check_hold()
             self._folders(manifest, log)
+            self._lay_party_bridge(manifest, log)
             self._check_hold()
             self._patches(manifest, clone, vals, "install", log)
             self._rehash_deployed(manifest)
@@ -5238,6 +5240,7 @@ class Applier:
                 self._check_hold()
                 self._undeploy(step, clone, log)
         self._check_hold()
+        self._take_back_party_bridge(manifest, log)
         self._unfolders(manifest, log)
         # T67, and BEFORE the `rmtree` below: the receipts that say which client
         # files are this app's own live in the clone's claim file.
@@ -6448,6 +6451,51 @@ class Applier:
             else:
                 path.mkdir(parents=True, exist_ok=True)
                 log.done.append(f"mkdir {rel}")
+
+    def _lay_party_bridge(self, manifest: Manifest, log: _Log) -> None:
+        """Put My Party's bridge scripts beside the Lua engine, once it is installed (T792).
+
+        `party.deploy()` had no caller, so My Party stopped at "the bridge scripts are not in
+        the server folder yet" on every install. The scripts are read when the world starts,
+        which for a C++ module is after the rebuild that compiles it in, and a Rebuild lays
+        them again (`stage_recreate`). A failure is reported in `skipped` and never fails the
+        install: the My Party tab names it, and **Set up My Party** tries again. Only for
+        `mod-ale`; the same hold check as the writes around it.
+        """
+        if manifest.id != "mod-ale":
+            return
+        self._check_hold()
+        laid = party.lay_bridge(self.server_dir)
+        if isinstance(laid, str):
+            log.skipped.append(laid)
+        elif laid is not None:
+            where = _rel(self.server_dir, party.dest_dir(self.server_dir))
+            said = f"My Party bridge scripts: {len(laid.names) - len(laid.kept)} in {where}"
+            log.done.append(said if laid.changed else f"{said} (already there)")
+            if laid.kept:
+                log.skipped.append(party.kept_sentence(laid.kept))
+
+    def _take_back_party_bridge(self, manifest: Manifest, log: _Log) -> None:
+        """Take out the bridge scripts this app put beside the Lua engine, on its Remove (T792).
+
+        Only the files whose bytes are ones this app wrote (`party.take_back_bridge`, which
+        reads its record, so an older bundled version goes too), so a script somebody edited,
+        or another module's, stays and keeps the folder (`_unfolders`).
+        A failure is reported and never fails the Remove.
+        """
+        if manifest.id != "mod-ale":
+            return
+        gone = party.take_back_bridge(self.server_dir)
+        if isinstance(gone, str):
+            log.skipped.append(gone)
+            return
+        if gone.gone:
+            log.done.append(f"rm My Party bridge scripts ({len(gone.gone)})")
+        if gone.kept:
+            log.skipped.append(
+                f"{', '.join(gone.kept)} in the script folder were changed on this machine, so "
+                "they were left as they are."
+            )
 
     def _unfolders(self, manifest: Manifest, log: _Log) -> None:
         """Take back each `folders` entry that is still empty; leave one that holds anything.
