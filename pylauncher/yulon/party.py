@@ -59,9 +59,9 @@ module's `conf/mod_ale.conf.dist` nor its `ALEConfig.cpp`.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
-import shutil
 import subprocess
 import time
 from collections.abc import Callable, Iterable, Mapping
@@ -123,10 +123,32 @@ class NothingToDeploy(RuntimeError):
 
 @dataclass(frozen=True)
 class Deployment:
-    """What one deploy did. `changed` is what owes the user a world restart."""
+    """What one deploy did. `changed` is what owes the user a world restart.
+
+    `kept` names the scripts that were NOT written because the file on disk is neither the
+    bundled one nor one this app wrote earlier: somebody changed it (T792).
+    """
 
     changed: bool
     names: tuple[str, ...]
+    kept: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class TakenBack:
+    """What the Remove of the Lua engine did to the bridge scripts (T792)."""
+
+    gone: tuple[str, ...]
+    kept: tuple[str, ...] = ()
+
+
+BRIDGE_RECORD = ".yulon-party-bridge.json"
+"""Which bridge scripts this app wrote, and the SHA-256 of each, beside them (T792).
+
+`scriptdeploy`'s rule for the same folder, kept in a record of its own: a script is replaced
+or taken back only while its bytes are still ones this app wrote, so a hand-edited one is
+never overwritten. It is a separate file because `scriptdeploy.lay()` removes every record
+entry its own specs no longer ship, and would take these for stale."""
 
 
 def lua_root() -> Path:
@@ -139,12 +161,8 @@ def dest_dir(server_dir: Path) -> Path:
     return server_dir / "env" / "dist" / "etc" / "modules" / "lua_scripts"
 
 
-def deploy(root: Path, dest: Path) -> Deployment:
-    """Copy every family's `*.lua` under `root` into the flat `dest`.
-
-    Flat because ALE scans one directory. Content-compared rather than
-    timestamped, so a redeploy of identical bytes reports `changed=False` and
-    does not ask for a world restart nobody needs.
+def _bundle(root: Path) -> dict[str, Path]:
+    """Every family's `*.lua` under `root`, flat, by name. Finding nothing raises.
 
     **Finding nothing raises.** The Rust launcher shipped the other behaviour
     and documented the cost in its own source: with the source root wrong it
@@ -153,29 +171,115 @@ def deploy(root: Path, dest: Path) -> Deployment:
     cause (`rust-main:crates/dml-wow/src/bridge.rs:56-70`). Both ways of finding
     nothing raise — an unreadable root, and a root holding no `.lua` at all.
     """
-    dest.mkdir(parents=True, exist_ok=True)
     try:
         families = sorted(p for p in root.iterdir() if p.is_dir())
     except OSError as exc:
         raise NothingToDeploy(_nothing(root)) from exc
-    copied: list[str] = []
-    changed = False
-    for family in families:
-        for src in sorted(family.glob("*.lua")):
-            target = dest / src.name
-            wanted = src.read_bytes()
-            if not target.is_file() or target.read_bytes() != wanted:
-                shutil.copy2(src, target)
-                changed = True
-            copied.append(src.name)
-    if not copied:
+    found = {src.name: src for family in families for src in sorted(family.glob("*.lua"))}
+    if not found:
         raise NothingToDeploy(_nothing(root))
-    logger.info(f"deployed {len(copied)} bridge scripts to {dest} (changed={changed})")
+    return found
+
+
+def _sha(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _read_bridge_record(dest: Path) -> dict[str, str]:
+    """The record, or empty when there is none or it cannot be read (then nothing is replaced)."""
+    try:
+        parsed = json.loads((dest / BRIDGE_RECORD).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as exc:
+        logger.warning(f"{dest / BRIDGE_RECORD} could not be read ({exc}); no script is ours")
+        return {}
+    files = parsed.get("files") if isinstance(parsed, dict) else None
+    if not isinstance(files, dict):
+        return {}
+    return {
+        k: v
+        for k, v in files.items()
+        if isinstance(k, str) and isinstance(v, str) and k.endswith(".lua") and Path(k).name == k
+    }
+
+
+def _publish(target: Path, data: bytes) -> None:
+    """`scriptdeploy.publish`: plain bytes at 0644, written whole.
+
+    Imported here and not at the top: the families package imports this module's callers.
+    """
+    from yulon.catalog.families import scriptdeploy
+
+    scriptdeploy.publish(target, data)
+
+
+def _write_bridge_record(dest: Path, files: dict[str, str]) -> None:
+    path = dest / BRIDGE_RECORD
+    if not files:
+        path.unlink(missing_ok=True)
+        return
+    text = json.dumps({"version": 1, "files": dict(sorted(files.items()))}, indent=2) + "\n"
+    _publish(path, text.encode("utf-8"))
+
+
+def deploy(root: Path, dest: Path) -> Deployment:
+    """Copy every family's `*.lua` under `root` into the flat `dest`.
+
+    Flat because ALE scans one directory. Content-compared rather than
+    timestamped, so a redeploy of identical bytes reports `changed=False` and
+    does not ask for a world restart nobody needs.
+
+    **Only this app's own copies are ever replaced** (T792, `scriptdeploy`'s rule for the
+    folder). A file at a bridge script's name is replaced only while its bytes are ones this
+    app wrote (`BRIDGE_RECORD`); a file somebody edited, or one that was there before and
+    differs from the bundled script, is left as it is and named in `Deployment.kept`. A file
+    that equals the bundled script is claimed (the workaround was to copy them by hand).
+    Files are written whole, plain bytes at mode 0644, by `scriptdeploy.publish`.
+
+    Finding no scripts raises `NothingToDeploy` (`_bundle`).
+    """
+    sources = _bundle(root)
+    dest.mkdir(parents=True, exist_ok=True)
+    record = _read_bridge_record(dest)
+    owned = dict(record)
+    changed = False
+    kept: list[str] = []
+    try:
+        for name, src in sorted(sources.items()):
+            target = dest / name
+            wanted = src.read_bytes()
+            new = _sha(wanted)
+            if target.is_symlink():
+                kept.append(name)
+                continue
+            try:
+                old: str | None = _sha(target.read_bytes())
+            except FileNotFoundError:
+                old = None
+            if old == new:
+                owned[name] = new
+                continue
+            if old is not None and record.get(name) != old:
+                kept.append(name)
+                continue
+            _publish(target, wanted)
+            owned[name] = new
+            changed = True
+    finally:
+        if owned != record:
+            try:
+                _write_bridge_record(dest, owned)
+            except OSError as exc:
+                logger.warning(f"could not write {dest / BRIDGE_RECORD}: {exc}")
+    logger.info(
+        f"deployed {len(sources)} bridge scripts to {dest} (changed={changed}, kept={kept})"
+    )
     # Sorted by NAME, not by the family walk that produced them: the flat
     # directory is what the engine sees, and a report ordered by a source
     # layout the destination does not have would move a script the day a
     # family is renamed.
-    return Deployment(changed, tuple(sorted(copied)))
+    return Deployment(changed, tuple(sorted(sources)), tuple(kept))
 
 
 def _nothing(root: Path) -> str:
@@ -194,22 +298,44 @@ DEPLOY_PRESS = "Set up My Party"
 """The press name on the reservation the bridge deploy takes (T607)."""
 
 
+def engine_cloned(server_dir: Path) -> bool:
+    """Is `modules/mod-ale` there? False, never a raise, when the folder cannot be asked."""
+    try:
+        return server_dir.joinpath(*ENGINE_FOLDER).is_dir()
+    except OSError:
+        return False
+
+
+def kept_sentence(names: tuple[str, ...]) -> str:
+    """The line for bridge scripts that were changed on this machine and so left alone."""
+    many = len(names) > 1
+    return (
+        f"{', '.join(names)} {'were' if many else 'was'} changed on this machine, so "
+        f"{'they were' if many else 'it was'} left as {'they are' if many else 'it is'} and "
+        f"the server runs {'those copies' if many else 'that copy'}, not the "
+        f"{'ones' if many else 'one'} Yu'lon ships. To take Yu'lon's, delete "
+        f"{'them' if many else 'it'} and press {DEPLOY_PRESS} on the My Party tab."
+    )
+
+
 def lay_bridge(server_dir: Path) -> Deployment | str | None:
     """Put the bridge scripts into a server that has the Lua engine; never raises (T792).
 
     The one call every automatic route makes -- the Modules tab's install of the engine, a
     Rebuild or an Update, and a fresh install -- so that none of them can fail because My
     Party's scripts could not be copied. `None` is a server without `modules/mod-ale`:
-    nothing is written. A `Deployment` is what `deploy()` did. A `str` is the sentence for a
-    deploy that failed; it names the button that tries again, and the caller shows it.
+    nothing is written. A `Deployment` is what `deploy()` did (its `kept` names scripts left
+    alone because they were changed). A `str` is the sentence for a deploy that failed; it
+    names the button that tries again, and the caller shows it.
 
-    Nothing here asks whether the world runs: the engine reads its script folder when the
-    world STARTS, and every caller is followed by a start or a recreate (or, for the install
-    of the engine, by the rebuild that compiles it in).
+    Nothing here asks whether the world runs. The engine loads the folder when the world
+    starts, and on `.reload ale` or `ALE.AutoReload`, so the rebuild route calls this with
+    the old world already stopped; the install of the engine is followed by the rebuild that
+    compiles it in.
     """
-    if not server_dir.joinpath(*ENGINE_FOLDER).is_dir():
-        return None
     try:
+        if not engine_cloned(server_dir):
+            return None
         return deploy(lua_root(), dest_dir(server_dir))
     except (NothingToDeploy, OSError) as exc:
         logger.warning(f"could not put My Party's bridge scripts into {server_dir}: {exc}")
@@ -219,26 +345,42 @@ def lay_bridge(server_dir: Path) -> Deployment | str | None:
         )
 
 
-def take_back_bridge(server_dir: Path) -> tuple[str, ...] | str:
+def take_back_bridge(server_dir: Path) -> TakenBack | str:
     """Remove the bridge scripts this app put in, and only those; never raises (T792).
 
-    For the Remove of the Lua engine. A script is taken out only while its bytes are still the
-    bundled ones, so a file somebody edited, or another module's script, stays. The names
-    removed, or a sentence for the one that could not be.
+    For the Remove of the Lua engine. A script is taken out only while its bytes are ones this
+    app wrote (`BRIDGE_RECORD`, so an older bundled version goes too) or the bundled ones; a
+    file somebody edited, and another module's script, stay and are named in `kept`. A
+    sentence for what could not be done.
     """
     dest = dest_dir(server_dir)
-    gone: list[str] = []
     try:
-        for family in sorted(p for p in lua_root().iterdir() if p.is_dir()):
-            for src in sorted(family.glob("*.lua")):
-                target = dest / src.name
-                if target.is_file() and target.read_bytes() == src.read_bytes():
-                    target.unlink()
-                    gone.append(src.name)
+        record = _read_bridge_record(dest)
+        try:
+            bundled = {name: _sha(src.read_bytes()) for name, src in _bundle(lua_root()).items()}
+        except NothingToDeploy:
+            bundled = {}
+        gone: list[str] = []
+        kept: list[str] = []
+        for name in sorted(set(record) | set(bundled)):
+            target = dest / name
+            if target.is_symlink():
+                kept.append(name)
+                continue
+            try:
+                digest = _sha(target.read_bytes())
+            except FileNotFoundError:
+                continue
+            if digest in (record.get(name), bundled.get(name)):
+                target.unlink()
+                gone.append(name)
+            else:
+                kept.append(name)
+        _write_bridge_record(dest, {})
     except OSError as exc:
         logger.warning(f"could not take My Party's bridge scripts out of {server_dir}: {exc}")
         return f"My Party's bridge scripts could not be taken out of the server folder ({exc})."
-    return tuple(sorted(gone))
+    return TakenBack(tuple(sorted(gone)), tuple(sorted(kept)))
 
 
 # -- reading the binary ----------------------------------------------------

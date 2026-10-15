@@ -36,9 +36,10 @@ Left out deliberately, each with the seam gap that decides it:
   folder: every player's panel stopped at "the bridge scripts are not in the server folder
   yet." The Lua engine's install and every rebuild now lay them on their own, and
   **Set up My Party** does it on demand. It is shown only while that is the first unmet
-  precondition (`PartyState.deploy_blocked`), says a world restart is owed when anything
-  was copied, and reads the preconditions again; it is no cure for a stopped world or an
-  engine that is not built in, and it is not shown for those.
+  precondition (`PartyState.deploy_blocked`), says a world restart (or a reload in the game)
+  loads them when anything was copied, and reads the preconditions again; it is no cure for
+  a stopped world or an engine that is not built in, and it is not shown for those. A script
+  the player changed is left alone and named.
 * **No presets.** `party.py` has no preset store and the prior art's is a
   directory of files under `~/.dml` (`90-main.sh:4152-4230`), which is a feature
   rather than a control.
@@ -166,13 +167,14 @@ the first unmet precondition is the scripts being missing or partly there."""
 DEPLOYING = "Putting the bridge scripts into the server folder."
 
 DEPLOYED_CHANGED = (
-    "The bridge scripts are in the server folder. Restart the world server so the Lua engine "
-    "loads them. The checks below show what is left."
+    "The bridge scripts are in the server folder. The Lua engine loads them when the world "
+    "server restarts, or on .reload ale in the game. The checks below show what is left."
 )
 
 DEPLOYED_UNCHANGED = (
     "The bridge scripts were already in the server folder, so nothing was copied. If My Party "
-    "still does not answer, the world server needs a restart for the Lua engine to load them."
+    "still does not answer, the Lua engine loads them when the world server restarts, or on "
+    ".reload ale in the game."
 )
 
 DISMISS_NOTHING = "Dismiss"
@@ -788,14 +790,17 @@ class PartyPanel(QWidget):
 
     @Slot(object)
     def _deployed(self, result: object) -> None:
-        """Say what was copied and whether a restart is owed, then read the checks again.
+        """Say what was copied and how the engine loads it, then read the checks again.
 
         Read again rather than assumed: the next unmet precondition is the server's own
         answer, and copying files is not the same as the bridge answering.
         """
         deployed = cast(party.Deployment, result)
         self._done()
-        self.report.setText(DEPLOYED_CHANGED if deployed.changed else DEPLOYED_UNCHANGED)
+        said = DEPLOYED_CHANGED if deployed.changed else DEPLOYED_UNCHANGED
+        if deployed.kept:
+            said = f"{said} {party.kept_sentence(deployed.kept)}"
+        self.report.setText(said)
         self._clear_report = False
         self._read_state(self.character.text().strip(), None)
 

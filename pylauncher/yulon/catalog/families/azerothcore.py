@@ -632,9 +632,14 @@ class AzerothCoreInstaller(StagedInstaller):
         """Does this install have Lua scripts to lay, or lay again, or remove (T562)?
 
         True for an entry with `lua_scripts`, and for one that dropped them while the
-        record of what an earlier press laid is still there.
+        record of what an earlier press laid is still there. Also for a server with the Lua
+        engine cloned (T792): My Party's bridge scripts are laid in the same window.
         """
-        return bool(self._block().lua_scripts) or scriptdeploy.record_path(server_dir).exists()
+        return (
+            bool(self._block().lua_scripts)
+            or scriptdeploy.record_path(server_dir).exists()
+            or party.engine_cloned(server_dir)
+        )
 
     def lay_scripts(self, server_dir: Path, *, quiet: bool) -> Iterator[str]:
         """Lay the entry's Lua scripts from the checkout as it stands now (T562).
@@ -657,8 +662,13 @@ class AzerothCoreInstaller(StagedInstaller):
         laid = party.lay_bridge(server_dir)
         if isinstance(laid, str):
             yield laid
-        elif laid is not None and laid.changed:
+            return
+        if laid is None:
+            return
+        if laid.changed:
             yield "My Party's bridge scripts are in the server folder."
+        if laid.kept:
+            yield party.kept_sentence(laid.kept)
 
     def imports_with_the_servers_down(self) -> bool:
         """True for an entry whose databases are imported by a compose one-shot (T706)."""

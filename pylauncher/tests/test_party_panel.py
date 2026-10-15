@@ -1259,3 +1259,22 @@ def test_a_second_press_is_refused_while_the_deploy_is_in_flight(qapp: object) -
 
     assert len(jobs) == 1
     assert not panel.deploy_button.isEnabled()
+
+
+def test_a_script_the_player_changed_is_named_beside_the_deploy_line(qapp: object) -> None:
+    stub = _StubParty(
+        state=_undeployed(),
+        deploy=party.Deployment(False, ("dml_a.lua", "dml_b.lua"), ("dml_a.lua",)),
+    )
+    panel = _panel(stub)
+
+    panel.deploy_bridge()
+
+    assert panel.report.text().startswith(DEPLOYED_UNCHANGED)
+    assert "dml_a.lua was changed on this machine" in panel.report.text()
+
+
+def test_the_deploy_line_says_how_the_engine_loads_the_scripts(qapp: object) -> None:
+    for line in (DEPLOYED_CHANGED, DEPLOYED_UNCHANGED):
+        assert "restarts" in line and ".reload ale" in line
+        assert "needed" not in line

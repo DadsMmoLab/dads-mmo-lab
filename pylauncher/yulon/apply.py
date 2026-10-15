@@ -6470,14 +6470,17 @@ class Applier:
             log.skipped.append(laid)
         elif laid is not None:
             where = _rel(self.server_dir, party.dest_dir(self.server_dir))
-            said = f"My Party bridge scripts: {len(laid.names)} in {where}"
+            said = f"My Party bridge scripts: {len(laid.names) - len(laid.kept)} in {where}"
             log.done.append(said if laid.changed else f"{said} (already there)")
+            if laid.kept:
+                log.skipped.append(party.kept_sentence(laid.kept))
 
     def _take_back_party_bridge(self, manifest: Manifest, log: _Log) -> None:
         """Take out the bridge scripts this app put beside the Lua engine, on its Remove (T792).
 
-        Only the files whose bytes are still the bundled ones (`party.take_back_bridge`), so a
-        script somebody edited, or another module's, stays and keeps the folder (`_unfolders`).
+        Only the files whose bytes are ones this app wrote (`party.take_back_bridge`, which
+        reads its record, so an older bundled version goes too), so a script somebody edited,
+        or another module's, stays and keeps the folder (`_unfolders`).
         A failure is reported and never fails the Remove.
         """
         if manifest.id != "mod-ale":
@@ -6485,8 +6488,14 @@ class Applier:
         gone = party.take_back_bridge(self.server_dir)
         if isinstance(gone, str):
             log.skipped.append(gone)
-        elif gone:
-            log.done.append(f"rm My Party bridge scripts ({len(gone)})")
+            return
+        if gone.gone:
+            log.done.append(f"rm My Party bridge scripts ({len(gone.gone)})")
+        if gone.kept:
+            log.skipped.append(
+                f"{', '.join(gone.kept)} in the script folder were changed on this machine, so "
+                "they were left as they are."
+            )
 
     def _unfolders(self, manifest: Manifest, log: _Log) -> None:
         """Take back each `folders` entry that is still empty; leave one that holds anything.

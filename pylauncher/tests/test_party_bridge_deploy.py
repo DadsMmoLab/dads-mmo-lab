@@ -15,6 +15,9 @@ A deploy that fails is logged and said, and never fails the install or the rebui
 from __future__ import annotations
 
 import shutil
+import stat
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -24,9 +27,11 @@ from tests.support_native import ENTRY, Recorder
 from yulon import party, resources
 from yulon.apply import Applier
 from yulon.catalog.catalog import load_catalog
+from yulon.catalog.families import scriptdeploy
 from yulon.catalog.families.azerothcore import AzerothCoreInstaller
 from yulon.catalog.installer import InstallOptions
 from yulon.git import CloneSpec
+from yulon.said import SaidByYulon
 
 LUA_DIR = Path("env") / "dist" / "etc" / "modules" / "lua_scripts"
 SIX = tuple(sorted(party.BRIDGE_SCRIPTS))
@@ -78,7 +83,7 @@ def test_the_helper_says_a_disk_failure_too(
     def full(*_args: object, **_kwargs: object) -> None:
         raise OSError(28, "No space left on device")
 
-    monkeypatch.setattr(party.shutil, "copy2", full)
+    monkeypatch.setattr(scriptdeploy, "publish", full)
 
     said = party.lay_bridge(tmp_path)
 
@@ -95,8 +100,140 @@ def test_taking_the_bridge_back_removes_only_our_own_bytes(tmp_path: Path) -> No
 
     gone = party.take_back_bridge(tmp_path)
 
-    assert isinstance(gone, tuple) and set(gone) == set(SIX[1:])
+    assert isinstance(gone, party.TakenBack)
+    assert set(gone.gone) == set(SIX[1:]) and gone.kept == (SIX[0],)
     assert _scripts(tmp_path) == sorted(["LootPet.lua", SIX[0]])
+    assert not (folder / party.BRIDGE_RECORD).exists(), "nothing left to remember"
+
+
+def test_the_helper_never_raises_when_the_engine_folder_cannot_be_asked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Python 3.13's `Path.is_dir()` raises PermissionError on EACCES."""
+    real = Path.is_dir
+
+    def refused(self: Path, *args: object, **kwargs: object) -> bool:
+        if self.name == "mod-ale":
+            raise PermissionError(13, "Permission denied", str(self))
+        return real(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "is_dir", refused)
+
+    assert party.lay_bridge(tmp_path) is None
+    assert party.engine_cloned(tmp_path) is False
+
+
+# -- hand edits and older bundles: only the app's own copies are replaced ---
+
+
+def _bundle(root: Path, body: str) -> Path:
+    folder = root / "party"
+    folder.mkdir(parents=True, exist_ok=True)
+    for name in SIX:
+        (folder / name).write_text(f"-- {name} {body}\n", encoding="utf-8")
+    return root
+
+
+def _with_engine(server: Path) -> None:
+    (server / "modules" / "mod-ale").mkdir(parents=True, exist_ok=True)
+
+
+def test_an_old_bundled_version_is_replaced_by_the_new_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server = tmp_path / "server"
+    _with_engine(server)
+    monkeypatch.setattr(party, "lua_root", lambda: _bundle(tmp_path / "v1", "one"))
+    party.lay_bridge(server)
+    monkeypatch.setattr(party, "lua_root", lambda: _bundle(tmp_path / "v2", "two"))
+
+    laid = party.lay_bridge(server)
+
+    assert isinstance(laid, party.Deployment) and laid.changed and laid.kept == ()
+    assert (server / LUA_DIR / SIX[0]).read_text(encoding="utf-8") == f"-- {SIX[0]} two\n"
+
+
+def test_an_edited_script_is_left_alone_and_named(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server = tmp_path / "server"
+    _with_engine(server)
+    monkeypatch.setattr(party, "lua_root", lambda: _bundle(tmp_path / "v1", "one"))
+    party.lay_bridge(server)
+    mine = server / LUA_DIR / SIX[0]
+    mine.write_text("-- my own change\n", encoding="utf-8")
+    monkeypatch.setattr(party, "lua_root", lambda: _bundle(tmp_path / "v2", "two"))
+
+    laid = party.lay_bridge(server)
+
+    assert isinstance(laid, party.Deployment) and laid.kept == (SIX[0],)
+    assert mine.read_text(encoding="utf-8") == "-- my own change\n"
+    assert (server / LUA_DIR / SIX[1]).read_text(encoding="utf-8") == f"-- {SIX[1]} two\n"
+    assert SIX[0] in party.kept_sentence(laid.kept)
+
+
+def test_a_differing_file_nobody_recorded_is_the_players(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server = tmp_path / "server"
+    _with_engine(server)
+    folder = server / LUA_DIR
+    folder.mkdir(parents=True)
+    (folder / SIX[0]).write_text("-- copied by hand from an older build\n", encoding="utf-8")
+
+    laid = party.lay_bridge(server)
+
+    assert isinstance(laid, party.Deployment) and laid.kept == (SIX[0],)
+    assert (folder / SIX[0]).read_text(
+        encoding="utf-8"
+    ) == "-- copied by hand from an older build\n"
+
+
+def test_a_hand_copied_current_script_is_claimed_and_taken_back(tmp_path: Path) -> None:
+    server = tmp_path / "server"
+    _with_engine(server)
+    folder = server / LUA_DIR
+    folder.mkdir(parents=True)
+    shutil.copy(party.lua_root() / "party" / SIX[0], folder / SIX[0])
+
+    laid = party.lay_bridge(server)
+
+    assert isinstance(laid, party.Deployment) and laid.kept == ()
+    gone = party.take_back_bridge(server)
+    assert isinstance(gone, party.TakenBack) and set(gone.gone) == set(SIX)
+
+
+def test_taking_back_removes_an_older_bundled_version_and_keeps_an_edited_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server = tmp_path / "server"
+    _with_engine(server)
+    monkeypatch.setattr(party, "lua_root", lambda: _bundle(tmp_path / "v1", "one"))
+    party.lay_bridge(server)
+    (server / LUA_DIR / SIX[0]).write_text("-- my own change\n", encoding="utf-8")
+    monkeypatch.setattr(party, "lua_root", lambda: _bundle(tmp_path / "v2", "two"))
+
+    gone = party.take_back_bridge(server)
+
+    assert isinstance(gone, party.TakenBack)
+    assert set(gone.gone) == set(SIX[1:]), "the v1 copies are not the v2 bundle, but were ours"
+    assert gone.kept == (SIX[0],)
+    assert _scripts(server) == [SIX[0]]
+
+
+def test_scripts_are_written_as_plain_bytes_at_0644(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle = _bundle(tmp_path / "v1", "one")
+    (bundle / "party" / SIX[0]).chmod(0o600)
+    server = tmp_path / "server"
+    _with_engine(server)
+    monkeypatch.setattr(party, "lua_root", lambda: bundle)
+
+    party.lay_bridge(server)
+
+    mode = stat.S_IMODE((server / LUA_DIR / SIX[0]).stat().st_mode)
+    assert mode == scriptdeploy.SCRIPT_MODE
 
 
 # -- the Modules tab: install and remove of the Lua engine -----------------
@@ -173,6 +310,13 @@ def test_removing_the_lua_engine_takes_the_bridge_scripts_it_placed(tmp_path: Pa
 def _rebuilt(
     tmp_path: Path, *, engine: bool, lay: bool = True
 ) -> tuple[Path, list[str], AzerothCoreInstaller]:
+    server_dir, said, made, _rec = _rebuilt_with(tmp_path, engine=engine, lay=lay)
+    return server_dir, said, made
+
+
+def _rebuilt_with(
+    tmp_path: Path, *, engine: bool, lay: bool = True, spy: Any = None
+) -> tuple[Path, list[str], AzerothCoreInstaller, Recorder]:
     root = tmp_path / "installers"
     shutil.copytree(resources.installers_dir(), root)
     rec = Recorder(images=True)
@@ -189,8 +333,10 @@ def _rebuilt(
         stale.unlink()
     if engine:
         (server_dir / "modules" / "mod-ale").mkdir(parents=True, exist_ok=True)
+    if spy is not None:
+        spy(rec)
     said = list(made.rebuild(InstallOptions(server_dir=server_dir)))
-    return server_dir, said, made
+    return server_dir, said, made, rec
 
 
 def test_a_rebuild_of_a_server_with_the_engine_and_no_scripts_deploys_them(
@@ -221,10 +367,33 @@ def test_a_failed_deploy_does_not_fail_the_rebuild(
     assert "The containers were replaced." in said
 
 
+def test_the_rebuild_lays_the_bridge_after_the_old_world_stopped_and_before_the_new_starts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[list[str]] = []
+
+    def spy(rec: Recorder) -> None:
+        real = party.lay_bridge
+        rec.calls.clear()  # only what this rebuild did, not the install before it
+
+        def watching(server_dir: Path) -> object:
+            seen.append(list(rec.calls))
+            return real(server_dir)
+
+        monkeypatch.setattr(party, "lay_bridge", watching)
+
+    _rebuilt_with(tmp_path, engine=True, spy=spy)
+
+    assert seen, "the rebuild never laid the bridge"
+    at_lay = seen[-1]
+    assert "stop_servers" in at_lay, at_lay
+    assert "recreate" not in at_lay, at_lay
+
+
 # -- the seam behind the button --------------------------------------------
 
 
-def _seam(server: Path) -> party.InstallParty:
+def _seam(server: Path, hold_server: Any = None) -> party.InstallParty:
     return party.InstallParty(
         load_catalog().get("wow-wotlk"),
         server,
@@ -233,6 +402,7 @@ def _seam(server: Path) -> party.InstallParty:
         container="ac-worldserver",
         world_running=lambda: True,
         engine=lambda: party.BinaryRead(True, "in"),
+        hold_server=hold_server,
     )
 
 
@@ -278,3 +448,33 @@ def test_the_state_says_when_the_press_would_help(tmp_path: Path) -> None:
     seam.deploy_bridge()
     after = seam.state("Pakka")
     assert after.deploy_blocked is False
+
+
+def test_the_press_takes_the_servers_hold_before_it_copies(tmp_path: Path) -> None:
+    events: list[str] = []
+
+    @contextmanager
+    def hold(press: str) -> Iterator[None]:
+        events.append(f"hold:{press}")
+        assert _scripts(tmp_path) == [], "the hold is taken before anything is copied"
+        yield
+        events.append("released")
+
+    seam = _seam(tmp_path, hold_server=hold)
+
+    seam.deploy_bridge()
+
+    assert events == [f"hold:{party.DEPLOY_PRESS}", "released"]
+    assert _scripts(tmp_path) == list(SIX)
+
+
+def test_a_refused_hold_copies_nothing_and_says_why(tmp_path: Path) -> None:
+    @contextmanager
+    def hold(press: str) -> Iterator[None]:
+        raise SaidByYulon("Another Yu'lon is rebuilding this server.")
+        yield
+
+    with pytest.raises(SaidByYulon):
+        _seam(tmp_path, hold_server=hold).deploy_bridge()
+
+    assert _scripts(tmp_path) == []
