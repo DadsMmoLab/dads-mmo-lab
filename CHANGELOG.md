@@ -22,6 +22,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Yu'lon puts My Party's bridge scripts into the server when the Lua engine is installed or the server is rebuilt.
 - **Set up My Party** on the My Party tab puts the bridge scripts into the server when they are missing.
 ### Fixed
+- **Check for updates** says why git could not answer for a module, instead of only that it did not.
 - **Remove** on City Bots now takes back its roster and bot account marks.
 - A server whose database password cannot be found now greys the accounts, backup and module buttons and says why.
 - A finished update no longer leaves **Rebuild** refused over files a failed **Put the folders back…** left.
