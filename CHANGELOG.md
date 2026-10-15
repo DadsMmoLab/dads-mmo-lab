@@ -19,7 +19,9 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A WotLK server inside WSL can have its accounts and characters packed for a move, with a script in the WoW guides.
 - New WoW WotLK and Unbound servers get a database password of their own; older servers keep theirs.
 - **Server build ▾** on the Modules tab has **Put the folders back…**, which puts the source folders back on their build.
+- **Set up My Party** on the My Party tab puts the bridge scripts into the server when they are missing.
 ### Fixed
+- **My Party** works again: Yu'lon now puts its bridge scripts into the server when the Lua engine is installed or rebuilt.
 - **Remove** on City Bots now takes back its roster and bot account marks.
 - A server whose database password cannot be found now greys the accounts, backup and module buttons and says why.
 - A finished update no longer leaves **Rebuild** refused over files a failed **Put the folders back…** left.
@@ -138,6 +140,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A power cut while Yu'lon saves a server setting no longer leaves that settings file empty.
 
 ### Changed
+- The added-bot note on the My Party tab says how many bots each character can add instead of reading like an error.
 - On an older WotLK install, the first Rebuild sends the whole server to Docker once (about 5 GB); later ones are quick.
 - The Server tab's **Play** now starts the game; **Launcher…** opens the launcher. The tray's **Play** offers to start a stopped server.
 - The tray's menu and panel offer the same **Start**, **Stop**, **Restart** and **Play**; **Quit tray…** is **Quit Yu'lon…**.

@@ -8079,6 +8079,17 @@ class StagedInstaller:
         """
         return iter(())
 
+    def lay_party_bridge(self, server_dir: Path) -> Iterator[str]:
+        """Put My Party's bridge scripts into a server that has the Lua engine (T792).
+
+        Called by `stage_recreate()` right before the containers are replaced, so a Rebuild,
+        an Update and a Return all lay them for the world that starts next, and by the
+        install's own `lua-and-sql` stage. Nothing on the spine; the AzerothCore family
+        overrides it. **It never raises**: a deploy that failed is a line, and the My Party
+        tab names it and offers **Set up My Party**; a rebuild must not fail on it.
+        """
+        return iter(())
+
     def imports_with_the_servers_down(self) -> bool:
         """Does a plain Rebuild run this family's database importer before the new build (T706)?
 
@@ -9786,6 +9797,8 @@ class StagedInstaller:
         warned = self._refresh_world_data(ctx.server_dir)
         if warned is not None:
             yield warned
+        # T792: the bridge scripts for the world that starts next; a line, never a raise.
+        yield from self.lay_party_bridge(ctx.server_dir)
         spec = self.entry.container_spec()
         # The replace begins with a stop, and a world still loading cannot hear
         # it (T158). `recreate_staged()` waits for it right before that stop --

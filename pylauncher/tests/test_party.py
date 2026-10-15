@@ -2804,8 +2804,11 @@ def test_the_cap_line_says_which_of_the_two_numbers_is_missing() -> None:
     unread = party._cap_note("Pakka", None)
     assert party.MAX_ADDED_BOTS_KEY in unread and party.PLAYERBOTS_CONF in unread
     checked = party._cap_note("Pakka", 40)
-    assert "(40) could not be checked from here" in checked
-    assert "Pakka's game window" in checked
+    assert checked == (
+        f"Up to 40 added bots per character (this server's {party.MAX_ADDED_BOTS_KEY}). "
+        "If the server refuses one, it says so in Pakka's game window."
+    )
+    assert "could not" not in checked, "the always-shown note must not read as an error"
 
 
 def test_a_master_that_is_not_on_this_server_is_a_sentence_and_not_an_empty_list() -> None:
@@ -3105,7 +3108,7 @@ def test_a_party_already_holding_the_caps_worth_of_bots_still_offers_its_rows(
     assert picked.added == 2
     assert picked.max_added == 2
     assert [row.name for row in picked.rows if row.allowed] == ["Nore"]
-    assert "(2) could not be checked from here" in picked.note
+    assert picked.note.startswith("Up to 2 added bots per character")
     assert "Pakka's game window" in picked.note
 
 

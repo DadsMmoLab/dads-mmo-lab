@@ -2717,6 +2717,12 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "the Rust launcher reported a success envelope when this listing found nothing, and "
         "My Party then silently did not work (`rust-main:bridge.rs:56-70`)"
     ),
+    ("party.py", "take_back_bridge"): (
+        "lists the app's OWN bundled `lua/` tree to find the bridge scripts it may take back out "
+        "of the server folder, as `deploy()` lists it to put them in; nothing of the user's is "
+        "listed, and a file is removed only while its bytes still equal the bundled copy's. An "
+        "unreadable bundle is told in a sentence, never read as 'nothing to remove'"
+    ),
     ("party.py", "read_facts"): (
         "lists the bridge directory under the server dir to say WHICH of the five scripts are "
         "there, and decides no write at all - My Party never writes into that folder, `deploy()` "

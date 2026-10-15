@@ -186,6 +186,61 @@ def _nothing(root: Path) -> str:
     )
 
 
+ENGINE_FOLDER = ("modules", "mod-ale")
+"""The Lua engine's checkout in an AzerothCore server folder. WotLK's Modules tab clones it
+there, and WoW Unbound's own install does."""
+
+DEPLOY_PRESS = "Set up My Party"
+"""The press name on the reservation the bridge deploy takes (T607)."""
+
+
+def lay_bridge(server_dir: Path) -> Deployment | str | None:
+    """Put the bridge scripts into a server that has the Lua engine; never raises (T792).
+
+    The one call every automatic route makes -- the Modules tab's install of the engine, a
+    Rebuild or an Update, and a fresh install -- so that none of them can fail because My
+    Party's scripts could not be copied. `None` is a server without `modules/mod-ale`:
+    nothing is written. A `Deployment` is what `deploy()` did. A `str` is the sentence for a
+    deploy that failed; it names the button that tries again, and the caller shows it.
+
+    Nothing here asks whether the world runs: the engine reads its script folder when the
+    world STARTS, and every caller is followed by a start or a recreate (or, for the install
+    of the engine, by the rebuild that compiles it in).
+    """
+    if not server_dir.joinpath(*ENGINE_FOLDER).is_dir():
+        return None
+    try:
+        return deploy(lua_root(), dest_dir(server_dir))
+    except (NothingToDeploy, OSError) as exc:
+        logger.warning(f"could not put My Party's bridge scripts into {server_dir}: {exc}")
+        return (
+            f"My Party's bridge scripts could not be put into the server folder ({exc}). "
+            f"Nothing else was affected; press {DEPLOY_PRESS} on the My Party tab to try again."
+        )
+
+
+def take_back_bridge(server_dir: Path) -> tuple[str, ...] | str:
+    """Remove the bridge scripts this app put in, and only those; never raises (T792).
+
+    For the Remove of the Lua engine. A script is taken out only while its bytes are still the
+    bundled ones, so a file somebody edited, or another module's script, stays. The names
+    removed, or a sentence for the one that could not be.
+    """
+    dest = dest_dir(server_dir)
+    gone: list[str] = []
+    try:
+        for family in sorted(p for p in lua_root().iterdir() if p.is_dir()):
+            for src in sorted(family.glob("*.lua")):
+                target = dest / src.name
+                if target.is_file() and target.read_bytes() == src.read_bytes():
+                    target.unlink()
+                    gone.append(src.name)
+    except OSError as exc:
+        logger.warning(f"could not take My Party's bridge scripts out of {server_dir}: {exc}")
+        return f"My Party's bridge scripts could not be taken out of the server folder ({exc})."
+    return tuple(sorted(gone))
+
+
 # -- reading the binary ----------------------------------------------------
 
 
@@ -2458,8 +2513,10 @@ def _cap_note(master: str, max_added: int | None) -> str:
     (the record quotes exactly two ALE functions, `Player:RunCommand` at
     `PlayerMethods.h:3531-3547` and the global `RunCommand` at
     `GlobalMethods.h:1405-1417`; no step in it read mod-ale's method tables, and
-    nothing in this tree pins them). So the cap is not checkable from here, and
-    this says which of the two facts is missing.
+    nothing in this tree pins them). So the cap is not checkable from here. The
+    sentence says what the number is and where a refusal shows up, and does not
+    open with "could not be checked", which a player read as an error (T792): it
+    is the always-shown note, not a failure.
     """
     if max_added is None:
         return (
@@ -2468,9 +2525,8 @@ def _cap_note(master: str, max_added: int | None) -> str:
             "add once whatever cap it has is reached, and it says so in the game window."
         )
     return (
-        f"The server's added-bot cap ({max_added}) could not be checked from here: the module "
-        "counts the bots it controls, which is not what the group table holds. A refusal "
-        f"arrives in {master}'s game window."
+        f"Up to {max_added} added bots per character (this server's {MAX_ADDED_BOTS_KEY}). "
+        f"If the server refuses one, it says so in {master}'s game window."
     )
 
 
@@ -3043,6 +3099,10 @@ class PartyState:
     checks: tuple[Precondition, ...]
     members: tuple[Member, ...] = ()
     problem: str = ""
+    deploy_blocked: bool = False
+    """The first unmet precondition is the bridge scripts missing or partly there, which
+    **Set up My Party** mends (T792). False for every other blocker: the button is no cure
+    for a stopped world or a Lua engine that is not built in."""
 
 
 class InstallParty:
@@ -3174,6 +3234,21 @@ class InstallParty:
             return Probe(None, f"the bridge could not be asked about: {exc}", "")
         return read_probe(answer)
 
+    def deploy_bridge(self) -> Deployment:
+        """Copy the bridge scripts into this server's Lua script folder (T792).
+
+        Behind **Set up My Party**. `changed` is what owes the world a restart: the engine reads
+        that folder when it starts. Raises `NothingToDeploy` in the app's own words when the
+        bundle holds no scripts, which is never reported as a success, and `OSError` when the
+        folder cannot be written. Under the server's cross-process hold, like the link write:
+        another Yu'lon rebuilding this server is told, in its own sentence, and nothing is
+        copied.
+        """
+        with ExitStack() as held:
+            if self._hold_server is not None:
+                held.enter_context(self._hold_server(DEPLOY_PRESS))
+            return deploy(lua_root(), dest_dir(self.server_dir))
+
     def state(self, master: str) -> PartyState:
         """The group, or the first precondition that is not met.
 
@@ -3186,7 +3261,8 @@ class InstallParty:
         checks = preconditions(facts)
         stop = blocker(facts)
         if stop is not None:
-            return PartyState(False, stop, checks)
+            first = next(check for check in checks if not check.met)
+            return PartyState(False, stop, checks, deploy_blocked=first.name == "deployed")
         rows = self.members(master)
         if isinstance(rows, str):
             return PartyState(True, "", checks, problem=rows)
