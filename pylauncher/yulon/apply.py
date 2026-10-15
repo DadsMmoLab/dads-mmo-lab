@@ -9624,6 +9624,17 @@ def _free_aside(path: Path) -> Path:
     return aside
 
 
+_WHY_CHARS = 160
+"""The longest reason a row's line carries, in characters (T793)."""
+
+
+def _cut_reason(why: str) -> str:
+    """`why` cut to `_WHY_CHARS` at a word, and ended "…" where it was cut (T793)."""
+    if len(why) <= _WHY_CHARS:
+        return why
+    return why[:_WHY_CHARS].rsplit(" ", 1)[0].rstrip(" ,;:") + "…"
+
+
 @dataclass(frozen=True)
 class ModuleUpdate:
     """One installed module and how far behind its upstream it is (checklist 8.7a)."""
@@ -9692,6 +9703,13 @@ class ModuleUpdate:
     (T150).
     """
 
+    why: str = ""
+    """Git's own reason for a row it could not answer, or `""` (T793).
+
+    Set from `Counted.why` by `_module_update()` and cached with the row for the same retry
+    wait, so the press that reads the cache says what the press that asked said.
+    """
+
     @property
     def line(self) -> str:
         """The row as the Modules tab prints it.
@@ -9712,6 +9730,8 @@ class ModuleUpdate:
         if not self.is_checkout:
             return f"{self.key}: not a git checkout — nothing to compare"
         if self.behind is None:
+            if self.why:
+                return f"{self.key}: could not ask git — {_cut_reason(self.why)}"
             return f"{self.key}: could not ask (no answer from git)"
         if self.put_back_tip:
             return PUT_BACK_TIP_LINE.format(id=self.key, new=self.put_back_tip[:7])
@@ -9881,6 +9901,7 @@ def _module_update(
             behind=counted.behind,
             family=kind,
             fetched=counted.fetched or "",
+            why=counted.why or "",
         )
     release = resolve(slug)
     counted = (
@@ -9898,6 +9919,7 @@ def _module_update(
         fetched=counted.fetched or "",
         release=release.tag if release is not None else "",
         installed_release=clone_release(path, item_id=path.name),
+        why=counted.why or "",
     )
 
 
@@ -10130,6 +10152,7 @@ def _write_module_updates(
                 "installed_release": row.installed_release,
                 "checked_unix": row.checked_unix,
                 "fetched": row.fetched,
+                "why": row.why,
             }
             for row in [*others, *rows]
         ],
@@ -10514,6 +10537,7 @@ def _read_module_updates_any_age(server_dir: Path) -> dict[tuple[str, str], Modu
                 head=str(row["head"]),
                 checked_unix=int(row["checked_unix"]),
                 fetched=str(row.get("fetched", "")),
+                why=str(row.get("why", "")),
             )
             for row in payload["rows"]
         }
