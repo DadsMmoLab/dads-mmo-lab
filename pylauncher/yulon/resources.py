@@ -61,3 +61,8 @@ def theme_images_dir() -> Path:
     tree in `build/pylauncher.spec` like `lua/`.
     """
     return bundle_root() / "yulon" / "ui" / "theme_images"
+
+
+def themes_dir() -> Path:
+    """`<bundle_root>/yulon/ui/themes` -- the bundled per-theme JSON files."""
+    return bundle_root() / "yulon" / "ui" / "themes"

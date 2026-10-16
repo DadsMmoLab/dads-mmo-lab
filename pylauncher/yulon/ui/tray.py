@@ -59,7 +59,13 @@ from yulon import autostart, docker, ui_settings
 from yulon.log import get_logger
 from yulon.ui.message_box import FittedMessageBox
 from yulon.ui.tab_titles import controller_tab_titles
-from yulon.ui.theme import COLOR_DANGER, COLOR_GOLD_BRIGHT, COLOR_UNCOMMON
+from yulon.ui.theme import (
+    COLOR_DANGER,
+    COLOR_TEXT_WARNING,
+    COLOR_UNCOMMON,
+    apply_dadcraft_theme,
+    normalize_theme_name,
+)
 from yulon.ui.tray_flyout import (
     PLAY,
     QUIT_YULON,
@@ -70,7 +76,8 @@ from yulon.ui.tray_flyout import (
     TrayFlyout,
     server_actions,
 )
-from yulon.ui.widgets.dadcraft_decorations import realm_tone
+from yulon.ui.widgets.dadcraft_decorations import DadcraftRealmBadge, realm_tone
+from yulon.ui.widgets.panel_style import panel_qss
 from yulon.ui.widgets.reasons import reason_of
 
 logger = get_logger(__name__)
@@ -78,7 +85,7 @@ logger = get_logger(__name__)
 OPEN_YULON = "Open Yu'lon"
 LOGS = "Logs"
 
-STATE_COLOURS = {"up": COLOR_UNCOMMON, "between": COLOR_GOLD_BRIGHT, "attention": COLOR_DANGER}
+STATE_COLOURS = {"up": COLOR_UNCOMMON, "between": COLOR_TEXT_WARNING, "attention": COLOR_DANGER}
 """The dot per icon state: the theme's online green, amber accent and danger red."""
 
 NOTE_NEVER = "never"
@@ -341,6 +348,7 @@ class YulonTray(QObject):
         self._bring_forward = bring_forward
         saved = ui_settings.load_ui_settings()
         self.keep_in_tray = saved.keep_in_tray if keep_in_tray is None else keep_in_tray
+        self.theme: str = saved.theme
         self.icon: TrayIcon | None = None
         self.state = "plain"
         self.note_seen = saved.tray_note == NOTE_NEVER
@@ -421,8 +429,13 @@ class YulonTray(QObject):
             self._make_icon()
         else:
             logger.info("tray: this desktop has no system tray; closing Yu'lon quits it")
+        settings_view = getattr(self.window, "yulon_settings_view", None)
+        if settings_view is not None and hasattr(settings_view, "bind_tray"):
+            settings_view.bind_tray(self)
         self.follow_servers()
         self.set_keep_in_tray(self.keep_in_tray)
+        if self.theme != ui_settings.DEFAULT_THEME:
+            self.apply_theme(self.theme)
 
     def _make_icon(self) -> None:
         # Windows drops a notification from an unnamed explicit app ID (no-op elsewhere).
@@ -460,6 +473,9 @@ class YulonTray(QObject):
                     pass
             self.window.yulon_quit = self.window.close  # type: ignore[attr-defined]
             self.window.yulon_quit_for_good = self.window.close  # type: ignore[attr-defined]
+            settings_view = getattr(self.window, "yulon_settings_view", None)
+            if settings_view is not None and hasattr(settings_view, "bind_tray"):
+                settings_view.bind_tray(None)
             if self._previous_settings is not None:
                 self.window.yulon_open_settings = self._previous_settings  # type: ignore[attr-defined]
         self._let_go_of_servers()
@@ -809,7 +825,12 @@ class YulonTray(QObject):
         QApplication.exit(0)
 
     def open_settings(self) -> None:
-        """The tray's Settings: keep running in the tray, start at sign-in."""
+        """The tray's Settings: show the in-window Settings submenu panel, or dialog fallback."""
+        top_menu = getattr(self.window, "yulon_top_menu", None)
+        if top_menu is not None and hasattr(top_menu, "show_settings"):
+            top_menu.show_settings()
+            self.open_window()
+            return
         from yulon.ui.tray_settings import TraySettingsDialog
 
         dialog = getattr(self, "_settings_dialog", None)
@@ -820,6 +841,38 @@ class YulonTray(QObject):
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
+
+    def apply_theme(self, theme_name: str) -> None:
+        """Apply `theme_name` to the window, header, panels, launchers, and flyout."""
+        resolved = normalize_theme_name(theme_name)
+        self.theme = resolved
+        if isinstance(self.window, QWidget):
+            apply_dadcraft_theme(
+                self.window,
+                width=self.window.width() or None,
+                theme_name=resolved,
+            )
+            for badge in self.window.findChildren(DadcraftRealmBadge):
+                badge.set_theme(resolved)
+            for widget in self.window.findChildren(QWidget):
+                if hasattr(widget, "apply_theme") and widget is not self.window:
+                    widget.apply_theme(resolved)
+                elif type(widget).__name__ in ("ModulesPanel", "TuningPanel"):
+                    widget.setStyleSheet(panel_qss(resolved))
+        for launcher in getattr(self.window, "yulon_launchers", {}).values():
+            if shiboken6.isValid(launcher) and hasattr(launcher, "apply_theme"):
+                launcher.apply_theme(resolved)
+        if self.flyout is not None and shiboken6.isValid(self.flyout):
+            apply_dadcraft_theme(self.flyout, theme_name=resolved)
+            self.flyout.set_theme(resolved)
+
+    def remember_theme(self, theme_name: str) -> bool:
+        """Apply `theme_name` immediately and save it to `ui.json`."""
+        resolved = normalize_theme_name(theme_name)
+        self.apply_theme(resolved)
+        saved = ui_settings.remember_theme(resolved)
+        self.settings_changed.emit()
+        return saved
 
     def remember_keep_in_tray(self, keep: bool) -> bool:
         """The Settings switch: applied now, and kept in `ui.json` for the next start.
@@ -1236,6 +1289,8 @@ class YulonTray(QObject):
             from yulon.ui.tray_settings import TraySwitches
 
             flyout = TrayFlyout(TraySwitches(self))
+            apply_dadcraft_theme(flyout, theme_name=self.theme)
+            flyout.set_theme(self.theme)
             flyout.play_requested.connect(self._flyout_play)
             flyout.start_requested.connect(self.start)
             flyout.stop_requested.connect(self.stop)

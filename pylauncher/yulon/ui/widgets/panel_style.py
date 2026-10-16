@@ -40,19 +40,29 @@ from yulon.ui.theme import (
     COLOR_BRASS_DEEP,
     COLOR_DANGER,
     COLOR_GOLD_BRASS,
+    get_theme,
 )
 
 CARD_OBJECT_NAMES: tuple[str, ...] = ("moduleFamilyCard", "tuningCard")
 """The two `QGroupBox` object names that are CARDS, and so take the centre notch."""
 
 
-def panel_qss() -> str:
+def panel_qss(theme_name: str | None = None) -> str:
     """The shared sheet, for `ModulesPanel` and `TuningPanel` to set on themselves.
 
     A function rather than a constant so the test that reads its colours calls
     the same thing the panels do -- a constant built at import time and a
     function would be two answers to check.
     """
+    if theme_name is None:
+        brass = COLOR_GOLD_BRASS
+        deep = COLOR_BRASS_DEEP
+        danger = COLOR_DANGER
+    else:
+        spec = get_theme(theme_name)
+        brass = spec.accent_brass
+        deep = spec.border_deep
+        danger = spec.danger
     notch = "\n".join(
         f"QGroupBox#{name}::title {{ subcontrol-position: top center; left: 0px; }}"
         for name in CARD_OBJECT_NAMES
@@ -60,22 +70,22 @@ def panel_qss() -> str:
     return f"""
 {notch}
 QPushButton {{
-    border-top: 1px solid {COLOR_GOLD_BRASS};
-    border-left: 1px solid {COLOR_GOLD_BRASS};
-    border-right: 1px solid {COLOR_BRASS_DEEP};
-    border-bottom: 2px solid {COLOR_BRASS_DEEP};
+    border-top: 1px solid {brass};
+    border-left: 1px solid {brass};
+    border-right: 1px solid {deep};
+    border-bottom: 2px solid {deep};
 }}
 QPushButton:pressed {{
-    border-top: 2px solid {COLOR_BRASS_DEEP};
-    border-left: 1px solid {COLOR_BRASS_DEEP};
-    border-right: 1px solid {COLOR_GOLD_BRASS};
-    border-bottom: 1px solid {COLOR_GOLD_BRASS};
+    border-top: 2px solid {deep};
+    border-left: 1px solid {deep};
+    border-right: 1px solid {brass};
+    border-bottom: 1px solid {brass};
 }}
 QPushButton[danger="true"] {{
-    border-color: {COLOR_DANGER};
+    border-color: {danger};
 }}
 QPushButton[danger="true"]:disabled {{
-    border-color: {COLOR_BRASS_DEEP};
+    border-color: {deep};
 }}
 """
 

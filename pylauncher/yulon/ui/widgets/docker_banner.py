@@ -13,7 +13,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QFrame, QLabel, QPushButton, QVBoxLayout, QWidget
 
 from yulon.docker_advice import Advice
-from yulon.ui.theme import COLOR_BG_PARCHMENT, COLOR_TEXT_WARNING
+from yulon.ui.theme import COLOR_BG_PARCHMENT, COLOR_TEXT_WARNING, get_theme, normalize_theme_name
 from yulon.ui.widgets.flow_layout import flow_bar
 
 BANNER_NAME = "docker-banner"
@@ -58,6 +58,15 @@ class DockerBanner(QFrame):
         box.addWidget(self.presses)
         box.addWidget(self.note_label)
         self.setVisible(False)
+
+    def apply_theme(self, theme_name: str | None = None) -> None:
+        """Restyle the Docker banner for `theme_name`."""
+        spec = get_theme(normalize_theme_name(theme_name))
+        self.setStyleSheet(
+            f"QFrame#{BANNER_NAME} {{ background-color: {spec.bg_container}; "
+            f"border: 1px solid {spec.text_warning}; }}"
+        )
+        self.title_label.setStyleSheet(f"color: {spec.text_warning}; font-weight: bold;")
 
     def add_press(self, button: QPushButton) -> None:
         """Put `button` in the press row, before Try again; its visibility stays its owner's."""

@@ -372,6 +372,35 @@ def test_a_source_checkout_greys_the_sign_in_switch_with_the_reason(
         dialog.deleteLater()
 
 
+def test_the_settings_dialog_changes_and_saves_the_color_theme(
+    tray: YulonTray, window: FakeWindow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yulon.ui.theme import THEME_CHOICES, get_theme
+    from yulon.ui.tray_settings import TraySettingsDialog
+
+    monkeypatch.setattr(autostart, "why_not", lambda *a, **k: None)
+    monkeypatch.setattr(autostart, "is_enabled", lambda *a, **k: False)
+    dialog = TraySettingsDialog(tray)
+    try:
+        choices = [
+            (dialog.theme_combo.itemData(i), dialog.theme_combo.itemText(i))
+            for i in range(dialog.theme_combo.count())
+        ]
+        assert tuple(choices) == THEME_CHOICES
+        assert dialog.current_theme() == "arthas"
+
+        dracula_idx = dialog.theme_combo.findData("dracula-dark")
+        assert dracula_idx >= 0
+        dialog.theme_combo.setCurrentIndex(dracula_idx)
+
+        assert tray.theme == "dracula-dark"
+        assert ui_settings.load_ui_settings().theme == "dracula-dark"
+        assert window.property("yulon_theme") == "dracula-dark"
+        assert get_theme("dracula-dark").bg_dark in window.styleSheet()
+    finally:
+        dialog.deleteLater()
+
+
 # ------------------------------------------------------- started at sign-in
 
 

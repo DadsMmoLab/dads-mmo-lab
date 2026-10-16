@@ -21,7 +21,7 @@ from PySide6.QtCore import QEvent, QObject, Qt
 from PySide6.QtWidgets import QLabel, QWidget
 from shiboken6 import isValid
 
-from yulon.ui.theme import COLOR_TEXT_MUTED
+from yulon.ui.theme import COLOR_TEXT_MUTED, get_theme, normalize_theme_name
 
 LINE_NAME = "reason-line"
 """The object name the line's own style sheet selects it by (an ID selector only)."""
@@ -98,6 +98,11 @@ class ReasonLine(QLabel):
         # line, whose own showing and hiding moves what the line says.
         self._between: list[QWidget] = []
         self.setVisible(False)
+
+    def apply_theme(self, theme_name: str | None = None) -> None:
+        """Restyle the reason line for `theme_name`."""
+        spec = get_theme(normalize_theme_name(theme_name))
+        self.setStyleSheet(f"QLabel#{LINE_NAME} {{ color: {spec.text_muted}; }}")
 
     def watch(self, press: QWidget, *, standing: str | None = None) -> None:
         """Explain `press` on this line; `standing` is its reason whenever it is greyed."""

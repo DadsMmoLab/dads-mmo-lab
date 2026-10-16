@@ -22912,9 +22912,9 @@ def test_a_restyle_at_an_unchanged_width_folds_nothing(
     _ran_a_job(view)
     view.module_report.setPlainText(A_REFUSAL_IN_THE_REPORT_BOX)
     process_events()
-    _at(window, (1000, 700))
-    assert view.rebuild_log.collapsed, "1000x700 does not fold the log, so this proves nothing"
-    assert view.module_report_strip.collapsed, "1000x700 does not fold the report either"
+    _at(window, (960, 640))
+    assert view.rebuild_log.collapsed, "minimum window did not fold the log"
+    assert view.module_report_strip.collapsed, "minimum window did not fold the report"
 
     # BOTH strips, because they are two objects running the same derivation and
     # a flicker in either is the same flash on the same tab. Counted with the

@@ -394,17 +394,21 @@ class _PathLabel(QLabel):
 
 
 def _muted(text: str, parent: QWidget, *, wrap: bool = True) -> QLabel:
+    spec = theme.get_theme(theme.resolve_widget_theme(parent))
     label = QLabel(text, parent)
     label.setWordWrap(wrap)
-    label.setStyleSheet(f"color: {theme.COLOR_TEXT_MUTED};")
+    label.setProperty("yulon_role", "muted")
+    label.setStyleSheet(f"color: {spec.text_muted};")
     return label
 
 
 def _warning(parent: QWidget) -> QLabel:
     """A one-off sentence in the warning colour; hidden until there is something to say."""
+    spec = theme.get_theme(theme.resolve_widget_theme(parent))
     label = QLabel("", parent)
     label.setWordWrap(True)
-    label.setStyleSheet(f"color: {theme.COLOR_TEXT_WARNING};")
+    label.setProperty("yulon_role", "warning")
+    label.setStyleSheet(f"color: {spec.text_warning};")
     label.setVisible(False)
     return label
 
@@ -616,26 +620,14 @@ class LauncherWindow(QWidget):
     def _build_banner(self) -> QFrame:
         self.banner = QFrame(self)
         self.banner.setObjectName("launcher-banner")
-        self.banner.setStyleSheet(
-            "QFrame#launcher-banner { background: qlineargradient(x1:0, y1:0, x2:1, y2:1, "
-            f"stop:0 {theme.COLOR_BG_PANEL}, stop:0.55 {theme.COLOR_EMBER}, "
-            f"stop:1 {theme.COLOR_BG_DARK}); "
-            f"border-bottom: 1px solid {theme.COLOR_GOLD_BRASS}; }}"
-            " QFrame#launcher-banner QLabel { background: transparent; border: none; }"
-        )
         box = QVBoxLayout(self.banner)
         box.setContentsMargins(24, 10, 24, 10)
         box.setSpacing(6)
         top = QHBoxLayout()
         top.setSpacing(16)
         self.banner_title = QLabel("", self.banner)
-        self.banner_title.setStyleSheet(
-            f"font-family: {theme.FONT_FAMILY_TITLE}; font-size: 28px; font-weight: bold; "
-            f"color: {theme.COLOR_GOLD_BRIGHT};"
-        )
         top.addWidget(self.banner_title, 0, Qt.AlignmentFlag.AlignBottom)
         self.banner_subtitle = QLabel("", self.banner)
-        self.banner_subtitle.setStyleSheet(f"color: {theme.COLOR_TEXT_GOLD};")
         top.addWidget(self.banner_subtitle, 1, Qt.AlignmentFlag.AlignBottom)
         box.addLayout(top)
         row = QHBoxLayout()
@@ -643,10 +635,41 @@ class LauncherWindow(QWidget):
         self.realm_badge = DadcraftRealmBadge("stopped", self.banner)
         row.addWidget(self.realm_badge, 0, Qt.AlignmentFlag.AlignVCenter)
         self.online_label = QLabel("", self.banner)
-        self.online_label.setStyleSheet(f"color: {theme.COLOR_TEXT_PRIMARY};")
         row.addWidget(self.online_label, 1)
         box.addLayout(row)
+        self.apply_theme(theme.resolve_widget_theme(self))
         return self.banner
+
+    def apply_theme(self, theme_name: str | None = None) -> None:
+        """Apply `theme_name` to the launcher window's banner, badge, and stylesheet."""
+        resolved = theme.normalize_theme_name(theme_name or theme.resolve_widget_theme(self))
+        spec = theme.get_theme(resolved)
+        self.setProperty("yulon_theme", resolved)
+        self.banner.setStyleSheet(
+            "QFrame#launcher-banner { background: qlineargradient(x1:0, y1:0, x2:1, y2:1, "
+            f"stop:0 {spec.bg_panel}, stop:0.55 {spec.ember}, "
+            f"stop:1 {spec.bg_dark}); "
+            f"border-bottom: 1px solid {spec.accent_brass}; }}"
+            " QFrame#launcher-banner QLabel { background: transparent; border: none; }"
+        )
+        self.banner_title.setStyleSheet(
+            f"font-family: {theme.FONT_FAMILY_TITLE}; font-size: 28px; font-weight: bold; "
+            f"color: {spec.accent_bright};"
+        )
+        self.banner_subtitle.setStyleSheet(f"color: {spec.text_gold};")
+        self.online_label.setStyleSheet(f"color: {spec.text_primary};")
+        self.realm_badge.set_theme(resolved)
+        if hasattr(self, "play_button"):
+            self.play_button.setIcon(dadcraft_icon("play", spec.primary_btn_text, 24))
+        for label in self.findChildren(QLabel):
+            role = label.property("yulon_role")
+            if role == "muted":
+                label.setStyleSheet(f"color: {spec.text_muted};")
+            elif role == "warning":
+                label.setStyleSheet(f"color: {spec.text_warning};")
+        if hasattr(self, "client_status_label"):
+            self._render_client()
+        theme.apply_dadcraft_theme(self, width=self.width(), theme_name=resolved)
 
     def _scroll(self, inner: QWidget, name: str) -> QScrollArea:
         """A frameless scroll area: the column fits at 960x640, and scrolls rather than clip."""
@@ -1198,6 +1221,11 @@ class LauncherWindow(QWidget):
             self._compact = compact
             self._render_room()
             self._render_account()
+        theme.apply_dadcraft_theme(
+            self,
+            width=self.width(),
+            theme_name=theme.resolve_widget_theme(self),
+        )
 
     def _render_room(self) -> None:
         """What the window leaves out below `COMPACT_BELOW`: lines that repeat a tooltip."""
@@ -1311,19 +1339,20 @@ class LauncherWindow(QWidget):
         self.client_source_label.set_path(str(source) if source is not None else "")
         status = self.client_status_label
         status.setToolTip("")
+        spec = theme.get_theme(theme.resolve_widget_theme(self))
         if reading is None:
             status.setText("Looking at the client…")
-            status.setStyleSheet(f"color: {theme.COLOR_TEXT_MUTED};")
+            status.setStyleSheet(f"color: {spec.text_muted};")
         elif reading.stale is None:
             status.setText("Could not compare it with your own client.")
-            status.setStyleSheet(f"color: {theme.COLOR_TEXT_MUTED};")
+            status.setStyleSheet(f"color: {spec.text_muted};")
         elif reading.stale:
             status.setText("Your own client was patched since: press Refresh from my client.")
             status.setToolTip("Changed: " + ", ".join(str(rel) for rel in reading.stale))
-            status.setStyleSheet(f"color: {theme.COLOR_TEXT_WARNING};")
+            status.setStyleSheet(f"color: {spec.text_warning};")
         else:
             status.setText("✓ Up to date with your own client")
-            status.setStyleSheet(f"color: {theme.COLOR_UNCOMMON};")
+            status.setStyleSheet(f"color: {spec.uncommon};")
 
     def _remote_address(self) -> str | None:
         """The saved realm address when it names another computer, else None (T667)."""

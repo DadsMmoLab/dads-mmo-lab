@@ -203,6 +203,9 @@ from yulon.ui.theme import (
     COLOR_TEXT_WARNING,
     PLAY_MENU_BUTTON,
     SERVER_BUILD_BUTTON,
+    get_theme,
+    normalize_theme_name,
+    resolve_widget_theme,
 )
 from yulon.ui.widgets.clean_up_dialog import CleanUpDialog
 from yulon.ui.widgets.client_addons_box import AddonRow, ClientAddonsBox
@@ -21400,6 +21403,55 @@ class ControllerView(QWidget):
         self._press_asking: _PressAsking | None = None
         self.reload_tuning()
         self.tuning_panel.set_enabled_actions(self._module_actions_allowed())
+
+    def apply_theme(self, theme_name: str | None = None) -> None:
+        """Restyle inline banners, labels, badges, and child panels for `theme_name`."""
+        resolved = normalize_theme_name(theme_name or resolve_widget_theme(self))
+        spec = get_theme(resolved)
+        self.setProperty("yulon_theme", resolved)
+        if hasattr(self, "realm_badge"):
+            self.realm_badge.set_theme(resolved)
+        if hasattr(self, "docker_banner") and hasattr(self.docker_banner, "apply_theme"):
+            self.docker_banner.apply_theme(resolved)
+        for banner in (
+            getattr(self, "compose_banner", None),
+            getattr(self, "corrections_banner", None),
+            getattr(self, "rebuild_banner", None),
+            getattr(self, "tuning_banner", None),
+            getattr(self, "tuning_log_offer", None),
+        ):
+            if banner is not None:
+                banner.setStyleSheet(
+                    f"background-color: {spec.bg_container}; border: 1px solid {spec.text_warning};"
+                )
+        for warn_lbl in (
+            getattr(self, "danger_label", None),
+            getattr(self, "compose_banner_label", None),
+            getattr(self, "corrections_banner_label", None),
+            getattr(self, "rebuild_banner_label", None),
+            getattr(self, "tuning_banner_label", None),
+        ):
+            if warn_lbl is not None:
+                warn_lbl.setStyleSheet(f"color: {spec.text_warning};")
+        for muted_lbl in (
+            getattr(self, "addon_pointer", None),
+            getattr(self, "uninstall_absent_label", None),
+            getattr(self, "custom_module_line_note", None),
+        ):
+            if muted_lbl is not None:
+                muted_lbl.setStyleSheet(f"color: {spec.text_muted};")
+        line_title = getattr(self, "custom_module_line_title", None)
+        if line_title is not None:
+            line_title.setStyleSheet(f"color: {spec.text_muted}; font-weight: bold;")
+        for panel in (
+            getattr(self, "modules_panel", None),
+            getattr(self, "tuning_panel", None),
+        ):
+            if panel is not None and hasattr(panel, "apply_theme"):
+                panel.apply_theme(resolved)
+        for child in self.findChildren(QWidget):
+            if child is not self and hasattr(child, "apply_theme"):
+                child.apply_theme(resolved)
 
     def reload_tuning(self) -> None:
         """Re-read every installed module's conf and redraw the cards.

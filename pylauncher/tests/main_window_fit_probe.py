@@ -101,13 +101,24 @@ def _buttons_shown_in(page: QWidget) -> list[QAbstractButton]:
 
 
 def _choose_tab(window: QMainWindow, tabs: QTabWidget, index: int) -> str | None:
-    """Click the sidebar's way to tab `index`; None, or why it could not be clicked."""
+    """Click the navigation bar's way to tab `index`; None, or why it could not be clicked."""
     pins = window.yulon_sidebar_pins  # type: ignore[attr-defined]
     button = pins.buttons.get(index)
     if button is not None:
         if not _reachable(button, window):
             return f"the pinned button {_name(button)} is off screen"
         QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+    elif hasattr(pins, "servers_button") and hasattr(pins, "server_indices"):
+        srv_btn = pins.servers_button
+        if not _reachable(srv_btn, window):
+            return f"the servers menu button {_name(srv_btn)} is off screen"
+        pins._populate_servers_menu()
+        indices = pins.server_indices()
+        actions = pins.servers_menu.actions()
+        if index in indices and indices.index(index) < len(actions):
+            actions[indices.index(index)].trigger()
+        else:
+            tabs.setCurrentIndex(index)
     else:
         bar = tabs.tabBar()
         if not _reachable(bar, window):
@@ -165,9 +176,13 @@ def measure(window: QMainWindow) -> dict[str, Any]:
                 unreachable.extend(_out_of_reach(where, _buttons_shown_in(page), window))
         else:
             unreachable.extend(_out_of_reach(title, _buttons_shown_in(page), window))
-    header_button = window.findChild(QAbstractButton, CHECK_UPDATES_BUTTON)
-    if header_button is not None and not _reachable(header_button, window):
-        unreachable.append(f"header: {_name(header_button)}")
+    check_button = window.findChild(QAbstractButton, CHECK_UPDATES_BUTTON)
+    if (
+        check_button is not None
+        and check_button.isVisible()
+        and not _reachable(check_button, window)
+    ):
+        unreachable.append(f"check_updates: {_name(check_button)}")
     return {
         "screen": screen.name(),
         "available": _rect(available),

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 import threading
 import time
@@ -68,6 +69,62 @@ def recent_addresses(addresses: Iterable[object]) -> list[str]:
     return kept
 
 
+DEFAULT_THEME = "arthas"
+"""The default UI theme (`yulon/ui/theme.py`)."""
+
+VALID_THEMES: tuple[str, ...] = (
+    "arthas",
+    "gruvbox-dark",
+    "gruvbox-light",
+    "98x-light",
+    "98x-dark",
+    "ocean",
+    "ocean-dark",
+    "jungle",
+    "jungle-dark",
+    "floral",
+    "floral-dark",
+    "dracula-dark",
+    "dracula-light",
+)
+"""Canonical theme IDs that `ui.json` may store."""
+
+_THEME_ALIASES: dict[str, str] = {
+    "98x": "98x-light",
+}
+
+_THEME_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+
+
+def clean_theme(value: object, config_dir: Path | None = None) -> str:
+    """Normalize `value` to a valid bundled or user theme ID, or `DEFAULT_THEME`."""
+    if not isinstance(value, str):
+        return DEFAULT_THEME
+    cleaned = value.strip().lower()
+    cleaned = _THEME_ALIASES.get(cleaned, cleaned)
+    if cleaned in VALID_THEMES:
+        return cleaned
+    if _THEME_ID_RE.match(cleaned):
+        base = config_dir if config_dir is not None else platform.config_dir()
+        themes_dir = base / "themes"
+        if (themes_dir / f"{cleaned}.json").is_file():
+            return cleaned
+        if themes_dir.is_dir():
+            try:
+                for path in sorted(themes_dir.glob("*.json")):
+                    try:
+                        raw = json.loads(path.read_text(encoding="utf-8-sig"))
+                    except (OSError, ValueError):
+                        continue
+                    if isinstance(raw, dict):
+                        raw_id = str(raw.get("id") or path.stem).strip().lower()
+                        if raw_id == cleaned:
+                            return cleaned
+            except OSError:
+                pass
+    return DEFAULT_THEME
+
+
 class LauncherPlace(BaseModel):
     """One server's launcher window: where it was, and the addresses typed into it."""
 
@@ -100,6 +157,8 @@ class UiSettings(BaseModel):
     """T540: closing the window hides it into the tray (where a tray exists)."""
     tray_note: str = ""
     """T540: "never" once the player said not to show "Yu'lon stays in the tray" again."""
+    theme: str = DEFAULT_THEME
+    """The chosen UI theme (`yulon/ui/theme.py`); 'arthas' until changed in Settings."""
 
     @field_validator("noticed_leftovers", mode="before")
     @classmethod
@@ -109,6 +168,11 @@ class UiSettings(BaseModel):
             if isinstance(value, list)
             else []
         )
+
+    @field_validator("theme", mode="before")
+    @classmethod
+    def _only_valid_theme(cls, value: object) -> str:
+        return clean_theme(value)
 
 
 def launcher_key(game: str, server_dir: Path) -> str:
@@ -132,7 +196,15 @@ def load_ui_settings(path: Path | None = None) -> UiSettings:
     _sweep_stale_temporaries(target, time.time())
     try:
         with target.open(encoding="utf-8-sig") as fh:
-            return UiSettings.model_validate(json.load(fh))
+            raw = json.load(fh)
+        if isinstance(raw, dict) and isinstance(raw.get("theme"), str):
+            raw["theme"] = clean_theme(raw["theme"], config_dir=target.parent)
+        settings = UiSettings.model_validate(raw)
+        if isinstance(raw, dict) and isinstance(raw.get("theme"), str):
+            object.__setattr__(
+                settings, "theme", clean_theme(raw["theme"], config_dir=target.parent)
+            )
+        return settings
     except FileNotFoundError:
         return UiSettings()
     except (OSError, ValueError, ValidationError) as exc:
@@ -261,3 +333,12 @@ def remember_tray(
         if tray_note is not None:
             settings.tray_note = tray_note
         return save_ui_settings(settings, path)
+
+
+def remember_theme(theme: str, path: Path | None = None) -> bool:
+    """Write the chosen UI theme onto what `ui.json` says now. False = not written."""
+    target = path if path is not None else ui_settings_path()
+    with _LOCK:
+        settings = load_ui_settings(target)
+        object.__setattr__(settings, "theme", clean_theme(theme, config_dir=target.parent))
+        return save_ui_settings(settings, target)

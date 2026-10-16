@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QPalette
+from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import QApplication, QFrame, QLabel, QMainWindow, QTabWidget, QWidget
 
 import main
@@ -37,6 +38,199 @@ def test_dadcraft_palette_construction() -> None:
     assert isinstance(palette, QPalette)
     assert palette.color(QPalette.ColorRole.Window).name().lower() == COLOR_BG_DARK.lower()
     assert palette.color(QPalette.ColorRole.Button).name().lower() == COLOR_BG_PANEL.lower()
+
+
+def test_shared_theme_accent_and_focus_ring_are_icy_blue() -> None:
+    accent = QColor(COLOR_GOLD_BRIGHT)
+    assert accent.blue() > accent.red()
+    assert accent.green() > accent.red()
+    assert f"border: 1px solid {COLOR_GOLD_BRIGHT};" in DADCRAFT_THEME_QSS
+    assert QColor(COLOR_BG_DARK).blue() > QColor(COLOR_BG_DARK).red()
+
+
+def test_header_renders_a_cool_glow_and_frost_particles(qapp: QApplication) -> None:
+    header = DadcraftHeader()
+    header.resize(720, 56)
+    header.show()
+    header._tick()
+    image = header.grab().toImage()
+
+    cool_pixels = 0
+    for y in range(image.height()):
+        for x in range(image.width()):
+            colour = image.pixelColor(x, y)
+            if colour.blue() > colour.red() + 20 and colour.green() > colour.red():
+                cool_pixels += 1
+
+    assert cool_pixels > image.width() * 10
+    assert any(mote.crystal for mote in header._frost_motes)
+    header.close()
+    header.deleteLater()
+
+
+def test_all_css_themes_and_arthas_build_valid_palettes_and_stylesheets(
+    qapp: QApplication,
+) -> None:
+    from PySide6.QtCore import qInstallMessageHandler
+
+    from yulon.ui.theme import THEME_CHOICES, THEMES, get_theme, normalize_theme_name
+
+    expected = (
+        "arthas",
+        "gruvbox-dark",
+        "gruvbox-light",
+        "98x-light",
+        "98x-dark",
+        "ocean",
+        "ocean-dark",
+        "jungle",
+        "jungle-dark",
+        "floral",
+        "floral-dark",
+        "dracula-dark",
+        "dracula-light",
+    )
+    assert tuple(THEMES) == expected
+    assert tuple(k for k, _ in THEME_CHOICES) == expected
+    assert normalize_theme_name("98x") == "98x-light"
+    assert normalize_theme_name("Arthas") == "arthas"
+
+    messages: list[str] = []
+    previous = qInstallMessageHandler(lambda _t, _c, msg: messages.append(msg))
+    widget = QWidget()
+    try:
+        for theme_id in expected:
+            spec = get_theme(theme_id)
+            palette = build_dadcraft_palette(theme_id)
+            assert palette.color(QPalette.ColorRole.Window).name().lower() == spec.bg_dark.lower()
+            apply_dadcraft_theme(widget, width=1280, theme_name=theme_id)
+            assert spec.bg_dark in widget.styleSheet()
+            assert spec.accent_bright in widget.styleSheet()
+    finally:
+        qInstallMessageHandler(previous)
+        widget.deleteLater()
+
+    parse_errors = [m for m in messages if "parse" in m.lower() and "stylesheet" in m.lower()]
+    assert parse_errors == [], parse_errors
+
+
+def test_gruvbox_uses_orange_accent_and_header_renders_theme_specific_animations(
+    qapp: QApplication,
+) -> None:
+    from yulon.ui.theme import THEMES, get_theme
+
+    assert get_theme("gruvbox-dark").accent_bright.upper() == "#FE8019"
+    assert get_theme("gruvbox-light").accent_bright.upper() == "#AF3A03"
+    assert get_theme("98x-light").animation == "98x"
+    assert get_theme("98x-dark").animation == "98x"
+
+    header = DadcraftHeader()
+    header.resize(720, 50)
+    assert header.height() == 50  # 10% reduced from 56px
+    header.show()
+    try:
+        rendered: dict[str, QColor] = {}
+        for theme_id in THEMES:
+            header.set_theme(theme_id)
+            header._tick()
+            img = header.grab().toImage()
+            assert not img.isNull()
+            rendered[theme_id] = img.pixelColor(img.width() // 2, img.height() - 8)
+        assert rendered["98x-light"] != rendered["arthas"]
+        assert rendered["gruvbox-dark"] != rendered["arthas"]
+        assert rendered["floral"] != rendered["ocean"]
+    finally:
+        header.close()
+        header.deleteLater()
+
+    # In a light theme, campaign cards render a light surface so dark text has high contrast.
+    host = QWidget()
+    card = DadcraftCampaignCard("wow-wotlk", host)
+    card.resize(300, 370)
+    apply_dadcraft_theme(host, theme_name="gruvbox-light")
+    host.show()
+    try:
+        card_img = card.grab().toImage()
+        center_px = card_img.pixelColor(card_img.width() // 2, card_img.height() // 2)
+        assert center_px.lightness() > 160, f"light theme card stayed dark: {center_px.name()}"
+    finally:
+        host.close()
+        host.deleteLater()
+
+
+def test_themes_load_from_json_files_and_support_user_accessible_custom_themes(
+    qapp: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import json
+
+    from yulon import platform, resources, ui_settings
+    from yulon.ui.theme import (
+        BUNDLED_THEME_ORDER,
+        available_theme_choices,
+        get_theme,
+        sync_user_themes,
+        user_themes_dir,
+    )
+
+    monkeypatch.setattr(platform, "config_dir", lambda: tmp_path)
+    assert user_themes_dir() == tmp_path / "themes"
+
+    # Bundled themes exist as individual JSON files under resources.themes_dir().
+    bundled_files = {p.stem for p in resources.themes_dir().glob("*.json")}
+    assert set(BUNDLED_THEME_ORDER) <= bundled_files
+
+    # Seeding the user-accessible themes folder copies the bundled JSON files there.
+    seeded = sync_user_themes()
+    assert seeded == tmp_path / "themes"
+    assert (seeded / "arthas.json").is_file()
+
+    # Dropping a custom JSON theme into the user folder makes it selectable and loadable.
+    custom_path = seeded / "frostfire-custom.json"
+    custom_path.write_text(
+        json.dumps(
+            {
+                "id": "frostfire-custom",
+                "label": "Frostfire Custom",
+                "is_light": False,
+                "bg_dark": "#11091C",
+                "accent_bright": "#FF55AA",
+                "animation": "floral",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    choices = dict(available_theme_choices())
+    assert choices.get("frostfire-custom") == "Frostfire Custom"
+    spec = get_theme("frostfire-custom")
+    assert spec.bg_dark == "#11091C"
+    assert spec.accent_bright == "#FF55AA"
+    assert spec.animation == "floral"
+
+    # And `ui.json` accepts and remembers the custom user theme ID (even when
+    # the filename differs from the inner `"id"` field, and unsafe CSS tokens
+    # are rejected without breaking the rest of the theme).
+    assert ui_settings.remember_theme("frostfire-custom")
+    assert ui_settings.load_ui_settings().theme == "frostfire-custom"
+
+    mismatched_path = seeded / "my-file.json"
+    mismatched_path.write_text(
+        json.dumps(
+            {
+                "id": "custom-inner-id",
+                "label": "Custom Inner",
+                "bg_dark": "#0F172A",
+                "accent_bright": "#38BDF8; } * { background: red",
+            }
+        ),
+        encoding="utf-8",
+    )
+    inner_spec = get_theme("custom-inner-id")
+    assert inner_spec.bg_dark == "#0F172A"
+    # Unsafe token with CSS syntax is ignored in favor of the default token.
+    assert inner_spec.accent_bright == COLOR_GOLD_BRIGHT
+    assert ui_settings.remember_theme("custom-inner-id")
+    assert ui_settings.load_ui_settings().theme == "custom-inner-id"
 
 
 def test_dadcraft_theme_qss_covers_essential_controls() -> None:
@@ -433,7 +627,8 @@ def test_build_catalog_tab_sets_west_tab_position(qapp: QApplication) -> None:
     panel = LogPanel()
     view = CatalogView(catalog, lambda _e: cast(Any, None), panel)
     tabs, _banner, _splitter = main.build_catalog_tab(window, view, panel)
-    assert tabs.tabPosition() == QTabWidget.TabPosition.West
+    assert tabs.tabPosition() == QTabWidget.TabPosition.North
+    assert window.property("top_menu") is not None
 
 
 def test_catalog_tile_has_custom_context_menu_policy(qapp: QApplication) -> None:

@@ -6,9 +6,9 @@ pixels out of the rectangles the style itself reports. Nothing compares a
 constant with itself: the colours come from `theme.COLOR_*`, the geometry from
 `style().subElementRect` / `subControlRect`, and the pixels from `grab()`.
 
-The holder paints pure blue behind everything. Blue is a colour the theme never
-uses, so a pixel is "the widget" exactly when it is not blue, and an edge
-blended with blue can never pass for one of the theme's colours.
+The holder paints pure magenta behind everything. Magenta is not part of the
+theme, so a pixel is "the widget" exactly when it is not magenta, and an edge
+blended with magenta can never pass for one of the theme's colours.
 """
 
 from __future__ import annotations
@@ -63,8 +63,8 @@ THEME_IMAGES = (
 )
 
 _HEX = re.compile(r"#[0-9A-Fa-f]{6}\b|#[0-9A-Fa-f]{3}\b")
-_BACKDROP = "QWidget#theme-probe { background-color: #0000FF; }"
-"""Test-only backdrop. Blue appears nowhere in the theme (asserted below)."""
+_BACKDROP = "QWidget#theme-probe { background-color: #FF00FF; }"
+"""Test-only backdrop, distinct from the icy blue used by the theme."""
 
 
 def _theme_colours() -> set[str]:
@@ -85,8 +85,8 @@ def _near(colour: QColor, hex_value: str, tolerance: int = 24) -> bool:
 
 
 def _is_backdrop(colour: QColor) -> bool:
-    """More blue than anything else by over half the way: the backdrop, or mostly it."""
-    return colour.blue() - max(colour.red(), colour.green()) >= 128
+    """The pure-magenta backdrop, including antialiased blends."""
+    return min(colour.red(), colour.blue()) - colour.green() >= 128
 
 
 def _pixels(image: QImage, rect: QRect) -> Iterator[QColor]:
@@ -521,6 +521,11 @@ def test_the_pyinstaller_spec_carries_the_theme_images() -> None:
         resources.theme_images_dir().relative_to(resources.bundle_root()),
     )
     assert wanted in pairs, pairs
+    wanted_themes = (
+        resources.themes_dir(),
+        resources.themes_dir().relative_to(resources.bundle_root()),
+    )
+    assert wanted_themes in pairs, pairs
 
 
 def test_the_images_load_from_a_folder_with_a_quote_and_spaces(
