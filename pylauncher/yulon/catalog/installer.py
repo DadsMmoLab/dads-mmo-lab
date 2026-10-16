@@ -37,7 +37,7 @@ from typing import TYPE_CHECKING, Protocol
 from yulon import docker, platform, resources, runner
 from yulon.after_stop import StopSaid, TrueAfterStop
 from yulon.catalog import composegen
-from yulon.catalog.catalog import CatalogEntry, EmulatorSource
+from yulon.catalog.catalog import CatalogEntry, EmulatorSource, SingleEntry
 from yulon.catalog.upstream import UpstreamNews
 from yulon.log import get_logger
 
@@ -438,8 +438,12 @@ def platform_names(platforms: Iterable[str]) -> str:
     return f"{', '.join(names[:-1])} or {names[-1]}"
 
 
-def unsupported_platform_message(entry: CatalogEntry, platform_id: str) -> str:
-    """Why this server cannot be installed here, in the user's words (roadmap 6.1)."""
+def unsupported_platform_message(entry: CatalogEntry | SingleEntry, platform_id: str) -> str:
+    """Why this server cannot be installed here, in the user's words (roadmap 6.1).
+
+    Either kind of entry: the sentence reads only the name and the platform list,
+    which a single-container server has too, and one place words the refusal.
+    """
     supported = platform_names(entry.install.platforms)
     where = platform_names([platform_id])
     return (
@@ -989,6 +993,25 @@ def cancelled_install_message(entry: CatalogEntry, server_dir: Path) -> str:
 # the provisioning probe now agree by construction, so an install can no longer
 # be refused with "Docker is not running" on a Windows box where
 # `ensure_docker()` had just proved that it is.
+
+
+class InstallRun(Protocol):
+    """The one call a Catalog tile and the CLI harness make of ANY engine: run the install.
+
+    Narrower than `InstallEngine`, on purpose. The single-container engine
+    (`single_install.SingleInstaller`) installs a `SingleEntry`, which has no rebuild,
+    database update, compose repair or correction route for the rest of that protocol to
+    describe; every `InstallEngine` satisfies this too, so the tile and the harness take
+    either without knowing which they got.
+    """
+
+    def run(
+        self,
+        options: InstallOptions | None = None,
+        *,
+        cancel: threading.Event | None = None,
+        ask: runner.Prompter | None = None,
+    ) -> Iterator[str]: ...
 
 
 class InstallEngine(Protocol):

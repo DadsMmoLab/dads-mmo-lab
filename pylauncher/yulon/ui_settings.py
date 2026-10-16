@@ -77,6 +77,9 @@ class LauncherPlace(BaseModel):
     """`QWidget.saveGeometry()`, base64. None until the window was first closed."""
     addresses: list[str] = Field(default_factory=list)
     """Typed realm addresses, newest first (`recent_addresses`)."""
+    account: str = ""
+    """The account name Play last started a single-container server's client with (DDON's
+    client takes it on its command line); "" until one was used."""
 
     @field_validator("addresses", mode="before")
     @classmethod
@@ -185,6 +188,7 @@ def remember_launcher(
     *,
     geometry: str | None = None,
     addresses: Iterable[str] | None = None,
+    account: str | None = None,
     path: Path | None = None,
 ) -> bool:
     """Write the fields given onto what `ui.json` says right now. False = not written.
@@ -201,6 +205,8 @@ def remember_launcher(
             update["geometry"] = geometry
         if addresses is not None:
             update["addresses"] = recent_addresses(addresses)
+        if account is not None:
+            update["account"] = account
         settings.launchers[key] = place.model_copy(update=update)
         return save_ui_settings(settings, path)
 

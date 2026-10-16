@@ -38,7 +38,7 @@ import os
 import re
 import shutil
 import subprocess
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -120,25 +120,77 @@ def launch_spec(
     exe = steam.client_executable(play_dir)
     if not exe.is_file():
         raise LaunchRefusal(NO_WOW_EXE.format(folder=play_dir))
+    return program_launch_spec(
+        exe,
+        game=game,
+        server_dir=server_dir,
+        os_name=os_name,
+        home=home,
+        config_dir=config_dir,
+        which=which,
+        cwd=play_dir,
+        no_runner_linux=NO_RUNNER_LINUX,
+        no_runner_macos=NO_RUNNER_MACOS,
+    )
+
+
+NO_RUNNER_LINUX_FOR = (
+    "Nothing on this machine can run {exe}, so nothing was started. {name} is a "
+    "Windows program and needs Proton or Wine here. Install Proton through Steam "
+    "(Library → filter by Tools → Proton → Install), or install Wine from your "
+    "distribution's packages, then press Play again."
+)
+"""`NO_RUNNER_LINUX` for any game's client: `exe` is its file name, `name` the game."""
+
+NO_RUNNER_MACOS_FOR = (
+    "Nothing on this Mac can run {exe}, so nothing was started. {name} is a Windows "
+    "program and needs Wine on macOS. Install Wine (for example through Homebrew), then "
+    "press Play again."
+)
+"""`NO_RUNNER_MACOS` for any game's client."""
+
+
+def program_launch_spec(
+    exe: Path,
+    args: Sequence[str] = (),
+    *,
+    game: str,
+    server_dir: Path,
+    os_name: str,
+    home: Path,
+    config_dir: Path,
+    which: Callable[[str], str | None] = shutil.which,
+    cwd: Path | None = None,
+    no_runner_linux: str,
+    no_runner_macos: str,
+) -> LaunchSpec:
+    """How to start the Windows program `exe` with `args` on `os_name`: itself, Proton or Wine.
+
+    `launch_spec()`'s dispatch, for any client: run directly on Windows; elsewhere the
+    first Steam's Proton, in this server's own prefix, else Wine; else the refusal the
+    caller words. The working folder is `cwd`, else the program's own, where a client
+    looks for its data. The caller has already checked that `exe` is there.
+    """
+    folder = cwd if cwd is not None else exe.parent
     if os_name == "windows":
-        return LaunchSpec(argv=(str(exe),), env={}, cwd=play_dir)
+        return LaunchSpec(argv=(str(exe), *args), env={}, cwd=folder)
     if os_name != "macos":
         found = _proton(home)
         if found is not None:
             script, steam_root = found
             prefix = _prefix(config_dir, game, server_dir)
             return LaunchSpec(
-                argv=(str(script), "run", str(exe)),
+                argv=(str(script), "run", str(exe), *args),
                 env={
                     "STEAM_COMPAT_DATA_PATH": str(prefix),
                     "STEAM_COMPAT_CLIENT_INSTALL_PATH": str(steam_root),
                 },
-                cwd=play_dir,
+                cwd=folder,
             )
     wine = which("wine")
     if wine:
-        return LaunchSpec(argv=(wine, str(exe)), env={}, cwd=play_dir)
-    raise LaunchRefusal(NO_RUNNER_MACOS if os_name == "macos" else NO_RUNNER_LINUX)
+        return LaunchSpec(argv=(wine, str(exe), *args), env={}, cwd=folder)
+    raise LaunchRefusal(no_runner_macos if os_name == "macos" else no_runner_linux)
 
 
 def _proton(home: Path) -> tuple[Path, Path] | None:
@@ -162,18 +214,24 @@ def _proton(home: Path) -> tuple[Path, Path] | None:
     return None
 
 
-def _prefix(config_dir: Path, game: str, server_dir: Path) -> Path:
-    """This server's own Proton prefix under Yu'lon's data folder, created if absent.
+def prefix_path(config_dir: Path, game: str, server_dir: Path) -> Path:
+    """This server's own Proton prefix under Yu'lon's data folder; nothing is created.
 
     Named `<game>-<first 12 hex of sha256(server folder)>`: stable across runs,
     unlike `hash()`, and readable enough to find by hand. The game id is kept to
     file-name characters so an id with a slash in it cannot climb out of
-    `proton/`. Proton makes the prefix's contents on the first run; the folder
-    has to exist before that.
+    `proton/`. The Steam Deck Gaming Mode client script names the same folder
+    (`gaming_mode.py`), so Gaming Mode and Play share one prefix.
     """
     digest = hashlib.sha256(str(server_dir).encode("utf-8")).hexdigest()[:12]
-    parent = config_dir / "proton"
-    prefix = parent / f"{re.sub(r'[^A-Za-z0-9_.-]', '_', game)}-{digest}"
+    return config_dir / "proton" / f"{re.sub(r'[^A-Za-z0-9_.-]', '_', game)}-{digest}"
+
+
+def _prefix(config_dir: Path, game: str, server_dir: Path) -> Path:
+    """`prefix_path()`, created if absent: Proton makes the contents on the first run,
+    and the folder has to exist before that."""
+    prefix = prefix_path(config_dir, game, server_dir)
+    parent = prefix.parent
     try:
         prefix.mkdir(parents=True, exist_ok=True)
     except OSError as exc:

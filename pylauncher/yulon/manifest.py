@@ -46,6 +46,24 @@ ClientDest = Literal["addons", "interface", "data"]
 PromptKind = Literal["string", "int", "float", "bool", "choice", "character"]
 
 
+def check_repo(value: str, hosts: tuple[str, ...]) -> str:
+    """`value` if it is an `owner/name` GitHub slug or an https URL on one of `hosts`; else raise.
+
+    One rule with the host list as its argument, so the curated catalog can name a
+    forge a third-party manifest may not (`catalog.CATALOG_REPO_HOSTS`) without a
+    second copy of the rest of it.
+    """
+    if "://" not in value:
+        if not re.match(_REPO_SLUG, value) or value.endswith(".git"):
+            raise ValueError(f"repo must be 'owner/name' (no .git, no spaces): {value!r}")
+        return value
+    parts = urlsplit(value)
+    host = (parts.hostname or "").lower()
+    if parts.scheme != "https" or host not in hosts:
+        raise ValueError(f"repo must be https on an allowed host {hosts}, got {value!r}")
+    return value
+
+
 class _Strict(BaseModel):
     """Base for every manifest model: unknown keys are an error, not ignored."""
 
@@ -104,17 +122,7 @@ class Source(_Strict):
     @field_validator("repo")
     @classmethod
     def _repo_is_allowed(cls, value: str) -> str:
-        if "://" not in value:
-            if not re.match(_REPO_SLUG, value) or value.endswith(".git"):
-                raise ValueError(f"repo must be 'owner/name' (no .git, no spaces): {value!r}")
-            return value
-        parts = urlsplit(value)
-        host = (parts.hostname or "").lower()
-        if parts.scheme != "https" or host not in ALLOWED_REPO_HOSTS:
-            raise ValueError(
-                f"repo must be https on an allowed host {ALLOWED_REPO_HOSTS}, got {value!r}"
-            )
-        return value
+        return check_repo(value, ALLOWED_REPO_HOSTS)
 
     @property
     def url(self) -> str:

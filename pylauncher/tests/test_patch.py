@@ -206,7 +206,14 @@ def test_a_missing_file_refuses_and_names_the_checkout(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("body", "reason"),
     [
-        ("--- /dev/null\n+++ b/new.cpp\n@@ -0,0 +1 @@\n+int x;\n", "creates or deletes"),
+        ("--- a/old.cpp\n+++ /dev/null\n@@ -1 +0,0 @@\n-int x;\n", "never deletes"),
+        ("new file mode 100755\n--- /dev/null\n+++ b/x.sh\n@@ -0,0 +1 @@\n+x\n", "nothing else"),
+        ("--- /dev/null\n+++ b/x.cpp\n@@ -1 +1 @@\n-int x;\n+int y;\n", "must start"),
+        (
+            "--- /dev/null\n+++ b/x.cpp\n@@ -0,0 +1 @@\n+int x;\n"
+            "--- a/x.cpp\n+++ b/x.cpp\n@@ -1 +1 @@\n-int x;\n+int y;\n",
+            "one hunk",
+        ),
         ("--- a/old.cpp\n+++ b/new.cpp\n@@ -1 +1 @@\n-int x;\n+int y;\n", "renames"),
         ("diff --git a/x b/x\nBinary files differ\n", "binary"),
         ("just prose\n", "not a line"),
@@ -225,6 +232,85 @@ def test_patches_this_module_does_not_apply_are_refused_by_name(
 ) -> None:
     with pytest.raises(patch.PatchError, match=reason):
         patch.apply(body, tmp_path, name="p")
+
+
+CREATES = (
+    "diff --git a/src/new.go b/src/new.go\n"
+    "new file mode 100644\n"
+    "index 00000000..ddcc2b2e\n"
+    "--- /dev/null\n"
+    "+++ b/src/new.go\n"
+    "@@ -0,0 +1,3 @@\n"
+    "+package pvf\n"
+    "+\n"
+    "+// 取钥\n"
+)
+EDITS = (
+    "--- a/src/old.go\n+++ b/src/old.go\n"
+    "@@ -1,2 +1,2 @@\n package pvf\n-func a() {}\n+func b() {}\n"
+)
+
+
+def test_a_created_file_is_written_whole_with_lf_and_counted_applied(tmp_path: Path) -> None:
+    results = patch.apply(CREATES, tmp_path, name="p")
+
+    assert [(r.path, r.applied, r.present) for r in results] == [("src/new.go", 1, 0)]
+    assert (tmp_path / "src" / "new.go").read_bytes() == "package pvf\n\n// 取钥\n".encode()
+
+
+def test_a_created_file_already_there_is_present_and_untouched_even_with_crlf(
+    tmp_path: Path,
+) -> None:
+    """The resume case: a second press finds the file the first one wrote."""
+    target = tmp_path / "src" / "new.go"
+    target.parent.mkdir()
+    target.write_bytes("package pvf\r\n\r\n// 取钥\r\n".encode())
+
+    results = patch.apply(CREATES, tmp_path, name="p")
+
+    assert [(r.applied, r.present) for r in results] == [(0, 1)]
+    assert target.read_bytes() == "package pvf\r\n\r\n// 取钥\r\n".encode()
+
+
+def test_a_different_file_where_one_is_created_refuses_and_writes_nothing_anywhere(
+    tmp_path: Path,
+) -> None:
+    """Somebody's file is never written over, and the edit beside it does not land either."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "old.go").write_text("package pvf\nfunc a() {}\n")
+    (tmp_path / "src" / "new.go").write_text("package other\n")
+
+    with pytest.raises(patch.PatchError, match="different file there"):
+        patch.apply(EDITS + CREATES, tmp_path, name="p")
+
+    assert (tmp_path / "src" / "old.go").read_text() == "package pvf\nfunc a() {}\n"
+    assert (tmp_path / "src" / "new.go").read_text() == "package other\n"
+
+
+def test_an_edit_and_a_creation_in_one_patch_land_together(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "old.go").write_text("package pvf\nfunc a() {}\n")
+
+    results = patch.apply(EDITS + CREATES, tmp_path, name="p")
+
+    assert [(r.path, r.applied) for r in results] == [("src/old.go", 1), ("src/new.go", 1)]
+    assert (tmp_path / "src" / "old.go").read_text() == "package pvf\nfunc b() {}\n"
+    assert (tmp_path / "src" / "new.go").is_file()
+
+
+def test_a_dry_run_of_a_creation_writes_nothing(tmp_path: Path) -> None:
+    results = patch.apply(CREATES, tmp_path, name="p", dry_run=True)
+
+    assert [(r.applied, r.present) for r in results] == [(1, 0)]
+    assert not (tmp_path / "src").exists()
+
+
+def test_a_created_file_without_a_final_newline_is_written_without_one(tmp_path: Path) -> None:
+    body = "--- /dev/null\n+++ b/x.txt\n@@ -0,0 +1,2 @@\n+one\n+two\n\\ No newline at end of file\n"
+
+    patch.apply(body, tmp_path, name="p")
+
+    assert (tmp_path / "x.txt").read_bytes() == b"one\ntwo"
 
 
 def test_a_hunk_with_more_lines_than_its_header_says_is_refused_not_truncated(

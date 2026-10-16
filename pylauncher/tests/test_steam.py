@@ -11,13 +11,16 @@ from __future__ import annotations
 import errno
 import json
 import os
+import shlex
+import shutil
+import subprocess
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
 import pytest
 
-from yulon import steam
+from yulon import gaming_mode, resources, steam
 
 CAPTURE = Path(__file__).resolve().parent / "data" / "steam-deck-shortcut-entries.json"
 
@@ -221,6 +224,37 @@ def test_two_steam_profiles_are_refused_and_both_ids_are_named(tmp_path: Path) -
 
     assert "18347166" in str(caught.value)
     assert "28006437" in str(caught.value)
+
+
+def _loginusers(home: Path, *recent: tuple[str, str]) -> None:
+    """Steam's config/loginusers.vdf: (account id, MostRecent "0"/"1") per account."""
+    config = home / ".local/share/Steam/config"
+    config.mkdir(parents=True, exist_ok=True)
+    body = "".join(
+        f'\t"{int(account) + steam.STEAMID64_BASE}"\n\t{{\n'
+        f'\t\t"AccountName"\t\t"someone"\n\t\t"MostRecent"\t\t"{flag}"\n\t}}\n'
+        for account, flag in recent
+    )
+    (config / "loginusers.vdf").write_text(f'"users"\n{{\n{body}}}\n', encoding="utf-8")
+
+
+def test_with_two_profiles_the_account_steam_signed_in_last_is_the_one(tmp_path: Path) -> None:
+    """Joshua's main Deck: a stale profile beside the real one, and Steam names the real one."""
+    for account in ("341514174", "28006437"):
+        (tmp_path / ".local/share/Steam/userdata" / account / "config").mkdir(parents=True)
+    _loginusers(tmp_path, ("341514174", "0"), ("28006437", "1"))
+    assert steam.find_profile(tmp_path).parent.name == "28006437"
+
+
+@pytest.mark.parametrize("flags", [("0", "0"), ("1", "1")])
+def test_two_profiles_steam_does_not_tell_apart_are_still_refused(
+    tmp_path: Path, flags: tuple[str, str]
+) -> None:
+    for account in ("18347166", "28006437"):
+        (tmp_path / ".local/share/Steam/userdata" / account / "config").mkdir(parents=True)
+    _loginusers(tmp_path, ("18347166", flags[0]), ("28006437", flags[1]))
+    with pytest.raises(steam.SteamRefusal, match="does not say which one signed in last"):
+        steam.find_profile(tmp_path)
 
 
 # --------------------------------------------------------------------------
@@ -1110,3 +1144,156 @@ def test_a_second_press_repairs_an_entry_that_points_into_the_mount(tmp_path: Pa
     assert server["appid"] == broken["appid"]
     assert server["LastPlayTime"] == 1789071688
     assert server["SomeFieldValveAddsNextYear"] == "keep me"
+
+
+# --------------------------------------------------------------------------
+# Steam Deck Gaming Mode: a WoW server's three tiles
+# --------------------------------------------------------------------------
+
+YULON_IMAGE = "/home/deck/Apps/Yu'lon (test).AppImage"
+
+
+def _wow_scripts(home: Path) -> Callable[[], steam.GamingScripts]:
+    def scripts() -> steam.GamingScripts:
+        return gaming_mode.wow_scripts(
+            "wow-tortoise",
+            "Turtle WoW",
+            home / "yulon-tortoise",
+            home=home,
+            config_dir=home / ".local/share/yulon",
+            installers_root=resources.installers_dir(),
+            yulon=[YULON_IMAGE],
+        )
+
+    return scripts
+
+
+def _gaming(home: Path, *, running: bool = False) -> steam.SteamShortcuts:
+    client = home / "clients/TurtleWoW"
+    shortcuts = _shortcuts(
+        home, running=running, client_dir=client if client.is_dir() else _client(home)
+    )
+    shortcuts.gaming = _wow_scripts(home)
+    return shortcuts
+
+
+def test_gaming_mode_writes_three_tiles_the_scripts_and_the_library(tmp_path: Path) -> None:
+    config = _profile(tmp_path)
+    _proton(tmp_path)
+    report = _gaming(tmp_path).add()
+
+    root, _ = steam.vdf_parse((config / "shortcuts.vdf").read_bytes())
+    entries = {e["AppName"]: e for e in root["shortcuts"].values()}
+    assert list(entries) == ["Turtle WoW", "Turtle WoW Server", "Turtle WoW Server Stop"]
+    assert report.entries == ("Turtle WoW", "Turtle WoW Server", "Turtle WoW Server Stop")
+    scripts = tmp_path / ".local/share/yulon/gaming-mode/wow-tortoise"
+    launcher, stop = scripts / "wow-launcher.sh", scripts / "wow-stop.sh"
+    assert report.scripts == (launcher, stop)
+    server = entries["Turtle WoW Server"]
+    assert server["Exe"] == '"/usr/bin/konsole"' and server["StartDir"] == '"/usr/bin/"'
+    assert shlex.split(str(server["LaunchOptions"])) == ["--hold", "-e", "bash", str(launcher)]
+    assert entries["Turtle WoW Server Stop"]["Exe"] == f'"{stop}"'
+    # The game tile is still 8.8's: the client's own executable, through Proton.
+    assert entries["Turtle WoW"]["Exe"] == f'"{tmp_path / "clients/TurtleWoW/WoW.exe"}"'
+    compat = (tmp_path / ".local/share/Steam/config/config.vdf").read_text(encoding="utf-8")
+    assert str(steam.to_unsigned(int(entries["Turtle WoW"]["appid"]))) in compat
+    assert str(steam.to_unsigned(int(server["appid"]))) not in compat
+    text = launcher.read_text(encoding="utf-8")
+    assert gaming_mode.markers(text) == set() and "\r" not in text
+    assert f"YULON=({shlex.join([YULON_IMAGE])})" in text
+    assert 'GAME="wow-tortoise"' in text and f'SERVER_DIR="{tmp_path / "yulon-tortoise"}"' in text
+    assert 'dml_await_and_track "Wow.exe WoW.exe"' in text
+    assert (tmp_path / "dml-launcher-lib.sh").is_file()
+    assert "was installed (1.3.0)" in report.lib
+    assert len(report.artwork) == 9
+    said = steam.confirmation(report)
+    assert "“Turtle WoW Server” (starts the server and stops it when you close the game)" in said
+    assert "“Turtle WoW Server Stop”" in said
+    assert str(launcher) in steam.confirmation_details(report)
+
+
+def test_a_second_gaming_mode_press_replaces_the_three_in_place(tmp_path: Path) -> None:
+    config = _profile(tmp_path)
+    _proton(tmp_path)
+    _gaming(tmp_path).add()
+    first = steam.vdf_parse((config / "shortcuts.vdf").read_bytes())[0]["shortcuts"]
+    report = _gaming(tmp_path).add()
+    second = steam.vdf_parse((config / "shortcuts.vdf").read_bytes())[0]["shortcuts"]
+    assert report.replaced
+    assert [e["appid"] for e in first.values()] == [e["appid"] for e in second.values()]
+
+
+def test_8_8s_two_entries_become_the_gaming_mode_three_in_place(tmp_path: Path) -> None:
+    """A WoW install added to Steam before keeps its two tiles' appids (and their artwork)."""
+    config = _profile(tmp_path)
+    _proton(tmp_path)
+    old = _shortcuts(tmp_path, client_dir=_client(tmp_path))
+    old.add()
+    before = steam.vdf_parse((config / "shortcuts.vdf").read_bytes())[0]["shortcuts"]
+    shortcuts = steam.SteamShortcuts(
+        game=old.game,
+        server_dir=old.server_dir,
+        client_dir=old.client_dir,
+        home=tmp_path,
+        is_running=lambda: False,
+        now=lambda: FIXED,
+        platform_id=lambda: "linux",
+        gaming=_wow_scripts(tmp_path),
+    )
+    shortcuts.add()
+    after = steam.vdf_parse((config / "shortcuts.vdf").read_bytes())[0]["shortcuts"]
+    by_name = {e["AppName"]: e["appid"] for e in after.values()}
+    for entry in before.values():
+        assert by_name[entry["AppName"]] == entry["appid"]
+    assert set(by_name) == {"Turtle WoW", "Turtle WoW Server", "Turtle WoW Server Stop"}
+
+
+def test_a_refused_gaming_mode_press_writes_no_script_and_no_library(tmp_path: Path) -> None:
+    _profile(tmp_path)
+    _proton(tmp_path)
+    with pytest.raises(steam.SteamRefusal):
+        _gaming(tmp_path, running=True).add()
+    assert not (tmp_path / ".local/share/yulon/gaming-mode").exists()
+    assert not (tmp_path / "dml-launcher-lib.sh").exists()
+
+
+def test_a_server_folder_a_script_cannot_quote_is_refused(tmp_path: Path) -> None:
+    with pytest.raises(steam.SteamRefusal, match="cannot quote"):
+        gaming_mode.wow_scripts(
+            "wow-tortoise",
+            "Turtle WoW",
+            tmp_path / "yulon $tortoise",
+            home=tmp_path,
+            config_dir=tmp_path / "y",
+            installers_root=resources.installers_dir(),
+            yulon=[YULON_IMAGE],
+        )
+
+
+@pytest.mark.skipif(shutil.which("bash") is None or os.name == "nt", reason="needs POSIX bash")
+def test_the_wow_scripts_are_valid_bash_and_yulons_path_stays_one_word(tmp_path: Path) -> None:
+    _profile(tmp_path)
+    _proton(tmp_path)
+    report = _gaming(tmp_path).add()
+    for script in report.scripts:
+        result = subprocess.run(["bash", "-n", str(script)], capture_output=True, text=True)
+        assert result.returncode == 0, f"{script.name}: {result.stderr}"
+    line = next(
+        x
+        for x in report.scripts[0].read_text(encoding="utf-8").splitlines()
+        if x.startswith("YULON=")
+    )
+    shown = subprocess.run(
+        ["bash", "-c", f'{line}; printf "%s|" "${{#YULON[@]}}" "${{YULON[0]}}"'],
+        capture_output=True,
+        text=True,
+    )
+    assert shown.stdout == f"1|{YULON_IMAGE}|"
+
+
+def test_yulon_argv_is_the_appimage_alone_or_the_interpreter_and_main() -> None:
+    assert gaming_mode.yulon_argv(lambda: ("/a/Yulon.AppImage", "")) == ["/a/Yulon.AppImage"]
+    assert gaming_mode.yulon_argv(lambda: ("/usr/bin/python3", "/src/main.py")) == [
+        "/usr/bin/python3",
+        "/src/main.py",
+    ]

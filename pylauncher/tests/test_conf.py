@@ -940,7 +940,13 @@ def test_the_conf_mode_stays_owner_only_only_while_the_images_run_as_root() -> N
     goes red, in the same commit, naming the constant to revisit.
     """
     installers = resources.installers_dir()
-    dockerfiles = sorted(installers.glob("*/native/Dockerfile.tmpl"))
+    # A single-container install (`catalog.SingleEntry`, DDON) writes no conf file: its one
+    # bind-mounted file is written at the default mode, so its image may run as the
+    # non-root user its base image declares. A host-program install (DFO) has no image.
+    single = {installers / entry.install.runtime.templates for entry in load_catalog().single}
+    dockerfiles = sorted(
+        path for path in installers.glob("*/native/Dockerfile.tmpl") if path.parent not in single
+    )
     compose = sorted(installers.glob("shared/*/*.yml.tmpl"))
     assert dockerfiles and compose, "the templates moved; this guard is now vacuous"
     offenders = []

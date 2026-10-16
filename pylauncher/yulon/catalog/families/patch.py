@@ -60,6 +60,17 @@ the terminator it already uses, and the patch's lines are matched without
 theirs. `git.py` clones with `core.autocrlf=false`, so in practice the files
 are LF on every platform, but a CRLF file is a case the tests drive rather
 than an assumption the module makes.
+
+**Creating a file, and nothing more drastic.** A file the patch brings into
+being (`--- /dev/null`, one `@@ -0,0` hunk, `new file mode 100644`) is written
+when the checkout has no such file, counted present when the checkout already
+has exactly those lines there (line endings aside), and refused when it has a
+different file at that path: that is somebody's file, and the patch was not
+written against it. It is resolved with every other file before anything is
+written, so it cannot be the half of a patch that landed. A created file is
+written LF, the patch's own terminator. DFO's key-scan fix (2026-10-13) brings
+two new Go files beside the one it edits, which is why this exists. Deleting
+or renaming a file is still refused.
 """
 
 from __future__ import annotations
@@ -95,6 +106,15 @@ class Hunk:
     `apply()`'s ordering rule turns on it -- see the `removals == 0` branch
     there. A hunk that only inserts leaves its own pre-image intact.
     """
+    creates: bool = False
+    """The hunk brings its file into being (`--- /dev/null`): `before` is empty."""
+    ends_with_newline: bool = True
+    """False when `\\ No newline at end of file` follows the hunk's last post-image line."""
+
+
+NEW_FILE_MODE = "new file mode 100644"
+"""The one mode a created file may have: a plain file. An executable bit is not a
+thing this module can promise on every platform, so it is refused rather than dropped."""
 
 
 class Outcome(enum.Enum):
@@ -119,13 +139,15 @@ def parse(text: str) -> tuple[Hunk, ...]:
     """Read a unified diff into hunks, refusing anything this module does not apply.
 
     Accepted: `diff --git`/`index` headers, `--- a/…`/`+++ b/…` pairs, `@@` hunks
-    of ` `, `-`, `+` lines and `\\ No newline at end of file`. Refused by name:
-    file creation and deletion (`/dev/null`), binary patches, renames, and a hunk
+    of ` `, `-`, `+` lines and `\\ No newline at end of file`, and a file's
+    creation (`--- /dev/null`, `new file mode 100644`, one `@@ -0,0` hunk). Refused
+    by name: deletion, binary patches, renames, any other file mode, and a hunk
     whose line counts do not add up — a patch file that was edited by hand.
     """
     hunks: list[Hunk] = []
     lines = text.splitlines()
     path: str | None = None
+    creating = False
     i = 0
     while i < len(lines):
         line = lines[i]
@@ -134,12 +156,13 @@ def parse(text: str) -> tuple[Hunk, ...]:
             if i + 1 >= len(lines) or not lines[i + 1].startswith("+++ "):
                 raise PatchError(f"patch line {i + 1}: `---` is not followed by `+++`")
             new = lines[i + 1][4:].split("\t")[0]
-            if old == "/dev/null" or new == "/dev/null":
+            if new == "/dev/null":
                 raise PatchError(
-                    f"patch line {i + 1}: creates or deletes {new if old == '/dev/null' else old}; "
-                    "this stage only edits files a checkout already has"
+                    f"patch line {i + 1}: deletes {_strip_prefix(old)}; this stage never deletes "
+                    "a file"
                 )
-            if _strip_prefix(old) != _strip_prefix(new):
+            creating = old == "/dev/null"
+            if not creating and _strip_prefix(old) != _strip_prefix(new):
                 raise PatchError(
                     f"patch line {i + 1}: renames {_strip_prefix(old)} to {_strip_prefix(new)}; "
                     "this stage does not rename"
@@ -154,9 +177,14 @@ def parse(text: str) -> tuple[Hunk, ...]:
             old_start = int(header.group(1))
             old_count = int(header.group(2) or 1)
             new_count = int(header.group(4) or 1)
+            if creating and (old_start, old_count) != (0, 0):
+                raise PatchError(
+                    f"patch line {i + 1}: {path} is created, so its hunk must start `@@ -0,0`"
+                )
             before: list[str] = []
             after: list[str] = []
             removals = 0
+            last = ""
             i += 1
             while i < len(lines) and (len(before) < old_count or len(after) < new_count):
                 body = lines[i]
@@ -173,20 +201,38 @@ def parse(text: str) -> tuple[Hunk, ...]:
                     after.append(body[1:])
                 else:
                     raise PatchError(f"patch line {i + 1}: {body!r} is not a hunk line")
+                last = body[:1]
                 i += 1
             if len(before) != old_count or len(after) != new_count:
                 raise PatchError(
                     f"patch line {i}: the hunk at {path}:{old_start} says {old_count}/{new_count} "
                     f"lines and carries {len(before)}/{len(after)}"
                 )
-            hunks.append(Hunk(path, old_start, tuple(before), tuple(after), removals))
+            # The marker sits after the hunk's last line, which the loop above has
+            # already counted, so it is read here: it says the post-image ends with
+            # no newline when that last line was on the post-image side.
+            bare_end = i < len(lines) and lines[i].startswith("\\") and last in ("+", " ", "")
+            hunks.append(
+                Hunk(
+                    path,
+                    old_start,
+                    tuple(before),
+                    tuple(after),
+                    removals,
+                    creates=creating,
+                    ends_with_newline=not bare_end,
+                )
+            )
             continue
         if line.startswith("Binary files") or line.startswith("GIT binary patch"):
             raise PatchError(f"patch line {i + 1}: binary patches are not applied")
+        if line == NEW_FILE_MODE:
+            i += 1
+            continue
         if line.startswith(("rename ", "similarity index", "new file mode", "deleted file mode")):
             raise PatchError(
-                f"patch line {i + 1}: {line!r} — this stage edits files in place and does "
-                "nothing else"
+                f"patch line {i + 1}: {line!r} — this stage edits files in place, creates plain "
+                "ones, and does nothing else"
             )
         if line and not line.startswith(("diff --git ", "index ", "\\")):
             # Strict on purpose: a line the parser cannot place is a hunk whose
@@ -229,6 +275,9 @@ def apply(text: str, root: Path, *, name: str, dry_run: bool = False) -> tuple[F
     planned: list[tuple[Path, bytes, FileResult]] = []
     for rel, file_hunks in by_file.items():
         target = _inside(root, rel, name)
+        if any(hunk.creates for hunk in file_hunks):
+            planned.append(_plan_creation(target, rel, file_hunks, name))
+            continue
         try:
             raw = target.read_bytes()
         except FileNotFoundError:
@@ -341,11 +390,48 @@ def apply(text: str, root: Path, *, name: str, dry_run: bool = False) -> tuple[F
     for target, out, result in planned:
         if result.applied and not dry_run:
             try:
+                target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(out)
             except OSError as exc:
                 raise PatchError(f"{name} could not write {target}: {exc}") from exc
         results.append(result)
     return tuple(results)
+
+
+def _plan_creation(
+    target: Path, rel: str, file_hunks: list[Hunk], name: str
+) -> tuple[Path, bytes, FileResult]:
+    """The write that creates `rel`, or none when the checkout already has exactly that file.
+
+    One hunk and nothing else: a created file is its post-image, so a second hunk, or
+    an edit of the same path in the same patch, is a patch this module cannot read
+    as one file. A file already at the path counts as present only when its lines
+    are the post-image's; any other file there is refused, never written over.
+    """
+    if len(file_hunks) != 1:
+        raise PatchError(
+            f"{name} creates {rel} and also has another hunk for it; a created file is one hunk"
+        )
+    hunk = file_hunks[0]
+    try:
+        raw = target.read_bytes()
+    except FileNotFoundError:
+        out = b"\n".join(ln.encode("utf-8", errors="surrogateescape") for ln in hunk.after)
+        if hunk.ends_with_newline and hunk.after:
+            out += b"\n"
+        return target, out, FileResult(rel, 1, 0)
+    except OSError as exc:
+        raise PatchError(f"{name} could not read {target}: {exc}") from exc
+    lines = raw.decode("utf-8", errors="surrogateescape").split("\n")
+    if lines[-1] == "":
+        lines.pop()
+    if [ln[:-1] if ln.endswith("\r") else ln for ln in lines] == list(hunk.after):
+        return target, b"", FileResult(rel, 0, 1)
+    raise PatchError(
+        f"{name} creates {rel}, and this checkout already has a different file there. The "
+        f"source tree at {target.parent} is not the one the patch was written against; nothing "
+        "was changed."
+    )
 
 
 def _inside(root: Path, rel: str, name: str) -> Path:
