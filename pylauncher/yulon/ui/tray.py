@@ -52,7 +52,7 @@ from yulon.ui.message_box import FittedMessageBox
 from yulon.ui.tab_titles import controller_tab_titles
 from yulon.ui.theme import (
     COLOR_DANGER,
-    COLOR_GOLD_BRIGHT,
+    COLOR_TEXT_WARNING,
     COLOR_UNCOMMON,
     apply_dadcraft_theme,
     normalize_theme_name,
@@ -70,7 +70,7 @@ RESTART = "Restart"
 LOGS = "Logs"
 QUIT_TRAY = "Quit tray…"
 
-STATE_COLOURS = {"up": COLOR_UNCOMMON, "between": COLOR_GOLD_BRIGHT, "attention": COLOR_DANGER}
+STATE_COLOURS = {"up": COLOR_UNCOMMON, "between": COLOR_TEXT_WARNING, "attention": COLOR_DANGER}
 """The dot per icon state: the theme's online green, amber accent and danger red."""
 
 NOTE_NEVER = "never"

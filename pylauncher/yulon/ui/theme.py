@@ -1367,12 +1367,12 @@ QToolButton#{SETTINGS_BUTTON} {{
     border: 1px solid transparent;
     border-bottom: 2px solid transparent;
     border-radius: 3px;
-    padding: 6px 18px;
+    padding: 0px 8px;
     font-family: {FONT_TITLE_SINGLE};
     font-size: {_px(13, scale)};
     font-weight: bold;
     min-height: {_touch(28, scale)};
-    min-width: 84px;
+    min-width: 64px;
 }}
 
 QToolButton#{TOP_MENU_BUTTON}:hover,

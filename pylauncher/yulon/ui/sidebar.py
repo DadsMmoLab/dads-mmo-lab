@@ -291,8 +291,8 @@ class TopMenuBar(QWidget):
         self._settings_widget = settings_widget
 
         row = QHBoxLayout(self)
-        row.setContentsMargins(14, 4, 14, 4)
-        row.setSpacing(12)
+        row.setContentsMargins(2, 0, 2, 0)
+        row.setSpacing(2)
         row.addStretch(1)
 
         self.catalog_button = self._make_button("Catalog", TOP_MENU_BUTTON)

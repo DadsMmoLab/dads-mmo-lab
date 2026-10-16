@@ -178,6 +178,7 @@ def build_catalog_tab(
     # Before any tab exists: `setTabBar` is only honoured on an empty widget.
     tabs.setTabBar(SidebarRail(tabs))
     tabs.setTabPosition(QTabWidget.TabPosition.North)
+    tabs.tabBar().hide()
     tabs.setIconSize(QSize(18, 18))
     tabs.setUsesScrollButtons(True)
     tabs.setElideMode(Qt.TextElideMode.ElideNone)
@@ -195,7 +196,7 @@ def build_catalog_tab(
     column.addWidget(header)
     window.setProperty("header", header)
     top_menu = TopMenuBar(tabs, parent=central)
-    column.addWidget(top_menu)
+    header.add_action(top_menu)
     window.setProperty("top_menu", top_menu)
     update_bar = UpdateBar(central)
     column.addWidget(update_bar)
