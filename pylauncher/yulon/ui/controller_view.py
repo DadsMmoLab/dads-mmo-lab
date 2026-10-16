@@ -89,6 +89,7 @@ from yulon import (
     docker,
     docker_advice,
     forgetting,
+    gaming_mode,
     install_wiring,
     logsnap,
     module_moves,
@@ -3182,7 +3183,25 @@ def _steam_seam(
     if platform.detect() != "linux":
         return None
     return steam_module.SteamShortcuts(
-        game=entry.name, server_dir=server_dir, client_dir=client_dir
+        game=entry.name,
+        server_dir=server_dir,
+        client_dir=client_dir,
+        # Steam Deck Gaming Mode: the Server tile starts the server through `yulon --server`
+        # and stops it when the game closes, and a third tile stops it (`gaming_mode`).
+        gaming=partial(_wow_gaming_scripts, entry, server_dir),
+    )
+
+
+def _wow_gaming_scripts(entry: CatalogEntry, server_dir: Path) -> steam_module.GamingScripts:
+    """This WoW install's Gaming Mode scripts, rendered when the button is pressed."""
+    return gaming_mode.wow_scripts(
+        entry.id,
+        entry.name,
+        server_dir,
+        home=Path.home(),
+        config_dir=platform.config_dir(),
+        installers_root=resources.installers_dir(),
+        yulon=gaming_mode.yulon_argv(),
     )
 
 
@@ -14262,7 +14281,7 @@ class ControllerView(QWidget):
             return
         self.steam_button.setEnabled(False)
         self.steam_details.set_text("")
-        self.steam_label.setText("Writing the two Steam entries\u2026")
+        self.steam_label.setText("Writing the Steam entries\u2026")
         self._run(shortcuts.add, self._steam_done, self._steam_failed)
 
     @Slot(object)

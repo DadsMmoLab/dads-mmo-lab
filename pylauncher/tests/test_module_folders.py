@@ -43,12 +43,19 @@ def test_mod_ale_tells_the_player_where_the_lua_files_go() -> None:
     assert ".lua" in sentence
 
 
-def test_installing_mod_ale_makes_the_empty_script_folder(tmp_path: Path) -> None:
+def test_installing_mod_ale_makes_the_script_folder_holding_only_the_bridge(
+    tmp_path: Path,
+) -> None:
+    """The folder is made, and nothing of the player's is in it (T792: only My Party's bridge)."""
+    from yulon import party
+
     _install_ale(tmp_path)
 
     folder = tmp_path / LUA
     assert folder.is_dir()
-    assert list(folder.iterdir()) == []
+    assert sorted(p.name for p in folder.iterdir()) == sorted(
+        [*party.BRIDGE_SCRIPTS, party.BRIDGE_RECORD]
+    )
 
 
 def test_a_second_install_keeps_the_scripts_already_in_the_folder(tmp_path: Path) -> None:

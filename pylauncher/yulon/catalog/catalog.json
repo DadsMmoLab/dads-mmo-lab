@@ -2734,5 +2734,276 @@
       ],
       "manifests_from": "wow-wotlk"
     }
+  ],
+  "single": [
+    {
+      "id": "ddon",
+      "name": "DDON",
+      "status": "beta",
+      "description": "Dragon's Dogma Online, Capcom's closed Japanese MMO, on the Arrowgene server. Play with your own 03.04.003 client; your account is made the first time you log in.",
+      "notes": [
+        "Pinned to Arrowgene develop e2411fe (PR #1115, 2026-09-06); the latest release tarball is three months behind it.",
+        "Built from Yu'lon's own Dockerfile: upstream's .dockerignore leaves out Arrowgene.Ddon.Metrics (referenced by the CLI since PR #992), so its image cannot build.",
+        "A transitive Microsoft.NETCore.DotNetHostResolver 2.2.8 drops a 2019 libhostfxr.so and apphost into the publish output; the Dockerfile deletes both and runs the server through dotnet.",
+        "Ready lines and ports measured on Windows 11 + Docker Desktop 29.8.2, 2026-10-12."
+      ],
+      "emulator": {
+        "name": "Arrowgene DDON server",
+        "sources": [
+          {
+            "repo": "sebastian-heinz/Arrowgene.DragonsDogmaOnline",
+            "branch": "develop",
+            "dest": "src",
+            "rev": "e2411fe8f9134fedd2b78f0db0bc561cadac98ce"
+          }
+        ]
+      },
+      "install": {
+        "default_server_dir": "yulon-ddon",
+        "platforms": [
+          "linux",
+          "windows"
+        ],
+        "native": {
+          "family": "arrowgene",
+          "templates": "ddon/native",
+          "image": "yulon.local/ddon-server",
+          "checkout": "src",
+          "ready": [
+            "Listening on 0.0.0.0:{{PORT_GAME}}.",
+            "Listening on 0.0.0.0:{{PORT_LOGIN}}."
+          ],
+          "ready_seconds": 300
+        }
+      },
+      "container": "ddon-server",
+      "service": "ddon-server",
+      "ports": [
+        {
+          "role": "login",
+          "port": 52100,
+          "label": "Login server"
+        },
+        {
+          "role": "game",
+          "port": 52000,
+          "label": "Game server"
+        },
+        {
+          "role": "web",
+          "port": 52099,
+          "label": "Web server (accounts and client downloads)"
+        }
+      ],
+      "advertise": {
+        "source": "src/Arrowgene.Ddon.Shared/Files/Assets/GameServerList.csv",
+        "dest": "etc/GameServerList.csv",
+        "column": "IpAddress"
+      },
+      "play": {
+        "exe": "DDO.exe",
+        "args": [
+          "addr={{HOST}} port={{PORT_LOGIN}} token={{ACCOUNT}} DL=http://{{HOST}}:{{PORT_WEB}}/win/ LVer=03.04.003.20181115.0 RVer=3040008"
+        ],
+        "client": "your DDON client folder (version 03.04.003, the one with DDO.exe in it)",
+        "launcher": {
+          "name": "DDON-Launcher",
+          "file": "DDO_Launcher.ini",
+          "section": "Yulon DDON",
+          "keys": {
+            "LobbyIP": "{{HOST}}",
+            "LPort": "{{PORT_LOGIN}}",
+            "DLIP": "{{HOST}}",
+            "DLPort": "{{PORT_WEB}}"
+          }
+        },
+        "gaming_mode": {
+          "title": "Dragon's Dogma Online",
+          "templates": "ddon/gaming-mode",
+          "launcher": "ddo-launcher",
+          "client": "ddo-client",
+          "stop": "ddo-stop"
+        }
+      },
+      "help_places": [
+        {
+          "label": "Arrowgene DDON server",
+          "url": "https://github.com/sebastian-heinz/Arrowgene.DragonsDogmaOnline/issues",
+          "purpose": "Bugs in the game server: quests, combat, items and anything the world does wrong."
+        },
+        {
+          "label": "Yu'lon",
+          "url": "https://github.com/DadsMmoLab/dads-mmo-lab/issues",
+          "purpose": "Problems with Yu'lon itself: installing, starting, and this app."
+        }
+      ]
+    },
+    {
+      "id": "dfo",
+      "name": "DFO",
+      "status": "beta",
+      "description": "Dungeon Fighter Online, Neople's side-scrolling brawler, on the 115US community server, on Windows and on a Steam Deck or Linux. Play with your own US 2.38.3.25 client. Early days upstream: the towns and first dungeons work, many later ones not yet.",
+      "notes": [
+        "Pinned to 115US main db707d59 (2026-10-10). Upstream lands fifty commits a day and its newest builds were refusing logins on 2026-10-11, so this pin moves only by hand.",
+        "0001 and 0002 were written by Dad's MMO Lab on 2026-10-11 against dea70aff and are still needed there: the 2.38.3.25 client's PVF keys sit outside the fixed slots the Go port reads, and 3.25 renumbered the PVF string table under three script hashes. 0003 is Yu'lon's: the GUI launcher in the source tree would otherwise pull upstream's newest code over the pin.",
+        "No Docker: the channel list listens on port 7001 (on every address, 0.0.0.0, measured) and hands out a game server on 127.0.0.2 at a port it picks each run, which no published container port can stand in for. Only this computer can reach that game server, so only this computer can play.",
+        "The first Start builds a 760 MB inner PVF and its caches from the player's client: up to ten minutes on the Deck, 45 s on Windows 11 (inner PVF 2 s). Later Starts reuse them: 30 s on Windows, 26 to 90 s on the Deck.",
+        "Measured on Windows 11, 2026-10-13: with 0001 and 0002, go test ./... passes all 49 packages under Go 1.26.5 and the build takes about 100 s; the inner PVF is byte-identical to upstream's 2.38.3.25 baseline (c3801215)."
+      ],
+      "emulator": {
+        "name": "115US DFO server",
+        "sources": [
+          {
+            "repo": "https://gitgud.io/fuckworld/115",
+            "branch": "main",
+            "dest": "src",
+            "rev": "db707d59e303b49426c62d9e35d14181e7823631"
+          }
+        ]
+      },
+      "install": {
+        "default_server_dir": "yulon-dfo",
+        "platforms": [
+          "linux",
+          "windows"
+        ],
+        "process": {
+          "family": "go",
+          "templates": "dfo/process",
+          "checkout": "src",
+          "archive": {
+            "url": "https://gitgud.io/fuckworld/115/-/archive/db707d59e303b49426c62d9e35d14181e7823631/115-db707d59e303b49426c62d9e35d14181e7823631.zip",
+            "sha256": "afe0dd1cb52f3b2ce8fdfd3cf4c2a344da12d79c7928254e809d1152cb45341d",
+            "size": 82205221,
+            "root": "115-db707d59e303b49426c62d9e35d14181e7823631"
+          },
+          "patches": [
+            {
+              "file": "dfo/process/patches/0001-pvf-restore-wrapper-key-scan-fallback.patch",
+              "source": "src",
+              "reason": "Finds the 2.38.3.25 client's PVF keys by scanning DFO.exe, as upstream's Python did, so the inner PVF can be built."
+            },
+            {
+              "file": "dfo/process/patches/0002-accept-2.38.3.25-script-hashes.patch",
+              "source": "src",
+              "reason": "Accepts the 2.38.3.25 hashes of three scripts whose content did not change, so the server starts with that client."
+            },
+            {
+              "file": "dfo/process/patches/0003-yulon-no-self-update.patch",
+              "source": "src",
+              "reason": "Stops the GUI launcher in the source tree from pulling upstream's newest code over this pinned build."
+            },
+            {
+              "file": "dfo/process/patches/0004-launcher-build-on-non-windows.patch",
+              "source": "src",
+              "reason": "Lets the server's launcher build on Linux, where upstream's Windows-only client host left it without types (Dad's MMO Lab, Deck, 2026-10-10).",
+              "platforms": [
+                "linux"
+              ]
+            }
+          ],
+          "toolchain": {
+            "name": "Go 1.26.5",
+            "url": "https://go.dev/dl/go1.26.5.windows-amd64.zip",
+            "sha256": "97e6b2a833b6d89f9ff17d25419ac0a7e3b482a044e9ab18cdef834bd834fd38",
+            "size": 74927386,
+            "root": "go",
+            "dest": "toolchain/go"
+          },
+          "toolchain_by_platform": {
+            "linux": {
+              "name": "Go 1.26.5",
+              "url": "https://go.dev/dl/go1.26.5.linux-amd64.tar.gz",
+              "sha256": "5c2c3b16caefa1d968a94c1daca04a7ca301a496d9b086e17ad77bb81393f053",
+              "size": 66879095,
+              "root": "go",
+              "dest": "toolchain/go"
+            }
+          },
+          "module": "src/server/work/dfo-lan",
+          "build": [
+            {
+              "package": "./cmd/wireprobe",
+              "output": "bin/wireprobe-pvf.exe"
+            },
+            {
+              "package": "./cmd/dfolauncher",
+              "output": "bin/dfolauncher.exe"
+            }
+          ],
+          "files": [
+            {
+              "template": "launcher.local.json.tmpl",
+              "dest": "src/server/launcher.local.json"
+            },
+            {
+              "template": "storage.local.json.tmpl",
+              "dest": "src/server/work/dfo-lan/runtime/storage/local.json"
+            }
+          ],
+          "serve": {
+            "argv": [
+              "{{MODULE}}/bin/dfolauncher.exe",
+              "launch",
+              "--server-only",
+              "--root",
+              "{{CHECKOUT}}",
+              "--account",
+              "{{ACCOUNT}}"
+            ],
+            "env": {
+              "DFO_SHOP_OPEN_ALL": "1",
+              "DFO_CONTRACT_PURCHASE_CRASH_FIX": "1",
+              "DFO_MAX_ITEM_PERIOD": "1",
+              "DFO_QUEST_VISIBLE_NPC_RELAX": "1",
+              "DFO_QUEST_NPC_DISTANCE_MULTIPLIER": "5"
+            },
+            "log": "yulon-server.log",
+            "session_log": {
+              "marker": "Logs: ",
+              "file": "gateway.err"
+            }
+          },
+          "lease": "src/server/work/dfo-lan/runtime/storage/dfolan.sqlite3.admin-guard",
+          "ready": [
+            "Server listening on 127.0.0.1:{{PORT_GATEWAY}} and"
+          ]
+        }
+      },
+      "ports": [
+        {
+          "role": "gateway",
+          "port": 7001,
+          "label": "Channel gateway"
+        }
+      ],
+      "play": {
+        "exe": "DFO.exe",
+        "args": [
+          "3?{{HOST}}?{{PORT_GATEWAY}}?{{ACCOUNT}}?00000000000000000000000000000000?0?0?30?0?0?0"
+        ],
+        "client": "your DFO client folder (US 2.38.3.25, the one with DFO.exe, Script.pvf and sk.dat in it)",
+        "gaming_mode": {
+          "title": "Dungeon Fighter Online",
+          "templates": "dfo/gaming-mode",
+          "launcher": "dfo-launcher",
+          "client": "dfo-client",
+          "stop": "dfo-stop",
+          "desktop_play": true
+        }
+      },
+      "help_places": [
+        {
+          "label": "115US DFO server",
+          "url": "https://gitgud.io/fuckworld/115",
+          "purpose": "The server's source and its own notes: content that is missing or wrong in the game."
+        },
+        {
+          "label": "Yu'lon",
+          "url": "https://github.com/DadsMmoLab/dads-mmo-lab/issues",
+          "purpose": "Problems with Yu'lon itself: installing, starting, and this app."
+        }
+      ]
+    }
   ]
 }

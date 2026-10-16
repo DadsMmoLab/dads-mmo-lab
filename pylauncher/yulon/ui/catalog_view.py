@@ -33,11 +33,13 @@ from PySide6.QtWidgets import (
 )
 
 from yulon import docker, platform, teardown, wsl
-from yulon.catalog.catalog import Catalog, CatalogEntry
+from yulon.catalog.catalog import Catalog, CatalogEntry, SingleEntry
 from yulon.catalog.installer import (
     FORMER_DEFAULT_DIRS,
     InstallEngine,
+    InstallerError,
     InstallOptions,
+    InstallRun,
     ReadyWaitStopped,
     cancelled_install_message,
     compose_file,
@@ -116,6 +118,8 @@ The `InstallEngine` protocol rather than a class: `installer_for()` decides the
 family engine from `catalog.json` data, and this view is deliberately not told
 what it got — every family has the same `run()`.
 """
+SingleInstallerFactory = Callable[[SingleEntry], InstallRun]
+"""Builds the engine for a single-container server (`install_wiring.single_installer_for_app`)."""
 DirPicker = Callable[[QWidget, str, Path | None], Path | None]
 
 
@@ -410,6 +414,8 @@ _CAMPAIGN_GLYPHS = {
     "wow-vanilla": "⚔️",
     "wow-tortoise": "🐢",
     "wow-centurion": "🛡️",
+    "ddon": "🐉",
+    "dfo": "👊",
 }
 
 _CAMPAIGN_SUBTITLES = {
@@ -419,6 +425,8 @@ _CAMPAIGN_SUBTITLES = {
     "wow-vanilla": "Classic Vanilla",
     "wow-tortoise": "Turtle WoW Solo",
     "wow-centurion": "Level-60 PvP with bots",
+    "ddon": "Dragon's Dogma Online",
+    "dfo": "Dungeon Fighter Online",
 }
 """The tile's second line; the client version in brackets comes from the entry (T194 C18).
 
@@ -447,6 +455,17 @@ def _server_software(entry: CatalogEntry) -> str:
 
 RECOMMENDED = "wow-wotlk"
 """The one tile marked "Recommended" (T195 C23): where a first-time player should start."""
+
+_STATUS_WORDS = {"beta": "Beta", "wip": "Work in progress"}
+"""What a single-container tile says under its title for an entry that is not `stable`."""
+
+OTHER_GAMES = "Other games"
+"""The heading over the shelf's second row group: every game that is not a WoW server.
+
+A row of its own spanning both columns, inside the SAME grid as the WoW tiles, so the
+tiles under it start a fresh row and take the WoW columns' widths (T28) rather than a
+second grid's.
+"""
 
 WELCOME = (
     "Yu'lon downloads and builds the server for you. Nothing changes on this "
@@ -496,6 +515,7 @@ class CatalogView(QWidget):
         pick_package: PackagePicker = _qt_package_picker,
         ask_yes: YesNo = ask_yes_no,
         ready_check: Callable[[CatalogEntry, Path], str | None] | None = None,
+        single_installer_factory: SingleInstallerFactory | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -503,6 +523,9 @@ class CatalogView(QWidget):
         # folder is known, so a drive that cannot hold the install is said before the client
         # folder is asked for. None draws no early check (the full preflight still runs).
         self._ready_check = ready_check
+        # The single-container servers' engine factory. Their tiles are drawn only when
+        # one is given: a view built without it shows the WoW cores alone.
+        self._make_single_installer = single_installer_factory
         # T601 level 2: `ui.move_in.MoveIn` (a plan for a file, the engine for a plan), or None
         # to draw no "Bring from another computer…" press. Typed loosely here so this view
         # does not import the move engine at module scope.
@@ -559,13 +582,18 @@ class CatalogView(QWidget):
         # Top-aligned, with the spare height in an empty row under the last
         # one: a tile is as tall as its own text at any width, never stretched
         # to its row neighbour or to the shelf (T195 C24).
-        for index, entry in enumerate(catalog.games):
-            grid.addWidget(
-                self._tile(entry), index // columns, index % columns, Qt.AlignmentFlag.AlignTop
-            )
+        row = self._place_tiles(grid, [self._tile(entry) for entry in catalog.games], 0, columns)
+        if single_installer_factory is not None and catalog.single:
+            # The other games (DDON), under an `OTHER_GAMES` heading after every WoW tile.
+            heading = QLabel(OTHER_GAMES, self)
+            heading.setObjectName("section-title")
+            heading.setContentsMargins(0, 10, 0, 0)
+            grid.addWidget(heading, row, 0, 1, columns)
+            others = [self._single_tile(entry) for entry in catalog.single]
+            row = self._place_tiles(grid, others, row + 1, columns)
         for col in range(columns):
             grid.setColumnStretch(col, 1)
-        grid.setRowStretch((len(catalog.games) + columns - 1) // columns, 1)
+        grid.setRowStretch(row, 1)
 
         inner = QWidget()
         inner.setLayout(grid)
@@ -583,6 +611,21 @@ class CatalogView(QWidget):
         self._log.run_finished.connect(self._on_run_finished)
 
     # -- tiles ----------------------------------------------------------
+
+    @staticmethod
+    def _place_tiles(grid: QGridLayout, tiles: list[QFrame], first_row: int, columns: int) -> int:
+        """Lay `tiles` out `columns` to a row from `first_row`; the first row after them.
+
+        Top-aligned, so a tile is as tall as its own text (T195 C24).
+        """
+        for index, tile in enumerate(tiles):
+            grid.addWidget(
+                tile,
+                first_row + index // columns,
+                index % columns,
+                Qt.AlignmentFlag.AlignTop,
+            )
+        return first_row + (len(tiles) + columns - 1) // columns
 
     @staticmethod
     def _tile_text(text: str, frame: QFrame, role: str = "") -> QLabel:
@@ -739,6 +782,84 @@ class CatalogView(QWidget):
             adopt.clicked.connect(lambda _checked=False, e=entry: self.adopt_from_wsl(e))
             box.addWidget(adopt)
             self._adopt_buttons[entry.id] = adopt
+        return frame
+
+    def _single_tile(self, entry: SingleEntry) -> QFrame:
+        """The tile of a single-container server: Install and Use existing, nothing about WoW.
+
+        "Use existing…" adopts a finished install Yu'lon made elsewhere (the CLI harness,
+        another copy of the app). No "Find in WSL…" or "Bring from another computer…":
+        the first adopts what the DML Launcher built inside a distro, the second unpacks
+        what "Pack the whole server…" made, and neither exists for this kind of server.
+        The client the player brings is named in the line under the title.
+        """
+        frame = DadcraftCampaignCard(entry.id, self)
+        frame.setMinimumHeight(0)
+        frame.setMaximumHeight(QWIDGETSIZE_MAX)
+        frame.setToolTip(f"Server software: {entry.emulator.name}")
+        box = QVBoxLayout(frame)
+        box.setSpacing(6)
+        box.setContentsMargins(14, 14, 14, 14)
+
+        header_box = QHBoxLayout()
+        glyph = QLabel(_CAMPAIGN_GLYPHS.get(entry.id, "⚔️"), frame)
+        glyph.setObjectName("tile-glyph")
+        header_box.addWidget(glyph)
+        title_col = QVBoxLayout()
+        title_col.setSpacing(1)
+        title_col.addWidget(self._tile_text(f"<b>{entry.name}</b>", frame, role="tile-title"))
+        sub_title = QLabel(_CAMPAIGN_SUBTITLES.get(entry.id, entry.name), frame)
+        sub_title.setObjectName("tile-subtitle")
+        title_col.addWidget(sub_title)
+        header_box.addLayout(title_col, 1)
+        box.addLayout(header_box)
+
+        desc_scroll = QScrollArea(frame)
+        desc_scroll.setObjectName("tile-desc-box")
+        desc_scroll.setWidgetResizable(True)
+        desc_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        desc_scroll.setWidget(self._tile_text(entry.description, desc_scroll, role="tile-desc"))
+        box.addWidget(desc_scroll)
+
+        meta_box = QHBoxLayout()
+        meta_box.setSpacing(6)
+        if entry.play is not None:
+            meta_box.addWidget(self._tile_text("Bring your own client", frame, role="tile-meta"))
+        if entry.status != "stable":
+            meta_box.addWidget(
+                self._tile_text(_STATUS_WORDS[entry.status], frame, role="tile-meta")
+            )
+        meta_box.addStretch(1)
+        box.addLayout(meta_box)
+
+        button = QPushButton("Install", frame)
+        button.setIcon(dadcraft_icon("download", "#FFF1A8", 16))
+        button.setObjectName(f"install-{entry.id}")
+        button.setProperty("primary", True)
+        button.setToolTip(f"Install {entry.name} server into your chosen directory.")
+        button.clicked.connect(lambda _checked=False, e=entry: self.start_single_install(e))
+        box.addWidget(button)
+        self._buttons[entry.id] = button
+        if not entry.install.supports(self._platform_id()):
+            box.addWidget(
+                self._tile_text(
+                    f"Installer needs {platform_names(entry.install.platforms)} — "
+                    "not available on this platform yet.",
+                    frame,
+                    role="tile-warning",
+                )
+            )
+            button.setEnabled(False)
+            button.setToolTip(unsupported_platform_message(entry, self._platform_id()))
+            self._gated.add(entry.id)
+        self._show_installed(entry.id)
+        existing = QPushButton("Use existing…", frame)
+        existing.setIcon(dadcraft_icon("folder", COLOR_TEXT_GOLD, 14))
+        existing.setObjectName(f"existing-{entry.id}")
+        existing.setToolTip(f"Manage a {entry.name} server Yu'lon already installed.")
+        existing.clicked.connect(lambda _checked=False, e=entry: self.attach_existing_single(e))
+        box.addWidget(existing)
+        self._existing_buttons[entry.id] = existing
         return frame
 
     def _show_installed(self, game_id: str) -> None:
@@ -923,6 +1044,40 @@ class CatalogView(QWidget):
         # created under (review, 2026-08-22).
         self._remember_installed(entry.id, server_dir)
         self.installed.emit(entry.id, server_dir, client_dir)
+        return True
+
+    def attach_existing_single(self, entry: SingleEntry) -> bool:
+        """`attach_existing()` for a single-container server; False if nothing was attached.
+
+        The folder must hold a finished install of this entry, recorded for THIS folder
+        (`single_install.existing_install()`, Install's own record checks), and then
+        pass the same folder rule as `attach_existing()`. No client folder is asked
+        for: Play asks for the player's own when it is used.
+        """
+        # The engine's module, imported where it is used (see MOVE_IN_FILE).
+        from yulon.catalog import process_install, single_install
+
+        engine = process_install if entry.install.process is not None else single_install
+        start = self._home / entry.install.default_server_dir
+        server_dir = self._pick_dir(
+            self,
+            f"Select the folder where {entry.name} is installed",
+            start if start.is_dir() else self._home,
+        )
+        if server_dir is None:
+            return False
+        try:
+            engine.existing_install(entry, server_dir, platform_id=self._platform_id)
+        except InstallerError as exc:
+            show_warning(self, "Not a server folder", str(exc))
+            return False
+        folder_problem = self._dir_problem(server_dir)
+        if folder_problem is not None:
+            show_warning(self, "That folder will not work", folder_problem)
+            return False
+        logger.info(f"attaching existing {entry.id} install at {server_dir}")
+        self._remember_installed(entry.id, server_dir)
+        self.installed.emit(entry.id, server_dir, None)
         return True
 
     def adopt_from_wsl(self, entry: CatalogEntry) -> bool:
@@ -1117,6 +1272,36 @@ class CatalogView(QWidget):
             entry, server_dir, client_dir, self._make_installer(entry), first_install=True
         )
 
+    def start_single_install(self, entry: SingleEntry) -> bool:
+        """`start_install()` for a single-container server. False if not started.
+
+        The same order and the same words: busy, then the platform, then the folder
+        (the suggestion first, a picker if declined). No client folder is asked for:
+        the server needs none, and Play asks for the player's own when it is used.
+        """
+        if self._make_single_installer is None:
+            return False
+        if self._log.running:
+            show_information(self, "Busy", "Another job is still running.")
+            return False
+        if not entry.install.supports(self._platform_id()):
+            message = unsupported_platform_message(entry, self._platform_id())
+            show_information(self, "Not available on this platform", message)
+            self.install_finished.emit(entry.id, False, message)
+            return False
+        suggested = self._home / entry.install.default_server_dir
+        taken = self._ask_suggestion(self, entry.name, suggested)
+        if taken is None:
+            return False
+        server_dir: Path | None = suggested
+        if not taken:
+            server_dir = self._pick_dir(self, f"Where should {entry.name} be installed?", suggested)
+        if server_dir is None:
+            return False
+        return self._run_install(
+            entry, server_dir, None, self._make_single_installer(entry), first_install=True
+        )
+
     def _ask_folders(self, entry: CatalogEntry) -> tuple[Path, Path | None] | None:
         """The server folder (the suggestion, or a pick) and, where needed, the client folder."""
         # Offered BEFORE the picker, because the picker cannot offer it. The
@@ -1208,10 +1393,10 @@ class CatalogView(QWidget):
 
     def _run_install(
         self,
-        entry: CatalogEntry,
+        entry: CatalogEntry | SingleEntry,
         server_dir: Path,
         client_dir: Path | None,
-        installer: InstallEngine,
+        installer: InstallRun,
         *,
         title: str | None = None,
         first_install: bool,
@@ -1294,12 +1479,35 @@ class CatalogView(QWidget):
             # turns into a permanent tab — an install the user had explicitly
             # cancelled, and on a run stopped earlier still, a directory that did
             # not exist at all (install gate, 2026-08-23).
-            note = cancelled_install_message(self._catalog.get(game_id), server_dir)
+            if self._catalog.is_single(game_id):
+                # The engine's module, imported where it is used (see MOVE_IN_FILE).
+                from yulon.catalog import process_install, single_install
+
+                single = self._catalog.get_single(game_id)
+                engine = process_install if single.install.process is not None else single_install
+                note = engine.cancelled_message(single, server_dir)
+            else:
+                note = cancelled_install_message(self._catalog.get(game_id), server_dir)
             logger.info(f"install of {game_id} was cancelled; nothing remembered")
             show_information(self, "Install cancelled", note)
             self.install_finished.emit(game_id, False, note)
             return
-        if ok and compose_file(server_dir) is None:
+        process_install_done = ok and self._is_process_install(game_id)
+        if process_install_done:
+            # A host-program install has no compose file to prove it; its proof is the
+            # one "Use existing…" asks for: this entry's record, for this folder, with
+            # every stage finished (`process_install.existing_install()`).
+            from yulon.catalog import process_install
+
+            try:
+                process_install.existing_install(
+                    self._catalog.get_single(game_id), server_dir, platform_id=self._platform_id
+                )
+            except InstallerError as exc:
+                ok = False
+                message = str(exc)
+                logger.info(f"{game_id} exited 0 with no finished record in {server_dir}")
+        elif ok and compose_file(server_dir) is None:
             # A clean exit is not proof of an install. Until 7.2 the bash
             # installer exited 0 for "Keeping existing install — exiting.",
             # which is what a user got by pressing Install a second time on a
@@ -1328,13 +1536,21 @@ class CatalogView(QWidget):
             show_warning(self, title, message)
         self.install_finished.emit(game_id, ok, message)
         if ok:
-            _pin_compose_project(server_dir)
+            if not process_install_done:
+                _pin_compose_project(server_dir)
             # AFTER `_set_buttons_enabled(True)` ran above: that pass re-enables
             # every ungated tile, so greying this one has to come second or the
             # unlock undoes it. Asserted, not just stated.
             self._remember_installed(game_id, server_dir)
             self.installed.emit(game_id, server_dir, client_dir)
             self.fresh_install.emit(game_id, server_dir, client_dir)
+
+    def _is_process_install(self, game_id: str) -> bool:
+        """Whether `game_id` is a single server built and run as host programs (DFO)."""
+        return (
+            self._catalog.is_single(game_id)
+            and self._catalog.get_single(game_id).install.process is not None
+        )
 
     def _offer_a_restart_instead(self, message: str) -> bool:
         """Offer to restart when a restart is now the whole of what is missing.

@@ -16872,50 +16872,12 @@ class StagedInstaller:
         seconds with no line its notice is said, after `stalled_after` its
         stalled notice, each once per silence. It ends nothing and sets
         nothing -- see `BUILD_STALLED_SECONDS` for the ruling and why.
+
+        The bridge itself is `pump_lines()`, which the single-container engine
+        (`catalog/single_install.py`) drives too; this method keeps the name the
+        stage bodies and their tests already use.
         """
-        queued: queue.Queue[str | None] = queue.Queue()
-        outcome: list[docker.AttachedRun] = []
-        failure: list[BaseException] = []
-
-        def work() -> None:
-            try:
-                ran = call(lambda line: _put_all(queued, line, stage))
-                # Read the moment the command returned (T250 review): `_check_run()`
-                # counts a bare exit 1 as the Stop only if the Stop came first.
-                stopped = cancel is not None and cancel.is_set()
-                outcome.append(replace(ran, stop_seen=stopped) if stopped else ran)
-            except BaseException as exc:  # noqa: BLE001 - re-raised on the caller's thread below
-                failure.append(exc)
-            finally:
-                queued.put(None)
-
-        worker = threading.Thread(target=work, daemon=True, name="yulon-install-output")
-        worker.start()
-        try:
-            if watch is None:
-                while True:
-                    item = queued.get()
-                    if item is None:
-                        break
-                    yield item
-            else:
-                yield from _watched(queued, watch)
-        except BaseException:
-            # Abandonment, or an exception thrown INTO this frame — never the
-            # normal path, which leaves the loop by `break` once the worker has
-            # put its sentinel; setting the cancel event there would mark a
-            # stage that succeeded as stopped. `BaseException` and not
-            # `GeneratorExit`, measured on m910q 2026-09-04: the CLI harness
-            # spends an install blocked in `lines.get()` above, so its Ctrl+C
-            # is raised right there as a `KeyboardInterrupt`, and the narrower
-            # clause let it past with the worker still running — §21's state,
-            # one exception type to the side of the test that closed it.
-            stop_abandoned_worker(worker, cancel, what="the install output")
-            raise
-        worker.join()
-        if failure:
-            raise InstallerError(f"the command could not be run: {failure[0]}") from failure[0]
-        return outcome[0]
+        return (yield from pump_lines(call, cancel=cancel, stage=stage, watch=watch))
 
     def _check_run(
         self,
@@ -17081,6 +17043,63 @@ def _watched(queued: queue.Queue[str | None], watch: QuietWatch) -> Iterator[str
         quiet_since = time.monotonic()
         said = 0
         yield item
+
+
+def pump_lines(
+    call: Callable[[docker.OutputSink], docker.AttachedRun],
+    *,
+    cancel: threading.Event | None,
+    stage: str,
+    watch: QuietWatch | None = None,
+) -> Generator[str, None, docker.AttachedRun]:
+    """Turn a push-style docker call into yielded lines, without buffering the run.
+
+    The body of `StagedInstaller._pump()`, whose docstring is the reasoning;
+    module-level so an engine that is not a `StagedInstaller` bridges the same way.
+    """
+    queued: queue.Queue[str | None] = queue.Queue()
+    outcome: list[docker.AttachedRun] = []
+    failure: list[BaseException] = []
+
+    def work() -> None:
+        try:
+            ran = call(lambda line: _put_all(queued, line, stage))
+            # Read the moment the command returned (T250 review): `_check_run()`
+            # counts a bare exit 1 as the Stop only if the Stop came first.
+            stopped = cancel is not None and cancel.is_set()
+            outcome.append(replace(ran, stop_seen=stopped) if stopped else ran)
+        except BaseException as exc:  # noqa: BLE001 - re-raised on the caller's thread below
+            failure.append(exc)
+        finally:
+            queued.put(None)
+
+    worker = threading.Thread(target=work, daemon=True, name="yulon-install-output")
+    worker.start()
+    try:
+        if watch is None:
+            while True:
+                item = queued.get()
+                if item is None:
+                    break
+                yield item
+        else:
+            yield from _watched(queued, watch)
+    except BaseException:
+        # Abandonment, or an exception thrown INTO this frame — never the
+        # normal path, which leaves the loop by `break` once the worker has
+        # put its sentinel; setting the cancel event there would mark a
+        # stage that succeeded as stopped. `BaseException` and not
+        # `GeneratorExit`, measured on m910q 2026-09-04: the CLI harness
+        # spends an install blocked in `lines.get()` above, so its Ctrl+C
+        # is raised right there as a `KeyboardInterrupt`, and the narrower
+        # clause let it past with the worker still running — §21's state,
+        # one exception type to the side of the test that closed it.
+        stop_abandoned_worker(worker, cancel, what="the install output")
+        raise
+    worker.join()
+    if failure:
+        raise InstallerError(f"the command could not be run: {failure[0]}") from failure[0]
+    return outcome[0]
 
 
 def _put_all(queued: queue.Queue[str | None], line: str, stage: str) -> None:

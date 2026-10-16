@@ -576,10 +576,11 @@ def build_window() -> object:
         QWidget,
     )
 
-    from yulon import __version__, forgetting, play_client, ui_settings
+    from yulon import __version__, forgetting, gaming_mode, play_client, ui_settings
     from yulon.catalog import native
     from yulon.catalog.catalog import load_catalog
-    from yulon.install_wiring import installer_for_app
+    from yulon.install_wiring import installer_for_app, single_installer_for_app
+    from yulon.process_controller import ProcessController
     from yulon.selfupdate.apply import (
         ReadyToRestart,
         SavedForManualInstall,
@@ -598,6 +599,7 @@ def build_window() -> object:
         stand_down,
         start_helper,
     )
+    from yulon.single_controller import SingleController, SingleServer
     from yulon.state import KnownInstall, load_state
     from yulon.ui.answers import said_yes
     from yulon.ui.catalog_view import CatalogView
@@ -607,6 +609,7 @@ def build_window() -> object:
     from yulon.ui.logs_view import LogsView
     from yulon.ui.move_in import move_in_for_app
     from yulon.ui.sidebar import SidebarPins, server_tab_icon
+    from yulon.ui.single_server_view import SingleServerView
     from yulon.ui.tab_titles import controller_tab_titles, retitle_controller_tabs
     from yulon.ui.theme import (
         CHECK_UPDATES_BUTTON,
@@ -645,6 +648,9 @@ def build_window() -> object:
         """
 
         yulon_controllers: list[QWidget]
+        # The single-container servers' tabs (`SingleServerView`), joined and asked
+        # alongside `yulon_controllers` (`_stop_background_threads`, `_busy_reasons`).
+        yulon_single_views: list[QWidget]
         yulon_log_panels: list[LogPanel]
         # The Logs tab (T93), read by `_busy_reasons()`: a support save holds the close.
         yulon_logs_view: LogsView
@@ -786,6 +792,8 @@ def build_window() -> object:
         move_in=move_in_for_app(catalog),
         # T702: the drive is judged as soon as the server folder is chosen.
         ready_check=native.early_refusal,
+        # The single-container servers' tiles (DDON), and the engine their Install drives.
+        single_installer_factory=single_installer_for_app,
     )
     tabs, update_bar, _splitter = build_catalog_tab(window, catalog_view, log_panel)
     # T388: where the screen is smaller than the 960x640 floor the contents
@@ -870,6 +878,11 @@ def build_window() -> object:
     # distro comparison both reach into `services` and `console_log`.
     controllers: dict[tuple[str, Path], ControllerView] = {}
     controller_views: list[QWidget] = []
+    # The single-container servers' tabs: a registry of their own, because every
+    # reader of `controllers` reaches for a WoW Server tab's services, which a
+    # `SingleServerView` does not have and must not pretend to.
+    single_views: dict[tuple[str, Path], SingleServerView] = {}
+    single_view_list: list[QWidget] = []
     # T192: each tab's status-dot slot, so `drop_controller()` can unhook it.
     status_dots: dict[tuple[str, Path], Callable[[str], None]] = {}
     # T187: one launcher window per server, keyed as its tab is. Made on the
@@ -1117,6 +1130,8 @@ def build_window() -> object:
         state.forget(game, folder)
         key = (game, folder)
         close_launcher(key)
+        if key in single_views:
+            drop_single_view(key)
         if key in controllers:
             drop_controller(key)
             # What tells two tabs apart is the shortest tail they do NOT share,
@@ -1157,6 +1172,9 @@ def build_window() -> object:
         install does. Nothing half-forgotten is left behind.
         """
         key = (game, Path(str(server_dir)))
+        if key in single_views:
+            request_single_removal(key)
+            return
         view = controllers.get(key)
         if view is None or key in removal_pending:
             return
@@ -1326,6 +1344,14 @@ def build_window() -> object:
             return
         current = tabs.currentWidget()
         views = list(controllers.values())
+        single = next((v for v in single_views.values() if v is current), None)
+        if single is not None:
+            header.follow(
+                single.realm_badge,
+                title=single.entry.name,
+                tooltip=tabs.tabToolTip(tabs.currentIndex()),
+            )
+            return
         if current not in views:
             header.follow(None)
             return
@@ -1480,6 +1506,158 @@ def build_window() -> object:
             play,
         )
 
+    def add_single_view(game: str, server_dir: Path) -> None:
+        """One tab per (game, server dir) for a single-container server; a repeat focuses it.
+
+        The `SingleServerView` counterpart of `add_controller()`, with the parts of
+        it that are not about a WoW core: the tab, its status dot, its ×, the
+        header and the tray's change signal. No ▶: Play lives on the tab itself.
+        """
+        key = (game, server_dir)
+        live = single_views.get(key)
+        if live is not None:
+            tabs.setCurrentWidget(live)
+            return
+        entry = catalog.get_single(game)
+        known = state.find(game, server_dir)
+
+        def remember_account(name: str) -> None:
+            ui_settings.remember_launcher(game, server_dir, account=name)
+
+        # One controller per runtime (`single_controller.SingleServer`): the container's,
+        # or the host programs' for a `process` install (DFO).
+        controller: SingleServer = (
+            ProcessController(entry, server_dir)
+            if entry.install.process is not None
+            else SingleController(entry, server_dir)
+        )
+        view = SingleServerView(
+            entry,
+            controller,
+            # Play's client folder lives in `state.json` like a WoW tab's, through the
+            # same live writer (T36); the account name beside it in `ui.json`.
+            client_dir=known.client_dir if known else None,
+            remember_client_dir=_remember_client_live(game, server_dir),
+            account=ui_settings.launcher_place(game, server_dir).account,
+            remember_account=remember_account,
+            # Add to Steam Deck (Gaming Mode)…: a seam on Linux only, None elsewhere.
+            gaming_mode_seam=gaming_mode.seam_for(entry, server_dir),
+        )
+        view.remove_requested.connect(request_removal)
+        view.stopped_for_removal.connect(on_single_stopped_for_removal)
+        view.action_failed.connect(
+            lambda message, name=entry.name: logger.warning(f"{name}: {message}")
+        )
+        single_views[key] = view
+        single_view_list.append(view)
+        panels.extend(view.log_panels())
+        tabs.addTab(view, entry.name)
+        index = tabs.indexOf(view)
+        tabs.setTabToolTip(index, str(server_dir))
+
+        def show_status_dot(status: str, view: SingleServerView = view) -> None:
+            at = tabs.indexOf(view)
+            if at != -1:
+                tabs.setTabIcon(at, server_tab_icon(status))
+
+        view.realm_badge.status_changed.connect(show_status_dot)
+        status_dots[key] = show_status_dot
+        show_status_dot(view.realm_badge.status)
+        strip = QWidget(tabs.tabBar())
+        strip.setObjectName(TAB_BUTTONS)
+        row = QHBoxLayout(strip)
+        row.setContentsMargins(0, 0, 0, 0)
+        forget = _forget_button(key, entry.name, strip)
+        policy = forget.sizePolicy()
+        policy.setRetainSizeWhenHidden(True)
+        forget.setSizePolicy(policy)
+        row.addWidget(forget)
+        forget_buttons.attach(index, strip)
+        navigator.invalidate()
+        tabs.setCurrentWidget(view)
+        window.servers_changed.emit()
+
+    def drop_single_view(key: tuple[str, Path]) -> None:
+        """`drop_controller()` for a single-container tab: shut down, join, unhook, remove."""
+        view = single_views.pop(key)
+        dot = status_dots.pop(key, None)
+        if dot is not None:
+            try:
+                view.realm_badge.status_changed.disconnect(dot)
+            except (RuntimeError, TypeError):  # pragma: no cover - never connected
+                pass
+        view.shutdown()
+        for panel in view.log_panels():
+            panel.stop()
+            panel.wait(5000)
+            if panel in panels:
+                panels.remove(panel)
+        if view in single_view_list:
+            single_view_list.remove(view)
+        index = tabs.indexOf(view)
+        if index != -1:
+            tabs.removeTab(index)
+            forget_buttons.tabs_changed()
+        navigator.invalidate()
+        view.deleteLater()
+        window.servers_changed.emit()
+
+    def request_single_removal(key: tuple[str, Path]) -> None:
+        """`request_removal()` for a single-container tab: the same question, stop and forget."""
+        view = single_views.get(key)
+        if view is None or key in removal_pending:
+            return
+        refusal = view.busy_reason()
+        if refusal is not None:
+            from yulon.ui.message_box import show_information
+
+            show_information(window, forgetting.REFUSED_TITLE, refusal)
+            return
+        folder_gone = not key[1].is_dir()
+        status = view.realm_badge.status
+        facts = forgetting.Facts(
+            name=view.entry.name,
+            server_dir=key[1],
+            wsl_distro=None,
+            folder_gone=folder_gone,
+            running=None if status == "unknown" else status in ("running", "starting"),
+        )
+        answer = QMessageBox.question(
+            window,
+            forgetting.TITLE,
+            forgetting.question(facts),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if not said_yes(answer):
+            return
+        if folder_gone:
+            finish_removal(key)
+            return
+        removal_pending.add(key)
+        view.stop_for_removal()
+
+    def on_single_stopped_for_removal(game: str, server_dir: object, ok: bool, why: str) -> None:
+        """`on_stopped_for_removal()` for a single-container tab."""
+        key = (game, Path(str(server_dir)))
+        if key not in removal_pending:
+            return
+        removal_pending.discard(key)
+        view = single_views.get(key)
+        if view is None:
+            return
+        if not ok:
+            answer = QMessageBox.question(
+                window,
+                forgetting.STOP_FAILED_TITLE,
+                forgetting.stop_failed_question(view.entry.name, why),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if not said_yes(answer):
+                return
+        finish_removal(key)
+
     def add_controller(
         game: str,
         server_dir: Path,
@@ -1628,6 +1806,9 @@ def build_window() -> object:
         window.servers_changed.emit()
 
     for install in state.installs:
+        if catalog.is_single(install.game):
+            add_single_view(install.game, install.server_dir)
+            continue
         try:
             add_controller(
                 install.game,
@@ -1682,6 +1863,9 @@ def build_window() -> object:
             ).keeping_unknown_fields_of(known)
         )
         _warn_unless_remembered(state, window)
+        if catalog.is_single(game):
+            add_single_view(game, sd)
+            return
         add_controller(game, sd, cd, known.wsl_distro if known else None, play)
 
     def on_fresh_install(game: str, server_dir: object, client_dir: object) -> None:
@@ -2335,6 +2519,7 @@ def build_window() -> object:
         window.setProperty("tabs", tabs)
         window.yulon_log_panels = panels
         window.yulon_controllers = controller_views
+        window.yulon_single_views = single_view_list
         assert isinstance(window, QWidget)
         return window
 
@@ -2387,6 +2572,7 @@ def build_window() -> object:
     # The live lists themselves, not a copy of either - see `_Window`.
     window.yulon_log_panels = panels
     window.yulon_controllers = controller_views
+    window.yulon_single_views = single_view_list
     window.yulon_logs_view = logs_view
     window.yulon_catalog_view = catalog_view
     window.yulon_close_refusal = lambda strict=False: close_refusal(window, strict=strict)
@@ -2524,7 +2710,10 @@ def _busy_reasons(window: object, *, strict: bool = False) -> list[str]:
     `_stop_background_threads()`), and a QThread destroyed while running
     aborts the process (T93).
     """
-    views: list[object] = [*getattr(window, "yulon_controllers", [])]
+    views: list[object] = [
+        *getattr(window, "yulon_controllers", []),
+        *getattr(window, "yulon_single_views", []),
+    ]
     for name in ("yulon_catalog_view", "yulon_logs_view"):
         extra = getattr(window, name, None)
         if extra is not None:
@@ -2620,6 +2809,19 @@ def main() -> int:
     _regain_docker_group()
     if "--provision" in sys.argv[1:] or os.environ.get("YULON_PROVISION"):
         return provision_headless()
+    if "--server" in sys.argv[1:]:
+        # A WoW server's Start, Stop or status with no window, for the Steam Deck's Gaming
+        # Mode tiles (`server_cli`): after the docker group is regained, before Qt starts an
+        # application or this copy claims the single instance (a Yu'lon may be open).
+        import logging
+
+        from yulon import server_cli
+
+        # Its own lines are for the tile's window; Yu'lon's log lines stay in yulon.log.
+        configure(config_dir=platform.config_dir(), stderr_level=logging.WARNING)
+        use_utf8_streams()
+        args = sys.argv[1:]
+        return server_cli.main(args[args.index("--server") + 1 :])
     logger.info("Yu'lon launcher starting")
     if sys.platform == "win32":
         try:
@@ -2867,7 +3069,10 @@ def _stop_background_threads(window: object) -> list[str]:
     unjoined: list[str] = []
     # T187: a launcher window drives a view; it goes before the views shut down.
     close_launchers(window)
-    for view in getattr(window, "yulon_controllers", []):
+    for view in (
+        *getattr(window, "yulon_controllers", []),
+        *getattr(window, "yulon_single_views", []),
+    ):
         view.shutdown()
     for panel in getattr(window, "yulon_log_panels", []):
         panel.stop()

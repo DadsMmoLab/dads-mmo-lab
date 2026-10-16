@@ -2352,6 +2352,14 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "single file of the player's in it answers False and is then never touched. An OSError "
         "answers False, which is the safe side of that question"
     ),
+    ("process_controller.py", "all_pids"): (
+        "Linux only: lists `/proc` so DFO's Stop can find every process in the server's "
+        "private network (the gateway, the game's Wine helpers). It decides which processes "
+        "are signalled and never a write. A process is counted only when its network "
+        "namespace is the holder's, so nothing outside that network is ever touched; an entry "
+        "that cannot be read has no namespace to match and is skipped; and a platform with no "
+        "`/proc` answers the empty list, where there is no private network either"
+    ),
     ("selfupdate/layout.py", "other_instances"): (
         "T90 plan 3. Lists `/proc` to find every OTHER live process running this app's own "
         "executable, before the update helper is started. It decides a REFUSAL and never a "

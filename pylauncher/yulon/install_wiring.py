@@ -38,7 +38,7 @@ from yulon.catalog import upstream
 # `native` in a walrus (`entry.install.native`), and a module of the same name
 # imported at the top of the file is exactly the kind of shadow that type-checks
 # in one function and not in the other.
-from yulon.catalog.catalog import CatalogEntry, DbPasswordUnknown, load_catalog
+from yulon.catalog.catalog import CatalogEntry, DbPasswordUnknown, SingleEntry, load_catalog
 from yulon.catalog.families import azerothcore, trinitycore
 from yulon.catalog.installer import (
     DEFAULT_INSTALLERS_ROOT,
@@ -46,6 +46,7 @@ from yulon.catalog.installer import (
     InstallEngine,
     InstallerError,
     InstallOptions,
+    InstallRun,
     WorldStoppedAfterReadyError,
     installer_for,
 )
@@ -391,6 +392,32 @@ def database_snapshot_for(
     if entry.install.native is None:
         return None
     return _MaintenanceSnapshot(entry, wsl_distro=wsl_distro)
+
+
+def single_installer_for_app(
+    entry: SingleEntry,
+    *,
+    platform_id: Callable[[], str] = platform.detect,
+    installers_root: Path = DEFAULT_INSTALLERS_ROOT,
+) -> InstallRun:
+    """The engine the app drives for a single server (`catalog.SingleEntry`), by its runtime.
+
+    No import gate and no database snapshot to wire: a server of this kind has no
+    database container, no import and no update route. One factory nonetheless, so
+    the Catalog tile and this harness build the engine the same way: the container
+    engine for a `native` install, the host-program one for a `process` install.
+    """
+    if entry.install.process is not None:
+        from yulon.catalog.process_install import ProcessInstaller, ProcessSeams
+
+        return ProcessInstaller(
+            entry, installers_root=installers_root, seams=ProcessSeams(platform_id=platform_id)
+        )
+    from yulon.catalog.single_install import SingleInstaller, SingleSeams
+
+    return SingleInstaller(
+        entry, installers_root=installers_root, seams=SingleSeams(platform_id=platform_id)
+    )
 
 
 def installer_for_app(
@@ -1275,11 +1302,16 @@ def main(argv: list[str] | None = None) -> int:
         args.server_dir,
         args.client_dir,
     )
+    catalog = load_catalog()
+    entry: CatalogEntry | SingleEntry
     try:
-        entry = load_catalog().get(args.game)
+        entry = catalog.get(args.game)
     except KeyError:
-        sys.stderr.write(f"unknown game {args.game!r}\n")
-        return 2
+        try:
+            entry = catalog.get_single(args.game)
+        except KeyError:
+            sys.stderr.write(f"unknown game {args.game!r}\n")
+            return 2
     # The harness runs an install the way the Install button does, so it is a first install
     # too (T723). Nothing else in this file runs `run()`.
     options = InstallOptions(
@@ -1293,7 +1325,11 @@ def main(argv: list[str] | None = None) -> int:
     # could not pass.
     cancel = threading.Event()
     try:
-        engine = installer_for_app(entry, installers_root=args.installers_root)
+        engine: InstallRun = (
+            single_installer_for_app(entry, installers_root=args.installers_root)
+            if isinstance(entry, SingleEntry)
+            else installer_for_app(entry, installers_root=args.installers_root)
+        )
         # `ask=` is not optional. Provisioning asks the docker-group consent and
         # the sudo password through it, and a run given no prompter answers
         # neither — which on a password-sudo box is the hang above.

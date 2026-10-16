@@ -31,13 +31,22 @@ from pydantic import (
 
 from yulon import server_build_presses
 from yulon.docker import ContainerSpec, SaveFirst
-from yulon.manifest import Db, Source
+from yulon.manifest import ALLOWED_REPO_HOSTS, Db, Source, check_repo
 from yulon.platform import PlatformId
 
 CATALOG_FILE = Path(__file__).resolve().with_name("catalog.json")
 
 Slug = Annotated[str, Field(pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")]
 Status = Literal["stable", "beta", "wip"]
+
+
+CATALOG_REPO_HOSTS: tuple[str, ...] = (*ALLOWED_REPO_HOSTS, "gitgud.io")
+"""The forges an emulator source in THIS file may name: a manifest's, plus gitgud.io.
+
+gitgud.io is a GitLab instance and the only home of DFO's 115US server
+(`fuckworld/115`). It is allowed here and not in `manifest.ALLOWED_REPO_HOSTS`,
+because this file is curated by Yu'lon's own developers and a manifest is not.
+"""
 
 
 class _Strict(BaseModel):
@@ -68,6 +77,12 @@ class EmulatorSource(Source):
                 f"dest must be a relative POSIX path inside the server dir, got {value!r}"
             )
         return value
+
+    @field_validator("repo")
+    @classmethod
+    def _repo_is_allowed(cls, value: str) -> str:
+        """`Source`'s rule over the catalog's wider host list (`CATALOG_REPO_HOSTS`)."""
+        return check_repo(value, CATALOG_REPO_HOSTS)
 
 
 class Emulator(_Strict):
@@ -1080,6 +1095,13 @@ class SourcePatch(_Strict):
         description="One sentence the install log says when the patch is applied: what it fixes.",
     )
 
+    platforms: tuple[PlatformId, ...] = Field(
+        default=(),
+        description=(
+            "The platforms the patch is applied on; empty for every one. DFO's non-Windows "
+            "build stub is a patch only Linux needs."
+        ),
+    )
     obsolete_when_absent: str | None = Field(
         default=None,
         min_length=1,
@@ -3671,11 +3693,725 @@ class CatalogEntry(_Strict):
         )
 
 
+# -- single-container servers: the catalog's second kind of entry ---------------------
+
+SINGLE_PLAY_TOKENS: tuple[str, ...] = ("HOST", "ACCOUNT")
+"""The `{{TOKEN}}`s a `SinglePlay` argument may spell besides each port's `port_token()`.
+
+`HOST` is the address the player's client dials (the one Networking advertises), and
+`ACCOUNT` the account name the player typed beside Play.
+"""
+
+_TEMPLATE_TOKEN = re.compile(r"\{\{([A-Za-z_][A-Za-z0-9_]*)\}\}")
+
+
+def port_token(role: str) -> str:
+    """The `{{TOKEN}}` a single-container server's port is spelled by: `login` -> `PORT_LOGIN`."""
+    return "PORT_" + role.upper().replace("-", "_")
+
+
+class ServerPort(_Strict):
+    """One host port a single-container server publishes, and what it is for.
+
+    A list of roles and not `Ports`' auth/world pair, because a server of this kind
+    runs every listener it has in one process: DDON's login, game and web servers
+    are three ports of one container, with no auth/world split to name.
+    """
+
+    role: Slug = Field(description="What the port is for, as a slug: `login`, `game`, `web`.")
+    port: int = Field(gt=0, lt=65536)
+    label: str = Field(min_length=1, description="What a player reads for it: 'Login server'.")
+
+
+class AdvertisedAddress(_Strict):
+    """The file holding the address a single-container server tells its clients to dial.
+
+    The WoW cores keep that address in a `realmlist` row; DDON keeps it in a column of
+    a CSV its server reads at start (`GameServerList.csv`, `IpAddress`). The engine
+    copies the shipped file out of the checkout once, the compose file mounts that copy
+    over the image's, and Networking rewrites the one column, so the address survives
+    a rebuild without the checkout being edited.
+    """
+
+    source: str = Field(
+        min_length=1, description="The shipped file, relative to the server dir (in the checkout)."
+    )
+    dest: str = Field(
+        min_length=1,
+        description="Where the copy lives, relative to the server dir; the compose file mounts it.",
+    )
+    column: str = Field(min_length=1, description="The CSV header column that holds the address.")
+
+    @field_validator("source", "dest")
+    @classmethod
+    def _stays_inside_the_server_dir(cls, value: str, info: ValidationInfo) -> str:
+        return _inside(value, f"advertise.{info.field_name}", names_a_file=True)
+
+
+class SingleNative(_Strict):
+    """What the single-container engine reads: the family, its templates, image and ready lines."""
+
+    family: Literal["arrowgene"] = Field(
+        description=(
+            "The emulator lineage. One so far: Arrowgene's .NET servers, built from source "
+            "into one image whose one container runs every listener."
+        )
+    )
+    templates: str = Field(
+        min_length=1,
+        description=(
+            "The folder under catalog/installers/ holding Dockerfile.tmpl, dockerignore.tmpl "
+            "and the three compose templates."
+        ),
+    )
+    image: str = Field(min_length=1, description="The image reference the build produces.")
+    checkout: str = Field(
+        min_length=1,
+        description=(
+            "The `dest` of the source the Dockerfile builds. Not the server dir itself: the "
+            "checkout ships its own Dockerfile, which the rendered one must not overwrite."
+        ),
+    )
+    ready: tuple[str, ...] = Field(
+        min_length=1,
+        description=(
+            "Log lines that must ALL appear in the container's current run before the server "
+            "counts as up. Takes each port's `PORT_<ROLE>` token."
+        ),
+    )
+    ready_seconds: int = Field(
+        default=300, gt=0, description="How long a start may take to print every ready line."
+    )
+
+    @field_validator("templates", "checkout")
+    @classmethod
+    def _stays_inside_its_folder(cls, value: str, info: ValidationInfo) -> str:
+        return _inside(value, f"native.{info.field_name}", names_a_file=True)
+
+
+SINGLE_PROCESS_TOKENS: tuple[str, ...] = (
+    "SERVER_DIR",
+    "CHECKOUT",
+    "MODULE",
+    "CLIENT_DIR",
+    "ACCOUNT",
+)
+"""The `{{TOKEN}}`s a process server's `serve` argv, its env and its file templates may spell.
+
+Besides each port's `port_token()`. Every path is absolute and spelled with `/`
+(`C:/Yulon DFO/src`), the form upstream's own JSON files ask for, so a path can be
+dropped into a JSON string or an argv alike: `SERVER_DIR` the install, `CHECKOUT`
+and `MODULE` the folders `process.checkout` and `process.module` name in it,
+`CLIENT_DIR` the player's own client and `ACCOUNT` the account the server is
+started for.
+"""
+
+
+class VerifiedArchive(_Strict):
+    """A zip fetched over HTTPS and used only at exactly this size and sha256.
+
+    The process runtime needs no git and no Docker on the host, so its sources and
+    its toolchain arrive as archives. An archive of one commit (a forge's
+    `/-/archive/<sha>/` download) is that commit's tree with nothing to check out,
+    and a sha256 measured once is what makes the download the bytes the pin was
+    measured on rather than whatever the URL serves today.
+    """
+
+    url: str = Field(min_length=1)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    size: int = Field(gt=0, description="Bytes; a download of any other size is refused unread.")
+    root: str = Field(
+        min_length=1,
+        description="The one top-level folder inside the zip; what is under it is what lands.",
+    )
+
+    @field_validator("url")
+    @classmethod
+    def _url_is_https(cls, value: str) -> str:
+        return _https_url(value, "archive.url")
+
+    @field_validator("root")
+    @classmethod
+    def _root_is_one_folder_name(cls, value: str) -> str:
+        if "/" in value:
+            raise ValueError(f"archive.root must be one folder name, got {value!r}")
+        return _inside(value, "archive.root", names_a_file=True)
+
+
+class GoToolchain(VerifiedArchive):
+    """The Go release a process server is built with, unpacked inside the server folder.
+
+    Pinned like a source, for a source's reason: upstream names the toolchain it
+    verified (`go 1.26.5`), and a build with whatever Go the player happens to
+    have is a build nobody measured.
+    """
+
+    name: str = Field(min_length=1, description="What the install log calls it: 'Go 1.26.5'.")
+    dest: str = Field(min_length=1, description="Where it is unpacked, relative to the server dir.")
+
+    @field_validator("dest")
+    @classmethod
+    def _dest_stays_inside(cls, value: str) -> str:
+        return _inside(value, "toolchain.dest", names_a_file=True)
+
+
+class GoBuild(_Strict):
+    """One `go build -trimpath -o <output> <package>`, run in `process.module`."""
+
+    package: str = Field(pattern=r"^\./[A-Za-z0-9_./-]+$", description="The package: ./cmd/x")
+    output: str = Field(min_length=1, description="The executable, relative to the module.")
+
+    @field_validator("package", "output")
+    @classmethod
+    def _stays_inside_the_module(cls, value: str, info: ValidationInfo) -> str:
+        _inside(value.removeprefix("./"), f"build.{info.field_name}", names_a_file=True)
+        return value
+
+
+class ProcessFile(_Strict):
+    """One file Start writes into the server folder from a template, every time it differs.
+
+    For the settings a server reads at start and keeps out of its own repository
+    (DFO's `launcher.local.json` and `runtime/storage/local.json`, both gitignored
+    upstream): they name absolute paths and the player's client folder, so they are
+    rendered at Start with `SINGLE_PROCESS_TOKENS`, not at install.
+    """
+
+    template: str = Field(min_length=1, description="The template, relative to `templates`.")
+    dest: str = Field(min_length=1, description="Where it is written, relative to the server dir.")
+
+    @field_validator("template", "dest")
+    @classmethod
+    def _stays_inside_its_folder(cls, value: str, info: ValidationInfo) -> str:
+        return _inside(value, f"files.{info.field_name}", names_a_file=True)
+
+
+class SessionLog(_Strict):
+    """A log the server program names in its own output, which the console follows too.
+
+    DFO's launcher prints little itself; the gateway it starts writes everything to
+    `gateway.err` in a per-run folder whose name carries the clock, and the launcher
+    says which folder in one line (`Logs: <folder>`) once the gateway is up.
+    """
+
+    marker: str = Field(min_length=1, description="The line prefix whose rest names the folder.")
+    file: str = Field(min_length=1, description="The file in that folder to follow.")
+
+    @field_validator("file")
+    @classmethod
+    def _file_is_a_name(cls, value: str) -> str:
+        if "/" in value:
+            raise ValueError(f"serve.session_log.file must be a file name, got {value!r}")
+        return _inside(value, "serve.session_log.file", names_a_file=True)
+
+
+class ProcessServe(_Strict):
+    """The command that IS the running server, and where its output is kept."""
+
+    argv: tuple[str, ...] = Field(
+        min_length=1, description="The program and its arguments; take SINGLE_PROCESS_TOKENS."
+    )
+    env: dict[str, str] = Field(
+        default_factory=dict,
+        description="Variables added to its environment, as upstream's own start script sets them.",
+    )
+    log: str = Field(
+        default="yulon-server.log",
+        min_length=1,
+        description="Its stdout and stderr, relative to the server dir; emptied at each Start.",
+    )
+    session_log: SessionLog | None = Field(
+        default=None,
+        description="A further log the program names in its output, followed once it is named.",
+    )
+
+    @field_validator("log")
+    @classmethod
+    def _log_stays_inside(cls, value: str) -> str:
+        return _inside(value, "serve.log", names_a_file=True)
+
+
+class SingleProcess(_Strict):
+    """What the process engine reads: a server built on the host and run as a host process.
+
+    The second runtime of the catalog's second kind. DDON is one container; DFO's
+    115US server is Windows programs that answer on two loopback addresses at once
+    (127.0.0.1:7001 for the channel list and 127.0.0.2 at a port the game server
+    picks), which no published container port can stand in for. So its source,
+    its patches and its toolchain are unpacked into the server folder, the build
+    is a `go build`, and Start runs `serve.argv` with no Docker anywhere.
+    """
+
+    family: Literal["go"] = Field(
+        description=(
+            "The build lineage. One so far: a Go module built from source with a pinned "
+            "toolchain into native programs."
+        )
+    )
+    templates: str = Field(
+        min_length=1,
+        description="The folder under catalog/installers/ holding this server's file templates.",
+    )
+    checkout: str = Field(min_length=1, description="The `dest` of the source the archive is of.")
+    archive: VerifiedArchive = Field(
+        description="That source at its pinned `rev`, as one zip; the URL must name the rev."
+    )
+    patches: tuple[SourcePatch, ...] = Field(
+        default=(),
+        description="Unified diffs applied over the unpacked source (`families/patch.py`).",
+    )
+    toolchain: GoToolchain
+    toolchain_by_platform: dict[PlatformId, GoToolchain] = Field(
+        default_factory=dict,
+        description=(
+            "The toolchain for a platform whose Go release is another archive than "
+            "`toolchain`'s (Linux ships a .tar.gz). Same `dest`, so where Go lives does not "
+            "depend on the platform."
+        ),
+    )
+    module: str = Field(
+        min_length=1, description="The folder holding go.mod, relative to the server dir."
+    )
+    build: tuple[GoBuild, ...] = Field(min_length=1)
+    files: tuple[ProcessFile, ...] = ()
+    serve: ProcessServe
+    lease: str | None = Field(
+        default=None,
+        description=(
+            "A lock file, relative to the server dir, that a killed server leaves behind with "
+            "its pid in it. Start removes it once that pid is gone, never while it runs: "
+            "upstream's own rule (`Clear-AdminGuard`)."
+        ),
+    )
+    ready: tuple[str, ...] = Field(
+        min_length=1,
+        description=(
+            "Lines that must ALL appear in this run's `serve.log` before the server counts as "
+            "up. Take each port's `PORT_<ROLE>` token."
+        ),
+    )
+
+    @field_validator("templates", "checkout", "module")
+    @classmethod
+    def _stays_inside_its_folder(cls, value: str, info: ValidationInfo) -> str:
+        return _inside(value, f"process.{info.field_name}", names_a_file=True)
+
+    @field_validator("lease")
+    @classmethod
+    def _lease_stays_inside(cls, value: str | None) -> str | None:
+        return None if value is None else _inside(value, "process.lease", names_a_file=True)
+
+    @model_validator(mode="after")
+    def _every_toolchain_lands_in_one_place(self) -> SingleProcess:
+        for platform_id, other in self.toolchain_by_platform.items():
+            if other.dest != self.toolchain.dest:
+                raise ValueError(
+                    f"process.toolchain_by_platform[{platform_id!r}].dest is {other.dest!r}, "
+                    f"not toolchain.dest {self.toolchain.dest!r}"
+                )
+        return self
+
+    def toolchain_for(self, platform_id: str) -> GoToolchain:
+        """The Go release this platform builds with: its own, else `toolchain`."""
+        for key, toolchain in self.toolchain_by_platform.items():
+            if key == platform_id:
+                return toolchain
+        return self.toolchain
+
+
+SingleRuntime = SingleNative | SingleProcess
+
+
+class SingleInstall(_Strict):
+    """How a single server is installed: where, on which platforms, and in which runtime.
+
+    Exactly one of `native` (one container, DDON) and `process` (host programs,
+    DFO). Two fields rather than one union, so the JSON says which it is in the
+    key a reader looks for and an entry naming both is refused by name.
+    """
+
+    default_server_dir: str = Field(min_length=1, description="Default dir name under $HOME")
+    platforms: tuple[PlatformId, ...] = Field(min_length=1)
+    native: SingleNative | None = None
+    process: SingleProcess | None = None
+
+    @model_validator(mode="after")
+    def _exactly_one_runtime(self) -> SingleInstall:
+        if (self.native is None) == (self.process is None):
+            raise ValueError(
+                "a single server's install names exactly one of `native` (one container) and "
+                "`process` (host programs)"
+            )
+        return self
+
+    @property
+    def runtime(self) -> SingleRuntime:
+        """The one runtime block this install has."""
+        if self.native is not None:
+            return self.native
+        assert self.process is not None  # `_exactly_one_runtime`
+        return self.process
+
+    def supports(self, platform_id: str) -> bool:
+        """True if this entry can be installed on `platform_id` (`platform.detect()`) at all."""
+        return platform_id in self.platforms
+
+
+SINGLE_LAUNCHER_TOKENS: tuple[str, ...] = ("HOST",)
+"""The `{{TOKEN}}`s a `SingleLauncher` value may spell besides each port's `port_token()`.
+
+`HOST` is the address the server advertises (Networking's choice). No `ACCOUNT`: a
+launcher asks for the account itself, at its own login.
+"""
+
+
+class SingleLauncher(_Strict):
+    """The player's own launcher, which keeps the servers it lists in a settings file.
+
+    DDON's community launcher (DDON-Launcher) lists every section of `DDO_Launcher.ini`
+    as a server it can log in to. "Add to <name>" on the server's tab writes ONE section
+    of Yu'lon's own into that file (`single_launcher.point_launcher()`) and no other line,
+    and only when the player presses it: the client folder is the player's, and this is
+    the one write Play's side of the app makes there.
+    """
+
+    name: str = Field(min_length=1, description="The launcher's name, as its button says it.")
+    file: str = Field(min_length=1, description="Its settings file, relative to the client folder.")
+    section: str = Field(
+        min_length=1,
+        description="The one section Yu'lon writes: this server in the launcher's list.",
+    )
+    keys: dict[str, str] = Field(
+        min_length=1,
+        description="Each key that section holds, in this order; values take HOST and PORT_<ROLE>.",
+    )
+
+    @field_validator("file")
+    @classmethod
+    def _file_stays_inside_the_client(cls, value: str) -> str:
+        return _inside(value, "play.launcher.file", names_a_file=True)
+
+    @field_validator("section")
+    @classmethod
+    def _section_is_one_plain_name(cls, value: str) -> str:
+        if value != value.strip() or set(value) & set("[]\r\n"):
+            raise ValueError(f"play.launcher.section must be a plain name, got {value!r}")
+        return value
+
+    @field_validator("keys")
+    @classmethod
+    def _keys_are_plain_lines(cls, value: dict[str, str]) -> dict[str, str]:
+        for key, text in value.items():
+            if not key or key != key.strip() or set(key) & set("[]=;#\r\n"):
+                raise ValueError(f"play.launcher.keys has a key that is not a plain name: {key!r}")
+            if set(text) & set("\r\n"):
+                raise ValueError(f"play.launcher.keys[{key!r}] must be one line, got {text!r}")
+        return value
+
+
+class SingleGamingMode(_Strict):
+    """Add to Steam Deck (Gaming Mode)…: the Lab's three Gaming Mode scripts for this game.
+
+    `gaming_mode.GamingMode` renders the three scripts from `templates`, installs the Lab's
+    shared `dml-launcher-lib.sh` beside them, and adds three Steam shortcuts named after
+    `title`: "<title> Server", "<title>" and "<title> Server Stop". Linux only.
+    """
+
+    title: str = Field(
+        min_length=1, description="The game's name in the Steam library, in a player's words."
+    )
+    templates: str = Field(
+        min_length=1, description="The scripts' folder, relative to catalog/installers/."
+    )
+    launcher: str = Field(
+        min_length=1, description="The server launcher script's name, without its .sh."
+    )
+    client: str = Field(min_length=1, description="The client script's name, without its .sh.")
+    stop: str = Field(min_length=1, description="The server stop script's name, without its .sh.")
+    desktop_play: bool = Field(
+        default=False,
+        description=(
+            "On Linux, Play runs the rendered client script too: the game must join the "
+            "server's private network (DFO), which a plain Proton launch cannot."
+        ),
+    )
+
+    @field_validator("templates")
+    @classmethod
+    def _templates_stay_inside_the_installers(cls, value: str) -> str:
+        return _inside(value, "play.gaming_mode.templates", names_a_file=False)
+
+    @field_validator("launcher", "client", "stop")
+    @classmethod
+    def _each_script_is_a_plain_name(cls, value: str) -> str:
+        # Without the .sh, which `*_file` adds: `catalog.json` names no bash file at all
+        # (`test_the_shipped_catalog_names_no_bash_file`, F.2's guard).
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", value):
+            raise ValueError(f"play.gaming_mode scripts are plain names without .sh, got {value!r}")
+        return value
+
+    @property
+    def launcher_file(self) -> str:
+        return f"{self.launcher}.sh"
+
+    @property
+    def client_file(self) -> str:
+        return f"{self.client}.sh"
+
+    @property
+    def stop_file(self) -> str:
+        return f"{self.stop}.sh"
+
+
+class SinglePlay(_Strict):
+    """How Play starts this game's client: an executable in the player's folder, with arguments.
+
+    The client is the player's own (README §3a): Play asks for its folder and never
+    fetches one. DDON's client takes the server's addresses and the account on its
+    command line, so the arguments are data here and Play writes nothing into the
+    client folder. `launcher`, when there is one, is the exception the player asks for.
+    """
+
+    exe: str = Field(min_length=1, description="The executable, relative to the client folder.")
+    args: tuple[str, ...] = Field(
+        default=(),
+        description="Arguments, each taking HOST, ACCOUNT and every port's PORT_<ROLE> token.",
+    )
+    client: str = Field(
+        min_length=1, description="The client the folder picker asks for, in a player's words."
+    )
+    launcher: SingleLauncher | None = Field(
+        default=None,
+        description="The player's own launcher, which the server's tab can add this server to.",
+    )
+    gaming_mode: SingleGamingMode | None = Field(
+        default=None,
+        description="The Steam Deck Gaming Mode scripts and shortcuts the server's tab can add.",
+    )
+
+    @field_validator("exe")
+    @classmethod
+    def _exe_stays_inside_the_client(cls, value: str) -> str:
+        return _inside(value, "play.exe", names_a_file=True)
+
+
+class SingleEntry(_Strict):
+    """One installable single server: the catalog's second kind of entry.
+
+    `CatalogEntry` is a WoW core's shape — db, auth and world containers, an auth and a
+    world port, MySQL schemas, a realmlist row, a client build — and some three hundred
+    call sites read those fields. A server that is one process with a port per listener
+    has none of them, so it is its own model, read only by the single-server engines,
+    controllers and view, and the WoW paths never see one. It runs in one of two
+    runtimes (`SingleInstall`): one container (`native`, DDON) or host programs
+    (`process`, DFO).
+    """
+
+    id: Slug
+    name: str = Field(min_length=1)
+    status: Status
+    description: str = ""
+    emulator: Emulator
+    install: SingleInstall
+    container: str | None = Field(
+        default=None,
+        min_length=1,
+        description="The one container's name (global to Docker); a `native` install's only.",
+    )
+    service: str | None = Field(
+        default=None,
+        min_length=1,
+        description="Its compose service, which the templates name; a `native` install's only.",
+    )
+    ports: tuple[ServerPort, ...] = Field(min_length=1)
+    advertise: AdvertisedAddress | None = None
+    play: SinglePlay | None = None
+    help_places: tuple[HelpPlace, ...] = ()
+    notes: tuple[str, ...] = Field(
+        default=(),
+        description="Facts for the people who maintain the entry; nothing reads or draws them.",
+    )
+
+    @model_validator(mode="after")
+    def _every_port_and_role_once(self) -> SingleEntry:
+        """No role or port number twice: one would shadow the other in every lookup."""
+        roles = [p.role for p in self.ports]
+        numbers = [str(p.port) for p in self.ports]
+        for what, values in (("role", roles), ("port", numbers)):
+            repeated = sorted({v for v in values if values.count(v) > 1})
+            if repeated:
+                raise ValueError(f"{self.id}: ports name the {what} {repeated[0]} twice")
+        return self
+
+    @model_validator(mode="after")
+    def _a_container_is_named_by_the_container_runtime_only(self) -> SingleEntry:
+        """`container` and `service` belong to a `native` install, and to no other.
+
+        A `process` server runs no container; a name for one would be a name every
+        Docker-side check (`Catalog`'s, the controller's ownership test) trusts.
+        """
+        named = self.container is not None and self.service is not None
+        if self.install.native is not None and not named:
+            raise ValueError(f"{self.id}: a `native` install names its container and its service")
+        if self.install.process is not None and (
+            self.container is not None or self.service is not None
+        ):
+            raise ValueError(f"{self.id}: a `process` install runs no container to name")
+        return self
+
+    @model_validator(mode="after")
+    def _the_checkout_is_a_source(self) -> SingleEntry:
+        """The runtime's `checkout` is a `dest` of `emulator.sources`, or the build has no tree."""
+        dests = {source.dest for source in self.emulator.sources}
+        checkout = self.install.runtime.checkout
+        if checkout not in dests:
+            raise ValueError(
+                f"{self.id}: the install's checkout is {checkout!r}, which is not a dest of any "
+                f"of this entry's sources {sorted(dests)}"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _the_archive_is_of_the_pinned_commit(self) -> SingleEntry:
+        """A `process` archive is the checkout's source at its `rev`, and its URL says so.
+
+        The archive is how the pin arrives; an archive URL naming another commit would
+        build something other than what `emulator.sources` claims, and nothing after
+        the download could tell. Its patches name that same source.
+        """
+        process = self.install.process
+        if process is None:
+            return self
+        source = next(s for s in self.emulator.sources if s.dest == process.checkout)
+        if source.rev is None or source.rev not in process.archive.url:
+            raise ValueError(
+                f"{self.id}: process.archive.url must be of the pinned rev of {source.dest!r} "
+                f"({source.rev}), got {process.archive.url!r}"
+            )
+        for patch in process.patches:
+            if patch.source != process.checkout:
+                raise ValueError(
+                    f"{self.id}: patch {patch.file} is applied inside {patch.source!r}, which is "
+                    f"not the checkout {process.checkout!r}"
+                )
+        return self
+
+    @model_validator(mode="after")
+    def _every_token_is_one_this_entry_fills(self) -> SingleEntry:
+        """A ready line, a Play argument or a launcher value spells only tokens this entry fills.
+
+        Refused here rather than at the first start, where an unfilled token would be a
+        ready wait that can never end, a client started with a literal `{{...}}`, or a
+        launcher told to dial one.
+        """
+        ports = {port_token(p.role) for p in self.ports}
+        checks: list[tuple[str, str, set[str]]] = [
+            (f"ready line {line!r}", line, ports) for line in self.install.runtime.ready
+        ]
+        process = self.install.process
+        if process is not None:
+            served = ports | set(SINGLE_PROCESS_TOKENS)
+            checks += [(f"serve argument {arg!r}", arg, served) for arg in process.serve.argv]
+            checks += [
+                (f"serve variable {key}={text!r}", text, served)
+                for key, text in process.serve.env.items()
+            ]
+        if self.play is not None:
+            known = ports | set(SINGLE_PLAY_TOKENS)
+            checks += [(f"play argument {arg!r}", arg, known) for arg in self.play.args]
+            if self.play.launcher is not None:
+                dialled = ports | set(SINGLE_LAUNCHER_TOKENS)
+                checks += [
+                    (f"launcher value {key}={text!r}", text, dialled)
+                    for key, text in self.play.launcher.keys.items()
+                ]
+        for what, text, known_tokens in checks:
+            for token in _TEMPLATE_TOKEN.findall(text):
+                if token not in known_tokens:
+                    raise ValueError(
+                        f"{self.id}: {what} spells {{{{{token}}}}}, which this entry does not "
+                        f"fill (it fills {sorted(known_tokens)})"
+                    )
+        return self
+
+    def port(self, role: str) -> int:
+        """The host port of `role`; `KeyError` if this server has no such listener."""
+        for entry in self.ports:
+            if entry.role == role:
+                return entry.port
+        raise KeyError(role)
+
+    def host_ports(self) -> tuple[int, ...]:
+        """Every host port this server publishes, in catalog order."""
+        return tuple(p.port for p in self.ports)
+
+    def port_tokens(self) -> dict[str, str]:
+        """`PORT_<ROLE>` -> the port number, for the templates, ready lines and Play arguments."""
+        return {port_token(p.role): str(p.port) for p in self.ports}
+
+    def published_host_ports(self) -> dict[int, str]:
+        """Every host port this entry binds, each with what it is for (`Catalog`'s checks)."""
+        return {p.port: p.label for p in self.ports}
+
+
 class Catalog(_Strict):
     """The whole catalog file."""
 
     schema_version: Literal[1] = 1
     games: tuple[CatalogEntry, ...] = ()
+    single: tuple[SingleEntry, ...] = Field(
+        default=(),
+        description=(
+            "The single-container servers (`SingleEntry`): one container, a port per "
+            "listener, no MySQL. Kept apart from `games` so every reader of a `CatalogEntry` "
+            "keeps the WoW shape it was written for."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _one_id_per_entry_across_both_kinds(self) -> Catalog:
+        """No id is both a WoW entry and a single-container one: `state.json` keys by id alone."""
+        seen = {entry.id for entry in self.games}
+        for entry in self.single:
+            if entry.id in seen:
+                raise ValueError(f"the catalog names the game id {entry.id!r} twice")
+            seen.add(entry.id)
+        return self
+
+    @model_validator(mode="after")
+    def _single_servers_take_ports_and_names_of_their_own(self) -> Catalog:
+        """A single-container server shares no container name and no host port with any entry.
+
+        Both are global to a Docker daemon. A WoW pair that shares its auth and world
+        ports is the deliberate "stop the other one first" case (`games`' own check);
+        a single-container server has no such pairing, so any overlap would only show
+        up as a bind error or a name collision after a build.
+        """
+        names: dict[str, str] = {}
+        ports: dict[int, str] = {}
+        for game in self.games:
+            c = game.containers
+            for name in (c.db, c.auth, c.world, c.db_import, c.client_data):
+                if name is not None:
+                    names.setdefault(name, game.id)
+            for number in game.published_host_ports():
+                ports.setdefault(number, game.id)
+        for entry in self.single:
+            if entry.container is not None:
+                if entry.container in names:
+                    raise ValueError(
+                        f"{entry.id} names the container {entry.container!r}, which "
+                        f"{names[entry.container]} already names; each needs its own"
+                    )
+                names[entry.container] = entry.id
+            for number, what in entry.published_host_ports().items():
+                if number in ports:
+                    raise ValueError(
+                        f"{entry.id}'s {what} is port {number}, which {ports[number]} also "
+                        "publishes; a single-container server needs ports of its own"
+                    )
+                ports[number] = entry.id
+        return self
 
     @model_validator(mode="after")
     def _every_container_name_is_handed_out_once(self) -> Catalog:
@@ -3739,6 +4475,17 @@ class Catalog(_Strict):
             if entry.id == game_id:
                 return entry
         raise KeyError(game_id)
+
+    def get_single(self, game_id: str) -> SingleEntry:
+        """Look a single-container entry up by id; `KeyError` if it is not one."""
+        for entry in self.single:
+            if entry.id == game_id:
+                return entry
+        raise KeyError(game_id)
+
+    def is_single(self, game_id: str) -> bool:
+        """Whether `game_id` is a single-container server (and so not a `get()` entry)."""
+        return any(entry.id == game_id for entry in self.single)
 
 
 def parse_catalog(data: object) -> Catalog:
