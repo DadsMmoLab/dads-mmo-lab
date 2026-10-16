@@ -255,6 +255,11 @@ MODULE_SURFACE_AFTER_7_2 = {
     # T568. `InstallEngine.reserved()` returns a context manager.
     "AbstractContextManager",
     "get_logger",
+    # Added deliberately with the single-container servers (DDON): the one call the
+    # Catalog tile and the harness make of either engine kind, and the entry type
+    # `unsupported_platform_message()` now also takes. A Protocol and an import.
+    "InstallRun",
+    "SingleEntry",
 }
 
 

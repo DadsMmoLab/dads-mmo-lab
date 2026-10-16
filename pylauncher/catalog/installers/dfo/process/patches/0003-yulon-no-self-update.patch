@@ -1,0 +1,16 @@
+diff --git a/launcher.settings.json b/launcher.settings.json
+index 7004a9b..f496b88 100644
+--- a/launcher.settings.json
++++ b/launcher.settings.json
+@@ -16,9 +16,9 @@
+   "update": {
+     "branch": "main",
+     "channel": "dev",
+-    "enabled": true,
++    "enabled": false,
+     "endpoint": "https://gitgud.io/fuckworld/115",
+-    "follow_latest": true
++    "follow_latest": false
+   },
+   "window": {
+     "height": 909,

@@ -1,0 +1,47 @@
+diff --git a/server/work/dfo-lan/internal/launcher/clienthost_other_types.go b/server/work/dfo-lan/internal/launcher/clienthost_other_types.go
+new file mode 100644
+index 00000000..221d886f
+--- /dev/null
++++ b/server/work/dfo-lan/internal/launcher/clienthost_other_types.go
+@@ -0,0 +1,41 @@
++//go:build !windows
++
++package launcher
++
++import (
++	"io"
++	"os"
++	"time"
++)
++
++// 非 Windows 构建所需的占位类型：hostProcessSpec / hostProcess 只在 clienthost_windows.go 里定义，
++// 而共用的 clienthost.go 与 clienthost_other.go 都引用它们，所以 GOOS=linux 的 dfolauncher 编不过。
++// 这里给出签名兼容的替身；startHostProcess 在非 Windows 上照旧直接返回 errClientHostUnsupported，
++// 这些方法实际不会被调用。有了它，`dfolauncher launch --server-only` / `prepare-inner-pvf` 等
++// 不依赖客户端宿主的子命令就能在 Linux 上构建、运行（客户端另行在 Wine/Proton 下启动）。
++type hostProcessSpec struct {
++	Target     string
++	Args       []string
++	WorkingDir string
++	Env        []string
++	UIMode     string
++	Timeout    time.Duration
++	WantStdout bool
++	WantStderr bool
++}
++
++type hostProcess struct {
++	Pid    int
++	job    uintptr
++	stderr *os.File
++}
++
++func (p *hostProcess) attachClient(pid int) error { return errClientHostUnsupported }
++func (p *hostProcess) awaitWrapperClient(sink io.Writer) (int, error) {
++	return 0, errClientHostUnsupported
++}
++func (p *hostProcess) drainStderr(sink io.Writer)             {}
++func (p *hostProcess) watch() (uint32, bool)                  { return 0, false }
++func (p *hostProcess) terminateAndWait(timeout time.Duration) {}
++func (p *hostProcess) exitCode() uint32                       { return 0 }
++func (p *hostProcess) closeAll() bool                         { return true }

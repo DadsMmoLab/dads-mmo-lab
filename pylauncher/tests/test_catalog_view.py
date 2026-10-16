@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 from PySide6.QtWidgets import (
     QGridLayout,
+    QLabel,
     QMainWindow,
     QMessageBox,
     QPushButton,
@@ -34,11 +35,12 @@ from tests.conftest import (
 from tests.support_player_text import text_faults
 from yulon import platform, runner, wsl
 from yulon.apply import ApplyError
-from yulon.catalog.catalog import CatalogEntry, load_catalog
+from yulon.catalog.catalog import CatalogEntry, SingleEntry, load_catalog
 from yulon.catalog.installer import (
     InstallEngine,
     InstallerError,
     InstallOptions,
+    InstallRun,
     WorldStoppedAfterReadyError,
 )
 from yulon.controller_wow_wotlk import modules as wotlk_modules
@@ -311,6 +313,115 @@ def test_the_columns_stay_equal_across_the_splitters_supported_width_range(
         len(set(measured.values())) == 3
     ), f"the three points did not land at genuinely different widths: {measured}"
     assert measured["min"] < measured["default"] < measured["wide"], measured
+
+
+# ------------------------------------------------- the shelf's "Other games" row
+
+
+def _no_single_engine(entry: SingleEntry) -> InstallRun:
+    raise AssertionError(f"nothing in this test installs {entry.id}")
+
+
+def _grid_cell(grid: QGridLayout, widget: QWidget) -> tuple[int, int, int, int]:
+    """(row, column, row span, column span) of `widget` in `grid`."""
+    index = grid.indexOf(widget)
+    assert index != -1, f"{widget.objectName() or widget} is not in the shelf's grid"
+    row, column, row_span, column_span = grid.getItemPosition(index)
+    return row, column, row_span, column_span
+
+
+def test_the_other_games_sit_under_their_own_heading_after_every_wow_tile(qapp: object) -> None:
+    """DDON's tile is the shelf's second group: a heading across both columns after the last
+    WoW row, then its tile on the row under it, as wide as a WoW tile (T28).
+
+    Measured off the live grid, laid out as `build_window()` lays it out: one grid for both
+    groups is what makes the widths agree, and a second grid would pass every row check
+    above while drawing the DDON tile at a width of its own.
+    """
+    panel = LogPanel()
+    view = CatalogView(
+        CATALOG,
+        lambda e: _FakeInstaller(e, []),
+        panel,
+        pick_dir=lambda *_: None,
+        single_installer_factory=_no_single_engine,
+    )
+    _window, scroll, _splitter = _catalog_in_the_default_window(view, panel)
+    grid = scroll.widget().layout()
+    assert isinstance(grid, QGridLayout)
+    headings = [
+        label
+        for label in scroll.widget().findChildren(QLabel, "section-title")
+        if label.text() == catalog_view.OTHER_GAMES
+    ]
+    assert len(headings) == 1, "one Other games heading, inside the shelf"
+    heading_row, heading_column, _span, heading_columns = _grid_cell(grid, headings[0])
+    assert (heading_column, heading_columns) == (0, 2), "the heading spans both columns"
+    wow_tiles = [view.button_for(game.id).parentWidget() for game in CATALOG.games]
+    assert max(_grid_cell(grid, tile)[0] for tile in wow_tiles) < heading_row
+    for single in CATALOG.single:
+        tile = view.button_for(single.id).parentWidget()
+        row, column, _rows, _columns = _grid_cell(grid, tile)
+        assert row > heading_row, f"{single.id} is drawn above its heading"
+        if single is CATALOG.single[0]:
+            assert (row, column) == (heading_row + 1, 0), "the first one starts a fresh row"
+        left = view.button_for(CATALOG.games[0].id).parentWidget()
+        assert abs(tile.width() - left.width()) <= 1, (tile.width(), left.width())
+
+
+def test_a_view_without_the_single_engine_shows_no_other_games_row(qapp: object) -> None:
+    """The heading belongs to the tiles: a view built without their factory draws neither."""
+    panel = LogPanel()
+    view = CatalogView(CATALOG, lambda e: _FakeInstaller(e, []), panel, pick_dir=lambda *_: None)
+    texts = [label.text() for label in view.findChildren(QLabel, "section-title")]
+    assert catalog_view.OTHER_GAMES not in texts
+    for single in CATALOG.single:
+        assert view.findChild(QPushButton, f"install-{single.id}") is None
+
+
+def test_use_existing_adopts_a_finished_ddon_install_without_reinstalling(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A DDON server the CLI harness installed is picked up from its tile, never rebuilt.
+
+    The engine's factory refuses to be called here: adopting reaches no engine.
+    """
+    from PySide6.QtWidgets import QMessageBox
+
+    from yulon.catalog import composegen, native
+    from yulon.catalog.single_install import STAGE_NAMES
+
+    warned: list[str] = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warned.append(a[2]))
+    server = tmp_path / "Yulon DDON"
+    server.mkdir()
+    view = CatalogView(
+        CATALOG,
+        lambda e: _FakeInstaller(e, []),
+        LogPanel(),
+        pick_dir=lambda *_: server,
+        home=tmp_path,
+        platform_id=lambda: "windows",
+        single_installer_factory=_no_single_engine,
+    )
+    got: list[tuple[str, object, object]] = []
+    view.installed.connect(lambda g, s, c: got.append((g, s, c)))
+    ddon = CATALOG.get_single("ddon")
+    assert view.existing_button_for("ddon").text() == "Use existing…"
+    assert view.attach_existing_single(ddon) is False
+    assert got == [] and "holds no DDON server that Yu'lon installed" in warned[0]
+    native.write_state(
+        server,
+        native.InstallState(
+            game_id="ddon",
+            install_id=composegen.install_id(server, platform_id=lambda: "windows"),
+            family="arrowgene",
+            completed=STAGE_NAMES,
+        ),
+    )
+    assert view.attach_existing_single(ddon) is True
+    assert got == [("ddon", server, None)]
+    assert not view.button_for("ddon").isEnabled(), "the tile now reads Installed"
 
 
 def test_install_asks_for_folders_then_streams_the_installer(
@@ -3103,3 +3214,75 @@ def test_the_install_question_for_an_empty_folder_says_it_is_already_there(
     text = _install_question(tmp_path, monkeypatch)
     assert "into this folder?" in text and "The folder is already there." in text
     assert "new folder" not in text and "makes the folder" not in text
+
+
+# ---------------------------------------- a host-program server's tile (DFO)
+
+
+class _FakeProcessEngine:
+    """A DFO engine whose run() writes the record a real finished install leaves, or not."""
+
+    def __init__(self, entry: SingleEntry, *, finishes: bool) -> None:
+        self.entry = entry
+        self.finishes = finishes
+
+    def preflight(self, *_a: object, **_k: object) -> None:
+        return None
+
+    def run(self, options: InstallOptions | None = None, **_k: object) -> Iterator[str]:
+        from yulon.catalog import composegen, native
+        from yulon.catalog.process_install import STAGE_NAMES
+
+        assert options is not None and options.server_dir is not None
+        server = options.server_dir
+        server.mkdir(parents=True, exist_ok=True)
+        done = STAGE_NAMES if self.finishes else STAGE_NAMES[:2]
+        native.write_state(
+            server,
+            native.InstallState(
+                game_id="dfo",
+                install_id=composegen.install_id(server, platform_id=lambda: "windows"),
+                family="go",
+                completed=done,
+            ),
+        )
+        yield "built"
+
+
+@pytest.mark.parametrize("finishes", [True, False])
+def test_a_dfo_install_is_remembered_by_its_record_and_never_pinned_as_compose(
+    qapp: object,
+    tmp_path: Path,
+    the_compose_project_is_not_pinned: list[Path],
+    monkeypatch: pytest.MonkeyPatch,
+    finishes: bool,
+) -> None:
+    """A host-program install has no compose file; its proof is its finished record."""
+    from PySide6.QtWidgets import QMessageBox
+
+    warned: list[str] = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warned.append(a[2]))
+    panel = LogPanel()
+    dfo = CATALOG.get_single("dfo")
+    view = CatalogView(
+        CATALOG,
+        lambda e: _FakeInstaller(e, []),
+        panel,
+        pick_dir=lambda *_: None,
+        home=tmp_path,
+        platform_id=lambda: "windows",
+        ask_suggestion=lambda *_: True,
+        single_installer_factory=lambda e: _FakeProcessEngine(e, finishes=finishes),
+    )
+    got: list[tuple[str, object, object]] = []
+    view.installed.connect(lambda g, s, c: got.append((g, s, c)))
+    assert view.start_single_install(dfo) is True
+    wait_for_panel(panel)
+    server = tmp_path / "yulon-dfo"
+    if finishes:
+        assert got == [("dfo", server, None)]
+        assert warned == []
+    else:
+        assert got == []
+        assert "did not finish" in warned[0]
+    assert the_compose_project_is_not_pinned == [], "a process install has no compose project"
