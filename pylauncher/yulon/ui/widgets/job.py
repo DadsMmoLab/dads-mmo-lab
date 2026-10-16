@@ -91,6 +91,20 @@ class _JobWorker(QObject):
             self.done.emit(result)
 
 
+def _is_running(thread: QThread) -> bool:
+    """Whether `thread` is running; a thread whose C++ object is already gone is not.
+
+    A held pair's thread can be destroyed under its Python wrapper (a test that tears a
+    view down, an exit that deletes children first); asking it then raises
+    `RuntimeError: Internal C++ object ... already deleted`, which would stop the sweep, the
+    exit join and the exit log for every other job. Nothing runs in a deleted thread.
+    """
+    try:
+        return thread.isRunning()
+    except RuntimeError:
+        return False
+
+
 class InFlight(QObject):
     """Owns every started (thread, worker) pair until the thread has FINISHED.
 
@@ -158,7 +172,7 @@ class InFlight(QObject):
         self._pairs = [
             (thread, worker, delivery)
             for thread, worker, delivery in self._pairs
-            if thread.isRunning() or (delivery is not None and not delivery.returned)
+            if _is_running(thread) or (delivery is not None and not delivery.returned)
         ]
         held = {id(thread) for thread, _worker, _delivery in self._pairs}
         self._labels = {key: label for key, label in self._labels.items() if key in held}
@@ -176,7 +190,7 @@ class InFlight(QObject):
         done = True
         for thread, worker, _delivery in list(self._pairs):
             label = self._labels.get(id(thread))
-            if thread.isRunning():
+            if _is_running(thread):
                 thread.quit()
                 if not thread.wait(timeout_ms):
                     done = False
@@ -192,7 +206,7 @@ class InFlight(QObject):
         return [
             self._labels.get(id(thread)) or describe(worker)
             for thread, worker, _delivery in self._pairs
-            if thread.isRunning()
+            if _is_running(thread)
         ]
 
 
@@ -352,13 +366,13 @@ class ThreadedJobRunner:
         thread.start()
 
     def _prune(self) -> None:
-        self._live = [pair for pair in self._live if pair[0].isRunning()]
+        self._live = [pair for pair in self._live if _is_running(pair[0])]
 
     def wait(self, timeout_ms: int = 10_000) -> bool:
         """Join every running job. True if they all finished within the timeout."""
         done = True
         for thread, _worker in list(self._live):
-            if thread.isRunning():
+            if _is_running(thread):
                 thread.quit()
                 done = bool(thread.wait(timeout_ms)) and done
         self._prune()

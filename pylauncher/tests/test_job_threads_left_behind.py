@@ -287,3 +287,25 @@ def test_the_suites_own_fixture_fails_and_joins_a_leak_across_a_real_test_bounda
     result.stdout.fnmatch_lines(["*ERROR at teardown of test_a_leaks_a_job_thread*"])
     result.stdout.fnmatch_lines(["*never took*leaked_work*"])
     take_every_held_answer()
+
+
+def test_a_held_thread_deleted_under_its_wrapper_is_swept_not_raised_on(qapp: object) -> None:
+    """CI (py3.11) met `RuntimeError: ... QThread already deleted` from `InFlight` at teardown.
+
+    A held pair's thread can be destroyed while its Python wrapper is still in the list;
+    `sweep()`, `wait_all()` and `still_running()` must treat it as finished, not raise, or one
+    deleted thread stops the exit join for every other job.
+    """
+    import shiboken6
+    from PySide6.QtCore import QObject, QThread
+
+    from yulon.ui.widgets.job import InFlight
+
+    held = InFlight()
+    thread = QThread()
+    held.hold(thread, QObject())
+    shiboken6.delete(thread)
+
+    assert held.still_running() == []
+    assert held.wait_all(timeout_ms=100) is True
+    assert held._pairs == []

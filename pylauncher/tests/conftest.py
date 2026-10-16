@@ -694,7 +694,8 @@ def joining_the_job_threads_left_behind(bound_ms: int) -> Iterator[None]:
     left = [pair for pair in _held_job_pairs() if not any(pair[0] is t for t in before)]
     # A thread joined directly (an exit join, `wait_all`) has ended with its answer still
     # queued to the GUI thread: it is held, not running, and still a leak (T771).
-    left = [pair for pair in left if pair[0].isRunning() or pair[2] is not None]
+    job_module = sys.modules["yulon.ui.widgets.job"]
+    left = [pair for pair in left if job_module._is_running(pair[0]) or pair[2] is not None]
     if not left:
         return
     job = sys.modules["yulon.ui.widgets.job"]
