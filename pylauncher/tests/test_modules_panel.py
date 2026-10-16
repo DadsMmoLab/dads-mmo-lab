@@ -2042,8 +2042,13 @@ def test_the_github_link_is_drawn_in_the_theme_gold_not_blue(qapp: object) -> No
         )
 
     pixels = [image.pixelColor(x, y) for y in range(image.height()) for x in range(image.width())]
-    assert sum(1 for c in pixels if near(c, COLOR_RARE)) == 0
-    assert sum(1 for c in pixels if near(c, COLOR_GOLD_LIGHT)) > 10
+    blue = sum(1 for c in pixels if near(c, COLOR_RARE))
+    light = sum(1 for c in pixels if near(c, COLOR_GOLD_LIGHT))
+    # The default theme draws links in its light accent (`COLOR_GOLD_LIGHT`, a pale cyan now),
+    # whose anti-aliased edge can land near the old blue in a few pixels: the guarantee is that
+    # the blue is not the link's colour, so it must be a small fraction of the accent pixels.
+    assert light > 10
+    assert blue * 10 < light
     assert host.isVisible()
 
 

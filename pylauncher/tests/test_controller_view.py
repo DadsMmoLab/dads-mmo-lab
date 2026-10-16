@@ -16774,6 +16774,19 @@ def _themed_window() -> Any:
     return window
 
 
+def _main_menu(window: Any) -> Any:
+    """The window's main navigation: the top menu's Catalog button (#444 replaced the left rail).
+
+    The `sidebar-tabs` tab bar still exists but is hidden, so the pad cannot, and need not,
+    reach it; what the player needs is to reach the menu that drives those tabs.
+    """
+    from yulon.ui.sidebar import TopMenuBar
+
+    bar = window.findChild(TopMenuBar)
+    assert bar is not None, "the window has no top menu"
+    return bar.catalog_button
+
+
 def _controller_in_the_real_window(view: ControllerView, tab_title: str) -> tuple[Any, Any]:
     """Lay `view` out inside the window `build_window()` builds, and show it.
 
@@ -18964,6 +18977,29 @@ def test_a_locked_row_keeps_its_reason_on_screen_at_every_width(
             # a string spelled here, so the chip and the refusal cannot drift.
             if row.data.install_reason not in button.toolTip():
                 silent.append(f"{width}: {row.data.id}'s elided lock says nothing on hover")
+    if not elided_somewhere:
+        # The top menu (#444) took the left rail's place, so the status column is wider at the
+        # smallest window than the longest lock label and no window width narrows it any more.
+        # The case is what the test is about, so the strip itself is squeezed: the same rule at
+        # the width the old rail left it.
+        row = next(r for r in locked if r.data.id == "accountwide")
+        lock = next(chip for chip in row.data.chips if chip.detail == row.data.install_reason)
+        strip = row.chip_strip
+        button = next(
+            b for b, chip in zip(row.chip_buttons, row.data.chips, strict=True) if chip is lock
+        )
+        _at(window, (main.MINIMUM_WINDOW_SIZE[0], 800))
+        for squeeze in range(strip.width(), 110, -20):
+            strip.setFixedWidth(squeeze)
+            process_events()
+            if lock.label not in strip.visible_chip_labels():
+                gone.append(f"squeezed to {squeeze}: {row.data.id} hid {lock.label!r}")
+            elif lock.label in strip.elided_chip_labels():
+                elided_somewhere = True
+                if row.data.install_reason not in button.toolTip():
+                    silent.append(f"squeezed to {squeeze}: the elided lock says nothing on hover")
+        strip.setMinimumWidth(0)
+        strip.setMaximumWidth(16777215)
     assert gone == [], f"the reason Install is locked left the screen at {gone[:3]}"
     assert silent == [], f"an elided lock with the sentence nowhere: {silent[:3]}"
     assert elided_somewhere, (
@@ -21589,7 +21625,7 @@ def test_a_taller_window_never_takes_back_what_a_shorter_one_showed(
                 )
 
 
-def _pad_routes(nav: Any, start: Any) -> dict[Any, list[Any]]:
+def _pad_routes(nav: Any, start: Any, *, home: Any = None) -> dict[Any, list[Any]]:
     """Every widget the D-pad reaches from `start`, each with the presses that reach it.
 
     A breadth-first walk through the real `Navigator`: from each widget reached,
@@ -21597,6 +21633,10 @@ def _pad_routes(nav: Any, start: Any) -> dict[Any, list[Any]]:
     too. Asked of the navigator the pad drives and not of `_iter_focusable()`,
     because what is under test is the navigator's own idea of what exists -- a
     cache of it, which a fresh walk of the tree would not see.
+
+    `home` is a window whose scroll areas go back to the top before every press: a page that
+    scrolls (the top menu takes height from it) answers a press by where it is scrolled, and
+    a route to be replayed by `_press_a_on` must not depend on where the last press left it.
     """
     from PySide6.QtWidgets import QApplication
 
@@ -21608,6 +21648,12 @@ def _pad_routes(nav: Any, start: Any) -> dict[Any, list[Any]]:
         here = frontier.pop(0)
         for direction in Direction:
             here.setFocus()
+            # Nothing remembered between presses: `here` may be the stop the last press landed
+            # on, and a press back would then undo that move (`_way_back`) instead of being
+            # asked of the layout. The replay in `_press_a_on` forgets it at every step too.
+            nav._last_move = None
+            if home is not None:
+                _scroll_home(home)
             nav.navigate(direction)
             landed = QApplication.focusWidget()
             if landed is not None and landed not in routes:
@@ -21616,7 +21662,9 @@ def _pad_routes(nav: Any, start: Any) -> dict[Any, list[Any]]:
     return routes
 
 
-def _press_a_on(nav: Any, start: Any, target: Any, routes: dict[Any, list[Any]]) -> None:
+def _press_a_on(
+    nav: Any, start: Any, target: Any, routes: dict[Any, list[Any]], *, home: Any = None
+) -> None:
     """Walk the pad from `start` to `target` along its route, then press A."""
     from PySide6.QtWidgets import QApplication
 
@@ -21625,6 +21673,9 @@ def _press_a_on(nav: Any, start: Any, target: Any, routes: dict[Any, list[Any]])
     assert target in routes, f"the pad cannot reach {target.text()!r}"
     start.setFocus()
     for direction in routes[target]:
+        nav._last_move = None  # as `_pad_routes` asked each press: nothing remembered
+        if home is not None:
+            _scroll_home(home)
         nav.navigate(direction)
     assert QApplication.focusWidget() is target, f"the route did not end on {target.text()!r}"
     nav.perform(Action.CONFIRM)
@@ -21674,7 +21725,7 @@ def test_the_pad_reaches_whichever_form_of_the_card_is_on_screen(
 
         _at(window, main.MINIMUM_WINDOW_SIZE)
         assert view.custom_module_line.isVisible(), "the card did not go to one line"
-        routes = _pad_routes(nav, start)
+        routes = _pad_routes(nav, start, home=window)
         reached = set(routes)
         line = [view.module_link_line_button, view.module_folder_line_button]
         assert (
@@ -21683,7 +21734,7 @@ def test_the_pad_reaches_whichever_form_of_the_card_is_on_screen(
         hidden = {view.module_link_button, view.module_folder_button} & reached
         assert not hidden, f"the pad still lands on the hidden card's buttons: {hidden}"
         for button in line:
-            _press_a_on(nav, start, button, routes)
+            _press_a_on(nav, start, button, routes, home=window)
         assert asked == [
             controller_view_module.MODULE_LINK_DIALOG_TITLE,
             controller_view_module.MODULE_FOLDER_DIALOG_TITLE,
@@ -21831,13 +21882,13 @@ def test_up_from_a_sub_tabs_top_row_still_reaches_a_tab_bar(
     """The way OUT of a page is kept: Up from its top row lands on a tab bar (T172).
 
     On every sub-tab, from every widget with nothing of its page above it. And
-    both tab bars -- the sub-tabs' and the sidebar rail -- are still reached by
+    both the sub-tabs' tab bar and the main menu (the top menu, #444) are still reached by
     the pad from every widget on every sub-tab. T172 stops the pad aiming at a
     tab widget's middle; the bars themselves stay stops at their own places,
     and a fix that dropped them as well would pass the test above.
     """
     from PySide6.QtCore import Qt
-    from PySide6.QtWidgets import QTabBar, QTabWidget
+    from PySide6.QtWidgets import QTabBar
 
     from yulon.ui.gamepad import install_gamepad_navigation
 
@@ -21846,7 +21897,7 @@ def test_up_from_a_sub_tabs_top_row_still_reaches_a_tab_bar(
     _at(window, size)
     nav, keyboard, gamepad = install_gamepad_navigation(window)
     sub = view._tabs
-    rail = window.findChild(QTabWidget, "sidebar-tabs").tabBar()
+    rail = _main_menu(window)
     stuck: list[str] = []
     unreached: list[str] = []
     top_rows = 0
@@ -21868,7 +21919,7 @@ def test_up_from_a_sub_tabs_top_row_still_reaches_a_tab_bar(
                     stuck.append(f"{sub.tabText(index)}: Up went to {type(landed).__name__}")
             for widget in widgets:
                 reached = set(_pad_routes(nav, widget))
-                for bar, name in ((sub.tabBar(), "the sub-tab bar"), (rail, "the rail")):
+                for bar, name in ((sub.tabBar(), "the sub-tab bar"), (rail, "the main menu")):
                     if bar not in reached:
                         unreached.append(f"{sub.tabText(index)}: {name}")
     finally:
@@ -21900,7 +21951,7 @@ def test_the_bumpers_still_switch_the_main_windows_tabs_from_the_rail(
     _at(window, size)
     nav, keyboard, gamepad = install_gamepad_navigation(window)
     main_tabs = window.findChild(QTabWidget, "sidebar-tabs")
-    rail = main_tabs.tabBar()
+    rail = _main_menu(window)
     try:
         main_tabs.setCurrentIndex(0)
         process_events()
@@ -22276,43 +22327,32 @@ def test_every_box_the_pad_goes_into_can_be_left_by_pressing_on_the_same_way(
 
 
 @pytest.mark.parametrize("size", PAD_WINDOW_SIZES, ids=lambda s: f"{s[0]}x{s[1]}")
-def test_left_from_the_modules_list_reaches_the_rail_in_a_few_presses(
+def test_the_main_menu_is_a_few_presses_from_the_modules_list(
     qapp: object, ps: _Ps, tmp_path: Path, size: tuple[int, int]
 ) -> None:
-    """Left from the Modules list reaches the rail in a few presses, never twice on one stop (T175).
+    """The pad gets from the Modules list to the main menu in at most four presses (T175).
 
-    The trap the test above is for, as the player met it: at 960x640 twelve
-    presses of Left from the list went Install, list, Install, list... and never
-    reached the rail. Held loosely, not to the exact walk -- which rests on the
-    list's top edge sharing a pixel row with the rail at 960x640 -- but to what
-    the player needs: at most four presses, each to a stop not landed on
-    before.
+    The trap the test above is for, as the player met it: at 960x640 twelve presses of Left
+    from the list went Install, list, Install, list... and never reached the main navigation.
+    That navigation was the left rail then and is the top menu now (#444), so Left from the
+    list has nothing beside it and wraps; what the player needs is unchanged: the menu is
+    reached by the shortest route the pad has in no more than four presses.
     """
-    from PySide6.QtWidgets import QApplication, QTabWidget
-
-    from yulon.ui.gamepad import Direction, install_gamepad_navigation
+    from yulon.ui.gamepad import install_gamepad_navigation
 
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
     window, _tab = _controller_in_the_real_window(view, "Modules")
     _at(window, size)
     nav, keyboard, gamepad = install_gamepad_navigation(window)
-    rail = window.findChild(QTabWidget, "sidebar-tabs").tabBar()
+    menu = _main_menu(window)
     area = view.modules_panel._area
     try:
         _scroll_home(window)
         area.setFocus()
         process_events()
-        walk = [area]
-        for _press in range(4):
-            nav.navigate(Direction.LEFT)
-            process_events()
-            landed = QApplication.focusWidget()
-            went = " -> ".join(_pad_describe(w, window) for w in [*walk, landed])
-            assert landed not in walk, f"Left from the list went round: {went}"
-            walk.append(landed)
-            if landed is rail:
-                break
-        assert walk[-1] is rail, f"Left from the list went: {went}"
+        routes = _pad_routes(nav, area)
+        assert menu in routes, "the main menu is out of the pad's reach from the Modules list"
+        assert len(routes[menu]) <= 4, f"the main menu is {len(routes[menu])} presses from the list"
     finally:
         keyboard.stop()
         gamepad.stop()

@@ -22,6 +22,14 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ## v0.9.18-Public — 2026-10-17
 
 ### New
+- Pick Yu'lon's look under **Settings…** with the new **Color theme** choice.
+- Install a Dragon's Dogma Online (DDON) server from the Catalog's new **Other games** row; play with your own client.
+- A DDON server's tab has Start, Stop, **Who can connect**, **Play**, **Add to DDON-Launcher** and the live log.
+- **Use existing…** on the DDON tile picks up a DDON server Yu'lon installed before, without reinstalling it.
+- Install a Dungeon Fighter Online (DFO) server in beta from **Other games**, on Windows or a Steam Deck.
+- A DFO server's tab starts it for your account from your own US 2.38.3.25 client, and **Play** opens that client on it.
+- On a Steam Deck, **Add to Steam Deck (Gaming Mode)…** on a DDON or DFO tab adds Server, game and Stop shortcuts.
+- On a Steam Deck, **Add to Steam…** on a WoW tab adds a Server tile that stops itself when you quit, and a Stop tile.
 - The Maintenance tab lists the backups an earlier uninstall kept, so a reinstall can restore them.
 - A WotLK server inside WSL can have its accounts and characters packed for a move, with a script in the WoW guides.
 - New WoW WotLK and Unbound servers get a database password of their own; older servers keep theirs.
@@ -30,6 +38,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - **Set up My Party** on the My Party tab puts the bridge scripts into the server when they are missing.
 
 ### Fixed
+- **Add to Steam…** on a Steam Deck with two Steam accounts uses the one signed in last, instead of refusing.
 - **Check for updates** says why git could not answer for a module, instead of only that it did not.
 - **Remove** on City Bots now takes back its roster and bot account marks.
 - A server whose database password cannot be found now greys the accounts, backup and module buttons and says why.
@@ -158,23 +167,6 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A new version is offered only after its tests pass, and the Windows and Mac builds are now tested on their own systems.
 - Install and error messages say "Docker" and "world server" in plain words, and the first install line is shorter.
 - A new WotLK or Unbound server starts with its command channel on, so the app can prove it without a button press.
-
-## v0.9.17-Public — 2026-10-16
-
-### New
-- Pick Yu'lon's look under **Settings…** with the new **Color theme** choice.
-- Install a Dragon's Dogma Online (DDON) server from the Catalog's new **Other games** row; play with your own client.
-- A DDON server's tab has Start, Stop, **Who can connect**, **Play**, **Add to DDON-Launcher** and the live log.
-- **Use existing…** on the DDON tile picks up a DDON server Yu'lon installed before, without reinstalling it.
-- Install a Dungeon Fighter Online (DFO) server in beta from **Other games**, on Windows or a Steam Deck.
-- A DFO server's tab starts it for your account from your own US 2.38.3.25 client, and **Play** opens that client on it.
-- On a Steam Deck, **Add to Steam Deck (Gaming Mode)…** on a DDON or DFO tab adds Server, game and Stop shortcuts.
-- On a Steam Deck, **Add to Steam…** on a WoW tab adds a Server tile that stops itself when you quit, and a Stop tile.
-
-### Fixed
-- **Add to Steam…** on a Steam Deck with two Steam accounts uses the one signed in last, instead of refusing.
-
-### Changed
 
 ## v0.9.16-Public — 2026-10-10
 

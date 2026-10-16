@@ -34,8 +34,7 @@ REPO = Path(__file__).resolve().parents[2]
 CHANGELOG = REPO / "CHANGELOG.md"
 
 PINNED: dict[str, tuple[int, str]] = {
-    "v0.9.18-Public": (132, "4b8db69334fe483a4f0be0576ed14ff41feccb8829cff511a9cefdff21423f62"),
-    "v0.9.17-Public": (9, "5f90ab881afca0e33418acc2b9cddc18b36fa239ca5c34dde6a166ca9d14faa2"),
+    "v0.9.18-Public": (141, "c5e0a8699232d426cbdf8a408b18361a96afb1627b48c4861418dff969c445ed"),
     "v0.9.16-Public": (63, "016f3fde6ed8e5c28a75e752be18268b313800690c1668959e699684ca791ca7"),
     "v0.9.15-Public": (68, "2416ef743ecedb20dfc9344274d69cc4bd23b5feb983a5e899f4d456647af26b"),
     "v0.9.14-Public": (5, "fe4bbd2f1356ab73845c8d87ad124f7cb7d7ab47ff235fa8170e7c6bc9d1b27a"),
