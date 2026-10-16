@@ -348,7 +348,7 @@ def test_every_tortoise_source_is_pinned_to_a_commit_not_a_moving_branch() -> No
     # rest are held to the SHAPE of a full commit id, because an abbreviation
     # is a prefix and a prefix can stop being unique.
     core = next(s for s in sources if s.repo.endswith("tortoise-wow"))
-    assert core.rev == "6131a26f91d60e64f6d58c7f0a9b6333f2d9f25a", (
+    assert core.rev == "10393426efe4bbe1de3a31fd071ca36fae358bb6", (
         f"the core is pinned to {core.rev!r}. It was 7c0fb278, then 3a8472e on the retired "
         "Shyalya fork, 9980181c on `tortoise-wow/tortoise-wow` branch `bot-helpers` since T30 "
         "(every measurement in this file taken against it on `yulon-arch` 2026-09-11, "
@@ -363,11 +363,16 @@ def test_every_tortoise_source_is_pinned_to_a_commit_not_a_moving_branch() -> No
         "tree change, the world shutdown logging the headless (bot) sessions out before the "
         "databases close (World.cpp, one line, PR #563), and two world-data updates (vendor "
         "stock, five deleted Redridge creatures, starter throwing weapons, eleven Dark Iron "
-        "gameobjects); AutoUpdater.cpp, mangosd.conf.dist.in, CMake and sql/base unchanged. "
+        "gameobjects); AutoUpdater.cpp, mangosd.conf.dist.in, CMake and sql/base unchanged; "
+        "and since v0.9.18 10393426 on branch `main` (2026-10-17, chosen without a live run): "
+        "1181dev's tip 6131a26f is its ancestor and `main` is four commits ahead, touching "
+        "src/game/Objects/Unit.h and src/scripts/spells/spell_druid.cpp only (GitHub compare), "
+        "so every measurement above holds; the TortoiseBots README names the core's `main` "
+        "branch as its base, and `main` has the SOAP interface (src/mangosd/MaNGOSsoap.cpp). "
         "Moving it again means taking them again"
     )
     module = next(s for s in sources if s.repo == "Sagiroth/TortoiseBots")
-    assert module.rev == "18d4d14b3efdd804dccc527003f5c92a02ff0c2c", (
+    assert module.rev == "ff668fee0604035943e2ff0028ea2fd16c029d64", (
         f"the bots module is pinned to {module.rev!r}. Its own pin is as load-bearing as the "
         "core's: the module is what decides the folder names its SQL is installed under, "
         "which conf keys exist, and what the world prints when it loads. It was fd7ec9ec "
@@ -424,7 +429,16 @@ def test_every_tortoise_source_is_pinned_to_a_commit_not_a_moving_branch() -> No
         "CMake or core change, no conf key renamed; `TargetWorldTickMs` 50 -> 100 in the "
         "`.dist` and the code (Yu'lon's conf carry moves a live 50), the pool AI one turn "
         "queue, and new `LogRetentionDays` 3: bot logs on by default, packed to .csv.gz each "
-        "hour, packs older than 3 days deleted"
+        "hour, packs older than 3 days deleted; and v0.9.18 moved it to ff668fee, release "
+        "v1.2.1 (2026-10-16, main's tip, chosen without a live run): 831 commits past "
+        "18d4d14b, read from the compare and the two trees: no conf key removed or renamed "
+        "(14 new keys with defaults; `RandomBotCombatStrategies` now `+dps assist,-threat`, a "
+        "key the install does not write), nine new migrations that are idempotent (CREATE "
+        "TABLE IF NOT EXISTS, INSERT IGNORE, DELETE before INSERT) in the same "
+        "`data/sql/world` and `data/sql/character` folders, TortoiseBots.cmake gaining the "
+        "new sources and a zlib link (zlib1g-dev is in the image already; the core finds ZLIB at "
+        "its top level), and the dashboard protocol 8 -> 9 (rebuilt from "
+        "the same checkout, T162)"
     )
     for source in sources:
         assert re.fullmatch(

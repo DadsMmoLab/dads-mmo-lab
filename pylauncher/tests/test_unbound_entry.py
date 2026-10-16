@@ -133,11 +133,12 @@ def test_its_database_password_plan_is_generated_like_wotlks_and_the_gate_reads_
     assert probe is not None and reset is not None
 
 
-CORE_REV = "2a2211cd8f3d157da432ec0175ddd4b8a191931f"
-PLAYERBOTS_REV = "79bd428115c8f33b74b13de23b133d49c3f75c60"
+CORE_REV = "8a4e76eac8c4ccebf547113afe7b51d6c3e91641"
+PLAYERBOTS_REV = "d750b4b3a50effdf22bedc8032f0e8e5f7cb8091"
 """Unbound's own core and bots pins. Unbound shipped on 7f12e89e / 7bae1b5c; T580 (2026-10-09)
 moved it to the pair T389 proved for wow-wotlk (f19a1879 / 037c0141), and T655 (2026-10-10) to the
-two test-staging merges of 2026-10-09 (core #264, module #2903). They are literals, not read from
+two test-staging merges of 2026-10-09 (core #264, module #2903), and v0.9.18 (2026-10-17) to the
+newest tips (core 8a4e76ea, module d750b4b3). They are literals, not read from
 wow-wotlk, and no test asserts the two entries agree: they move separately on purpose. A move of
 Unbound's core or mod-ale re-checks its five core patches and the module's Lua against the new
 revisions (T580 found mod-ale #391 changed what the Mentor's `SetSkill` call grants), so a WotLK
@@ -158,6 +159,10 @@ BOT_SESSION_CALL: dict[tuple[str, str], str] = {
     ("mod-playerbots/azerothcore-wotlk", "2a2211cd8f3d157da432ec0175ddd4b8a191931f"): "IsHeadless",
     ("mod-playerbots/mod-playerbots", "79bd428115c8f33b74b13de23b133d49c3f75c60"): "IsHeadless",
     ("azerothcore/mod-ale", "84b85cc55980dbf67d596f3d5cb34ded10c59102"): "IsHeadless",
+    # v0.9.18, read on GitHub at each revision 2026-10-17: WorldSession.h:1234 declares
+    # `IsHeadless()` and no `IsBot()`; Playerbots.cpp:148 and PlayerbotAI.cpp:2549 call it.
+    ("mod-playerbots/azerothcore-wotlk", "8a4e76eac8c4ccebf547113afe7b51d6c3e91641"): "IsHeadless",
+    ("mod-playerbots/mod-playerbots", "d750b4b3a50effdf22bedc8032f0e8e5f7cb8091"): "IsHeadless",
 }
 """The name of the core's "is this session a bot" call, as each source has it at a revision.
 
@@ -208,6 +213,8 @@ CORE_SET_SKILL_PARAMS: dict[str, tuple[str, str, str, str]] = {
     "7f12e89ee5f467a50e62eba1d525eac7dc953d03": ("id", "step", "currVal", "maxVal"),
     "f19a18799a35f7c24bdcdc9ea399c601f166259b": ("id", "step", "currVal", "maxVal"),  # :2108
     "2a2211cd8f3d157da432ec0175ddd4b8a191931f": ("id", "step", "currVal", "maxVal"),  # :2109
+    # v0.9.18: Player.h:2109 at 8a4e76ea, read on GitHub 2026-10-17.
+    "8a4e76eac8c4ccebf547113afe7b51d6c3e91641": ("id", "step", "currVal", "maxVal"),
 }
 """The core's `Player::SetSkill` parameters, per core revision: the other half of what
 `ALE_SET_SKILL_SLOTS` assumes (step, value, max after the id). 7f12e89e and f19a1879 as T580 read
@@ -303,6 +310,11 @@ PLAYERBOTS_CONFIG_MEMBERS: dict[tuple[str, str], tuple[str, ...]] = {
         "reactDistance",
     ),
     ("mod-playerbots/mod-playerbots", "79bd428115c8f33b74b13de23b133d49c3f75c60"): (
+        "SightDistance",
+        "ReactDistance",
+    ),
+    # v0.9.18: PlayerbotAIConfig.h:115 at d750b4b3 (the header grew two lines above it).
+    ("mod-playerbots/mod-playerbots", "d750b4b3a50effdf22bedc8032f0e8e5f7cb8091"): (
         "SightDistance",
         "ReactDistance",
     ),

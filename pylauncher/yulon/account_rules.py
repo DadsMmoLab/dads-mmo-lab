@@ -16,13 +16,13 @@ a password can have (`commands.py`). The shortest name (3) and password (4) are 
 same allow-list's. The longest are each core's own `MAX_ACCOUNT_STR` and password
 ceiling, read at the catalog's pinned trees on 2026-10-11:
 
-- `azerothcore` (AzerothCore): name 17, password 16. azerothcore-wotlk 2a2211cd
-  `src/server/game/Accounts/AccountMgr.h:34-35`.
+- `azerothcore` (AzerothCore): name 17, password 16. azerothcore-wotlk 2a2211cd and
+  8a4e76ea `src/server/game/Accounts/AccountMgr.h:34-35`.
 - `mangos_srp6` (CMaNGOS): name 16, password 16. mangos-tbc 15b6ddb4 and mangos-classic
   8ec338a1 `src/game/Accounts/AccountMgr.h:34`; `ChangePassword` holds the password to
   the same 16.
 - `mangos_sha` (tortoise-wow, the MaNGOS-Zero line): name 16, password 16. tortoise-wow
-  6131a26f `src/game/AccountMgr.h:50`, `AccountMgr.cpp:146`.
+  6131a26f and 10393426 `src/game/AccountMgr.h:50`, `AccountMgr.cpp:146`.
 - `trinitycore` (TrinityCore112, Centurion): name 16, password 16. TrinityCore112
   25d3e6ef `src/server/game/Accounts/AccountMgr.h:41-42`.
 

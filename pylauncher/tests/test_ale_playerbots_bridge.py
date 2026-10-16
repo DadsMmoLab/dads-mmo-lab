@@ -13,7 +13,8 @@ today, and a mod-ale that has caught up), that it puts every file back byte for 
 and how it recovers from a compile it never saw finish.
 
 The header and binding excerpts are the measured bytes (line 113 of
-`src/PlayerbotAIConfig.h` at mod-playerbots 037c0141 and 79bd4281; lines 515 and
+`src/PlayerbotAIConfig.h` at mod-playerbots 037c0141 and 79bd4281, line 115 at
+d750b4b3; lines 515 and
 528 of `src/LuaEngine/methods/Playerbots/PlayerBotAIMethods.h` at mod-ale cead0cb).
 """
 

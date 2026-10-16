@@ -102,11 +102,20 @@ jobs:
     # stayed green. README §2 says 3.11+, so CI has to mean it. Ends are cheaper
     # than the middle: 3.11 is the floor we promise, 3.13 is what a developer
     # actually has installed.
-    name: lint-type-test (py${{ matrix.python-version }})
+    #
+    # FOUR SHARDS per version (eight jobs): pytest alone took 19 min on 3.13 and 31 min on
+    # 3.11 with `-n auto` on four cores, and the setup is about 40 s, so caching is not the
+    # lever and more jobs are. Shard N runs the tests whose node id hashes to N mod 4
+    # (`tests/conftest.py`, `--shard-id` / `--num-shards`; the node id, not the file, so the
+    # big files spread). Together the four run every test exactly once
+    # (`tests/test_ci_shards.py`). The checkers run on shard 0 only: they do not depend on
+    # the shard, and four copies would only spend the minutes the split saves.
+    name: lint-type-test (py${{ matrix.python-version }}, shard ${{ matrix.shard }}/4)
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.11", "3.13"]
+        shard: [0, 1, 2, 3]
     steps:
       - uses: actions/checkout@v4
 
@@ -130,9 +139,11 @@ jobs:
       - run: pip install -r requirements-dev.txt
 
       - name: ruff (lint)
+        if: matrix.shard == 0
         run: python -m ruff check .
 
       - name: black (format check)
+        if: matrix.shard == 0
         run: python -m black --check .
 
       # Three platforms, because a POSIX-only or Windows-only import is red on
@@ -142,12 +153,15 @@ jobs:
       # and once without one (green here, red for every Windows developer).
       # Neither could be caught by a checker that runs Linux only.
       - name: mypy (types, this platform)
+        if: matrix.shard == 0
         run: python -m mypy yulon main.py
 
       - name: mypy (types, as Windows)
+        if: matrix.shard == 0
         run: python -m mypy --platform win32 yulon main.py
 
       - name: mypy (types, as macOS)
+        if: matrix.shard == 0
         run: python -m mypy --platform darwin yulon main.py
 
       # `not integration` is the whole point of the split - see the header.
@@ -159,8 +173,11 @@ jobs:
       # 2026-10-01. Every test still runs in both legs; only the wall clock
       # changes. `loadfile` is not used: it pins a whole file to one worker,
       # and the biggest file alone is a large share of the suite.
+      #
+      # `--shard-id`/`--num-shards` (T-shards, `tests/conftest.py`): this job's quarter of the
+      # suite. Every test still runs in both legs; the four shards of a leg run all of it.
       - name: pytest (tests)
-        run: python -m pytest -q -m "not integration" -n auto
+        run: python -m pytest -q -m "not integration" -n auto --shard-id ${{ matrix.shard }} --num-shards 4
 
   # T687: THE OTHER TWO PLATFORMS THE RELEASE SHIPS. `lint-type-test` runs on
   # Linux only, so until this job the Windows zip and the macOS dmg went out

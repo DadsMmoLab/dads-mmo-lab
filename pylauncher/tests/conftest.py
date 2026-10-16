@@ -21,6 +21,7 @@ import sys
 import tempfile
 import time
 import weakref
+import zlib
 from collections.abc import Callable, Iterator, Mapping
 from logging.handlers import RotatingFileHandler
 from pathlib import Path, PureWindowsPath
@@ -35,6 +36,44 @@ from yulon import platform, server_build_gone
 from yulon.catalog import upstream
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    """`--shard-id N --num-shards M`: run the Nth of M slices of the collected tests.
+
+    CI splits its pytest run into four jobs per Python version (`ci.yml`); a run given neither
+    option is the whole suite, so the local runners (`yt`, `yt-vm`) are unchanged.
+    """
+    group = parser.getgroup("shards", "split the run into slices")
+    group.addoption("--shard-id", type=int, default=0, help="which slice to run (0-based)")
+    group.addoption("--num-shards", type=int, default=1, help="how many slices the run is cut into")
+
+
+def shard_of(nodeid: str, num_shards: int) -> int:
+    """The slice a test belongs to: its node id's CRC-32 modulo the slice count.
+
+    The node id and not the file, so the biggest files spread over every slice; the same
+    answer in every process (under xdist each worker collects and filters on its own).
+    """
+    return zlib.crc32(nodeid.encode()) % num_shards
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Keep this slice's tests, after every other hook (the `-m` expression's) has run."""
+    num_shards = config.getoption("--num-shards")
+    shard_id = config.getoption("--shard-id")
+    if num_shards == 1 and shard_id == 0:
+        return
+    if num_shards < 1 or not 0 <= shard_id < num_shards:
+        raise pytest.UsageError(
+            f"--shard-id {shard_id} is not a slice of --num-shards {num_shards}"
+        )
+    kept = [item for item in items if shard_of(item.nodeid, num_shards) == shard_id]
+    dropped = [item for item in items if shard_of(item.nodeid, num_shards) != shard_id]
+    if dropped:
+        config.hook.pytest_deselected(items=dropped)
+    items[:] = kept
 
 
 def _redirect_qt_settings() -> Path:

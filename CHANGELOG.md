@@ -159,6 +159,8 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Opening a DDON or DFO server's tab no longer fails with an error since 0.9.17.
 
 ### Changed
+- New WotLK and Unbound servers build the newest AzerothCore and Playerbots, from 16 October.
+- Tortoise servers build the newest TortoiseBots (v1.2.1) on the Tortoise core's main branch.
 - The added-bot note on the My Party tab says how many bots each character can add instead of reading like an error.
 - On an older WotLK install, the first Rebuild sends the whole server to Docker once (about 5 GB); later ones are quick.
 - The Server tab's **Play** now starts the game; **Launcher…** opens the launcher. The tray's **Play** offers to start a stopped server.

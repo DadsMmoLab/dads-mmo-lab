@@ -745,7 +745,7 @@ def test_a_mismatched_kept_build_keeps_its_record_while_docker_keeps_its_names(
 
 # -- WotLK in normal use: only what its Dockerfile reads counts (T230) --------
 
-WOTLK_DATA = Path(__file__).resolve().parent / "data" / "azerothcore-wotlk-2a2211cd"
+WOTLK_DATA = Path(__file__).resolve().parent / "data" / "azerothcore-wotlk-8a4e76ea"
 """mod-playerbots/azerothcore-wotlk at commit 2a2211cd8f3d157da432ec0175ddd4b8a191931f (the
 catalog's pin for wow-wotlk; read at 7f12e89e 2026-10-05, the same bytes at f19a1879
 2026-10-08 and at 2a2211cd 2026-10-10), byte for byte: the root `.dockerignore`,

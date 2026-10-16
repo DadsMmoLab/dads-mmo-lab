@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import re
 
-PIN = "2a2211cd8f3d157da432ec0175ddd4b8a191931f"
-"""mod-playerbots/azerothcore-wotlk: wow-wotlk's pin, and wow-unbound's core, since T655
-(2026-10-10). `PIN_COLUMNS` was read at `FORMER_PINS[0]` and shown to hold here (see `VALID_AT`)."""
+PIN = "8a4e76eac8c4ccebf547113afe7b51d6c3e91641"
+"""mod-playerbots/azerothcore-wotlk: wow-wotlk's pin, and wow-unbound's core, since v0.9.18
+(2026-10-17; 2a2211cd, T655, before). `PIN_COLUMNS` was read at `FORMER_PINS[1]`, f19a1879,
+and shown to hold here (see `VALID_AT`)."""
 
 FORMER_PINS = (
+    "2a2211cd8f3d157da432ec0175ddd4b8a191931f",
     "f19a18799a35f7c24bdcdc9ea399c601f166259b",
     "7f12e89ee5f467a50e62eba1d525eac7dc953d03",
 )
@@ -26,8 +28,10 @@ VALID_AT = frozenset({PIN, *FORMER_PINS})
 `CREATE TABLE IF NOT EXISTS` for two new `*_dbc` tables; T389). Between f19a1879 and 2a2211cd
 (175 commits) no file under `data/sql/base` changed and the 66 `db_world` updates hold no
 ALTER, CREATE, DROP, RENAME or TRUNCATE (the range's one DDL is `db_auth` 2026_09_27_00 on
-`uptime`; T655, read in checkouts 2026-10-10). Each pin move must add its revision here after
-checking the same two things."""
+`uptime`; T655, read in checkouts 2026-10-10). Between 2a2211cd and 8a4e76ea (164 commits,
+v0.9.18, read from the GitHub compare 2026-10-17) no file under `data/sql/base` changed and the
+73 `db_world` updates hold no ALTER, CREATE, DROP, RENAME or TRUNCATE statement. Each pin
+move must add its revision here after checking the same two things."""
 
 PIN_COLUMNS: dict[str, frozenset[str]] = {
     "creature": frozenset(

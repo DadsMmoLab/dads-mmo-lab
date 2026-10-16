@@ -234,8 +234,8 @@ def test_every_shipped_entry_is_installable_on_linux_and_names_its_family() -> N
 
 GATE_PINS = {
     "wow-wotlk": {
-        "mod-playerbots/azerothcore-wotlk": "2a2211cd8f3d157da432ec0175ddd4b8a191931f",
-        "mod-playerbots/mod-playerbots": "79bd428115c8f33b74b13de23b133d49c3f75c60",
+        "mod-playerbots/azerothcore-wotlk": "8a4e76eac8c4ccebf547113afe7b51d6c3e91641",
+        "mod-playerbots/mod-playerbots": "d750b4b3a50effdf22bedc8032f0e8e5f7cb8091",
     },
     "wow-tbc": {
         "cmangos/mangos-tbc": "15b6ddb4ec9e443d49f4e438af73782ce5c16491",
@@ -251,9 +251,18 @@ GATE_PINS = {
 """The commit each shipped source is pinned to, and the gate that ran on it.
 
 Read out of the gate boxes' own checkouts (`git rev-parse HEAD` in each source's
-`dest`), never off a branch tip. Pinned 2026-09-05; `wow-wotlk` moved 2026-09-26, 2026-10-08 and
-2026-10-10:
+`dest`), never off a branch tip. Pinned 2026-09-05; `wow-wotlk` moved 2026-09-26, 2026-10-08,
+2026-10-10 and 2026-10-17:
 
+* `wow-wotlk`: 2026-10-17 (v0.9.18), core `8a4e76ea` (16 Oct, 164 commits on) and module `d750b4b3`
+  (12 commits on), pinned to the newest `Playerbot`/`master` tips without a live run: the owner's
+  word, CI the only gate. Read from the two compares instead: no file under `data/sql/base`
+  and no DDL in the core's 73 new `db_world` updates, no change to `WorldSession.h`,
+  `Player.h::SetSkill`, `AccountMgr.h` or the Docker recipe files, and one
+  `worldserver.conf.dist` line (`DungeonFinder.OptionsMask` 5 -> 7); the module only adds config
+  keys (`RandomBotJoinLfgOutleveledExpansion`, `AllowBattlegroundCommands`,
+  `RpgStatusProbWeight.DoGather`), and keeps `SightDistance`/`ReactDistance` that mod-ale
+  reads. Unbound's five core patches apply in order to the new core.
 * `wow-wotlk`: T655 (2026-10-10), core `2a2211cd` and module `79bd4281`, the two `test-staging`
   merges of 2026-10-09 (core #264, module #2903, ten minutes apart). The module reads its
   settings as `Playerbots.*` since ed54b459 (#2854), which T657 taught Yu'lon to follow, and
@@ -1074,10 +1083,12 @@ def test_tortoise_clones_the_core_branch_the_bots_module_requires_and_the_module
     assert len(sources) == 2, f"the stack is the core plus the module: {[s.repo for s in sources]}"
     core, module = sources
     assert core.repo == "tortoise-wow/tortoise-wow"
-    assert core.branch == "1181dev", (
-        "`1181dev` is `main` (which carries the headless bot sessions since `bot-helpers` was "
-        "merged into it) plus the SOAP interface of PR #491, merged there and not into `main` "
-        "on 2026-09-17; `bot-helpers` itself is 0 commits ahead of `main` and has no SOAP"
+    assert core.branch == "main", (
+        "`main` carries the headless bot sessions (`bot-helpers` was merged into it) and, "
+        "since v0.9.18, the SOAP interface of PR #491 that `1181dev` held alone from "
+        "2026-09-17: 1181dev's last commit 6131a26f is an ancestor of the pinned main tip "
+        "10393426 (main is four commits ahead), and the TortoiseBots README names the core's "
+        "`main` branch as its base; `bot-helpers` itself has no SOAP"
     )
     assert core.dest == "src/tortoise-wow"
     assert module.repo == "Sagiroth/TortoiseBots"
