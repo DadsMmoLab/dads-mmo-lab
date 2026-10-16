@@ -607,6 +607,7 @@ def build_window() -> object:
     from yulon.ui.logs_view import LogsView
     from yulon.ui.move_in import move_in_for_app
     from yulon.ui.sidebar import TopMenuBar, server_tab_icon
+    from yulon.ui.single_server_view import SingleServerView
     from yulon.ui.tab_titles import controller_tab_titles, retitle_controller_tabs
     from yulon.ui.theme import (
         CHECK_UPDATES_BUTTON,
