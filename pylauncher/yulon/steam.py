@@ -46,6 +46,7 @@ well, because a seam that trusts its caller is a seam that gets called wrong.
 from __future__ import annotations
 
 import re
+import shlex
 import shutil
 import struct
 import subprocess
@@ -210,10 +211,10 @@ NO_PROFILE = (
 )
 
 TWO_PROFILES = (
-    "Two Steam accounts have profiles on this machine (userdata ids {ids}). "
-    "Yu'lon will not guess which library these two entries belong in. Remove the "
-    "profile you do not want from {root}, or sign in as the account you do want "
-    "and press Add to Steam… again."
+    "Two Steam accounts have profiles on this machine (userdata ids {ids}), and Steam "
+    "does not say which one signed in last. Yu'lon will not guess which library these "
+    "entries belong in. Sign in to Steam as the account you want (then close Steam), or "
+    "remove the profile you do not want from {root}, and press Add to Steam… again."
 )
 
 NOT_LINUX = (
@@ -287,12 +288,42 @@ def steam_roots(home: Path) -> tuple[Path, ...]:
     )
 
 
+STEAMID64_BASE = 76561197960265728
+"""A SteamID64 less this is the account id a `userdata/<id>` folder is named by."""
+
+
+def most_recent_account(userdata: Path) -> str | None:
+    """The account id Steam's `config/loginusers.vdf` (beside `userdata`) marks MostRecent.
+
+    None when the file is missing or unreadable, or marks no account or more than one.
+    Steam sets `MostRecent` on the account that signed in last; a stale profile left by
+    another account does not have it (Joshua's main Deck: account 341514174's folder is
+    newer than the real one's, so a folder's date is not the answer).
+    """
+    try:
+        text = (userdata.parent / "config" / "loginusers.vdf").read_text(
+            encoding="utf-8", errors="replace"
+        )
+    except OSError:
+        return None
+    recent = [
+        match.group(1)
+        for match in re.finditer(r'"(\d{17})"\s*\{([^{}]*)\}', text)
+        if re.search(r'"mostrecent"\s*"1"', match.group(2), re.IGNORECASE)
+    ]
+    if len(recent) != 1:
+        return None
+    return str(int(recent[0]) - STEAMID64_BASE)
+
+
 def find_profile(home: Path) -> Path:
     """The one `userdata/<id>/config` on this machine, or a refusal naming why.
 
     De-duplicated by `Path.resolve()` — see the module docstring; on the box this
     was read from, two of the three roots are the same directory through a
-    symlink and a naive count answers "two profiles" for one account.
+    symlink and a naive count answers "two profiles" for one account. With more
+    than one account, the one Steam marks as signed in last is the answer
+    (`most_recent_account()`); with none marked, it refuses, as before.
     """
     found: dict[Path, Path] = {}
     for root in steam_roots(home):
@@ -307,6 +338,14 @@ def find_profile(home: Path) -> Path:
     if not found:
         raise SteamRefusal(NO_PROFILE.format(roots=", ".join(str(r) for r in steam_roots(home))))
     if len(found) > 1:
+        marked = {
+            signed_in
+            for root in steam_roots(home)
+            if root.is_dir() and (signed_in := most_recent_account(root)) is not None
+        }
+        chosen = [config for config in found.values() if config.parent.name in marked]
+        if len(marked) == 1 and len(chosen) == 1:
+            return chosen[0]
         ids = ", ".join(sorted(path.parent.name for path in found.values()))
         root = sorted(found.values())[0].parent.parent
         raise SteamRefusal(TWO_PROFILES.format(ids=ids, root=root))
@@ -911,11 +950,31 @@ def _write_compat(path: Path, text: str) -> None:
 # --------------------------------------------------------------------------
 
 
+KONSOLE = "/usr/bin/konsole"
+KONSOLE_DIR = "/usr/bin/"
+"""The Lab's Server tiles open the launcher in Konsole, so its output shows in Gaming Mode."""
+
+
+@dataclass(frozen=True)
+class GamingScripts:
+    """A WoW server's Gaming Mode scripts, rendered and not yet written (`gaming_mode`).
+
+    `write()` writes them (and the Lab's launcher library when ours is newer); `add()`
+    calls it after its refusals and backups, before the shortcuts that point at them.
+    """
+
+    launcher: Path
+    stop: Path
+    write: Callable[[], None]
+    lib: str
+    """What becomes of `~/dml-launcher-lib.sh`, in a sentence for the Details fold."""
+
+
 @dataclass(frozen=True)
 class AddReport:
     """What one press changed, in the words the confirmation is built from."""
 
-    entries: tuple[str, str]
+    entries: tuple[str, ...]
     path: Path
     backup: Path | None
     replaced: bool
@@ -923,6 +982,8 @@ class AddReport:
     compat_tool: str
     compat_path: Path
     compat_backup: Path | None
+    scripts: tuple[Path, ...] = ()
+    lib: str = ""
 
 
 def confirmation(report: AddReport) -> str:
@@ -933,8 +994,14 @@ def confirmation(report: AddReport) -> str:
     -- folded under the sentence, because this writes inside the user's own
     Steam profile and the honest confirmation is one they can check by hand.
     """
-    client, server = report.entries
     where = "Updated in your Steam library" if report.replaced else "Added to your Steam library"
+    if len(report.entries) == 3:
+        client, server, stop = report.entries
+        return (
+            f"{where}: “{server}” (starts the server and stops it when you close the game), "
+            f"“{client}” (the game) and “{stop}”. Restart Steam to see them."
+        )
+    client, server = report.entries
     return (
         f"{where}: “{client}” (the game) and “{server}” (this launcher). Restart Steam to see them."
     )
@@ -942,7 +1009,7 @@ def confirmation(report: AddReport) -> str:
 
 def confirmation_details(report: AddReport) -> str:
     """Every file the press wrote or backed up, by name, for the Details fold."""
-    client, _server = report.entries
+    client = report.entries[0]
     backup = (
         f"It was backed up first as {report.backup.name}."
         if report.backup is not None
@@ -957,6 +1024,14 @@ def confirmation_details(report: AddReport) -> str:
             f"{len(report.artwork)} artwork files written under {report.path.parent / 'grid'}.",
             f"“{client}” runs through the compatibility tool {report.compat_tool}, set in "
             f"{report.compat_path}{compat_backup}.",
+        )
+        + (
+            (
+                "The Gaming Mode scripts: " + ", ".join(str(s) for s in report.scripts) + ".",
+                report.lib,
+            )
+            if report.scripts
+            else ()
         )
     )
 
@@ -978,6 +1053,10 @@ class SteamShortcuts:
     now: Callable[[], datetime] = datetime.now
     platform_id: Callable[[], str] = platform.detect
     launcher: Callable[[], tuple[str, str]] = launcher_command
+    gaming: Callable[[], GamingScripts] | None = None
+    """Gaming Mode (a WoW server on a Steam Deck): the Server tile runs the Lab's launcher
+    in Konsole, which starts the server through Yu'lon and stops it when the game closes,
+    and a third tile stops it. None keeps 8.8's two entries exactly as they were."""
 
     def add(self) -> AddReport:
         """Write the two entries, the artwork and the compatibility tool.
@@ -1000,18 +1079,33 @@ class SteamShortcuts:
             raise SteamRefusal(NO_PROTON.format(tools=steam_root / "compatibilitytools.d"))
 
         client_exe = client_executable(self.client_dir)
-        launcher_exe, launcher_opts = self.launcher()
         client_entry = new_entry(
             name=self.game,
             exe=str(client_exe),
             startdir=str(self.client_dir),
         )
-        server_entry = new_entry(
-            name=f"{self.game} Server",
-            exe=launcher_exe,
-            startdir=str(Path(launcher_exe).parent),
-            launchopts=launcher_opts,
-        )
+        scripts = self.gaming() if self.gaming is not None else None
+        stop_entry: VdfMap | None = None
+        if scripts is not None:
+            server_entry = new_entry(
+                name=f"{self.game} Server",
+                exe=KONSOLE,
+                startdir=KONSOLE_DIR,
+                launchopts=f"--hold -e bash {shlex.quote(str(scripts.launcher))}",
+            )
+            stop_entry = new_entry(
+                name=f"{self.game} Server Stop",
+                exe=str(scripts.stop),
+                startdir=str(scripts.stop.parent),
+            )
+        else:
+            launcher_exe, launcher_opts = self.launcher()
+            server_entry = new_entry(
+                name=f"{self.game} Server",
+                exe=launcher_exe,
+                startdir=str(Path(launcher_exe).parent),
+                launchopts=launcher_opts,
+            )
 
         path = config / "shortcuts.vdf"
         root: VdfMap = {"shortcuts": {}}
@@ -1035,6 +1129,10 @@ class SteamShortcuts:
         replaced_server, server_entry = upsert(shortcuts, server_entry)
         replaced = replaced_client | replaced_server
         expected = before + (not replaced_client) + (not replaced_server)
+        if stop_entry is not None:
+            replaced_stop, stop_entry = upsert(shortcuts, stop_entry)
+            replaced = replaced | replaced_stop
+            expected += not replaced_stop
 
         payload = vdf_dump(root)
         reparsed, consumed = vdf_parse(payload)
@@ -1062,6 +1160,8 @@ class SteamShortcuts:
         try:
             backup = _backup(path, stamp)
             compat_backup = _backup(compat_path, stamp)
+            if scripts is not None:
+                scripts.write()  # before the shortcuts that point at them
             grid = config / "grid"
             grid.mkdir(parents=True, exist_ok=True)
             client_art = artwork_paths(grid, int(client_entry["appid"]))
@@ -1069,6 +1169,10 @@ class SteamShortcuts:
             art = client_art + server_art
             _write_artwork(client_art, icon_png(CLIENT_ACCENT))
             _write_artwork(server_art, icon_png(SERVER_ACCENT))
+            if stop_entry is not None:
+                stop_art = artwork_paths(grid, int(stop_entry["appid"]))
+                art = art + stop_art
+                _write_artwork(stop_art, icon_png(SERVER_ACCENT))
             _write_compat(compat_path, compat_text)
             _write_shortcuts(path, payload)
         except OSError as exc:
@@ -1088,7 +1192,8 @@ class SteamShortcuts:
             f"({'replaced' if replaced else 'added'} ours), compat tool {tool}"
         )
         return AddReport(
-            entries=(self.game, f"{self.game} Server"),
+            entries=(self.game, f"{self.game} Server")
+            + ((f"{self.game} Server Stop",) if stop_entry is not None else ()),
             path=path,
             backup=backup,
             replaced=replaced,
@@ -1096,4 +1201,6 @@ class SteamShortcuts:
             compat_tool=tool,
             compat_path=compat_path,
             compat_backup=compat_backup,
+            scripts=(scripts.launcher, scripts.stop) if scripts is not None else (),
+            lib=scripts.lib if scripts is not None else "",
         )

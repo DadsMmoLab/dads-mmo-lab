@@ -14,8 +14,16 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ## Unreleased
 
 ### New
+- Install a Dragon's Dogma Online (DDON) server from the Catalog's new **Other games** row; play with your own client.
+- A DDON server's tab has Start, Stop, **Who can connect**, **Play**, **Add to DDON-Launcher** and the live log.
+- **Use existing…** on the DDON tile picks up a DDON server Yu'lon installed before, without reinstalling it.
+- Install a Dungeon Fighter Online (DFO) server in beta from **Other games**, on Windows or a Steam Deck.
+- A DFO server's tab starts it for your account from your own US 2.38.3.25 client, and **Play** opens that client on it.
+- On a Steam Deck, **Add to Steam Deck (Gaming Mode)…** on a DDON or DFO tab adds Server, game and Stop shortcuts.
+- On a Steam Deck, **Add to Steam…** on a WoW tab adds a Server tile that stops itself when you quit, and a Stop tile.
 
 ### Fixed
+- **Add to Steam…** on a Steam Deck with two Steam accounts uses the one signed in last, instead of refusing.
 
 ### Changed
 

@@ -1,0 +1,71 @@
+diff --git a/server/work/dfo-lan/internal/catalog/odyssey.go b/server/work/dfo-lan/internal/catalog/odyssey.go
+index 76b74082..e226e371 100644
+--- a/server/work/dfo-lan/internal/catalog/odyssey.go
++++ b/server/work/dfo-lan/internal/catalog/odyssey.go
+@@ -72,9 +72,18 @@ func LoadOdysseyGrowth(path string) (*OdysseyGrowth, error) {
+ 	return NewOdysseyGrowth(r)
+ }
+ 
++// odysseyGrowthDefinitionSHA256 是 aradodyssey.etc 可接受的脚本记录哈希（按客户端版本）。
++// ScriptRecord.SHA256 是脚本**原始字节**的哈希，而字符串单元在原始字节里存的是全局字符串表的
++// 下标。2.38.3.25 重排了字符串表，所以内容完全相同的 800 个单元哈希也变了——已逐单元比对
++// （type + 文本/数值）与 configs/odyssey-growth-release.json 一致。
++var odysseyGrowthDefinitionSHA256 = map[string]bool{
++	"638e71ab8fdc84b4be28db8ca3302fd1dfe689a9b771907514297edee4b8c8e8": true, // 2.38.2.34
++	"0b310543182501100c1f999ef3b63c00239cf092fdcd3ccbfaed50e8c6f8f82e": true, // 2.38.3.25
++}
++
+ // NewOdysseyGrowth shares validation and runtime index construction across native and JSON sources.
+ func NewOdysseyGrowth(r OdysseyGrowth) (*OdysseyGrowth, error) {
+-	if r.Source != OdysseySource || r.Definition.SHA256 != "638e71ab8fdc84b4be28db8ca3302fd1dfe689a9b771907514297edee4b8c8e8" {
++	if r.Source != OdysseySource || !odysseyGrowthDefinitionSHA256[r.Definition.SHA256] {
+ 		return nil, fmt.Errorf("Odyssey source mismatch")
+ 	}
+ 	r.ClearLevels = map[uint32]byte{}
+diff --git a/server/work/dfo-lan/internal/catalog/odyssey_native.go b/server/work/dfo-lan/internal/catalog/odyssey_native.go
+index 63c220c9..0c323004 100644
+--- a/server/work/dfo-lan/internal/catalog/odyssey_native.go
++++ b/server/work/dfo-lan/internal/catalog/odyssey_native.go
+@@ -65,8 +65,16 @@ type OdysseyWeaponChoices struct {
+ 	} `json:"categories"`
+ }
+ 
++// odysseyWeaponDefinitionSHA256 是武器自选箱（10417789.stk）可接受的脚本记录哈希（按客户端版本）。
++// 原因同 odysseyGrowthDefinitionSHA256：2.38.3.25 重排字符串表，原始字节哈希变化；
++// 1554 个单元已逐单元比对，与 configs/odyssey-weapon-box-release.json 一致。
++var odysseyWeaponDefinitionSHA256 = map[string]bool{
++	"d67f5042a5e17ef30581e297f030561de39f92ad5e215d742ec067aeaad96bec": true, // 2.38.2.34
++	"0b1e7ea5fd80dc1a8f470449efb0175ff47777ad5a94fc940d2a23e5fb994050": true, // 2.38.3.25
++}
++
+ func ValidateOdysseyWeaponChoices(c OdysseyWeaponChoices) (OdysseyWeaponChoices, error) {
+-	if c.Source != OdysseySource || c.Template != 10417789 || len(c.Categories) != 85 || c.Definition.SHA256 != "d67f5042a5e17ef30581e297f030561de39f92ad5e215d742ec067aeaad96bec" {
++	if c.Source != OdysseySource || c.Template != 10417789 || len(c.Categories) != 85 || !odysseyWeaponDefinitionSHA256[c.Definition.SHA256] {
+ 		return c, fmt.Errorf("invalid Odyssey weapon source")
+ 	}
+ 	return c, nil
+diff --git a/server/work/dfo-lan/internal/inventory/clear_cube.go b/server/work/dfo-lan/internal/inventory/clear_cube.go
+index cb05b8f6..b64b2315 100644
+--- a/server/work/dfo-lan/internal/inventory/clear_cube.go
++++ b/server/work/dfo-lan/internal/inventory/clear_cube.go
+@@ -42,10 +42,19 @@ func SetClearCubeSource(checksum string) {
+ 	clearCubeSourceChecksum = checksum
+ }
+ 
++// clearCubeScriptSHA256 是无色小晶块脚本可接受的哈希（按客户端版本）。
++// 注意：脚本 SHA256 是**原始字节**哈希，字符串单元存的是全局字符串表下标，并不与归档无关——
++// 2.38.3.25 重排了字符串表，同样的 33 个单元哈希就变了（已逐单元比对 type + 文本/数值，与
++// 2.38.2.34 的记录完全一致）。
++var clearCubeScriptSHA256 = map[string]bool{
++	"c6b47f4db2c1ba08b809aa54e6a512becba560199699c95cd9a264caf07077d5": true, // 2.38.2.34
++	"744fe805683bac92e4b548c9bafb2659d31be39811e0e20d684488f9e43a14f6": true, // 2.38.3.25
++}
++
+ // WithClearCubeItem applies the same source gate and storage-only projection
+ // regardless of whether its complete script came from PVF or an audit export.
+ func WithClearCubeItem(base catalog.LootCatalog, item catalog.LootItem) (catalog.LootCatalog, error) {
+-	if base.Source.Checksum != clearCubeSourceChecksum || item.ID != 3037 || item.Kind != "stackable" || item.StackableType != "[material]" || item.Script.SHA256 != "c6b47f4db2c1ba08b809aa54e6a512becba560199699c95cd9a264caf07077d5" {
++	if base.Source.Checksum != clearCubeSourceChecksum || item.ID != 3037 || item.Kind != "stackable" || item.StackableType != "[material]" || !clearCubeScriptSHA256[item.Script.SHA256] {
+ 		return base, fmt.Errorf("clear cube source mismatch")
+ 	}
+ 	out := base

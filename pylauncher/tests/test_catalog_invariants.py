@@ -333,6 +333,17 @@ def test_the_named_template_dirs_and_the_shipped_ones_are_the_same_set() -> None
             named.add(build_context)
             for name in DOCKERFILE_TEMPLATES:
                 assert (build_context / name).is_file(), f"{entry.id}: {build_context / name}"
+    # A single server (`catalog.SingleEntry`) keeps its templates in the one directory it
+    # names: a container's compose and Dockerfile set, or every file a process's Start writes.
+    for single in load_catalog().single:
+        templates = TEMPLATES / single.install.runtime.templates
+        named.add(templates)
+        if single.install.process is not None:
+            wanted: tuple[str, ...] = tuple(f.template for f in single.install.process.files)
+        else:
+            wanted = (*COMPOSE_TEMPLATES, *DOCKERFILE_TEMPLATES)
+        for name in wanted:
+            assert (templates / name).is_file(), f"{single.id}: {templates / name}"
     orphans = sorted(str(path.relative_to(TEMPLATES)) for path in on_disk - named)
     # T179: the TrinityCore family's templates land before the entry that names them, the same
     # way its family-decision sites may be `pending` -- and only while no shipped entry is of

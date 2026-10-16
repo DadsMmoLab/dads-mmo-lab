@@ -1,0 +1,262 @@
+diff --git a/server/work/dfo-lan/internal/catalog/pvf/unwrap.go b/server/work/dfo-lan/internal/catalog/pvf/unwrap.go
+index 081f3f7d..f5edfe90 100644
+--- a/server/work/dfo-lan/internal/catalog/pvf/unwrap.go
++++ b/server/work/dfo-lan/internal/catalog/pvf/unwrap.go
+@@ -196,7 +196,7 @@ func unwrapBlocks(in io.Reader, out io.Writer, keys [][]byte, stats *OuterUnwrap
+ // RSA 私钥与 AES key，用私钥解开 sk.dat，再解出每一把 32 字节的段密钥。
+ //
+ // 密钥只在内存里存在，绝不落盘、绝不进日志（与 scripts/prepare_inner_pvf.py 的头注释一致）。
+-func wrapperKeys(clientDir string) ([][]byte, error) {
++func wrapperKeysFixedVA(clientDir string) ([][]byte, error) {
+ 	exe := filepath.Join(clientDir, "DFO.exe")
+ 	privatePEM, aesKeyLiteral, err := wrapperLiterals(exe)
+ 	if err != nil {
+diff --git a/server/work/dfo-lan/internal/catalog/pvf/unwrap_scan.go b/server/work/dfo-lan/internal/catalog/pvf/unwrap_scan.go
+new file mode 100644
+index 00000000..ddcc2b2e
+--- /dev/null
++++ b/server/work/dfo-lan/internal/catalog/pvf/unwrap_scan.go
+@@ -0,0 +1,120 @@
++package pvf
++
++import (
++	"encoding/hex"
++	"fmt"
++	"os"
++	"path/filepath"
++	"regexp"
++	"strings"
++)
++
++// 取钥的全文件扫描回退：把 2026-10-04 的 Python 修复（docs/进度-20261004-wrapper_keys多版本密钥提取修复.md）
++// 补回 Go 实现——Go 迁移时这段回退没有带过来。固定 VA 槽位只在 2.38.2.34 里存着包装字面量；
++// 2.38.3.25 的这两个槽位只剩运行期残值（指针 0x127），剥壳因此报「VA 0x127 低于 ImageBase」，
++// 内层 PVF 生成中断。与 pvf_archive.wrapper_keys() 相同的两段式：
++//  1. 固定 VA 快路径（wrapperKeysFixedVA，即原 Go 实现）；
++//  2. 全文件扫描：每个 PEM 私钥块，配对其结束后 0x200 字节内首个 64 位大写十六进制串；
++//     只有真能解开 sk.dat 的组合才算数（exe 里那把无关的 MIICeQ 钥在这里自然剔除）。
++
++var wrapperPEMBlock = regexp.MustCompile(`(?s)-----BEGIN (?:RSA )?PRIVATE KEY-----.*?-----END (?:RSA )?PRIVATE KEY-----`)
++
++// wrapperAESWindow 是 PEM 块结束后寻找 AES 十六进制串的窗口（脚本里的 0x200）。
++const wrapperAESWindow = 0x200
++
++func wrapperKeys(clientDir string) ([][]byte, error) {
++	keys, fixedErr := wrapperKeysFixedVA(clientDir)
++	if fixedErr == nil {
++		return keys, nil
++	}
++	keys, scanErr := wrapperKeysScan(clientDir)
++	if scanErr == nil {
++		return keys, nil
++	}
++	return nil, fmt.Errorf("固定 VA 取钥失败（%v），全文件扫描回退也失败（%v）", fixedErr, scanErr)
++}
++
++func wrapperKeysScan(clientDir string) ([][]byte, error) {
++	exe, err := os.ReadFile(filepath.Join(clientDir, "DFO.exe"))
++	if err != nil {
++		return nil, fmt.Errorf("读取客户端 DFO.exe 失败：%w", err)
++	}
++	ciphertext, err := os.ReadFile(filepath.Join(clientDir, "sk.dat"))
++	if err != nil {
++		return nil, fmt.Errorf("读取 sk.dat 失败：%w", err)
++	}
++	blocks := wrapperPEMBlock.FindAllIndex(exe, -1)
++	tried := 0
++	for _, span := range blocks {
++		end := span[1] + wrapperAESWindow
++		if end > len(exe) {
++			end = len(exe)
++		}
++		aesHex := lastHexRunOf64(exe[span[1]:end])
++		if aesHex == nil {
++			continue
++		}
++		tried++
++		if keys, err := deriveWrapperKeys(exe[span[0]:span[1]], aesHex, ciphertext); err == nil {
++			return keys, nil
++		}
++	}
++	return nil, fmt.Errorf("DFO.exe 里 %d 个 PEM 块、%d 组候选都解不开 sk.dat（三件套不配套？）", len(blocks), tried)
++}
++
++// lastHexRunOf64 复刻正则 `[0-9A-F]{64}(?![0-9A-F])` 的最左匹配：第一段长度 ≥64 的大写
++// 十六进制串的最后 64 个字符。
++func lastHexRunOf64(window []byte) []byte {
++	isHex := func(b byte) bool { return (b >= '0' && b <= '9') || (b >= 'A' && b <= 'F') }
++	run := 0
++	for i, b := range window {
++		if !isHex(b) {
++			run = 0
++			continue
++		}
++		run++
++		if run >= 64 && (i+1 == len(window) || !isHex(window[i+1])) {
++			return window[i-63 : i+1]
++		}
++	}
++	return nil
++}
++
++// deriveWrapperKeys 与 wrapperKeysFixedVA 的后半段相同：RSA 分块解 sk.dat → 前缀按 256 对齐
++// 做 AES-CBC → 每 32 字节一把段密钥。任何一步失败都返回错误，供候选筛选。
++func deriveWrapperKeys(privatePEM, aesKeyLiteral, ciphertext []byte) ([][]byte, error) {
++	private, err := parseWrapperPrivateKey(privatePEM)
++	if err != nil {
++		return nil, err
++	}
++	size := private.Size()
++	if size <= 0 || len(ciphertext) == 0 || len(ciphertext)%size != 0 {
++		return nil, fmt.Errorf("sk.dat 长度 %d 不是 RSA 模长 %d 的整数倍", len(ciphertext), size)
++	}
++	plain := make([]byte, 0, len(ciphertext))
++	for offset := 0; offset < len(ciphertext); offset += size {
++		block, err := private.Decrypt(nil, ciphertext[offset:offset+size], nil)
++		if err != nil {
++			return nil, fmt.Errorf("sk.dat 第 %d 块 RSA/PKCS#1 v1.5 解密失败：%w", offset/size+1, err)
++		}
++		plain = append(plain, block...)
++	}
++	aesKey, err := hex.DecodeString(strings.TrimSpace(string(aesKeyLiteral)))
++	if err != nil {
++		return nil, fmt.Errorf("AES key 候选不是十六进制：%w", err)
++	}
++	prefix := len(plain) / wrapperKeyQuantum * wrapperKeyQuantum
++	head, err := aesCBCZeroIVDecrypt(aesKey, plain[:prefix:prefix])
++	if err != nil {
++		return nil, fmt.Errorf("解密段密钥失败：%w", err)
++	}
++	plain = append(head, plain[prefix:]...)
++	if len(plain) == 0 || len(plain)%wrapperKeySize != 0 {
++		return nil, fmt.Errorf("段密钥长度 %d 不是 %d 的整数倍", len(plain), wrapperKeySize)
++	}
++	keys := make([][]byte, 0, len(plain)/wrapperKeySize)
++	for offset := 0; offset < len(plain); offset += wrapperKeySize {
++		keys = append(keys, plain[offset:offset+wrapperKeySize])
++	}
++	return keys, nil
++}
+diff --git a/server/work/dfo-lan/internal/catalog/pvf/unwrap_scan_test.go b/server/work/dfo-lan/internal/catalog/pvf/unwrap_scan_test.go
+new file mode 100644
+index 00000000..f4d78d66
+--- /dev/null
++++ b/server/work/dfo-lan/internal/catalog/pvf/unwrap_scan_test.go
+@@ -0,0 +1,117 @@
++package pvf
++
++// 覆盖 unwrap_scan.go 的全文件扫描回退，对应 Python 侧的 scripts/test_pvf_wrapper_keys.py：
++// 合成 RSA/AES 夹具，**不含任何真实密钥**。
++
++import (
++	"bytes"
++	"crypto/rand"
++	"crypto/rsa"
++	"crypto/x509"
++	"encoding/binary"
++	"encoding/hex"
++	"encoding/pem"
++	"path/filepath"
++	"strings"
++	"testing"
++)
++
++// scanLiterals 造一对 PEM 私钥 + 大写十六进制 AES 字面量（扫描回退只认大写，与真实 DFO.exe 一致）。
++func scanLiterals(t *testing.T) (*rsa.PrivateKey, []byte, []byte, []byte) {
++	t.Helper()
++	key, err := rsa.GenerateKey(rand.Reader, 2048)
++	if err != nil {
++		t.Fatal(err)
++	}
++	privatePEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
++	aesKey := randomBytes(t, 32)
++	return key, privatePEM, aesKey, []byte(strings.ToUpper(hex.EncodeToString(aesKey)))
++}
++
++// writeScanSkDat 按 writeSyntheticClient 同样的规则造 sk.dat（480 字节：prefix=256 只加密前段，
++// 其余透传，顺带覆盖“不整除”的边界），返回期望解出的段密钥。
++func writeScanSkDat(t *testing.T, dir string, key *rsa.PrivateKey, aesKey []byte) [][]byte {
++	t.Helper()
++	keys := randomBytes(t, 15*wrapperKeySize)
++	wrapped := append([]byte(nil), keys...)
++	aesCBCZeroIVEncrypt(t, aesKey, wrapped[:256])
++	writeFile(t, filepath.Join(dir, "sk.dat"), rsaBlocks(t, key, wrapped))
++	return splitKeys(keys)
++}
++
++// 非 PE 的假 exe（固定 VA 必失败）+ 诱饵钥在前、真实钥在后：扫描回退必须取回真实钥。
++func TestWrapperKeysScanFallbackRecoversKeys(t *testing.T) {
++	dir := t.TempDir()
++	key, realPEM, aesKey, aesHex := scanLiterals(t)
++	_, decoyPEM, _, decoyHex := scanLiterals(t)
++	want := writeScanSkDat(t, dir, key, aesKey)
++
++	var exe bytes.Buffer
++	exe.Write(randomBytes(t, 4096))
++	exe.Write(decoyPEM)
++	exe.WriteString("\x00\x00")
++	exe.Write(decoyHex)
++	exe.Write(make([]byte, 0x300))
++	exe.Write(realPEM)
++	exe.Write(make([]byte, 0x40))
++	exe.Write(aesHex)
++	exe.Write(randomBytes(t, 4096))
++	writeFile(t, filepath.Join(dir, "DFO.exe"), exe.Bytes())
++
++	if _, err := wrapperKeysFixedVA(dir); err == nil {
++		t.Fatal("fixed-VA path unexpectedly succeeded on a non-PE file")
++	}
++	got, err := wrapperKeys(dir)
++	if err != nil {
++		t.Fatalf("wrapperKeys: %v", err)
++	}
++	if len(got) != len(want) {
++		t.Fatalf("got %d keys, want %d", len(got), len(want))
++	}
++	for index := range want {
++		if !bytes.Equal(got[index], want[index]) {
++			t.Fatalf("key %d differs", index)
++		}
++	}
++}
++
++// 2.38.3.25 的形态：合法 PE，但两个字面量槽只剩运行期残值 0x127；真实字面量在文件别处。
++func TestWrapperKeysScanFallbackOnResidueSlots(t *testing.T) {
++	dir := t.TempDir()
++	key, realPEM, aesKey, aesHex := scanLiterals(t)
++	want := writeScanSkDat(t, dir, key, aesKey)
++
++	file := syntheticPE(realPEM, aesHex)
++	raw := file[syntheticSectionRaw:]
++	binary.LittleEndian.PutUint64(raw[syntheticSlotOffset:], 0x127)
++	binary.LittleEndian.PutUint64(raw[syntheticSlotOffset+8:], 0x127)
++	// 原位置的 PEM 与 hex 相距超过 0x200，不能配对；按真实 exe 的布局在文件尾再放一组。
++	file = append(file, realPEM...)
++	file = append(file, 0, 0, 0, 0)
++	file = append(file, aesHex...)
++	writeFile(t, filepath.Join(dir, "DFO.exe"), file)
++
++	if _, err := wrapperKeysFixedVA(dir); err == nil || !strings.Contains(err.Error(), "0x127") {
++		t.Fatalf("fixed-VA error = %v, want the residue-pointer diagnosis", err)
++	}
++	got, err := wrapperKeys(dir)
++	if err != nil {
++		t.Fatalf("wrapperKeys: %v", err)
++	}
++	if len(got) != len(want) || !bytes.Equal(got[0], want[0]) || !bytes.Equal(got[len(got)-1], want[len(want)-1]) {
++		t.Fatal("scan fallback returned the wrong keys")
++	}
++}
++
++// 没有任何候选能解开 sk.dat 时必须报错（而不是返回一套错钥）。
++func TestWrapperKeysScanNoUsableKey(t *testing.T) {
++	dir := t.TempDir()
++	key, _, aesKey, _ := scanLiterals(t)
++	writeScanSkDat(t, dir, key, aesKey)
++	_, decoyPEM, _, decoyHex := scanLiterals(t)
++	writeFile(t, filepath.Join(dir, "DFO.exe"), append(append(append(randomBytes(t, 512), decoyPEM...), 0), decoyHex...))
++
++	if _, err := wrapperKeys(dir); err == nil || !strings.Contains(err.Error(), "sk.dat") {
++		t.Fatalf("error = %v, want an sk.dat diagnosis", err)
++	}
++}
