@@ -23,6 +23,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - On a Steam Deck, **Add to Steam…** on a WoW tab adds a Server tile that stops itself when you quit, and a Stop tile.
 
 ### Fixed
+- Opening a DDON or DFO server's tab no longer fails with an error since 0.9.17.
 - **Add to Steam…** on a Steam Deck with two Steam accounts uses the one signed in last, instead of refusing.
 
 ### Changed
