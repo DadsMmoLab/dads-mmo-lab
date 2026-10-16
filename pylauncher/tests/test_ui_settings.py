@@ -158,3 +158,14 @@ def test_a_failed_save_whose_cleanup_also_fails_still_answers_false(
 
 def test_a_half_typed_address_is_never_remembered() -> None:
     assert recent_addresses(["10.0.", ".x", ".", "-", ":", "10.0.0.7"]) == ["10.0.0.7"]
+
+
+def test_theme_defaults_to_arthas_and_round_trips_through_ui_json(tmp_path: Path) -> None:
+    path = tmp_path / "ui.json"
+    assert load_ui_settings(path).theme == "arthas"
+    assert ui_settings.remember_theme("dracula-dark", path=path)
+    assert load_ui_settings(path).theme == "dracula-dark"
+    assert ui_settings.remember_theme("98x", path=path)
+    assert load_ui_settings(path).theme == "98x-light"
+    assert ui_settings.remember_theme("unknown-theme", path=path)
+    assert load_ui_settings(path).theme == "arthas"

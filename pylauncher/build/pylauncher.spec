@@ -47,6 +47,10 @@ datas = [
         os.path.join(ROOT, "yulon", "ui", "theme_images"),
         os.path.join("yulon", "ui", "theme_images"),
     ),
+    (
+        os.path.join(ROOT, "yulon", "ui", "themes"),
+        os.path.join("yulon", "ui", "themes"),
+    ),
     # Non-Python package data: the catalog lives next to its models.
     (os.path.join(ROOT, "yulon", "catalog", "catalog.json"), os.path.join("yulon", "catalog")),
 ]

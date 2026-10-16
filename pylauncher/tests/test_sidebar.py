@@ -310,3 +310,51 @@ def test_an_unknown_realm_shows_no_dot_at_all(qapp: object) -> None:
     assert unknown.size() == plain.size()
     assert unknown.convertToFormat(plain.format()) == plain, "an unknown realm draws a dot"
     assert _icon_image("stopped").convertToFormat(plain.format()) != plain, "the probe is blind"
+
+
+def test_top_menu_bar_disables_servers_when_none_installed_and_opens_dropdown_for_servers(
+    rail,
+) -> None:
+    from yulon.ui.sidebar import TopMenuBar
+
+    window, tabs = rail
+    _pinned_pair(tabs)
+    settings_panel = QLabel("Settings")
+    top_menu = TopMenuBar(tabs, settings_widget=settings_panel, parent=window)
+    window.show()
+    process_events(20)
+
+    assert not top_menu.servers_button.isEnabled()
+    assert top_menu.catalog_button.isChecked()
+
+    top_menu.log_button.click()
+    process_events(10)
+    assert tabs.currentIndex() == 1
+    assert top_menu.log_button.isChecked()
+
+    top_menu.settings_button.click()
+    process_events(10)
+    assert tabs.currentWidget() is settings_panel
+    assert top_menu.settings_button.isChecked()
+
+    top_menu.catalog_button.click()
+    process_events(10)
+    assert tabs.currentIndex() == 0
+    assert tabs.indexOf(settings_panel) == -1
+
+    wotlk_idx = tabs.addTab(QLabel("WotLK"), "WoW WotLK")
+    tbc_idx = tabs.addTab(QLabel("TBC"), "WoW TBC")
+    top_menu.refresh_servers()
+    assert top_menu.servers_button.isEnabled()
+    actions = top_menu.servers_menu.actions()
+    assert [a.text() for a in actions] == ["WoW WotLK", "WoW TBC"]
+
+    actions[1].trigger()
+    process_events(10)
+    assert tabs.currentIndex() == tbc_idx
+    assert top_menu.servers_button.isChecked()
+
+    actions[0].trigger()
+    process_events(10)
+    assert tabs.currentIndex() == wotlk_idx
+    assert top_menu.servers_button.isChecked()

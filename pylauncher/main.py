@@ -170,25 +170,16 @@ def build_catalog_tab(
     from PySide6.QtWidgets import QSplitter, QTabWidget, QVBoxLayout, QWidget
 
     from yulon.ui.icons import get_tab_icon
-    from yulon.ui.sidebar import SidebarRail
+    from yulon.ui.sidebar import SidebarRail, TopMenuBar
     from yulon.ui.widgets.update_bar import UpdateBar
 
     tabs = QTabWidget(window)
     tabs.setObjectName("sidebar-tabs")
     # Before any tab exists: `setTabBar` is only honoured on an empty widget.
-    # The rail keeps its width with every tab hidden, and never draws or
-    # leaves current a hidden tab (T192, `sidebar.py`).
     tabs.setTabBar(SidebarRail(tabs))
-    tabs.setTabPosition(QTabWidget.TabPosition.West)
+    tabs.setTabPosition(QTabWidget.TabPosition.North)
     tabs.setIconSize(QSize(18, 18))
-    # The sidebar grows by one tab per remembered install; once there are more
-    # than the window's height can show, Qt's default is to shrink every tab
-    # until the text clips rather than scroll. Scroll buttons keep each tab at
-    # its styled size and let the rail scroll instead, on any window height.
     tabs.setUsesScrollButtons(True)
-    # Never elided (T192): with ElideRight every tab shrank to its elided
-    # minimum once the rail overflowed -- "WoW…", "Cata…". The titles are short
-    # now (`tab_titles.sidebar_titles`) and the rail scrolls instead.
     tabs.setElideMode(Qt.TextElideMode.ElideNone)
     central = QWidget(window)
     column = QVBoxLayout(central)
@@ -198,8 +189,14 @@ def build_catalog_tab(
     from yulon.ui.widgets.dadcraft_decorations import DadcraftHeader
 
     header = DadcraftHeader(parent=central)
+    win_theme = window.property("yulon_theme")
+    if isinstance(win_theme, str) and win_theme:
+        header.set_theme(win_theme)
     column.addWidget(header)
     window.setProperty("header", header)
+    top_menu = TopMenuBar(tabs, parent=central)
+    column.addWidget(top_menu)
+    window.setProperty("top_menu", top_menu)
     update_bar = UpdateBar(central)
     column.addWidget(update_bar)
     column.addWidget(tabs, 1)
@@ -597,18 +594,21 @@ def build_window() -> object:
     from yulon.ui.launcher_window import LauncherWindow
     from yulon.ui.logs_view import LogsView
     from yulon.ui.move_in import move_in_for_app
-    from yulon.ui.sidebar import SidebarPins, server_tab_icon
+    from yulon.ui.sidebar import TopMenuBar, server_tab_icon
     from yulon.ui.tab_titles import controller_tab_titles, retitle_controller_tabs
     from yulon.ui.theme import (
         CHECK_UPDATES_BUTTON,
         FORGET_TAB_BUTTON,
         LAUNCH_TAB_BUTTON,
-        SETTINGS_BUTTON,
         TAB_BUTTONS,
         apply_dadcraft_theme,
+        normalize_theme_name,
     )
+    from yulon.ui.tray_settings import SettingsView
+    from yulon.ui.widgets.dadcraft_decorations import DadcraftRealmBadge
     from yulon.ui.widgets.job import threaded_job_runner
     from yulon.ui.widgets.log_panel import LogPanel
+    from yulon.ui.widgets.panel_style import panel_qss
     from yulon.ui.widgets.update_dialog import UpdateChoice, UpdateDialog, default_open_url
     from yulon.ui.widgets.update_progress import UpdateProgressDialog
     from yulon.update import (
@@ -639,8 +639,10 @@ def build_window() -> object:
         yulon_log_panels: list[LogPanel]
         # The Logs tab (T93), read by `_busy_reasons()`: a support save holds the close.
         yulon_logs_view: LogsView
-        # T192: the Catalog and Logs buttons pinned above the rail.
-        yulon_sidebar_pins: SidebarPins
+        yulon_settings_view: SettingsView
+        # Centered top navigation bar (Catalog, Servers, Log, Settings).
+        yulon_sidebar_pins: TopMenuBar
+        yulon_top_menu: TopMenuBar
         # T179: the runner of the start-up sweep of temporary client copies, held
         # so the job is not collected while it runs.
         yulon_sweep_jobs: Any
@@ -728,7 +730,7 @@ def build_window() -> object:
     window.yulon_quit = window.close
     window.setWindowTitle(f"Dad's MMO Lab — Yu'lon {__version__}")
     window.setWindowIcon(get_app_icon())
-    apply_dadcraft_theme(window)
+    apply_dadcraft_theme(window, theme_name=ui_settings.load_ui_settings().theme)
     window._theme_width = DEFAULT_WINDOW_SIZE[0]  # matches the unscaled theme just applied
 
     # Gamepad / D-pad navigation (handheld), created HERE — before `tabs`, the
@@ -783,21 +785,40 @@ def build_window() -> object:
     # tab reads nothing until it is shown (see `logs_view.py`). The lambda reads
     # `state.installs` at each call, so an install made later is in the next save.
     logs_view = LogsView(lambda: list(state.installs), catalog)
+    window.yulon_logs_view = logs_view
     tabs.insertTab(1, logs_view, get_tab_icon("console"), "Logs")
     tabs.setTabToolTip(1, "Yu'lon's own logs, and a file to send when something goes wrong")
-    # T192: both stay tabs 0 and 1 -- `indexOf()`, the bumpers and
-    # `setCurrentIndex(0)` all still reach them -- but are drawn as two pinned
-    # buttons above the rail, so a rail of servers scrolls and they never do.
-    # Hiding the current tab moves the bar off it, so the Catalog is made
-    # current again after: a hidden tab can be current, and the rail draws
-    # nothing selected while it is.
+
+    def _apply_window_theme(theme_name: str) -> bool:
+        resolved = normalize_theme_name(theme_name)
+        apply_dadcraft_theme(window, width=window.width() or None, theme_name=resolved)
+        for badge in window.findChildren(DadcraftRealmBadge):
+            badge.set_theme(resolved)
+        for widget in window.findChildren(QWidget):
+            if hasattr(widget, "apply_theme") and widget is not window:
+                widget.apply_theme(resolved)
+            elif type(widget).__name__ in ("ModulesPanel", "TuningPanel"):
+                widget.setStyleSheet(panel_qss(resolved))
+        for launcher in getattr(window, "yulon_launchers", {}).values():
+            if shiboken6.isValid(launcher) and hasattr(launcher, "apply_theme"):
+                launcher.apply_theme(resolved)
+        return ui_settings.remember_theme(resolved)
+
+    settings_view = SettingsView(window, on_theme_changed=_apply_window_theme, parent=window)
+    settings_view.hide()
+    window.yulon_settings_view = settings_view
     tabs.tabBar().setTabVisible(0, False)
     tabs.tabBar().setTabVisible(1, False)
+    tabs.tabBar().hide()
     tabs.setCurrentIndex(0)
-    window.yulon_sidebar_pins = SidebarPins(
-        tabs,
-        [(0, get_tab_icon("catalog"), "Catalog"), (1, get_tab_icon("console"), "Logs")],
-    )
+
+    top_menu = window.property("top_menu")
+    assert isinstance(top_menu, TopMenuBar)
+    top_menu.set_settings_widget(settings_view)
+    top_menu.refresh_servers()
+    window.yulon_sidebar_pins = top_menu
+    window.yulon_top_menu = top_menu
+    window.servers_changed.connect(top_menu.refresh_servers)
     navigator.invalidate()
 
     def _build_tab_menu(pos: QPoint) -> QMenu | None:
@@ -879,6 +900,9 @@ def build_window() -> object:
             place = ui_settings.launcher_place(*key)
             launcher = LauncherWindow(view, addresses=place.addresses)
             launcher.setWindowIcon(get_app_icon())
+            win_theme = window.property("yulon_theme")
+            if isinstance(win_theme, str) and win_theme:
+                launcher.apply_theme(win_theme)
             if place.geometry is not None:
                 launcher.restore_geometry_text(place.geometry)
             launcher.closed.connect(
@@ -1539,6 +1563,9 @@ def build_window() -> object:
         view.realm_badge.status_changed.connect(show_status_dot)
         status_dots[key] = show_status_dot
         show_status_dot(view.realm_badge.status)
+        win_theme = window.property("yulon_theme")
+        if isinstance(win_theme, str) and win_theme:
+            view.apply_theme(win_theme)
         # T95: the ×, on a server page only. Catalog (and T93's Logs) never get
         # one, because only this function attaches it and only to a ControllerView.
         forget_buttons.attach(tabs.indexOf(view), _tab_buttons(key, entry.name))
@@ -2244,21 +2271,17 @@ def build_window() -> object:
 
     check_button = QPushButton("Check for updates", window)
     check_button.setObjectName(CHECK_UPDATES_BUTTON)
-    # Not flat (T193 A20): it is the window's one control for the update check,
-    # and it is drawn as the theme's button, edge and fill, on the ember glow.
+    # Placed inside the Settings submenu panel (`SettingsView.add_action`).
     check_button.clicked.connect(update_host.check_now)
-    header = window.property("header")
-    if header is not None:
-        header.add_action(check_button)
-    # T540: the tray's two switches. `main()`'s `YulonTray` replaces the seam
-    # with its dialog; a window built without one (a test) only says so.
-    window.yulon_open_settings = lambda: logger.info("settings: no tray object in this window")
-    settings_button = QPushButton("Settings…", window)
-    settings_button.setObjectName(SETTINGS_BUTTON)
-    settings_button.setToolTip("Keep Yu'lon in the system tray, and start it when you sign in")
-    settings_button.clicked.connect(lambda _checked=False: window.yulon_open_settings())
-    if header is not None:
-        header.add_action(settings_button)
+    settings_view.add_action(check_button)
+
+    def _open_settings_panel() -> None:
+        top_menu.show_settings()
+        _bring_to_front(window)
+
+    window.yulon_open_settings = _open_settings_panel
+    top_menu.settings_button.clicked.disconnect()
+    top_menu.settings_button.clicked.connect(lambda _checked=False: window.yulon_open_settings())
 
     if in_smoke_test():
         # No launch check: it would ask GitHub and write `update.json` in the
@@ -2496,7 +2519,10 @@ def main() -> int:
     # T540: an application that says when it is asked to quit (the tray's close-to-tray).
     app = YulonApplication(sys.argv)
     app.setWindowIcon(get_app_icon())
-    apply_dadcraft_theme(app)
+    from yulon import ui_settings
+
+    startup_theme = ui_settings.load_ui_settings().theme
+    apply_dadcraft_theme(app, theme_name=startup_theme)
     # One Yu'lon per user (T152), claimed BEFORE the window: `build_window()`
     # reads state.json and starts the update check, and a second copy doing
     # either beside the first is the race this exists to stop. After the theme,

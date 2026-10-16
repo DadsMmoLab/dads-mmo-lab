@@ -46,15 +46,13 @@ from yulon import dashboard
 from yulon.ui.gamepad import BACK_CLOSES
 from yulon.ui.icons import dadcraft_icon
 from yulon.ui.theme import (
-    COLOR_BG_CONTAINER,
-    COLOR_BG_PANEL,
-    COLOR_BRASS_DARK,
     COLOR_DANGER,
-    COLOR_GOLD_BRASS,
     COLOR_GOLD_BRIGHT,
     COLOR_TEXT_MUTED,
-    COLOR_TEXT_PRIMARY,
     COLOR_UNCOMMON,
+    DEFAULT_THEME,
+    get_theme,
+    normalize_theme_name,
 )
 from yulon.ui.widgets.dadcraft_decorations import realm_tone
 
@@ -330,34 +328,8 @@ class TrayFlyout(QWidget):
         self.setProperty(BACK_CLOSES, True)
         self.setAttribute(Qt.WidgetAttribute.WA_QuitOnClose, False)
         self.setFixedWidth(FLYOUT_WIDTH)
-        self.setStyleSheet(f"""
-            QWidget#tray-flyout {{
-                background: {COLOR_BG_PANEL};
-                border: 1px solid {COLOR_GOLD_BRASS};
-            }}
-            QFrame#tray-row {{
-                background: {COLOR_BG_CONTAINER};
-                border: 1px solid {COLOR_BRASS_DARK};
-                border-radius: 4px;
-            }}
-            QLabel#tray-header {{ color: {COLOR_TEXT_PRIMARY}; font-weight: bold; }}
-            QLabel#tray-count {{ color: {COLOR_TEXT_MUTED}; }}
-            QLabel#tray-row-title {{ color: {COLOR_TEXT_PRIMARY}; font-weight: bold; }}
-            QLabel#tray-row-detail {{ color: {COLOR_TEXT_MUTED}; font-size: 11px; }}
-            QToolButton#tray-row-button {{
-                border: 2px solid {COLOR_BRASS_DARK};
-                border-radius: 4px;
-                padding: 0;
-                min-width: {ICON_BUTTON}px;
-                max-width: {ICON_BUTTON}px;
-                min-height: {ICON_BUTTON}px;
-                max-height: {ICON_BUTTON}px;
-            }}
-            /* Where the pad or the keyboard is (cold review): the theme's focus gold. */
-            QToolButton#tray-row-button:focus {{
-                border: 2px solid {COLOR_GOLD_BRIGHT};
-            }}
-            """)
+        self._theme_name = DEFAULT_THEME
+        self.set_theme(DEFAULT_THEME)
         column = QVBoxLayout(self)
         column.setContentsMargins(10, 8, 10, 10)
         column.setSpacing(6)
@@ -399,6 +371,39 @@ class TrayFlyout(QWidget):
         foot.addWidget(self.quit_button, 1)
         column.addLayout(foot)
         self._cards: list[ServerCard] = []
+
+    def set_theme(self, theme_name: str | None = None) -> None:
+        """Restyle the flyout panel for `theme_name`."""
+        self._theme_name = normalize_theme_name(theme_name)
+        spec = get_theme(self._theme_name)
+        self.setStyleSheet(f"""
+            QWidget#tray-flyout {{
+                background: {spec.bg_panel};
+                border: 1px solid {spec.accent_brass};
+            }}
+            QFrame#tray-row {{
+                background: {spec.bg_container};
+                border: 1px solid {spec.border_dark};
+                border-radius: 4px;
+            }}
+            QLabel#tray-header {{ color: {spec.text_primary}; font-weight: bold; }}
+            QLabel#tray-count {{ color: {spec.text_muted}; }}
+            QLabel#tray-row-title {{ color: {spec.text_primary}; font-weight: bold; }}
+            QLabel#tray-row-detail {{ color: {spec.text_muted}; font-size: 11px; }}
+            QToolButton#tray-row-button {{
+                border: 2px solid {spec.border_dark};
+                border-radius: 4px;
+                padding: 0;
+                min-width: {ICON_BUTTON}px;
+                max-width: {ICON_BUTTON}px;
+                min-height: {ICON_BUTTON}px;
+                max-height: {ICON_BUTTON}px;
+            }}
+            /* Where the pad or the keyboard is: the theme's focus edge. */
+            QToolButton#tray-row-button:focus {{
+                border: 2px solid {spec.accent_bright};
+            }}
+            """)
 
     def cards(self) -> list[ServerCard]:
         return [card for card in self._cards if not card.isHidden()]
