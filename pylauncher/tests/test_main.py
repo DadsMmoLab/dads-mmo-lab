@@ -522,7 +522,7 @@ def _app_window(qapp: object) -> Iterator[Any]:
 
     from PySide6.QtWidgets import QApplication
 
-    from yulon import update_state
+    from yulon import ui_settings, update_state
     from yulon.ui.controller_view import ControllerView
 
     monkeypatch = pytest.MonkeyPatch()
@@ -530,6 +530,11 @@ def _app_window(qapp: object) -> Iterator[Any]:
     scratch = Path(tempfile.mkdtemp(prefix="yulon-test-update-state-"))
     monkeypatch.setattr(
         update_state, "update_state_path", lambda config_dir=None: scratch / "update.json"
+    )
+    monkeypatch.setattr(
+        ui_settings,
+        "ui_settings_path",
+        lambda config_dir=None: (config_dir or scratch) / "ui.json",
     )
     monkeypatch.setattr(
         state,
@@ -5060,59 +5065,54 @@ def _at_width(window: Any, size: tuple[int, int]) -> None:
 
 
 def test_the_header_check_button_has_an_opaque_brass_edge(shown_window: Any) -> None:
-    """A20: the header's selector-less sheet stripped the button's border and fill.
-
-    `background: transparent; border: none;` with no selector reaches every
-    child (T188 C1's mechanism), and the button was also flat: it read as a
-    caption on the ember glow. Four pixels down the middle of its left edge are
-    the theme's hairline, which is opaque, so the glow animating behind it
-    cannot change them.
-
-    Mutation: give the header its selector-less sheet back and the edge is the
-    glow, not `COLOR_BRASS_DARK`.
-    """
+    """The Check for updates button lives in the Settings panel and carries the theme's border."""
     from PySide6.QtGui import QColor
     from PySide6.QtWidgets import QPushButton
 
     from yulon.ui.theme import COLOR_BRASS_DARK
 
-    button = shown_window.findChild(QPushButton, "check-for-updates")
-    assert button is not None
-    button.clearFocus()
-    image = button.grab().toImage()
-    middle = image.height() // 2
-    edge = [image.pixelColor(0, y).name() for y in range(middle - 2, middle + 2)]
-    assert edge == [QColor(COLOR_BRASS_DARK).name()] * 4, edge
+    shown_window.yulon_top_menu.show_settings()
+    process_events(20)
+    try:
+        button = shown_window.findChild(QPushButton, "check-for-updates")
+        assert button is not None
+        assert shown_window.yulon_settings_view.isAncestorOf(button)
+        button.clearFocus()
+        image = button.grab().toImage()
+        middle = image.height() // 2
+        edge = [image.pixelColor(0, y).name() for y in range(middle - 2, middle + 2)]
+        assert edge == [QColor(COLOR_BRASS_DARK).name()] * 4, edge
+    finally:
+        shown_window.yulon_top_menu.show_catalog()
+        process_events(10)
 
 
 @pytest.mark.parametrize("size", [(960, 640), (1280, 800), (1920, 1080)])
 def test_the_header_check_button_is_never_cut_off(shown_window: Any, size: tuple[int, int]) -> None:
-    """T188's renders showed "Check for updates" cut at 1280 on the Catalog.
-
-    Measured for T193: a harness artefact, not the app. The shot was taken 0.2 s
-    after the resize, and the 120 ms restyle had grown the font but the header's
-    relayout had not landed yet; at a 1 s settle the button is whole at every
-    size. Kept as the guard on that answer: reached from 960, the way a window
-    is dragged wider, the button is as wide as it asks to be, wider than its words.
-    """
+    """In the Settings panel, "Check for updates" is whole and never clipped at any window size."""
     from PySide6.QtWidgets import QPushButton
 
     from yulon.ui.theme import TOUCH_TARGET_PX
 
-    button = shown_window.findChild(QPushButton, "check-for-updates")
-    assert button is not None
-    _at_width(shown_window, (960, 640))
-    _at_width(shown_window, size)
+    shown_window.yulon_top_menu.show_settings()
+    process_events(20)
+    try:
+        button = shown_window.findChild(QPushButton, "check-for-updates")
+        assert button is not None
+        assert shown_window.yulon_settings_view.isAncestorOf(button)
+        _at_width(shown_window, (960, 640))
+        _at_width(shown_window, size)
 
-    words = button.fontMetrics().horizontalAdvance(button.text())
-    assert button.width() >= button.sizeHint().width(), (button.width(), button.sizeHint())
-    assert button.width() > words, (button.width(), words)
-    # And inside the header, top to bottom: at the theme's 8px padding it was
-    # 50px tall in a 44px row and stood out over the header's bottom edge.
-    header = shown_window.property("header")
-    inside = header.contentsRect().marginsRemoved(header.layout().contentsMargins())
-    assert inside.contains(button.geometry()), (button.geometry(), inside)
-    assert button.height() >= TOUCH_TARGET_PX
+        words = button.fontMetrics().horizontalAdvance(button.text())
+        assert button.width() >= button.sizeHint().width(), (button.width(), button.sizeHint())
+        assert button.width() > words, (button.width(), words)
+        assert shown_window.yulon_settings_view.rect().contains(
+            button.mapTo(shown_window.yulon_settings_view, button.rect().topLeft())
+        )
+        assert button.height() >= TOUCH_TARGET_PX
+    finally:
+        shown_window.yulon_top_menu.show_catalog()
+        process_events(10)
 
 
 # -- T192: whole short names on the rail; Catalog and Logs pinned above it -----------
@@ -5175,23 +5175,19 @@ def test_every_server_tab_shows_its_whole_short_name(
 def test_catalog_and_logs_are_pinned_above_the_rail_at_every_size(
     shown_window: Any, five_servers: list[Any], size: tuple[int, int]
 ) -> None:
-    """The Catalog was tab 0 of a scrolling bar, so with a few servers it scrolled away.
-
-    Both are pinned buttons above the bar, inside the tab widget, each at least
-    its own size hint, and the bar starts below them -- after the restyle at
-    each size, which is what moves the bar.
-
-    Mutation: drop the `::tab-bar` offset and the bar starts at the top, under
-    the pins.
-    """
+    """Catalog, Servers, Log and Settings live in the centered top menu bar above the tabs."""
     _at_width(shown_window, size)
     tabs = shown_window.property("tabs")
     bar = tabs.tabBar()
     pins = shown_window.yulon_sidebar_pins
     assert pins.isVisible()
-    assert tabs.rect().contains(pins.geometry()), (pins.geometry(), tabs.rect())
-    assert pins.geometry().bottom() < bar.geometry().top(), (pins.geometry(), bar.geometry())
-    for button in pins.buttons.values():
+    assert pins.geometry().bottom() <= tabs.geometry().top(), (pins.geometry(), tabs.geometry())
+    for button in (
+        pins.catalog_button,
+        pins.servers_button,
+        pins.log_button,
+        pins.settings_button,
+    ):
         assert button.isVisible()
         assert button.width() >= button.sizeHint().width(), (button.size(), button.sizeHint())
         assert button.height() >= button.sizeHint().height(), (button.size(), button.sizeHint())
@@ -5471,12 +5467,10 @@ def test_a_rebuilt_tab_gets_its_new_badge_s_dot_and_the_old_badge_lets_go(
 def test_the_header_names_the_server_on_screen_and_nothing_on_the_catalog(
     shown_window: Any, tmp_path: Any
 ) -> None:
-    """The game strip: "WoW WotLK — <folder>" beside the badge, clear of both header controls.
+    """The game strip: "WoW WotLK — <folder>" beside the badge, clear of the badge.
 
     Mutation: stop passing `title=` and the header names nothing.
     """
-    from PySide6.QtWidgets import QPushButton
-
     header = shown_window.property("header")
     tabs = shown_window.property("tabs")
     server_dir = tmp_path / "Hdr Realm"
@@ -5486,16 +5480,10 @@ def test_the_header_names_the_server_on_screen_and_nothing_on_the_catalog(
         tabs.setCurrentWidget(view)
         _at_width(shown_window, (960, 640))
         title = header._realm_title
-        check = shown_window.findChild(QPushButton, "check-for-updates")
         assert title.isVisible()
         assert title.text().startswith("WoW WotLK"), title.text()
         assert title.toolTip() == f"WoW WotLK — {server_dir}"
-        assert not title.geometry().intersects(check.geometry()), (
-            title.geometry(),
-            check.geometry(),
-        )
         assert not title.geometry().intersects(header._badge.geometry())
-        assert check.width() >= check.sizeHint().width(), "the name squeezed the update check"
 
         tabs.setCurrentIndex(0)
         process_events(10)
@@ -5561,7 +5549,7 @@ def test_ctrl_tab_reaches_the_catalog_and_logs_from_the_rail_and_from_them(
 
     tabs.setCurrentIndex(last)
     process_events(10)
-    assert press(tabs.tabBar(), Qt.Key.Key_Tab, ctrl) == 0, "the rail skipped the Catalog"
+    assert press(tabs, Qt.Key.Key_Tab, ctrl) == 0, "the rail skipped the Catalog"
     assert pins.buttons[0].isChecked()
     catalog = _catalog_view(shown_window)
     assert press(catalog, Qt.Key.Key_Tab, ctrl) == 1, "the Catalog skipped Logs"
@@ -5586,7 +5574,7 @@ def test_ctrl_tab_reaches_the_catalog_and_logs_from_the_rail_and_from_them(
 def test_a_long_server_name_is_shortened_in_a_narrow_header_and_whole_again_wider(
     shown_window: Any, tmp_path: Any
 ) -> None:
-    """The header's name gives way before the update check and the badge, and comes back.
+    """The header's name gives way before the badge, and comes back when wider.
 
     Task 2's lesson: a label whose size hint is what it shows never asks for
     its room back, so a name cut at 960 stayed cut at 1920.
@@ -5594,29 +5582,26 @@ def test_a_long_server_name_is_shortened_in_a_narrow_header_and_whole_again_wide
     Mutation: answer `_RealmTitle.sizeHint` from the text on screen and the
     name is still shortened at 1920.
     """
-    from PySide6.QtWidgets import QPushButton
-
     header = shown_window.property("header")
     tabs = shown_window.property("tabs")
-    server_dir = tmp_path / "A very long server folder name that cannot fit beside the badge"
+    folder_name = (
+        "A very long server folder name that cannot fit beside the badge on a narrow window"
+    )
+    server_dir = tmp_path / folder_name
     _catalog_view(shown_window).installed.emit("wow-wotlk", server_dir, None)
     view = _tab_for(shown_window, server_dir)
     try:
         tabs.setCurrentWidget(view)
         title = header._realm_title
-        check = shown_window.findChild(QPushButton, "check-for-updates")
         _at_width(shown_window, (960, 640))
         whole = title.full_text
         assert whole == f"WoW WotLK — {server_dir.name}"
         assert title.text() != whole and title.text().endswith("…"), title.text()
         assert title.text().startswith("WoW"), title.text()
-        assert not title.geometry().intersects(check.geometry())
         assert not title.geometry().intersects(header._badge.geometry())
-        assert check.width() >= check.sizeHint().width(), "the name squeezed the update check"
 
         _at_width(shown_window, (1920, 1080))
         assert title.text() == whole, f"still cut at 1920: {title.text()!r}"
-        assert not title.geometry().intersects(check.geometry())
         assert not title.geometry().intersects(header._badge.geometry())
     finally:
         _drop(shown_window, "wow-wotlk", server_dir)
@@ -6110,12 +6095,12 @@ def test_a_sign_in_start_that_finds_yulon_stuck_leaves_without_a_box(tmp_path: P
 
 
 def test_the_header_has_a_settings_button_that_opens_the_trays_settings(window: Any) -> None:
-    from PySide6.QtWidgets import QPushButton
+    from PySide6.QtWidgets import QAbstractButton
 
-    button = window.findChild(QPushButton, "yulon-settings")
-    assert button is not None, "no Settings… in the header"
-    assert button.text() == "Settings…"
-    assert button.parent() is window.property("header")
+    button = window.findChild(QAbstractButton, "yulon-settings")
+    assert button is not None, "no Settings button in the top menu bar"
+    assert button.text() == "Settings"
+    assert button.parent() is window.property("top_menu")
     real = window.yulon_open_settings
     opened: list[int] = []
     window.yulon_open_settings = lambda: opened.append(1)
@@ -6124,6 +6109,14 @@ def test_the_header_has_a_settings_button_that_opens_the_trays_settings(window: 
     finally:
         window.yulon_open_settings = real
     assert opened == [1]
+
+    # Clicking Settings with the real handler opens the Settings submenu panel.
+    button.click()
+    tabs = window.property("tabs")
+    assert tabs.currentWidget() is window.yulon_settings_view
+    assert window.yulon_top_menu.settings_button.isChecked()
+    window.yulon_top_menu.show_catalog()
+    assert tabs.currentIndex() == 0
 
 
 def test_a_finished_install_also_puts_the_default_addons_in(

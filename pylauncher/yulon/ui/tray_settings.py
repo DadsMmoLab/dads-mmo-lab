@@ -8,21 +8,36 @@ greyed and the dialog says once why closing Yu'lon quits it.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import Qt
+import shiboken6
+from PySide6.QtCore import Qt, QUrl, Signal
+from PySide6.QtGui import QDesktopServices, QShowEvent
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
+    QFrame,
+    QHBoxLayout,
     QLabel,
+    QPushButton,
     QVBoxLayout,
     QWidget,
 )
 
-from yulon import autostart
+from yulon import autostart, ui_settings
 from yulon.log import get_logger
 from yulon.ui.gamepad import BACK_CLOSES
+from yulon.ui.theme import (
+    OPEN_THEMES_FOLDER_BUTTON,
+    THEME_COMBO,
+    apply_dadcraft_theme,
+    available_theme_choices,
+    normalize_theme_name,
+    sync_user_themes,
+)
 
 if TYPE_CHECKING:
     from yulon.ui.tray import YulonTray
@@ -31,6 +46,7 @@ logger = get_logger(__name__)
 
 KEEP = "Keep running when Yu'lon is closed"
 SIGN_IN = "Start the tray when I sign in"
+THEME_LABEL = "Color theme:"
 """The owner's words on design C (T551), in the panel and the Settings dialog alike."""
 NO_TRAY = (
     "This desktop has no system tray, so closing Yu'lon quits it, as it always has. "
@@ -151,7 +167,7 @@ class TraySwitches(QWidget):
 
 
 class TraySettingsDialog(QDialog):
-    """The header's Settings…: the tray's switches (`TraySwitches`) and Close."""
+    """The header's Settings…: theme selector, tray switches (`TraySwitches`) and Close."""
 
     def __init__(self, tray: YulonTray) -> None:
         super().__init__(None)
@@ -163,6 +179,17 @@ class TraySettingsDialog(QDialog):
         self.setProperty(BACK_CLOSES, True)
         self.setAttribute(Qt.WidgetAttribute.WA_QuitOnClose, False)
         column = QVBoxLayout(self)
+
+        theme_row = QHBoxLayout()
+        self.theme_label = QLabel(THEME_LABEL, self)
+        self.theme_combo = QComboBox(self)
+        self.theme_combo.setObjectName(THEME_COMBO)
+        for theme_id, label in available_theme_choices():
+            self.theme_combo.addItem(label, theme_id)
+        theme_row.addWidget(self.theme_label, 0)
+        theme_row.addWidget(self.theme_combo, 1)
+        column.addLayout(theme_row)
+
         self.switches = TraySwitches(tray, self)
         self.keep = self.switches.keep
         self.sign_in = self.switches.sign_in
@@ -171,3 +198,244 @@ class TraySettingsDialog(QDialog):
         buttons.rejected.connect(self.close)
         column.addWidget(self.switches)
         column.addWidget(buttons)
+
+        self.theme_combo.currentIndexChanged.connect(self._theme_changed)
+        tray.settings_changed.connect(self._read_theme)
+        self._read_theme()
+        apply_dadcraft_theme(self, theme_name=self.current_theme())
+
+    def showEvent(self, event: QShowEvent) -> None:  # noqa: N802 - Qt's own name
+        super().showEvent(event)
+        current = self.current_theme()
+        choices = available_theme_choices(seed_user_dir=True)
+        self.theme_combo.blockSignals(True)
+        self.theme_combo.clear()
+        for theme_id, label in choices:
+            self.theme_combo.addItem(label, theme_id)
+        idx = self.theme_combo.findData(current)
+        if idx >= 0:
+            self.theme_combo.setCurrentIndex(idx)
+        self.theme_combo.blockSignals(False)
+
+    def current_theme(self) -> str:
+        """The theme ID currently selected in the combo box."""
+        data = self.theme_combo.currentData()
+        raw = data if isinstance(data, str) else self.theme_combo.currentText()
+        return normalize_theme_name(raw)
+
+    def _read_theme(self) -> None:
+        current = getattr(self.tray, "theme", None) or ui_settings.load_ui_settings().theme
+        normalized = normalize_theme_name(current)
+        index = self.theme_combo.findData(normalized)
+        if index >= 0 and index != self.theme_combo.currentIndex():
+            self.theme_combo.blockSignals(True)
+            self.theme_combo.setCurrentIndex(index)
+            self.theme_combo.blockSignals(False)
+        apply_dadcraft_theme(self, theme_name=normalized)
+
+    def _theme_changed(self, _index: int) -> None:
+        chosen = self.current_theme()
+        remember = getattr(self.tray, "remember_theme", None)
+        if callable(remember):
+            ok = bool(remember(chosen))
+        else:
+            ok = ui_settings.remember_theme(chosen)
+        apply_dadcraft_theme(self, theme_name=chosen)
+        if not ok:
+            self.switches._said_problem = (
+                "This setting could not be saved, so it lasts only until Yu'lon closes."
+            )
+            self.switches._settle()
+
+
+class _WindowTrayAdapter(QWidget):
+    """Lightweight tray stand-in for `SettingsView` before `YulonTray.install()` binds a tray."""
+
+    settings_changed = Signal()
+
+    def __init__(
+        self,
+        window: QWidget,
+        on_theme_changed: Callable[[str], bool] | None = None,
+    ) -> None:
+        super().__init__(window)
+        self._window = window
+        self._on_theme_changed = on_theme_changed
+        self.icon: object = None
+        saved = ui_settings.load_ui_settings()
+        self.keep_in_tray: bool = saved.keep_in_tray
+        self.theme: str = saved.theme
+
+    def remember_keep_in_tray(self, keep: bool) -> bool:
+        self.keep_in_tray = keep
+        saved = ui_settings.remember_tray(keep_in_tray=keep)
+        self.settings_changed.emit()
+        return saved
+
+    def remember_theme(self, theme_name: str) -> bool:
+        normalized = normalize_theme_name(theme_name)
+        self.theme = normalized
+        if self._on_theme_changed is not None:
+            saved = self._on_theme_changed(normalized)
+        else:
+            apply_dadcraft_theme(
+                self._window, width=self._window.width() or None, theme_name=normalized
+            )
+            saved = ui_settings.remember_theme(normalized)
+        self.settings_changed.emit()
+        return saved
+
+
+class SettingsView(QWidget):
+    """In-window Settings submenu panel opened by the top menu bar's Settings item."""
+
+    def __init__(
+        self,
+        window: QWidget,
+        *,
+        on_theme_changed: Callable[[str], bool] | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setObjectName("settings-view")
+        self._window = window
+        self._adapter = _WindowTrayAdapter(window, on_theme_changed)
+        self._tray: YulonTray | _WindowTrayAdapter = self._adapter
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(16, 12, 16, 12)
+        outer.setSpacing(12)
+
+        heading = QLabel("Settings", self)
+        heading.setObjectName("section-title")
+        outer.addWidget(heading)
+
+        card = QFrame(self)
+        card.setObjectName("panel")
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(16, 14, 16, 14)
+        card_layout.setSpacing(12)
+
+        theme_row = QHBoxLayout()
+        self.theme_label = QLabel(THEME_LABEL, card)
+        self.theme_combo = QComboBox(card)
+        self.theme_combo.setObjectName(THEME_COMBO)
+        self.open_themes_button = QPushButton("Open themes folder…", card)
+        self.open_themes_button.setObjectName(OPEN_THEMES_FOLDER_BUTTON)
+        self.open_themes_button.setToolTip(
+            "Open the folder where theme .json files live so you can add or edit custom themes"
+        )
+        self.open_themes_button.clicked.connect(self.open_themes_folder)
+        theme_row.addWidget(self.theme_label, 0)
+        theme_row.addWidget(self.theme_combo, 1)
+        theme_row.addWidget(self.open_themes_button, 0)
+        card_layout.addLayout(theme_row)
+
+        self._switches_box = QVBoxLayout()
+        self._switches_box.setContentsMargins(0, 0, 0, 0)
+        self.switches = TraySwitches(self._tray, card)  # type: ignore[arg-type]
+        self._switches_box.addWidget(self.switches)
+        card_layout.addLayout(self._switches_box)
+
+        self._actions_row = QHBoxLayout()
+        self._actions_row.setContentsMargins(0, 4, 0, 0)
+        self._actions_row.addStretch(1)
+        card_layout.addLayout(self._actions_row)
+
+        outer.addWidget(card)
+        outer.addStretch(1)
+
+        self.keep = self.switches.keep
+        self.sign_in = self.switches.sign_in
+        self.note = self.switches.note
+
+        self.refresh_themes()
+        self.theme_combo.currentIndexChanged.connect(self._theme_changed)
+        self._tray.settings_changed.connect(self._read_theme)
+        self._read_theme()
+
+    def add_action(self, widget: QWidget) -> None:
+        """Place an action button (such as 'Check for updates') inside the Settings panel."""
+        widget.setParent(self)
+        self._actions_row.insertWidget(0, widget)
+
+    def showEvent(self, event: QShowEvent) -> None:  # noqa: N802 - Qt's own name
+        super().showEvent(event)
+        self.refresh_themes(seed_user_dir=True)
+
+    def open_themes_folder(self) -> None:
+        """Seed the user-accessible `themes/` folder and open it in the file manager."""
+        folder = sync_user_themes()
+        self.refresh_themes()
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+
+    def refresh_themes(self, *, seed_user_dir: bool = False) -> None:
+        """Reload the theme dropdown from bundled and user `.json` theme files."""
+        current = (
+            getattr(self._tray, "theme", None)
+            or self._window.property("yulon_theme")
+            or ui_settings.load_ui_settings().theme
+        )
+        choices = available_theme_choices(seed_user_dir=seed_user_dir)
+        self.theme_combo.blockSignals(True)
+        self.theme_combo.clear()
+        for theme_id, label in choices:
+            self.theme_combo.addItem(label, theme_id)
+        normalized = normalize_theme_name(current)
+        index = self.theme_combo.findData(normalized)
+        if index >= 0:
+            self.theme_combo.setCurrentIndex(index)
+        self.theme_combo.blockSignals(False)
+
+    def bind_tray(self, tray: YulonTray | None) -> None:
+        """Bind a live `YulonTray` (or revert to the window adapter on uninstall)."""
+        old = self._tray
+        if old is not None and shiboken6.isValid(old):
+            try:
+                old.settings_changed.disconnect(self._read_theme)
+            except (RuntimeError, TypeError):
+                pass
+        if shiboken6.isValid(self.switches):
+            self._switches_box.removeWidget(self.switches)
+            self.switches.hide()
+            self.switches.deleteLater()
+        self._tray = tray if tray is not None else self._adapter
+        self.switches = TraySwitches(self._tray, self)  # type: ignore[arg-type]
+        self._switches_box.addWidget(self.switches)
+        self.keep = self.switches.keep
+        self.sign_in = self.switches.sign_in
+        self.note = self.switches.note
+        self._tray.settings_changed.connect(self._read_theme)
+        self._read_theme()
+
+    def current_theme(self) -> str:
+        """The theme ID currently selected in the combo box."""
+        data = self.theme_combo.currentData()
+        raw = data if isinstance(data, str) else self.theme_combo.currentText()
+        return normalize_theme_name(raw)
+
+    def _read_theme(self) -> None:
+        current = (
+            getattr(self._tray, "theme", None)
+            or self._window.property("yulon_theme")
+            or ui_settings.load_ui_settings().theme
+        )
+        normalized = normalize_theme_name(current)
+        index = self.theme_combo.findData(normalized)
+        if index >= 0 and index != self.theme_combo.currentIndex():
+            self.theme_combo.blockSignals(True)
+            self.theme_combo.setCurrentIndex(index)
+            self.theme_combo.blockSignals(False)
+
+    def _theme_changed(self, _index: int) -> None:
+        chosen = self.current_theme()
+        remember = getattr(self._tray, "remember_theme", None)
+        if callable(remember):
+            ok = bool(remember(chosen))
+        else:
+            ok = ui_settings.remember_theme(chosen)
+        if not ok:
+            self.switches._said_problem = (
+                "This setting could not be saved, so it lasts only until Yu'lon closes."
+            )
+            self.switches._settle()

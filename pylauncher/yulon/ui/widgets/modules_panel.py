@@ -59,16 +59,18 @@ from yulon.git import Behind, is_behind
 from yulon.manifest import Manifest, ManifestType
 from yulon.manifest_store import FAMILY_FILES
 from yulon.ui.theme import (
-    COLOR_BG_PANEL,
     COLOR_BG_PARCHMENT_LIGHT,
     COLOR_BRASS_DARK,
-    COLOR_GOLD_BORDER,
     COLOR_TEXT_GOLD,
     COLOR_TEXT_MUTED,
     COLOR_TEXT_PRIMARY,
     COLOR_TEXT_WARNING,
     COLOR_UNCOMMON,
+    DEFAULT_THEME,
     TOUCH_TARGET_PX,
+    get_theme,
+    normalize_theme_name,
+    resolve_widget_theme,
 )
 from yulon.ui.widgets.panel_style import panel_qss
 
@@ -1757,7 +1759,43 @@ class RowWidget(QFrame):
         outer.addWidget(self.detail)
 
         self.set_enabled_actions(True)
-        self.set_selected(False)
+        self._selected = False
+        self._theme_name = DEFAULT_THEME
+        self.apply_theme(DEFAULT_THEME)
+
+    def apply_theme(self, theme_name: str | None = None) -> None:
+        """Restyle the module row and its child labels/chips for `theme_name`."""
+        self._theme_name = normalize_theme_name(theme_name)
+        spec = get_theme(self._theme_name)
+        self.name_label.setStyleSheet(f"color: {spec.text_gold}; font-weight: bold;")
+        self.version_label.setStyleSheet(f"color: {spec.text_muted};")
+        if self.paths_label is not None:
+            self.paths_label.setStyleSheet(f"color: {spec.text_muted};")
+        self.description_label.setStyleSheet(f"color: {spec.text_muted};")
+        if self.data.badge in (BADGE_SQL_NOT_APPLIED, BADGE_STATE_UNKNOWN):
+            badge_colour = spec.text_warning
+        elif self.data.installed:
+            badge_colour = spec.uncommon
+        else:
+            badge_colour = spec.text_muted
+        self.badge_label.setStyleSheet(f"color: {badge_colour}; font-weight: bold;")
+        for button, chip in zip(self.chip_buttons, self.data.chips, strict=False):
+            colour = spec.text_warning if chip.kind == "owed" else spec.text_muted
+            button.setStyleSheet(
+                f"color: {colour}; border: 1px solid {spec.border_dark}; padding: 0px 6px; "
+                f"min-height: {TOUCH_TARGET_PX}px;"
+            )
+        if self.chip_strip.overflow is not None:
+            self.chip_strip.overflow.setStyleSheet(
+                f"color: {spec.text_muted}; border: 1px solid {spec.border_dark}; "
+                f"padding: 0px 6px; min-height: {TOUCH_TARGET_PX}px;"
+            )
+        self.detail.setStyleSheet(
+            f"QFrame#moduleRowDetail {{ background-color: {spec.bg_hover}; "
+            f"border-left: 3px solid {spec.text_warning}; }}"
+        )
+        self.detail_label.setStyleSheet(f"color: {spec.text_primary};")
+        self.set_selected(self._selected)
 
     def set_enabled_actions(self, enabled: bool) -> None:
         """Arm or disarm this row's one press.
@@ -1786,14 +1824,16 @@ class RowWidget(QFrame):
 
     def set_selected(self, selected: bool) -> None:
         """Highlight, through the theme's own constants (T42 forbids touching `theme.py`)."""
+        self._selected = selected
+        spec = get_theme(getattr(self, "_theme_name", DEFAULT_THEME))
         if selected:
             self.setStyleSheet(
-                f"QFrame#moduleRow {{ background-color: {COLOR_BG_PARCHMENT_LIGHT}; "
-                f"border-left: 3px solid {COLOR_GOLD_BORDER}; }}"
+                f"QFrame#moduleRow {{ background-color: {spec.bg_hover}; "
+                f"border-left: 3px solid {spec.accent_border}; }}"
             )
         else:
             self.setStyleSheet(
-                f"QFrame#moduleRow {{ background-color: {COLOR_BG_PANEL}; "
+                f"QFrame#moduleRow {{ background-color: {spec.bg_panel}; "
                 f"border-left: 3px solid transparent; }}"
             )
 
@@ -2021,6 +2061,7 @@ class ModulesPanel(QWidget):
         self._open: dict[str, bool] = {}
         self._selected: tuple[str, str] | None = None
         self._actions_enabled = True
+        self._theme_name: str | None = None
         # The shared look (T44 item 6), set on the PANEL so every card and
         # every button inside it inherits it. Nothing here invents a colour --
         # see `panel_style`.
@@ -2091,6 +2132,24 @@ class ModulesPanel(QWidget):
         self._selected = keep if keep in self._rows else None
         for key, widget in self._rows.items():
             widget.set_selected(key == self._selected)
+        active = self._theme_name or resolve_widget_theme(self)
+        if active != DEFAULT_THEME or self._theme_name is not None:
+            self.apply_theme(active)
+
+    def apply_theme(self, theme_name: str | None = None) -> None:
+        """Restyle the panel, its family cards, and its rows for `theme_name`."""
+        resolved = normalize_theme_name(theme_name or resolve_widget_theme(self))
+        self._theme_name = resolved
+        spec = get_theme(resolved)
+        self.setStyleSheet(panel_qss(resolved))
+        self.empty_label.setStyleSheet(f"color: {spec.text_muted};")
+        for card in self._cards.values():
+            card.hint_label.setStyleSheet(f"color: {spec.text_muted}; font-style: italic;")
+            card.installed_header.setStyleSheet(f"color: {spec.text_primary}; font-weight: bold;")
+            if card.toggle is not None:
+                card.toggle.setStyleSheet(f"color: {spec.text_muted}; border: none;")
+        for row_widget in self._rows.values():
+            row_widget.apply_theme(resolved)
 
     def _make(self, data: ModuleRow) -> RowWidget:
         widget = RowWidget(data)

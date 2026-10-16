@@ -977,7 +977,13 @@ class Navigator(QObject):
         if isinstance(app, QApplication):
             popup = app.activePopupWidget()
             if popup is not None:
+                owner = popup.parentWidget()
                 popup.close()
+                # Qt normally restores the popup owner's activation itself.
+                # Some platforms leave no active window after closing a menu,
+                # which also leaves the next bumper action without a tab context.
+                if QApplication.activeWindow() is None and owner is not None:
+                    owner.window().activateWindow()
                 return True
             modal = app.activeModalWidget()
             if modal is not None:

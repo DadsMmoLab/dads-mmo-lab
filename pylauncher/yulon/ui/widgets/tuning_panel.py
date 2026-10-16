@@ -66,6 +66,10 @@ from yulon.ui.theme import (
     COLOR_TEXT_PRIMARY,
     COLOR_TEXT_WARNING,
     COLOR_UNCOMMON,
+    DEFAULT_THEME,
+    get_theme,
+    normalize_theme_name,
+    resolve_widget_theme,
 )
 from yulon.ui.widgets.flow_layout import FlowScroll, flow_bar
 from yulon.ui.widgets.panel_style import panel_qss
@@ -712,7 +716,29 @@ class RowEditor(QWidget):
         self.changed_label.setStyleSheet(f"color: {COLOR_TEXT_WARNING};")
         self.changed_label.setVisible(False)
         box.addWidget(self.changed_label)
+        self._theme_name = DEFAULT_THEME
         self._draw_chips()
+        self._draw_rail()
+
+    def apply_theme(self, theme_name: str | None = None) -> None:
+        """Restyle the row editor's labels and rail for `theme_name`."""
+        self._theme_name = normalize_theme_name(theme_name)
+        spec = get_theme(self._theme_name)
+        self.label.setStyleSheet(f"color: {spec.text_primary}; font-weight: bold;")
+        self.chips.setStyleSheet(f"color: {spec.text_muted};")
+        if self.bounds_label is not None:
+            self.bounds_label.setStyleSheet(f"color: {spec.text_muted};")
+        if getattr(self, "value_label", None) is not None and self.value_label is not None:
+            self.value_label.setStyleSheet(f"color: {spec.text_muted};")
+        if self.key_label is not None:
+            self.key_label.setStyleSheet(f"color: {spec.text_muted};")
+        if self.explain_label is not None:
+            self.explain_label.setStyleSheet(f"color: {spec.text_muted};")
+        if self.note_label is not None:
+            self.note_label.setStyleSheet(f"color: {spec.text_muted}; font-style: italic;")
+        if self.reason_label is not None:
+            self.reason_label.setStyleSheet(f"color: {spec.text_muted};")
+        self.changed_label.setStyleSheet(f"color: {spec.text_warning};")
         self._draw_rail()
 
     def _make_control(self) -> QCheckBox | QSpinBox | QLineEdit | None:
@@ -852,8 +878,9 @@ class RowEditor(QWidget):
         rail every row wears marks nothing, and a value moved and moved back
         is not a change (`changed` asks both questions).
         """
+        spec = get_theme(getattr(self, "_theme_name", DEFAULT_THEME))
         if self.changed:
-            self.setStyleSheet(f"border-left: 2px solid {COLOR_TEXT_WARNING}; padding-left: 6px;")
+            self.setStyleSheet(f"border-left: 2px solid {spec.text_warning}; padding-left: 6px;")
         else:
             self.setStyleSheet("")
 
@@ -973,6 +1000,19 @@ class CardWidget(QGroupBox):
             if button is not None:
                 button.setEnabled(enabled)
 
+    def apply_theme(self, theme_name: str | None = None) -> None:
+        """Restyle the card and its row editors for `theme_name`."""
+        resolved = normalize_theme_name(theme_name)
+        spec = get_theme(resolved)
+        self.title_label.setStyleSheet(f"color: {spec.text_primary}; font-weight: bold;")
+        self.count_label.setStyleSheet(f"color: {spec.text_muted};")
+        self.hint_label.setStyleSheet(f"color: {spec.text_muted}; font-style: italic;")
+        self.files_label.setStyleSheet(f"color: {spec.text_muted};")
+        cheap = self.card.rules in ((), ("restart",))
+        self.rule_label.setStyleSheet(f"color: {spec.uncommon if cheap else spec.text_warning};")
+        for editor in self.editors.values():
+            editor.apply_theme(resolved)
+
 
 class TuningPanel(QWidget):
     """The tab: guided cards on one side, the file itself on the other.
@@ -1009,6 +1049,7 @@ class TuningPanel(QWidget):
         self._narrow: bool | None = None
         """The shape last laid out: `None` until the first resize, so the first
         one -- wide or narrow -- is a change and sets the split up (T190)."""
+        self._theme_name: str | None = None
         self.setStyleSheet(panel_qss())
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -1268,6 +1309,35 @@ class TuningPanel(QWidget):
         for widget in self._cards.values():
             widget.set_rule_lifted(widget.card.rules == lifted)
         self._draw_file_note()
+        active = self._theme_name or resolve_widget_theme(self)
+        if active != DEFAULT_THEME or self._theme_name is not None:
+            self.apply_theme(active)
+
+    def apply_theme(self, theme_name: str | None = None) -> None:
+        """Restyle the tuning panel, cards, file buttons, and editor for `theme_name`."""
+        resolved = normalize_theme_name(theme_name or resolve_widget_theme(self))
+        self._theme_name = resolved
+        spec = get_theme(resolved)
+        self.setStyleSheet(panel_qss(resolved))
+        checked_qss = (
+            f"QPushButton:checked {{ background-color: {spec.bg_hover}; "
+            f"color: {spec.accent_bright}; border-bottom: 2px solid {spec.accent_bright}; }}"
+        )
+        self.side_buttons.setStyleSheet(checked_qss)
+        self.files.setStyleSheet(checked_qss)
+        self.rule_note.setStyleSheet(f"color: {spec.uncommon};")
+        self.empty_label.setStyleSheet(f"color: {spec.text_muted};")
+        self.file_note.setStyleSheet(f"color: {spec.text_muted};")
+        self.shadow_warning.setStyleSheet(f"color: {spec.text_warning};")
+        lines = 4 * self.editor.fontMetrics().lineSpacing()
+        self.editor.setStyleSheet(
+            f"background-color: {spec.bg_panel}; border: 1px solid {spec.accent_border}; "
+            f"color: {spec.text_primary}; min-height: {lines}px;"
+        )
+        self.backup_label.setStyleSheet(f"color: {spec.text_muted};")
+        self._relint()
+        for card_widget in self._cards.values():
+            card_widget.apply_theme(resolved)
 
     def _card_pressed(self, signal: SignalInstance, family: str, module_id: str) -> None:
         """Hand a card's Save or Revert up, naming the card for the redraw it causes."""
@@ -1666,9 +1736,10 @@ class TuningPanel(QWidget):
         # a clean file and an unlinted one looked identical -- and a guard a
         # user cannot tell from a guard that is not running is not reassuring
         # anybody.
+        spec = get_theme(self._theme_name or DEFAULT_THEME)
         self.lint_label.setText(said or LINT_OK)
         self.lint_label.setStyleSheet(
-            f"color: {COLOR_TEXT_WARNING};" if said else f"color: {COLOR_UNCOMMON};"
+            f"color: {spec.text_warning};" if said else f"color: {spec.uncommon};"
         )
 
     # ------------------------------------------------------------ the shape

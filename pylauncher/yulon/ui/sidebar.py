@@ -22,10 +22,13 @@ Three things a plain `QTabBar` gets wrong once its current tab is hidden, and
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import Any
 
 from PySide6.QtCore import QEvent, QObject, QPointF, QSize, Qt, Slot
 from PySide6.QtGui import QBrush, QColor, QIcon, QKeyEvent, QPainter, QPaintEvent, QPen
 from PySide6.QtWidgets import (
+    QHBoxLayout,
+    QMenu,
     QStyle,
     QStyleOptionTab,
     QStylePainter,
@@ -41,9 +44,13 @@ from yulon.ui.theme import (
     COLOR_RARE,
     COLOR_TEXT_MUTED,
     COLOR_UNCOMMON,
+    SERVERS_MENU_BUTTON,
+    SETTINGS_BUTTON,
     SIDEBAR_PIN_BUTTON,
     SIDEBAR_PIN_GAP,
     SIDEBAR_RAIL_WIDTH,
+    TOP_MENU_BAR,
+    TOP_MENU_BUTTON,
 )
 from yulon.ui.widgets.dadcraft_decorations import realm_tone
 
@@ -262,3 +269,199 @@ class SidebarPins(QWidget):
         bar = self._bar.geometry()
         self.setGeometry(bar.x(), 0, max(bar.width(), RAIL_MIN_WIDTH), max(0, bar.y()))
         self.raise_()
+
+
+class TopMenuBar(QWidget):
+    """Centered horizontal top menu bar below the banner: Catalog, Servers, Log, Settings."""
+
+    def __init__(
+        self,
+        tabs: QTabWidget,
+        *,
+        catalog_index: int = 0,
+        logs_index: int = 1,
+        settings_widget: QWidget | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setObjectName(TOP_MENU_BAR)
+        self._tabs = tabs
+        self._catalog_index = catalog_index
+        self._logs_index = logs_index
+        self._settings_widget = settings_widget
+
+        row = QHBoxLayout(self)
+        row.setContentsMargins(2, 0, 2, 0)
+        row.setSpacing(2)
+        row.addStretch(1)
+
+        self.catalog_button = self._make_button("Catalog", TOP_MENU_BUTTON)
+        self.catalog_button.setToolTip("Browse and install server emulators")
+        self.catalog_button.clicked.connect(lambda _c=False: self.show_catalog())
+        row.addWidget(self.catalog_button)
+
+        self.servers_button = self._make_button("Servers", SERVERS_MENU_BUTTON)
+        self.servers_menu = QMenu(self.servers_button)
+        self.servers_menu.setObjectName("servers-dropdown-menu")
+        self.servers_menu.aboutToShow.connect(self._populate_servers_menu)
+        self.servers_button.setMenu(self.servers_menu)
+        self.servers_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        row.addWidget(self.servers_button)
+
+        self.log_button = self._make_button("Log", TOP_MENU_BUTTON)
+        self.log_button.setToolTip(
+            "Yu'lon's own logs, and a file to send when something goes wrong"
+        )
+        self.log_button.clicked.connect(lambda _c=False: self.show_logs())
+        row.addWidget(self.log_button)
+
+        self.settings_button = self._make_button("Settings", SETTINGS_BUTTON)
+        self.settings_button.setToolTip(
+            "Change the color theme, keep Yu'lon in the system tray, and start it at sign-in"
+        )
+        self.settings_button.clicked.connect(lambda _c=False: self.show_settings())
+        row.addWidget(self.settings_button)
+
+        row.addStretch(1)
+
+        self.buttons: dict[int, QToolButton] = {
+            self._catalog_index: self.catalog_button,
+            self._logs_index: self.log_button,
+        }
+        tabs.currentChanged.connect(self._sync)
+        tabs.installEventFilter(self)
+        self.refresh_servers()
+
+    @staticmethod
+    def _make_button(text: str, object_name: str) -> QToolButton:
+        button = QToolButton()
+        button.setObjectName(object_name)
+        button.setText(text)
+        button.setCheckable(True)
+        button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        return button
+
+    def set_settings_widget(self, widget: QWidget) -> None:
+        self._settings_widget = widget
+        self._sync(self._tabs.currentIndex())
+
+    def server_indices(self) -> list[int]:
+        """Tab indices that hold a server `ControllerView`."""
+        indices: list[int] = []
+        for idx in range(self._tabs.count()):
+            if idx in (self._catalog_index, self._logs_index):
+                continue
+            widget = self._tabs.widget(idx)
+            if widget is not None and widget is not self._settings_widget:
+                indices.append(idx)
+        return indices
+
+    def refresh_servers(self) -> None:
+        """Enable or disable the Servers dropdown based on installed servers and sync checks."""
+        indices = self.server_indices()
+        has_servers = bool(indices)
+        self.servers_button.setEnabled(has_servers)
+        self.servers_button.setToolTip(
+            "Choose an installed server"
+            if has_servers
+            else "No servers installed yet — install one from the Catalog"
+        )
+        self._populate_servers_menu()
+        self._sync(self._tabs.currentIndex())
+
+    def _populate_servers_menu(self) -> None:
+        from yulon.ui.tab_titles import controller_tab_titles
+
+        self.servers_menu.clear()
+        indices = self.server_indices()
+        views: list[Any] = [self._tabs.widget(idx) for idx in indices]
+        pairs = [
+            (view.entry.name, view.services.controller.server_dir)
+            for view in views
+            if hasattr(view, "entry") and hasattr(view, "services")
+        ]
+        titles = (
+            controller_tab_titles(pairs)
+            if len(pairs) == len(indices)
+            else [self._tabs.tabText(idx) for idx in indices]
+        )
+        current = self._tabs.currentIndex()
+        for idx, title in zip(indices, titles, strict=False):
+            action = self.servers_menu.addAction(self._tabs.tabIcon(idx), title)
+            action.setCheckable(True)
+            action.setChecked(idx == current)
+            action.triggered.connect(lambda _c=False, i=idx: self._tabs.setCurrentIndex(i))
+
+    def show_catalog(self) -> None:
+        self._tabs.setCurrentIndex(self._catalog_index)
+        self._sync(self._tabs.currentIndex())
+
+    def show_logs(self) -> None:
+        if 0 <= self._logs_index < self._tabs.count():
+            self._tabs.setCurrentIndex(self._logs_index)
+        self._sync(self._tabs.currentIndex())
+
+    def show_settings(self) -> None:
+        if self._settings_widget is not None:
+            idx = self._tabs.indexOf(self._settings_widget)
+            if idx < 0:
+                idx = self._tabs.addTab(self._settings_widget, "Settings")
+                self._tabs.tabBar().setTabVisible(idx, False)
+            self._tabs.setCurrentIndex(idx)
+        self._sync(self._tabs.currentIndex())
+
+    @Slot(int)
+    def _sync(self, current: int) -> None:
+        settings_idx = (
+            self._tabs.indexOf(self._settings_widget) if self._settings_widget is not None else -1
+        )
+        if settings_idx >= 0 and current != settings_idx:
+            # Remove the Settings panel from `tabs` when leaving it so tabs 0..N
+            # stay [Catalog, Logs, *servers] for bumper/Ctrl+Tab ring navigation.
+            self._tabs.blockSignals(True)
+            self._tabs.removeTab(settings_idx)
+            if self._settings_widget is not None:
+                self._settings_widget.setParent(self._tabs.window())
+                self._settings_widget.hide()
+            self._tabs.blockSignals(False)
+            self.buttons.pop(settings_idx, None)
+            settings_idx = -1
+        elif settings_idx >= 0:
+            self.buttons[settings_idx] = self.settings_button
+        is_server = current in self.server_indices()
+        for button, active in (
+            (self.catalog_button, current == self._catalog_index),
+            (self.servers_button, is_server),
+            (self.log_button, current == self._logs_index),
+            (self.settings_button, settings_idx >= 0 and current == settings_idx),
+        ):
+            button.blockSignals(True)
+            button.setChecked(active)
+            button.blockSignals(False)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
+        if (
+            watched is self._tabs
+            and event.type() == QEvent.Type.KeyPress
+            and isinstance(event, QKeyEvent)
+        ):
+            return self._ctrl_tab(event)
+        return False
+
+    def _ctrl_tab(self, event: QKeyEvent) -> bool:
+        if not event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            return False
+        if event.key() == Qt.Key.Key_Backtab or (
+            event.key() == Qt.Key.Key_Tab and event.modifiers() & Qt.KeyboardModifier.ShiftModifier
+        ):
+            step = -1
+        elif event.key() == Qt.Key.Key_Tab:
+            step = 1
+        else:
+            return False
+        count = self._tabs.count()
+        if count < 2:
+            return False
+        self._tabs.setCurrentIndex((self._tabs.currentIndex() + step) % count)
+        event.accept()
+        return True
