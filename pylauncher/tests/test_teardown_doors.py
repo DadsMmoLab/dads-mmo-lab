@@ -325,8 +325,14 @@ EXEMPT: dict[str, tuple[str, set[str] | str, str]] = {
     "_play_client_deleted": ("slot", "play_client_dir_changed:on_play_client_dir_changed", ""),
     "finish_removal": (
         "callers",
-        {"request_removal", "on_stopped_for_removal"},
-        "carries out a removal both callers asked `forget_refusal()` about",
+        {
+            "request_removal",
+            "on_stopped_for_removal",
+            "request_single_removal",
+            "on_single_stopped_for_removal",
+        },
+        "carries out a removal each caller asked `forget_refusal()` (a single-container "
+        "tab: `single_removal_refusal()`) about",
     ),
     "on_uninstalled": (
         "callers",

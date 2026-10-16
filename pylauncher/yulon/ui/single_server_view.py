@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from yulon import gaming_mode, platform, single_launcher, single_network, single_play
+from yulon import gaming_mode, platform, single_launcher, single_network, single_play, teardown
 from yulon.catalog.catalog import SingleEntry
 from yulon.log import get_logger
 from yulon.play_launch import LaunchSpec
@@ -328,6 +328,15 @@ class SingleServerView(QWidget):
         if self._pressing:
             return f"{self.entry.name} is still {self._pressing}."
         return None
+
+    def teardown_work(self, *, quitting: bool = False) -> str | None:
+        """What may not be cut off on this tab, as a `teardown` kind, or None.
+
+        The tab has one kind of work, a press that has not answered. This is the question
+        a server tab's removal asks (`single_removal_refusal()` in main.py), as `ControllerView`
+        answers it.
+        """
+        return teardown.ACTION if self._pressing else None
 
     def shutdown(self) -> None:
         """Stop polling and join this view's jobs before the window is torn down.

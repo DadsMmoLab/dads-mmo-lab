@@ -1607,7 +1607,7 @@ def build_window() -> object:
         view = single_views.get(key)
         if view is None or key in removal_pending:
             return
-        refusal = view.busy_reason()
+        refusal = single_removal_refusal(view)
         if refusal is not None:
             from yulon.ui.message_box import show_information
 
@@ -1656,6 +1656,13 @@ def build_window() -> object:
             )
             if not said_yes(answer):
                 return
+        # Asked again, as `on_stopped_for_removal()` does: a press may have begun in the gap.
+        refusal = single_removal_refusal(view)
+        if refusal is not None:
+            from yulon.ui.message_box import show_information
+
+            show_information(window, forgetting.REFUSED_TITLE, refusal)
+            return
         finish_removal(key)
 
     def add_controller(
@@ -2788,6 +2795,18 @@ def _install_close_guard(window: object) -> object:
     guard = _RefuseCloseWhileBusy(window)  # type: ignore[arg-type]
     window.installEventFilter(guard)  # type: ignore[attr-defined]
     return guard
+
+
+def single_removal_refusal(view: Any) -> str | None:
+    """Why a single-container server may not be removed from Yu'lon right now, or None.
+
+    `ControllerView.forget_refusal()` for a tab that has one kind of work, a press that has
+    not answered; it asks `teardown_work()` like every other door and words the answer as
+    `busy_reason()`.
+    """
+    if view.teardown_work() is None:
+        return None
+    return view.busy_reason()
 
 
 def main() -> int:
