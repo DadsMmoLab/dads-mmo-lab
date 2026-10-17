@@ -525,6 +525,7 @@ class GuardedApplier(Applier):
         expect_head: str | None = None,
         record_move: bool = False,
         replace_addons: bool = False,
+        defer_exists: bool = False,
     ) -> ApplyReport:
         # `folder` and `complete` are the base class's second way to fill an
         # item's folder (from a link or a folder on this computer). Passed
@@ -539,6 +540,8 @@ class GuardedApplier(Applier):
         # its releases is why they exist -- dropped here, the base would
         # re-resolve the release, or reset a checkout that moved after the check.
         # `record_move` (T557) is `update()`'s too, passed through for the same rule.
+        # `defer_exists` (T679) is a move-in's: a Tortoise server packs clone mods, and a
+        # keyword dropped here is a `TypeError` out of the move's module step.
         self._refuse_a_core_module_name(manifest)
         note = self._guard(manifest, "install")
         complete = complete or self._recompleter_for(manifest)
@@ -554,6 +557,7 @@ class GuardedApplier(Applier):
                 expect_head=expect_head,
                 record_move=record_move,
                 replace_addons=replace_addons,
+                defer_exists=defer_exists,
             ),
             note,
         )

@@ -35,7 +35,6 @@ route's two presses and runs only when the module's commit actually changed.
 
 from __future__ import annotations
 
-import contextlib
 import re
 import threading
 import time
@@ -319,32 +318,31 @@ class StopFailed(Exception):
 
 
 def restart_world(controller: Controller) -> None:
-    """Stop, then start: the Server tab's own restart (`_do_restart`), for the module to reload.
+    """Stop, then start (`Controller.restart()`, the Server tab's own), for the module to reload.
 
     The controller already knows which daemon it means, so nothing here names one.
-    Asked first whether a start may run at all (`Controller.refuse_start()`, T197), as
-    `_do_restart` does, so a refused start leaves the running world running.
+    `restart()` reserves the server before it asks anything (T761, T568's rule), asks
+    every start refusal before its stop (T197, T377), and is one lifecycle command from
+    the stop to the start (T216), so a refused start leaves the running world running.
 
     Raises:
         StartRefused: no start may run here; nothing was stopped.
-        StopFailed: the stop raised; nothing was started.
+        StopFailed: the server is held (a job here, or another Yu'lon), or the stop
+            raised; nothing was started.
     """
-    controller.refuse_before_a_stop()  # T377: the database too, before the stop
-    # One lifecycle command from the stop to the start (T216 review round 3), so a
-    # restore cannot take its hold in between and leave the world stopped. A
-    # server already held refuses before the stop: nothing was stopped or
-    # started, which is what `StopFailed` tells the caller.
-    with contextlib.ExitStack() as composite:
-        try:
-            composite.enter_context(
-                docker.lifecycle(
-                    controller.server_dir, spec=controller.spec, wsl_distro=controller.wsl_distro
-                )
-            )
-            controller.stop()
-        except Exception as exc:  # noqa: BLE001 - re-raised, typed: see `StopFailed`
+    halves: list[str] = []
+    try:
+        controller.restart(
+            stopping=lambda: halves.append("stopping"), stopped=lambda: halves.append("stopped")
+        )
+    except Exception as exc:  # noqa: BLE001 - re-raised, typed: see `StopFailed`
+        # The stop raised, or a held server refused before anything was asked: the world
+        # that may still be up is the OLD run (T144). A start refusal and the start's own
+        # failure keep their own types.
+        held = not halves and isinstance(exc, docker.ServerHeldError)
+        if held or halves == ["stopping"]:
             raise StopFailed(str(exc)) from exc
-        controller.start()
+        raise
 
 
 def head_sha(dest: Path, *, wsl_distro: str | None = None) -> str | None:

@@ -132,7 +132,7 @@ def reachable_distro(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         console.platform,
         "wsl_prefix",
-        lambda wsl_distro, inside=None: ("wsl.exe", "-d", wsl_distro, "--"),
+        lambda wsl_distro, inside=None: ("wsl.exe", "-d", wsl_distro, "--exec"),
     )
 
 
@@ -202,6 +202,39 @@ def _distro_send(command: str = "server info", **kwargs: Any) -> tuple[Any, _Fak
     return reply, made[0]
 
 
+# Measured on yulon-win11 (WSL 2.7.12, 2026-10-12) against a distro with no `script`:
+# audits/proofs/security-platform/missing_program_exec_output.txt.
+_NO_SCRIPT_SAID = {
+    "wsl --exec (since T744)": b"<3>WSL (26 - Relay) ERROR: CreateProcessCommon:818: "
+    b"execvpe(script) failed: No such file or directory\n",
+    "ash behind --": b"/bin/sh: script: not found\n",
+    "bash behind --": b"bash: line 1: script: command not found\n",
+}
+
+
+@pytest.mark.parametrize("said", list(_NO_SCRIPT_SAID))
+def test_a_distro_without_script_gets_the_install_help_not_a_server_reply(
+    reachable_distro: None, said: str
+) -> None:
+    """The distro's "no such program" must not reach the console panel as the server's answer.
+
+    Since T744 the attach starts `script` with `wsl --exec`, so wsl.exe itself
+    reports the failed exec; the shell's wording from before is still recognised.
+    Mutation: drop the `execvpe` match in `_says_no_script()`.
+    """
+    with pytest.raises(console.ConsoleError) as caught:
+        _distro_send(stdout=io.BytesIO(_NO_SCRIPT_SAID[said]))
+    assert str(caught.value) == console.NO_SCRIPT_HELP.format(
+        distro="dml-arch", container="ac-worldserver"
+    )
+
+
+def test_a_server_reply_that_names_a_script_is_still_a_reply(reachable_distro: None) -> None:
+    """Only the distro's failure is recognised: a Lua script line from the server passes through."""
+    reply, _proc = _distro_send(stdout=io.BytesIO(b"AC> \r\nLoaded 3 Lua script files\r\n"))
+    assert isinstance(reply, console.ConsoleReply), reply
+
+
 def test_a_wsl_console_allocates_its_pty_inside_the_distro(reachable_distro: None) -> None:
     """Windows has no pty to give docker; the distro does, and script(1) opens it.
 
@@ -213,7 +246,7 @@ def test_a_wsl_console_allocates_its_pty_inside_the_distro(reachable_distro: Non
     ~/.docker/config.json would otherwise change it out from under us.
     """
     _reply, proc = _distro_send()
-    assert proc.argv[1:4] == ["-d", "dml-arch", "--"], proc.argv
+    assert proc.argv[1:4] == ["-d", "dml-arch", "--exec"], proc.argv
     assert proc.argv[4] == "script"
     assert proc.argv[5] == "-qec"
     assert proc.argv[7] == "/dev/null"
@@ -509,7 +542,7 @@ def test_attach_argv_reaches_the_distros_own_docker(monkeypatch: pytest.MonkeyPa
     """The GM console attaches to a container, and it must be the right daemon's."""
     monkeypatch.setattr(console.platform, "_which", lambda name, path=None: "wsl.exe")
     argv = console.attach_argv("ac-worldserver", wsl_distro="dml-arch")
-    assert argv[:5] == ["wsl.exe", "-d", "dml-arch", "--", "docker"]
+    assert argv[:5] == ["wsl.exe", "-d", "dml-arch", "--exec", "docker"]
     assert argv[-1] == "ac-worldserver"
     assert "--sig-proxy=false" in argv
 

@@ -11,6 +11,8 @@ Nothing here touches the network, and nothing runs a process.
 from __future__ import annotations
 
 import hashlib
+import os
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -87,6 +89,7 @@ class _IO:
         self.cancelled = False
         self.urls: list[str] = []
         self.downloaded: list[tuple[str, Path, int]] = []
+        self.download_options: list[tuple[str | None, bool]] = []
         self.verified: list[tuple[Path, str]] = []
         self.staged: list[Path] = []
         self.smoked: list[Path] = []
@@ -121,9 +124,12 @@ class _IO:
         expected_size: int,
         progress: object,
         cancelled: object,
+        digest: str | None = None,
+        keep_existing: bool = False,
     ) -> Path:
         self._step("download")
         self.downloaded.append((url, dest, expected_size))
+        self.download_options.append((digest, keep_existing))
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(b"the new build archive")
         return dest
@@ -284,6 +290,8 @@ def test_the_download_lands_in_its_own_marked_folder_and_not_in_the_staging_one(
     assert dest.parent != layout.work_dir(install, layout.NEW_NAME)
     assert size == SIZE, "the size the RELEASE declares is the bound, not a header"
     assert io.verified == [(dest, DIGEST)]
+    # The digest is checked on the `.part` before the rename too; the folder is Yu'lon's own.
+    assert io.download_options == [(DIGEST, False)]
     assert not layout.work_dir(
         install, layout.DOWNLOAD_NAME
     ).exists(), "the archive was still there when the helper was planned"
@@ -431,6 +439,8 @@ def test_macos_downloads_its_dmg_and_stops_there(tmp_path: Path) -> None:
     assert isinstance(outcome, SavedForManualInstall)
     assert outcome.path == tmp_path / "Downloads" / dmg
     assert io.calls == ["fetch_text", "download", "verify"]
+    # Checked before the rename, and never over a file of the player's (T745).
+    assert io.download_options == [(DIGEST, True)]
 
 
 def test_an_appimage_that_cannot_find_its_own_file_says_so(tmp_path: Path) -> None:
@@ -472,3 +482,178 @@ def test_an_artifact_size_the_feed_made_up_is_refused_before_the_download(
         _apply(io, install, tmp_path, result=offer)
     assert io.calls == []
     _nothing_is_staged(install)
+
+
+# -- download only: the player's own files in Downloads (T745) ---------------
+
+
+class _Body:
+    """The network answer for the REAL `fetch.download`: one body, read in one go."""
+
+    def __init__(self, body: bytes) -> None:
+        self.body = body
+
+    def getheader(self, name: str, default: str | None = None) -> str | None:
+        return str(len(self.body)) if name == "Content-Length" else default
+
+    def read1(self, amount: int) -> bytes:
+        out, self.body = self.body[:amount], self.body[amount:]
+        return out
+
+    def close(self) -> None:
+        return None
+
+
+def _download_only(tmp_path: Path, body: bytes, published: bytes) -> SavedForManualInstall:
+    """macOS, through the real `fetch.download` and `fetch.verify`: only the wire is fake."""
+    from yulon.selfupdate import fetch
+
+    dmg = f"Yulon-{TAG}-macos.dmg"
+    sums = f"{hashlib.sha256(published).hexdigest()}  {dmg}\n"
+    io = ApplyIO(
+        fetch_text=lambda _url: sums,
+        download=lambda url, dest, **kw: fetch.download(
+            url, dest, open_url=lambda _u, _w: _Body(body), **kw
+        ),
+    )
+    downloads = tmp_path / "Downloads"
+    downloads.mkdir(exist_ok=True)
+    offer = UpdateCheck(
+        current="0.8.66-Public",
+        latest=TAG,
+        available=True,
+        url="https://github.com/DadsMmoLab/dads-mmo-lab/releases",
+        assets=(
+            ReleaseAsset(dmg, f"https://example.invalid/{dmg}", len(published)),
+            ReleaseAsset(CHECKSUMS_NAME, "https://example.invalid/sums", 100),
+        ),
+        has_checksums=True,
+    )
+    outcome = apply_update(
+        offer,
+        Install(InstallKind.MACOS_APP, None, "", False),
+        downloads_dir=downloads,
+        pid=4242,
+        progress=lambda _done, _total: None,
+        stage_changed=lambda _s: None,
+        cancelled=lambda: False,
+        io=io,
+    )
+    assert isinstance(outcome, SavedForManualInstall)
+    return outcome
+
+
+def test_a_download_that_fails_its_checksum_leaves_the_players_same_named_file(
+    tmp_path: Path,
+) -> None:
+    """The player fetched this release by hand; a bad download must not overwrite or delete it."""
+    downloads = tmp_path / "Downloads"
+    downloads.mkdir()
+    mine = downloads / f"Yulon-{TAG}-macos.dmg"
+    mine.write_bytes(b"the player's own copy, from the release page")
+    with pytest.raises(UpdateError, match="checksum does not match"):
+        _download_only(tmp_path, b"X" * 64, published=b"Y" * 64)
+    assert mine.read_bytes() == b"the player's own copy, from the release page"
+    assert sorted(p.name for p in downloads.iterdir()) == [mine.name], "rubbish was left"
+
+
+def test_a_good_download_takes_a_free_name_beside_the_players_file(tmp_path: Path) -> None:
+    downloads = tmp_path / "Downloads"
+    downloads.mkdir()
+    mine = downloads / f"Yulon-{TAG}-macos.dmg"
+    mine.write_bytes(b"the player's own copy")
+    (downloads / f"Yulon-{TAG}-macos (1).dmg").write_bytes(b"an older one of theirs")
+    outcome = _download_only(tmp_path, b"Y" * 64, published=b"Y" * 64)
+    assert outcome.path == downloads / f"Yulon-{TAG}-macos (2).dmg"
+    assert outcome.path.read_bytes() == b"Y" * 64
+    assert mine.read_bytes() == b"the player's own copy"
+    assert (downloads / f"Yulon-{TAG}-macos (1).dmg").read_bytes() == b"an older one of theirs"
+
+
+def test_a_good_download_with_the_name_free_takes_the_artifacts_own_name(tmp_path: Path) -> None:
+    outcome = _download_only(tmp_path, b"Y" * 64, published=b"Y" * 64)
+    assert outcome.path == tmp_path / "Downloads" / f"Yulon-{TAG}-macos.dmg"
+    assert sorted(p.name for p in outcome.path.parent.iterdir()) == [outcome.path.name]
+
+
+# ------------------------------------------------- a killed download's hidden part (T765)
+
+OLD_PART = ".Yulon-v0.8.60-Public-macos.dmg.yulon-part"
+
+
+def _aged(path: Path, minutes: int = 60) -> Path:
+    then = time.time() - minutes * 60
+    os.utime(path, (then, then), follow_symlinks=False)
+    return path
+
+
+def test_a_killed_downloads_hidden_part_goes_at_the_next_update(tmp_path: Path) -> None:
+    """A SIGKILL mid-download skips `download()`'s clean-up and leaves `.<name>.yulon-part`
+    in the player's Downloads; the next update, of whatever version, takes it away."""
+    downloads = tmp_path / "Downloads"
+    downloads.mkdir()
+    part = downloads / OLD_PART
+    part.write_bytes(b"half of an older release")
+    _aged(part)
+    outcome = _download_only(tmp_path, b"Y" * 64, published=b"Y" * 64)
+    assert sorted(p.name for p in downloads.iterdir()) == [outcome.path.name]
+
+
+def test_a_failed_update_still_takes_the_killed_downloads_part_away(tmp_path: Path) -> None:
+    downloads = tmp_path / "Downloads"
+    downloads.mkdir()
+    part = downloads / OLD_PART
+    part.write_bytes(b"half of an older release")
+    _aged(part)
+    with pytest.raises(UpdateError, match="checksum does not match"):
+        _download_only(tmp_path, b"X" * 64, published=b"Y" * 64)
+    assert not os.path.lexists(part)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "Yulon-v0.8.60-Public-macos.dmg.yulon-part",  # not hidden: not the name Yu'lon writes
+        ".Yulon-v0.8.60-Public-macos.dmg.part",  # a browser's, not Yu'lon's
+        ".Yulon-v0.8.60-Public-macos.dmg.yulon-partial",  # another suffix
+    ],
+)
+def test_the_players_own_files_are_never_swept(tmp_path: Path, name: str) -> None:
+    downloads = tmp_path / "Downloads"
+    downloads.mkdir()
+    theirs = downloads / name
+    theirs.write_bytes(b"the player's")
+    _aged(theirs)
+    _download_only(tmp_path, b"Y" * 64, published=b"Y" * 64)
+    assert theirs.read_bytes() == b"the player's"
+
+
+def test_a_part_written_in_the_last_minutes_is_left_for_the_yulon_writing_it(
+    tmp_path: Path,
+) -> None:
+    downloads = tmp_path / "Downloads"
+    downloads.mkdir()
+    live = downloads / OLD_PART
+    live.write_bytes(b"another Yu'lon is still downloading this")
+    _download_only(tmp_path, b"Y" * 64, published=b"Y" * 64)
+    assert live.read_bytes() == b"another Yu'lon is still downloading this"
+
+
+def test_a_link_or_folder_wearing_the_part_name_is_never_swept(tmp_path: Path) -> None:
+    downloads = tmp_path / "Downloads"
+    downloads.mkdir()
+    target = tmp_path / "elsewhere.dmg"
+    target.write_bytes(b"the player's")
+    link = downloads / OLD_PART
+    try:
+        link.symlink_to(target)
+    except OSError:
+        pytest.skip("this system cannot make a symbolic link")
+    _aged(link)
+    folder = downloads / ".Yulon-v0.8.61-Public-macos.dmg.yulon-part"
+    folder.mkdir()
+    (folder / "inside").write_bytes(b"x")
+    _aged(folder)
+    _download_only(tmp_path, b"Y" * 64, published=b"Y" * 64)
+    assert link.is_symlink() and target.read_bytes() == b"the player's"
+    assert (folder / "inside").read_bytes() == b"x"

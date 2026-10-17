@@ -14,6 +14,15 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ## Unreleased
 
 ### New
+
+### Fixed
+
+### Changed
+
+## v0.9.18-Public — 2026-10-17
+
+### New
+- Pick Yu'lon's look under **Settings…** with the new **Color theme** choice.
 - Install a Dragon's Dogma Online (DDON) server from the Catalog's new **Other games** row; play with your own client.
 - A DDON server's tab has Start, Stop, **Who can connect**, **Play**, **Add to DDON-Launcher** and the live log.
 - **Use existing…** on the DDON tile picks up a DDON server Yu'lon installed before, without reinstalling it.
@@ -21,11 +30,146 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A DFO server's tab starts it for your account from your own US 2.38.3.25 client, and **Play** opens that client on it.
 - On a Steam Deck, **Add to Steam Deck (Gaming Mode)…** on a DDON or DFO tab adds Server, game and Stop shortcuts.
 - On a Steam Deck, **Add to Steam…** on a WoW tab adds a Server tile that stops itself when you quit, and a Stop tile.
+- The Maintenance tab lists the backups an earlier uninstall kept, so a reinstall can restore them.
+- A WotLK server inside WSL can have its accounts and characters packed for a move, with a script in the WoW guides.
+- New WoW WotLK and Unbound servers get a database password of their own; older servers keep theirs.
+- **Server build ▾** on the Modules tab has **Put the folders back…**, which puts the source folders back on their build.
+- Yu'lon puts My Party's bridge scripts into the server when the Lua engine is installed or the server is rebuilt.
+- **Set up My Party** on the My Party tab puts the bridge scripts into the server when they are missing.
 
 ### Fixed
+- The top menu no longer jumps sideways when you open a server's page.
 - **Add to Steam…** on a Steam Deck with two Steam accounts uses the one signed in last, instead of refusing.
+- **Check for updates** says why git could not answer for a module, instead of only that it did not.
+- **Remove** on City Bots now takes back its roster and bot account marks.
+- A server whose database password cannot be found now greys the accounts, backup and module buttons and says why.
+- A finished update no longer leaves **Rebuild** refused over files a failed **Put the folders back…** left.
+- A failed update that leaves its patch out names **Put the folders back…** under **Server build ▾** on the Modules tab.
+- **Start** on a WSL server now waits for Docker to come up even when Windows already lists the distro as running.
+- The first **Start** on a WSL server whose distro is stopped now waits for the distro to boot instead of failing.
+- Installing or updating a module again on a server inside WSL no longer fails when Git for Windows is installed.
+- **Find in WSL…** no longer labels a running server stopped because its one-time setup containers have finished.
+- **Return to the tested pin…** no longer refuses a move forward because upstream removed or changed older SQL files.
+- A Tortoise update no longer runs a database migration again because upstream changed it; it stops and names the file.
+- A Rebuild that waits for Repair no longer says the server comes back up, and counts only the steps it runs.
+- An update put back and left stopped no longer blames world tables or says the old build starts on its databases.
+- The Rebuild question before a Repair no longer promises that a build you may not have stays as it is.
+- A Lua script installed before ALE's first rebuild now says to rebuild first, also after Yu'lon restarts.
+- Individual Progression now turns on character settings and its item stats, and Remove puts the old values back.
+- Removing Level One Mounts now puts mount and riding prices back as they were, not at ten times the stock price.
+- A Rebuild that waits for Repair now says it keeps the database container and that a failed build goes back stopped.
+- A Rebuild with no build to keep now warns that a compile you stop may still finish and become the new build.
+- Removing a module now names the accounts, characters and tables its SQL left in the databases.
+- Removing a module now names its own uninstall SQL and what it would delete, without running it.
+- A module added from a link or folder now reports the SQL the server applies, and says which SQL nothing applies.
+- **Repair the database…** on a WotLK server inside WSL now finishes and starts it, instead of failing after its import.
+- A failed first install now says to press Install again or **Use existing…**, not to use a tab it does not have yet.
+- Start on a Centurion server inside WSL with an unfinished world update now names **Finish the world update**.
+- Move files Yu'lon writes can be read by you alone, and a pack's leftover copy can be deleted from Backups.
+- The Console tab now refuses a shutdown command typed with a leading ! as it does one with a dot.
+- An update saved to your Downloads folder never replaces or deletes a file of yours with the same name.
+- **Back up now** is refused while a restore that did not finish may have left the databases half-written.
+- **Create** on a name that already exists is refused, not silently raising its GM level and dropping your password.
+- On a server in WSL, module data files now copy, My Party reads the Lua engine, and the Tortoise update check works.
+- A server build now waits for Docker and tries once more when Docker stops answering during it.
+- Rebuilding a WotLK server from an older Yu'lon no longer sends its whole source to Docker again for the login server.
+- The command channel now proves itself once the world is up, and **Turn on the command channel** gives its tries back.
+- **Bring from another computer…** is pressable again on a game's tile right after **Remove from Yu'lon**.
+- A restore still loading after "Quit anyway" now blocks starts, module and account writes, Back up now and moves, with its own message.
+- Moving accounts or a whole server while a restore is still loading, Yu'lon's own included, now says to wait for it, not to restore again.
+- A press refused during **Bring from another computer…** now names it instead of an accounts and characters move.
+- Installing the Lua engine (ALE) on a WotLK server from an older Yu'lon no longer breaks its build with a compile error.
+- A genuine Vanilla 1.12.1 client is no longer warned about as a repack.
+- A module install into a folder Yu'lon cannot write now names the folder and says what to do.
+- On Windows, Uninstall of a server folder that is a junction is refused before it empties the folder it points to.
+- Uninstall of a server folder that is a link now says so before it removes anything, instead of after the Docker side is gone.
+- Uninstall of a junction server folder no longer writes into the folder it points to, nor blames a read-only file.
+- The built-in account lock no longer writes to a TBC or Vanilla database while a restore is loading it.
+- The built-in accounts get locked when the database comes up after Yu'lon opened, however long it takes.
+- On a Mac, clicking Yu'lon in the Dock brings its window back when it was closed into the menu bar.
+- On Windows, deleting a folder no longer clears read-only flags or removes folders behind a junction inside it.
+- The update check no longer offers an older build as the newest once a version has a tenth patch release.
+- Uninstall now moves your database backups to a folder beside the server folder and says where, instead of deleting them.
+- Bringing in a server with Auction House Bot from another computer no longer stops on a missing character.
+- TBC and Vanilla servers no longer keep built-in admin accounts that anyone on your network could log in to.
+- Closing, updating or changing the client folder waits for a running restore, backup or install; Quit asks first.
+- **Play** at another computer's address skips the local server; your own public address counts as another computer.
+- **Play** after starting the server now waits for the realm to come up before it starts the game.
+- Closing, quitting, updating or changing the client folder is refused while a restore, backup or install is running.
+- On Windows, **Quit anyway** now ends Yu'lon at once instead of leaving it running unseen for up to a minute.
+- **PLAY** at another computer's address skips the local server; your own public address counts as another computer.
+- **PLAY** after starting the server now waits for the realm to come up before it starts the game.
+- Install now asks before it starts or installs Docker Engine as root, and never installs a second engine over yours.
+- A full drive is now said right after you pick the server folder, and a wrong move file before any folder is asked.
+- The Accounts tab only creates names and passwords that Delete, Set password and GM level can use afterwards.
+- Start finds a port taken by another server's database or by a program before anything starts, and names it.
+- **Rebuild** now applies the database updates of a module you just installed, such as City Bots, so the world starts.
+- After an update or rebuild that stopped part-way, **Start** is refused or allowed for a reason that is still true.
+- **Update the server to latest** no longer runs the SQL of a module Yu'lon applies itself, such as ARAC, a second time.
+- A **Rebuild** whose database updates fail puts your databases back as they were and names the update that failed.
+- A server list that an older copy of Yu'lon emptied comes back the next time you open this version.
+- **Update now** checks that the new version's window really opens before it installs it, as it was meant to.
+- A module that breaks a rebuild before it ever built now tells you to press **Remove**, not that it was kept as it was.
+- A message of the day or XP-rate text with a backslash in it no longer stops the install, and is written as typed.
+- A typed answer with a line break in it is refused instead of writing a second setting into the server's file.
+- **Azeroth Chatter** loads its holiday, season and month words again.
+- **AH Bot Plus** installed after **AH Bot** starts from its own settings; reinstalling one module keeps yours.
+- **Apply module SQL** no longer says "nothing to apply" for ten modules whose SQL the server does apply.
+- A module change that no longer fits the module's file is reported, instead of being listed as already applied.
+- Removing **Battle Pass** no longer deletes your own Lua libraries from the lua_scripts folder.
+- A Lua script module that would replace one of your own files sets yours aside, and **Remove** puts it back.
+- Updating a Lua script module takes away the files its new version dropped, so they no longer load.
+- The **Battle Pass** vendor can now be spawned in the world, and removing Battle Pass takes it away.
+- Removing or updating a Lua script module keeps any of its files you changed, and says which.
+- A Lua script module that would replace another module's file is refused, naming that module.
+- A ready-to-play WotLK or Unbound client whose realmlist sat beside Wow.exe now logs in to your server, not an old one.
+- **Play** in a client unpacked with lower-case folder names keeps your game settings instead of starting a new file.
+- While a restore runs, Modules installs and other database changes wait for it instead of writing into it.
+- Start, Update and Rebuild refuse a server whose restore did not finish, and say how to finish or undo it.
+- Restore refuses a backup that would overwrite MySQL's own accounts and passwords.
+- A backup or restore that worked is no longer reported as failed when the database cannot be stopped afterwards.
+- Uninstall can be pressed again after a folder that could not be fully deleted, and then finishes the job.
+- A server brought in from another computer can be used with Use existing and is not installed again.
+- Reinstalling after an uninstall that removed the characters sets up the command channel fresh, without Repair.
+- The Console tab no longer shows a typed account password, whether the command is shortened, capitalised or dotted.
+- A support file now also takes out the password of a shortened or quoted account command.
+- On Linux and macOS your database backups can now be read by you alone.
+- The Bots tab name filter no longer fails on a name typed with a backslash.
+- **Start** on a WotLK or Unbound server whose build is gone from Docker now says so before anything starts.
+- A WotLK or Unbound database import that fails part-way no longer counts as finished; **Repair** clears and redoes it.
+- A restore that carried on in Docker after Quit anyway no longer reads as unfinished once it ended cleanly.
+- The tray's Stop and Restart are refused while that server runs another job; Stop asks first over a loading restore.
+- A failed Rebuild or update that puts the databases back keeps the record of an unfinished database import.
+- Stop the other server and start this one no longer stops a database a restore is still loading.
+- Uninstall is refused while a restore is running or did not finish, so a reinstall never starts on half-written data.
+- Rebuild and update no longer start a server whose database import never finished; it stays stopped for **Repair**.
+- The bots' restart on a Tortoise server no longer touches its database while another Yu'lon is working on it.
+- Update and Return put a folder left off its build back on it, and the Lua scripts note no longer blocks them then.
+- Rebuild refuses a source folder left off its build, and calls a folder an older pin only when git shows it is one.
+- A stopped rebuild's note that cannot be read now refuses Start until **Rebuild the server…** checks the image tags.
+- A cut-short backup of your own database whose name starts with move_ is no longer listed as a move leftover.
+- A move package's leftover that Yu'lon could not read for a moment is still named as one in the Backups list.
+- A download of an update that was stopped by force no longer leaves a hidden file in Downloads after the next update.
+- Stop, Restart or Quit during a WotLK or Unbound database import now records it, so Start offers **Repair** instead.
+- A TBC, Vanilla, Tortoise or Centurion install that did not finish installing no longer starts on a half-imported world.
+- A leftover database copy from a move keeps its name when its first lines cannot be read for a moment.
+- City Bots' install and database updates are refused, naming the accounts, when a real account uses a bot's account number.
+- Check for module updates works on a PC without Git installed.
+- A full disk or crash while turning the command channel on or off no longer cuts off your settings or their backup.
+- A power cut while Yu'lon saves a server setting no longer leaves that settings file empty.
+- Opening a DDON or DFO server's tab no longer fails with an error since 0.9.17.
 
 ### Changed
+- New WotLK and Unbound servers build the newest AzerothCore and Playerbots, from 16 October.
+- Tortoise servers build the newest TortoiseBots (v1.2.1) on the Tortoise core's main branch.
+- The added-bot note on the My Party tab says how many bots each character can add instead of reading like an error.
+- On an older WotLK install, the first Rebuild sends the whole server to Docker once (about 5 GB); later ones are quick.
+- The Server tab's **Play** now starts the game; **Launcher…** opens the launcher. The tray's **Play** offers to start a stopped server.
+- The tray's menu and panel offer the same **Start**, **Stop**, **Restart** and **Play**; **Quit tray…** is **Quit Yu'lon…**.
+- **Battle Pass** no longer asks for its vendor's creature entry: the vendor it creates is always the one it uses.
+- A new version is offered only after its tests pass, and the Windows and Mac builds are now tested on their own systems.
+- Install and error messages say "Docker" and "world server" in plain words, and the first install line is shorter.
+- A new WotLK or Unbound server starts with its command channel on, so the app can prove it without a button press.
 
 ## v0.9.16-Public — 2026-10-10
 

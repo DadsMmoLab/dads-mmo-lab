@@ -29,6 +29,7 @@ from tests.conftest import (
     HANG_BOUND_MS,
     process_events,
     pump_until,
+    pump_until_every_job_has_answered,
     three_way_only,
     wait_for_panel,
 )
@@ -468,6 +469,34 @@ def test_console_tab_sends_commands(qapp: object, ps: _Ps, tmp_path: Path) -> No
     view.send_console_command()
     assert sent == ["server info"]
     assert "> server info" in view.console_log.text() and "ok" in view.console_log.text()
+
+
+@pytest.mark.parametrize(
+    "typed",
+    [
+        "account create dad Zq7s3cretWv",
+        ".account create dad Zq7s3cretWv",
+        "Account create dad Zq7s3cretWv",
+        "acc create dad Zq7s3cretWv",
+        "account set password dad Zq7s3cretWv Zq7s3cretWv",
+        "account set pass dad Zq7s3cretWv Zq7s3cretWv",
+        "account password old Zq7s3cretWv Zq7s3cretWv",
+    ],
+)
+def test_the_console_echo_hides_a_password_in_any_spelling_of_an_account_command(
+    qapp: object, ps: _Ps, tmp_path: Path, typed: str
+) -> None:
+    """The panel echoes each command as `> ...`, and a screenshot of it goes to
+    support. The cores take any prefix of each word, any case and a leading dot,
+    so only the exact `account create` prefix being hidden left the rest in clear
+    (T683 S4). The command itself still goes to the server unchanged."""
+    sent: list[str] = []
+    view = ControllerView(WOTLK, _services(ps, tmp_path, sent), status_poll_ms=0)
+    view.command_edit.setText(typed)
+    view.send_console_command()
+    assert sent == [typed]
+    assert "Zq7s3cretWv" not in view.console_log.text()
+    assert "> " in view.console_log.text()
 
 
 @pytest.mark.parametrize(
@@ -2028,8 +2057,10 @@ def test_the_importers_last_words_go_under_details_and_yulons_sentence_stays_on_
     )
     with pytest.raises(docker.DockerCommandError) as raised:
         docker.apply_module_sql(SPEC, tmp_path)
-    monkeypatch.undo()
-    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    monkeypatch.undo()  # `_inline_jobs` with it: the view is given `run_inline` again (T771)
+    view = ControllerView(
+        WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, job_runner=run_inline
+    )
     view.module_report.setPlainText("ac-db-import: applying mod-aoe-loot…")
     failures: list[str] = []
     view.action_failed.connect(failures.append)
@@ -2061,15 +2092,18 @@ def test_a_repair_whose_import_died_says_so_with_its_last_words_under_details(
     )
     with pytest.raises(docker.DockerCommandError) as raised:
         docker.repair_import(SPEC, tmp_path, _probe(UNIMPORTED))
-    monkeypatch.undo()
-    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    monkeypatch.undo()  # `_inline_jobs` with it: the view is given `run_inline` again (T771)
+    view = ControllerView(
+        WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, job_runner=run_inline
+    )
     failures: list[str] = []
     view.action_failed.connect(failures.append)
 
     view._repair_failed(raised.value)
 
     said = view.danger_label.text()
-    assert "still read as absent" in said, said
+    # T678: an importer that exited 1 is said as that, before any probe reading.
+    assert "failed (exit 1)" in said and "unfinished" in said, said
     assert "ERROR 1698" not in said, "the import's own words are on the line"
     assert "ERROR 1698" in view.danger_details.text()
     assert failures and "ERROR 1698" in failures[0], "the log lost them"
@@ -2101,14 +2135,17 @@ def test_a_repair_that_did_not_finish_says_so_in_words_and_puts_the_command_unde
     from tests.support_player_text import command_faults
     from tests.test_docker import SPEC, UNIMPORTED, _probe, _repair_doubles
 
+    # Exit 0: the post-check's sentences (T678 fails a non-zero exit before the probe).
     _repair_doubles(
-        monkeypatch, [], running={SPEC.db}, import_exit=1, import_output=lambda: ("ERROR 1698",)
+        monkeypatch, [], running={SPEC.db}, import_exit=0, import_output=lambda: ("ERROR 1698",)
     )
     probe = _probe(UNIMPORTED) if after is None else _probe(UNIMPORTED, after)
     with pytest.raises(docker.DockerCommandError) as raised:
         docker.repair_import(SPEC, tmp_path, probe)
-    monkeypatch.undo()
-    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    monkeypatch.undo()  # `_inline_jobs` with it: the view is given `run_inline` again (T771)
+    view = ControllerView(
+        WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, job_runner=run_inline
+    )
 
     view._repair_failed(raised.value)
 
@@ -2132,8 +2169,10 @@ def test_a_repair_whose_database_never_came_up_names_no_command_on_the_line(
     _repair_doubles(monkeypatch, [], running=set(), health="starting")
     with pytest.raises(docker.DockerCommandError) as raised:
         docker.repair_import(SPEC, tmp_path, _probe(UNIMPORTED), db_timeout=0)
-    monkeypatch.undo()
-    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    monkeypatch.undo()  # `_inline_jobs` with it: the view is given `run_inline` again (T771)
+    view = ControllerView(
+        WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, job_runner=run_inline
+    )
 
     view._repair_failed(raised.value)
 
@@ -2203,8 +2242,10 @@ def test_a_stop_docker_would_not_do_says_so_in_words_with_dockers_words_below(
     monkeypatch.setattr(docker, "_docker", refused)
     with pytest.raises(docker.DockerCommandError) as raised:
         docker._run_docker_stop("ac-worldserver")
-    monkeypatch.undo()
-    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    monkeypatch.undo()  # `_inline_jobs` with it: the view is given `run_inline` again (T771)
+    view = ControllerView(
+        WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, job_runner=run_inline
+    )
 
     view._stop_failed(raised.value)
 
@@ -2249,8 +2290,10 @@ def test_a_start_whose_containers_did_not_stay_up_puts_the_log_command_under_det
     monkeypatch.setattr(docker, "_status_safe", lambda **_k: [SPEC.db, SPEC.auth])
     with pytest.raises(docker.DockerRefusal) as raised:
         docker.start_staged(SPEC, tmp_path)
-    monkeypatch.undo()
-    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    monkeypatch.undo()  # `_inline_jobs` with it: the view is given `run_inline` again (T771)
+    view = ControllerView(
+        WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, job_runner=run_inline
+    )
     failures: list[str] = []
     view.action_failed.connect(failures.append)
 
@@ -4048,7 +4091,7 @@ def test_the_maintenance_tab_asks_the_distro_s_docker_what_is_running(
 
     def fake_prefix(wsl_distro: str | None = None, *, inside: str | None = None) -> tuple[str, ...]:
         asked.append(wsl_distro)
-        return ("wsl.exe", "-d", str(wsl_distro), "--", "docker")
+        return ("wsl.exe", "-d", str(wsl_distro), "--exec", "docker")
 
     monkeypatch.setattr(docker.platform, "docker_prefix", fake_prefix)
     monkeypatch.setattr(
@@ -4313,6 +4356,21 @@ def test_for_wotlk_defaults_to_no_distro(qapp: object, tmp_path: Path) -> None:
     assert ControllerServices.for_wotlk(entry, tmp_path).controller.wsl_distro is None
 
 
+def _with_its_password(entry: CatalogEntry, folder: Path) -> Path:
+    """`folder` as an install of `entry` leaves it: the password file a generated plan names.
+
+    T785: a folder without one is an install whose database password nobody can know, and the
+    tab refuses that instead of trying `password`; the tests here that mean an ordinary
+    install say so.
+    """
+    folder.mkdir(parents=True, exist_ok=True)
+    if entry.install.password.file:
+        (folder / entry.install.password.file).write_text(
+            "test-password-1a2b3c\n", encoding="utf-8"
+        )
+    return folder
+
+
 def test_a_cmangos_install_s_account_path_addresses_its_own_schema(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -4333,7 +4391,7 @@ def test_a_cmangos_install_s_account_path_addresses_its_own_schema(
         return subprocess.CompletedProcess(argv, 0, "" if len(seen) == 1 else "1", "")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
-    services = ControllerServices.for_wotlk(tortoise, tmp_path, None)
+    services = ControllerServices.for_wotlk(tortoise, _with_its_password(tortoise, tmp_path), None)
     services.create_account("bob", "hunter2", 0)
 
     assert seen, "nothing was sent to mysql at all"
@@ -4364,7 +4422,9 @@ def test_a_cmangos_backup_reaches_that_game_s_own_maintenance_binding(
     )
 
     with pytest.raises(MaintenanceError) as err:
-        ControllerServices.for_entry(tortoise, tmp_path, None).backup()
+        ControllerServices.for_entry(
+            tortoise, _with_its_password(tortoise, tmp_path), None
+        ).backup()
 
     assert "tortoise-db" in str(err.value), str(err.value)
     assert "ac-database" not in str(err.value), "the backup censused AzerothCore's containers"
@@ -4453,7 +4513,9 @@ def test_a_tortoise_account_is_created_with_that_core_s_own_scheme(
         return AccountResult(username="BOB", account_id=1, created=True, gm_level=0)
 
     monkeypatch.setattr(tortoise_accounts, "_create_account", fake_create)
-    ControllerServices.for_entry(tortoise, tmp_path, None).create_account("bob", "pw", 0)
+    ControllerServices.for_entry(
+        tortoise, _with_its_password(tortoise, tmp_path), None
+    ).create_account("bob", "pw", 0)
     assert seen.get("scheme") == "mangos_sha", seen
 
 
@@ -4549,14 +4611,17 @@ def test_for_wotlk_takes_its_import_gate_from_install_wiring(
     def reset_sentinel() -> tuple[str, ...]:
         return ()
 
-    def fake_gate(entry: CatalogEntry, *, wsl_distro: str | None = None) -> tuple[object, object]:
-        gate_calls.append((entry.id, wsl_distro))
+    def fake_gate(
+        entry: CatalogEntry, *, server_dir: Path | None = None, wsl_distro: str | None = None
+    ) -> tuple[object, object]:
+        gate_calls.append((entry.id, server_dir, wsl_distro))
         return probe_sentinel, reset_sentinel
 
     monkeypatch.setattr(controller_view_module.install_wiring, "import_gate_for", fake_gate)
 
     services = ControllerServices.for_wotlk(WOTLK, tmp_path, None, "dml-arch")
-    assert gate_calls == [(WOTLK.id, "dml-arch")], gate_calls
+    # The folder travels too (T748): the probe asks with that folder's own password.
+    assert gate_calls == [(WOTLK.id, tmp_path, "dml-arch")], gate_calls
     assert services.controller.import_probe is probe_sentinel
     assert services.controller.reset_unfinished is reset_sentinel
 
@@ -4636,6 +4701,193 @@ def test_a_password_file_that_cannot_be_read_still_opens_the_tab_and_says_why(
         tortoise.id in message and str(tortoise.install.password.file) in message
         for message in said
     ), said
+
+
+# ------------------------- T785: a database password nobody can know is a refusal, not `password`
+
+
+def _wotlk_install_made_after_t748(
+    tmp_path: Path, *, file: str | None = None, env: str | None = None
+) -> Path:
+    """A NEW WotLK folder: its record says "generated", plus whichever copies of the secret."""
+    from tests.test_wotlk_generated_password import a_record
+
+    server = tmp_path / "wotlk-new"
+    a_record(server, generated=True)
+    if file is not None:
+        (server / ".db_password").write_text(file + "\n", encoding="utf-8")
+    if env is not None:
+        (server / ".env").write_text(f"DB_ROOT_PASSWORD={env}\n", encoding="utf-8")
+    return server
+
+
+class _SeenPasswords:
+    """Every root password a `DockerSql`/`DockerMysql` is built with, and every MYSQL_PWD sent."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.built: list[object] = []
+        self.sent: list[str] = []
+        real_sql = controller_view_module.DockerSql
+        real_mysql = controller_view_module.wotlk_maintenance.DockerMysql
+
+        def sql(container: str, password: object, **kwargs: object) -> DockerSql:
+            self.built.append(password)
+            return real_sql(container, password, **kwargs)  # type: ignore[arg-type]
+
+        def mysql(container: str, password: object, **kwargs: object) -> DockerMysql:
+            self.built.append(password)
+            return real_mysql(container, password, **kwargs)  # type: ignore[arg-type]
+
+        def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            env = kwargs.get("env")
+            if isinstance(env, dict) and "MYSQL_PWD" in env:
+                self.sent.append(env["MYSQL_PWD"])
+            return subprocess.CompletedProcess(argv, 0, "" if len(self.sent) < 2 else "1", "")
+
+        monkeypatch.setattr(controller_view_module, "DockerSql", sql)
+        monkeypatch.setattr(controller_view_module.wotlk_maintenance, "DockerMysql", mysql)
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+    def literal_default_was_built(self) -> bool:
+        return "password" in [p for p in self.built if isinstance(p, str)]
+
+
+def test_a_new_server_whose_password_is_unknowable_opens_with_its_database_controls_off(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T785: no `.db_password` and no `.env` line. Start and Stop stay, the database controls
+    are greyed saying why, and nothing ever logs in with the published `password`."""
+    from yulon.ui.widgets.reasons import reason_of
+
+    server = _wotlk_install_made_after_t748(tmp_path)
+    seen = _SeenPasswords(monkeypatch)
+    services = ControllerServices.for_entry(WOTLK, server)
+    refusal = services.db_refusal
+    assert refusal is not None and ".db_password" in refusal, refusal
+
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    ps.names = ""
+    view.refresh_status()
+
+    assert view.start_button.isEnabled(), "Start needs no database"
+    for press in (
+        view.create_account_button,
+        view.backup_button,
+        view.restore_button,
+        view.module_sql_button,
+    ):
+        assert not press.isEnabled(), press.text()
+    assert reason_of(view.create_account_button) == refusal
+    assert reason_of(view.backup_button) == refusal
+    assert refusal in view.restore_reasons.text()
+    assert refusal in view.account_reasons.text()
+    # The module rows stay: a module of files and conf keys needs no database. A module that
+    # runs SQL as root is refused at its press (next test).
+    assert view._module_actions_allowed()
+    assert view._module_needs_the_database(modules.store().load("module", "mod-arac"))
+    assert not view._module_needs_the_database(modules.store().load("module", "mod-aoe-loot"))
+    assert not seen.literal_default_was_built(), seen.built
+    assert seen.sent == [], "something reached mysql"
+
+
+def test_a_press_that_gets_past_the_greyed_database_controls_shows_the_refusal_and_runs_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same controls reached another way (a menu, a shortcut, a re-enable): each says the
+    refusal where its result goes. Module apply (install) does not run."""
+    server = _wotlk_install_made_after_t748(tmp_path)
+    seen = _SeenPasswords(monkeypatch)
+    services = ControllerServices.for_entry(WOTLK, server)
+    refusal = services.db_refusal
+    assert refusal is not None
+    ran: list[str] = []
+    monkeypatch.setattr(Applier, "install", lambda self, *a, **k: ran.append("install"))
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    view.account_name.setText("bob")
+    view.account_password.setText("hunter2hunter2")
+    view.create_account()
+    assert refusal in view.account_report.text()
+
+    view.back_up()
+    assert refusal in view.maintenance_report.toPlainText()
+
+    view.module_report.setPlainText("")
+    _select_module(view, "mod-arac")
+    view._module_action("install")
+    assert refusal in view.module_report.toPlainText()
+    assert ran == [], "the module apply ran"
+
+    view.module_report.setPlainText("")
+    view.apply_module_sql()
+    assert refusal in view.module_report.toPlainText()
+
+    assert not seen.literal_default_was_built(), seen.built
+    assert seen.sent == [], "something reached mysql"
+
+
+def test_the_seams_of_an_unknowable_password_refuse_with_its_words_and_never_log_in(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yulon.catalog.catalog import DbPasswordUnknown
+    from yulon.controller_wow_wotlk.maintenance import MaintenanceError
+
+    server = _wotlk_install_made_after_t748(tmp_path)
+    seen = _SeenPasswords(monkeypatch)
+    services = ControllerServices.for_entry(WOTLK, server)
+
+    with pytest.raises(DbPasswordUnknown):
+        services.create_account("bob", "hunter2hunter2", 0)
+    with pytest.raises(MaintenanceError, match=".db_password"):
+        services.backup()
+    for built in seen.built:
+        assert callable(built), "a literal password was handed to a database seam"
+        # The tab's seams raise the catalog's refusal; the import probe's says it as its own.
+        with pytest.raises(
+            (DbPasswordUnknown, controller_view_module.install_wiring._PasswordUnknown)
+        ):
+            built()
+    assert seen.sent == []
+
+
+def test_a_new_server_whose_env_holds_the_password_keeps_every_database_control(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T785: `.db_password` gone but `.env` holds the line `generate-compose` wrote: the value is
+    used, and the controls are as they always were."""
+    server = _wotlk_install_made_after_t748(tmp_path, env="wotlk-from-the-env-file")
+    seen = _SeenPasswords(monkeypatch)
+    services = ControllerServices.for_entry(WOTLK, server)
+    assert services.db_refusal is None
+
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    ps.names = ""
+    view.refresh_status()
+    for press in (view.create_account_button, view.backup_button, view.module_sql_button):
+        assert press.isEnabled(), press.text()
+    assert view._module_actions_allowed()
+
+    services.create_account("bob", "hunter2hunter2", 0)
+    assert seen.sent and set(seen.sent) == {"wotlk-from-the-env-file"}, seen.sent
+    assert not seen.literal_default_was_built(), seen.built
+
+
+def test_an_old_server_with_no_password_file_keeps_the_published_password(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T785, unchanged: a folder whose record predates generated passwords keeps `password`."""
+    from tests.test_wotlk_generated_password import an_old_folder
+
+    server = tmp_path / "wotlk-old"
+    an_old_folder(server)
+    seen = _SeenPasswords(monkeypatch)
+    services = ControllerServices.for_entry(WOTLK, server)
+    assert services.db_refusal is None
+
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    assert view.create_account_button.isEnabled() and view.backup_button.isEnabled()
+    services.create_account("bob", "hunter2hunter2", 0)
+    assert set(seen.sent) == {"password"}, seen.sent
 
 
 def test_both_db_seams_for_wotlk_builds_are_bound_to_the_distro_they_live_in(
@@ -4877,7 +5129,9 @@ def test_each_game_s_account_form_addresses_its_own_schema_with_its_own_client(
             return subprocess.CompletedProcess(argv, 0, "" if len(__seen) == 1 else "1", "")
 
         monkeypatch.setattr(subprocess, "run", fake_run)
-        services = ControllerServices.for_entry(entry, tmp_path / entry.id)
+        services = ControllerServices.for_entry(
+            entry, _with_its_password(entry, tmp_path / entry.id)
+        )
         try:
             services.create_account("bob", "hunter2", 0)
         except AccountError:
@@ -6936,7 +7190,7 @@ def test_each_game_browses_bots_in_its_own_schemas_and_names_no_registry_it_lack
             return subprocess.CompletedProcess(list(argv), 0, "0\t0\t0", "")
 
         monkeypatch.setattr(apply_module.subprocess, "run", fake_run)
-        server_dir = tmp_path / entry.id
+        server_dir = _with_its_password(entry, tmp_path / entry.id)
         (server_dir / "etc").mkdir(parents=True, exist_ok=True)
         services = ControllerServices.for_entry(entry, server_dir)
         assert services.bots is not None, f"{entry.id} has no Bots tab"
@@ -7262,6 +7516,71 @@ def test_a_ticked_uninstall_says_where_the_kept_database_password_went(
     text = view.uninstall_label.text()
     assert "find those characters again" in text
     assert str(kept) in text
+
+
+class _HasBackups(_FakeUninstall):
+    """A plan that found backups to move (T677)."""
+
+    def __init__(self, server_dir: Path, kept: Path, **kwargs: object) -> None:
+        super().__init__(server_dir, **kwargs)  # type: ignore[arg-type]
+        self.kept = kept
+
+    def plan(self) -> purge.PurgePlan:
+        return replace(super().plan(), backups_to=self.kept)
+
+
+def test_the_plan_names_the_folder_the_backups_are_moved_to(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T677: the dialog said backups are untouched; it must now say exactly where they go."""
+    kept = tmp_path / "wowserver - kept backups"
+    view = _uninstall_view(ps, tmp_path, _HasBackups(tmp_path, kept))
+    view.show_uninstall_plan()
+    text = view.uninstall_label.text()
+    assert f"your backups are moved to {kept}" in text
+
+
+def test_the_plan_speaks_once_about_the_backups_in_each_of_the_three_cases(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T677: one statement, from the plan, and never a second one inside "It does not touch"."""
+    kept = tmp_path / "wowserver - kept backups"
+    elsewhere = tmp_path / "elsewhere"
+
+    present = _uninstall_view(ps, tmp_path, _HasBackups(tmp_path, kept))
+    present.show_uninstall_plan()
+    text = present.uninstall_label.text()
+    assert f"your backups are moved to {kept}" in text
+    assert text.lower().count("backup") == 2  # "backups are moved" and "kept backups" in the path
+
+    class _Linked(_FakeUninstall):
+        def plan(self) -> purge.PurgePlan:
+            return replace(super().plan(), backups_linked_to=elsewhere)
+
+    linked = _uninstall_view(ps, tmp_path, _Linked(tmp_path))
+    linked.show_uninstall_plan()
+    text = linked.uninstall_label.text()
+    assert f"your backups folder is a link to {elsewhere}" in text
+    assert "are moved" not in text
+    assert text.lower().count("backup") == 1
+
+    none = _uninstall_view(ps, tmp_path, _FakeUninstall(tmp_path))
+    none.show_uninstall_plan()
+    assert "backup" not in none.uninstall_label.text().lower()
+
+
+def test_a_finished_uninstall_says_where_the_backups_now_are(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    kept = tmp_path / "wowserver - kept backups"
+    fake = _FakeUninstall(
+        tmp_path,
+        report=purge.PurgeReport(folder_removed=True, record_forgotten=True, backups_kept=kept),
+    )
+    view = _uninstall_view(ps, tmp_path, fake)
+    view.show_uninstall_plan()
+    view.run_uninstall()
+    assert f"Your backups were kept: they are now in {kept}." in view.uninstall_label.text()
 
 
 def test_the_removal_is_signalled_up_with_the_game_and_the_folder(
@@ -8368,6 +8687,8 @@ def test_a_rebuild_the_sources_refuse_is_refused_before_the_question(
     services.rebuild_refusal = lambda: None
     view = ControllerView(WOTLK, services, status_poll_ms=0)
     assert view.rebuild_server() is True
+    # The job it started runs on the panel's thread: let it end here (T771).
+    wait_for_panel(view.rebuild_log)
     assert len(asked) == 1, "nothing to refuse: the question is asked as before"
 
 
@@ -9018,8 +9339,7 @@ def _cmangos_stack(
         "_mysql",
         lambda self, db, *, stdin=None, statement=None, extra=(): stack.mysql(db, statement),
     )
-    server_dir = tmp_path / game
-    server_dir.mkdir()
+    server_dir = _with_its_password(entry, tmp_path / game)
     services = ControllerServices.for_entry(entry, server_dir)
     assert services.applier is not None
     path = Path(__file__).resolve().parents[1] / "manifests" / game / "mods" / "all-stackables.json"
@@ -10016,6 +10336,7 @@ def _client_dir_view(
     client_dir: Path | None = None,
     fake: _FakeClientDir | None = None,
     pick_client_dir: Callable[..., Path | None] = lambda *_: None,
+    job_runner: Callable[..., Any] | None = None,
 ) -> tuple[ControllerView, _FakeClientDir]:
     """A tab wired with the T36 write seam, over the real factory wiring.
 
@@ -10028,7 +10349,10 @@ def _client_dir_view(
     services = ControllerServices.for_entry(entry, server_dir, client_dir=client_dir)
     fake = fake if fake is not None else _FakeClientDir()
     services.set_client_dir = fake
-    view = ControllerView(entry, services, status_poll_ms=0, pick_client_dir=pick_client_dir)
+    extra = {} if job_runner is None else {"job_runner": job_runner}
+    view = ControllerView(
+        entry, services, status_poll_ms=0, pick_client_dir=pick_client_dir, **extra
+    )
     return view, fake
 
 
@@ -14098,16 +14422,17 @@ def test_a_finished_recreate_is_reported_on_the_gui_thread_by_a_real_threaded_ru
     write lands on. Recreate, because it is the branch that clears BOTH owed
     sets.
 
-    Mutation: hand `_run` a closure again (`lambda answer: self._tuning_job_done(answer)`)
-    and the writes are recorded off the GUI thread.
+    Mutation: in `ThreadedJobRunner.__call__` (yulon/ui/widgets/job.py), connect
+    `worker.done` to `delivery.done` with `Qt.ConnectionType.DirectConnection` instead of
+    the queued connection. The answer and the writes it makes then run on the worker
+    thread, and the wait for the jobs those answers start fails before the thread
+    assertion is reached. A closure handed to `_run` no longer bites: since T97 every
+    callable runs on the GUI thread through `_Delivery`.
     """
     from PySide6.QtWidgets import QMessageBox
 
-    runners: list[ThreadedJobRunner] = []
-
     def real_runner(parent: object) -> ThreadedJobRunner:
-        runners.append(ThreadedJobRunner(parent))  # type: ignore[arg-type]
-        return runners[-1]
+        return ThreadedJobRunner(parent)  # type: ignore[arg-type]
 
     monkeypatch.setattr(controller_view_module, "threaded_job_runner", real_runner)
     view = _tuning_view(ps, tmp_path)
@@ -14139,7 +14464,9 @@ def test_a_finished_recreate_is_reported_on_the_gui_thread_by_a_real_threaded_ru
         lambda: view.tuning_report.toPlainText() == "recreate: the server was started.",
         "the recreate's report",
     )
-    assert all(runner.wait(HANG_BOUND_MS) for runner in runners)
+    # The report is not the end: the recreate's answer starts a status read, and that read's
+    # answer starts more (T771). Wait for every job this test started, not only for the report.
+    pump_until_every_job_has_answered("the jobs the recreate's answers started")
 
     assert view._busy is False
     assert view._tuning_owed.get("restart") is None, "a recreate covers the restart it owed"
@@ -14731,7 +15058,11 @@ def test_the_server_cloned_rows_update_chip_runs_the_server_update(
     assert row.detail_button.text() == UPDATE_TO_LATEST_BUTTON_LABEL
     row.detail_button.click()
     pump_until(lambda: len(spy.presses) == 1, "the chip started the server update")
-    row.hide()
+    # The job it started runs on the panel's thread: let it end here (T771).
+    wait_for_panel(view.rebuild_log)
+    # The job's end rebuilt the rows and deleted the cards `row` was taken from
+    # (T781): hide the row the panel draws now.
+    view.modules_panel.row("mod-playerbots").hide()
 
     assert len(boxes) == 1, "the update started without its confirmation"
     assert per_module == [], "the chip reached the per-module applier"
@@ -16443,6 +16774,19 @@ def _themed_window() -> Any:
     return window
 
 
+def _main_menu(window: Any) -> Any:
+    """The window's main navigation: the top menu's Catalog button (#444 replaced the left rail).
+
+    The `sidebar-tabs` tab bar still exists but is hidden, so the pad cannot, and need not,
+    reach it; what the player needs is to reach the menu that drives those tabs.
+    """
+    from yulon.ui.sidebar import TopMenuBar
+
+    bar = window.findChild(TopMenuBar)
+    assert bar is not None, "the window has no top menu"
+    return bar.catalog_button
+
+
 def _controller_in_the_real_window(view: ControllerView, tab_title: str) -> tuple[Any, Any]:
     """Lay `view` out inside the window `build_window()` builds, and show it.
 
@@ -16877,7 +17221,7 @@ def test_the_time_zone_leaves_nothing_on_the_tuning_tab_cut(
 
 
 ARAC_FILE = "modules/mod-arac/data/sql/db-world/arac.sql"
-AOE_FILE = "modules/mod-aoe-loot/data/sql/db-world/aoe_loot_module_string.sql"
+AOE_FILE = "modules/mod-aoe-loot/data/sql/db-world/base/aoe_loot_module_string.sql"
 APPLYING_AOE = ">> Applying update aoe_loot_module_string.sql"
 
 
@@ -16885,8 +17229,8 @@ def _two_modules_on_disk(server_dir: Path) -> None:
     """One shipped module of each route, with its SQL where its manifest says.
 
     `mod-arac` declares `data/sql/db-world/arac.sql` as `applied_by="direct"`
-    and `mod-aoe-loot` declares `data/sql/db-world/*.sql` as `db-import`, in the
-    bundled manifests these tests read through the real store.
+    and `mod-aoe-loot` declares `data/sql/db-world/base/*.sql` as `db-import` (where
+    upstream keeps it, T689), in the bundled manifests these tests read through the real store.
     """
     for rel in (ARAC_FILE, AOE_FILE):
         path = server_dir / rel
@@ -16955,7 +17299,7 @@ def test_the_module_sql_press_never_hands_the_updater_a_file_this_app_applied(
         "sql data/sql/db-world/arac.sql -> world: not handed to the updater: this app "
         "applies it itself at install" in text
     )
-    assert "sql data/sql/db-world/aoe_loot_module_string.sql -> world: applied" in text
+    assert "sql data/sql/db-world/base/aoe_loot_module_string.sql -> world: applied" in text
     assert "FAILED" not in text, text
 
 
@@ -18252,6 +18596,7 @@ def test_the_three_server_build_presses_are_one_menu_and_each_reaches_its_own_sl
         view.rebuild_action,
         view.update_to_latest_action,
         view.return_to_pin_action,
+        view.put_the_folders_back_action,  # T786: hidden here, nothing is off its build
     ]
     assert view.server_build_menu.toolTipsVisible(), "the menu hides its entries' tooltips"
     for action in view.server_build_menu.actions():
@@ -18285,10 +18630,15 @@ def test_the_server_build_button_greys_only_when_every_press_it_offers_is_dead(
     assert view.server_build_button.isEnabled() is True
 
     view._set_busy(True)
-    assert [a.isEnabled() for a in view.server_build_menu.actions()] == [False, False, False]
+    assert [a.isEnabled() for a in view.server_build_menu.actions()] == [False] * 4
     assert view.server_build_button.isEnabled() is False, "a job is running and it is live"
     view._set_busy(False)
-    assert [a.isEnabled() for a in view.server_build_menu.actions()] == [True, True, True]
+    assert [a.isEnabled() for a in view.server_build_menu.actions()] == [
+        True,
+        True,
+        True,
+        False,
+    ]  # T786: the fourth entry is hidden
     assert view.server_build_button.isEnabled() is True, "the job ended and it stayed grey"
 
     # No rebuild wiring and no route: Rebuild is the one entry shown, and dead.
@@ -18627,6 +18977,29 @@ def test_a_locked_row_keeps_its_reason_on_screen_at_every_width(
             # a string spelled here, so the chip and the refusal cannot drift.
             if row.data.install_reason not in button.toolTip():
                 silent.append(f"{width}: {row.data.id}'s elided lock says nothing on hover")
+    if not elided_somewhere:
+        # The top menu (#444) took the left rail's place, so the status column is wider at the
+        # smallest window than the longest lock label and no window width narrows it any more.
+        # The case is what the test is about, so the strip itself is squeezed: the same rule at
+        # the width the old rail left it.
+        row = next(r for r in locked if r.data.id == "accountwide")
+        lock = next(chip for chip in row.data.chips if chip.detail == row.data.install_reason)
+        strip = row.chip_strip
+        button = next(
+            b for b, chip in zip(row.chip_buttons, row.data.chips, strict=True) if chip is lock
+        )
+        _at(window, (main.MINIMUM_WINDOW_SIZE[0], 800))
+        for squeeze in range(strip.width(), 110, -20):
+            strip.setFixedWidth(squeeze)
+            process_events()
+            if lock.label not in strip.visible_chip_labels():
+                gone.append(f"squeezed to {squeeze}: {row.data.id} hid {lock.label!r}")
+            elif lock.label in strip.elided_chip_labels():
+                elided_somewhere = True
+                if row.data.install_reason not in button.toolTip():
+                    silent.append(f"squeezed to {squeeze}: the elided lock says nothing on hover")
+        strip.setMinimumWidth(0)
+        strip.setMaximumWidth(16777215)
     assert gone == [], f"the reason Install is locked left the screen at {gone[:3]}"
     assert silent == [], f"an elided lock with the sentence nowhere: {silent[:3]}"
     assert elided_somewhere, (
@@ -21252,7 +21625,7 @@ def test_a_taller_window_never_takes_back_what_a_shorter_one_showed(
                 )
 
 
-def _pad_routes(nav: Any, start: Any) -> dict[Any, list[Any]]:
+def _pad_routes(nav: Any, start: Any, *, home: Any = None) -> dict[Any, list[Any]]:
     """Every widget the D-pad reaches from `start`, each with the presses that reach it.
 
     A breadth-first walk through the real `Navigator`: from each widget reached,
@@ -21260,6 +21633,10 @@ def _pad_routes(nav: Any, start: Any) -> dict[Any, list[Any]]:
     too. Asked of the navigator the pad drives and not of `_iter_focusable()`,
     because what is under test is the navigator's own idea of what exists -- a
     cache of it, which a fresh walk of the tree would not see.
+
+    `home` is a window whose scroll areas go back to the top before every press: a page that
+    scrolls (the top menu takes height from it) answers a press by where it is scrolled, and
+    a route to be replayed by `_press_a_on` must not depend on where the last press left it.
     """
     from PySide6.QtWidgets import QApplication
 
@@ -21271,6 +21648,12 @@ def _pad_routes(nav: Any, start: Any) -> dict[Any, list[Any]]:
         here = frontier.pop(0)
         for direction in Direction:
             here.setFocus()
+            # Nothing remembered between presses: `here` may be the stop the last press landed
+            # on, and a press back would then undo that move (`_way_back`) instead of being
+            # asked of the layout. The replay in `_press_a_on` forgets it at every step too.
+            nav._last_move = None
+            if home is not None:
+                _scroll_home(home)
             nav.navigate(direction)
             landed = QApplication.focusWidget()
             if landed is not None and landed not in routes:
@@ -21279,7 +21662,9 @@ def _pad_routes(nav: Any, start: Any) -> dict[Any, list[Any]]:
     return routes
 
 
-def _press_a_on(nav: Any, start: Any, target: Any, routes: dict[Any, list[Any]]) -> None:
+def _press_a_on(
+    nav: Any, start: Any, target: Any, routes: dict[Any, list[Any]], *, home: Any = None
+) -> None:
     """Walk the pad from `start` to `target` along its route, then press A."""
     from PySide6.QtWidgets import QApplication
 
@@ -21288,6 +21673,9 @@ def _press_a_on(nav: Any, start: Any, target: Any, routes: dict[Any, list[Any]])
     assert target in routes, f"the pad cannot reach {target.text()!r}"
     start.setFocus()
     for direction in routes[target]:
+        nav._last_move = None  # as `_pad_routes` asked each press: nothing remembered
+        if home is not None:
+            _scroll_home(home)
         nav.navigate(direction)
     assert QApplication.focusWidget() is target, f"the route did not end on {target.text()!r}"
     nav.perform(Action.CONFIRM)
@@ -21337,7 +21725,7 @@ def test_the_pad_reaches_whichever_form_of_the_card_is_on_screen(
 
         _at(window, main.MINIMUM_WINDOW_SIZE)
         assert view.custom_module_line.isVisible(), "the card did not go to one line"
-        routes = _pad_routes(nav, start)
+        routes = _pad_routes(nav, start, home=window)
         reached = set(routes)
         line = [view.module_link_line_button, view.module_folder_line_button]
         assert (
@@ -21346,7 +21734,7 @@ def test_the_pad_reaches_whichever_form_of_the_card_is_on_screen(
         hidden = {view.module_link_button, view.module_folder_button} & reached
         assert not hidden, f"the pad still lands on the hidden card's buttons: {hidden}"
         for button in line:
-            _press_a_on(nav, start, button, routes)
+            _press_a_on(nav, start, button, routes, home=window)
         assert asked == [
             controller_view_module.MODULE_LINK_DIALOG_TITLE,
             controller_view_module.MODULE_FOLDER_DIALOG_TITLE,
@@ -21494,13 +21882,13 @@ def test_up_from_a_sub_tabs_top_row_still_reaches_a_tab_bar(
     """The way OUT of a page is kept: Up from its top row lands on a tab bar (T172).
 
     On every sub-tab, from every widget with nothing of its page above it. And
-    both tab bars -- the sub-tabs' and the sidebar rail -- are still reached by
+    both the sub-tabs' tab bar and the main menu (the top menu, #444) are still reached by
     the pad from every widget on every sub-tab. T172 stops the pad aiming at a
     tab widget's middle; the bars themselves stay stops at their own places,
     and a fix that dropped them as well would pass the test above.
     """
     from PySide6.QtCore import Qt
-    from PySide6.QtWidgets import QTabBar, QTabWidget
+    from PySide6.QtWidgets import QTabBar
 
     from yulon.ui.gamepad import install_gamepad_navigation
 
@@ -21509,7 +21897,7 @@ def test_up_from_a_sub_tabs_top_row_still_reaches_a_tab_bar(
     _at(window, size)
     nav, keyboard, gamepad = install_gamepad_navigation(window)
     sub = view._tabs
-    rail = window.findChild(QTabWidget, "sidebar-tabs").tabBar()
+    rail = _main_menu(window)
     stuck: list[str] = []
     unreached: list[str] = []
     top_rows = 0
@@ -21531,7 +21919,7 @@ def test_up_from_a_sub_tabs_top_row_still_reaches_a_tab_bar(
                     stuck.append(f"{sub.tabText(index)}: Up went to {type(landed).__name__}")
             for widget in widgets:
                 reached = set(_pad_routes(nav, widget))
-                for bar, name in ((sub.tabBar(), "the sub-tab bar"), (rail, "the rail")):
+                for bar, name in ((sub.tabBar(), "the sub-tab bar"), (rail, "the main menu")):
                     if bar not in reached:
                         unreached.append(f"{sub.tabText(index)}: {name}")
     finally:
@@ -21563,7 +21951,7 @@ def test_the_bumpers_still_switch_the_main_windows_tabs_from_the_rail(
     _at(window, size)
     nav, keyboard, gamepad = install_gamepad_navigation(window)
     main_tabs = window.findChild(QTabWidget, "sidebar-tabs")
-    rail = main_tabs.tabBar()
+    rail = _main_menu(window)
     try:
         main_tabs.setCurrentIndex(0)
         process_events()
@@ -21939,43 +22327,35 @@ def test_every_box_the_pad_goes_into_can_be_left_by_pressing_on_the_same_way(
 
 
 @pytest.mark.parametrize("size", PAD_WINDOW_SIZES, ids=lambda s: f"{s[0]}x{s[1]}")
-def test_left_from_the_modules_list_reaches_the_rail_in_a_few_presses(
+def test_the_main_menu_is_a_few_presses_from_the_modules_list(
     qapp: object, ps: _Ps, tmp_path: Path, size: tuple[int, int]
 ) -> None:
-    """Left from the Modules list reaches the rail in a few presses, never twice on one stop (T175).
+    """The pad gets from the Modules list to the main menu in at most four presses (T175).
 
-    The trap the test above is for, as the player met it: at 960x640 twelve
-    presses of Left from the list went Install, list, Install, list... and never
-    reached the rail. Held loosely, not to the exact walk -- which rests on the
-    list's top edge sharing a pixel row with the rail at 960x640 -- but to what
-    the player needs: at most four presses, each to a stop not landed on
-    before.
+    The trap the test above is for, as the player met it: at 960x640 twelve presses of Left
+    from the list went Install, list, Install, list... and never reached the main navigation.
+    That navigation was the left rail then and is the top menu now (#444), so Left from the
+    list has nothing beside it and wraps; what the player needs is unchanged: the menu is
+    reached by the shortest route the pad has in no more than four presses.
     """
-    from PySide6.QtWidgets import QApplication, QTabWidget
-
-    from yulon.ui.gamepad import Direction, install_gamepad_navigation
+    from yulon.ui.gamepad import install_gamepad_navigation
 
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
     window, _tab = _controller_in_the_real_window(view, "Modules")
     _at(window, size)
     nav, keyboard, gamepad = install_gamepad_navigation(window)
-    rail = window.findChild(QTabWidget, "sidebar-tabs").tabBar()
+    menu = _main_menu(window).parentWidget()
     area = view.modules_panel._area
     try:
         _scroll_home(window)
         area.setFocus()
         process_events()
-        walk = [area]
-        for _press in range(4):
-            nav.navigate(Direction.LEFT)
-            process_events()
-            landed = QApplication.focusWidget()
-            went = " -> ".join(_pad_describe(w, window) for w in [*walk, landed])
-            assert landed not in walk, f"Left from the list went round: {went}"
-            walk.append(landed)
-            if landed is rail:
-                break
-        assert walk[-1] is rail, f"Left from the list went: {went}"
+        routes = _pad_routes(nav, area)
+        # Any of the menu's buttons is the menu: which one the pad lands on first depends on
+        # where the header puts them.
+        presses = [len(route) for stop, route in routes.items() if menu.isAncestorOf(stop)]
+        assert presses, "the main menu is out of the pad's reach from the Modules list"
+        assert min(presses) <= 4, f"the main menu is {min(presses)} presses from the list"
     finally:
         keyboard.stop()
         gamepad.stop()
@@ -24067,8 +24447,7 @@ def test_without_a_ready_to_play_client_the_wiring_is_what_it_was(
     """
     monkeypatch.setattr(controller_view_module.platform, "detect", lambda: "linux")
     entry = _factory_entry(game)
-    server_dir = tmp_path / "srv"
-    server_dir.mkdir()
+    server_dir = _with_its_password(entry, tmp_path / "srv")
     original = _a_client(tmp_path / "WoW")
 
     before = controller_view_module._FACTORIES[game](entry, server_dir, original, None)
@@ -24627,6 +25006,409 @@ def test_play_with_the_world_down_and_cancel_starts_and_plays_nothing(
 
     assert not any(c[:3] == ["docker", "compose", "up"] for c in ps.calls)
     assert launched == []
+
+
+# -- T667/T672: PLAY and the address it logs in at -----------------------------
+
+
+def _this_host_owns(monkeypatch: pytest.MonkeyPatch, *addresses: str) -> None:
+    """This host's interfaces own exactly `addresses` (plus loopback, which is always its own)."""
+    monkeypatch.setattr(networking, "_can_bind", lambda ip: ip in addresses)
+    monkeypatch.setattr(networking, "_own_names", lambda: ())
+
+
+class _RealmWait:
+    """The `ready_after_start` seam: answers `verdict`, and notes what the game had done by then."""
+
+    def __init__(self, launched: list[object], verdict: str = "ready") -> None:
+        self.verdict = verdict
+        self.launched = launched
+        self.asked: list[int] = []  # how many games were started when each wait ran
+        self.cancels: list[object] = []
+
+    def __call__(self, *, cancel: object = None) -> native.StartAnswer:
+        self.asked.append(len(self.launched))
+        self.cancels.append(cancel)
+        return native.StartAnswer(self.verdict)  # type: ignore[arg-type]
+
+
+def _wait_view(
+    ps: _Ps,
+    tmp_path: Path,
+    launched: list[object],
+    *,
+    address: str | None,
+    verdict: str = "ready",
+) -> tuple[ControllerView, Path, _RealmWait]:
+    original = _game_client(tmp_path / "clients" / "WoW")
+    play = _built(original, tmp_path)
+    if address is not None:
+        _save_launcher(play, {"realm_address": address})
+    view, _ = _play_view(ps, tmp_path, original=original, play=play)
+    wait = _RealmWait(launched, verdict)
+    view.services.ready_after_start = wait
+    ps.names = ""
+    return view, play, wait
+
+
+def test_play_at_another_computers_address_neither_asks_starts_nor_waits_for_the_local_server(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launched: list[object]
+) -> None:
+    """T667: the Steam Deck case. The server runs elsewhere; the local one is stopped."""
+    _this_host_owns(monkeypatch)
+    boxes = _answer(monkeypatch, controller_view_module.QMessageBox.StandardButton.Yes)
+    view, play, wait = _wait_view(ps, tmp_path, launched, address="192.168.0.60")
+    asked_before = len(ps.calls)
+
+    view.play()
+
+    assert boxes == [], "asked to start the local server for a remote address"
+    assert ps.calls[asked_before:] == [], "looked at (or started) the local server"
+    assert wait.asked == [], "waited for the local realm"
+    assert len(launched) == 1
+    assert _realmlist(play).startswith("set realmlist 192.168.0.60\n")
+    assert not view._play_pending
+
+
+def test_play_at_another_computers_address_writes_the_port_of_a_server_off_3724(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launched: list[object]
+) -> None:
+    """The remote path writes `realmlist_value()` with the entry's auth port, as the local does."""
+    _this_host_owns(monkeypatch)
+    # A second server beside 3724:
+    ports = WOTLK.ports.model_copy(update={"auth": 3725})
+    entry = WOTLK.model_copy(update={"ports": ports})
+    original = _game_client(tmp_path / "clients" / "WoW")
+    play = _built(original, tmp_path)
+    _save_launcher(play, {"realm_address": "192.168.0.60"})
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = ""
+
+    view.play()
+
+    assert len(launched) == 1
+    assert _realmlist(play).startswith("set realmlist 192.168.0.60:3725\n")
+
+
+@pytest.mark.parametrize("address", ["127.0.0.1", None, "192.168.0.60"])
+def test_play_at_this_computers_address_asks_starts_waits_and_only_then_plays(
+    qapp: object,
+    ps: _Ps,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    launched: list[object],
+    address: str | None,
+) -> None:
+    """T667 keeps today's start for loopback and for this host's own LAN IP; T672 adds the wait."""
+    _this_host_owns(monkeypatch, "192.168.0.60")
+    boxes = _answer(monkeypatch, controller_view_module.QMessageBox.StandardButton.Yes)
+    view, _play, wait = _wait_view(ps, tmp_path, launched, address=address)
+
+    view.play()
+
+    assert "The server is stopped. Start it first?" in boxes[0].text()  # type: ignore[attr-defined]
+    assert any(c[:4] == ["docker", "compose", "up", "-d"] for c in ps.calls), "never started"
+    assert wait.asked == [0], "the game was started before the realm was waited for"
+    assert len(launched) == 1
+
+
+def test_play_does_not_wait_when_the_server_was_already_running(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launched: list[object]
+) -> None:
+    """One wait, after PLAY's own start: a running server is not watched for a minute each press."""
+    _this_host_owns(monkeypatch)
+    view, _play, wait = _wait_view(ps, tmp_path, launched, address=None)
+    ps.names = WORLD_UP
+
+    view.play()
+
+    assert wait.asked == []
+    assert len(launched) == 1
+
+
+@pytest.mark.parametrize(
+    "verdict, said",
+    [
+        ("ceiling", "still loading"),
+        ("loop", "crash-looping"),
+        ("fatal", "will not come up"),
+        ("quiet", "looks stuck"),
+        ("unreadable", "Docker stopped answering"),
+    ],
+)
+def test_play_whose_realm_never_comes_up_says_so_and_starts_no_game(
+    qapp: object,
+    ps: _Ps,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    launched: list[object],
+    verdict: str,
+    said: str,
+) -> None:
+    _this_host_owns(monkeypatch)
+    _answer(monkeypatch, controller_view_module.QMessageBox.StandardButton.Yes)
+    view, _play, wait = _wait_view(ps, tmp_path, launched, address=None, verdict=verdict)
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+
+    view.play()
+
+    assert wait.asked == [0]
+    assert launched == [], "the game was started into a realm that is not up"
+    text = view.play_label.text()
+    assert said in text and "not started" in text, text
+    assert failures and said in failures[0]
+    assert not view._play_pending and not view._play_after_start
+
+
+def test_play_whose_wait_broke_starts_no_game_and_says_it_could_not_wait(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launched: list[object]
+) -> None:
+    _this_host_owns(monkeypatch)
+    _answer(monkeypatch, controller_view_module.QMessageBox.StandardButton.Yes)
+    view, _play, _wait = _wait_view(ps, tmp_path, launched, address=None)
+
+    def broken(*, cancel: object = None) -> native.StartAnswer:
+        raise InstallerError("no ready markers")
+
+    view.services.ready_after_start = broken
+
+    view.play()
+
+    assert launched == []
+    assert "could not wait" in view.play_label.text()
+    assert not view._play_pending
+
+
+def test_play_waits_with_a_deadline_and_a_timeout_is_said_as_one(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launched: list[object]
+) -> None:
+    """The shared check can run for hours; PLAY ends it at its own deadline, through `cancel`."""
+    _this_host_owns(monkeypatch)
+    _answer(monkeypatch, controller_view_module.QMessageBox.StandardButton.Yes)
+    monkeypatch.setattr(controller_view_module, "PLAY_REALM_WAIT_SECONDS", 0.05)
+    view, _play, _wait = _wait_view(ps, tmp_path, launched, address=None)
+
+    def forever(*, cancel: threading.Event) -> native.StartAnswer:
+        # Inline, the wait holds the GUI thread, so the deadline's timer needs the loop pumped.
+        for _ in range(100):
+            if cancel.is_set():
+                return native.StartAnswer("cancelled")
+            process_events(20)
+        raise AssertionError("the deadline never set the cancel")
+
+    view.services.ready_after_start = forever  # type: ignore[assignment]
+
+    view.play()
+
+    assert launched == []
+    text = view.play_label.text()
+    assert "was not up after" in text and "not started" in text, text
+    assert not view._play_pending
+
+
+def test_cancel_during_the_wait_for_the_realm_starts_no_game(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launched: list[object]
+) -> None:
+    _this_host_owns(monkeypatch)
+    _answer(monkeypatch, controller_view_module.QMessageBox.StandardButton.Yes)
+    view, _play, _wait = _wait_view(ps, tmp_path, launched, address=None)
+
+    def pressed_cancel(*, cancel: threading.Event) -> native.StartAnswer:
+        assert not view.play_cancel_button.isHidden(), "no Cancel offered during the wait"
+        view._cancel_play_download()  # the player presses Cancel while the wait runs
+        assert cancel.is_set(), "Cancel did not reach the wait"
+        return native.StartAnswer("cancelled")
+
+    view.services.ready_after_start = pressed_cancel  # type: ignore[assignment]
+
+    view.play()
+
+    assert launched == []
+    assert "Stopped waiting for the realm" in view.play_label.text()
+    assert view.play_cancel_button.isHidden()
+    assert not view._play_pending
+
+
+def _warnings(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Every warning box the view puts up, by its text (none is shown)."""
+    said: list[str] = []
+    monkeypatch.setattr(
+        controller_view_module, "show_warning", lambda _parent, _title, text: said.append(text)
+    )
+    return said
+
+
+def test_a_ready_answer_that_arrives_after_a_cancel_starts_no_game(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launched: list[object]
+) -> None:
+    """The wait had already seen the realm up when Cancel was pressed: Cancel still wins."""
+    _this_host_owns(monkeypatch)
+    _answer(monkeypatch, controller_view_module.QMessageBox.StandardButton.Yes)
+    warned = _warnings(monkeypatch)
+    view, _play, _wait = _wait_view(ps, tmp_path, launched, address=None)
+
+    def ready_after_cancel(*, cancel: threading.Event) -> native.StartAnswer:
+        view._cancel_play_download()
+        assert cancel.is_set()
+        return native.StartAnswer("ready")
+
+    view.services.ready_after_start = ready_after_cancel  # type: ignore[assignment]
+
+    view.play()
+
+    assert launched == [], "a ready answer after Cancel started the game"
+    assert "Stopped waiting for the realm" in view.play_label.text()
+    assert warned and "Stopped waiting for the realm" in warned[0], "Cancel keeps its message"
+    assert not view._play_pending
+
+
+def test_a_stop_during_the_wait_ends_it_starts_no_game_and_adds_no_dialog(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launched: list[object]
+) -> None:
+    _this_host_owns(monkeypatch)
+    _answer(monkeypatch, controller_view_module.QMessageBox.StandardButton.Yes)
+    warned = _warnings(monkeypatch)
+    view, _play, _wait = _wait_view(ps, tmp_path, launched, address=None)
+    seen: list[bool] = []
+
+    def stop_then_ready(*, cancel: threading.Event) -> native.StartAnswer:
+        view._set_busy(True)  # the player's Stop (or Restart) takes the server
+        seen.append(cancel.is_set())
+        return native.StartAnswer("ready")
+
+    view.services.ready_after_start = stop_then_ready  # type: ignore[assignment]
+
+    view.play()
+    view._set_busy(False)
+
+    assert seen == [True], "a Server action did not end the wait"
+    assert launched == [], "the game started over the player's Stop"
+    assert "Stopped waiting for the realm" in view.play_label.text()
+    assert warned == [], "a warning box on top of the player's own Stop"
+    assert not view._play_pending
+
+
+def test_closing_the_tab_during_the_wait_ends_it_and_starts_no_game(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launched: list[object]
+) -> None:
+    _this_host_owns(monkeypatch)
+    _answer(monkeypatch, controller_view_module.QMessageBox.StandardButton.Yes)
+    view, _play, _wait = _wait_view(ps, tmp_path, launched, address=None)
+    seen: list[bool] = []
+
+    def closed_then_ready(*, cancel: threading.Event) -> native.StartAnswer:
+        view.shutdown()
+        seen.append(cancel.is_set())
+        return native.StartAnswer("ready")
+
+    view.services.ready_after_start = closed_then_ready  # type: ignore[assignment]
+
+    view.play()
+
+    assert seen == [True], "shutdown() did not end the wait"
+    assert launched == []
+
+
+def test_play_asked_for_the_realm_only_after_its_own_start_not_before(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launched: list[object]
+) -> None:
+    """The wait is a second answer to the second press: ready once, not ready the next time."""
+    _this_host_owns(monkeypatch)
+    _answer(monkeypatch, controller_view_module.QMessageBox.StandardButton.Yes)
+    view, _play, wait = _wait_view(ps, tmp_path, launched, address=None, verdict="ceiling")
+
+    view.play()
+    assert launched == []
+
+    wait.verdict = "ready"
+    ps.names = ""
+    view.play()
+
+    assert wait.asked == [0, 0]
+    assert len(launched) == 1
+
+
+# -- T694: the Server tab's PLAY plays, "Launcher…" opens the launcher ---------
+
+
+def _launcher_spy(view: ControllerView) -> list[int]:
+    opened: list[int] = []
+    view.open_launcher = lambda: opened.append(1)
+    return opened
+
+
+def test_the_tabs_play_button_starts_the_game_and_does_not_open_the_launcher(
+    qapp: object, ps: _Ps, tmp_path: Path, launched: list[object]
+) -> None:
+    original = _game_client(tmp_path / "clients" / "WoW")
+    view, _ = _play_view(ps, tmp_path, original=original, play=_built(original, tmp_path))
+    opened = _launcher_spy(view)
+    ps.names = WORLD_UP
+
+    assert (
+        view.play_button is not None
+        and view.play_button.text() == controller_view_module.PLAY_LABEL
+    )
+    view.play_button.click()
+
+    assert len(launched) == 1, "PLAY did not start the game"
+    assert opened == [], "PLAY opened the launcher instead"
+
+
+def test_the_tabs_play_button_on_a_stopped_server_starts_it_waits_and_plays(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launched: list[object]
+) -> None:
+    _this_host_owns(monkeypatch)
+    _answer(monkeypatch, controller_view_module.QMessageBox.StandardButton.Yes)
+    view, _play, wait = _wait_view(ps, tmp_path, launched, address=None)
+    opened = _launcher_spy(view)
+
+    assert view.play_button is not None
+    view.play_button.click()
+
+    assert any(c[:4] == ["docker", "compose", "up", "-d"] for c in ps.calls), "never started"
+    assert wait.asked == [0] and len(launched) == 1
+    assert opened == []
+
+
+def test_the_launcher_button_opens_the_launcher_and_starts_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, launched: list[object]
+) -> None:
+    original = _game_client(tmp_path / "clients" / "WoW")
+    view, _ = _play_view(ps, tmp_path, original=original, play=_built(original, tmp_path))
+    opened = _launcher_spy(view)
+    ps.names = WORLD_UP  # a running server: a PLAY would start the game at once
+
+    assert view.launcher_button is not None and not view.launcher_button.isHidden()
+    assert view.launcher_button.text() == "Launcher…"
+    view.launcher_button.click()
+
+    assert opened == [1]
+    assert launched == [] and not view._play_pending
+    assert not any(c[:3] == ["docker", "compose", "up"] for c in ps.calls)
+
+
+def test_the_launcher_button_is_there_only_with_a_ready_to_play_client(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    original = _game_client(tmp_path / "clients" / "WoW")
+    without, _ = _play_view(ps, tmp_path, original=original, play=None)
+    assert without.launcher_button is not None and without.launcher_button.isHidden()
+    assert without.play_button is not None
+    assert without.play_button.text() == controller_view_module.MAKE_PLAY_CLIENT_LABEL
+
+
+def test_the_launcher_button_stays_usable_while_a_server_job_runs(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Opening a window changes nothing, so a busy tab does not grey it."""
+    original = _game_client(tmp_path / "clients" / "WoW")
+    view, _ = _play_view(ps, tmp_path, original=original, play=_built(original, tmp_path))
+    view._set_busy(True)
+
+    assert view.launcher_button is not None and view.launcher_button.isEnabled()
+    view._set_busy(False)
 
 
 def test_play_rewrites_the_realmlist_even_after_a_hand_edit(
@@ -25732,6 +26514,37 @@ def test_play_points_every_locales_realmlist_at_this_machine(
     assert gb.read_text(encoding="utf-8") == "set realmlist logon.example.com\n"
 
 
+def _root_realmlist_only(client: Path) -> Path:
+    """A repack-style 3.3.5a client (T665): its realmlist at the top level, none in `Data/enUS/`,
+    and a Config.wtf that still names the player's old server."""
+    (client / "Data" / "enUS" / "realmlist.wtf").unlink()
+    (client / "Data" / "enUS" / "locale-enUS.MPQ").write_bytes(b"MPQ the locale")
+    (client / "realmlist.wtf").write_text("set realmlist logon.warmane.com\n", encoding="utf-8")
+    (client / "WTF").mkdir()
+    (client / "WTF" / "Config.wtf").write_text(
+        'SET locale "enUS"\nSET realmList "logon.warmane.com"\n', encoding="utf-8"
+    )
+    return client
+
+
+def test_play_gives_a_client_with_only_a_top_level_realmlist_one_in_its_locale_folder(
+    qapp: object, ps: _Ps, tmp_path: Path, launched: list[object]
+) -> None:
+    """T665: 3.3.5a reads `Data/<locale>/realmlist.wtf`; without one it logs in wherever the
+    copied Config.wtf points, the player's old server."""
+    original = _root_realmlist_only(_game_client(tmp_path / "clients" / "WoW"))
+    play = _built(original, tmp_path)
+    view, _ = _play_view(ps, tmp_path, original=original, play=play)
+    ps.names = WORLD_UP
+
+    view.play()
+
+    assert len(launched) == 1
+    assert _realmlist(play) == "set realmlist 127.0.0.1\n"
+    assert (play / "realmlist.wtf").read_text(encoding="utf-8") == "set realmlist 127.0.0.1\n"
+    assert not (original / "Data" / "enUS" / "realmlist.wtf").exists()
+
+
 def _dialog_for(tmp_path: Path, plan: play_client.BuildPlan, target: Path) -> Any:
     offer = replace(_offer(tmp_path, lambda _t: plan), plan=plan, target=target)
     return controller_view_module.PlayClientDialog(offer)
@@ -25820,7 +26633,7 @@ def test_the_client_folder_is_not_forgotten_while_make_is_planning(
     view.forget_client_dir()
 
     assert rows.written == [], "the client folder was forgotten under a running Make…"
-    assert said and "busy with another action" in said[-1]
+    assert said and "ready-to-play client" in said[-1]
 
 
 def test_a_plan_answering_after_the_tab_closed_opens_no_dialog(
@@ -26850,6 +27663,63 @@ def test_the_realmlist_keeps_unbounds_own_login_port(
 
     assert _realmlist(play).startswith("set realmlist 127.0.0.1:3725\n")
     assert ":3724" not in _realmlist(play)
+
+
+def test_an_unbound_client_whose_realmlist_was_top_level_only_logs_in_at_3725(
+    qapp: object, ps: _Ps, tmp_path: Path, site: _Site, steps: list[str], asks: _Asks
+) -> None:
+    """T665: 3.3.5a reads `Data/<locale>/realmlist.wtf`, else Config.wtf's realmList, which the
+    copy kept from the player's old server; neither may leave the game going to 3724."""
+    _lay_folder_module(tmp_path, module=UNBOUND_MODULE)
+    original = _root_realmlist_only(_game_client(tmp_path / "clients" / "WoW"))
+    play = play_client.default_target(original, UNBOUND.name, tmp_path)
+    play_client.create(
+        original,
+        play,
+        game=UNBOUND.id,
+        server_dir=tmp_path,
+        allow_full_copy=False,
+        reflink=lambda _s, _d: False,
+    )
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=UNBOUND)
+    ps.names = WORLD_UP
+
+    view.play()
+
+    assert steps[-1] == "launch"
+    assert _realmlist(play) == "set realmlist 127.0.0.1:3725\n"
+    text = _config(play)
+    assert 'SET realmList "127.0.0.1:3725"' in text and "warmane" not in text, text
+    assert 'SET locale "enUS"' in text, "a line of the player's own was touched"
+    assert not (original / "Data" / "enUS" / "realmlist.wtf").exists()
+    assert "warmane" in (original / "WTF" / "Config.wtf").read_text(encoding="utf-8")
+
+
+def test_on_3724_the_realmlist_files_alone_carry_the_address(
+    qapp: object, ps: _Ps, tmp_path: Path, site: _Site, steps: list[str], asks: _Asks
+) -> None:
+    """T665's Config.wtf line is for a server off 3724 only; on 3724 the copy's Config.wtf is
+    left as the player had it, and the locale realmlist (which the game reads first) says it."""
+    _lay_folder_module(tmp_path, module=UNBOUND_MODULE)
+    entry = UNBOUND.model_copy(update={"ports": UNBOUND.ports.model_copy(update={"auth": 3724})})
+    original = _root_realmlist_only(_game_client(tmp_path / "clients" / "WoW"))
+    play = play_client.default_target(original, entry.name, tmp_path)
+    play_client.create(
+        original,
+        play,
+        game=entry.id,
+        server_dir=tmp_path,
+        allow_full_copy=False,
+        reflink=lambda _s, _d: False,
+    )
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+
+    view.play()
+
+    assert steps[-1] == "launch"
+    assert _realmlist(play) == "set realmlist 127.0.0.1\n"
+    assert 'SET realmList "logon.warmane.com"' in _config(play)
 
 
 def test_a_client_that_pressed_play_before_the_addons_still_gets_the_out_of_date_switch(
@@ -28182,6 +29052,21 @@ def test_without_a_typed_address_the_catalogs_realmlist_stays(
 
     text = _config(play)
     assert 'SET realmList "127.0.0.1"' in text and "patchList" not in text
+
+
+def test_off_3724_the_catalogs_own_realmlist_still_wins(
+    qapp: object, ps: _Ps, tmp_path: Path, site: _Site, steps: list[str], asks: _Asks
+) -> None:
+    """T665 sets Config.wtf's realmList only where the catalog does not: the catalog's is the
+    server's own word."""
+    entry, original, play = _made_client(tmp_path)
+    entry = entry.model_copy(update={"ports": entry.ports.model_copy(update={"auth": 3725})})
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+
+    view.play()
+
+    assert 'SET realmList "127.0.0.1"' in _config(play)
 
 
 @pytest.mark.parametrize("config", [True, False])

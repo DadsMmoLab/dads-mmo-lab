@@ -289,7 +289,7 @@ def test_only_the_world_and_auth_servers_share_a_buildx_group(tmp_path: Path) ->
 
 
 PINNED_WOTLK_DOCKERFILE = (
-    Path(__file__).resolve().parent / "data" / "azerothcore-wotlk-2a2211cd" / "Dockerfile"
+    Path(__file__).resolve().parent / "data" / "azerothcore-wotlk-8a4e76ea" / "Dockerfile"
 )
 """The catalog pin's `apps/docker/Dockerfile`; `test_build_context` fails a pin bump until it is
 vendored again, which re-runs the check below on the new recipe."""
@@ -604,7 +604,7 @@ def test_write_plan_replaces_only_the_files_the_caller_proved_replaceable(
     written = composegen.write_plan(
         render(server_dir), server_dir, replaceable=(composegen.BASE_FILE,)
     )
-    assert len(written) == 3
+    assert len(written) == 4, written  # the three files and `.env` (T748)
     assert (
         (server_dir / composegen.BASE_FILE)
         .read_text(encoding="utf-8")
@@ -631,6 +631,7 @@ def test_write_plan_rewrites_its_own_files_and_leaves_identical_ones_alone(tmp_p
         composegen.BASE_FILE,
         composegen.OVERRIDE_FILE,
         composegen.BUILD_FILE,
+        composegen.DOTENV_FILE,  # WotLK's password reaches compose through it (T748)
     }
     assert composegen.write_plan(plan, server_dir) == ()  # idempotent by content
     # Every generated file carries the marker, which is the whole rewrite rule.
@@ -691,6 +692,33 @@ def test_a_disk_that_fills_during_write_plan_leaves_the_old_file_whole(
     assert sorted(p.name for p in server_dir.iterdir()) == before, "a temp file was left"
     if sys.platform != "win32":
         assert base.stat().st_mode & 0o777 == 0o640
+
+
+def test_a_channel_backup_that_fills_the_disk_is_not_left_cut_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T780: a full disk while the command channel's backup is written leaves no backup.
+
+    `<override>.before-channel` is what a rollback puts back over the live override, so
+    a copy cut short there is a broken override waiting for the next rollback. It is
+    written beside its place and renamed in only when whole: a write that fails part-way
+    raises, leaves no backup, and leaves no temporary file behind.
+    """
+    server_dir = tmp_path / "wow"
+    server_dir.mkdir()
+    composegen.write_plan(render(server_dir), server_dir)
+    override = server_dir / composegen.OVERRIDE_FILE
+    backup = override.with_name(override.name + composegen.CHANNEL_BACKUP_SUFFIX)
+    before = override.read_text(encoding="utf-8")
+    listing = sorted(p.name for p in server_dir.iterdir())
+    calls = _disk_fills_half_way(monkeypatch)
+
+    with pytest.raises(OSError, match="No space left"):
+        composegen.record_channel_press(ENTRY, server_dir, before)
+
+    assert len(calls) >= 2, "the fill never reached a second write"
+    assert not backup.exists(), "a cut-off backup was left"
+    assert sorted(p.name for p in server_dir.iterdir()) == listing, "a temp file was left"
 
 
 def test_write_plan_keeps_a_files_mode_and_gives_a_new_one_the_usual_mode(tmp_path: Path) -> None:
@@ -804,7 +832,8 @@ def test_the_folder_is_fsynced_after_the_rename_on_posix(
     """Codex round 3: the rename is durable only once the directory entry is on disk."""
     path = tmp_path / composegen.BASE_FILE
     spy = _OsWithTurns(["MainThread"], {}, path)
-    monkeypatch.setattr(composegen, "os", spy)
+    # T791: the folder sync is `platform.fsync_folder()`, the one shared helper.
+    monkeypatch.setattr(platform, "os", spy)
     composegen._replace_whole(path, "services: {}\n")
     assert spy.dir_fsyncs == [str(tmp_path)]
 
@@ -816,7 +845,7 @@ def test_on_windows_the_folder_is_not_opened_to_be_fsynced(
     path = tmp_path / composegen.BASE_FILE
     spy = _OsWithTurns(["MainThread"], {}, path)
     spy.name = "nt"
-    monkeypatch.setattr(composegen, "os", spy)
+    monkeypatch.setattr(platform, "os", spy)
     composegen._replace_whole(path, "services: {}\n")
     assert path.read_text(encoding="utf-8") == "services: {}\n"
     assert spy.dir_fsyncs == []
@@ -1465,11 +1494,15 @@ def test_a_generated_password_template_may_not_mention_the_password_token(tmp_pa
         )
 
 
-def test_a_fixed_password_still_lands_in_the_base_file_and_not_in_env(tmp_path: Path) -> None:
-    """WotLK is unchanged: the fixed value is the interpolation default, `.env` stays untouched."""
+def test_an_old_wotlk_folder_hands_compose_its_published_password_through_env(
+    tmp_path: Path,
+) -> None:
+    """T748: WotLK's compose text names no password at all, not even as a default. A folder
+    with no record of a new install renders the published one, and only into `.env`."""
     plan = render(tmp_path / "wow")
-    assert plan.dotenv == {}
-    assert "${DB_ROOT_PASSWORD:-password}" in plan.base
+    assert plan.dotenv == {"DB_ROOT_PASSWORD": "password"}
+    assert "${DB_ROOT_PASSWORD:?Yu'lon .env is missing}" in plan.base
+    assert "${DB_ROOT_PASSWORD:-" not in plan.base
 
 
 # -- A16: the committed byte snapshot ------------------------------------------
@@ -1522,7 +1555,8 @@ def test_the_wotlk_render_reproduces_the_committed_snapshot_byte_for_byte() -> N
             composegen.install_id(LINUX_SERVER_DIR, platform_id=lambda: "linux") == LINUX_INSTALL_ID
         )
     assert f"name: yulon-wow-wotlk-{LINUX_INSTALL_ID}\n" in texts[composegen.BASE_FILE]
-    assert "${DB_ROOT_PASSWORD:-password}" in texts[composegen.BASE_FILE]
+    assert "${DB_ROOT_PASSWORD:?Yu'lon .env is missing}" in texts[composegen.BASE_FILE]
+    assert "${DB_ROOT_PASSWORD:-" not in texts[composegen.BASE_FILE]
     assert ":z" not in texts[composegen.BASE_FILE]
 
 

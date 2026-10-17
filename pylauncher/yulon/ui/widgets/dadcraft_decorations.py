@@ -225,6 +225,27 @@ class DadcraftRealmBadge(QWidget):
         )
 
 
+REALM_TITLE_SLOT_PX = 280
+"""The width the header keeps for the server's name, whether or not a server page is open.
+
+The header row is laid out around it: the top menu sits where this slot leaves it, so the
+menu stays put when a server page shows the name and badge and when the Catalog hides them.
+Roomy enough for "WoW WotLK — parent/folder"; a longer name is elided (the whole of it on
+hover), never given a wider slot."""
+
+BADGE_STATUSES = (
+    "running",
+    "starting",
+    "stopping",
+    "partial",
+    "restarting",
+    "loop",
+    "unknown",
+    "stopped",
+    "failed",
+)
+"""Every status word the realm badge shows, to find the widest text it ever has."""
+
 REALM_TITLE_MIN_CHARS = 8
 """How much of the header's server name survives the narrowest window (T192):
 enough to see which game it is, the whole of it one hover away."""
@@ -242,6 +263,7 @@ class _RealmTitle(QLabel):
         super().__init__(parent)
         self.full_text = ""
         self.setWordWrap(False)
+        self.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
     def set_full_text(self, text: str) -> None:
         self.full_text = text
@@ -253,11 +275,13 @@ class _RealmTitle(QLabel):
         return math.ceil(QFontMetricsF(self.font()).horizontalAdvance(self.full_text))
 
     def sizeHint(self) -> QSize:  # noqa: N802  (Qt's own name)
-        """The WHOLE name's width, whatever is on screen, so a cut name asks for its room back."""
-        margins = self.contentsMargins()
-        return QSize(
-            self._whole_width() + margins.left() + margins.right(), super().sizeHint().height()
-        )
+        """The header's fixed name slot, whatever the name is and whether or not it shows.
+
+        The same width with a server page open and without one (the label then sits empty and
+        hidden, its place kept), so what shares the row with it does not move. A name longer
+        than the slot is shortened to it, with the whole of it on hover.
+        """
+        return QSize(REALM_TITLE_SLOT_PX, super().sizeHint().height())
 
     def minimumSizeHint(self) -> QSize:  # noqa: N802  (Qt's own name)
         return QSize(
@@ -369,6 +393,19 @@ class DadcraftHeader(QFrame):
 
         self._badge = DadcraftRealmBadge("stopped", self)
         layout.addWidget(self._badge, 0, Qt.AlignmentFlag.AlignVCenter)
+        # The name and the badge keep their places when hidden (the Catalog, the Logs tab):
+        # hiding them would hand their room to the stretch and move the top menu sideways
+        # each time a server page opened or closed.
+        for kept in (self._realm_title, self._badge):
+            policy = kept.sizePolicy()
+            policy.setRetainSizeWhenHidden(True)
+            kept.setSizePolicy(policy)
+        badge_layout = self._badge.layout()
+        if badge_layout is not None:
+            badge_layout.setAlignment(
+                self._badge._label,
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+            )
         self._followed: DadcraftRealmBadge | None = None
         self.set_theme(DEFAULT_THEME)
 
@@ -408,11 +445,28 @@ class DadcraftHeader(QFrame):
             f"color: {realm_color}; background: transparent;"
         )
         self._badge.set_theme(self._theme_name)
+        self._reserve_badge_width()
         self.update()
 
     def set_realm_status(self, status: str) -> None:
         """Forward realm status to the embedded badge."""
         self._badge.set_status(status)
+
+    def _reserve_badge_width(self) -> None:
+        """Keep room for the widest status text, so the badge's width never moves the row.
+
+        A badge that said "STOPPING" and then "STATUS UNKNOWN" would push the top menu sideways
+        between two server pages, or between a server page and the Catalog, as the retained
+        width of a hidden badge is the one it last had. Its text stays right-aligned in the room.
+        """
+        probe = DadcraftRealmBadge("stopped")
+        probe.set_theme(self._theme_name)
+        widest = 0
+        for status in BADGE_STATUSES:
+            probe.set_status(status)
+            widest = max(widest, probe.sizeHint().width())
+        probe.deleteLater()
+        self._badge.setMinimumWidth(widest)
 
     def follow(
         self,

@@ -254,14 +254,52 @@ dates too - `v0.8.7-Public` was cut on 2026-09-19, six days AFTER
 """
 
 
-def test_the_last_number_orders_as_a_decimal_fraction() -> None:
-    """Owner's rule, 2026-09-21: `.65` is sixty-five hundredths, not sixty-five."""
+def test_the_last_number_orders_as_a_decimal_fraction_below_0_9() -> None:
+    """Owner's rule, 2026-09-21: `.65` is sixty-five hundredths, not sixty-five.
+
+    Only below 0.9: from there on the hybrid rule of 2026-10-11 reads it whole.
+    """
     ordered = ["v0.8.6", "v0.8.65", "v0.8.66", "v0.8.69", "v0.8.7"]
     keys = [rn.version_key(tag) for tag in ordered]
     assert keys == sorted(keys), f"decimal order broken: {list(zip(ordered, keys, strict=True))}"
     assert rn.version_key("v0.8.7") == rn.version_key("v0.8.70"), ".7 and .70 are one version"
     assert rn.version_key("v0.8.0") < rn.version_key("v0.8.01")
     assert rn.version_key("v0.9.0") > rn.version_key("v0.8.99")
+
+
+HYBRID_ORDER = [
+    "v0.8.6",
+    "v0.8.65",
+    "v0.8.7",
+    "v0.8.90",
+    "v0.9.0",
+    "v0.9.2",
+    "v0.9.9",
+    "v0.9.10",
+    "v0.9.13",
+    "v0.9.16",
+    "v0.9.17",
+    "v0.9.99",
+    "v0.9.100",
+    "v0.10.0",
+    "v0.10.9",
+    "v0.10.10",
+    "v0.10.11",
+    "v1.0.0",
+    "v1.0.9",
+    "v1.0.10",
+]
+
+
+def test_the_last_number_is_a_whole_number_from_0_9_on() -> None:
+    """Owner's hybrid rule, 2026-10-11: 0.9.9 < 0.9.10 < 0.9.16, and 0.10.9 < 0.10.10."""
+    keys = [rn.version_key(tag) for tag in HYBRID_ORDER]
+    for n in range(len(HYBRID_ORDER) - 1):
+        lower, higher = HYBRID_ORDER[n], HYBRID_ORDER[n + 1]
+        assert keys[n] < keys[n + 1], f"{lower} should sort below {higher}"  # type: ignore[operator]
+    assert rn.version_key("v0.9.10") == (0, 9, Fraction(10))
+    assert rn.version_key("v0.8.90") == (0, 8, Fraction(9, 10))
+    assert rn.version_key("v0.9.1") != rn.version_key("v0.9.10"), "0.9.10 is not 0.9.1"
 
 
 @pytest.mark.parametrize(
@@ -360,6 +398,36 @@ def test_previous_across_the_real_tag_history() -> None:
     assert rn.pick_previous(REAL_TAGS, "v0.8.71-Public") == "v0.8.7-Public"
     assert rn.pick_previous(REAL_TAGS, "v0.8.69-fixtest") == "v0.8.65-Public"
     assert rn.pick_previous(REAL_TAGS, "v0.8.65-Public") == "v0.8.4-Public"
+
+
+def test_previous_when_a_minor_reaches_patch_ten() -> None:
+    """MEASURED before the fix: pick_previous(v0.10.10) was v0.10.0, so the body
+    re-announced the whole minor."""
+    tags = [f"v0.10.{n}-Public" for n in range(11)]
+    assert rn.pick_previous(tags, "v0.10.10-Public") == "v0.10.9-Public"
+    assert rn.pick_previous(tags, "v0.10.9-Public") == "v0.10.8-Public"
+    assert rn.pick_previous(tags, "v0.10.1-Public") == "v0.10.0-Public"
+    nine = ["v0.8.7-Public", "v0.8.90-Public", "v0.9.2-Public", "v0.9.9-Public", "v0.9.10-Public"]
+    assert rn.pick_previous(nine, "v0.9.10-Public") == "v0.9.9-Public"
+    assert rn.pick_previous(nine, "v0.9.2-Public") == "v0.8.90-Public"
+
+
+def test_the_changelog_pin_reads_the_whole_number_rule() -> None:
+    """`new_entries` drops bullets under a heading at or below `previous`.
+
+    Under the old decimal rule `## v0.10.9` (= .9) was ABOVE previous `v0.10.10`
+    (= .1), so a history bullet under 0.10.9 was announced again.
+    """
+    new = (
+        "## Unreleased\n\n### Fixed\n- fresh.\n\n"
+        "## v0.10.10 (2026-11-01)\n\n### Fixed\n- ten.\n\n"
+        "## v0.10.9 (2026-10-30)\n\n### Fixed\n- nine.\n"
+    )
+    notes = rn.new_entries("", new, "v0.10.10-Public")
+    assert "fresh." in notes
+    assert "nine." not in notes, "0.10.9 is history once 0.10.10 is out"
+    assert "ten." not in notes
+    assert "nine." in rn.new_entries("", new, "v0.10.8-Public")
 
 
 def test_a_version_equal_to_this_one_is_not_a_previous_release() -> None:

@@ -1,0 +1,411 @@
+{
+ "recorded": "2026-10-11",
+ "repos": {
+  "Aldori15/azerothcore-eluna-accountwide": {
+   "commit": "fddbd8c82b27272b27cbaf49bafadb0e91fbf7b5",
+   "branch": "default",
+   "files": [
+    "sql/accountwide_profession_recipe_lookup.sql",
+    "sql/create_accountwide_tables.sql"
+   ]
+  },
+  "AsgavinYT/azerothcore-all-stackables-200": {
+   "commit": "75a636ec97dcfccb77d9bd4bb91cbbe1aabfcb27",
+   "branch": "default",
+   "files": [
+    "All_Stackables_200_Down.sql",
+    "All_Stackables_200_Up.sql"
+   ]
+  },
+  "AsgavinYT/hearthstone-cooldowns": {
+   "commit": "76ef3091589c86deace95cfd49b7f15d67da762a",
+   "branch": "default",
+   "files": [
+    "Hearthstone_15_Min.sql",
+    "Hearthstone_1_Min.sql",
+    "Hearthstone_1_Sec.sql",
+    "Hearthstone_30_Min.sql",
+    "Hearthstone_5_Min.sql"
+   ]
+  },
+  "DadsMmoLab/dads-mmo-lab": {
+   "commit": "a093beac29bacd96dea573d1e1517aa8bc1e928e",
+   "branch": "default",
+   "files": [
+    "guides/wow-wotlk/ALE-Kegs/BlackMarketAuctionHouse/sql/BMAH_Up.sql"
+   ]
+  },
+  "DustinHendrickson/mod-player-bot-level-brackets": {
+   "commit": "a94f9c6458bf6264164436a53ddd4e5c3ed44fdb",
+   "branch": "default",
+   "files": [
+    "data/sql/characters/base/2025_07_31_bot_level_brackets_guild_tracker.sql"
+   ]
+  },
+  "Grim-Batol/Paragon-Anniversary": {
+   "commit": "a3cb1bb5d9b3983154b9e7a71459b199fcea0d9f",
+   "branch": "default",
+   "files": [
+    "sql/01_create_database.sql",
+    "sql/02_create_config_tables.sql",
+    "sql/03_create_experience_tables.sql",
+    "sql/04_create_paragon_tables.sql",
+    "sql/05_create_triggers.sql",
+    "sql/06_insert_default_config.sql",
+    "sql/11-13-2026_Example_Data.sql"
+   ]
+  },
+  "InstanceForge/mod-dungeon-master": {
+   "commit": "612eaf804cd7fc4af74fde66d376a571a5550077",
+   "branch": "default",
+   "files": [
+    "data/sql/db-characters/base/dm_characters_setup.sql",
+    "data/sql/db-world/base/dm_setup.sql"
+   ]
+  },
+  "Shonik/lua-battlepass": {
+   "commit": "9f42bfe402d941d1202d408636ceb4642bc097c2",
+   "branch": "default",
+   "files": [
+    "sql/battlepass_characters.sql",
+    "sql/battlepass_world.sql"
+   ]
+  },
+  "StraysFromPath/mod-rare-drops": {
+   "commit": "cf6ea06d32d751328836b65d9b7270975aa3c68a",
+   "branch": "default",
+   "files": [
+    "data/sql/db-world/base/skeleton_module_acore_string.sql",
+    "data/sql/db-world/updates/mod rare drops final.sql"
+   ]
+  },
+  "ZhengPeiRu21/mod-individual-progression": {
+   "commit": "60336b349cce2bc209d154bb840f2370f1cc16f2",
+   "branch": "default",
+   "files": [
+    "data/sql/world/base/00_cleanup.sql",
+    "data/sql/world/base/adjustment_auras.sql",
+    "data/sql/world/base/aq_gate_quest.sql",
+    "data/sql/world/base/aq_war.sql",
+    "data/sql/world/base/aq_war_effort.sql",
+    "data/sql/world/base/av.sql",
+    "data/sql/world/base/av_creatures.sql",
+    "data/sql/world/base/av_gameobjects.sql",
+    "data/sql/world/base/boss_lord_kazzak.sql",
+    "data/sql/world/base/class_trainers.sql",
+    "data/sql/world/base/cs_individualProgression.sql",
+    "data/sql/world/base/dungeon_aq20.sql",
+    "data/sql/world/base/dungeon_aq40.sql",
+    "data/sql/world/base/dungeon_attunements.sql",
+    "data/sql/world/base/dungeon_blackfathom_deeps.sql",
+    "data/sql/world/base/dungeon_blackrock_depths.sql",
+    "data/sql/world/base/dungeon_blackrock_spire.sql",
+    "data/sql/world/base/dungeon_blackwing_lair.sql",
+    "data/sql/world/base/dungeon_coilfang_reservoir.sql",
+    "data/sql/world/base/dungeon_deadmines.sql",
+    "data/sql/world/base/dungeon_dire_maul.sql",
+    "data/sql/world/base/dungeon_gnomeregan.sql",
+    "data/sql/world/base/dungeon_karazhan.sql",
+    "data/sql/world/base/dungeon_maraudon.sql",
+    "data/sql/world/base/dungeon_molten_core.sql",
+    "data/sql/world/base/dungeon_onyxia.sql",
+    "data/sql/world/base/dungeon_ragefire_chasm.sql",
+    "data/sql/world/base/dungeon_razorfen_downs.sql",
+    "data/sql/world/base/dungeon_razorfen_kraul.sql",
+    "data/sql/world/base/dungeon_scarlet_monastery.sql",
+    "data/sql/world/base/dungeon_scholomance.sql",
+    "data/sql/world/base/dungeon_shadow_labyrinth.sql",
+    "data/sql/world/base/dungeon_shadowfang_keep.sql",
+    "data/sql/world/base/dungeon_stockade.sql",
+    "data/sql/world/base/dungeon_stratholme.sql",
+    "data/sql/world/base/dungeon_sunken_temple.sql",
+    "data/sql/world/base/dungeon_uldaman.sql",
+    "data/sql/world/base/dungeon_wailing_caverns.sql",
+    "data/sql/world/base/dungeon_zulaman.sql",
+    "data/sql/world/base/dungeon_zulfarrak.sql",
+    "data/sql/world/base/dungeon_zulgurub.sql",
+    "data/sql/world/base/ipp_aware_npcs.sql",
+    "data/sql/world/base/item_enchantment_rates.sql",
+    "data/sql/world/base/mounts_and_riding.sql",
+    "data/sql/world/base/naxx40.sql",
+    "data/sql/world/base/naxx40_archmage_tarsis.sql",
+    "data/sql/world/base/naxx40_creatures.sql",
+    "data/sql/world/base/naxx40_frozen_runes.sql",
+    "data/sql/world/base/naxx40_gameobjects.sql",
+    "data/sql/world/base/naxx40_omarion.sql",
+    "data/sql/world/base/naxx40_quests.sql",
+    "data/sql/world/base/naxx40_spells.sql",
+    "data/sql/world/base/player_levelstats.sql",
+    "data/sql/world/base/player_progression.sql",
+    "data/sql/world/base/player_starting_gear.sql",
+    "data/sql/world/base/player_starting_skillbars.sql",
+    "data/sql/world/base/player_starting_weapon_skills.sql",
+    "data/sql/world/base/professions.sql",
+    "data/sql/world/base/pvp_brackets.sql",
+    "data/sql/world/base/pvp_quests.sql",
+    "data/sql/world/base/pvp_vendors.sql",
+    "data/sql/world/base/quest_missing_diplomat.sql",
+    "data/sql/world/base/quest_the_masquerade.sql",
+    "data/sql/world/base/quest_xp_table.sql",
+    "data/sql/world/base/restore_achievements.sql",
+    "data/sql/world/base/si.sql",
+    "data/sql/world/base/si_creatures.sql",
+    "data/sql/world/base/si_gameobjects.sql",
+    "data/sql/world/base/spell_restorations.sql",
+    "data/sql/world/base/tbc_creatures.sql",
+    "data/sql/world/base/tbc_item_changes.sql",
+    "data/sql/world/base/tbc_loot_fixes.sql",
+    "data/sql/world/base/tbc_raid_hp_restoration.sql",
+    "data/sql/world/base/tbc_reference_loot.sql",
+    "data/sql/world/base/tbc_vendors.sql",
+    "data/sql/world/base/vanilla_creature_immunities.sql",
+    "data/sql/world/base/vanilla_creature_reputations.sql",
+    "data/sql/world/base/vanilla_creatures.sql",
+    "data/sql/world/base/vanilla_item_changes.sql",
+    "data/sql/world/base/vanilla_pooled_treasure_chests.sql",
+    "data/sql/world/base/vanilla_quest_levels.sql",
+    "data/sql/world/base/vanilla_quest_reputations.sql",
+    "data/sql/world/base/vanilla_skinning_adjustments.sql",
+    "data/sql/world/base/vanilla_spell_school_resistances.sql",
+    "data/sql/world/base/vanilla_vendors.sql",
+    "data/sql/world/base/vanilla_world_level_adjustments.sql",
+    "data/sql/world/base/vanilla_xp_tables.sql",
+    "data/sql/world/base/warlock_pet_stats.sql",
+    "data/sql/world/base/wotlk_emblems.sql",
+    "data/sql/world/base/wotlk_vendors.sql",
+    "data/sql/world/base/zone_alterac_mountains.sql",
+    "data/sql/world/base/zone_arathi_highlands.sql",
+    "data/sql/world/base/zone_ashenvale.sql",
+    "data/sql/world/base/zone_azshara.sql",
+    "data/sql/world/base/zone_badlands.sql",
+    "data/sql/world/base/zone_barrens.sql",
+    "data/sql/world/base/zone_blades_edge_mountains.sql",
+    "data/sql/world/base/zone_blasted_lands.sql",
+    "data/sql/world/base/zone_bloodmyst_isle.sql",
+    "data/sql/world/base/zone_burning_steppes.sql",
+    "data/sql/world/base/zone_dalaran.sql",
+    "data/sql/world/base/zone_darkshore.sql",
+    "data/sql/world/base/zone_darnassus.sql",
+    "data/sql/world/base/zone_deadwind_pass.sql",
+    "data/sql/world/base/zone_desolace.sql",
+    "data/sql/world/base/zone_dragonblight.sql",
+    "data/sql/world/base/zone_dun_morogh.sql",
+    "data/sql/world/base/zone_durotar.sql",
+    "data/sql/world/base/zone_duskwood.sql",
+    "data/sql/world/base/zone_dustwallow_marsh.sql",
+    "data/sql/world/base/zone_eastern_plaguelands.sql",
+    "data/sql/world/base/zone_elwynn_forest.sql",
+    "data/sql/world/base/zone_eversong_woods.sql",
+    "data/sql/world/base/zone_felwood.sql",
+    "data/sql/world/base/zone_feralas.sql",
+    "data/sql/world/base/zone_ghostlands.sql",
+    "data/sql/world/base/zone_hellfire_peninsula.sql",
+    "data/sql/world/base/zone_hillsbrad_foothills.sql",
+    "data/sql/world/base/zone_hinterlands.sql",
+    "data/sql/world/base/zone_ironforge.sql",
+    "data/sql/world/base/zone_isle_of_queldanas.sql",
+    "data/sql/world/base/zone_loch_modan.sql",
+    "data/sql/world/base/zone_mulgore.sql",
+    "data/sql/world/base/zone_nagrand.sql",
+    "data/sql/world/base/zone_netherstorm.sql",
+    "data/sql/world/base/zone_orgrimmar.sql",
+    "data/sql/world/base/zone_redridge_mountains.sql",
+    "data/sql/world/base/zone_searing_gorge.sql",
+    "data/sql/world/base/zone_shadowmoon_valley.sql",
+    "data/sql/world/base/zone_shattrath.sql",
+    "data/sql/world/base/zone_silithus.sql",
+    "data/sql/world/base/zone_silvermoon.sql",
+    "data/sql/world/base/zone_silverpine.sql",
+    "data/sql/world/base/zone_stonetalon_mountains.sql",
+    "data/sql/world/base/zone_stormwind.sql",
+    "data/sql/world/base/zone_stranglethorn.sql",
+    "data/sql/world/base/zone_swamp_of_sorrows.sql",
+    "data/sql/world/base/zone_tanaris.sql",
+    "data/sql/world/base/zone_teldrassil.sql",
+    "data/sql/world/base/zone_terokkar_forest.sql",
+    "data/sql/world/base/zone_thousand_needles.sql",
+    "data/sql/world/base/zone_thunder_bluff.sql",
+    "data/sql/world/base/zone_tirisfal_glades.sql",
+    "data/sql/world/base/zone_undercity.sql",
+    "data/sql/world/base/zone_ungoro.sql",
+    "data/sql/world/base/zone_western_plaguelands.sql",
+    "data/sql/world/base/zone_westfall.sql",
+    "data/sql/world/base/zone_wetlands.sql",
+    "data/sql/world/base/zone_winterspring.sql",
+    "data/sql/world/base/zone_zangarmarsh.sql",
+    "optional/sql/world/zz_optional_ammo_stack_size.sql",
+    "optional/sql/world/zz_optional_aq_quest_nerf.sql",
+    "optional/sql/world/zz_optional_av_landmines.sql",
+    "optional/sql/world/zz_optional_creature_stats.sql",
+    "optional/sql/world/zz_optional_item_stack_sizes.sql",
+    "optional/sql/world/zz_optional_limit_spells_to_expansion.sql",
+    "optional/sql/world/zz_optional_phasing.sql",
+    "optional/sql/world/zz_optional_remove_heirlooms.sql",
+    "optional/sql/world/zz_optional_restore_crafting_cd_timers.sql",
+    "optional/sql/world/zz_optional_restore_potion_cd.sql",
+    "optional/sql/world/zz_optional_restore_rogue_poisons.sql",
+    "optional/sql/world/zz_optional_small_group_adjustments.sql",
+    "optional/sql/world/zz_optional_spell_damage_and_healing.sql",
+    "optional/sql/world/zz_optional_stackable_buff_scrolls.sql",
+    "optional/sql/world/zz_optional_tbc_heroic_dungeon_keys_nerf.sql",
+    "optional/sql/world/zz_optional_tbc_pvp_prices.sql",
+    "optional/sql/world/zz_optional_unobtainable_items.sql",
+    "optional/sql/world/zz_optional_vanilla_crafting_requirements.sql",
+    "optional/sql/world/zz_optional_vanilla_models.sql",
+    "optional/sql/world/zz_optional_vanilla_regen_values.sql",
+    "optional/sql/world/zz_optional_vanilla_transports.sql",
+    "optional/sql/world/zz_optional_wotlk_hp_values_for_tbc_raids.sql"
+   ]
+  },
+  "Zoidwaffle/sql-npc-teleporter": {
+   "commit": "38078d1d9c21b7d21d8c5c5ef9d5fc8617dd5fb7",
+   "branch": "default",
+   "files": [
+    "data/sql/db-world/teleporter_capital.dist",
+    "data/sql/db-world/teleporter_starting_zone.dist"
+   ]
+  },
+  "azerothcore/mod-1v1-arena": {
+   "commit": "5ef5708d031f3b02283e6e599aa655bd320d904e",
+   "branch": "default",
+   "files": [
+    "data/sql/db-world/base/1v1_Battlemaster.sql",
+    "data/sql/delete/1v1_delete.sql"
+   ]
+  },
+  "azerothcore/mod-ah-bot": {
+   "commit": "c11d8318cbd8714a9980f9464f78e07d3d48a70a",
+   "branch": "default",
+   "files": [
+    "data/sql/db-world/auctionhousebot_professionItems.sql",
+    "data/sql/db-world/mod_auctionhousebot.sql",
+    "data/sql/db-world/z_filter_disabled_and_trash.sql"
+   ]
+  },
+  "azerothcore/mod-aoe-loot": {
+   "commit": "44486b1aecebd86944ce115972b3c839544903d3",
+   "branch": "default",
+   "files": [
+    "data/sql/db-world/base/aoe_loot_module_string.sql"
+   ]
+  },
+  "azerothcore/mod-autobalance": {
+   "commit": "1d707cb61a0962ab01e4123681e2d3b66cc558a2",
+   "branch": "default",
+   "files": []
+  },
+  "azerothcore/mod-learn-spells": {
+   "commit": "016b92d520f343d074ffd5d46016a94f4a3a6ebd",
+   "branch": "default",
+   "files": []
+  },
+  "azerothcore/mod-npc-beastmaster": {
+   "commit": "99dbd9b73f63c39b0773c575bea7a8add8049ccf",
+   "branch": "default",
+   "files": [
+    "data/sql/db-characters/track_tamed_pets.sql",
+    "data/sql/db-world/beastmaster_tames.sql",
+    "data/sql/db-world/beastmaster_tames_inserts.sql",
+    "data/sql/db-world/npc_beastmaster.sql"
+   ]
+  },
+  "azerothcore/mod-solocraft": {
+   "commit": "59588838988d1b74111d26670d99d0e649014b93",
+   "branch": "default",
+   "files": [
+    "data/sql/db-characters/mod_solo_craft.sql",
+    "data/sql/db-world/mod_solo_craft.sql"
+   ]
+  },
+  "azerothcore/mod-transmog": {
+   "commit": "327753a05b9024f2a90738bb08e9b8afc2fc9a21",
+   "branch": "default",
+   "files": [
+    "data/sql/db-auth/acore_cms_subscriptions.sql",
+    "data/sql/db-characters/trasmorg.sql",
+    "data/sql/db-world/2016_11_17_transmog_npc.sql",
+    "data/sql/db-world/2016_11_17_transmog_texts.sql",
+    "data/sql/db-world/2024_08_25_transmog_vendor_items.sql",
+    "data/sql/db-world/2026_05_09_migrate_to_module_string.sql",
+    "data/sql/db-world/2026_07_23_transmog_claim_strings.sql"
+   ]
+  },
+  "azerothcore/portals-in-all-capitals": {
+   "commit": "9adae9c851a5fe0c600c40bc10291d361d9c23ff",
+   "branch": "default",
+   "files": [
+    "portals-in-all-capitals.down.sql",
+    "portals-in-all-capitals.up.sql"
+   ]
+  },
+  "claudevandort/mod-mount-scaling": {
+   "commit": "309da733af3bcb233c33d51fbddcdc5f05aa99bf",
+   "branch": "default",
+   "files": [
+    "data/sql/db_world/mount_scaling_trainer.sql"
+   ]
+  },
+  "heyitsbench/mod-arac": {
+   "commit": "3f605e09c656eb3b620ef2d70c7ef61808c1cfb0",
+   "branch": "default",
+   "files": [
+    "data/sql/Copy for Custom Race.sql",
+    "data/sql/db-world/(Optional)/Copy for Custom Race.sql",
+    "data/sql/db-world/arac.sql"
+   ]
+  },
+  "noisiver/mod-junk-to-gold": {
+   "commit": "2134690bb03899e5c9e44d0682e8e6abf0bbbaf2",
+   "branch": "default",
+   "files": []
+  },
+  "pangolp/mod-quest-loot-party": {
+   "commit": "6f073c1bef1bba1aa73787d1e30db7429f2b1c7b",
+   "branch": "default",
+   "files": [
+    "data/sql/db-world/base/qlp_2026_04_19_00.sql"
+   ]
+  },
+  "pjerra/mod-city-bots": {
+   "commit": "bed13ced47f9edae725d78d282296c17f94793bb",
+   "branch": "default",
+   "files": [
+    "data/sql/db-auth/updates/2026_07_16_03_stage_cast_one_account_per_bot.sql",
+    "data/sql/db-characters/updates/2026_08_22_00_stage_cast_characters.sql",
+    "data/sql/db-characters/updates/2026_08_22_01_stage_cast_outfits.sql",
+    "data/sql/db-world/updates/2026_07_13_01_city_bot_poi.sql",
+    "data/sql/db-world/updates/2026_07_13_02_city_bot_ambiance.sql",
+    "data/sql/db-world/updates/2026_07_15_05_playercreateinfo_human_undead_hunter.sql",
+    "data/sql/dev/db-characters/updates/2026_07_17_06_fix_goldshire_dueler_positions.sql",
+    "data/sql/dev/db-characters/updates/2026_07_17_12_sync_stage_cast_characters_to_roster.sql",
+    "data/sql/dev/db-characters/updates/2026_07_17_15_fisher_and_goldshire_dueler_positions.sql",
+    "data/sql/dev/db-characters/updates/2026_07_23_01_stage_cast_readable_names.sql",
+    "data/sql/dev/db-characters/updates/2026_07_25_01_orgrimmar_fisher_positions.sql",
+    "data/sql/dev/db-characters/updates/2026_08_11_01_sync_citizen_roster_race_classes.sql",
+    "data/sql/dev/db-characters/updates/2026_08_28_00_strip_citizen_bot_achievements.sql",
+    "data/sql/dev/db-world/updates/2026_07_17_10_force_gate_duel_exact_pois.sql",
+    "data/sql/dev/db-world/updates/2026_07_17_11_fix_goldshire_duel_pois.sql",
+    "data/sql/dev/db-world/updates/2026_07_17_13_duel_recovery_and_fishing_pois.sql",
+    "data/sql/dev/db-world/updates/2026_07_23_02_separate_goldshire_fishers.sql",
+    "data/sql/dev/db-world/updates/2026_07_23_03_expand_capital_roam_pois.sql",
+    "data/sql/dev/db-world/updates/2026_07_23_04_add_capital_bank_hubs.sql",
+    "data/sql/dev/diagnostics/duel_bot_diagnostics.sql",
+    "data/sql/dev/playerbots/updates/2026_07_17_08_gate_dueler_round_robin_pois.sql",
+    "data/sql/dev/playerbots/updates/2026_07_17_09_goldshire_duelers_level_80.sql",
+    "data/sql/dev/playerbots/updates/2026_07_17_14_dedicated_city_fishers.sql",
+    "data/sql/dev/playerbots/updates/2026_07_23_01_stage_cast_readable_names.sql",
+    "data/sql/playerbots/updates/2026_07_15_00_citizen_roster.sql",
+    "data/sql/uninstall/db-world/uninstall_mod_city_bots.sql",
+    "data/sql/uninstall/playerbots/uninstall_mod_city_bots.sql"
+   ]
+  },
+  "tomcoffingiii/mod-level-one-mounts": {
+   "commit": "143f5dae20e981423eb72de15dd24855aa946dec",
+   "branch": "default",
+   "files": [
+    "level-one-mounts.sql",
+    "level-twenty-mounts.sql"
+   ]
+  }
+ }
+}

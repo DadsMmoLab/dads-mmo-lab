@@ -383,16 +383,66 @@ _HTTP_CLI_AUTH = re.compile(
 _USER_THEN_PASSWORD = re.compile(
     r"(?P<head>[ \t'\"]-u[^\s\"',]+['\"]?,?[ \t]*['\"]?-p)" + _QUOTED_OR_BARE
 )
+
+
+def _prefix_of(word: str, shortest: int) -> str:
+    """`word` or any prefix of it at least `shortest` long: `a`, `acc`, `account`.
+
+    The cores run a console command from a prefix of each of its words, so `acc
+    create` and `account set pass` set a password as surely as the full spelling
+    does (T683). The mangos family takes the FIRST table entry a prefix matches
+    (`ChatHandler::hasStringAbbr`, tortoise-wow Chat.cpp:1483), and `account` comes
+    first in Tortoise's table (:838), so a bare `a` is `account` there."""
+    tail = ""
+    for letter in reversed(word[shortest:]):
+        tail = f"(?:{letter}{tail})?"
+    return word[:shortest] + tail
+
+
+_ACCOUNT = r"\b" + _prefix_of("account", 1) + r"[ \t]+"
+_CLOSED = r"(?=[\s,\]}]|\Z)"
+"""After a closing quote or bracket: a space or the end, as the mangos cores require of a
+quoted argument (`ExtractQuotedArg`, mangos-tbc Chat.cpp:2502-2508), or what closes the JSON
+record the command sits in."""
+_ACCOUNT_NAME = r"(?:\"[^\"\r\n]{0,100}\"|'[^'\r\n]{0,100}'|\[[^\]\r\n]{0,100}\]|[^\s\"']+)"
+"""The mangos cores read the account name as `'bob'`, `"bob"` or `[bob]` as well as bare
+(`ExtractQuotedOrLiteralArg`, mangos-tbc Level3.cpp:1140-1141)."""
+_ACCOUNT_VALUE = (
+    r"\\{1,8}\"[^\r\n]{0,200}?\\{1,8}\""  # \"a b\"  (inside a JSON string)
+    r"|\\{1,8}'[^\r\n]{0,200}?\\{1,8}'"  # \'a b\'  (inside a repr)
+    # "a b"  'a b'  [a b]: the quoted forms the mangos cores read
+    r"|(?:\"[^\"\r\n]{0,200}\"|'[^'\r\n]{0,200}'|\[[^\]\r\n]{0,200}\])" + _CLOSED +
+    # A bare word, as AzerothCore splits on spaces: a quote may open it ('pw), sit inside
+    # it (pa",ss) or never close. Only a quote that closes the string the command sits in
+    # (a JSON record: the quote, maybe `,` `]` `}`, then a space or the end) is left out.
+    r"|(?:[^\s\"']|[\"'](?![,\]}]*(?:\s|\Z)))+"
+)
 _ACCOUNT_CREATE = re.compile(
-    r"(?i)(?P<head>\baccount[ \t]+create[ \t]+[^\s\"']+[ \t]+)(?P<value>[^\s\"']+)"
+    r"(?i)(?P<head>" + _ACCOUNT + _prefix_of("create", 1) + r"[ \t]+" + _ACCOUNT_NAME + r"[ \t]+)"
+    r"(?P<value>" + _ACCOUNT_VALUE + r")"
 )
 _ACCOUNT_PASSWORD = re.compile(
-    r"(?i)(?P<head>\baccount[ \t]+set[ \t]+password[ \t]+[^\s\"']+[ \t]+)"
-    r"(?P<value>\*\*\*(?![^\s\"'])|[^\s\"']+(?:[ \t]+[^\s\"']+)?)"
+    r"(?i)(?P<head>"
+    + _ACCOUNT
+    + _prefix_of("set", 1)
+    + r"[ \t]+"
+    + _prefix_of("password", 1)
+    + r"[ \t]+"
+    + _ACCOUNT_NAME
+    + r"[ \t]+)"
+    r"(?P<value>\*\*\*(?![^\s\"'])|(?:"
+    + _ACCOUNT_VALUE
+    + r")(?:[ \t]+(?:"
+    + _ACCOUNT_VALUE
+    + r"))?)"
 )
 _OWN_PASSWORD = re.compile(
-    r"(?i)(?P<head>\baccount[ \t]+password[ \t]+)"
-    r"(?P<value>\*\*\*(?![^\s\"'])|[^\s\"']+(?:[ \t]+[^\s\"']+){0,2})"
+    r"(?i)(?P<head>" + _ACCOUNT + _prefix_of("password", 1) + r"[ \t]+)"
+    r"(?P<value>\*\*\*(?![^\s\"'])|(?:"
+    + _ACCOUNT_VALUE
+    + r")(?:[ \t]+(?:"
+    + _ACCOUNT_VALUE
+    + r")){0,2})"
 )
 _XML_SECRET = re.compile(
     r"(?i)(?P<head><(?P<tag>[\w:.-]*(?:password|passwd|secret|token|session[_-]?key"
@@ -449,6 +499,17 @@ def _mask_head_value(match: re.Match[str]) -> str:
     if _is_masked(match.group("value")):
         return match.group(0)  # already masked: a second pass must change nothing
     return match.group("head") + MASK
+
+
+def hide_account_passwords(text: str) -> str:
+    """`text` with the password of every account command in it masked, and nothing else.
+
+    For an echo of a typed console command (T683 S4): the same spellings the support
+    file is cleaned of, without the rest of the redactor, so `server info` and every
+    other command still read as typed."""
+    for pattern in (_ACCOUNT_CREATE, _ACCOUNT_PASSWORD, _OWN_PASSWORD):
+        text = pattern.sub(_mask_head_value, text)
+    return text
 
 
 _QUOTED = re.compile(r"(\\*[\"'])(.*?)(\\*[\"'])", re.DOTALL)

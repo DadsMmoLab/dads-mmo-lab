@@ -215,13 +215,13 @@ def test_a_remove_stops_between_its_steps_once_the_hold_is_lost(tmp_path: Path) 
     spy = _Spy()
     applier = _applier(tmp_path, spy, NO_SQL)
     applier.install(parse_manifest(NO_SQL))
-    real_undeploy = applier._undeploy
+    real_undeploy = applier._undeploy_recorded
 
-    def lose_then_undeploy(*args: Any) -> None:
+    def lose_then_undeploy(*args: Any) -> bool:
         spy.lost.set()
-        real_undeploy(*args)
+        return real_undeploy(*args)
 
-    applier._undeploy = lose_then_undeploy  # type: ignore[method-assign]
+    applier._undeploy_recorded = lose_then_undeploy  # type: ignore[method-assign]
     with pytest.raises(ApplyRefusal):
         applier.remove(parse_manifest(NO_SQL))
     assert applier.clone_dir(
@@ -237,7 +237,8 @@ def _lose_after(applier: Applier, spy: _Spy, name: str, nth: int = 1) -> list[st
     """
     calls: list[str] = []
     for each in (
-        "_deploy _folders _patches _sql _conf _client _dbc _finish_claim _undeploy _unfolders "
+        "_deploy _folders _patches _sql _conf _client _dbc _finish_claim _undeploy_recorded "
+        "_unfolders "
         "_unclient _refuse_checkout_links"
     ).split():
         real = getattr(applier, each)
@@ -267,8 +268,8 @@ BETWEEN_STEPS = [
     ("configure", "_refuse_checkout_links", 1, "_patches"),
     ("configure", "_sql", 1, "_conf"),
     ("remove", "_refuse_checkout_links", 1, "_patches"),
-    ("remove", "_sql", 1, "_undeploy"),
-    ("remove", "_undeploy", 1, "_unfolders"),
+    ("remove", "_sql", 1, "_undeploy_recorded"),
+    ("remove", "_undeploy_recorded", 1, "_unfolders"),
     ("remove", "_unfolders", 1, "_unclient"),
     ("remove", "_unclient", 1, "rmtree"),
 ]

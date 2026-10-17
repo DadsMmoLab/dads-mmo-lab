@@ -17,13 +17,13 @@
             "branch": "Playerbot",
             "depth": null,
             "dest": ".",
-            "rev": "2a2211cd8f3d157da432ec0175ddd4b8a191931f"
+            "rev": "8a4e76eac8c4ccebf547113afe7b51d6c3e91641"
           },
           {
             "repo": "mod-playerbots/mod-playerbots",
             "branch": "master",
             "dest": "modules/mod-playerbots",
-            "rev": "79bd428115c8f33b74b13de23b133d49c3f75c60"
+            "rev": "d750b4b3a50effdf22bedc8032f0e8e5f7cb8091"
           }
         ]
       },
@@ -35,8 +35,10 @@
         ],
         "default_server_dir": "yulon-wotlk",
         "password": {
-          "mode": "fixed",
-          "value": "password"
+          "mode": "generated",
+          "file": ".db_password",
+          "prefix": "wotlk-",
+          "legacy": "password"
         },
         "native": {
           "family": "azerothcore",
@@ -1074,7 +1076,7 @@
           6141
         ],
         "notes": [
-          "Community repacks (realmlist.wtf at top level, no locale folder) are detected and warned about."
+          "Yu'lon checks the client's archives (the MPQ count and dbc.MPQ) before it extracts anything."
         ]
       },
       "has_manifests": true,
@@ -1102,26 +1104,26 @@
       "status": "beta",
       "description": "Turtle WoW's world on the Tortoise core, the code the Turtle WoW V2 servers are built from, with the TortoiseBots bots built in. Yu'lon compiles it from source in Docker.",
       "notes": [
-        "Penqle core: tortoise-wow/tortoise-wow branch 1181dev, a MaNGOS Zero lineage, with the TortoiseBots module compiled in statically and the whole thing source-compiled in Docker.",
-        "1181dev is main plus the SOAP interface (PR #491, merged there 2026-09-17); it carries the headless bot sessions (PR #438, bot-helpers is fully merged into main) the bots module requires, and the bots themselves are Sagiroth/TortoiseBots, cloned into modules/TortoiseBots.",
+        "Penqle core: tortoise-wow/tortoise-wow branch main, a MaNGOS Zero lineage, with the TortoiseBots module compiled in statically and the whole thing source-compiled in Docker.",
+        "The core moved from its 1181dev branch to main with v0.9.18: 1181dev was main plus the SOAP interface (PR #491, 2026-09-17), main now holds all of it (src/mangosd/MaNGOSsoap.cpp) and four commits more, and the TortoiseBots README names the core's main branch as its base. main carries the headless bot sessions (PR #438, bot-helpers is fully merged into it) the bots module requires, and the bots themselves are Sagiroth/TortoiseBots, cloned into modules/TortoiseBots.",
         "It replaces the retired Shyalya fork that vendored the cmangos playerbots; a server already installed from that fork goes on opening, starting and being played, and is not migrated.",
         "Commands reach this world over SOAP again: the core builds gsoap from source behind ENABLE_SOAP, which the image template switches on (T86, 2026-09-17).",
         "Installed, started and pressed headless through the app's own seams on the test box; no client rendered there (T30, T86)."
       ],
       "emulator": {
-        "name": "tortoise-wow/tortoise-wow @ 1181dev (the Penqle core) + Sagiroth/TortoiseBots",
+        "name": "tortoise-wow/tortoise-wow @ main (the Penqle core) + Sagiroth/TortoiseBots",
         "sources": [
           {
             "repo": "tortoise-wow/tortoise-wow",
-            "branch": "1181dev",
+            "branch": "main",
             "dest": "src/tortoise-wow",
-            "rev": "6131a26f91d60e64f6d58c7f0a9b6333f2d9f25a"
+            "rev": "10393426efe4bbe1de3a31fd071ca36fae358bb6"
           },
           {
             "repo": "Sagiroth/TortoiseBots",
             "branch": "main",
             "dest": "src/tortoise-wow/modules/TortoiseBots",
-            "rev": "18d4d14b3efdd804dccc527003f5c92a02ff0c2c",
+            "rev": "ff668fee0604035943e2ff0028ea2fd16c029d64",
             "follow": "releases"
           }
         ]
@@ -1415,7 +1417,7 @@
                 "file": "wow-tortoise/patches/updater-no-wait-for-enter.patch",
                 "source": "src/tortoise-wow",
                 "obsolete_when_absent": "std::getline(std::cin",
-                "reason": "tortoise-wow's DB auto-updater ends a failed migration with std::getline(std::cin) (src/shared/Database/AutoUpdater.cpp:236-239 at 187af788, the same bytes at 6131a26f); the world container keeps stdin open for the Console tab, so the read never returns and a failed update hangs the world with no signal handler, no SOAP and no error line. The patch drops the read so the world reports the failure and exits, as Shyalya's fork did in b405b10adb"
+                "reason": "tortoise-wow's DB auto-updater ends a failed migration with std::getline(std::cin) (src/shared/Database/AutoUpdater.cpp:236-239 at 187af788, the same bytes at 6131a26f and at 10393426); the world container keeps stdin open for the Console tab, so the read never returns and a failed update hangs the world with no signal handler, no SOAP and no error line. The patch drops the read so the world reports the failure and exits, as Shyalya's fork did in b405b10adb"
               }
             ]
           }
@@ -1479,7 +1481,7 @@
         "publish": true,
         "must_not_listen": [],
         "notes": [
-          "SOAP IS BACK ON THIS CORE since PR #491 merged into 1181dev on 2026-09-17 (57abad6f3): ns1__executeCommand under urn:MaNGOS, HTTP Basic auth, SEC_ADMINISTRATOR (rank 4) required, banned accounts refused (403), the rank and the ban read from the row per request, 64 KiB request cap. The core's CMake option ENABLE_SOAP defaults OFF, so the image template passes -DENABLE_SOAP=ON; without it this block would install cleanly and answer nothing.",
+          "SOAP IS BACK ON THIS CORE since PR #491 merged into 1181dev on 2026-09-17 (57abad6f3; main holds it since the pin moved there, v0.9.18): ns1__executeCommand under urn:MaNGOS, HTTP Basic auth, SEC_ADMINISTRATOR (rank 4) required, banned accounts refused (403), the rank and the ban read from the row per request, 64 KiB request cap. The core's CMake option ENABLE_SOAP defaults OFF, so the image template passes -DENABLE_SOAP=ON; without it this block would install cleanly and answer nothing.",
           "This block is the same one that stood here between 2026-09-08 and 2026-09-11 (c7e577c7) and that T30's `attach` note kept as the way back; the transport in ui/controller_view.py `_for_tortoise` is channel_setup.InstallChannel over channel.SoapChannel again, and tests/test_catalog_operations.py expects `soap`."
         ]
       },
@@ -2440,13 +2442,13 @@
             "branch": "Playerbot",
             "depth": null,
             "dest": ".",
-            "rev": "2a2211cd8f3d157da432ec0175ddd4b8a191931f"
+            "rev": "8a4e76eac8c4ccebf547113afe7b51d6c3e91641"
           },
           {
             "repo": "mod-playerbots/mod-playerbots",
             "branch": "master",
             "dest": "modules/mod-playerbots",
-            "rev": "79bd428115c8f33b74b13de23b133d49c3f75c60"
+            "rev": "d750b4b3a50effdf22bedc8032f0e8e5f7cb8091"
           },
           {
             "repo": "azerothcore/mod-ale",
@@ -2470,8 +2472,10 @@
         ],
         "default_server_dir": "yulon-unbound",
         "password": {
-          "mode": "fixed",
-          "value": "password"
+          "mode": "generated",
+          "file": ".db_password",
+          "prefix": "unbound-",
+          "legacy": "password"
         },
         "native": {
           "family": "azerothcore",

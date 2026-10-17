@@ -68,11 +68,11 @@ password.
 from __future__ import annotations
 
 import hashlib
-import re
 import secrets
 from dataclasses import dataclass
-from typing import Literal, Protocol, get_args
+from typing import Literal, NamedTuple, Protocol, get_args
 
+from yulon import account_rules
 from yulon.apply import ApplyError, DockerSql
 from yulon.controller_wow_wotlk import docker_ctl
 from yulon.log import get_logger
@@ -90,8 +90,8 @@ VERIFIER_LENGTH = 32  # SRP6.h VERIFIER_LENGTH
 
 # AccountMgr.h. Both are ceilings, not targets: AzerothCore refuses anything
 # LONGER, so a "stronger" 32-character password is rejected outright.
-MAX_USERNAME = 17  # MAX_ACCOUNT_STR
-MAX_PASSWORD = 16  # MAX_PASS_STR
+MAX_USERNAME = account_rules.NAME_MAX["azerothcore"]  # MAX_ACCOUNT_STR
+MAX_PASSWORD = account_rules.PASSWORD_MAX  # MAX_PASS_STR
 
 # AccountMgr.cpp passes sWorld's CONFIG_EXPANSION; 2 is WotLK, and is what the
 # server wrote in both observed rows. Written explicitly rather than left to the
@@ -110,13 +110,6 @@ MAX_GM_LEVEL = 3
 
 _ACCOUNTS_DB: Db = "auth"
 
-# AzerothCore itself only length-checks the name, but the client sends the
-# username in the logon packet and the realmlist/auth path treats it as a plain
-# token. Control characters and whitespace cannot be typed at a login box and
-# would produce an account nobody can sign in to, so they are refused here with
-# a sentence rather than written and discovered later.
-_USERNAME_OK = re.compile(r"\A[^\s\x00-\x1f\x7f]+\Z")
-
 
 class AccountError(RuntimeError):
     """An account could not be created (bad name/password, or the write failed).
@@ -124,6 +117,21 @@ class AccountError(RuntimeError):
     Never carries the password: `create_account()` builds every message in this
     module from the username and the reason alone.
     """
+
+
+class AccountExists(AccountError):
+    """A player's Create named an account that is already there (T749). Nothing was written.
+
+    Only Yu'lon's own accounts (`APP_ACCOUNT_PREFIX`) are kept and brought up to the level
+    asked: an existing account anyone else made keeps its password AND its level, and the
+    player is told which presses change them.
+    """
+
+    def __init__(self, name: str) -> None:
+        super().__init__(
+            f"An account named {name} already exists, so nothing was changed. Use Set password "
+            "or Set GM level for it."
+        )
 
 
 @dataclass(frozen=True)
@@ -416,7 +424,16 @@ def create_account(
     AzerothCore wrote it, and the GM grant is skipped when the account is
     already at the level.
 
-    An account that exists keeps its credentials — salt and verifier are never
+    **Only Yu'lon's own accounts (`APP_ACCOUNT_PREFIX`, the command channel's) are
+    brought up to what was asked when they exist (T749).** Any other name that exists is
+    refused with `AccountExists` before anything is written: this is the player's Create
+    (every family's Create and the launcher's go through here), and keeping the old password
+    in silence while raising someone else's account, or a bot's, to the level typed is not
+    what a Create may do. `account_rules.create_problem()` refuses a player the app's prefix,
+    so a player's press never reaches the keep-and-raise half; the channel's settle does, and
+    reads `created is False` as "the row is there with a password this machine lacks" (T386).
+
+    An own account that exists keeps its credentials — salt and verifier are never
     rewritten, so a second call with a different password does not lock the
     owner out — and its GM level is only ever raised. `gm_level` means "at
     least this", so the default cannot demote an administrator and a caller
@@ -441,6 +458,7 @@ def create_account(
         genuine failure never returns.
 
     Raises:
+        AccountExists: the name is taken and is not one of Yu'lon's own (T749).
         AccountError: the username or password is unusable, `gm_level` is out
             of range (above `max_gm_level` -- AzerothCore's 3 by default, the tree's
             own `accounts.level.max_level` where a wrapper passes it: Tortoise's is 4,
@@ -451,7 +469,7 @@ def create_account(
             out of every statement but the first (review, 2026-08-23). Never
             contains the password.
     """
-    name = _checked_username(username)
+    name = _checked_username(username, scheme)
     if name.isdigit() and not names_are_names:
         raise AccountError(
             f"{name} is made only of digits, and this server's account commands read digits as "
@@ -462,7 +480,8 @@ def create_account(
     if not NO_GM <= gm_level <= max_gm_level:
         raise AccountError(f"GM level must be between {NO_GM} and {max_gm_level}, got {gm_level}")
 
-    account_id, created = _account_row(sql, name, password, scheme)
+    keep_existing = name.startswith(APP_ACCOUNT_PREFIX)
+    account_id, created = _account_row(sql, name, password, scheme, keep_existing=keep_existing)
     # AccountMgr::CreateAccount runs LOGIN_INS_REALM_CHARACTERS_INIT right after
     # the insert. Reproduced verbatim; its `WHERE acctid IS NULL` makes it
     # idempotent, which is what lets it run on the already-exists path too.
@@ -594,27 +613,36 @@ def _valid_password(password: str) -> bool:
     return commands.valid_account_password(password)
 
 
-def _account_row(sql: SqlSeam, name: str, password: str, scheme: Scheme) -> tuple[int, bool]:
+def _account_row(
+    sql: SqlSeam, name: str, password: str, scheme: Scheme, *, keep_existing: bool
+) -> tuple[int, bool]:
     """The account's id, and whether *this* call wrote its row.
 
     Never touches a row that is already there: re-salting a taken name would
     silently change the owner's password, which is the one thing worse than
     refusing (`tests/integration/test_accounts_live.py` checks that against a
-    real database).
+    real database). Without `keep_existing` (anything but Yu'lon's own account, T749) a
+    row that is there, or that appears while this inserts, is `AccountExists` -- unless the
+    insert answered an error and the row holds the salt it wrote: then it is this call's
+    row (committed, the answer lost) and is finished as created. Where that cannot be told,
+    the player is told so (`_maybe_created()`).
     """
     # Built before the lookup, so a scheme this module does not know refuses
     # having asked the database nothing at all rather than after a SELECT. The
     # cost is a salt derived for a name that turns out to be taken, which is a
     # SHA1 and a modular exponentiation nobody waits for.
-    statement = _insert_statement(name, password, scheme)
+    insert = _insert_statement(name, password, scheme)
     existing = _account_id(sql, name)
     if existing is not None:
+        if not keep_existing:
+            logger.info(f"account {name} already exists (id {existing}); Create refused")
+            raise AccountExists(name)
         logger.info(f"account {name} already exists (id {existing}), keeping its password")
         return existing, False
 
     logger.info(f"creating account {name}")  # never the password
     try:
-        sql.run_statement(_ACCOUNTS_DB, statement)
+        sql.run_statement(_ACCOUNTS_DB, insert.statement)
     except ApplyError as exc:
         # Something raced us to the name between the check above and here. Ask
         # the database again rather than reading the driver's error text: the
@@ -629,7 +657,18 @@ def _account_row(sql: SqlSeam, name: str, password: str, scheme: Scheme) -> tupl
             # back in some errors. `from exc` keeps the reason on the chain.
             raise AccountError(f"could not create account {name}: the insert failed") from exc
         logger.info(f"account {name} appeared while we were inserting it (id {raced})")
-        return raced, False
+        if keep_existing:
+            return raced, False
+        # T749 round 2: the error may have come AFTER the insert committed (a timeout, an exec
+        # that died on the way back), and then the row is the player's own, with the password
+        # typed and no GM grant yet. Told apart by what only this insert wrote.
+        ours = _is_this_inserts_row(sql, raced, insert)
+        if ours:
+            logger.info(f"account {name}: the insert answered an error, but its row is there")
+            return raced, True
+        if ours is None:
+            raise AccountError(_maybe_created(name)) from exc
+        raise AccountExists(name) from exc
 
     account_id = _account_id(sql, name)
     if account_id is None:
@@ -640,7 +679,44 @@ def _account_row(sql: SqlSeam, name: str, password: str, scheme: Scheme) -> tupl
     return account_id, True
 
 
-def _insert_statement(name: str, password: str, scheme: Scheme) -> str:
+class _Insert(NamedTuple):
+    """An `account` INSERT, and how to tell the row it writes from anybody else's (T749)."""
+
+    statement: str
+    proof: tuple[str, str] | None
+    """`(column expression, the value this insert wrote)`, read back by
+    `_is_this_inserts_row()`: the random salt. None where the stored value is the same for
+    anyone who types that name and password (`mangos_sha`'s hash), so it proves nothing."""
+
+
+def _is_this_inserts_row(sql: SqlSeam, account_id: int, insert: _Insert) -> bool | None:
+    """Whether the row `account_id` is the one `insert` wrote; None when that cannot be told."""
+    if insert.proof is None:
+        return None
+    column, wrote = insert.proof
+    try:
+        rows = _query_rows(
+            sql,
+            f"SELECT {column} FROM account WHERE id = {account_id}",
+            f"read back account {account_id}",
+        )
+    except AccountError as exc:
+        logger.warning(f"could not tell whether account {account_id} is this insert's: {exc}")
+        return None
+    return bool(rows) and rows[0].upper() == wrote.upper()
+
+
+def _maybe_created(name: str) -> str:
+    """The sentence for an insert that answered an error with a row of that name there after."""
+    return (
+        f"Yu'lon cannot tell whether it created {name}: the database answered with an error, "
+        "and an account by that name is there now. Look for it in the account list: if it "
+        "is the one you just made, its password is the one you typed, and Set GM level gives "
+        "it a level. Nothing else was changed."
+    )
+
+
+def _insert_statement(name: str, password: str, scheme: Scheme) -> _Insert:
     """The `account` INSERT this core wants — or a refusal naming the scheme.
 
     The columns ARE the scheme, so there is no shape to fall back to: until
@@ -655,37 +731,41 @@ def _insert_statement(name: str, password: str, scheme: Scheme) -> str:
         # at its own default and raised by `_grant_gm()` when asked, so an
         # ordinary account is never briefly an administrator.
         s_hex, v_hex = mangos_srp6_credentials(name, password)
-        return (
+        return _Insert(
             "INSERT INTO account (username, v, s, joindate)"
             f" VALUES ({_text_literal(name)}, {_text_literal(v_hex)},"
-            f" {_text_literal(s_hex)}, NOW())"
+            f" {_text_literal(s_hex)}, NOW())",
+            ("s", s_hex),
         )
     if scheme == "mangos_sha":
         # Byte for byte what the core's own `account create` emits, columns and
         # all: it names only these three, and every other column on that table
         # has a default. Adding `expansion` or `email` here would be this app
         # inventing a row shape the core does not write.
-        return (
+        return _Insert(
             "INSERT INTO account(username,sha_pass_hash,joindate)"
             f" VALUES({_text_literal(name)},"
-            f"{_text_literal(mangos_password_hash(name, password))},NOW())"
+            f"{_text_literal(mangos_password_hash(name, password))},NOW())",
+            None,
         )
     if scheme == "azerothcore":
         salt, verifier = registration_data(name, password)
-        return (
+        return _Insert(
             "INSERT INTO account (username, salt, verifier, expansion, reg_mail, email, joindate)"
             f" VALUES ({_text_literal(name)}, {_hex_literal(salt)}, {_hex_literal(verifier)},"
-            f" {EXPANSION}, '', '', NOW())"
+            f" {EXPANSION}, '', '', NOW())",
+            ("HEX(salt)", salt.hex()),
         )
     if scheme == "trinitycore":
         # `LOGIN_INS_ACCOUNT` (CENTURION faac5fc9, `LoginDatabase.cpp:63`), column for
         # column. No `expansion`: the column's default is 2 on Centurion's schema
         # (`auth_schema.sql:33`), which is what the core's own `account create` leaves.
         salt, verifier = registration_data(name, password)
-        return (
+        return _Insert(
             "INSERT INTO account (username, salt, verifier, reg_mail, email, joindate)"
             f" VALUES ({_text_literal(name)}, {_hex_literal(salt)}, {_hex_literal(verifier)},"
-            " '', '', NOW())"
+            " '', '', NOW())",
+            ("HEX(salt)", salt.hex()),
         )
     raise _unknown_scheme(scheme, "write an account row for")
 
@@ -867,33 +947,36 @@ def _query_rows(sql: SqlSeam, statement: str, what: str) -> list[str]:
     return [line.strip() for line in output.splitlines() if line.strip()]
 
 
-def _checked_username(username: str) -> str:
-    """The folded username, or `AccountError` explaining why it cannot be used."""
+def _checked_username(username: str, scheme: str | None = None) -> str:
+    """The folded username, or `AccountError` explaining why it cannot be used.
+
+    `account_rules.name_problem()` is the rule (T673): the characters the account
+    commands can carry, and `scheme`'s core's own longest name, so every account this
+    writes is one Delete, Set password and Set GM level can name afterwards. With no
+    `scheme` (a lookup, not a write) the longest any core takes.
+    """
     name = fold(username.strip())
     if not name:
         raise AccountError("the account name cannot be empty")
-    if len(name) > MAX_USERNAME:
-        raise AccountError(
-            f"the account name can be at most {MAX_USERNAME} characters, got {len(name)}"
-        )
-    if not _USERNAME_OK.match(name):
-        raise AccountError("the account name cannot contain spaces or control characters")
+    problem = account_rules.name_problem(name, scheme=scheme)
+    if problem:
+        raise AccountError(problem)
     return name
 
 
 def _check_password(password: str) -> None:
-    """Refuse a password AzerothCore would refuse — without naming it in the error.
+    """Refuse a password Set password could not set again — without naming it in the error.
 
-    The length is the only thing checked, because it is the only thing
-    `AccountMgr::CreateAccount()` checks. Note `MAX_PASS_STR` is a ceiling: a
-    longer password is rejected by the server, not truncated, so silently
-    letting one through here would write a verifier for a password the user can
-    never enter.
+    `account_rules.password_problem()` (T673): `MAX_PASS_STR` is a ceiling every core
+    shares (a longer password is rejected by the server, not truncated, so letting one
+    through would write a verifier for a password the user can never enter), and the
+    characters are the ones `account set password` can carry on its one line.
     """
     if not password:
         raise AccountError("the password cannot be empty")
-    if len(password) > MAX_PASSWORD:
-        raise AccountError(f"the password can be at most {MAX_PASSWORD} characters")
+    problem = account_rules.password_problem(password)
+    if problem:
+        raise AccountError(problem)
 
 
 def sql_for(db_root_password: str, container: str = docker_ctl.SPEC.db) -> SqlSeam:

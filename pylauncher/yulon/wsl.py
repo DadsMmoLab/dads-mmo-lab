@@ -22,6 +22,7 @@ import json
 import re
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -190,6 +191,118 @@ def distro_state(distro: str) -> DistroState:
     return "stopped"
 
 
+BOOT_TIMEOUT = 90.0
+"""How long `boot()` waits for a stopped distro to come up AND its Docker to answer (T775).
+
+Measured on yulon-win11, 2026-10-12, three stages after the first `wsl -d Ubuntu --exec ...`
+into a stopped distro: no answer in 5 s; 17 s later "Failed to start the systemd user
+session"; one second after that the distro was up but `/var/run/docker.sock` did not exist
+yet (dockerd still starting); only a press 100 s after the first worked."""
+
+_BOOT_RETRY_SECONDS = 2.0
+
+_NO_SUCH_PROGRAM = "execvpe("
+"""What wsl.exe says when `--exec` cannot find the program: no Docker CLI in the distro, which
+waiting does not fix. It is also what a Docker Desktop distro says while Desktop is not running
+(the CLI is a link into Desktop's own mount, which is gone)."""
+
+_DESKTOP_STUB = "could not be found in this wsl"
+"""Docker Desktop's stand-in `docker` for a distro it is not integrated with: "The command 'docker'
+could not be found in this WSL 2 distro. We recommend to activate the WSL integration in Docker
+Desktop settings." Lower-cased. UNMEASURED: Docker Desktop's message as remembered, never
+seen on a test box. If it is wrong the text matches nothing and the probe falls through to the
+transient path (retry, then "slow" or "silent"), so the worst case is a wait, not a bad refusal."""
+
+_BOOT_SIGN = "systemd user session"
+"""The line a distro prints while it is booting ("Failed to start the systemd user session for
+'pk'"), seen live both on a failing probe and on a probe that then exited 0."""
+
+_PERMISSION = "permission denied while trying to connect"
+"""The Docker CLI's own sentence for a socket that refuses this user ("permission denied while
+trying to connect to the Docker daemon socket", also in `docker_advice`). Not the bare words: a
+distro's boot-time stderr can say "permission denied" about something else."""
+
+BootResult = Literal[
+    "up", "slow", "silent", "cancelled", "gone", "no-docker", "desktop", "permission"
+]
+"""Why `boot()` returned:
+
+* `up`: Docker answered, or there was nothing to wait for.
+* `slow`: it did not answer in time after a boot was SEEN; a second try may fix it.
+* `silent`: it never answered and no boot was seen (a running distro whose daemon is stopped).
+* `cancelled`; `gone` (wsl.exe: no such distro); `no-docker` (no docker program in the distro);
+  `desktop` (its docker needs Docker Desktop's WSL integration); `permission` (the socket
+  refuses this user)."""
+
+_PROBE_SECONDS = 60.0
+"""One probe's own bound. A cold distro's first `docker version` blocked ~33 s and then exited 0
+(measured live, unc-probe-output.txt), so the bound sits well above it, inside `BOOT_TIMEOUT`; a
+hung one must still not eat the whole wait."""
+
+
+def boot(
+    distro: str,
+    *,
+    cancel: threading.Event | None = None,
+    timeout: float | None = None,
+) -> BootResult:
+    """Wait until `distro`'s Docker answers, and say why not if it does not (T775, T776).
+
+    A cold distro's first `wsl -d` command boots it (the VM, systemd's user session, then
+    dockerd), which takes longer than the few seconds Docker questions get. Whoever booted it --
+    the press, or Yu'lon reading the server folder over the WSL share when it opened -- WSL may
+    already LIST it as running while its Docker is 30 s from answering (T775 round 3, measured on
+    yulon-win11), so the state is not a gate: a warm distro costs one quick `docker version`.
+
+    The probe is a Docker question, not a shell command: a distro that runs `true` can still have
+    no daemon, and a reservation asked then reads "Docker is down", which lets the press go ahead
+    WITHOUT a reservation. It is retried every 2 s while the failure is the transient kind (user
+    session starting, no `docker.sock` yet, a probe that timed out), for at most `timeout`
+    (`BOOT_TIMEOUT`). Permanent failures end it at once, each with its own result: no docker
+    program, Docker Desktop's integration, permission denied.
+
+    A distro WSL does not list (deleted, renamed), a listing that did not answer, or a host
+    without wsl.exe skip it as "up": those fail as fast as before at the real call. Never raises.
+    """
+    state = distro_state(distro)
+    if state == "unknown":
+        return "up"
+    saw_boot = state == "stopped"
+    prefix = platform.docker_prefix(distro)
+    if prefix is None:
+        return "up"
+    argv = [*prefix, "version", "--format", "{{.Server.Version}}"]
+    limit = BOOT_TIMEOUT if timeout is None else timeout
+    deadline = time.monotonic() + limit
+    logger.info(f"waiting for {distro}'s Docker to answer before asking anything")
+    while True:
+        left = deadline - time.monotonic()
+        if cancel is not None and cancel.is_set():
+            return "cancelled"
+        if left <= 0:
+            return "slow" if saw_boot else "silent"
+        asked = min(left, _PROBE_SECONDS)
+        if cancel is None:
+            done = runner.run(argv, timeout=asked)
+        else:
+            done = runner.run_cancellable(argv, timeout=asked, cancel=cancel)
+        said = f"{done.stdout}{done.stderr}".replace("\x00", "").lower()
+        saw_boot = saw_boot or _BOOT_SIGN in said
+        if done.returncode == 0:
+            logger.info(f"{distro}'s Docker answers")
+            return "up"
+        if done.returncode == _DISTRO_NOT_FOUND_RETURNCODE:
+            return "gone"
+        if _NO_SUCH_PROGRAM in said:
+            return "no-docker"
+        if _DESKTOP_STUB in said:
+            return "desktop"
+        if _PERMISSION in said:
+            return "permission"
+        logger.info(f"{distro}'s Docker is not answering yet ({done.returncode}); asking again")
+        time.sleep(min(_BOOT_RETRY_SECONDS, max(0.0, deadline - time.monotonic())))
+
+
 def is_running(distro: str) -> bool:
     """True only if WSL SAID `distro` is up right now (`distro_state()`), WITHOUT starting it.
 
@@ -329,6 +442,23 @@ def missing_distro_problem(distro: str | None, returncode: int, output: str = ""
     )
 
 
+_RUNNING_PART = re.compile(r"(?:^|,)\s*running\(\d+\)")
+
+
+def _any_running(status: str) -> bool:
+    """Is any container of a `docker compose ls` project running? (T773)
+
+    Compose folds a project's containers into one `state(count)` per state, joined by
+    ", " in alphabetical order: `running(3)`, `exited(3)`, and for a server whose
+    one-shots (database import, client-data init) have finished, `exited(2), running(3)`.
+    Asking whether the status STARTS with "running" read that last one as stopped, and
+    the picker labelled a running Unbound server "(stopped)" (yulon-win11, 2026-10-12).
+    A one-shot never stays running, so a running container is one of the long-lived
+    services (database, auth, world): the project is up.
+    """
+    return _RUNNING_PART.search(status) is not None
+
+
 def parse_compose_ls(distro: str, stdout: str) -> tuple[FoundServer, ...]:
     """Turn `docker compose ls --all --format json` into servers we could adopt.
 
@@ -370,8 +500,7 @@ def parse_compose_ls(distro: str, stdout: str) -> tuple[FoundServer, ...]:
             FoundServer(
                 distro=distro,
                 project=name,
-                # `running(1)`, `exited(3)`, `paused(2)` - only the first says up.
-                running=str(project.get("Status") or "").startswith("running"),
+                running=_any_running(str(project.get("Status") or "")),
                 server_dir=server_dir,
             )
         )
@@ -526,8 +655,8 @@ def release_script(*keys: str) -> str:
 def _exec_argv(distro: str, script: str) -> list[str] | None:
     """`wsl -d <distro> --exec sh -c <script>`, or None without wsl.exe.
 
-    `--exec` and not the `--` of `platform.wsl_prefix()`: after `--` wsl.exe
-    hands the joined command line to the distro's login shell, which would
+    `--exec`, as `platform.wsl_prefix()` ends too since T744: after a bare `--`
+    wsl.exe hands the joined command line to the distro's shell, which would
     expand the script's `$$` and `$(...)` for itself before `sh` ever saw them.
     """
     launcher = platform._which(platform.WSL_PROGRAM)

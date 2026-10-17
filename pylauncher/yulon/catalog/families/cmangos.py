@@ -75,8 +75,9 @@ from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import ClassVar, cast
 
-from yulon import core_modules, dbsecret, docker, git, platform, server_build_presses, tuning
+from yulon import core_modules, docker, git, platform, server_build_presses, tuning
 from yulon.catalog import bot_count, bot_dashboard, composegen, snapshot
+from yulon.catalog import native as native_secret
 from yulon.catalog.catalog import (
     CmangosData,
     ConfPatchTable,
@@ -162,21 +163,30 @@ class _Direction:
     dest: Path
     old: str
     new: str
+    _asked: bool = False
     _said: bool | None = None
+    _why: str = ""
+
+    def peek(self) -> bool | None:
+        """True / False when git or GitHub can say; None when neither can (T767). Never refuses."""
+        if not self._asked:
+            self._said, self._why = moves_forward(
+                self.seams, self.repo, self.dest, self.old, self.new
+            )
+            self._asked = True
+        return self._said
 
     def known(self) -> bool:
         """True when forward; refuses (fail closed) when neither git nor GitHub can say."""
-        if self._said is None:
-            said, why = moves_forward(self.seams, self.repo, self.dest, self.old, self.new)
-            if said is None:
-                raise InstallerError(
-                    updates_unread_sentence(
-                        f"going back takes away in {self.repo}",
-                        f"{why}, so the direction of the move is unknown",
-                    )
+        said = self.peek()
+        if said is None:
+            raise InstallerError(
+                updates_unread_sentence(
+                    f"going back takes away in {self.repo}",
+                    f"{self._why}, so the direction of the move is unknown",
                 )
-            self._said = said
-        return self._said
+            )
+        return said
 
 
 def updates_unread_sentence(source: str, why: str) -> str:
@@ -236,6 +246,60 @@ def newer_migrations_refusal(
     )
 
 
+def changed_migrations_refusal(again: Mapping[str, Sequence[str]], *, to_pin: bool) -> str:
+    """Why a Tortoise update stopped: it would run a migration again with new bytes (T770).
+
+    `again` is, per database, the file labels whose old bytes its `migrations` table holds
+    and whose new bytes it does not. Yu'lon has no mechanism to skip a migration or mark it
+    applied: the ledger is the core's, and writing a key into it is only safe when the new
+    bytes' effect is already in the database, which nothing here can know without running
+    them. So the refusal names the files and how long it lasts, and offers no other press
+    as a way forward: either one, moving to code with the new contents, refuses too.
+    """
+    total = sum(len(labels) for labels in again.values())
+    shown = "; ".join(f"{schema}: {', '.join(labels)}" for schema, labels in again.items())
+    one = total == 1
+    where = "The commit this Yu'lon was tested with" if to_pin else "Upstream's newest code"
+    return (
+        f"{where} changes {total} database migration{'' if one else 's'} your server already "
+        f"ran ({shown}). Tortoise's server knows a migration it ran by the file's bytes, not "
+        f"its name, so at its next start it would run {'it' if one else 'them'} again with the "
+        "new bytes, and a migration that cannot run twice stops the world from starting. "
+        f"Yu'lon cannot tell whether {'it' if one else 'they'} can run twice, and it has no "
+        f"safe way to skip a migration or mark it done. {NOTHING_DONE} Any update or return "
+        "to code that carries the new contents is refused the same way, until upstream ships "
+        f"the old contents of {'that file' if one else 'those files'} again or removes "
+        f"{'it' if one else 'them'}; until then, keep the build you have."
+    )
+
+
+@dataclass(frozen=True)
+class _MovedMigrations:
+    """One moved source's migration files at the running commit and the target (T632, T770).
+
+    `before` / `after` are, per database, `{file name: the hashes the database may hold}`
+    read from git's trees (`_migrations_at()`); `module` is "" for the core.
+    """
+
+    source: EmulatorSource
+    dest: Path
+    old: str
+    new: str
+    module: str
+    before: dict[Db, dict[str, tuple[str, ...]]]
+    after: dict[Db, dict[str, tuple[str, ...]]]
+
+    def label(self, name: str) -> str:
+        return f"{self.module}/{name}" if self.module else name
+
+    def keys(self, hashes: Sequence[str]) -> tuple[str, ...]:
+        return tuple(f"{self.module}:{h}" for h in hashes)
+
+
+_Changed = dict[Db, dict[str, tuple[_MovedMigrations, tuple[str, ...], tuple[str, ...]]]]
+"""Per database, `{file label: (its source, the old bytes' keys, the new bytes' keys)}` (T770)."""
+
+
 MODULE_INSTALL_RULE = re.compile(
     r"install\(\s*DIRECTORY\s+\"[^\"]*/data/sql/(?P<src>[\w.-]+)/?\"\s+"
     r"DESTINATION\s+\"[^\"]*/data/sql/(?P<dst>[\w.-]+)\"\s*\)",
@@ -252,7 +316,7 @@ INSERT_IGNORE = re.compile(rb"^([ \t]*)INSERT INTO", re.MULTILINE)
 the runtime stage): its database hash is the rewritten copy's, so both spellings are asked."""
 
 
-CATALOG_ERROR_TAIL = "That is a catalog error in the app, not something to fix on this machine."
+CATALOG_ERROR_TAIL = native_secret.CATALOG_ERROR_TAIL
 """The one sentence every refusal here about a malformed catalog entry ends in.
 
 Three refusals said it in two spellings until 2026-09-01 — two "a catalog
@@ -313,7 +377,7 @@ ETC_DIR = composegen.SERVER_CONF_DIR
 `composegen`'s name since T169: a render reads the confs there, to bind the
 folder they name, and composegen cannot import this module."""
 
-DB_DATA_VOLUME = "db-data"
+DB_DATA_VOLUME = native_secret.DB_DATA_VOLUME
 """The named volume key in `catalog/installers/shared/cmangos/base.yml.tmpl`.
 
 Compose names the volume `<project>_<key>`; `db-password` asks the daemon
@@ -321,7 +385,7 @@ about exactly that name. `test_families_cmangos.py` reads all three constants
 back out of that template so the two cannot drift apart silently.
 """
 
-SECRET_FILE_MODE = 0o600
+SECRET_FILE_MODE = native_secret.SECRET_FILE_MODE
 """The mode `db-password` creates `.db_password` with: the password itself is in it.
 
 **Deliberately not `conf.CONF_MODE`, which is the same number for a different
@@ -336,7 +400,7 @@ widening silent and invisible; two constants naming each other is the cheaper
 half of that trade.
 
 What the number actually buys is not the same on every platform this app ships
-to — see `_write_secret`, which measured it.
+to — see `native.write_secret`, which measured it.
 """
 
 
@@ -573,7 +637,9 @@ class CmangosInstaller(StagedInstaller):
                 yield from self._name_what_moved(
                     reports, source, dest, old, self._seams.head_sha(dest)
                 )
-        yield from self._refuse_newer_migrations(server_dir, moved, to_pin=to_pin)
+        if self._updates_at_start():
+            trees = self._migrations_moved(moved, to_pin=to_pin)
+            yield from self._refuse_what_the_databases_ran(server_dir, trees, to_pin=to_pin)
         return _MovedChanges(catch_up=catch_up, confs=self._conf_defaults_moved(moved))
 
     # -- a moved module's changed conf defaults, carried into the live conf (T656) ----
@@ -702,13 +768,60 @@ class CmangosInstaller(StagedInstaller):
 
     # -- going back over migrations a newer build already applied (T632) ----
 
+    def _refuse_what_the_databases_ran(
+        self, server_dir: Path, trees: Sequence[_MovedMigrations], *, to_pin: bool
+    ) -> Generator[str, None, None]:
+        """T632's and T770's refusals, with one question to the databases for both.
+
+        A Return reads what the target lacks (`_refuse_newer_migrations()`), both presses
+        what it changed (`_refuse_changed_migrations()`); the keys of both go to
+        `_ledger_holds()` once, so a stopped database is started at most once per press.
+        T632's refusal comes first: going back, a changed file is also one the target lacks.
+        Before anything is built, stopped or copied; a refusal puts every source back.
+        """
+        lacked = self._migrations_the_target_lacks(trees) if to_pin else {}
+        changed = self._migrations_the_target_changes(trees)
+        if not lacked and not changed:
+            return
+        asked: dict[Db, list[str]] = {}
+        if lacked:
+            count = sum(len(files) for files in lacked.values())
+            yield (
+                f"The tested commit does not ship {count} database migration"
+                f"{'' if count == 1 else 's'} the code you run has; asking the databases "
+                f"whether they already hold {'it' if count == 1 else 'them'}."
+            )
+            for role, files in lacked.items():
+                asked.setdefault(role, []).extend(k for keys in files.values() for k in keys)
+        if changed:
+            changes = sum(len(files) for files in changed.values())
+            where = "The tested commit" if to_pin else "Upstream's newest code"
+            yield (
+                f"{where} changes the bytes of {changes} database migration"
+                f"{'' if changes == 1 else 's'} the code you run has; asking the databases "
+                f"whether they already ran {'it' if changes == 1 else 'them'}."
+            )
+            for role, labelled in changed.items():
+                asked.setdefault(role, []).extend(
+                    k for _owner, ran, new in labelled.values() for k in (*ran, *new)
+                )
+        held = self._ledger_holds(server_dir, asked)
+        if lacked:
+            self._refuse_newer_migrations(server_dir, lacked, held)
+            yield "None of them was applied, so the older server can start on your databases."
+        if changed:
+            self._refuse_changed_migrations(changed, held, to_pin=to_pin)
+            yield (
+                f"The databases did not run {'it' if changes == 1 else 'them'} with the old "
+                "bytes, so no migration runs a second time."
+            )
+
     def _refuse_newer_migrations(
         self,
         server_dir: Path,
-        moved: Sequence[tuple[EmulatorSource, Path, str]],
-        *,
-        to_pin: bool,
-    ) -> Generator[str, None, None]:
+        lacked: Mapping[Db, Mapping[str, tuple[str, ...]]],
+        held: Mapping[Db, set[str]],
+    ) -> None:
         """Refuse "Return to the tested pin…" onto databases a newer build already migrated.
 
         Tortoise's worldserver applies its core's and TortoiseBots' migration files at
@@ -716,53 +829,91 @@ class CmangosInstaller(StagedInstaller):
         `migrations` table as `Module` + `Hash` (key `<module>:<SHA-1 of the file>`,
         `AutoUpdater.cpp` `GetMigrationKey()`) and never takes one back; the older
         core then starts on a schema it does not know. T630 refused this for
-        AzerothCore by file name; here the ledger has no names, so the files the move
-        takes away are read from git at both commits and hashed
+        AzerothCore by file name; here the ledger is keyed by hash, not name, so the
+        files the move takes away are read from git at both commits and hashed
         (`_migrations_the_target_lacks()`), and only then are the databases asked.
-        Before anything is built, stopped or copied; a refusal puts every source back.
         Only a Return, and only for a tree whose conf switches that updater on.
         """
-        yield from ()
-        if not to_pin or not self._updates_at_start():
-            return
-        lacked = self._migrations_the_target_lacks(moved)
-        if not lacked:
-            return
-        count = sum(len(files) for files in lacked.values())
-        yield (
-            f"The tested commit does not ship {count} database migration"
-            f"{'' if count == 1 else 's'} the code you run has; asking the databases whether "
-            f"they already hold {'it' if count == 1 else 'them'}."
-        )
-        container = self.entry.container_spec().db
-        try:
-            was_up: bool | None = self._seams.ask_db_running(container)
-        except Exception as exc:  # noqa: BLE001 - any seam failure is one answer here
-            logger.warning(f"could not tell whether {container} is running: {exc}")
-            was_up = None
-        try:
-            applied = self._migrations_applied(server_dir, lacked)
-            if applied:
-                backups = server_dir / snapshot.BACKUPS_FOLDER
-                copies = {
-                    schema: snapshot.copy_from_before_migrations(
-                        backups,
-                        schema,
-                        [h for hashes in found.values() for h in hashes],
-                        game=self.entry.id,
+        schemas = self.entry.schema_map()
+        applied: dict[str, dict[str, tuple[str, ...]]] = {}
+        for role, files in lacked.items():
+            found = {
+                label: tuple(key.partition(":")[2] for key in keys if key.upper() in held[role])
+                for label, keys in files.items()
+            }
+            found = {label: hashes for label, hashes in found.items() if hashes}
+            if found:
+                applied[schemas[role]] = found
+        if applied:
+            backups = server_dir / snapshot.BACKUPS_FOLDER
+            copies = {
+                schema: snapshot.copy_from_before_migrations(
+                    backups,
+                    schema,
+                    [h for hashes in found.values() for h in hashes],
+                    game=self.entry.id,
+                )
+                for schema, found in applied.items()
+            }
+            raise InstallerError(newer_migrations_refusal(applied, copies))
+
+    # -- going forward over a migration whose bytes changed under its name (T770) ----
+
+    def _migrations_the_target_changes(self, trees: Sequence[_MovedMigrations]) -> _Changed:
+        """Per database, each file both commits ship by name with other bytes at the target.
+
+        The AutoUpdater skips a file only when its `<module>:<SHA-1>` key is in the
+        database's ledger (`AutoUpdater.cpp` `ProcessTargetUpdates()`; the ledger's `Name`
+        only feeds a log line), so such a file runs again at the next start, and its plain
+        `INSERT` or `DROP INDEX` then stops the world (T600). A file whose old bytes the
+        target still ships under some name is not counted: that key stays in the ledger.
+        """
+        changed: _Changed = {}
+        for tree in trees:
+            for role, files in tree.before.items():
+                now = tree.after[role]
+                shipped = {h for hashes in now.values() for h in hashes}
+                for name, hashes in files.items():
+                    if name not in now or shipped.intersection(hashes):
+                        continue
+                    changed.setdefault(role, {})[tree.label(name)] = (
+                        tree,
+                        tree.keys(hashes),
+                        tree.keys(now[name]),
                     )
-                    for schema, found in applied.items()
-                }
-                raise InstallerError(newer_migrations_refusal(applied, copies))
-        except BaseException:
-            # What this press started it puts back, as the adopt press does.
-            if was_up is False:
-                logger.info(self._stop_the_database_again(container))
-            raise
-        # The check passed: the same, so a press that goes on finds the database as it was.
-        if was_up is False:
-            logger.info(self._stop_the_database_again(container))
-        yield "None of them was applied, so the older server can start on your databases."
+        return changed
+
+    def _refuse_changed_migrations(
+        self, changed: _Changed, held: Mapping[Db, set[str]], *, to_pin: bool
+    ) -> None:
+        """Refuse a move that would make the world run a migration again with new bytes.
+
+        Both presses, whatever the direction: going back, `_refuse_newer_migrations()`
+        has already refused a changed file whose old bytes the database holds, so in
+        practice this is a forward Return or "Update the server to latest…" (T767 made the
+        forward Return skip that file). A file refuses when the ledger holds an old key
+        and no new one. No SQL is run to test whether the new bytes could run twice. Every
+        source with such a file is named in the `UpdateRefused`, so the Server tab offers
+        none of their commits again.
+        """
+        schemas = self.entry.schema_map()
+        again: dict[str, list[str]] = {}
+        refused: dict[str, str] = {}
+        for role, labelled in changed.items():
+            for label, (owner, ran, new) in labelled.items():
+                if any(k.upper() in held[role] for k in ran) and not any(
+                    k.upper() in held[role] for k in new
+                ):
+                    again.setdefault(schemas[role], []).append(label)
+                    refused.setdefault(owner.source.repo, owner.new)
+        if refused:
+            (repo, commit), *also = refused.items()
+            raise UpdateRefused(
+                changed_migrations_refusal(again, to_pin=to_pin),
+                repo=repo,
+                commit=commit,
+                also=tuple(also),
+            )
 
     def _conf_value(self, key: str) -> str | None:
         """The entry's conf table's value for `key`, unquoted, or None."""
@@ -772,19 +923,19 @@ class CmangosInstaller(StagedInstaller):
                 return value.strip().strip('"')
         return None
 
-    def _tree(self, dest: Path, rev: str, path: str, *, what: str) -> dict[str, bytes]:
+    def _tree(self, dest: Path, rev: str, path: str, *, what: str, moving: str) -> dict[str, bytes]:
         """Git's files under `path` at `rev`, or the fail-closed refusal when git cannot say."""
         found = self._seams.tree_bytes(dest, rev, path)
         if found is None:
             raise InstallerError(
                 updates_unread_sentence(
-                    f"going back takes away in {what}",
+                    f"{moving} in {what}",
                     f"git could not list {path} at {rev[:7]}",
                 )
             )
         return found
 
-    def _folder_names(self) -> dict[Db, str]:
+    def _folder_names(self, moving: str) -> dict[Db, str]:
         """The three folder names the updater reads, from the conf; a catalog error if absent."""
         names: dict[Db, str] = {}
         for role, key in (
@@ -796,7 +947,7 @@ class CmangosInstaller(StagedInstaller):
             if value is None:
                 raise InstallerError(
                     updates_unread_sentence(
-                        "going back takes away",
+                        moving,
                         "the catalog does not name this server's migration folders",
                     )
                 )
@@ -804,7 +955,7 @@ class CmangosInstaller(StagedInstaller):
         return names
 
     def _migrations_at(
-        self, source: EmulatorSource, dest: Path, rev: str, *, core: bool
+        self, source: EmulatorSource, dest: Path, rev: str, *, core: bool, moving: str
     ) -> dict[Db, dict[str, tuple[str, ...]]]:
         """Per database, `{file name: the hashes the database may hold for it}` at `rev`.
 
@@ -816,7 +967,7 @@ class CmangosInstaller(StagedInstaller):
         that says where they go is not read, so it refuses.
         """
         what = source.repo
-        names = self._folder_names()
+        names = self._folder_names(moving)
         base = self._conf_value("Database.AutoUpdate.Path")
         where: dict[Db, str | None] = {}
         if core:
@@ -824,7 +975,7 @@ class CmangosInstaller(StagedInstaller):
             if inside is None:
                 raise InstallerError(
                     updates_unread_sentence(
-                        "going back takes away",
+                        moving,
                         "the catalog does not say where this server's migrations are",
                     )
                 )
@@ -832,12 +983,14 @@ class CmangosInstaller(StagedInstaller):
             where = {role: f"{root}/{name}" for role, name in names.items()}
         else:
             module = posixpath.basename(source.dest.rstrip("/"))
-            text = self._tree(dest, rev, f"{module}.cmake", what=what).get(f"{module}.cmake", b"")
+            text = self._tree(dest, rev, f"{module}.cmake", what=what, moving=moving).get(
+                f"{module}.cmake", b""
+            )
             rules = {
                 m["dst"]: m["src"]
                 for m in MODULE_INSTALL_RULE.finditer(text.decode("utf-8", "replace"))
             }
-            every = self._tree(dest, rev, "data/sql", what=what)
+            every = self._tree(dest, rev, "data/sql", what=what, moving=moving)
             folders = {
                 posixpath.dirname(path)
                 for path in every
@@ -848,7 +1001,7 @@ class CmangosInstaller(StagedInstaller):
                 if not any(uncovered == one or uncovered.startswith(f"{one}/") for one in parsed):
                     raise InstallerError(
                         updates_unread_sentence(
-                            f"going back takes away in {what}",
+                            f"{moving} in {what}",
                             f"{module}.cmake at {rev[:7]} does not say where {uncovered} is "
                             "installed",
                         )
@@ -857,7 +1010,7 @@ class CmangosInstaller(StagedInstaller):
                 if dst not in names.values():
                     raise InstallerError(
                         updates_unread_sentence(
-                            f"going back takes away in {what}",
+                            f"{moving} in {what}",
                             f"{module}.cmake at {rev[:7]} installs data/sql/{dst}, which is "
                             "not one of the migration folders this server reads",
                         )
@@ -868,7 +1021,7 @@ class CmangosInstaller(StagedInstaller):
             }
         found: dict[Db, dict[str, tuple[str, ...]]] = {}
         for role, folder in where.items():
-            files = self._tree(dest, rev, folder, what=what) if folder else {}
+            files = self._tree(dest, rev, folder, what=what, moving=moving) if folder else {}
             found[role] = {
                 posixpath.basename(path): _hashes_of(
                     data, edited=core and role == "world" and path.endswith(f"/{SEDDED_FILE}")
@@ -878,29 +1031,25 @@ class CmangosInstaller(StagedInstaller):
             }
         return found
 
-    def _migrations_the_target_lacks(
-        self, moved: Sequence[tuple[EmulatorSource, Path, str]]
-    ) -> dict[Db, dict[str, tuple[str, ...]]]:
-        """Per database, `{file label: its keys}` the running commit has and the target lacks.
+    def _migrations_moved(
+        self, moved: Sequence[tuple[EmulatorSource, Path, str]], *, to_pin: bool
+    ) -> list[_MovedMigrations]:
+        """Each moved source's migration files at the running commit and at the target.
 
         Both lists come from git's tree at each commit (never from disk, where an untracked
-        or edited copy hides a removal), per source and per database folder. A key is
-        `<module>:<SHA-1>`, so the same bytes under the same module and database count as
-        shipped by the target whatever the file is now called; the same bytes in another
-        module's or database's folder do not. Only a file present at the running commit
-        counts, and when the target is ahead of it in history (`Seams.is_ancestor`) a file
-        the target's name list lacks was deleted upstream: older, not newer (a Return that
-        moves forward over a squash). Never by name order: going back, a migration written
-        before the target's newest but merged after it is newer.
+        or edited copy hides a removal), per source and per database folder, read once for
+        both checks that use them (T632's and T770's). Fail-closed: git that cannot say
+        refuses, in the words of the press that asked.
         """
+        moving = "going back takes away" if to_pin else "this update changes"
         sources = self.entry.emulator.sources
-        lacked: dict[Db, dict[str, tuple[str, ...]]] = {}
+        found: list[_MovedMigrations] = []
         for source, dest, old in moved:
             new = self._seams.head_sha(dest)
             if new is None:
                 raise InstallerError(
                     updates_unread_sentence(
-                        f"going back takes away in {source.repo}", "git did not say its commit"
+                        f"{moving} in {source.repo}", "git did not say its commit"
                     )
                 )
             if new == old:
@@ -910,33 +1059,81 @@ class CmangosInstaller(StagedInstaller):
                 for other in sources
                 if other is not source
             )
-            module = "" if core else posixpath.basename(source.dest.rstrip("/"))
+            found.append(
+                _MovedMigrations(
+                    source=source,
+                    dest=dest,
+                    old=old,
+                    new=new,
+                    module="" if core else posixpath.basename(source.dest.rstrip("/")),
+                    before=self._migrations_at(source, dest, old, core=core, moving=moving),
+                    after=self._migrations_at(source, dest, new, core=core, moving=moving),
+                )
+            )
+        return found
+
+    def _migrations_the_target_lacks(
+        self, trees: Sequence[_MovedMigrations]
+    ) -> dict[Db, dict[str, tuple[str, ...]]]:
+        """Per database, `{file label: its keys}` the running commit has and the target lacks.
+
+        A key is `<module>:<SHA-1>`, so the same bytes under the same module and database
+        count as shipped by the target whatever the file is now called; the same bytes in
+        another module's or database's folder do not. Only a file present at the running
+        commit counts, and when the target is ahead of it in history
+        (`direction.moves_forward()`: git, else GitHub's compare) no file counts: the target
+        deleted or changed it upstream, so it is older, not newer (a Return that moves
+        forward over a squash or an edit, T767; the edit is `_refuse_changed_migrations()`'s,
+        T770). With no direction a changed file counts and a deleted one refuses and says
+        why. Never by name order: going back, a migration written before the target's
+        newest but merged after it is newer.
+        """
+        lacked: dict[Db, dict[str, tuple[str, ...]]] = {}
+        for tree in trees:
             # Only a move FORWARD in history can have a deleted file: going back, every file
             # the running commit added since is one the target lacks, however its name is dated
             # (Tortoise dates a migration by when it was written, not merged).
-            forward = _Direction(self._seams, source.repo, dest, old, new)
-            before = self._migrations_at(source, dest, old, core=core)
-            after = self._migrations_at(source, dest, new, core=core)
-            for role, files in before.items():
-                shipped = {h for hashes in after[role].values() for h in hashes}
+            forward = _Direction(self._seams, tree.source.repo, tree.dest, tree.old, tree.new)
+            for role, files in tree.before.items():
+                shipped = {h for hashes in tree.after[role].values() for h in hashes}
                 for name, hashes in files.items():
                     if shipped.intersection(hashes):
                         continue
-                    if name not in after[role] and forward.known():
+                    # T767: a target that descends from the running commit changed or
+                    # deleted this file itself, so its bytes are not newer than the target.
+                    if forward.peek():
                         continue
-                    label = f"{module}/{name}" if module else name
-                    lacked.setdefault(role, {})[label] = tuple(f"{module}:{h}" for h in hashes)
+                    # No direction: a deleted name refuses and says why (`known()`).
+                    if name not in tree.after[role] and forward.known():
+                        continue
+                    lacked.setdefault(role, {})[tree.label(name)] = tree.keys(hashes)
         return lacked
 
-    def _migrations_applied(
-        self, server_dir: Path, lacked: Mapping[Db, Mapping[str, tuple[str, ...]]]
-    ) -> dict[str, dict[str, tuple[str, ...]]]:
-        """Per schema, which lacked files its `migrations` table holds (label -> held hashes).
+    def _ledger_holds(
+        self, server_dir: Path, asked: Mapping[Db, Sequence[str]]
+    ) -> dict[Db, set[str]]:
+        """Per database, which of the `<module>:<HASH>` keys asked its `migrations` table holds.
 
-        The database is brought up alone (a stopped server has it down), never the world:
-        a start would run the updater. A table that does not exist holds none; a database
-        that cannot answer refuses.
+        Upper case, as `MIGRATIONS_QUESTION` answers. The database is brought up alone (a
+        stopped server has it down), never the world: a start would run the updater; one
+        this check started goes down again however it ends, as the adopt press does. A
+        table that does not exist holds none; a database that cannot answer refuses.
         """
+        container = self.entry.container_spec().db
+        try:
+            was_up: bool | None = self._seams.ask_db_running(container)
+        except Exception as exc:  # noqa: BLE001 - any seam failure is one answer here
+            logger.warning(f"could not tell whether {container} is running: {exc}")
+            was_up = None
+        try:
+            return self._ask_the_ledger(server_dir, asked)
+        finally:
+            if was_up is False:
+                logger.info(self._stop_the_database_again(container))
+
+    def _ask_the_ledger(
+        self, server_dir: Path, asked: Mapping[Db, Sequence[str]]
+    ) -> dict[Db, set[str]]:
         spec = self.entry.container_spec()
         try:
             self._seams.start_db(spec, server_dir, because="nothing was built or changed")
@@ -951,10 +1148,11 @@ class CmangosInstaller(StagedInstaller):
         client = self._native().db.client
         schemas = self.entry.schema_map()
         ask = self._query_seam()
-        applied: dict[str, dict[str, tuple[str, ...]]] = {}
-        for role, files in lacked.items():
+        held: dict[Db, set[str]] = {}
+        for role, keys in asked.items():
+            held[role] = set()
             schema = schemas[role]
-            digests = sorted({key.partition(":")[2] for keys in files.values() for key in keys})
+            digests = sorted({key.partition(":")[2] for key in keys})
             quoted = ", ".join(f"'{digest}'" for digest in digests)
             try:
                 if not ask(spec.db, client, password, schema, MIGRATIONS_TABLE_QUESTION).strip():
@@ -967,15 +1165,8 @@ class CmangosInstaller(StagedInstaller):
                         f"Yu'lon could not ask {schema} which of them it already has: {exc}",
                     )
                 ) from exc
-            held = {line.strip().upper() for line in rows.splitlines() if line.strip()}
-            found = {
-                label: tuple(key.partition(":")[2] for key in keys if key.upper() in held)
-                for label, keys in files.items()
-            }
-            found = {label: hashes for label, hashes in found.items() if hashes}
-            if found:
-                applied[schema] = found
-        return applied
+            held[role] = {line.strip().upper() for line in rows.splitlines() if line.strip()}
+        return held
 
     def _refuse_new_chain_files(
         self,
@@ -2015,131 +2206,6 @@ class CmangosInstaller(StagedInstaller):
             "and every character in it."
         )
 
-    def _db_password(self, ctx: StageContext) -> Iterator[str]:
-        """Persist the generated secret, or refuse to replace one the database already has.
-
-        The spine resolved `ctx.secrets` before the stages ran — reading the
-        file when it exists, minting `prefix + token_hex(8)` otherwise — so
-        this stage's job is narrow: the evidence is the FILE (never recorded in
-        the state file), and a missing file next to an existing `db-data`
-        volume is a refusal. That volume was initialised with the password the
-        file held; writing a new one would leave every later stage unable to
-        log in, and the scripts' answer to that (wipe the volume silently) is
-        exactly what the design rejects.
-
-        Three outcomes, kept apart by `docker.volume_exists()`, which raises
-        rather than guessing: the volume exists (refuse), no such volume (safe
-        to write), Docker would not say (refuse). Collapsing the third into the
-        second is the destructive edit, and it is the one that looks like
-        robustness.
-
-        The refusal names `docker volume rm` rather than a button. Checked
-        2026-09-01: the Server tab's only removal action is "Stop and remove
-        containers…", `docker.remove_staged()` passes no `-v` on purpose, and
-        its own armed warning tells the user the volume is kept — so nothing in
-        this app deletes a named volume, and sending the user there would send
-        them round a loop that ends at this same message.
-        """
-        plan = self.entry.install.password
-        if plan.mode != "generated":
-            yield "This server uses a fixed database password; nothing to write."
-            return
-        if plan.file is None:
-            # `PasswordPlan`'s validator refuses this shape and `resolve_secrets()`
-            # refuses it again before stage 1; this keeps the type honest, and says
-            # which defect it is rather than reporting a broken catalog as a design
-            # choice the user should go looking for.
-            raise InstallerError(
-                f"{self.entry.name}'s catalog entry says its database password is generated "
-                f"but names no file to keep it in. {CATALOG_ERROR_TAIL}"
-            )
-        path = ctx.server_dir / plan.file
-        if path.is_file():
-            yield f"The database password is already in {plan.file}; keeping it."
-            return
-        volume = self._db_volume(ctx.server_dir)
-        try:
-            exists = self._seams.volume_exists(volume)
-        except docker.DockerCommandError as exc:
-            # `DockerCliMissingError` subclasses this and lands here too, on
-            # purpose: preflight already refused a machine with no Docker, the
-            # outcome is identical (nothing is written), and `exc` carries that
-            # error's own install-Docker help verbatim, which is the actionable
-            # half. This module raises no such error of its own — deliberately
-            # not spelling the constant, because `test_platform.py`'s
-            # `test_the_missing_cli_help_names_every_module_that_raises_it`
-            # finds raisers by searching module TEXT for the name, so a mention
-            # here would be read as a raise.
-            raise InstallerError(
-                f"Docker would not say whether the database volume {volume} exists ({exc}), so "
-                "this install cannot prove a new password is safe to write. Nothing was written."
-            ) from exc
-        if exists and self._is_the_copy_this_volume_was_made_with(ctx, volume):
-            try:
-                _write_secret(path, ctx.secrets.db_password)
-            except OSError as exc:
-                raise InstallerError(f"{path} could not be written: {exc}") from exc
-            yield (
-                f"Put this install's database password back into {plan.file} from the copy "
-                f"Yu'lon kept when the folder was removed. The database in {volume} is the one "
-                "your characters are in. Back that file up."
-            )
-            return
-        if exists:
-            raise InstallerError(
-                f"{path} is gone, but this install's database volume {volume} still exists and "
-                "was created with the password that file held. A new password would lock this "
-                f"install out of its own database, so nothing was written. Put {plan.file} back "
-                "if you have a copy of it. If it is lost, that database cannot be opened again. "
-                "This deletes it, and every character in it, so this install can start over "
-                "(removing the containers does not):\n"
-                f"docker volume rm {volume}"
-            )
-        try:
-            _write_secret(path, ctx.secrets.db_password)
-        except OSError as exc:
-            raise InstallerError(f"{path} could not be written: {exc}") from exc
-        yield (
-            f"Wrote this install's database password to {plan.file}. Back that file up: the "
-            f"database in {volume} cannot be opened without it."
-        )
-
-    def _is_the_copy_this_volume_was_made_with(self, ctx: StageContext, volume: str) -> bool:
-        """Is the secret in hand the one Yu'lon kept when it deleted this install's folder?
-
-        The narrow exception to the refusal above, and it is narrow in three
-        ways rather than one, because a wrong `True` here writes a password
-        into a file the rest of the install then believes:
-
-        * there has to BE a copy, filed under this game and this folder's
-          install id — the pair a reinstall to the same folder recomputes;
-        * the copy has to name THIS volume. Two installs of one game keep two
-          copies, and a value from the wrong one locks this database out
-          exactly as a minted password would, while looking like a recovery;
-        * it has to be the value the spine actually resolved. `resolve_secrets()`
-          reads the FILE first and only falls back to the copy, so a
-          `.db_password` that reappeared between the two reads wins — and if the
-          two disagree, the one the database was created with is not knowable
-          from here and the refusal is the honest answer.
-
-        A stale copy for a volume that no longer exists never reaches this
-        method: it is only asked when the volume DOES exist.
-        """
-        kept = dbsecret.recall(self.entry.id, self._install_id(ctx.server_dir))
-        if kept is None:
-            return False
-        return kept.volume == volume and kept.password == ctx.secrets.db_password
-
-    def _db_volume(self, server_dir: Path) -> str:
-        """`<compose project>_<volume key>` — what `docker volume ls` shows for this install."""
-        project = composegen.project_name(
-            self.entry.id,
-            server_dir,
-            platform_id=self._seams.platform_id,
-            install_id=self._install_id(server_dir),
-        )
-        return f"{project}_{DB_DATA_VOLUME}"
-
     def _password_origin_note(self, ctx: StageContext) -> str:
         """Where this install's database password came from — the half `render()` cannot know.
 
@@ -2633,7 +2699,7 @@ class CmangosInstaller(StagedInstaller):
 
         The password reaches these files because the emulator reads files, and
         `conf.CONF_MODE` is what that costs. What the mode buys is not the same
-        everywhere — see `_write_secret` below, which measured the same
+        everywhere — see `native.write_secret`, which measured the same
         question for `.db_password` — and `conf.py`'s constant carries the
         other half: `0o600` is correct only while the images run as root. No
         line this stage yields carries the value.
@@ -3129,11 +3195,11 @@ class CmangosInstaller(StagedInstaller):
             # review of T14, round 1).
             raise InstallerError(
                 f"Yu'lon could not tell whether {self.entry.name}'s world server is running "
-                f"({why or 'the daemon gave no answer'}), and a running one holds these "
+                f"({why or 'Docker gave no answer'}), and a running one holds these "
                 f"databases in memory and writes back over whatever it finds in them. "
                 f"Nothing was applied, nothing was imported and nothing was cleared. Docker "
                 f"itself may be the thing that is not answering — it reads a stopped container "
-                f"and a daemon that is down the same way — so check that Docker is running, "
+                f"and Docker being down the same way — so check that Docker is running, "
                 f"then press Stop on the Server tab if the server is up, and apply these "
                 f'files with "{UPDATES_BUTTON_LABEL}" on the Modules tab (or run the install '
                 f"again from the command line)."
@@ -4604,36 +4670,3 @@ class _Remembering:
         a reading taken before a stage that could have changed the answer.
         """
         return self.inner.adoption_gaps()
-
-
-def _write_secret(path: Path, value: str) -> None:
-    """Write the password, asking for `SECRET_FILE_MODE` at creation. One trailing newline.
-
-    The newline is a contract: `resolve_secrets()` reads this file back with
-    `.strip()` (A8), and a file the user opened in Notepad and saved gets one
-    whether we write it or not.
-
-    **What the mode buys, measured rather than assumed** (a Windows laptop,
-    Windows 11 26200, CPython 3.13.14, 2026-09-01): on POSIX the mode is
-    applied by `open(2)` itself, so the file is owner-only from its first byte
-    and never has a window at 0644. On Windows it does nothing at all — the
-    file lands at `st_mode 0o666`, byte-identical to a plain `open(path, "w")`,
-    and `icacls` shows only the ACEs inherited from the parent folder; under a
-    folder granting `BUILTIN\\Users:(RX)` the secret is readable by every local
-    account. A following `os.chmod(path, 0o600)` changes neither, so no
-    rearrangement of these two calls buys anything there.
-
-    So this is a POSIX guarantee and a Windows no-op, and the sentence the
-    stage yields does not promise otherwise.
-    `test_the_secret_file_is_owner_only_on_posix_and_only_inherits_the_folder_acl_on_windows`
-    pins both halves; the Windows half goes red if that ever changes.
-
-    **Windows: the folder, not the file (T174).** No DACL is set on this file:
-    the install locks the whole server folder to this account before each
-    stage (`serverlock.py`), and the file, created in it with no security
-    attributes of its own, inherits that. So `icacls` on it still shows only
-    inherited entries, and they are the owner-only ones on a locked folder.
-    """
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, SECRET_FILE_MODE)
-    with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
-        fh.write(value + "\n")

@@ -27,11 +27,13 @@ this project has shipped in neighbouring modules already:
 
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import os
 import re
 import stat
+import threading
 from pathlib import Path
 
 import pytest
@@ -915,10 +917,12 @@ def test_apply_table_asks_for_the_mode_at_creation_not_after(
     chmods = _chmods(monkeypatch)
     conf.apply_table(TABLE, etc, TOKENS)
 
-    temps = [(name, mode) for name, mode in opened if name.endswith(conf._TEMP_SUFFIX)]
+    temps = [
+        (name.rsplit(".yulon-tmp-", 1)[0], mode) for name, mode in opened if ".yulon-tmp-" in name
+    ]
     assert temps == [
-        (f"mangosd.conf{conf._TEMP_SUFFIX}", conf.CONF_MODE),
-        (f"realmd.conf{conf._TEMP_SUFFIX}", conf.CONF_MODE),
+        (".mangosd.conf", conf.CONF_MODE),
+        (".realmd.conf", conf.CONF_MODE),
     ], f"the conf temp files were not created owner-only: {opened}"
     assert chmods == [], (
         "a chmod after creation means there was a window at the umask default; " f"got {chmods}"
@@ -1071,7 +1075,7 @@ def test_apply_table_names_a_conf_whose_value_cannot_be_encoded(tmp_path: Path) 
 
     The two properties the atomic write buys are asserted alongside the message,
     because they are what makes this defect minor rather than serious: the conf on
-    disk is still the old one, and no `.yulon-new` is left beside it.
+    disk is still the old one, and no temporary file is left beside it.
     """
     surrogate = json.loads(r'"\ud800"')
     table = ConfPatchTable(
@@ -1412,3 +1416,211 @@ def test_pressing_install_again_repairs_a_conf_written_before_the_fix(
     with caplog.at_level(logging.INFO, logger=conf.logger.name):
         assert conf.apply_table(CENTURION_TABLE, etc, {}) == ()
     assert not [r for r in caplog.records if "commented out" in r.getMessage()]
+
+
+# -- conf._write(): durable, and a temp of its own (T791) -----------------
+
+
+class _OsWithTurns:
+    """`conf`'s `os` for a two-writer test: each rename waits for its turn (T163's shape).
+
+    Every writer has written its temp before any rename lands, and the renames then
+    land one after another in `order`. Everything but `replace` is the real `os`.
+    """
+
+    def __init__(self, order: list[str], published: dict[str, bytes], path: Path) -> None:
+        self.order = order
+        self.published = published
+        self.path = path
+        self.arrived = threading.Barrier(len(order), timeout=10)
+        self.turn = threading.Condition()
+        self.next = 0
+        self.name = os.name
+
+    def replace(self, src: object, dst: object) -> None:
+        me = threading.current_thread().name
+        self.arrived.wait()
+        with self.turn:
+            assert self.turn.wait_for(lambda: self.order[self.next] == me, timeout=10)
+            try:
+                os.replace(src, dst)  # type: ignore[arg-type]
+                self.published[me] = self.path.read_bytes()
+            finally:
+                self.next += 1
+                self.turn.notify_all()
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(os, name)
+
+
+def test_a_conf_is_synced_before_its_rename_and_its_folder_after(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T791: the new bytes are on disk before the rename, and the new entry after it (POSIX).
+
+    The server reads its conf on the way up. A rename whose bytes never reached the disk
+    leaves an empty conf where the old one was after a power cut, and until the folder is
+    synced the rename itself can come back undone. Windows cannot open a folder.
+    """
+    path = tmp_path / "mangosd.conf"
+    path.write_text("old\n", encoding="utf-8")
+    order: list[str] = []
+    real_fsync, real_replace = os.fsync, os.replace
+
+    def recording_fsync(fd: int) -> None:
+        order.append("folder" if stat.S_ISDIR(os.fstat(fd).st_mode) else "file")
+        real_fsync(fd)
+
+    def recording_replace(src: object, dst: object) -> None:
+        order.append("replace")
+        real_replace(src, dst)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "fsync", recording_fsync)
+    monkeypatch.setattr(os, "replace", recording_replace)
+
+    conf._write(path, "new\n")
+
+    assert path.read_text(encoding="utf-8") == "new\n"
+    assert order == (["file", "replace"] if os.name == "nt" else ["file", "replace", "folder"])
+
+
+def test_a_conf_whose_bytes_cannot_be_synced_is_not_written_and_leaves_no_temporary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T791: a refused sync of the new bytes is a failed write, and the old conf is what is left.
+
+    The sync comes before the rename, so the refusal stops the write before the conf is
+    touched. The family's writer reports it as `InstallerError`, as it reports every failure.
+    """
+    path = tmp_path / "mangosd.conf"
+    path.write_text("old\n", encoding="utf-8")
+    real_fsync = os.fsync
+
+    def refusing_file(fd: int) -> None:
+        if not stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError(errno.EIO, "Input/output error")
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", refusing_file)
+
+    with pytest.raises(InstallerError, match="Input/output error"):
+        conf._write(path, "new\n")
+
+    assert path.read_text(encoding="utf-8") == "old\n"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["mangosd.conf"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows cannot open a folder to sync it")
+def test_a_folder_refusing_its_sync_after_a_conf_rename_is_logged_not_raised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """T791: the new conf is in place by then, so a refused folder sync is a warning.
+
+    Reporting the write as failed when the rename has happened would be untrue, so the
+    refusal is logged, as `platform.fsync_folder` logs it, and the write stands.
+    """
+    path = tmp_path / "mangosd.conf"
+    path.write_text("old\n", encoding="utf-8")
+    folder_syncs: list[int] = []
+    real_fsync = os.fsync
+
+    def refusing_folder(fd: int) -> None:
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            folder_syncs.append(fd)
+            raise OSError(errno.EIO, "Input/output error")
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", refusing_folder)
+
+    with caplog.at_level(logging.WARNING, logger="yulon.platform"):
+        conf._write(path, "new\n")
+
+    assert path.read_text(encoding="utf-8") == "new\n"
+    assert len(folder_syncs) == 1
+    assert "could not fsync" in caplog.text
+
+
+def test_two_writers_of_one_conf_each_publish_their_own_whole_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T791: the two-writer case T163 found for the compose writer, here for the conf writer.
+
+    Both temps are written before either rename lands (A's first). With the one name
+    `<name>.yulon-new`, B's `O_TRUNC` wrote into A's open temp, so A's rename published
+    B's text. Each writer's rename must publish exactly its own text.
+    """
+    path = tmp_path / "mangosd.conf"
+    path.write_text("old\n", encoding="utf-8")
+    texts = {"A": "A = 1\n" * 500, "B": "B = 2\n" * 700}
+    published: dict[str, bytes] = {}
+    monkeypatch.setattr(conf, "os", _OsWithTurns(["A", "B"], published, path))
+    raised: dict[str, BaseException] = {}
+
+    def write(name: str) -> None:
+        try:
+            conf._write(path, texts[name])
+        except BaseException as exc:  # noqa: BLE001 - recorded and asserted on below
+            raised[name] = exc
+
+    writers = [threading.Thread(target=write, args=(n,), name=n) for n in ("A", "B")]
+    for writer in writers:
+        writer.start()
+    for writer in writers:
+        writer.join(timeout=20)
+
+    assert raised == {}, f"a writer failed: {raised}"
+    assert published.get("A") == texts["A"].encode("utf-8"), "A's rename published another file"
+    assert published.get("B") == texts["B"].encode("utf-8"), "B's rename published another file"
+    assert path.read_bytes() in {t.encode("utf-8") for t in texts.values()}
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["mangosd.conf"]
+
+
+def test_a_file_already_named_like_the_old_temp_is_left_alone(tmp_path: Path) -> None:
+    """T791: a file that only has the old temp name is never written through or deleted."""
+    path = tmp_path / "mangosd.conf"
+    path.write_text("old\n", encoding="utf-8")
+    stale = tmp_path / "mangosd.conf.yulon-new"
+    stale.write_text("an older attempt's temp\n", encoding="utf-8")
+
+    conf._write(path, "new\n")
+
+    assert path.read_text(encoding="utf-8") == "new\n"
+    assert stale.read_text(encoding="utf-8") == "an older attempt's temp\n"
+
+
+def test_an_unexpected_failure_writing_a_conf_leaves_no_temporary_and_the_old_conf(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T791: the temp goes on every failure, and the conf is left as it was."""
+    path = tmp_path / "mangosd.conf"
+    path.write_text("old\n", encoding="utf-8")
+
+    def unexpected(src: object, dst: object) -> None:
+        raise RuntimeError("an unexpected failure")
+
+    monkeypatch.setattr(os, "replace", unexpected)
+
+    with pytest.raises(RuntimeError, match="an unexpected failure"):
+        conf._write(path, "new\n")
+
+    assert path.read_text(encoding="utf-8") == "old\n"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["mangosd.conf"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the POSIX mode is a no-op on Windows")
+def test_replace_file_keeps_a_live_conf_mode_and_a_missing_one_is_owner_only(
+    tmp_path: Path,
+) -> None:
+    """T791: the temp is owner-only, then given the live file's mode; a new file is 0600."""
+    live = tmp_path / "realmd.conf"
+    live.write_text("old\n", encoding="utf-8")
+    live.chmod(0o644)
+    missing = tmp_path / "mangosd.conf"
+
+    conf.replace_file(live, "new\n")
+    conf.replace_file(missing, "new\n")
+
+    assert live.read_text(encoding="utf-8") == "new\n"
+    assert stat.S_IMODE(live.stat().st_mode) == 0o644
+    assert stat.S_IMODE(missing.stat().st_mode) == 0o600
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["mangosd.conf", "realmd.conf"]

@@ -35,7 +35,15 @@ from dataclasses import dataclass
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from typing import Any, Literal, Protocol
 
-from yulon import apply, docker, module_answers, module_source, move, reset_defaults
+from yulon import (
+    apply,
+    docker,
+    forgetting,
+    module_answers,
+    module_source,
+    move,
+    reset_defaults,
+)
 from yulon.catalog.catalog import (
     LUA_SCRIPTS_DIR,
     CatalogEntry,
@@ -46,7 +54,7 @@ from yulon.catalog.git_head import read_head_file
 from yulon.log import get_logger
 from yulon.manifest import Manifest, ManifestType
 from yulon.move import PackedModule, PackedSource, PackFile, ServerFacts, ServerSpec, counts_phrase
-from yulon.move_flows import PRESS_BRING_IN, MoveError, MoveWorld
+from yulon.move_flows import PRESS_BRING_IN, MoveError, MoveWorld, move_held_reason
 from yulon.server_build_presses import REBUILD, under_server_build
 from yulon.support import redact
 from yulon.support.sources import conf_files
@@ -429,7 +437,9 @@ def gather_server_facts(
             f"{move.SETTINGS_MAX_BYTES // 1024**2} MB and {move.SETTINGS_MAX_FILES} files). Take "
             f"out Lua scripts the server does not need, then pack again. {_NOT_PACKED}"
         )
-    if secret_password:
+    # An install made before generated passwords has the published `legacy` word, and finding
+    # that word in a file proves nothing (T748), as a fixed published password never did.
+    if secret_password and secret_password != entry.install.password.legacy:
         needle = secret_password.encode("utf-8")
         for packed in files:
             if needle in packed.data:
@@ -931,19 +941,44 @@ def write_marker(server_dir: Path, digest: str, done: Sequence[str], **more: obj
     os.replace(partial, target)
 
 
+def move_in_finished(marker: Mapping[str, object]) -> bool:
+    """A move-in record whose every step is done: a server, no longer a move (T682).
+
+    Before T682 a finished move kept its record for good; such a folder is read as what it is.
+    """
+    done = marker.get("done")
+    return isinstance(done, list) and all(step in done for step in STEPS)
+
+
+def unfinished_move_in(server_dir: Path) -> bool:
+    """`server_dir` holds a whole-server move that did not finish (T682). Never raises.
+
+    A record that cannot be read still says a move was building here, so it counts; one whose
+    every step is done does not.
+    """
+    try:
+        if not (server_dir / MOVE_IN_FILE).exists():
+            return False
+    except OSError:
+        return False
+    marker = read_marker(server_dir)
+    return marker is None or not move_in_finished(marker)
+
+
 def folder_refusal(server_dir: Path, digest: str) -> tuple[str | None, bool]:
     """`(refusal, resuming)` for the folder a whole server would be built in.
 
     A folder that is not there, or is empty, is a new install. One that holds a move-in record
     of THIS package is that move, unfinished, and carries on. Anything else is refused: an
-    existing Yu'lon server above all, whose databases a move would otherwise replace.
+    existing Yu'lon server above all, whose databases a move would otherwise replace -- a
+    FINISHED move among them (T682), which a second press would otherwise install again.
     """
     if not server_dir.exists():
         return None, False
     if not server_dir.is_dir():
         return not_empty(server_dir), False
     marker = read_marker(server_dir)
-    if marker is not None and marker.get("package") == digest:
+    if marker is not None and marker.get("package") == digest and not move_in_finished(marker):
         return None, True
     from yulon.catalog import native
 
@@ -962,18 +997,20 @@ def plan_server_import(
     platform_id: str,
     lookup_for: Callable[[CatalogEntry], ModuleLookup],
     commit_known: Callable[[str, str], bool | None],
+    read_package: Callable[[Path], move.Package] = move.read_package,
 ) -> ServerImportPlan:
     """Read a whole-server package and say what building it here would do. Nothing is written.
 
     `server_dir_for` names the folder (the Catalog's default for that game, or the player's
     pick); `commit_known(repo, sha)` asks GitHub whether a packed commit still exists, None when
-    it cannot say (asked last, and only when nothing else refused).
+    it cannot say (asked last, and only when nothing else refused). `read_package` is the
+    seam a caller that reads the same file twice shares one read through (T702).
     """
     from yulon.catalog.installer import unsupported_platform_message
     from yulon.move_flows import record_refusals
 
     try:
-        package = move.read_package(path)
+        package = read_package(path)
     except move.MovePackageError as exc:
         return ServerImportPlan(path=path, manifest=None, refusals=(str(exc),))
     manifest = package.manifest
@@ -1070,7 +1107,11 @@ class ModuleApplier(Protocol):
     """The Modules tab's applier, as far as a move needs it (`apply.Applier`)."""
 
     def install(
-        self, manifest: Manifest, values: Mapping[str, str] | None = None
+        self,
+        manifest: Manifest,
+        values: Mapping[str, str] | None = None,
+        *,
+        defer_exists: bool = False,
     ) -> apply.ApplyReport: ...
 
 
@@ -1132,6 +1173,26 @@ class _Record:
         """Put the record back if something cleared the folder (the core's clone does)."""
         if self.server_dir.is_dir() and not (self.server_dir / MOVE_IN_FILE).exists():
             self.save()
+
+    def load_cut_off(self) -> bool:
+        """Every step before the data is done and a restore of this folder did not finish (T681).
+
+        The steps are recorded only after the install has run, so a record that has reached
+        the data step belongs to a folder whose install finished on an earlier press.
+        """
+        from yulon.controller_wow_wotlk import maintenance
+
+        if "data" in self.done or not all(step in self.done for step in STEPS[:-1]):
+            return False
+        return maintenance.interrupted_restore(self.server_dir) is not None
+
+    def forget(self) -> None:
+        """Remove the record once the move is finished (T682). A record that stays is harmless:
+        `move_in_finished()` reads one whose steps are all done as a finished move."""
+        try:
+            (self.server_dir / MOVE_IN_FILE).unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning(f"the finished move's record could not be removed: {exc}")
 
     def finished(self, step: str) -> None:
         self.done.append(step)
@@ -1213,6 +1274,14 @@ class MovedInInstall:
         refusal, _resuming = folder_refusal(server_dir, digest)
         if refusal:
             raise MoveError(f"{refusal} Nothing was started.")
+        # T735: a hold on the folder is asked before anything is written or said, the record's
+        # save and `load_cut_off()` included: a restore load another Yu'lon left running (the
+        # T730 sentence), or a job of this Yu'lon. The record then reads as "cut off" too, and
+        # "The last press stopped ... put in again" beside "wait for it" said two things.
+        # T737: in a move's words, so a Restore's hold is not told as a Start's.
+        held = move_held_reason(server_dir)
+        if held is not None:
+            raise MoveError(held)
         record = _Record.read(server_dir, digest)
         yield f"Bringing a {manifest.game.name} server from another computer into {server_dir}"
         # The record goes in BEFORE the install, so an install that fails or is stopped part-way
@@ -1220,14 +1289,24 @@ class MovedInInstall:
         # one "already holding a server". The core's clone into the server folder itself clears
         # the folder, so the record is put back after every line the install says.
         record.save()
-        try:
-            for line in self._engine.run(options, cancel=cancel, ask=ask):
+        if record.load_cut_off():
+            # T681 (lifecycle L19): the last press stopped inside the data step, so the databases
+            # are half-replaced. The install finished on an earlier press (every step runs after
+            # it), and its own start would bring the server up on them; the data step below
+            # loads every database again, which is how this is finished.
+            yield (
+                "The last press stopped while the databases were being put in. The server is "
+                "not started on them; they are all put in again below."
+            )
+        else:
+            try:
+                for line in self._engine.run(options, cancel=cancel, ask=ask):
+                    record.keep()
+                    yield line
+            finally:
+                # Also when the install fails before it says anything after the clone cleared
+                # the folder: whatever the install left, this file carries on in it.
                 record.keep()
-                yield line
-        finally:
-            # Also when the install fails before it says anything after the clone cleared the
-            # folder: whatever the install left, this file carries on in it.
-            record.keep()
         server = self._server_for(server_dir, options.client_dir)
         # One reservation of the server for every step, so another Yu'lon is refused for the
         # whole bring-in and the steps' own Stop runs inside it, not as a press of its own.
@@ -1244,6 +1323,9 @@ class MovedInInstall:
             except docker.ServerHeldError as exc:
                 raise MoveError(f"{exc} Nothing more was changed; {_CARRY_ON}") from exc
             yield from self._each_stage(server, server_dir, package, record, cancel)
+        # T682 (lifecycle L18): every step is done, so the folder is a server, no longer a move.
+        # A record left behind made "Use existing..." and Install refuse it for good.
+        record.forget()
         yield from self._closing(server_dir)
 
     def _each_stage(
@@ -1373,7 +1455,9 @@ class MovedInInstall:
                         yield from self._left_over
                         self._left_over.clear()
                 else:
-                    report = server.applier.install(manifest, values)
+                    # The characters are loaded by the `data` step, after this one: a "does
+                    # this character exist" question now reads an empty database (T679).
+                    report = server.applier.install(manifest, values, defer_exists=True)
             except apply.ApplyError as exc:
                 raise MoveError(
                     f"{manifest.name} could not be installed again: {exc} Press Bring from "
@@ -1467,9 +1551,10 @@ def _check_cancel(cancel: threading.Event | None) -> None:
 
 
 def _stop_if_running(world: MoveWorld) -> Iterator[str]:
-    from yulon.move_flows import _server_is_up
+    from yulon.move_flows import _server_is_up, refuse_over_a_running_load
 
     if _server_is_up(world):
+        refuse_over_a_running_load(world)  # T730
         yield "Stopping the server for this step."
         world.stop_server()
 
@@ -1638,7 +1723,13 @@ def load_the_data(
     manifest = package.manifest
     undone = "Nothing was put in yet."
     with _database_session(
-        world, because="the databases are put in", undone=undone, press=PRESS_BRING_IN
+        world,
+        because="the databases are put in",
+        undone=undone,
+        press=PRESS_BRING_IN,
+        alone=forgetting.MOVE_IN_WRITES_ALONE,
+        leased=forgetting.MOVE_IN_HOLDS_THE_DATABASES,
+        held=forgetting.MOVE_IN_HOLDS_THE_SERVER,
     ):
         roles = _present_roles(world, SERVER_ROLES)
         here = _read_versions(world, roles)
@@ -1663,7 +1754,9 @@ def load_the_data(
         folder = maintenance.backups_dir(world.server_dir) / (
             ".move-in-" + world.now().strftime("%Y%m%d-%H%M%S")
         )
-        folder.mkdir(parents=True, exist_ok=False)
+        # The owner's alone (T745): the auth dump unpacked here holds every verifier, and a
+        # backups folder made before T683 S5 is 0775.
+        folder.mkdir(parents=True, exist_ok=False, mode=0o700)
         safety: list[Path] = []
         loaded: list[str] = []
         try:

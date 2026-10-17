@@ -98,6 +98,8 @@ def new_entries(old: str, new: str, previous: str | None = None) -> str:
     into short lines and filed them under their own release headings, and
     without this rule the next release would have announced all of them again
     as new. `## Unreleased`, and a heading above `previous`, are read as before.
+    "At or below" is `version_key`'s hybrid order: from 0.9 on, `## v0.10.9` is
+    below a previous of `v0.10.10`.
     """
     seen = {bullet for _, bullet in parse_changelog(old)}
     released = version_key(previous) if previous is not None else None
@@ -114,37 +116,52 @@ def new_entries(old: str, new: str, previous: str | None = None) -> str:
     return "\n".join(blocks)
 
 
+WHOLE_NUMBER_FROM = (0, 9)
+"""The first `(major, minor)` whose LAST number is a whole number (owner, 2026-10-11).
+
+A copy of `yulon.update.WHOLE_NUMBER_FROM`: this script cannot import from the
+app, and `tests/test_update.py` pins the two keys equal tag by tag.
+"""
+
+
 def version_key(tag: str) -> tuple[int, int, Fraction] | None:
-    """How Yu'lon versions sort: the LAST number is a decimal fraction.
+    """How Yu'lon versions sort: a HYBRID rule for the LAST number.
 
-    Owner's decision, 2026-09-21, and it is what the tag history has always
-    done. `v0.8.7-Public` was cut on 2026-09-19, six days AFTER
-    `v0.8.65-Public`; the whole line reads 0.6.5, 0.6.51 ... 0.6.59, 0.8.0,
-    0.8.4, 0.8.5, 0.8.6, 0.8.65, 0.8.7, with the fork's .66 .67 .68 .69 test
-    tags sitting between .65 and .7. Read as integers, 65 > 7, so the notes for
-    the release after 0.8.7 would have been measured against 0.8.65 and would
-    have re-published everything 0.8.7 already announced.
+    Owner's decision, 2026-10-11 (it amends the decimal rule of 2026-09-21):
 
-    So major and minor are whole numbers, and the last number is a fraction of
-    its own digits: "65" is 65/100, "7" is 7/10, "0" is 0. That makes
-    .6 < .65 < .66 < .69 < .7, and .7 and .70 the same version.
+    * Before 0.9 the last number is a decimal fraction, and it is what the tag
+      history has always done. `v0.8.7-Public` was cut on 2026-09-19, six days
+      AFTER `v0.8.65-Public`; the whole line reads 0.6.5, 0.6.51 ... 0.6.59,
+      0.8.0, 0.8.4, 0.8.5, 0.8.6, 0.8.65, 0.8.7, with the fork's .66 .67 .68
+      .69 test tags sitting between .65 and .7. Read as integers, 65 > 7, so
+      the notes for the release after 0.8.7 would have been measured against
+      0.8.65 and would have re-published everything 0.8.7 already announced.
+      "65" is 65/100, "7" is 7/10, "0" is 0, so .6 < .65 < .69 < .7, and .7
+      and .70 are the same version.
+    * From 0.9 on the last number is a WHOLE number: 0.9.9 < 0.9.10 < 0.9.16,
+      and 0.10.9 < 0.10.10. That is how the releases since 0.9 are counted
+      (0.9.13, .14, .15, .16). As a decimal, `.10 == .1 < .9`, so the notes of
+      v0.10.10 would have been measured against v0.10.0 (T669).
+
+    Major and minor are always whole numbers, so the boundary needs no care:
+    `(0, 8, ...) < (0, 9, ...)`. The third part is a `Fraction` on both sides
+    so every key stays comparable.
 
     `Fraction`, not `float`: the comparison is exact, and two tags that mean
     the same version compare equal rather than nearly equal.
 
-    A LEADING ZERO IS PART OF THE FRACTION, and that is the point rather than a
-    quirk: `.05` is five hundredths and sorts below `.1`, where reading the
-    digits as an integer would put it above.
-
-    KNOWN COST, not fixed: 0.8.10 would order BELOW 0.8.9, because 10/100 is
-    less than 9/10. No tag in this repository has ever been written that way,
-    and the scheme the owner picked is the one the tags are in.
+    A LEADING ZERO IS PART OF THE FRACTION below 0.9, and that is the point
+    rather than a quirk: `.05` is five hundredths and sorts below `.1`, where
+    reading the digits as an integer would put it above. From 0.9 on, `.05`
+    is just 5.
     """
     match = _ANY_VERSION.match(tag.strip())
     if match is None:
         return None
-    last = match[3]
-    return (int(match[1]), int(match[2]), Fraction(int(last), 10 ** len(last)))
+    major, minor, last = int(match[1]), int(match[2]), match[3]
+    if (major, minor) >= WHOLE_NUMBER_FROM:
+        return (major, minor, Fraction(int(last)))
+    return (major, minor, Fraction(int(last), 10 ** len(last)))
 
 
 def pick_previous(tags: Iterable[str], tag: str) -> str | None:
@@ -153,7 +170,7 @@ def pick_previous(tags: Iterable[str], tag: str) -> str | None:
     Two tags can spell one version, and one pair already does: upstream's
     `v0.8.7-Public` is commit 3534587b, whose `__version__` reads
     "0.8.70-Public" (measured 2026-09-21). To whoever cut it those are one
-    release, which is the decimal rule stated from the other end. So the tie is
+    release, which is the decimal rule (below 0.9) stated from the other end. So the tie is
     broken by `max` falling through to the tag string - the lexicographically
     last one wins, deterministically - and which of them is named does not
     change the notes, because the changelog is read at a commit either way.

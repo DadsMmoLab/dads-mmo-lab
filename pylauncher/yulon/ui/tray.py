@@ -4,7 +4,7 @@ The owner's design (ticket T540): closing the window hides it, and the tray icon
 says how the servers are -- plain, a green dot when a realm is online, an amber
 ring while one starts or stops, a red dot when one needs attention (crash loop,
 partly up). A left click opens the flyout, a right click the menu, and Quit
-tray… is the one way out.
+Yu'lon… is the one way out.
 
 **One process, one status.** The tray is the same app with its window hidden,
 not a second program, so the single-instance lock (T152) is still held and a
@@ -36,7 +36,16 @@ from typing import Any, Protocol
 
 import shiboken6
 from PySide6.QtCore import QEvent, QObject, QPointF, QRect, QSize, Qt, QTimer, Signal, Slot
-from PySide6.QtGui import QBrush, QColor, QFont, QIcon, QPainter, QPen, QPixmap
+from PySide6.QtGui import (
+    QBrush,
+    QColor,
+    QFont,
+    QGuiApplication,
+    QIcon,
+    QPainter,
+    QPen,
+    QPixmap,
+)
 from PySide6.QtWidgets import (
     QAbstractButton,
     QApplication,
@@ -57,7 +66,16 @@ from yulon.ui.theme import (
     apply_dadcraft_theme,
     normalize_theme_name,
 )
-from yulon.ui.tray_flyout import TrayFlyout
+from yulon.ui.tray_flyout import (
+    PLAY,
+    QUIT_YULON,
+    RESTART,
+    SERVER_PRESSES,
+    START,
+    STOP,
+    TrayFlyout,
+    server_actions,
+)
 from yulon.ui.widgets.dadcraft_decorations import DadcraftRealmBadge, realm_tone
 from yulon.ui.widgets.panel_style import panel_qss
 from yulon.ui.widgets.reasons import reason_of
@@ -65,10 +83,7 @@ from yulon.ui.widgets.reasons import reason_of
 logger = get_logger(__name__)
 
 OPEN_YULON = "Open Yu'lon"
-PLAY = "Play"
-RESTART = "Restart"
 LOGS = "Logs"
-QUIT_TRAY = "Quit tray…"
 
 STATE_COLOURS = {"up": COLOR_UNCOMMON, "between": COLOR_TEXT_WARNING, "attention": COLOR_DANGER}
 """The dot per icon state: the theme's online green, amber accent and danger red."""
@@ -360,6 +375,8 @@ class YulonTray(QObject):
         self._ended = False
         """This copy has to go (the lost-lock exit): a refused quit is not forgotten."""
         self._watching_app = False
+        self._app_active = False
+        """The app was last said to be active (T691): counted while the window is hidden."""
         self._flyout_hidden_at = 0.0
 
     # ---------------------------------------------------------------- set up
@@ -662,13 +679,63 @@ class YulonTray(QObject):
                 return live
         return None
 
+    def _refused(self, live: Any, verb: str, press: Any) -> bool:
+        """Whether the tab cannot do `verb` now, said to the player when so (T690, T697).
+
+        The tray's menu row or flyout row may be older than what the tab is doing now: a job
+        that began since (F-4: the tab refuses a Start over it silently, and its Stop has no
+        check of its own, its button is greyed instead), or a state that greyed the tab's
+        own button (the server came up or went down outside Yu'lon). The press says why
+        nothing happens instead of doing nothing, or doing it under that job.
+        """
+        doing = getattr(live, "action_in_progress", lambda: None)()
+        if doing:
+            self.tell(
+                f"Yu'lon cannot {verb.lower()} that server yet",
+                f"{self._title_of(live)}: {doing} is still running on its Server tab. "
+                f"Press {verb} again when it has finished.",
+            )
+            return True
+        if verb in (STOP, RESTART):
+            # T711: a Stop or Restart takes the database from under the tab's work (a restore
+            # left half-written, a backup lost). The tab's own door guard decides, as it does
+            # for the quit and the client-folder doors (T690); its Server-tab action was said
+            # just above. Start is no teardown and keeps the tab's own rule.
+            refusal = getattr(live, "teardown_refusal", lambda: None)()
+            if refusal:
+                self.tell(
+                    f"Yu'lon cannot {verb.lower()} that server yet",
+                    f"{self._title_of(live)}: {refusal}",
+                )
+                return True
+        if press is not None and not press.isEnabled():
+            why = reason_of(press) or press.toolTip() or "its Server tab cannot do that now."
+            self.tell(
+                f"Yu'lon cannot {verb.lower()} that server now",
+                f"{self._title_of(live)}: {why}",
+            )
+            return True
+        return False
+
     def start(self, view: Any) -> None:
         """Start one server through its own tab's Start: the same job, guards and badge."""
         live = self._current(view)
         if live is None:
             self.open_window()
             return
+        if self._refused(live, START, getattr(live, "start_button", None)):
+            return
         live.start_server()
+
+    def stop(self, view: Any) -> None:
+        """Stop one server through its own tab's Stop (T697): it saves every character."""
+        live = self._current(view)
+        if live is None:
+            self.open_window()
+            return
+        if self._refused(live, STOP, getattr(live, "stop_button", None)):
+            return
+        live.stop_server()
 
     def restart(self, view: Any) -> None:
         """Restart one server through its own tab's Restart (T559): Stop, then Start, one job."""
@@ -676,13 +743,25 @@ class YulonTray(QObject):
         if live is None:
             self.open_window()
             return
+        if self._refused(live, RESTART, getattr(live, "restart_button", None)):
+            return
         live.restart_from_server_tab()
 
     def play(self, view: Any) -> None:
-        """Open this server's client launcher window, the sidebar ▶'s way (T187)."""
+        """Play this server through its own tab's PLAY (T694): start it if stopped, wait, play.
+
+        A server with no ready-to-play client has nothing to play: its launcher window opens,
+        where "Make a ready-to-play client" is the way on (the sidebar ▶'s way, T187).
+        """
         live = self._current(view)
+        if live is None:
+            self.open_window()
+            return
+        if getattr(live.services, "play_client_dir", None) is not None:
+            live.play()
+            return
         opener = getattr(self.window, "yulon_open_launcher", None)
-        if live is None or opener is None:
+        if opener is None:
             self.open_window()
             return
         opener(live.entry.id, live.services.controller.server_dir)
@@ -822,7 +901,7 @@ class YulonTray(QObject):
         ]
 
     def ask_to_quit(self) -> None:
-        """Quit tray…: with servers running, ask whether to leave them or stop them first.
+        """Quit Yu'lon…: with servers running, ask whether to leave them or stop them first.
 
         Leaving them is the default and loses nothing: they are Docker
         containers, they keep running, and Yu'lon picks them up when it starts.
@@ -835,6 +914,17 @@ class YulonTray(QObject):
             else:
                 self.open_window()
             return
+        # T690: work that cannot be cut off is said BEFORE the question. The box below
+        # offered "Stop N servers, then quit" over a Restart in flight and said only
+        # "1 server is running" (measured), and the refusal came after the choice.
+        if (reason := self._work_refusal()) is not None:
+            logger.info(f"tray: quit refused: {reason}")
+            self.open_window()
+            if self.confirm_quit_anyway(reason):
+                self.window.yulon_forced_quit = reason  # type: ignore[attr-defined]
+                logger.warning(f"tray: quit anyway chosen over running work: {reason}")
+                self.quit()
+            return
         running = self.running_servers()
         if not running:
             self.quit()
@@ -845,9 +935,34 @@ class YulonTray(QObject):
         elif choice == "stop":
             self.stop_then_quit(running)
 
+    def _removal_note(self) -> str:
+        """The sentence for a quit while a removal waits for its Stop (T690), or "".
+
+        The removal continues when the Stop ends, in the running window; a quit drops it, so
+        the server is still on the list at the next start. Kept that way on purpose.
+        """
+        pending = getattr(self.window, "yulon_removal_pending", None)
+        if pending is not None and pending():
+            return (
+                "A server is being stopped so it can be removed from Yu'lon. If you quit now "
+                "the server will still be listed next time; remove it again then."
+            )
+        return ""
+
+    def _work_refusal(self) -> str | None:
+        """What the window's close would refuse over, or None (`main.close_refusal()`, T690)."""
+        refusing = getattr(self.window, "yulon_close_refusal", None)
+        return refusing() if refusing is not None else None
+
+    def confirm_quit_anyway(self, reason: str) -> bool:
+        """The refusal with its way out ("Quit anyway"), answered. A seam for the tests."""
+        from yulon.ui import quit_anyway
+
+        return quit_anyway.ask(self.window, reason)
+
     def choose_quit(self, count: int) -> str:
         """The quit box, answered: "leave", "stop" or "cancel". A seam for the tests."""
-        box, buttons = quit_box(count)
+        box, buttons = quit_box(count, self._removal_note())
         try:
             box.exec()
             clicked = box.clickedButton()
@@ -859,8 +974,8 @@ class YulonTray(QObject):
             box.deleteLater()
 
     def choose_while_stopping(self, count: int) -> str:
-        """Quit tray… while Stop-then-quit waits: "wait" or "quit". A seam for the tests."""
-        box, buttons = while_stopping_box(count)
+        """Quit Yu'lon… while Stop-then-quit waits: "wait" or "quit". A seam for the tests."""
+        box, buttons = while_stopping_box(count, self._removal_note())
         try:
             box.exec()
             clicked = box.clickedButton()
@@ -883,24 +998,32 @@ class YulonTray(QObject):
         the tab's own reason, rather than quitting with it still up.
         """
         titles = dict(zip(self.views(), server_titles(self.views()), strict=True))
-        blocked = [view for view in running if not view.stop_button.isEnabled()]
-        if blocked:
-            view = blocked[0]
-            why = view.stop_button.toolTip() or "it is busy"
-            self.tell(
-                "Yu'lon cannot stop that server yet",
-                f"{titles.get(view, view.entry.name)} cannot be stopped right now: {why}\n\n"
-                "Yu'lon has not quit. Try again when it has finished.",
-            )
-            self.open_window()
+        if self._a_stop_is_greyed(running, titles):
             return
+        # T711 review round 2: every tab's own question first (a restore still loading
+        # there), before any Stop begins or any wait is wired: a modal question runs its own
+        # event loop, and a Stop that ended under it was read as "not stopped". One kept
+        # load calls the quit off and stops nothing.
+        kept = [view for view in running if not getattr(view, "agrees_to_stop", lambda: True)()]
+        if kept:
+            names = ", ".join(titles.get(view, view.entry.name) for view in kept)
+            logger.info(f"tray: quit called off, a Stop was declined: {names}")
+            self.show_server(kept[0])
+            self.tell(
+                "Yu'lon did not quit",
+                f"{names} was not stopped: you kept its restore running, so no server was "
+                "stopped and Yu'lon stays open. Quit Yu'lon… asks again.",
+            )
+            return
+        if self._a_stop_is_greyed(running, titles):
+            return  # round 3 N4: the questions' event loops may have let a job begin
         self.open_window()
         self._stopping = list(running)
         for view in running:
             view.realm_badge.status_changed.connect(self._a_stop_moved)
             view.action_failed.connect(self._a_stop_failed)
         for view in running:
-            view.stop_server()
+            getattr(view, "stop_agreed", view.stop_server)()
         logger.info(f"tray: stopping {len(running)} server(s), then quitting")
         # A Stop's own job ends by `docker.STOP_PROCESS_DEADLINE_SECONDS`; a wait
         # past that and a margin is a Stop that will not report (adversarial
@@ -913,6 +1036,21 @@ class YulonTray(QObject):
         self._stop_deadline.start()
         self._a_stop_moved("")
 
+    def _a_stop_is_greyed(self, running: Sequence[Any], titles: dict[Any, str]) -> bool:
+        """Say so and True when a server's Stop is greyed (another job of its tab runs)."""
+        blocked = [view for view in running if not view.stop_button.isEnabled()]
+        if not blocked:
+            return False
+        view = blocked[0]
+        why = view.stop_button.toolTip() or "it is busy"
+        self.tell(
+            "Yu'lon cannot stop that server yet",
+            f"{titles.get(view, view.entry.name)} cannot be stopped right now: {why}\n\n"
+            "Yu'lon has not quit. Try again when it has finished.",
+        )
+        self.open_window()
+        return True
+
     @Slot(str)
     def _a_stop_moved(self, _status: str) -> None:
         """Quit once every Stop has ended with its server down; end the wait if one did not.
@@ -922,7 +1060,7 @@ class YulonTray(QObject):
         "stopping" is a Stop that is over. Over and not down -- Docker went
         quiet ("unknown"), or the server is still up -- is not waited on for
         ever (adversarial review): Yu'lon stays open, says which, and the next
-        Quit tray… asks again.
+        Quit Yu'lon… asks again.
         """
         if not self._stopping:
             return
@@ -942,7 +1080,7 @@ class YulonTray(QObject):
             "Yu'lon did not quit",
             f"{names} did not read as stopped after its Stop "
             f"({status_words(left[0].realm_badge.status)}). Yu'lon stays open so you can "
-            "see why; Quit tray… asks again.",
+            "see why; Quit Yu'lon… asks again.",
         )
 
     @Slot()
@@ -960,7 +1098,7 @@ class YulonTray(QObject):
         self.tell(
             "Yu'lon did not quit",
             f"{names} did not report its Stop in time. Yu'lon stays open so you can see "
-            "why; Quit tray… asks again.",
+            "why; Quit Yu'lon… asks again.",
         )
 
     @Slot(str)
@@ -1057,7 +1195,11 @@ class YulonTray(QObject):
             self.build_menu(self._menu)
 
     def build_menu(self, menu: QMenu | None = None) -> QMenu:
-        """Option A: counts, one row per server, Open Yu'lon, Play ▸, Logs, Quit tray…
+        """Option A: counts, one row per server, Open Yu'lon, Play ▸, Logs, Quit Yu'lon…
+
+        Under each server's row are its Start, Restart and Stop from `server_actions()`, the
+        list the flyout's row shows too (T697), and Play ▸ lists every server, live where
+        that list offers Play.
 
         Built each time it opens, from the tabs as they are then; a test drives
         this, because `QMenu.exec` cannot be replaced.
@@ -1081,14 +1223,18 @@ class YulonTray(QObject):
                 dash.triggered.connect(
                     lambda _checked=False, v=view, k=entry.kind: self.dashboard(v, k)
                 )
-            if is_online(status) or status.lower() == "partial":
-                # T559: the tab's own Restart, under its row (and its dashboard),
-                # greyed here when it is greyed there; the press checks again.
-                press = getattr(view, "restart_button", None)
-                restart = menu.addAction(f"{RESTART} {title}")
-                restart.setEnabled(press is None or press.isEnabled())
-                restart.setToolTip("" if press is None else reason_of(press))
-                restart.triggered.connect(lambda _checked=False, v=view: self.restart(v))
+            # T559/T697: the tab's own Start, Restart and Stop, under its row (and its
+            # dashboard), greyed here when greyed there; the press checks again.
+            presses = {START: self.start, STOP: self.stop, RESTART: self.restart}
+            for offered in server_actions(view, status):
+                if offered.name not in SERVER_PRESSES:
+                    continue
+                press = menu.addAction(f"{offered.name} {title}")
+                press.setEnabled(offered.enabled)
+                press.setToolTip(offered.reason)
+                press.triggered.connect(
+                    lambda _checked=False, v=view, act=presses[offered.name]: act(v)
+                )
         menu.setToolTipsVisible(True)
         menu.addSeparator()
         open_action = menu.addAction(OPEN_YULON)
@@ -1098,19 +1244,25 @@ class YulonTray(QObject):
         open_action.triggered.connect(self.open_window)
         menu.setDefaultAction(open_action)
         play_menu = QMenu(PLAY, menu)
+        play_menu.setToolTipsVisible(True)
         for view, title, status in servers:
             if is_online(status):
                 label = title
             else:
                 label = f"{title} ({'starting' if realm_tone(status) == 'between' else 'stopped'})"
             action = play_menu.addAction(label)
-            action.setEnabled(is_online(status))
+            # T694: a stopped server is started by Play. Not one that is starting (the tab
+            # refuses a Play over a Start), crash-looping or unknown: Open Yu'lon is the way.
+            # T697: the flyout's list, so Play is greyed (with Start's reason) in both or none.
+            play = next((a for a in server_actions(view, status) if a.name == PLAY), None)
+            action.setEnabled(play is not None and play.enabled)
+            action.setToolTip("" if play is None else play.reason)
             action.triggered.connect(lambda _checked=False, v=view: self.play(v))
         play_menu.setEnabled(bool(servers))
         menu.addMenu(play_menu)
         menu.addAction(LOGS).triggered.connect(self.show_logs)
         menu.addSeparator()
-        menu.addAction(QUIT_TRAY).triggered.connect(self.ask_to_quit)
+        menu.addAction(QUIT_YULON).triggered.connect(self.ask_to_quit)
         return menu
 
     @Slot(object)
@@ -1141,6 +1293,8 @@ class YulonTray(QObject):
             flyout.set_theme(self.theme)
             flyout.play_requested.connect(self._flyout_play)
             flyout.start_requested.connect(self.start)
+            flyout.stop_requested.connect(self.stop)
+            flyout.restart_requested.connect(self.restart)
             flyout.open_server_requested.connect(self._flyout_show_server)
             flyout.open_requested.connect(self._flyout_open)
             flyout.quit_requested.connect(self._flyout_quit)
@@ -1210,6 +1364,12 @@ class YulonTray(QObject):
         kind = event.type()
         if self._watching_app and not self.window.isHidden():
             self._watch_app(False)  # the window is back: nothing to watch for
+        if kind is QEvent.Type.ApplicationActivate:
+            self._app_activated()
+            return False
+        if kind is QEvent.Type.ApplicationDeactivate:
+            self._app_active = False
+            return False
         if watched is self.window and kind is QEvent.Type.Close:
             if self._must_quit:
                 # Accepted or refused is decided after this filter (the busy
@@ -1283,10 +1443,36 @@ class YulonTray(QObject):
         if not isinstance(app, QApplication):
             return
         if on:
+            # Where the count of activations starts (T691): a window closed with
+            # Yu'lon in front is hidden in an app that is already active.
+            self._app_active = (
+                QGuiApplication.applicationState() == Qt.ApplicationState.ApplicationActive
+            )
             app.installEventFilter(self)
         else:
             app.removeEventFilter(self)
         self._watching_app = on
+
+    def _app_activated(self) -> None:
+        """T691: a click on the Dock icon brings the window back from the tray, on a Mac.
+
+        Qt has no event of its own for the Dock: Cocoa's `applicationShouldHandleReopen`
+        is answered by Qt's delegate with the app's state set to active with
+        `forcePropagate` (qtbase `qcocoaapplicationdelegate.mm`), so
+        `QEvent.ApplicationActivate` reaches the app even when it already was active
+        (`QGuiApplicationPrivate::setApplicationState`). Every other activation is a
+        change from inactive: Cmd+Tab, the launch (a `--tray` start included), the
+        tray's own flyout raising itself. So only "active, again" is the Dock, as LyX
+        reads it; any activation would pull the window out under the flyout.
+
+        Only for a window in the tray: the app is watched only while the window is
+        hidden, and the window's own Show lets go of it (`eventFilter`).
+        """
+        again = self._app_active
+        self._app_active = True
+        if again and sys.platform == "darwin":
+            logger.info("tray: Yu'lon was opened again from the Dock; showing the window")
+            self.open_window()
 
     def hide_window(self) -> None:
         """Into the tray. The window's jobs, pollers and launchers carry on."""
@@ -1314,8 +1500,8 @@ OWN_DIALOG = "yulonTrayDialog"
 """A property on the tray's own boxes: asked from the tray, they need no window behind them."""
 
 
-def quit_box(count: int) -> tuple[QMessageBox, dict[str, QAbstractButton]]:
-    """Quit tray… with `count` servers running: leave them (default), stop them, or cancel."""
+def quit_box(count: int, note: str = "") -> tuple[QMessageBox, dict[str, QAbstractButton]]:
+    """Quit Yu'lon… with `count` servers running: leave them (default), stop them, or cancel."""
     box = FittedMessageBox(QMessageBox.Icon.Question, "Quit Yu'lon?", "")
     if count == 1:
         said = (
@@ -1327,7 +1513,7 @@ def quit_box(count: int) -> tuple[QMessageBox, dict[str, QAbstractButton]]:
             f"{count} servers are running. They keep running after Yu'lon quits: they are "
             "Docker containers, and Yu'lon picks them up again when it starts."
         )
-    box.setText(said)
+    box.setText(f"{said}\n\n{note}" if note else said)
     box.setProperty(OWN_DIALOG, True)
     plural = "server" if count == 1 else "servers"
     leave = box.addButton("Quit, leave servers running", QMessageBox.ButtonRole.AcceptRole)
@@ -1338,14 +1524,17 @@ def quit_box(count: int) -> tuple[QMessageBox, dict[str, QAbstractButton]]:
     return box, {"leave": leave, "stop": stop, "cancel": cancel}
 
 
-def while_stopping_box(count: int) -> tuple[QMessageBox, dict[str, QAbstractButton]]:
-    """Quit tray… again while Yu'lon waits for its Stops: keep waiting (default) or quit now."""
+def while_stopping_box(
+    count: int, note: str = ""
+) -> tuple[QMessageBox, dict[str, QAbstractButton]]:
+    """Quit Yu'lon… again while Yu'lon waits for its Stops: keep waiting (default) or quit now."""
     noun = "server" if count == 1 else "servers"
     box = FittedMessageBox(QMessageBox.Icon.Question, "Yu'lon is stopping servers", "")
-    box.setText(
-        f"Yu'lon is stopping {count} {noun} and will quit when they are down. A stop that is "
-        "already running carries on if Yu'lon quits now."
+    said = (
+        f"Yu'lon is stopping {count} {noun} and will quit when they are down. If you quit now, "
+        "Yu'lon closes once the stop in progress has finished (about a minute or two)."
     )
+    box.setText(f"{said}\n\n{note}" if note else said)
     box.setProperty(OWN_DIALOG, True)
     wait = box.addButton("Keep waiting", QMessageBox.ButtonRole.RejectRole)
     now = box.addButton("Quit now", QMessageBox.ButtonRole.AcceptRole)
@@ -1362,14 +1551,15 @@ def note_box(parent: QWidget | None = None) -> tuple[QMessageBox, dict[str, QAbs
         box.setParent(parent, box.windowFlags())
     text = (
         "Yu'lon keeps running in the system tray, so your servers' status and Play are one "
-        "click away. Quit tray… in its menu closes it for good."
+        f"click away. {QUIT_YULON} in its menu closes it for good."
     )
     if sys.platform == "win32":
         # Windows 11 puts a new tray icon under the ^ beside the clock (seen on yulon-win11).
         text += "\n\nNo icon by the clock? Look under the ^ arrow, and drag it out to keep it."
     box.setText(text)
     got_it = box.addButton("Got it", QMessageBox.ButtonRole.AcceptRole)
-    quit_instead = box.addButton("Quit Yu'lon instead", QMessageBox.ButtonRole.DestructiveRole)
+    # T697: the menu's own name for the same way out (it asks the same quit question).
+    quit_instead = box.addButton(QUIT_YULON, QMessageBox.ButtonRole.DestructiveRole)
     never = box.addButton("Don't show again", QMessageBox.ButtonRole.RejectRole)
     box.setDefaultButton(got_it)
     box.setEscapeButton(got_it)

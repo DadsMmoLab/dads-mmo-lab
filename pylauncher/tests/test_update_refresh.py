@@ -11,6 +11,7 @@ below only stand in for the network and the clock.
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import threading
@@ -81,7 +82,7 @@ def test_the_refresh_fetch_carries_low_speed_limits_and_a_process_timeout(
         return _completed(1, stderr="stop here")
 
     monkeypatch.setattr(runner, "run_cancellable", fake)
-    assert RefreshGit(cancel).counted_behind(dest, None) == Counted(None)
+    assert RefreshGit(cancel).counted_behind(dest, None) == Counted(None, why="stop here")
     (argv, kwargs), *rest = seen
     assert not rest, "a failed fetch must not be followed by a count"
     assert argv[argv.index(f"http.lowSpeedLimit={git.FETCH_LOW_SPEED_LIMIT}") - 1] == "-c"
@@ -473,3 +474,139 @@ def test_a_quit_during_a_slow_github_compare_returns_promptly(tmp_path: Path) ->
     assert asked == ["o/mod-a"], "the compare was never reached, so this proved nothing"
     assert rows == ()
     assert took < 3, f"the refresh waited {took:.1f}s on GitHub's compare after a cancel"
+
+
+# ---------------------------------------------- why git could not answer, on the row (T793)
+
+_DUBIOUS = (
+    "fatal: detected dubious ownership in repository at "
+    "'//wsl.localhost/dml-arch/home/dml/games/wow-server-playerbots/modules/mod-playerbots'"
+)
+_HEAD = "c" * 40
+_BOTH = [
+    git.RunnerGit(),
+    git.ContainerGit(selinux_enforcing=lambda: False, filesystem_type=lambda _path: "ext4"),
+]
+
+
+class _Refused:
+    """`runner.run` as one clone's git: HEAD answers, and every fetch is refused with `stderr`."""
+
+    def __init__(self, stderr: str) -> None:
+        self.stderr = stderr
+        self.fetches = 0
+
+    def __call__(self, argv: list[str], **_kwargs: object) -> object:
+        if "fetch" in argv:
+            self.fetches += 1
+            return _completed(128, stderr=self.stderr)
+        return _completed(stdout=f"{_HEAD}\n")
+
+
+def _press(
+    server: Path, impl: git.RunnerGit | git.ContainerGit, now: int
+) -> tuple[apply_module.ModuleUpdate, ...]:
+    """The Check press's read of the day's rows: `cached_module_updates()`, GitHub kept out."""
+    return apply_module.cached_module_updates(
+        server,
+        kind="module",
+        git=impl,
+        newest_release=lambda _slug: None,
+        compare_commits=lambda *_args: None,
+        now=now,
+    )
+
+
+@pytest.mark.parametrize("impl", _BOTH, ids=["host", "containerized"])
+def test_the_row_says_what_git_refused_with(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, impl: git.RunnerGit | git.ContainerGit
+) -> None:
+    """T793: a refused fetch's first line is the row's reason, from either way of running git."""
+    monkeypatch.setattr(runner, "run", _Refused(f"{_DUBIOUS}\nTo add an exception:\n"))
+    (row,) = _press(_server(tmp_path, "mod-x"), impl, now=1_000)
+    assert row.behind is None
+    assert row.line == f"mod-x: could not ask git — {_DUBIOUS}"
+
+
+@pytest.mark.parametrize("impl", _BOTH, ids=["host", "containerized"])
+def test_a_refusal_with_no_words_keeps_the_old_sentence(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, impl: git.RunnerGit | git.ContainerGit
+) -> None:
+    monkeypatch.setattr(runner, "run", _Refused(""))
+    (row,) = _press(_server(tmp_path, "mod-x"), impl, now=1_000)
+    assert row.line == "mod-x: could not ask (no answer from git)"
+
+
+def test_the_day_cache_keeps_the_reason_for_the_retry_wait(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """T793: a failed row is kept for the retry wait, so the reason is kept with it.
+
+    The second press inside the hour is answered from the cache: git is not asked again, and
+    the row still says why, as the first press did.
+    """
+    server = _server(tmp_path, "mod-x")
+    refused = _Refused(_DUBIOUS)
+    monkeypatch.setattr(runner, "run", refused)
+    impl = git.RunnerGit()
+    (first,) = _press(server, impl, now=1_000)
+    assert refused.fetches == 1
+    (again,) = _press(server, impl, now=1_000 + 60)
+    assert refused.fetches == 1, "a failure inside the retry wait was asked of git again"
+    assert again.line == first.line == f"mod-x: could not ask git — {_DUBIOUS}"
+    saved = json.loads((server / apply_module.MODULE_UPDATES_FILE).read_text(encoding="utf-8"))
+    assert saved["rows"][0]["why"] == _DUBIOUS
+
+
+def test_a_cache_written_before_the_reason_was_kept_reads_as_it_did(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    server = _server(tmp_path, "mod-x")
+    old_row = {
+        "family": "module",
+        "key": "mod-x",
+        "head": _HEAD,
+        "behind": None,
+        "release": "",
+        "installed_release": "",
+        "checked_unix": 1_000,
+        "fetched": "",
+    }
+    (server / apply_module.MODULE_UPDATES_FILE).write_text(
+        json.dumps({"version": 1, "rows": [old_row]}), encoding="utf-8"
+    )
+    refused = _Refused(_DUBIOUS)
+    monkeypatch.setattr(runner, "run", refused)
+    (row,) = _press(server, git.RunnerGit(), now=1_060)
+    assert refused.fetches == 0, "a fresh failed row was asked of git again"
+    assert row.line == "mod-x: could not ask (no answer from git)"
+
+
+def test_a_long_reason_is_cut_to_one_line_at_a_word(tmp_path: Path) -> None:
+    row = apply_module.ModuleUpdate(
+        key="mod-x", path=tmp_path, is_checkout=True, behind=None, why="fatal: " + "word " * 80
+    )
+    assert "\n" not in row.line
+    assert row.line.startswith("mod-x: could not ask git — fatal: word word")
+    assert row.line.endswith("word…"), row.line
+    assert len(row.line) <= 200, row.line
+
+
+@pytest.mark.parametrize("impl", _BOTH, ids=["host", "containerized"])
+def test_a_release_row_says_why_too(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, impl: git.RunnerGit | git.ContainerGit
+) -> None:
+    """T793: a row counted against its newest release says why, as a branch row does."""
+    monkeypatch.setattr(runner, "run", _Refused(_DUBIOUS))
+    newest = upstream.Release(tag="v9", sha="e" * 40)
+    (row,) = apply_module.cached_module_updates(
+        _server(tmp_path, "mod-x"),
+        kind="module",
+        git=impl,
+        releases={"mod-x": "o/mod-x"},
+        newest_release=lambda _slug: newest,
+        compare_commits=lambda *_args: None,
+        now=1_000,
+    )
+    assert row.release == "v9" and row.behind is None
+    assert row.line == f"mod-x: could not ask git — {_DUBIOUS}"

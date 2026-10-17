@@ -59,6 +59,77 @@ def test_quit_with_nothing_running_just_quits(
     assert quits == [1]
 
 
+def test_quit_says_what_cannot_be_cut_off_before_it_asks_anything(
+    tray: YulonTray, window: FakeWindow, quits: list[int]
+) -> None:
+    """T690: the box said "1 server is running" over a Restart in flight (measured on m910q).
+
+    Mutation: drop the `_work_refusal()` check from `ask_to_quit()`, and the quit
+    question is asked over work that cannot be cut off.
+    """
+    _add(window, FakeView("WotLK", "/srv/a", "running"))
+    window.yulon_close_refusal = lambda strict=False: "Restart is running on this server."  # type: ignore[attr-defined]
+    seen: list[str] = []
+    asked: list[int] = []
+    tray.confirm_quit_anyway = lambda reason: seen.append(reason) or False  # type: ignore[method-assign]
+    tray.choose_quit = lambda count: asked.append(count) or "leave"  # type: ignore[method-assign]
+
+    tray.ask_to_quit()
+
+    assert asked == [], "the quit question was put over work that cannot be cut off"
+    assert quits == []
+    assert seen == ["Restart is running on this server."]
+    assert window.isVisible(), "the window must come forward with the reason"
+
+
+def test_quit_anyway_from_the_tray_quits_and_marks_the_exit_as_forced(
+    tray: YulonTray, window: FakeWindow, quits: list[int]
+) -> None:
+    """No trap: a refusal that cannot be overruled would make a stuck flag unquittable."""
+    _add(window, FakeView("WotLK", "/srv/a", "running"))
+    window.yulon_close_refusal = lambda strict=False: "A restore is running."  # type: ignore[attr-defined]
+    tray.confirm_quit_anyway = lambda reason: True  # type: ignore[method-assign]
+
+    tray.ask_to_quit()
+
+    assert quits == [1]
+    assert window.yulon_forced_quit == "A restore is running."  # type: ignore[attr-defined]
+
+
+def test_quit_over_a_removal_in_progress_says_the_server_will_still_be_listed(
+    tray: YulonTray, window: FakeWindow
+) -> None:
+    """Quitting during the stop a removal asked for drops the removal (kept on purpose).
+
+    Mutation: drop the note from `quit_box()` / `_removal_note()`.
+    """
+    _add(window, FakeView("WotLK", "/srv/a", "running"))
+    window.yulon_removal_pending = lambda: True  # type: ignore[attr-defined]
+    for build in (tray_module.quit_box, tray_module.while_stopping_box):
+        box, _buttons = build(1, tray._removal_note())
+        try:
+            assert "still be listed" in box.text(), box.text()
+            assert "remove it again" in box.text(), box.text()
+        finally:
+            box.deleteLater()
+    window.yulon_removal_pending = lambda: False  # type: ignore[attr-defined]
+    assert tray._removal_note() == ""
+
+
+def test_quit_now_while_stopping_says_yulon_closes_once_the_stop_has_finished(qapp: Any) -> None:
+    """The box promised the stop "carries on"; it is Yu'lon that waits for it and then closes.
+
+    Mutation: put the old sentence back in `while_stopping_box()`.
+    """
+    box, buttons = tray_module.while_stopping_box(1)
+    try:
+        text = box.text()
+        assert "closes once" in text and "stop" in text and "minute" in text, text
+        assert "carries on" not in text, text
+    finally:
+        box.deleteLater()
+
+
 def test_quit_leaving_the_servers_running(
     tray: YulonTray, window: FakeWindow, quits: list[int]
 ) -> None:
@@ -200,7 +271,7 @@ def test_the_note_box_has_its_three_answers(qapp: Any) -> None:
     try:
         assert {b.text() for b in buttons.values()} == {
             "Got it",
-            "Quit Yu'lon instead",
+            "Quit Yu'lon…",
             "Don't show again",
         }
         assert box.defaultButton() is buttons["got_it"]

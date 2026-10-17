@@ -8,13 +8,20 @@ order, and the guards are the flow's own.
 
 from __future__ import annotations
 
+import os
 import re
+import stat
+import subprocess
+import sys
+import threading
+from collections.abc import Callable, Iterator
 from datetime import datetime
 from pathlib import Path
 from typing import IO
 
 import pytest
 
+from tests.test_restore_load_pid import _marker_with
 from yulon import docker, move, move_flows
 from yulon.catalog.catalog import CatalogEntry, load_catalog
 from yulon.controller_wow_wotlk import maintenance
@@ -301,6 +308,100 @@ def test_the_temporary_dumps_are_gone_and_nothing_else_in_backups_is_touched(
     folder.mkdir()
     move_flows.export_package(box.world, folder, stop_allowed=False)
     assert sorted(p.name for p in backups.iterdir()) == [mine.name]
+
+
+def test_the_packs_dumps_never_land_where_the_backups_list_reads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T747: a pack killed mid-zip left `<stamp>_move_acore_auth.sql` that Delete refused."""
+    from yulon import backup_shelf
+
+    box = Box(tmp_path, running_now=("ac-database",))
+    listed: list[tuple[str, ...]] = []
+    packed_from: list[Path] = []
+    real = move.write_package
+
+    def watching(dest: Path, header: Header, dumps: list[DumpFile], **kw: object) -> object:
+        shelf = backup_shelf.read_shelf(box.server_dir, game_id="wow-wotlk", installed={})
+        listed.append(tuple(r.name for r in shelf.rows))
+        packed_from.extend(d.path for d in dumps)
+        return real(dest, header, dumps, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(move, "write_package", watching)
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    move_flows.export_package(box.world, folder, stop_allowed=False)
+    assert listed == [()], listed
+    work = move_flows.pack_folder(box.server_dir)
+    assert packed_from and all(p.parent == work for p in packed_from), packed_from
+    assert not work.exists(), "the working folder was left after a pack that worked"
+
+
+def test_a_killed_packs_leftovers_are_cleared_when_the_next_pack_starts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    box = Box(tmp_path, running_now=("ac-database",))
+    work = move_flows.pack_folder(box.server_dir)
+    work.mkdir(parents=True)
+    leftover = work / "20261001_000000_move_acore_auth.sql"
+    leftover.write_bytes(b"every verifier, from a pack that was killed")
+    seen: list[bool] = []
+    real = move.write_package
+
+    def watching(*a: object, **kw: object) -> object:
+        seen.append(leftover.exists())
+        return real(*a, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(move, "write_package", watching)
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    move_flows.export_package(box.world, folder, stop_allowed=False)
+    assert seen == [False], "the last pack's leftover was still there while this one packed"
+    assert not work.exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX modes; Windows has the folder's ACL")
+def test_the_packs_working_folder_is_owner_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    box = Box(tmp_path, running_now=("ac-database",))
+    backups = maintenance.backups_dir(box.server_dir)
+    backups.mkdir(parents=True)
+    backups.chmod(0o775)  # a backups folder made before T683 S5
+    modes: list[int] = []
+    real = move.write_package
+
+    def watching(*a: object, **kw: object) -> object:
+        modes.append(stat.S_IMODE(move_flows.pack_folder(box.server_dir).stat().st_mode))
+        return real(*a, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(move, "write_package", watching)
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    old = os.umask(0o002)
+    try:
+        move_flows.export_package(box.world, folder, stop_allowed=False)
+    finally:
+        os.umask(old)
+    assert modes == [0o700], [oct(m) for m in modes]
+
+
+def test_a_failed_pack_leaves_no_working_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    box = Box(tmp_path, running_now=("ac-database",))
+
+    def broken(*_a: object, **_kw: object) -> object:
+        raise move.MovePackageError("the disk went away")
+
+    monkeypatch.setattr(move, "write_package", broken)
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    with pytest.raises(MaintenanceError, match="the disk went away"):
+        move_flows.export_package(box.world, folder, stop_allowed=False)
+    assert not move_flows.pack_folder(box.server_dir).exists()
+    backups = maintenance.backups_dir(box.server_dir)
+    assert not [p.name for p in backups.iterdir()] if backups.exists() else True
 
 
 def test_a_running_server_is_not_stopped_without_a_yes(tmp_path: Path) -> None:
@@ -684,6 +785,33 @@ def test_the_extracted_dumps_do_not_stay_behind(tmp_path: Path) -> None:
     )
     backups = maintenance.backups_dir(box.server_dir)
     assert not [p for p in backups.iterdir() if p.is_dir()]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX modes; Windows has the folder's ACL")
+def test_the_folder_a_bring_in_unpacks_into_is_owner_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The unpacked auth dump holds every verifier: the folder is 0700 whatever backups/ is."""
+    box, _package, plan = ready(tmp_path)
+    backups = maintenance.backups_dir(box.server_dir)
+    backups.mkdir(parents=True, exist_ok=True)
+    backups.chmod(0o775)  # a backups folder made before T683 S5
+    seen: list[int] = []
+    real = move_flows._checked_plans
+
+    def recording(world: object, package: object, schemas: object, folder: Path) -> object:
+        seen.append(stat.S_IMODE(folder.stat().st_mode))
+        return real(world, package, schemas, folder)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(move_flows, "_checked_plans", recording)
+    old = os.umask(0o002)
+    try:
+        move_flows.run_import(
+            box.world, plan, confirm=None, use_old_realm_name=False, stop_allowed=False
+        )
+    finally:
+        os.umask(old)
+    assert seen == [0o700], [oct(m) for m in seen]
 
 
 def test_replacing_players_needs_the_plans_own_token(tmp_path: Path) -> None:
@@ -1125,6 +1253,8 @@ def test_a_backup_that_fails_part_way_leaves_no_dump_behind(tmp_path: Path) -> N
         move_flows.export_package(box.world, folder, stop_allowed=False)
     backups = maintenance.backups_dir(box.server_dir)
     assert not [p for p in backups.glob("*_move_*")], "an auth dump with every verifier stayed"
+    # T747: the dumps are written into the pack's working folder now, so that goes too.
+    assert not move_flows.pack_folder(box.server_dir).exists(), "the working folder stayed"
 
 
 def test_a_stop_that_fails_half_way_still_has_the_server_started_again(tmp_path: Path) -> None:
@@ -1242,3 +1372,314 @@ def test_a_target_without_the_playerbots_schema_is_not_asked_about_its_ledger(
     package = packed_with(tmp_path, present=PLAYERBOTS)
     box = target(tmp_path)  # acore_auth, acore_characters, acore_world only
     assert move_flows.plan_import(box.world, package).allowed
+
+
+# =============================================================== a restore load still running
+
+
+@pytest.fixture
+def live_load() -> Iterator[subprocess.Popen[bytes]]:
+    """A real process the restore record names as its load (never a fake pid)."""
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    yield child
+    child.kill()
+    child.wait()
+
+
+def _ended_load_pid() -> int:
+    gone = subprocess.Popen([sys.executable, "-c", "pass"])
+    gone.wait()
+    return gone.pid
+
+
+STILL_LOADING = "is still loading its databases in Docker"
+
+
+def test_a_running_load_refuses_the_export_plan_in_its_own_words(
+    tmp_path: Path, live_load: subprocess.Popen[bytes]
+) -> None:
+    """T734: a load another Yu'lon left running is waited for, not "restored again"."""
+    box = Box(tmp_path, running_now=("ac-database", "ac-authserver", "ac-worldserver"))
+    _marker_with(box.server_dir, live_load.pid)
+    plan = move_flows.plan_export(box.world)
+    assert len(plan.refusals) == 1, plan.refusals
+    assert STILL_LOADING in plan.refusals[0]
+    assert "Wait for it to finish" in plan.refusals[0]
+    assert "did not finish" not in plan.refusals[0]
+    assert "Restore again" not in plan.refusals[0]
+
+
+@pytest.mark.parametrize("stop_allowed", [False, True])
+def test_a_running_load_refuses_the_export_before_anything_is_stopped_or_packed(
+    tmp_path: Path, live_load: subprocess.Popen[bytes], stop_allowed: bool
+) -> None:
+    box = Box(tmp_path, running_now=("ac-database", "ac-authserver", "ac-worldserver"))
+    _marker_with(box.server_dir, live_load.pid)
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    with pytest.raises(move_flows.MoveError) as raised:
+        move_flows.export_package(box.world, folder, stop_allowed=stop_allowed)
+    said = str(raised.value)
+    assert STILL_LOADING in said and "did not finish" not in said, said
+    assert box.events == [], "nothing was stopped, dumped or started"
+    assert not list(folder.iterdir())
+
+
+def test_a_running_load_refuses_the_import_plan_in_its_own_words(
+    tmp_path: Path, live_load: subprocess.Popen[bytes]
+) -> None:
+    package = packed(tmp_path)
+    box = target(tmp_path)
+    _marker_with(box.server_dir, live_load.pid)
+    plan = move_flows.plan_import(box.world, package)
+    assert not plan.allowed
+    assert [r for r in plan.refusals if STILL_LOADING in r] == list(plan.refusals), plan.refusals
+    assert len(plan.refusals) == 1
+    assert "did not finish" not in plan.refusals[0]
+    assert box.events == []
+
+
+def test_a_load_that_ended_still_refuses_the_export_and_the_import_as_unfinished(
+    tmp_path: Path,
+) -> None:
+    """The record outlives its load: "did not finish ... Restore again" is the right advice."""
+    package = packed(tmp_path)
+    source = Box(tmp_path, running_now=("ac-database",))
+    _marker_with(source.server_dir, _ended_load_pid())
+    record = maintenance.interrupted_restore(source.server_dir)
+    assert record is not None and not record.load_running
+    assert move_flows.plan_export(source.world).refusals == (move_flows._UNFINISHED_RESTORE,)
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    with pytest.raises(move_flows.MoveError) as raised:
+        move_flows.export_package(source.world, folder, stop_allowed=False)
+    assert str(raised.value) == move_flows._UNFINISHED_RESTORE
+    box = target(tmp_path)
+    _marker_with(box.server_dir, _ended_load_pid())
+    assert move_flows.plan_import(box.world, package).refusals == (move_flows._UNFINISHED_RESTORE,)
+
+
+def test_a_damaged_install_record_is_still_said_first_over_a_running_load(
+    tmp_path: Path, live_load: subprocess.Popen[bytes]
+) -> None:
+    box = Box(tmp_path, running_now=("ac-database",), ownership=Ownership.UNKNOWN)
+    _marker_with(box.server_dir, live_load.pid)
+    assert move_flows.plan_export(box.world).refusals == (move_flows.INSTALL_RECORD_DAMAGED,)
+
+
+# =============================================================== this Yu'lon's own restore (T736)
+
+
+def _press_during_own_restore(
+    box: Box, press: Callable[[], object], *, live_pid: int | None = None
+) -> tuple[object, bool]:
+    """A real restore of `box`, held the way the Maintenance tab holds one; `press` mid-load.
+
+    The lease and the hold are `controller_view._restore_with_the_database()` and
+    `_restore_under_the_lease()`'s own: `RESTORE_HOLDS_THE_DATABASES`, then
+    `hold_the_server(alone=RESTORE_WRITES_ALONE)`. The engine's restore then writes its record
+    and loads; `press` runs on a thread of its own (the tab's JobRunner gives each press one)
+    while the first database is being loaded. `live_pid` names a real process as the load's,
+    as a real `docker exec` load is recorded. Returns what the press returned or raised, and
+    whether the restore record was in place when it was pressed.
+    """
+    from yulon import forgetting
+
+    report = box.world.backup()
+    plan = box.world.plan_restore(
+        next(d.path for d in report.dumps if d.database == "acore_characters")
+    )
+    assert plan.allowed, plan.refusals
+    load = box.db.load_from
+    got: list[object] = []
+    record_there: list[bool] = []
+
+    def load_and_press(source: IO[bytes]) -> None:
+        if not got:
+            if live_pid is not None:
+                _marker_with(box.server_dir, live_pid)
+            record_there.append(maintenance.interrupted_restore(box.server_dir) is not None)
+
+            def pressed() -> None:
+                try:
+                    got.append(press())
+                except Exception as exc:  # noqa: BLE001 - the press's answer, whatever it is
+                    got.append(exc)
+
+            worker = threading.Thread(target=pressed)
+            worker.start()
+            worker.join(30)
+        load(source)
+
+    box.db.load_from = load_and_press  # type: ignore[method-assign]
+    with (
+        docker.maintenance_lease(
+            box.server_dir,
+            forgetting.RESTORE_HOLDS_THE_DATABASES,
+            press=forgetting.PRESS_RESTORE,
+        ),
+        docker.hold_the_server(
+            box.server_dir,
+            forgetting.RESTORE_HOLDS_THE_SERVER,
+            press=forgetting.PRESS_RESTORE,
+            alone=forgetting.RESTORE_WRITES_ALONE,
+        ),
+    ):
+        box.world.restore(plan, "before-the-test")
+    box.db.load_from = load  # type: ignore[method-assign]
+    assert got and record_there, "the press never ran mid-load"
+    return got[0], record_there[0]
+
+
+@pytest.mark.parametrize("load_named", [False, True], ids=["no-load-pid", "live-load-pid"])
+def test_a_pack_during_this_yulons_own_restore_names_the_restore(
+    tmp_path: Path, live_load: subprocess.Popen[bytes], load_named: bool
+) -> None:
+    """T736: the restore is named, never "did not finish ... Restore again".
+
+    T737: in a move's own words (`RESTORE_HOLDS_A_MOVE`), not the Start/Stop sentence the hold
+    carries, whose reason is what starting or stopping would do.
+    Mutation: ask only `orphaned_restore_reason()` in `_refuse_if_unsafe` (it steps aside for
+    this process's own hold, so the record's "did not finish" was said).
+    """
+    from yulon import forgetting
+
+    box = Box(tmp_path, running_now=("ac-database",))
+    plan, record_there = _press_during_own_restore(
+        box,
+        lambda: move_flows.plan_export(box.world),
+        live_pid=live_load.pid if load_named else None,
+    )
+    assert record_there, "the restore record was not in place: the test proves nothing"
+    assert isinstance(plan, move_flows.ExportPlan), plan
+    assert plan.refusals == (forgetting.RESTORE_HOLDS_A_MOVE,), plan.refusals
+    assert move_flows.plan_export(box.world).allowed, "the restore is over: Pack goes ahead"
+
+
+def test_a_pack_during_this_yulons_own_restore_stops_and_packs_nothing(tmp_path: Path) -> None:
+    from yulon import forgetting
+
+    box = Box(tmp_path, running_now=("ac-database",))
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    events_at_press: list[int] = []
+
+    def pack() -> object:
+        events_at_press.append(len(box.events))
+        try:
+            return move_flows.export_package(box.world, folder, stop_allowed=True)
+        finally:
+            events_at_press.append(len(box.events))
+
+    raised, _ = _press_during_own_restore(box, pack)
+    assert isinstance(raised, move_flows.MoveError), raised
+    assert str(raised) == forgetting.RESTORE_HOLDS_A_MOVE
+    assert events_at_press[0] == events_at_press[1], "the pack stopped, dumped or started"
+    assert not list(folder.iterdir())
+
+
+def test_a_bring_in_plan_during_this_yulons_own_restore_names_the_restore(
+    tmp_path: Path,
+) -> None:
+    from yulon import forgetting
+
+    package = packed(tmp_path)
+    box = target(tmp_path)
+    plan, record_there = _press_during_own_restore(
+        box, lambda: move_flows.plan_import(box.world, package)
+    )
+    assert record_there
+    assert isinstance(plan, move_flows.ImportPlan), plan
+    assert plan.refusals == (forgetting.RESTORE_HOLDS_A_MOVE,), plan.refusals
+
+
+def test_a_start_during_the_same_restore_keeps_the_start_and_stop_sentence(tmp_path: Path) -> None:
+    """T737: only a move is told the move's sentence; a Start in the same restore keeps T216's.
+
+    Mutation: rewrite the hold's sentence itself instead of what a move is told (a Start would
+    then be told about packing).
+    """
+    from yulon import forgetting
+
+    box = Box(tmp_path, running_now=("ac-database",))
+
+    def start() -> object:
+        with docker._in_flight(box.server_dir, press=forgetting.PRESS_START):
+            return "started"
+
+    raised, record_there = _press_during_own_restore(box, start)
+    assert record_there
+    assert isinstance(raised, docker.ServerHeldError), raised
+    assert str(raised) == forgetting.RESTORE_HOLDS_THE_SERVER
+    said = forgetting.RESTORE_HOLDS_A_MOVE
+    assert said != forgetting.RESTORE_HOLDS_THE_SERVER
+    assert "Starting" not in said and "started or stopped" not in said, said
+    assert "Wait for the restore to finish, then try again." in said, said
+
+
+def test_a_start_during_an_accounts_bring_in_is_told_accounts_and_characters(
+    tmp_path: Path,
+) -> None:
+    """T737's other side: the Maintenance tab's Bring in keeps its own sentences.
+
+    Mutation: make `_database_session`'s hold and lease sentences the whole-server ones.
+    """
+    from yulon import forgetting
+
+    package = packed(tmp_path)
+    box = target(tmp_path)
+    plan = move_flows.plan_import(box.world, package)
+    assert plan.allowed, plan.refusals
+    said: dict[str, object] = {}
+    load = box.db.load_from
+
+    def start() -> object:
+        with docker._in_flight(box.server_dir, press=forgetting.PRESS_START):
+            return "started"
+
+    def backup() -> object:
+        with docker.maintenance_lease(
+            box.server_dir, forgetting.BACKUP_HOLDS_THE_DATABASES, press=forgetting.PRESS_BACKUP
+        ):
+            return "backed up"
+
+    def answer(name: str, press: Callable[[], object]) -> None:
+        try:
+            said[name] = press()
+        except Exception as exc:  # noqa: BLE001 - the press's answer, whatever it is
+            said[name] = exc
+
+    def load_and_press(source: IO[bytes]) -> None:
+        if not said:
+            for name, press in (("start", start), ("backup", backup)):
+                worker = threading.Thread(target=answer, args=(name, press))
+                worker.start()
+                worker.join(30)
+        load(source)
+
+    box.db.load_from = load_and_press  # type: ignore[method-assign]
+    move_flows.run_import(
+        box.world, plan, confirm=None, use_old_realm_name=False, stop_allowed=False
+    )
+    assert str(said.get("start")) == forgetting.MOVE_HOLDS_THE_SERVER, said
+    assert isinstance(said["start"], docker.ServerHeldError)
+    assert str(said.get("backup")) == forgetting.MOVE_HOLDS_THE_DATABASES, said
+    assert isinstance(said["backup"], docker.MaintenanceLeaseTaken)
+
+
+def test_clear_pack_folder_takes_a_dead_packs_folder_and_follows_no_link(tmp_path: Path) -> None:
+    """T765: the engine half of the uninstall's sweep (purge.py calls it after its redesign)."""
+    server = tmp_path / "server"
+    work = move_flows.pack_folder(server)
+    work.mkdir(parents=True)
+    (work / "20261001_000000_move_acore_auth.sql").write_bytes(b"every verifier")
+    move_flows.clear_pack_folder(server)
+    assert not os.path.lexists(work)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "mine.sql").write_bytes(b"the player's")
+    work.symlink_to(elsewhere, target_is_directory=True)
+    move_flows.clear_pack_folder(server)
+    assert not os.path.lexists(work)
+    assert (elsewhere / "mine.sql").read_bytes() == b"the player's"
+    move_flows.clear_pack_folder(server)  # nothing there: nothing to do

@@ -22,8 +22,10 @@ clause inside another one:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
+import sys
 import tempfile
 from collections.abc import Iterator
 from datetime import date
@@ -266,6 +268,24 @@ def test_a_missing_folder_is_refused_before_anything_is_read(tmp_path: Path) -> 
 # -- completing a derived manifest from what the clone turned out to hold ---
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows cannot name a file with a colon")
+def test_a_conf_dist_named_with_a_colon_is_left_out_and_said(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The manifest refuses a path with `:` in it (T683 S7). One such file is left out with a
+    log line naming it; the rest of the module still installs with its other confs."""
+    clone = tmp_path / "mod-my-thing"
+    (clone / "conf").mkdir(parents=True)
+    (clone / "conf" / "a:b.conf.dist").write_text("X = 1\n", encoding="utf-8")
+    (clone / "conf" / "alpha.conf.dist").write_text("Alpha = 1\n", encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING):
+        done = module_source.complete(_link("you/mod-my-thing"), clone)
+
+    assert [c.template for c in done.conf] == ["conf/alpha.conf.dist"]
+    assert "conf/a:b.conf.dist" in caplog.text
+
+
 def test_complete_finds_every_conf_dist_and_maps_it_to_the_modules_conf_dir(
     tmp_path: Path,
 ) -> None:
@@ -296,7 +316,10 @@ def test_complete_finds_every_conf_dist_and_maps_it_to_the_modules_conf_dir(
 def test_complete_maps_each_sql_directory_to_its_database_and_ignores_the_rest(
     tmp_path: Path,
 ) -> None:
-    """`sql_dbdir_target` (`RUST modmgr.rs:2625-2633`), both spellings, verbatim.
+    """The updater's own folder rule (`apply.updater_folder_dbs()`, T752), not a list of its own.
+
+    `playerbots/` gets no step since T752: the core updater never opens it, so a step for it
+    stayed "pending" through every press of Apply module SQL. `db-foo` matches no database.
 
     The glob is recursive where the shipped manifests' is flat: a derivation cannot
     know whether the author used `base/`/`updates/` subfolders, and what the glob
@@ -315,7 +338,6 @@ def test_complete_maps_each_sql_directory_to_its_database_and_ignores_the_rest(
         ("auth", "data/sql/db-auth/**/*.sql", "db-import", "install"),
         ("world", "data/sql/db-world/**/*.sql", "db-import", "install"),
         ("characters", "data/sql/db_characters/**/*.sql", "db-import", "install"),
-        ("playerbots", "data/sql/playerbots/**/*.sql", "db-import", "install"),
     ]
 
 

@@ -22,6 +22,7 @@ from yulon import docker, forgetting
 from yulon.ui import controller_view as controller_view_module
 from yulon.ui import single_instance
 from yulon.ui.controller_view import ControllerView
+from yulon.ui.widgets.job import run_inline
 
 HOLDER = docker.ServerHolder(
     "yulon-busy-abc",
@@ -55,7 +56,9 @@ class _Asked:
 def view(
     qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch  # noqa: F811
 ) -> ControllerView:
-    made = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    made = ControllerView(
+        WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, job_runner=run_inline
+    )
 
     # Jobs run in line: the worker half is what is under test, not the thread.
     def run_in_line(fn: Any, done: Any, failed: Any) -> None:

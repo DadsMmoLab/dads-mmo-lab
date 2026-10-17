@@ -334,9 +334,17 @@ def test_a_stop_during_the_core_updates_names_the_press_not_the_install(tmp_path
         sink: object = None,
         cancel: object = None,
         record_ended: bool = False,
+        allowed_modules: str | None = None,
     ) -> AttachedRun:
         stop.set()
-        return inner(service, where, sink=sink, cancel=cancel, record_ended=record_ended)
+        return inner(
+            service,
+            where,
+            sink=sink,
+            cancel=cancel,
+            record_ended=record_ended,
+            allowed_modules=allowed_modules,
+        )
 
     made._seams = replace(made._seams, one_shot=one_shot)
     with pytest.raises(InstallerError) as raised:
@@ -1046,6 +1054,9 @@ def test_rebuild_with_no_record_goes_on_and_says_the_sources_are_on_an_older_pin
     assert not any("older pin" in line for line in said), said
     rec.calls.clear()
     rec.heads[server_dir / MODULE] = NEW
+    pin = next(s.rev for s in WOTLK.emulator.sources if s.dest == MODULE)
+    assert pin is not None
+    rec.ancestors.add((server_dir / MODULE, NEW, pin))  # git: NEW is in the pin's history
     said = list(make().rebuild(InstallOptions(server_dir=server_dir)))
     assert "build" in rec.calls, "never refused without a record"
     told = [line for line in said if "older pin" in line]
@@ -1054,6 +1065,22 @@ def test_rebuild_with_no_record_goes_on_and_says_the_sources_are_on_an_older_pin
     assert server_build_presses.UPDATE_TO_LATEST in told[0]
     assert "database" in told[0]
     assert not any("checkout" in line for line in said), said
+
+
+@pytest.mark.parametrize("undecided", [False, True], ids=["newer", "git-cannot-say"])
+def test_rebuild_with_no_record_calls_a_folder_an_older_pin_only_where_git_shows_it(
+    tmp_path: Path, undecided: bool
+) -> None:
+    """T758: the line called a folder an update had moved PAST the pin "an older pin"."""
+    rec, server_dir, make = _spine(tmp_path, WOTLK)
+    rec.heads[server_dir / MODULE] = NEW
+    rec.ancestry_undecided = undecided
+    said = list(make().rebuild(InstallOptions(server_dir=server_dir)))
+    assert "build" in rec.calls, "never refused without a record"
+    assert not any("older pin" in line for line in said), said
+    told = [line for line in said if f"{server_dir / MODULE} is on {NEW[:7]}, not on" in line]
+    assert len(told) == 1, said
+    assert server_build_presses.UPDATE_TO_LATEST in told[0] and "database" in told[0]
 
 
 def _off(server_dir: Path) -> Path:
@@ -1249,13 +1276,17 @@ def test_core_updates_that_fail_never_start_the_new_build_and_the_copy_goes_back
     assert _moving_heads(rec, server_dir, made) == {OLD}
 
 
-def test_a_plain_rebuild_and_a_tbc_update_run_no_import(tmp_path: Path) -> None:
+def test_a_plain_rebuild_imports_once_and_a_tbc_update_runs_no_import(tmp_path: Path) -> None:
+    """T706: a plain WotLK Rebuild runs the importer once, before the new build starts;
+    it ran none until a module's world SQL was seen never to reach the database."""
     rec, server_dir, make = _spine(tmp_path / "wotlk", WOTLK)
     for source in WOTLK.emulator.sources:
         assert source.rev is not None
         rec.heads[server_dir / source.dest] = source.rev
     list(make().rebuild(InstallOptions(server_dir=server_dir)))
-    assert not [call for call in rec.calls if call.startswith("one-shot:")]
+    assert [call for call in rec.calls if call.startswith("one-shot:")] == [
+        "one-shot:ac-db-import"
+    ], rec.calls
     rec, _dir, _made, _fake, _said, _raised = _press(tmp_path / "tbc", TBC)
     assert not [call for call in rec.calls if call.startswith("one-shot:")]
 

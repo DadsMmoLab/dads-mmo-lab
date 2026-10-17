@@ -21,6 +21,7 @@ import sys
 import tempfile
 import time
 import weakref
+import zlib
 from collections.abc import Callable, Iterator, Mapping
 from logging.handlers import RotatingFileHandler
 from pathlib import Path, PureWindowsPath
@@ -35,6 +36,44 @@ from yulon import platform, server_build_gone
 from yulon.catalog import upstream
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    """`--shard-id N --num-shards M`: run the Nth of M slices of the collected tests.
+
+    CI splits its pytest run into four jobs per Python version (`ci.yml`); a run given neither
+    option is the whole suite, so the local runners (`yt`, `yt-vm`) are unchanged.
+    """
+    group = parser.getgroup("shards", "split the run into slices")
+    group.addoption("--shard-id", type=int, default=0, help="which slice to run (0-based)")
+    group.addoption("--num-shards", type=int, default=1, help="how many slices the run is cut into")
+
+
+def shard_of(nodeid: str, num_shards: int) -> int:
+    """The slice a test belongs to: its node id's CRC-32 modulo the slice count.
+
+    The node id and not the file, so the biggest files spread over every slice; the same
+    answer in every process (under xdist each worker collects and filters on its own).
+    """
+    return zlib.crc32(nodeid.encode()) % num_shards
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Keep this slice's tests, after every other hook (the `-m` expression's) has run."""
+    num_shards = config.getoption("--num-shards")
+    shard_id = config.getoption("--shard-id")
+    if num_shards == 1 and shard_id == 0:
+        return
+    if num_shards < 1 or not 0 <= shard_id < num_shards:
+        raise pytest.UsageError(
+            f"--shard-id {shard_id} is not a slice of --num-shards {num_shards}"
+        )
+    kept = [item for item in items if shard_of(item.nodeid, num_shards) == shard_id]
+    dropped = [item for item in items if shard_of(item.nodeid, num_shards) != shard_id]
+    if dropped:
+        config.hook.pytest_deselected(items=dropped)
+    items[:] = kept
 
 
 def _redirect_qt_settings() -> Path:
@@ -545,6 +584,22 @@ def _docker_cli_is_the_plain_name(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _no_docker_is_installed_on_this_linux_box(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Provisioning tests see a machine with no Docker on it, whatever this one has (T700).
+
+    `platform.linux_docker_on_board()` reads the systemd unit directories and
+    Docker Desktop's install paths, so without this the install-path tests pass or
+    fail on the developer's own docker-ce. `test_docker_consent.py` sets what a
+    test needs.
+    """
+    monkeypatch.setattr(platform, "_SYSTEMD_UNIT_DIRS", ())
+    monkeypatch.setattr(platform, "_docker_desktop_paths", lambda: ())
+    monkeypatch.setattr(platform, "_docker_snap_paths", lambda: ())
+    monkeypatch.setattr(platform, "_docker_rootless_paths", lambda: ())
+    monkeypatch.setattr(platform, "_docker_cli_context", lambda: None)
+
+
+@pytest.fixture(autouse=True)
 def _compose_is_new_enough(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every Start asks `docker compose version` first (T658); a unit test's Compose is new enough.
 
@@ -577,6 +632,170 @@ def qapp() -> Iterator[object]:
 
     app = QApplication.instance() or QApplication([])
     yield app
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _no_job_thread_runs_into_interpreter_teardown() -> Iterator[None]:
+    """Join every view job's thread at the end of the run, as `main()` does at exit (T764).
+
+    A view job's thread quits through `worker.done -> thread.quit`, a call queued to the GUI
+    thread, so a test that builds a view and never pumps the event loop leaves the thread in
+    its event loop. Held by `job.in_flight()` into interpreter teardown, that QThread is
+    destroyed while running and Qt aborts the run AFTER pytest has printed its summary
+    ("QThread: Destroyed while thread '' is still running", rc 134): five files alone did it,
+    and the full run passed only because a later test pumped the loop. `wait_all()` quits each
+    thread directly. A job still busy past the bound is named here rather than in an abort.
+    Since T769 the fixture below joins each test's own threads at that test's end; this one
+    is left for what a module fixture started.
+    """
+    yield
+    job = sys.modules.get("yulon.ui.widgets.job")
+    holder = getattr(job, "_in_flight", None) if job is not None else None
+    if holder is None:
+        return
+    if not holder.wait_all(timeout_ms=HANG_BOUND_MS):
+        raise RuntimeError(
+            f"background jobs still running at the end of the run: {holder.still_running()}"
+        )
+
+
+_HELD_BEFORE_THE_TEST: list[list[Any]] = []
+"""The threads held when each running guard began, innermost last (read by the helper below)."""
+
+
+def _held_job_pairs() -> list[tuple[Any, Any, Any]]:
+    """Every `(thread, worker, delivery)` `job.in_flight()` holds, running or already ended.
+
+    Read through `sys.modules`, as the session fixture above does: a test that never
+    imported the job module cannot have started a job, and importing it here would load Qt
+    for every test. An ended thread is still held while its answer has not returned (T771).
+    """
+    job = sys.modules.get("yulon.ui.widgets.job")
+    holder = getattr(job, "_in_flight", None) if job is not None else None
+    if holder is None:
+        return []
+    return list(holder._pairs)
+
+
+def joining_the_job_threads_left_behind(bound_ms: int) -> Iterator[None]:
+    """The body of the fixture below: note what is held, yield to the test, join what it added.
+
+    A plain generator so `test_job_threads_left_behind.py` can drive the very code the
+    fixture runs, inside one test, with a bound of its own.
+    """
+    before = [pair[0] for pair in _held_job_pairs()]
+    _HELD_BEFORE_THE_TEST.append(before)
+    try:
+        yield
+    finally:
+        popped = _HELD_BEFORE_THE_TEST.pop()
+        if popped is not before:
+            raise AssertionError("the held-before stack is out of order")
+    left = [pair for pair in _held_job_pairs() if not any(pair[0] is t for t in before)]
+
+    # A thread joined directly (an exit join, `wait_all`) has ended with its answer still
+    # queued to the GUI thread: it is held, not running, and still a leak (T771).
+    def _running(thread: Any) -> bool:
+        try:
+            return bool(thread.isRunning())
+        except RuntimeError:  # its C++ object is already deleted: nothing runs in it
+            return False
+
+    left = [pair for pair in left if _running(pair[0]) or pair[2] is not None]
+    if not left:
+        return
+    job = sys.modules["yulon.ui.widgets.job"]
+    hung: list[str] = []
+    unpumped: list[str] = []
+    for thread, worker, delivery in left:
+        name = job.in_flight()._labels.get(id(thread)) or job.describe(worker)
+        if thread.isRunning():
+            thread.quit()
+            if not thread.wait(bound_ms):
+                hung.append(name)
+                continue
+        if delivery is None or not delivery.delivered:
+            # Its answer was handed over and the thread is only on its way out: that is a
+            # test that waited for its job, not a leak. Anything else never got its answer.
+            unpumped.append(name)
+    if hung:
+        pytest.fail(
+            f"this test left background jobs running that did not finish within {bound_ms} ms "
+            f"of being told to quit (T769): {hung}. Join them in the test's own teardown."
+        )
+    if unpumped:
+        pytest.fail(
+            f"this test left background jobs whose answer it never took (T771): {unpumped}. "
+            "They are joined now. Build the view with `job_runner=run_inline`, or pump the "
+            "event loop until the job's answer has arrived."
+        )
+
+
+@pytest.fixture(autouse=True)
+def _job_threads_a_test_leaves_running_are_joined() -> Iterator[None]:
+    """Fail a test that leaves a job thread running, and join that thread at its end.
+
+    A view built with real job threads and never pumped leaves each job's thread in its event
+    loop: the `worker.done -> thread.quit` call is queued to the GUI thread and nothing
+    delivers it. Five files did that alone, and before T764 the run aborted after its
+    summary. The session fixture above joined them, but only at the end of the run, so a job
+    that HUNG was reported against no test, or against whichever ran last (T769: joined here,
+    the hang fails the test that started it). Since T771 every leak fails too, once the last
+    leaking files were fixed: a job whose answer the test never took is a test that did not
+    wait for what it started, and its answer would land in whichever test pumps next.
+
+    Threads already running when the test began (a module fixture's) are left to their
+    owner; the session fixture still joins whatever is left at the end of the run.
+    """
+    yield from joining_the_job_threads_left_behind(HANG_BOUND_MS)
+
+
+def take_every_held_answer() -> None:
+    """Deliver the answers of job threads that have ALREADY ENDED, right after a test joined
+    them directly (`shutdown()`, `wait()`).
+
+    A joined thread has ended but its answer is still queued to the GUI thread; the guard
+    above fails the test that leaves it there (T771), so a test that joins pumps it here.
+    Never takes a thread still running (an unpumped job is the guard's to fail: draining it
+    would switch the guard off) nor one held before the test began (a module fixture's).
+    """
+    before = _HELD_BEFORE_THE_TEST[-1] if _HELD_BEFORE_THE_TEST else []
+    ended = [
+        delivery
+        for thread, _worker, delivery in _held_job_pairs()
+        if delivery is not None and not thread.isRunning() and not any(thread is t for t in before)
+    ]
+    # Each answer on its own: a pump over the whole queue would deliver a running job's too.
+    from PySide6.QtCore import QCoreApplication
+
+    deadline = time.monotonic() + HANG_BOUND
+    for delivery in ended:
+        while not delivery.delivered:
+            if time.monotonic() >= deadline:
+                raise AssertionError("a joined job's answer never arrived")
+            QCoreApplication.sendPostedEvents(delivery, 0)
+            time.sleep(0.005)
+
+
+def pump_until_every_job_has_answered(what: str) -> None:
+    """Pump the GUI loop until every job this test started has ended and its answer is taken.
+
+    The guard above fails a test that leaves one of these unanswered (T771). An answer can
+    start more jobs: a status read asked again when the one before was superseded, and that
+    answer asks about the import, and so on. So each check looks at what is held NOW, and a
+    job that a delivery starts is waited for as well. Bounded as every wait here (`pump_until`),
+    and it says what it was waiting for when the bound runs out.
+    """
+    before = _HELD_BEFORE_THE_TEST[-1] if _HELD_BEFORE_THE_TEST else []
+
+    def settled() -> bool:
+        return all(
+            not thread.isRunning() and (delivery is None or delivery.delivered)
+            for thread, _worker, delivery in _held_job_pairs()
+            if not any(thread is t for t in before)
+        )
+
+    pump_until(settled, what)
 
 
 def process_events(ms: int = 50) -> None:
@@ -1332,7 +1551,7 @@ DOCKER_ARGV0S = ("docker", "docker.exe", "wsl", "wsl.exe")
 r"""Every argv[0] `docker._docker()` can produce, so the guard below knows one when it sees one.
 
 `platform.docker_prefix()` answers `["docker"]`, an absolute
-`...\resources\bin\docker.exe`, or `["wsl", "-d", <distro>, "--", "docker"]`.
+`...\resources\bin\docker.exe`, or `["wsl", "-d", <distro>, "--exec", "docker"]`.
 The guard matches on the BASENAME, so the pinned Windows path is caught too.
 """
 
@@ -1375,6 +1594,23 @@ def _no_unit_test_holds_a_real_distro_open(monkeypatch: pytest.MonkeyPatch) -> N
 
     monkeypatch.setattr(wsl, "_spawn", refuse)
     monkeypatch.setattr(wsl, "_run_release", refuse)
+
+
+@pytest.fixture(autouse=True)
+def _no_unit_test_binds_a_real_host_port_at_start(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every Start binds this server's host ports first (T671); a unit test's are free.
+
+    Without this, a test driving `Controller.start()` would bind 3724, 8085 and 3306 on
+    the machine running the suite, and fail wherever one is taken. The tests about the
+    probe itself (`tests/test_start_ports.py`) put the real `platform.bind_tcp` back.
+    """
+    from yulon import controller
+
+    monkeypatch.setattr(
+        controller,
+        "bind_host_port",
+        lambda host, port: platform.PortBind(host, port, "free", "not bound in a unit test"),
+    )
 
 
 @pytest.fixture(autouse=True)

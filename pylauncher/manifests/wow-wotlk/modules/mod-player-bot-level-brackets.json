@@ -17,7 +17,7 @@
   "sql": [
     {
       "db": "characters",
-      "path": "data/sql/db-characters/*.sql",
+      "path": "data/sql/characters/base/*.sql",
       "applied_by": "db-import"
     }
   ],

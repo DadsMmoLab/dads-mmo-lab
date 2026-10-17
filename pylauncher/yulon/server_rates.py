@@ -213,17 +213,18 @@ _GAMES: dict[str, _GameRates] = {
     "wow-wotlk": _GameRates(
         file="env/dist/etc/worldserver.conf",
         repo="mod-playerbots/azerothcore-wotlk",
-        rev="2a2211cd8f3d157da432ec0175ddd4b8a191931f",
+        rev="8a4e76eac8c4ccebf547113afe7b51d6c3e91641",
         keys=_ALL_KEYS,
         notes={},
     ),
     # T554: the same core and the same world conf as wow-wotlk, at Unbound's OWN pin. It shipped on
     # 7f12e89e; T580 (2026-10-09) moved it to f19a1879, wow-wotlk's pin since T389; T655
-    # (2026-10-10) moved both to 2a2211cd (worldserver.conf.dist unchanged between the two).
+    # (2026-10-10) moved both to 2a2211cd (worldserver.conf.dist unchanged between the two);
+    # the move to 8a4e76ea (2026-10-17) changed only the default of `DungeonFinder.OptionsMask`.
     "wow-unbound": _GameRates(
         file="env/dist/etc/worldserver.conf",
         repo="mod-playerbots/azerothcore-wotlk",
-        rev="2a2211cd8f3d157da432ec0175ddd4b8a191931f",
+        rev="8a4e76eac8c4ccebf547113afe7b51d6c3e91641",
         keys=_ALL_KEYS,
         notes={},
     ),
@@ -250,7 +251,7 @@ _GAMES: dict[str, _GameRates] = {
     "wow-tortoise": _GameRates(
         file="etc/mangosd.conf",
         repo="tortoise-wow/tortoise-wow",
-        rev="6131a26f91d60e64f6d58c7f0a9b6333f2d9f25a",
+        rev="10393426efe4bbe1de3a31fd071ca36fae358bb6",
         keys=_ALL_KEYS,
         notes={"Rate.XP.Kill": _TURTLE_MODE, "Rate.Drop.Money": _LEVEL_CAP_MONEY},
     ),

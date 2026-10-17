@@ -263,7 +263,7 @@ def test_a_wsl_install_copies_through_its_own_distro_from_its_linux_path(
     server_dir = Path("\\\\wsl.localhost\\dml-arch\\home\\pk\\wow-server-playerbots")
     clone_root = tmp_path / "clone"
     volume = _volume(tmp_path)
-    wsl = ("wsl", "-d", "dml-arch", "--cd", "/home/pk/wow-server-playerbots", "--", "docker")
+    wsl = ("wsl", "-d", "dml-arch", "--cd", "/home/pk/wow-server-playerbots", "--exec", "docker")
     calls, prefixes = _compose_run_double(monkeypatch, volume, prefix=wsl)
     monkeypatch.setattr(docker, "world_running", lambda *_a, **_k: False)
     services = ControllerServices.for_wotlk(WOTLK, server_dir, None, "dml-arch")
@@ -368,7 +368,7 @@ def test_removing_arac_names_what_it_did_not_take_back(
 
     assert report.left_behind == (
         "the server DBC files from patch-contents/DBFilesContent (in the server's data volume)",
-        "what data/sql/db-world/arac.sql wrote into the world database",
+        "what data/sql/db-world/arac.sql wrote into the world database (tables or rows)",
     )
     text = _format_report(report)
     assert "Removing mod-arac did not undo everything it installed" in text
@@ -381,7 +381,11 @@ def test_removing_arac_names_what_it_did_not_take_back(
 
 
 def test_a_remove_that_leaves_nothing_behind_says_nothing_about_it(tmp_path: Path) -> None:
-    """The line is about the steps a remove cannot reach; a manifest with none gets none."""
+    """The line is about the steps a remove cannot reach; a manifest with none gets none.
+
+    No `sql` since T751: a db-import file is one of those steps (its rows stay), so it is
+    named now; `tests/test_module_sql_residue.py` covers it.
+    """
     manifest = Manifest.model_validate(
         {
             "id": "mod-plain",
@@ -389,7 +393,6 @@ def test_a_remove_that_leaves_nothing_behind_says_nothing_about_it(tmp_path: Pat
             "type": "module",
             "game": "wow-wotlk",
             "source": {"repo": "azerothcore/mod-plain"},
-            "sql": [{"db": "world", "path": "data/sql/db-world/*.sql", "applied_by": "db-import"}],
         }
     )
     report = controller_view_module.Applier(tmp_path).remove(manifest)

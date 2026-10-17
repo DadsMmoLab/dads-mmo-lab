@@ -1,9 +1,10 @@
 """T551: the tray's left-click panel is design C, the compact status list ("Replace B with C").
 
 "Servers" and "N online" at the top; one 44 px row per server (a status dot, the
-name, a second line, and a small square icon button: Play online, Start stopped,
-Open when it needs attention, none while starting; Tortoise has a second icon for
-its bot dashboard); the tray's two switches, live; Open Yu'lon | Quit tray….
+name, a second line, and a small square icon button: Play online or stopped (T697),
+Open when it needs attention, none while starting; Start, Stop and Restart beside
+it, `test_tray_actions.py`; Tortoise has a second icon for its bot dashboard); the
+tray's two switches, live; Open Yu'lon | Quit Yu'lon….
 """
 
 from __future__ import annotations
@@ -98,7 +99,7 @@ def test_each_server_is_one_44_px_row_with_a_dot_name_and_second_line(
     assert cata.detail.text() == "Crash loop"
 
 
-def test_the_icon_button_is_play_start_open_or_none(tray: YulonTray, window: FakeWindow) -> None:
+def test_the_icon_button_is_play_open_or_none(tray: YulonTray, window: FakeWindow) -> None:
     _add(window, FakeView("WotLK", "/srv/a", "running"))
     _add(window, FakeView("TBC", "/srv/b", "starting"))
     _add(window, FakeView("Vanilla", "/srv/c", "stopped"))
@@ -107,7 +108,7 @@ def test_the_icon_button_is_play_start_open_or_none(tray: YulonTray, window: Fak
     assert [_action(_row(panel, n)) for n in ("WotLK", "TBC", "Vanilla", "Cata")] == [
         "Play",
         "",
-        "Start",
+        "Play",
         "Open",
     ]
     assert _row(panel, "TBC").action.isHidden(), "a server starting has no icon button"
@@ -117,17 +118,18 @@ def test_the_icon_button_is_play_start_open_or_none(tray: YulonTray, window: Fak
 
 
 def test_the_buttons_do_what_they_say(tray: YulonTray, window: FakeWindow) -> None:
-    _add(window, FakeView("WotLK", "/srv/a", "running"))
+    online = _add(window, FakeView("WotLK", "/srv/a", "running"))
     stopped = _add(window, FakeView("Vanilla", "/srv/c", "stopped"))
     _add(window, FakeView("Cata", "/srv/d", "loop"))
     panel = _open(tray)
     _row(panel, "WotLK").action.click()
-    assert window.opened == [("game-wotlk", Path("/srv/a"))]
+    assert online.played == 1 and window.opened == []
     panel = _open(tray)
-    _row(panel, "Vanilla").action.click()
+    _row(panel, "Vanilla").start.click()
     assert stopped.starts == 1
     assert _row(panel, "Vanilla").detail.text() == "Starting", "a Start must show at once"
     assert _action(_row(panel, "Vanilla")) == ""
+    assert _row(panel, "Vanilla").start.isHidden()
     _row(panel, "Cata").action.click()
     assert window.shown_tabs == [("game-cata", Path("/srv/d"))]
 
@@ -137,8 +139,9 @@ def test_start_is_greyed_with_the_tabs_own_reason(tray: YulonTray, window: FakeW
     view.start_button.setEnabled(False)
     view.start_button.setToolTip("Waiting for the module install to finish")
     row = _row(_open(tray), "Vanilla")
-    assert not row.action.isEnabled()
-    assert row.action.toolTip() == "Waiting for the module install to finish"
+    for button in (row.start, row.action):  # Play on a stopped server is a Start first
+        assert not button.isEnabled()
+        assert button.toolTip() == "Waiting for the module install to finish"
 
 
 @pytest.mark.parametrize(
@@ -214,7 +217,7 @@ def test_the_footer_is_open_yulon_and_quit_tray(tray: YulonTray, window: FakeWin
     window.hide()
     panel = _open(tray)
     assert panel.open_button.text() == "Open Yu'lon"
-    assert panel.quit_button.text() == "Quit tray…"
+    assert panel.quit_button.text() == "Quit Yu'lon…"
     assert panel.open_button.y() == panel.quit_button.y(), "the footer is one row split in two"
     panel.open_button.click()
     assert window.isVisible()
@@ -296,7 +299,7 @@ def test_a_click_begun_on_one_server_never_lands_on_another(
     window.yulon_controllers.remove(first)
     window.servers_changed.emit()  # the row is now WotLK's
     row.action.clicked.emit()
-    assert (first.starts, second.starts) == (0, 0), "the click landed on another server"
+    assert (first.played, second.played) == (0, 0), "the click landed on another server"
 
 
 def test_a_dashboard_click_begun_on_one_server_never_lands_on_another(
@@ -343,9 +346,9 @@ def test_start_is_a_power_symbol_not_the_server_glyph(tray: YulonTray, window: F
     """Lead, 2026-10-07: the server glyph's two bars did not read as Start; Play has ▶."""
     _add(window, FakeView("Vanilla", "/srv/c", "stopped"))
     row = _row(_open(tray), "Vanilla")
-    assert row.action.accessibleName() == "Start Vanilla"
-    assert row.action.toolTip() == "Start Vanilla"
-    assert row.action.icon().cacheKey() == tray_flyout.power_icon().cacheKey()
+    assert row.start.accessibleName() == "Start Vanilla"
+    assert row.start.toolTip() == "Start Vanilla"
+    assert row.start.icon().cacheKey() == tray_flyout.power_icon().cacheKey()
     image = tray_flyout.power_icon().pixmap(32, 32).toImage()
     amber = [
         image.pixelColor(x, y).alpha() > 0

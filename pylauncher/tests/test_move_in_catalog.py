@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from tests.conftest import wait_for_panel
 from tests.test_catalog_view import _FakeInstaller
 from yulon import move_server
 from yulon.catalog.catalog import load_catalog
@@ -87,10 +88,45 @@ def test_a_yes_to_the_plan_runs_its_engine_in_the_suggested_folder(
     mover = Mover(tmp_path)
     built, asked = view(tmp_path, mover)
     assert built.bring_from_another_computer(WOTLK) is True
+    # The job it started runs on the panel's thread: let it end here (T771).
+    wait_for_panel(built._log)
     folder = tmp_path / WOTLK.install.default_server_dir
     assert mover.planned == [(tmp_path / "w.zip", folder)]
     assert [a[0] for a in asked] == ["Bring this server in?"]
     assert len(mover.engines) == 1
+
+
+def test_the_move_runs_its_engine_with_no_first_install_flag(qapp: object, tmp_path: Path) -> None:
+    """T723: only the Install button may switch a channel on at install; the move must not."""
+    mover = Mover(tmp_path)
+    built, _ = view(tmp_path, mover)
+    assert built.bring_from_another_computer(WOTLK) is True
+    wait_for_panel(built._log)
+    assert [opts.first_install for opts in mover.engines[0].ran_with] == [False]
+
+
+def test_the_install_button_runs_its_engine_as_a_first_install(
+    qapp: object, tmp_path: Path
+) -> None:
+    """T723: the Install button is the press that says this is an install run."""
+    made: list[_FakeInstaller] = []
+
+    def factory(entry: object) -> _FakeInstaller:
+        made.append(_FakeInstaller(entry, ["building"]))  # type: ignore[arg-type]
+        return made[-1]
+
+    built = CatalogView(
+        CATALOG,
+        factory,  # type: ignore[arg-type]
+        LogPanel(),
+        pick_dir=lambda _p, _t, _s: tmp_path / "client",
+        ask_suggestion=lambda _p, _g, _s: True,
+        home=tmp_path,
+        platform_id=lambda: "linux",
+    )
+    assert built.start_install(WOTLK) is True
+    wait_for_panel(built._log)
+    assert [opts.first_install for opts in made[-1].ran_with] == [True]
 
 
 def test_a_no_runs_nothing(qapp: object, tmp_path: Path) -> None:
@@ -161,6 +197,33 @@ def test_an_installed_game_offers_no_second_server(qapp: object, tmp_path: Path)
     )
     bring = built.findChild(QPushButton, f"move-in-{WOTLK.id}")
     assert bring is not None and not bring.isEnabled()
+
+
+def test_removing_the_install_offers_bring_from_another_computer_again(
+    qapp: object, tmp_path: Path
+) -> None:
+    from PySide6.QtWidgets import QPushButton
+
+    built = CatalogView(
+        CATALOG,
+        lambda e: _FakeInstaller(e, []),
+        LogPanel(),
+        home=tmp_path,
+        installed_games={WOTLK.id: tmp_path / "already"},
+        move_in=Mover(tmp_path).move_in(),
+        platform_id=lambda: "linux",
+    )
+    bring = built.findChild(QPushButton, f"move-in-{WOTLK.id}")
+    assert bring is not None and not bring.isEnabled()
+    built.forget_installed(WOTLK.id, {})
+    assert bring.isEnabled()
+    built.forget_installed(WOTLK.id, {WOTLK.id: tmp_path / "second"})
+    assert not bring.isEnabled()
+    built.forget_installed(WOTLK.id, {})
+    built._gated.add(WOTLK.id)
+    built.forget_installed(WOTLK.id, {WOTLK.id: tmp_path / "x"})
+    built.forget_installed(WOTLK.id, {})
+    assert not bring.isEnabled()
 
 
 def test_install_into_an_unfinished_move_sends_the_player_to_bring_in(

@@ -61,7 +61,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from yulon import apply, docker, forgetting, links, platform, tuning
+from yulon import apply, docker, forgetting, kept_backups, links, platform, tuning
 from yulon.controller_wow_wotlk import maintenance
 from yulon.controller_wow_wotlk.maintenance import MaintenanceError, backups_dir
 from yulon.log import get_logger
@@ -78,13 +78,23 @@ _FIXED_LABELS = (
     "before-new-build",
     "after-new-build",
     "pre-restore",
+    maintenance.HALF_RESTORED_LABEL,
     "before-move-load",
     "before-move",
+    "move",
 )
 # What a move into this server writes (T601): the copy taken first, and the copies taken
 # before each load. Read before the `before-<id>` shape, or a move would read as an item
 # called "move".
 _MOVE_LABELS = ("before-move", "before-move-load")
+# A pack's own dump (T747): a working file an older Yu'lon wrote into this folder and a killed
+# pack left behind. It holds every verifier, and an auth one leaves out the realm row, so it is
+# never a good copy: listed as a leftover the player may delete.
+_LEFTOVER_LABELS = ("move",)
+PACK_LEFTOVER = (
+    "Left over from making a move package that did not finish. It is not a backup (an accounts "
+    "copy leaves out the realm list), and it holds every account's login data: delete it."
+)
 _IN_USE_MINUTES = 30
 """A `.partial` changed this recently may still be being written, so it is left alone."""
 _ITEM_LABEL_LEAD = "before-"
@@ -134,6 +144,14 @@ class ShelfRow:
 
 
 @dataclass(frozen=True)
+class KeptSet:
+    """The backups an earlier uninstall of this server kept in a folder beside its own (T677)."""
+
+    folder: Path
+    rows: tuple[ShelfRow, ...]
+
+
+@dataclass(frozen=True)
 class Shelf:
     folder: Path
     rows: tuple[ShelfRow, ...]
@@ -141,6 +159,8 @@ class Shelf:
     """Set when the folder leads out of the install: listed, never deleted from."""
     folder_id: tuple[int, int] | None = None
     game_id: str | None = None
+    kept: tuple[KeptSet, ...] = ()
+    """Folders earlier uninstalls kept beside the server folder: listed for Restore only."""
 
 
 @dataclass(frozen=True)
@@ -203,10 +223,11 @@ def read_shelf(
     """
     folder = backups_dir(server_dir)
     refused = _outside(folder, server_dir)
+    earlier = _kept_sets(server_dir, game_id)
     try:
         folder_st = os.stat(folder)
     except OSError:
-        return Shelf(folder, (), refused, None, game_id)
+        return Shelf(folder, (), refused, None, game_id, earlier)
     folder_id = (folder_st.st_dev, folder_st.st_ino)
     rows = _rows_in(folder, game_id)
     kept, firm = _protections(
@@ -226,7 +247,32 @@ def read_shelf(
             )
         )
     final.sort(key=lambda r: (r.made_at, r.name), reverse=True)
-    return Shelf(folder, tuple(final), refused, folder_id, game_id)
+    return Shelf(folder, tuple(final), refused, folder_id, game_id, earlier)
+
+
+KEPT_CANNOT_DELETE = (
+    "Kept from an earlier uninstall of this server. Yu'lon never deletes from that folder: "
+    "delete the folder yourself when you no longer need these."
+)
+
+
+def _kept_sets(server_dir: Path, game_id: str | None) -> tuple[KeptSet, ...]:
+    """The folders earlier uninstalls kept beside this server's folder, with their backups (T677).
+
+    Listed so a reinstall into the same folder can Restore from them. Every row is read-only
+    here: it is never selected by a Clean up and a Delete of it is refused, because the folder
+    is the player's to delete.
+    """
+    sets: list[KeptSet] = []
+    for folder in kept_backups.earlier_sets(server_dir):
+        rows = [
+            replace(r, kept_because=None, cannot_delete=KEPT_CANNOT_DELETE)
+            for r in _rows_in(folder, game_id)
+        ]
+        rows.sort(key=lambda r: (r.made_at, r.name), reverse=True)
+        if rows:
+            sets.append(KeptSet(folder, tuple(rows)))
+    return tuple(sets)
 
 
 def _outside(folder: Path, server_dir: Path) -> str | None:
@@ -319,6 +365,8 @@ def _row(path: Path, name: str, kind: Kind, st: os.stat_result, game_id: str | N
     candidates = _candidates(rest) if kind != "gz" else [(None, rest)]
     usable, problem, game = False, None, None
     unchecked = False
+    # A read of the file failed: nothing read later (the head check below) can settle its name.
+    read_failed = False
     if kind == "partial":
         problem = "A backup that was cut short; it never became a copy that can be restored."
     elif kind == "gz":
@@ -331,7 +379,7 @@ def _row(path: Path, name: str, kind: Kind, st: os.stat_result, game_id: str | N
             # file "unusable". A read that failed proves nothing about it.
             problem = str(exc)
             if isinstance(exc.__cause__, OSError):
-                unchecked = True
+                unchecked = read_failed = True
                 problem = f"Yu'lon could not check this file just now ({exc.__cause__})."
         else:
             try:
@@ -354,12 +402,27 @@ def _row(path: Path, name: str, kind: Kind, st: os.stat_result, game_id: str | N
                 if isinstance(exc.__cause__, OSError):
                     # Cannot tell which reading is right: keep the first (label included) and
                     # hold the file back, rather than let a later reading drop its label.
-                    usable, unchecked = False, True
+                    usable, unchecked, read_failed = False, True, True
                     problem = f"Yu'lon could not check this file just now ({exc.__cause__})."
                     break
                 continue
             label, database = cand_label, cand_db
             break
+    if usable and label in _LEFTOVER_LABELS:
+        usable, problem = False, PACK_LEFTOVER
+    elif label in _LEFTOVER_LABELS and not read_failed:
+        # Not verified, so no reading was confirmed above (T765): a cut-short copy of a
+        # database really named `move_x` is not a pack's leftover of `x` unless its own USE
+        # line says so. Not after a failed read (T769): nothing read later can settle it. And
+        # a failed read of the head itself is not "not named" either (T771): the label is
+        # kept and the file held back as one that could not be checked, as above.
+        try:
+            head_says = maintenance.head_names(path, database)
+        except MaintenanceError as exc:
+            head_says, unchecked = True, True
+            problem = f"Yu'lon could not check this file just now ({exc.__cause__ or exc})."
+        if not head_says:
+            label, database = candidates[-1]
     item = None
     if label is not None and label not in _FIXED_LABELS and label.startswith(_ITEM_LABEL_LEAD):
         item = label.removeprefix(_ITEM_LABEL_LEAD)
@@ -411,6 +474,22 @@ def _foreign(r: ShelfRow, game_id: str | None) -> bool:
     return game_id is not None and r.game is not None and r.game != game_id
 
 
+def _a_good_copy(r: ShelfRow, game_id: str | None) -> bool:
+    """A whole dump of one of this game's databases, as it stood: what "keep the newest" counts.
+
+    A restore's copy of a database an earlier restore left half-written (`half-restored`,
+    T746) is a copy and never a good one: counted, it would push a good backup out of the
+    newest copies kept.
+    """
+    return (
+        r.kind == "dump"
+        and r.usable
+        and r.database is not None
+        and r.label != maintenance.HALF_RESTORED_LABEL
+        and not _foreign(r, game_id)
+    )
+
+
 def _protections(
     server_dir: Path,
     rows: list[ShelfRow],
@@ -456,7 +535,7 @@ def _protections(
     # 1. the newest good copy of every database
     newest: dict[str, ShelfRow] = {}
     for r in rows:
-        if r.kind != "dump" or not r.usable or r.database is None or _foreign(r, game_id):
+        if r.database is None or not _a_good_copy(r, game_id):
             continue
         best = newest.get(r.database)
         if best is None or (r.made_at, r.name) > (best.made_at, best.name):
@@ -694,7 +773,7 @@ def _select(shelf: Shelf, rule: Rule, now: datetime) -> list[ShelfRow]:
     if rule.keep_newest is not None:
         by_database: dict[str, list[ShelfRow]] = {}
         for r in shelf.rows:
-            if r.kind == "dump" and r.usable and r.database and not _foreign(r, shelf.game_id):
+            if r.database is not None and _a_good_copy(r, shelf.game_id):
                 by_database.setdefault(r.database, []).append(r)
         for copies in by_database.values():
             copies.sort(key=lambda r: (r.made_at, r.name), reverse=True)
@@ -933,10 +1012,14 @@ def set_keep_setting(server_dir: Path, keep: int | None) -> None:
 _MADE_BY = {
     None: "a backup you took",
     "pre-restore": "taken before a restore",
+    maintenance.HALF_RESTORED_LABEL: (
+        "taken before a restore, of a database an earlier restore left half-written"
+    ),
     "before-new-build": "taken before an update",
     "after-new-build": "the new build's data, taken as an update went back",
     "before-move": "taken before moving accounts and characters in",
     "before-move-load": "taken before one step of moving in",
+    "move": "left over from making a move package",
 }
 
 
@@ -976,6 +1059,8 @@ def describe(r: ShelfRow, game_id: str | None = None) -> str:
     parts = [when, database, size, what_made_it(r), game]
     if r.unchecked:
         parts.append("could not be checked")
+    elif r.label in _LEFTOVER_LABELS and r.kind == "dump":
+        parts.append("not a backup")
     elif not r.usable and r.kind == "dump":
         parts.append("cut short or unreadable")
     return " · ".join(parts)

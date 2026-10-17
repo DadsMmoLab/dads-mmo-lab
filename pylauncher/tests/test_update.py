@@ -69,21 +69,30 @@ def fake_github(url: str) -> str:
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
-        ("v1.2.3", (1, 2, Fraction(3, 10))),
-        ("1.2.3", (1, 2, Fraction(3, 10))),
+        ("v1.2.3", (1, 2, Fraction(3))),
+        ("1.2.3", (1, 2, Fraction(3))),
         ("v0.1.4-rc1", (0, 1, Fraction(4, 10))),
         ("v0.8.65", (0, 8, Fraction(65, 100))),
         ("v0.8.7", (0, 8, Fraction(7, 10))),
         ("v0.8.70", (0, 8, Fraction(7, 10))),
         ("v0.8.0", (0, 8, Fraction(0, 1))),
+        # The boundary: 0.8.90 is still a decimal, 0.9.x is the first whole number.
+        ("v0.8.90", (0, 8, Fraction(9, 10))),
+        ("v0.8.99", (0, 8, Fraction(99, 100))),
+        ("v0.9.0", (0, 9, Fraction(0))),
+        ("v0.9.9", (0, 9, Fraction(9))),
+        ("v0.9.10", (0, 9, Fraction(10))),
+        ("v0.9.16-Public", (0, 9, Fraction(16))),
+        ("v0.10.10", (0, 10, Fraction(10))),
+        ("v1.0.10", (1, 0, Fraction(10))),
         ("nightly", None),
         ("", None),
     ],
 )
-def test_version_key_reads_the_last_number_as_a_decimal(
+def test_version_key_reads_the_last_number_by_the_hybrid_rule(
     text: str, expected: tuple[int, int, Fraction] | None
 ) -> None:
-    """`65` is .65 and `7` is .7, so `.7` is the newer of the two."""
+    """Below 0.9 `65` is .65 and `7` is .7; from 0.9 on `10` is ten (owner, 2026-10-11)."""
     assert version_key(text) == expected
 
 
@@ -132,6 +141,78 @@ def test_trailing_zeroes_do_not_make_a_version_newer() -> None:
     assert version_key("v0.8.70") == version_key("v0.8.7")
 
 
+# Oldest first. The real tags (v0.8.90, v0.9.13 .. v0.9.16) plus the ones the
+# hybrid rule exists for. Every neighbour pair must be strictly increasing.
+HYBRID_ORDER = [
+    "v0.8.6",
+    "v0.8.65",
+    "v0.8.7",
+    "v0.8.90",
+    "v0.9.0",
+    "v0.9.2",
+    "v0.9.9",
+    "v0.9.10",
+    "v0.9.13",
+    "v0.9.16",
+    "v0.9.17",
+    "v0.9.99",
+    "v0.9.100",
+    "v0.10.0",
+    "v0.10.9",
+    "v0.10.10",
+    "v0.10.11",
+    "v1.0.0",
+    "v1.0.9",
+    "v1.0.10",
+]
+
+
+def test_the_hybrid_order_holds_across_the_nine_boundary() -> None:
+    """Decimal below 0.9, whole from 0.9 on, and every key comparable with every other."""
+    for lower, higher in zip(HYBRID_ORDER, HYBRID_ORDER[1:], strict=False):
+        assert is_newer(higher, lower), f"{higher} should be newer than {lower}"
+        assert not is_newer(lower, higher), f"{lower} must not be newer than {higher}"
+    assert sorted(HYBRID_ORDER, key=lambda tag: version_key(tag) or ()) == HYBRID_ORDER
+
+
+def test_a_tenth_patch_is_newer_than_a_ninth_from_0_9_on() -> None:
+    """The defect T669: as a decimal `.10 == .1`, so 0.10.10 lost to 0.10.9."""
+    assert is_newer("v0.9.10", "0.9.9") is True
+    assert is_newer("v0.10.10", "0.10.9") is True
+    assert is_newer("v0.10.9", "0.10.10") is False
+    assert is_newer("v0.10.10", "0.10.1") is True, "0.10.1 must be offered 0.10.10"
+    assert is_newer("v0.9.16", "0.9.2") is True
+
+
+def test_a_stray_old_looking_tag_does_not_outrank_the_newest() -> None:
+    """`v0.9.2` read as `.2` was above `.16`; as a whole number it is below it."""
+    assert is_newer("v0.9.2-Public", "0.9.16-Public") is False
+
+
+def test_the_decimal_rule_still_holds_below_0_9() -> None:
+    assert is_newer("v0.8.7", "0.8.65") is True
+    assert version_key("v0.8.7") == version_key("v0.8.70")
+    assert is_newer("v0.8.70", "0.8.7") is False
+    assert is_newer("v0.9.0", "0.8.90") is True
+
+
+def test_the_feed_never_offers_a_downgrade_across_a_patch_ten() -> None:
+    """MEASURED before the fix: on 0.10.10 the feed offered v0.10.9 as the newest."""
+    feed = json.dumps([release(f"v0.10.{n}-Public", body=f"- n{n}") for n in range(10, -1, -1)])
+    on_ten = evaluate_feed(feed, "0.10.10-Public")
+    assert on_ten.latest == "v0.10.10-Public"
+    assert on_ten.available is False
+
+    on_one = evaluate_feed(feed, "0.10.1-Public")
+    assert on_one.latest == "v0.10.10-Public"
+    assert on_one.available is True
+    assert [n.tag for n in on_one.notes][0] == "v0.10.10-Public"
+    assert "v0.10.1-Public" not in [n.tag for n in on_one.notes]
+
+    on_nine = evaluate_feed(feed, "0.10.9-Public")
+    assert [n.tag for n in on_nine.notes] == ["v0.10.10-Public"]
+
+
 def test_the_minor_number_is_still_a_whole_number() -> None:
     """Only the LAST number is a fraction; 0.9.0 outranks every 0.8.x there can be."""
     assert is_newer("v0.9.0", "0.8.99") is True
@@ -148,17 +229,17 @@ def test_the_minor_number_is_still_a_whole_number() -> None:
         # `PUBLIC_TAG` is case-insensitive, so a `V` tag passes the filter. It
         # has to key too, or the release is dropped without a word.
         ("V0.8.7-Public", (0, 8, Fraction(7, 10))),
-        ("V1.2.3", (1, 2, Fraction(3, 10))),
+        ("V1.2.3", (1, 2, Fraction(3))),
         # A suffix is fine here: deciding what is a PUBLIC tag is not this
         # function's job, it is `is_public_tag`'s.
         ("v0.8.7-Public-rc1", (0, 8, Fraction(7, 10))),
-        ("v1.2.3-Public-rc1", (1, 2, Fraction(3, 10))),
+        ("v1.2.3-Public-rc1", (1, 2, Fraction(3))),
         ("v0.6.59Public", (0, 6, Fraction(59, 100))),
         ("0.8.70-Public", (0, 8, Fraction(7, 10))),
         # Nine digits is the cap, and the tenth is refused rather than trimmed.
         ("v0.8.999999999", (0, 8, Fraction(999999999, 10**9))),
         ("v0.8.9999999999", None),
-        ("v999999999.2.3", (999999999, 2, Fraction(3, 10))),
+        ("v999999999.2.3", (999999999, 2, Fraction(3))),
         ("v9999999999.2.3", None),
         ("v0.9999999999.3", None),
     ],
@@ -846,6 +927,17 @@ def test_the_build_script_orders_versions_exactly_as_the_app_does() -> None:
     tags = [
         *THE_REAL_TAG_HISTORY,
         *(f"{tag}-Public" for tag in THE_REAL_TAG_HISTORY),
+        # The hybrid rule's boundary and its far side (T669): a copy that missed
+        # the whole-number branch would agree on every tag above.
+        *HYBRID_ORDER,
+        *(f"{tag}-Public" for tag in HYBRID_ORDER),
+        "v0.8.99",
+        "v0.8.999999999",
+        "v0.9.05",
+        "V0.10.10-Public",
+        "v0.10.10-Public-rc1",
+        "v999999999.9.999999999",
+        "v0.9." + "9" * 5000,
         "V0.8.7-Public",
         "v0.8.70-Public",
         "v0.8.7-Public-rc1",

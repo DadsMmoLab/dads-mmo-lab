@@ -1,4 +1,4 @@
-"""mod-ale's Playerbots support, compiled against whichever names mod-playerbots' config has (T645).
+"""mod-ale's Playerbots support, built against the names the server's code has (T645, T732).
 
 azerothcore/mod-ale's Playerbots bindings (`src/LuaEngine/methods/Playerbots/`, since
 03b106c #397) read two members of mod-playerbots' `PlayerbotAIConfig` by name:
@@ -25,6 +25,16 @@ that has not, is bridged back the same way) and it does nothing at all:
 * for a name with no twin, or with two: the compiler's own error stands, and the
   failed build's note (`native.ale_playerbots_note()`) says what it means.
 
+**The session check (T732).** mod-ale 5472013 (#408) calls `GetSession()->IsHeadless()`;
+the playerbots core named that `WorldSession::IsBot()` until f19a1879 (v0.9.15's pin), and
+Yu'lon never moves an existing server's core, so a server made by 0.9.14 or older failed
+every Rebuild once mod-ale was in it. The same rule applies to the core's
+`WorldSession.h`: in a file that defines `class WorldSession`, a `GetSession()->IsHeadless(`
+(or `IsBot(`) in mod-ale's sources whose name the header does not declare as
+`bool <Name>(`, while it declares the other, is written with the declared name, in
+either direction. Only that call shape is touched: mod-ale's own `LuaPlayer::IsBot`
+and its Lua name table keep their text.
+
 **Why only for the compile, and not left on disk like a carried core patch.** On
 WotLK mod-ale is a Modules-tab clone, and its Update refuses a checkout with an
 edited tracked file (T44/T47): a rewrite left behind would block the very update
@@ -47,7 +57,7 @@ import json
 import os
 import re
 from collections.abc import Iterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
 from yulon.catalog.families import conf
@@ -58,6 +68,9 @@ logger = get_logger(__name__)
 
 ALE = "modules/mod-ale"
 """Where the Modules tab (WotLK) and the catalog (Unbound) put azerothcore/mod-ale."""
+
+WORLD_SESSION = "src/server/game/Server/WorldSession.h"
+"""The core's session class, the header whose names decide the session check (T732)."""
 
 CONFIG_HEADER = "modules/mod-playerbots/src/PlayerbotAIConfig.h"
 """mod-playerbots' config class, the one header whose names decide (src/ at every commit read)."""
@@ -71,6 +84,9 @@ _USE = re.compile(r"\bsPlayerbotAIConfig\.([A-Za-z_]\w*)")
 _IDENTIFIER = re.compile(r"[A-Za-z_]\w*")
 _COMMENT = re.compile(r"//[^\n]*|/\*.*?\*/", re.DOTALL)
 _CLASS = re.compile(r"\bclass\s+PlayerbotAIConfig\b")
+_SESSION_CLASS = re.compile(r"\bclass\s+WorldSession\s*[{:]")
+_SESSION_NAMES = {"IsHeadless": "IsBot", "IsBot": "IsHeadless"}
+_SESSION_USE = re.compile(r"(GetSession\s*\(\s*\)\s*->\s*)(IsHeadless|IsBot)(\s*\()")
 
 
 @dataclass(frozen=True)
@@ -81,6 +97,31 @@ class _Bridged:
     original: str
     bridged: str
     renames: Mapping[str, str]
+    session_renames: Mapping[str, str] = field(default_factory=dict)
+
+
+def session_renames_for(header: str, source: str) -> dict[str, str]:
+    """The `GetSession()-><name>(` names in `source` to write as the core's header spells them.
+
+    A called name is renamed only when the header (comments stripped) defines
+    `class WorldSession`, does not declare `bool <name>(`, and declares its twin
+    (`IsHeadless` <-> `IsBot`). Nothing otherwise: a core with neither, or both, is left
+    to the compiler, and a file that is not the session class is no evidence.
+    """
+    code = _COMMENT.sub(" ", header)
+    if not _SESSION_CLASS.search(code):
+        return {}
+
+    def declared(name: str) -> bool:
+        return re.search(rf"\bbool\s+{name}\s*\(", code) is not None
+
+    found: dict[str, str] = {}
+    for match in _SESSION_USE.finditer(source):
+        name = match[2]
+        twin = _SESSION_NAMES[name]
+        if name not in found and not declared(name) and declared(twin):
+            found[name] = twin
+    return found
 
 
 def renames_for(header: str, source: str) -> dict[str, str]:
@@ -156,32 +197,49 @@ def _sources(server_dir: Path) -> Iterator[Path]:
                 yield path
 
 
+def _header_text(server_dir: Path, relative: str) -> str | None:
+    """A core or module header's text, None when absent, a link (no evidence) or unreadable."""
+    path = server_dir / relative
+    if path.is_symlink() or not path.is_file():
+        return None
+    return _read_text(path)
+
+
 def _plan(server_dir: Path) -> tuple[_Bridged, ...]:
     """What a bridge would rewrite here, read-only; empty for every case the docstring lists."""
-    header_path = server_dir / CONFIG_HEADER
-    if header_path.is_symlink() or not header_path.is_file():
-        return ()
-    header = _read_text(header_path)
-    if header is None:
+    config = _header_text(server_dir, CONFIG_HEADER)
+    session = _header_text(server_dir, WORLD_SESSION)
+    if config is None and session is None:
         return ()
     planned: list[_Bridged] = []
     for path in _sources(server_dir):
         text = _read_text(path)
-        if text is None or "sPlayerbotAIConfig." not in text:
+        if text is None:
             continue
-        renames = renames_for(header, text)
-        if not renames:
+        renames = renames_for(config, text) if config is not None else {}
+        session_renames = session_renames_for(session, text) if session is not None else {}
+        if not renames and not session_renames:
             continue
-        bridged = _rewritten(text, renames)
+        bridged = _rewritten(text, renames, session_renames)
         planned.append(
-            _Bridged(path.relative_to(server_dir).as_posix(), text, bridged, dict(renames))
+            _Bridged(
+                path.relative_to(server_dir).as_posix(),
+                text,
+                bridged,
+                dict(renames),
+                dict(session_renames),
+            )
         )
     return tuple(planned)
 
 
-def _rewritten(text: str, renames: Mapping[str, str]) -> str:
-    """`text` with each `sPlayerbotAIConfig.<name>` in `renames` spelled the new way."""
-    return _USE.sub(lambda m: f"sPlayerbotAIConfig.{renames.get(m[1], m[1])}", text)
+def _rewritten(
+    text: str, renames: Mapping[str, str], session_renames: Mapping[str, str] | None = None
+) -> str:
+    """`text` with each `sPlayerbotAIConfig.<name>` and `GetSession()-><name>(` spelled anew."""
+    text = _USE.sub(lambda m: f"sPlayerbotAIConfig.{renames.get(m[1], m[1])}", text)
+    sessions = session_renames or {}
+    return _SESSION_USE.sub(lambda m: f"{m[1]}{sessions.get(m[2], m[2])}{m[3]}", text)
 
 
 def _digest(text: str) -> str:
@@ -277,7 +335,7 @@ def put_back(server_dir: Path) -> list[str]:
 
 
 def bridge(server_dir: Path) -> list[str]:
-    """Rewrite mod-ale's config names to mod-playerbots' for the compile that follows (T645).
+    """Rewrite mod-ale's config and session-check names to the server's for the compile (T732).
 
     A record left by a compile that never finished is put back first. Then the plan is
     made from the files as they stand; nothing to bridge says nothing. A list and not a
@@ -318,10 +376,18 @@ def bridge(server_dir: Path) -> list[str]:
             "Nothing was built."
         ) from exc
     for item in planned:
-        names = ", ".join(f"{old} -> {new}" for old, new in item.renames.items())
-        said.append(
-            f"mod-playerbots and mod-ale's Playerbots support spell some config names "
-            f"differently ({names}); Yu'lon compiles {item.path} with mod-playerbots' "
-            "spelling and puts the file back as mod-ale ships it once the compile ends."
-        )
+        if item.renames:
+            names = ", ".join(f"{old} -> {new}" for old, new in item.renames.items())
+            said.append(
+                f"mod-playerbots and mod-ale's Playerbots support spell some config names "
+                f"differently ({names}); Yu'lon compiles {item.path} with mod-playerbots' "
+                "spelling and puts the file back as mod-ale ships it once the compile ends."
+            )
+        if item.session_renames:
+            names = ", ".join(f"{old} -> {new}" for old, new in item.session_renames.items())
+            said.append(
+                f"This server's core and mod-ale name a session check differently ({names}); "
+                f"Yu'lon compiles {item.path} with the core's name and puts the file back "
+                "as mod-ale ships it once the compile ends."
+            )
     return said

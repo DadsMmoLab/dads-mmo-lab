@@ -177,7 +177,7 @@ def test_every_game_has_the_box_with_its_three_presses(
     game: str, qapp: object, tmp_path: Path
 ) -> None:
     services = ControllerServices.for_entry(CATALOG.get(game), tmp_path / game, None)
-    view = ControllerView(CATALOG.get(game), services, status_poll_ms=0)
+    view = ControllerView(CATALOG.get(game), services, status_poll_ms=0, job_runner=run_inline)
     box = view.addon_box
     assert not box.isHidden()
     assert box.title() == "Game add-ons you bring"
@@ -194,7 +194,9 @@ def test_a_hand_built_services_object_without_the_route_has_no_box(
 ) -> None:
     services = ControllerServices.for_entry(CATALOG.get("wow-wotlk"), tmp_path / "s", None)
     services.client_addons = None
-    view = ControllerView(CATALOG.get("wow-wotlk"), services, status_poll_ms=0)
+    view = ControllerView(
+        CATALOG.get("wow-wotlk"), services, status_poll_ms=0, job_runner=run_inline
+    )
     assert view.addon_box.isHidden()
 
 

@@ -38,7 +38,7 @@ from yulon.catalog import upstream
 # `native` in a walrus (`entry.install.native`), and a module of the same name
 # imported at the top of the file is exactly the kind of shadow that type-checks
 # in one function and not in the other.
-from yulon.catalog.catalog import CatalogEntry, SingleEntry, load_catalog
+from yulon.catalog.catalog import CatalogEntry, DbPasswordUnknown, SingleEntry, load_catalog
 from yulon.catalog.families import azerothcore, trinitycore
 from yulon.catalog.installer import (
     DEFAULT_INSTALLERS_ROOT,
@@ -61,6 +61,7 @@ from yulon.catalog.native import (
     CorrectionRoute,
     KeptBuildRoute,
     LatestRoute,
+    PutFoldersBackRoute,
     RewrittenHistory,
     Seams,
     SourceVersion,
@@ -72,6 +73,8 @@ from yulon.catalog.native import (
     moved_pin_confirmation,
     moved_pins,
     parked_build_note,
+    put_the_folders_back_confirmation,
+    put_the_folders_back_offered,
     read_state,
     return_to_pin_confirmation,
     rewritten_line,
@@ -96,6 +99,7 @@ from yulon.said import with_details
 from yulon.ui import lines
 
 if TYPE_CHECKING:
+    from yulon.apply import RootPassword
     from yulon.controller_wow_wotlk import maintenance as wotlk_maintenance
 
 logger = get_logger(__name__)
@@ -107,15 +111,13 @@ fixed value (moved from `controller_wow_wotlk.modules`, which re-exports it)."""
 
 
 def fixed_db_password(entry: CatalogEntry) -> str:
-    """The password the app's own DB clients use for `entry`: its fixed value, else the default.
+    """The published password the app falls back to for `entry` when it knows no folder.
 
-    A `generated` plan has no value, and the fallback is the one both callers
-    already carried. That is correct for every consumer this module has — the
-    AzerothCore probe pair — because only a fixed-password entry names a
-    one-shot import service. It is NOT a general "what is this install's
-    password": a caller that holds a `server_dir` must ask
-    `entry.install.db_password(server_dir)`, which reads the file a generated
-    plan wrote, and 7.3's `MarkerGate` reads that same file.
+    A `generated` plan has no value, so the fallback is the published one (WotLK's
+    `password`, which is also what an install made before generated passwords has).
+    It is NOT "this install's password": a caller that holds a `server_dir` must ask
+    `entry.install.db_password(server_dir)`, which reads the record a new install
+    wrote or answers the published value for an old folder (T748).
     """
     return entry.install.password.value or DEFAULT_DB_ROOT_PASSWORD
 
@@ -123,6 +125,7 @@ def fixed_db_password(entry: CatalogEntry) -> str:
 def import_gate_for(
     entry: CatalogEntry,
     *,
+    server_dir: Path | None = None,
     wsl_distro: str | None = None,
 ) -> tuple[docker.ImportProbe | None, docker.ResetUnfinished | None]:
     """The AzerothCore probe/reset pair for `entry`, or `(None, None)`.
@@ -148,10 +151,12 @@ def import_gate_for(
     tab and the CLI install locally; the Server tab knows the distro of an
     existing install and passes it.
 
-    The password is deliberately the FIXED one and not a file read: this
-    function has no `server_dir`, and it is only ever built for an entry that
-    names an import service — wow-wotlk, whose plan is `fixed`. A game that
-    generates its password can never reach the line.
+    With a `server_dir` the password is that folder's own (`db_password()`), so a
+    new install's probe asks with the password its database was created with (T748).
+    Without one, the published fallback is used: correct for an old folder and not
+    for a new one, which is why the engine passes the folder and the Server tab
+    passes its own (`ui/controller_view.py`). The folder's password is read when the
+    database is first asked, not here. A game with no import service never reaches the line.
 
     `apply` and the two controller modules are imported inside the function on
     purpose: `controller_wow_wotlk.modules` imports THIS module at module scope
@@ -166,7 +171,22 @@ def import_gate_for(
     from yulon.controller_wow_wotlk import maintenance as wotlk_maintenance
     from yulon.controller_wow_wotlk import repair as wotlk_repair
 
-    password = fixed_db_password(entry)
+    password: RootPassword
+    if server_dir is None:
+        password = fixed_db_password(entry)
+    else:
+        folder = server_dir
+
+        def password() -> str:
+            # The folder's own password (T748), read when the database is first asked, so a
+            # tab built for a server inside a stopped WSL distro does not start it (T133).
+            # `known_db_password()`: the file, else the `.env` line a new install was given,
+            # else a refusal in player words (T785) -- never the published default.
+            try:
+                return entry.install.known_db_password(folder)
+            except DbPasswordUnknown as exc:
+                raise _PasswordUnknown(str(exc)) from exc
+
     # `client=` on BOTH. This function is entry-driven -- it builds the import
     # gate for whichever game is being installed, not for WotLK -- so an
     # unbound seam here falls back to `mysql` on the three CMaNGOS games, which
@@ -181,14 +201,24 @@ def import_gate_for(
     mysql = wotlk_maintenance.DockerMysql(spec.db, password, wsl_distro=wsl_distro, client=client)
 
     def probe() -> docker.ImportState:
-        return wotlk_repair.import_state(
-            sql, mysql, lambda: docker.health(spec.db, wsl_distro=wsl_distro)
-        )
+        try:
+            return wotlk_repair.import_state(
+                sql, mysql, lambda: docker.health(spec.db, wsl_distro=wsl_distro)
+            )
+        except _PasswordUnknown as exc:
+            return docker.ImportState("unreadable", str(exc))
 
-    def reset(*, everything: bool = False) -> tuple[str, ...]:
-        return wotlk_repair.reset_unfinished(sql, mysql, everything=everything)
+    def reset(*, everything: bool = False, seeded: bool = False) -> tuple[str, ...]:
+        try:
+            return wotlk_repair.reset_unfinished(sql, mysql, everything=everything, seeded=seeded)
+        except _PasswordUnknown as exc:
+            raise InstallerError(f"Nothing was dropped: {str(exc).rstrip('.')}.") from exc
 
     return probe, reset
+
+
+class _PasswordUnknown(InstallerError):
+    """A folder's import gate was asked, and that folder's password cannot be read (T748)."""
 
 
 SNAPSHOT_LEASE_REASON = (
@@ -217,7 +247,11 @@ class _MaintenanceSnapshot:
     def _mysql(self, server_dir: Path) -> wotlk_maintenance.DockerMysql:
         from yulon.controller_wow_wotlk import maintenance
 
-        password = self.entry.install.db_password(server_dir) or fixed_db_password(self.entry)
+        try:
+            # Never the published default in place of an unknowable one (T748 round 4).
+            password = self.entry.install.known_db_password(server_dir)
+        except DbPasswordUnknown as exc:
+            raise maintenance.MaintenanceError(str(exc)) from exc
         client = native.db.client if (native := self.entry.install.native) is not None else None
         return maintenance.DockerMysql(
             self.entry.container_spec().db, password, wsl_distro=self.wsl_distro, client=client
@@ -240,6 +274,8 @@ class _MaintenanceSnapshot:
         spec = self.entry.container_spec()
         try:
             with docker.maintenance_lease(server_dir, SNAPSHOT_LEASE_REASON):
+                # T712: read with the copy, and written into it.
+                record = maintenance.import_record_text(server_dir, spec.import_service)
                 self._database_up(server_dir)
                 report = maintenance.backup(
                     server_dir,
@@ -250,6 +286,9 @@ class _MaintenanceSnapshot:
                     spec=spec,
                     core_databases=self.entry.core_databases(),
                     wsl_distro=self.wsl_distro,
+                    # T712: carried in every file of the copy, so whoever restores it puts
+                    # the unfinished-import record back as it was (`IMPORT_RECORD_LEAD`).
+                    import_record=record,
                 )
         except (
             maintenance.MaintenanceError,
@@ -312,6 +351,8 @@ class _MaintenanceSnapshot:
                         wsl_distro=self.wsl_distro,
                         safety_label=ROLLBACK_SAFETY_LABEL,
                         before_load=partial(_drop_what_the_copy_lacks, mysql, tables),
+                        # T712 round 3: "no import record" is applied by the last file only.
+                        last_of_a_copy=path == snapshot.files[-1],
                     )
                     restored.extend(report.databases)
                     safety.extend(report.safety_backup)
@@ -395,25 +436,53 @@ def installer_for_app(
     daemon this process reaches, and Yu'lon does not install into a distro
     (`pyplan/wsl-resident-servers.md` §7).
     """
-    probe, reset = import_gate_for(entry, wsl_distro=wsl_distro)
     copy = database_snapshot_for(entry, wsl_distro=wsl_distro)
+    modules = importer_modules_for(entry)
+
+    def folder_gate(
+        server_dir: Path,
+    ) -> tuple[docker.ImportProbe | None, docker.ResetUnfinished | None]:
+        # The engine asks with the folder it is working on, so the password is that folder's
+        # (T748). There is no engine-wide pair: one with no folder could only ask with the
+        # published `password`, which a new install does not have (T785).
+        return import_gate_for(entry, server_dir=server_dir, wsl_distro=wsl_distro)
+
     if wsl_distro is None:
         return installer_for(
             entry,
             platform_id=platform_id,
             installers_root=installers_root,
-            import_probe=probe,
-            reset_unfinished=reset,
             database_snapshot=copy,
+            importer_modules=modules,
+            import_gate=folder_gate,
         )
     return installer_for(
         entry,
         installers_root=installers_root,
-        import_probe=probe,
-        reset_unfinished=reset,
         seams=Seams.in_wsl(wsl_distro),
         database_snapshot=copy,
+        importer_modules=modules,
+        import_gate=folder_gate,
     )
+
+
+def importer_modules_for(entry: CatalogEntry) -> Callable[[Path], str] | None:
+    """Which modules a Rebuild's importer may update, for `entry` (T706); None = no importer.
+
+    The Modules tab's own split (`controller_wow_wotlk.modules.importer_modules()`),
+    read off the folder when the Rebuild runs, under the game's own manifests
+    (`user_game` is the entry, as the Modules tab binds it). Imported inside the
+    function for `import_gate_for()`'s reason.
+    """
+    if not entry.container_spec().import_service:
+        return None
+
+    def allowed(server_dir: Path) -> str:
+        from yulon.controller_wow_wotlk import modules as wotlk_modules
+
+        return wotlk_modules.importer_modules(server_dir, user_game=entry.id)
+
+    return allowed
 
 
 def _refuse_unless_in_the_distro(server_dir: Path, wsl_distro: str) -> None:
@@ -875,6 +944,48 @@ def update_to_latest_for_app(
     )
 
 
+def put_the_folders_back_for_app(
+    entry: CatalogEntry,
+    server_dir: Path,
+    *,
+    wsl_distro: str | None = None,
+    engine: Callable[[], InstallEngine] | None = None,
+) -> PutFoldersBackRoute | None:
+    """The "Put the folders back…" control for this install, or None where it has no engine (T786).
+
+    Only a native install has the press (`StagedInstaller.put_the_folders_back()`); for any
+    other entry the menu entry does not exist. `offered` is the engine's own reading
+    (`put_the_folders_back_offered()`, files only), and a server inside a WSL distro that is
+    stopped, or whose folder is in another distro, answers False rather than boot or read it.
+
+    The engine is built per press (`engine`, for a test's seams; else `installer_for_app()`),
+    for `rebuild_for_app()`'s reason. The press holds the server's reservation itself, so the
+    tab takes none.
+    """
+    if entry.install.native is None:
+        return None
+
+    def offered() -> bool:
+        if not _in_the_distro(server_dir, wsl_distro) or _distro_down(wsl_distro):
+            return False
+        return put_the_folders_back_offered(server_dir)
+
+    def confirmation() -> str:
+        return put_the_folders_back_confirmation(entry, server_dir)
+
+    def press(cancel: threading.Event | None = None) -> Iterator[str]:
+        if wsl_distro is not None:
+            _refuse_unless_in_the_distro(server_dir, wsl_distro)
+        made = engine() if engine is not None else installer_for_app(entry, wsl_distro=wsl_distro)
+        if not isinstance(made, StagedInstaller):
+            raise InstallerError(
+                f"{entry.name} has no folders to put back here. Nothing was changed."
+            )
+        yield from made.put_the_folders_back(InstallOptions(server_dir=server_dir), cancel=cancel)
+
+    return PutFoldersBackRoute(offered=offered, confirmation=confirmation, press=press)
+
+
 ReextractPress = Callable[..., Iterator[str]]
 """`press(cancel=None, client_dir=None)`: the "Re-extract map data" run, its lines live (T179)."""
 
@@ -1201,7 +1312,11 @@ def main(argv: list[str] | None = None) -> int:
         except KeyError:
             sys.stderr.write(f"unknown game {args.game!r}\n")
             return 2
-    options = InstallOptions(server_dir=args.server_dir, client_dir=args.client_dir)
+    # The harness runs an install the way the Install button does, so it is a first install
+    # too (T723). Nothing else in this file runs `run()`.
+    options = InstallOptions(
+        server_dir=args.server_dir, client_dir=args.client_dir, first_install=True
+    )
     # One event per run, as the Catalog tab makes one per install. It is the
     # only seam that stops a bridge worker whose consumer has gone: a `run()`
     # given no event leaves `_pump()`'s worker running on abandonment

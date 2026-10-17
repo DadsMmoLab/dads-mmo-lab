@@ -50,6 +50,7 @@ from yulon.catalog.catalog import (
     CmangosData,
     NativeInstall,
     TrinityCoreData,
+    record_says_generated,
 )
 from yulon.log import get_logger
 
@@ -231,6 +232,84 @@ def channel_is_on(server_dir: Path) -> bool:
     return dotenv_value(server_dir, CHANNEL_PORT_VAR) != CHANNEL_PORT_RELEASED
 
 
+def channel_start_refusal(
+    entry: CatalogEntry, server_dir: Path, *, first_install: bool
+) -> str | None:
+    """Why a first install must leave its command channel alone, or `None` (T723).
+
+    The one thing that refuses is a `DOCKER_SOAP_EXTERNAL_PORT` line already in the
+    folder's `.env`: the host port claim is already set (by a press, a rollback's
+    released `127.0.0.1:0`, a hand edit, or an earlier run of this install), and the
+    install does not overwrite what is there. It asks nothing of the override or of
+    any backup file: the decision to switch on is the press's (`first_install`), never the folder's
+    contents, because a folder with files missing looks like a first install to the
+    disk and is not one.
+    """
+    if not first_install or not _channel_on_env_route(entry):
+        return None
+    claim = dotenv_value(server_dir, CHANNEL_PORT_VAR)
+    if claim is None:
+        return None
+    return (
+        f"The command channel was left as it is: {CHANNEL_PORT_VAR} is already set in .env "
+        f"({claim}), so this install did not change it."
+    )
+
+
+def _channel_on_env_route(entry: CatalogEntry) -> bool:
+    operations = entry.operations
+    return operations is not None and bool(operations.enable_env)
+
+
+def channel_starts_on(entry: CatalogEntry, server_dir: Path, *, first_install: bool) -> bool:
+    """Whether this install's first render switches its channel on (T723).
+
+    Two things decide it, and neither is a file being missing. The press says it is
+    an install run (`first_install`, set by the Install button and the install
+    harness, and by nothing else: Update, Repair, Reset and a move never set it).
+    And the entry's channel is an environment route (`operations.enable_env`, WotLK
+    and Unbound). The owner decided on 2026-10-12 that such an install starts on,
+    the way the conf-file trees' keys are written at install (T87), so the first
+    boot binds the channel and nothing is pressed.
+
+    The one exception is `channel_start_refusal()`: a `DOCKER_SOAP_EXTERNAL_PORT`
+    line already in `.env` is the user's, and is left alone. An install into a folder
+    that already has an override is still an install, so it switches on too, unless
+    that line is there (a press or a rollback always leaves it).
+    """
+    return (
+        first_install
+        and _channel_on_env_route(entry)
+        and channel_start_refusal(entry, server_dir, first_install=first_install) is None
+    )
+
+
+def record_channel_press(entry: CatalogEntry, server_dir: Path, before: str) -> None:
+    """Keep the record a channel press keeps, for a channel that starts on (T723).
+
+    The two writes `channel_setup.enable()` makes on its first press, in the same
+    order: the override as it was before the channel (`before`), then the host
+    port claim on loopback. With both there `channel_is_on()` is true, so every
+    writer of the override renders the channel's environment (T101), and a
+    rollback restores `before` and releases the port, as it does after a press.
+
+    The claim goes through `write_dotenv()`, the one writer of `.env` that keeps
+    it owner-only, because that file holds the database root password.
+    """
+    operations = entry.operations
+    if operations is None or operations.port is None:
+        raise ComposeGenError(f"{entry.id} has no command channel port to claim")
+    target = server_dir / OVERRIDE_FILE
+    backup = target.with_name(target.name + CHANNEL_BACKUP_SUFFIX)
+    if not backup.exists():
+        # As `enable()` does: the record of the override before ANY channel is the first
+        # one kept, so a leftover one from an earlier press is never replaced. It goes
+        # through the compose files' own writer, so it is whole or absent, never a cut-off
+        # copy that a rollback would restore (T780).
+        _replace_whole(backup, before)
+    write_dotenv(server_dir, {CHANNEL_PORT_VAR: f"127.0.0.1:{operations.port}"})
+
+
 def channel_world_env(entry: CatalogEntry, server_dir: Path) -> dict[str, str] | None:
     """The environment a REGENERATED override carries: `None` unless a channel press is live.
 
@@ -243,6 +322,9 @@ def channel_world_env(entry: CatalogEntry, server_dir: Path) -> dict[str, str] |
     T101 the stage rendered without it, so a Repair on WotLK wrote the
     pre-channel override back and its own `up` brought the world up with SOAP
     off (yulon-ubuntu, 2026-09-24).
+
+    A first install's channel is live from its first render on, because
+    `record_channel_press()` writes its record before the second render (T723).
 
     A channel switched on through `enable_conf` (the CMaNGOS trees) has nothing
     here: its keys are in `mangosd.conf`, which no regeneration rewrites.
@@ -458,8 +540,8 @@ def _slug(text: str) -> str:
 class ComposePlan:
     """The three files' text plus the `.env` keys this install needs on top of them.
 
-    `dotenv` is empty for a fixed-password game (WotLK): the catalog's value is
-    the base file's interpolation default and needs no `.env`. For a
+    `dotenv` is empty for a fixed-password game (none ships one since T748): the
+    catalog's value is the base file's interpolation default and needs no `.env`. For a
     generated-password game it carries exactly `DB_ROOT_PASSWORD`, which
     `write_plan()` merges into `.env` through `write_dotenv()` — the one writer
     of that file — so the secret is never in a compose file git can see. A
@@ -541,6 +623,8 @@ def render(
             spliced into YAML, the entry generates its password and none was
             given, a template names `{{DB_PASSWORD}}` in generated mode, or the
             entry declares `containers.services` (see `_container_prefix()`).
+        DotenvSecretError: an install made before generated passwords sets a
+            `DB_ROOT_PASSWORD` in its `.env` that compose reads otherwise (`dotenv_secret()`).
     """
     native = _native_of(entry)
     templates = templates_root / native.templates
@@ -549,13 +633,24 @@ def render(
         password = db_password
     elif plan.mode == "fixed" and plan.value:
         password = plan.value
+    elif (legacy := entry.install.legacy_password(server_dir)) is not None:
+        # T748: a folder that is not provably a new install (its record predates generated
+        # passwords, or it has none) keeps the password it has always had. A new install's
+        # record says so, and it still has to be given its own.
+        password = legacy
     else:
         raise ComposeGenError(
             f"{entry.name} generates its database password per install, and none was given "
             "to render its compose files with."
         )
-    _refuse_unsafe(password, "the database root password")
     generated = plan.mode == "generated"
+    # A value this folder's `.env` already hands compose stays out of the compose text and is
+    # not rewritten (below), so compose has been reading it as written all along.
+    kept = generated and _env_hands_compose(entry, server_dir, password)
+    if not (kept and plan.legacy is not None):
+        # T748 round 2: the one exception is an install made before generated passwords
+        # (WotLK, Unbound) keeping its own `.env` value, which reaches no conf or SQL text.
+        _refuse_unsafe(password, "the database root password")
     template_names = ("base.yml.tmpl", "override.yml.tmpl", "build.yml.tmpl")
     texts = {name: _read_template(templates / name) for name in template_names}
     if generated:
@@ -664,8 +759,34 @@ def render(
         raise ComposeGenError(
             f"the time zone could not be written into the override: {exc}"
         ) from exc
-    build = fill(
-        texts["build.yml.tmpl"],
+    build = _fill_build(entry, texts["build.yml.tmpl"])
+    # A `.env` that already hands compose this password keeps its line as written: rewriting a
+    # quoted or commented value unquoted would change what compose reads (T748 round 2).
+    dotenv = {"DB_ROOT_PASSWORD": password} if generated and not kept else {}
+    return ComposePlan(base, override, build, dotenv)
+
+
+def render_build(entry: CatalogEntry, *, templates_root: Path) -> str:
+    """The build overlay alone, byte for byte what `render()` puts in `ComposePlan.build`.
+
+    T740 split it out for the Rebuild, which writes this one file again and none of the
+    other two. Until then only `render()` made it, and the Rebuild ran no
+    `generate-compose`, so an install kept the overlay of the day it was installed: on
+    yulon-win11 one from 2026-09-12 lacked T525's buildx group, and authserver sent its
+    whole context cold on its own buildx folder (T733's gate). It needs no password, bind
+    label or zone: the template fills only `BUILD_CONTEXT` and the catalog facts.
+
+    Raises:
+        ComposeGenError: the entry has no `install.native` block, the template cannot be
+            read, or a placeholder was left unfilled.
+    """
+    native = _native_of(entry)
+    return _fill_build(entry, _read_template(templates_root / native.templates / "build.yml.tmpl"))
+
+
+def _fill_build(entry: CatalogEntry, template: str) -> str:
+    return fill(
+        template,
         {
             # `.` and not the absolute path: the server dir IS the checkout, and
             # compose resolves a relative context against the file's own
@@ -682,7 +803,6 @@ def render(
             **entry_tokens(entry),
         },
     )
-    return ComposePlan(base, override, build, {"DB_ROOT_PASSWORD": password} if generated else {})
 
 
 def _read_if_there(path: Path) -> str | None:
@@ -1658,18 +1778,64 @@ def write_plan(
         (BUILD_FILE, plan.build),
     ):
         path = server_dir / name
-        if name not in replaceable and not is_ours(path):
-            raise ComposeGenError(
-                f"{path} was not written by Yu'lon, so it was not touched and nothing was "
-                "installed. Point the install at an empty folder, or move that file aside."
-            )
-        if path.exists() and path.read_text(encoding="utf-8") == text:
-            continue
-        _replace_whole(path, text)
-        written.append(path)
+        if _write_one(path, text, replaceable=name in replaceable):
+            written.append(path)
     if plan.dotenv:
-        written.append(write_dotenv(server_dir, plan.dotenv))
+        # Reported only when the bytes change: `write_plan()` answers `()` for a second run over
+        # the same plan, and a generated plan's `.env` is part of that (T748).
+        env = server_dir / DOTENV_FILE
+        before = env.read_bytes() if env.is_file() else None
+        write_dotenv(server_dir, plan.dotenv)
+        if env.read_bytes() != before:
+            written.append(env)
     return tuple(written)
+
+
+def write_build(server_dir: Path, text: str) -> bool:
+    """Write the build overlay alone, by `write_plan()`'s rules; True when it was written.
+
+    T740's Rebuild writes this one file and no other. The rules are `write_plan()`'s,
+    shared through `_write_one()`: a file without the marker is refused, never
+    replaced, and matching text is left alone so its mtime does not move.
+
+    Raises:
+        ComposeGenError: the file there was not written by Yu'lon.
+        OSError: it could not be written; `_replace_whole()` left the old file whole.
+    """
+    path = server_dir / BUILD_FILE
+    if not is_ours(path):
+        # Its own sentence: `_write_one()`'s speaks of an install, and this is no install.
+        raise ComposeGenError(f"{path} was not written by Yu'lon, so it was not touched")
+    return _write_one(path, text, replaceable=True)
+
+
+def build_is_current(server_dir: Path, text: str) -> bool:
+    """Does the build overlay on disk already say `text`, by the test `write_build()` writes on?
+
+    T740 round 2 (cold review): the Rebuild compared bytes to plan its write while the write
+    compared `read_text()`, which reads a CRLF copy as the same text, so a CRLF overlay was
+    reported written and never was. Both now ask `_already()`.
+
+    Raises:
+        OSError, UnicodeDecodeError: the file could not be read as UTF-8 text.
+    """
+    return _already(server_dir / BUILD_FILE, text)
+
+
+def _already(path: Path, text: str) -> bool:
+    return path.exists() and path.read_text(encoding="utf-8") == text
+
+
+def _write_one(path: Path, text: str, *, replaceable: bool) -> bool:
+    if not replaceable and not is_ours(path):
+        raise ComposeGenError(
+            f"{path} was not written by Yu'lon, so it was not touched and nothing was "
+            "installed. Point the install at an empty folder, or move that file aside."
+        )
+    if _already(path, text):
+        return False
+    _replace_whole(path, text)
+    return True
 
 
 COMPOSE_TEMP_PREFIX = ".yulon-tmp-"
@@ -1739,7 +1905,7 @@ def _replace_whole(path: Path, text: str) -> None:
             pass
         temp.unlink(missing_ok=True)
         raise
-    _fsync_folder(path.parent)
+    platform.fsync_folder(path.parent)
 
 
 REPLACE_BACKOFF = (0.05, 0.1, 0.2, 0.4)
@@ -1789,25 +1955,6 @@ def _replace_when_free(temp: Path, path: Path) -> None:
                     f"Close that program and press again. ({exc})"
                 ) from exc
             _sleep(wait)
-
-
-def _fsync_folder(folder: Path) -> None:
-    """Put the folder's entries on disk: the rename above is not durable until they are.
-
-    POSIX only; Windows cannot open a directory. After the rename, so a
-    failure here is a warning and not a raise: the new file is already in
-    place, and reporting the write as failed would be untrue.
-    """
-    if os.name == "nt":
-        return
-    try:
-        fd = os.open(folder, os.O_RDONLY)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-    except OSError as exc:
-        logger.warning(f"could not fsync {folder} after replacing a compose file in it: {exc}")
 
 
 def merge_dotenv(existing: str, additions: Mapping[str, str]) -> str:
@@ -1867,6 +2014,89 @@ def dotenv_value(server_dir: Path, key: str) -> str | None:
         if stripped[: split.start()].strip() == key:
             found = stripped[split.end() :].strip()
     return found
+
+
+def _env_hands_compose(entry: CatalogEntry, server_dir: Path, password: str) -> bool:
+    """Whether this folder's `.env` already hands compose `password` as `DB_ROOT_PASSWORD`.
+
+    A line compose would read otherwise (`DotenvSecretError`) is no for a new install, whose
+    `.db_password` value then replaces it. For an install made before generated passwords
+    (T748) that line is the only record of its database's password, so the refusal stands
+    and the line is never rewritten under it.
+    """
+    try:
+        return dotenv_secret(server_dir, "DB_ROOT_PASSWORD") == password
+    except DotenvSecretError:
+        if entry.install.password.legacy is not None and not record_says_generated(server_dir):
+            raise
+        return False
+
+
+class DotenvSecretError(ComposeGenError):
+    """A `.env` password Yu'lon cannot read the way Docker Compose does (T748 round 3)."""
+
+
+def _dotenv_refusal(key: str, why: str) -> DotenvSecretError:
+    return DotenvSecretError(
+        f"The {key} line in this server's {DOTENV_FILE} {why}, so Yu'lon cannot tell which "
+        "password the database has. Put the password the database "
+        f"really uses between single quotes on that line, like {key}='your password': "
+        "Docker and Yu'lon both read a single-quoted value exactly as written (a ' in it "
+        "is written \\')."
+    )
+
+
+def dotenv_secret(server_dir: Path, key: str) -> str | None:
+    """`dotenv_value()` read as compose-go's dotenv parser reads it, for a value handed to mysql.
+
+    T748 round 3, against compose-go's `dotenv/parser.go`: an unquoted value ends at ` #` (a
+    space; a tab before `#` is not a comment) and loses trailing whitespace; a quoted one ends
+    at its first unescaped closing quote, where `\\<that quote>` is the quote itself and any
+    other backslash stays; after that only blanks and a `#` comment may follow on its line.
+    A single-quoted value is then taken as written. Compose goes on to expand `$` variables
+    in unquoted and double-quoted values, and escape sequences (`\\n`, `\\t`, octal, `\\$` ...)
+    in double-quoted ones; this does not guess at either. A value that needs them, or that
+    the parser would not read as one value, raises `DotenvSecretError`, whose text tells
+    the player to single-quote it, which compose-go reads literally.
+
+    Raises:
+        DotenvSecretError: the value holds `$`, a double-quoted escape other than `\\"` and
+            `\\\\`, text after its closing quote, or a quote never closed on its line.
+    """
+    raw = dotenv_value(server_dir, key)
+    if raw is None:
+        return None
+    if not raw.startswith(("'", '"')):
+        value = raw.split(" #", 1)[0].rstrip()
+        if "$" in value:
+            raise _dotenv_refusal(key, "holds a $, which Docker reads as the start of a variable")
+        return value
+    quote = raw[0]
+    chars: list[str] = []
+    escaped = False
+    for index in range(1, len(raw)):
+        char = raw[index]
+        if char == quote and not escaped:
+            rest = raw[index + 1 :].lstrip()
+            if rest and not rest.startswith("#"):
+                raise _dotenv_refusal(key, "has more text after its closing quote")
+            break
+        if escaped and char != quote:
+            chars.append("\\")
+        escaped = char == "\\" and not escaped
+        if not escaped:
+            chars.append(char)
+    else:
+        raise _dotenv_refusal(key, "opens a quote it never closes")
+    value = "".join(chars)
+    if quote == "'":
+        return value
+    if "$" in value:
+        raise _dotenv_refusal(key, "holds a $, which Docker reads as the start of a variable")
+    parts = value.split("\\\\")
+    if any("\\" in part for part in parts):
+        raise _dotenv_refusal(key, "holds a backslash, which Docker reads as an escape")
+    return "\\".join(parts)
 
 
 def write_dotenv(server_dir: Path, additions: Mapping[str, str]) -> Path:

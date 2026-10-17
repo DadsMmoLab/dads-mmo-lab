@@ -33,7 +33,11 @@
     {
       "db": "world",
       "path": "All_Stackables_200_Down.sql",
-      "when": "remove"
+      "when": "remove",
+      "undoes": [
+        "All_Stackables_200_Up.sql"
+      ],
+      "note": "T751 round 2: together with the backup put back after it, which holds every item the Up file changes (all of them stack above 1), it takes the Up file back in full."
     },
     {
       "db": "world",

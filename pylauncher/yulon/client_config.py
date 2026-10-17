@@ -41,7 +41,7 @@ import time
 from collections.abc import Callable, Collection
 from pathlib import Path
 
-from yulon import play_client
+from yulon import client_names, play_client
 from yulon.catalog.catalog import ConfigWtf
 from yulon.log import get_logger
 
@@ -113,15 +113,20 @@ def _merged(raw: bytes, cfg: ConfigWtf, *, first_run: bool, remove: Collection[s
 
 
 def _config_path(play_dir: Path) -> Path:
-    """`WTF/Config.wtf` of `play_dir`, refusing a `WTF` that is a link or a shared file."""
-    wtf = play_dir / CONFIG_WTF.parent
+    """`WTF/Config.wtf` of `play_dir`, refusing a `WTF` that is a link or a shared file.
+
+    Under the names already on disk (T675): a client unpacked with `unzip -LL` has
+    `wtf/config.wtf`, and a new `WTF/Config.wtf` beside it, on a disk that tells
+    cases apart, held none of the player's settings.
+    """
+    target = play_dir.joinpath(*client_names.on_disk(play_dir, CONFIG_WTF.as_posix()).parts)
+    wtf = target.parent
     if play_client._is_link(wtf):
         raise play_client.PlayClientError(
             f"{wtf} is a link to another folder, so its Config.wtf was not changed: writing "
             "there could change another client's settings. Make the ready-to-play client "
             "again from the server's Client settings."
         )
-    target = play_dir / CONFIG_WTF
     try:
         st = target.lstat()
     except FileNotFoundError:

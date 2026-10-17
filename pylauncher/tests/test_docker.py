@@ -38,6 +38,16 @@ from yulon.said import SaidByYulon
 from yulon.ui import lines
 
 SPEC = docker_ctl.SPEC
+IMPORT_UP = [
+    "docker",
+    "compose",
+    "up",
+    "--no-deps",
+    "--exit-code-from",
+    "ac-db-import",
+    "ac-db-import",
+]
+"""The import one-shot's argv: `--exit-code-from` since T678, the rest as live-gated 2026-08-23."""
 _GRACE = str(docker.STOP_GRACE_SECONDS)
 """The stop grace as it appears in argv, so an expected command reads like the real one."""
 
@@ -1433,7 +1443,7 @@ def test_pin_project_name_never_truncates_the_env_on_a_write_failure(
     monkeypatch.setattr(docker.platform.os, "fdopen", boom)
     assert docker.pin_project_name(tmp_path) is None
     assert env.read_text(encoding="utf-8") == "DB_ROOT_PASSWORD=hunter2\n"
-    assert not list(tmp_path.glob("*.yulon-new")), "the temp file is cleaned up"
+    assert not list(tmp_path.glob("*.yulon-tmp-*")), "the temp file is cleaned up"
 
 
 def test_pin_project_name_leaves_non_utf8_bytes_alone(
@@ -2675,7 +2685,7 @@ def test_repair_import_names_only_the_one_shot_service(monkeypatch: pytest.Monke
     assert docker.repair_import(SPEC, Path("/tmp/wow"), _probe(UNIMPORTED, IMPORTED)) is True
 
     ups = [c for c in calls if c[:3] == ["docker", "compose", "up"]]
-    assert ups == [["docker", "compose", "up", "--no-deps", "ac-db-import"]], ups
+    assert ups == [IMPORT_UP], ups
     for cmd in calls:
         assert SPEC.world not in cmd, cmd
         assert SPEC.auth not in cmd, cmd
@@ -2757,11 +2767,10 @@ def test_repair_import_will_not_run_against_containers_it_cannot_prove_are_its_o
 def test_repair_import_catches_an_import_that_exited_zero_having_done_nothing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The exit code is not the answer, exactly as it is not for `compose down`.
+    """An exit of 0 is not the whole answer, exactly as it is not for `compose down`.
 
-    A one-shot that died part-way and one that never touched a table look
-    identical from outside, so the database is asked again instead, and only a
-    database that now reads as imported counts as a repair.
+    The database is asked again as well, and only a database that now reads as
+    imported counts as a repair. (A non-zero exit is a failure on its own: T678.)
     """
     calls: list[list[str]] = []
     _repair_doubles(monkeypatch, calls, running={SPEC.db})
@@ -2770,7 +2779,7 @@ def test_repair_import_catches_an_import_that_exited_zero_having_done_nothing(
     # T248: which logs to read is under Details, as a command; the line says it in words.
     assert isinstance(raised.value, docker.DockerRefusal)
     assert "docker compose logs ac-db-import" in raised.value.detail, "did not say which logs"
-    assert ["docker", "compose", "up", "--no-deps", "ac-db-import"] in calls
+    assert IMPORT_UP in calls
 
 
 def test_repair_import_accepts_an_import_that_seeded_its_own_accounts(
@@ -2798,7 +2807,7 @@ def test_repair_import_accepts_an_import_that_seeded_its_own_accounts(
         complete=True,
     )
     assert docker.repair_import(SPEC, Path("/tmp/wow"), _probe(UNIMPORTED, seeded)) is True
-    assert ["docker", "compose", "up", "--no-deps", "ac-db-import"] in calls
+    assert IMPORT_UP in calls
 
 
 def test_repair_import_refuses_a_database_it_could_not_ask(
@@ -2898,7 +2907,7 @@ def test_showing_the_import_did_not_change_the_command_it_runs(
     _repair_doubles(monkeypatch, without_sink, running={SPEC.db})
     docker.repair_import(SPEC, server_dir, _probe(UNIMPORTED, IMPORTED))
 
-    expected = [["docker", "compose", "up", "--no-deps", "ac-db-import"]]
+    expected = [IMPORT_UP]
     assert _import_command(with_sink) == expected
     assert _import_command(without_sink) == expected
     assert cwds == [server_dir], "the import ran somewhere other than the install"
@@ -2935,15 +2944,15 @@ def test_the_imports_lines_reach_the_sink_as_it_prints_them(
     assert snapshots == [list(printed[:1]), list(printed[:2]), list(printed)], snapshots
 
 
-def test_an_import_that_exited_non_zero_is_logged_and_the_database_asked_anyway(
+def test_an_import_that_exited_non_zero_is_logged_and_never_called_a_repair(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Streaming must not turn the exit code into an exception.
+    """Streaming must not turn the exit code into an exception, nor into a success.
 
-    `runner.stream()` raises `CalledProcessError` on a non-zero exit, and this
-    is the one caller that must not let it: a one-shot that failed part-way and
-    one that failed having done nothing exit alike, so the post-import probe is
-    the only thing that can tell them apart and it has to run either way.
+    `runner.stream()` raises `CalledProcessError` on a non-zero exit; it comes back
+    as the run's status, logged with the importer's last words. Until T678 the probe
+    then decided, and an importer that died part-way leaves schemas it reads as
+    `imported` (T658), so this test pinned a crashed import as a finished repair.
     """
     calls: list[list[str]] = []
     _repair_doubles(
@@ -2960,8 +2969,9 @@ def test_an_import_that_exited_non_zero_is_logged_and_the_database_asked_anyway(
         return UNIMPORTED if len(asked) == 1 else IMPORTED
 
     with caplog.at_level("DEBUG", logger="yulon.docker"):
-        assert docker.repair_import(SPEC, Path("/tmp/wow"), probe) is True
-    assert len(asked) == 2, "the post-import probe never ran"
+        with pytest.raises(docker.DockerCommandError, match="failed \\(exit 1\\)"):
+            docker.repair_import(SPEC, Path("/tmp/wow"), probe)
+    assert len(asked) == 1, "a failed import was asked whether it finished"
     said = [r.getMessage() for r in caplog.records if r.levelno >= 30]
     assert any("exited 1" in m and "Access denied" in m for m in said), said
 
@@ -2990,8 +3000,7 @@ def test_the_failure_text_of_a_broken_import_reaches_the_error_on_screen(
         docker.repair_import(SPEC, Path("/tmp/wow"), _probe(UNIMPORTED))
     said = str(raised.value)
     assert "ERROR 1698" in raised.value.detail, raised.value.detail
-    assert "ERROR 1698" not in said, "the import's own words are Details', not the line's (T214)"
-    assert "still read as absent" in said, "the state it is in stopped being said"
+    assert "failed (exit 1)" in said and "unfinished" in said, said
 
 
 def test_a_thirty_minute_import_is_not_kept_in_memory(
@@ -3211,9 +3220,12 @@ def test_repair_import_refuses_an_import_that_seeded_rows_and_then_died(
     Reported as success, that hides the Repair button (the probe no longer says
     `repairable`) and leaves the user a broken server, a success message, and no
     way back. `complete` is what separates the two (review, 2026-08-23).
+
+    Exit 0 here: since T678 a non-zero exit fails before the probe is asked, so
+    this is the post-check's own half, for a run that reported nothing wrong.
     """
     calls: list[list[str]] = []
-    _repair_doubles(monkeypatch, calls, running={SPEC.db}, import_exit=1)
+    _repair_doubles(monkeypatch, calls, running={SPEC.db}, import_exit=0)
     half_done = docker.ImportState(
         "populated",
         "400 rows in acore_auth.account, but acore_world holds no tables",
@@ -3684,6 +3696,403 @@ def test_a_failed_service_ends_the_build_with_its_own_status_and_lines(
     assert "#1 building ac-worldserver" in lines_seen
 
 
+def _session_dies(state: Path, service: str, times: int) -> None:
+    """The fake's next `times` builds of `service` end as a dead BuildKit session (T733)."""
+    (state / f"session-dies-{service}").write_text(str(times), encoding="utf-8")
+
+
+def test_a_service_whose_build_session_died_is_built_once_more_on_its_own_folder(
+    build_cli: Path, tmp_path: Path
+) -> None:
+    """T733: a Docker that froze while the context was sent costs one more try, not the press.
+
+    On yulon-win11 (2026-10-12) Docker Desktop froze for about five minutes while
+    db-import's first 2.4 GB context was being sent; BuildKit's 15 s session check
+    failed through it and compose exited 1 with "session healthcheck failed
+    fatally". A send that dies keeps nothing, and the Rebuild was over. The same
+    call again, on the SAME buildx folder (a new folder would be a new node and a
+    cold send for good), builds past it; the services after it are then built as
+    usual, and the panel is told why one service is built twice.
+    """
+    _session_dies(build_cli, "ac-db-import", 1)
+    lines_seen: list[str] = []
+    run = docker.build_staged(
+        _server_with(tmp_path, WOTLK_OVERLAY), THREE_FILES, sink=lines_seen.append
+    )
+    assert run.returncode == 0, run.tail
+    assert [line.split()[-1] for line in _build_lines(build_cli)] == [
+        "ac-worldserver",
+        "ac-authserver",
+        "ac-db-import",
+        "ac-db-import",
+        "ac-client-data-init",
+    ]
+    configs = [Path(config) for config, _, _ in build_env(build_cli)]
+    assert configs[2] == configs[3]
+    assert configs[2].name == "ac-db-import"
+    assert lines_seen.count(docker.SESSION_RETRY_LINE) == 1, lines_seen
+    # T733 review N2: one short sentence that holds wherever the session died, so it
+    # names no service and quotes none of BuildKit's words.
+    said = docker.SESSION_RETRY_LINE
+    assert "ac-" not in said and "db-import" not in said
+    assert docker.SESSION_DIED not in said and "session" not in said.lower()
+    assert said.count(".") == 1 and said.endswith(".") and len(said) <= 80
+
+
+def test_a_build_session_that_dies_twice_ends_the_build_with_the_second_tries_lines(
+    build_cli: Path, tmp_path: Path
+) -> None:
+    """One more try, not a loop (T733): a Docker that keeps dropping the session fails as before.
+
+    Each try sends the whole context again (a dead send keeps nothing, measured on
+    m910q and on yulon-win11), so a third would only make the player wait another
+    send for the same answer. The second try's status and lines are the build's
+    answer, and no later service is started.
+    """
+    _session_dies(build_cli, "ac-db-import", 2)
+    run = docker.build_staged(_server_with(tmp_path, WOTLK_OVERLAY), THREE_FILES)
+    assert run.returncode == 1
+    assert any("session healthcheck failed fatally" in line for line in run.tail)
+    assert [line.split()[-1] for line in _build_lines(build_cli)] == [
+        "ac-worldserver",
+        "ac-authserver",
+        "ac-db-import",
+        "ac-db-import",
+    ]
+
+
+def test_a_build_that_passed_is_never_built_again_whatever_its_lines_say(
+    build_cli: Path, tmp_path: Path
+) -> None:
+    """Only a FAILED call is tried again (T733): a session that died after the send costs nothing.
+
+    The worldserver compile on yulon-win11 lost its session at 23:58Z and passed;
+    building such a service again would only repeat a finished build.
+    """
+    (build_cli / "session-dies-late-ac-worldserver").write_text("", encoding="utf-8")
+    run = docker.build_staged(_server_with(tmp_path, WOTLK_OVERLAY), THREE_FILES)
+    assert run.returncode == 0, run.tail
+    assert [line.split()[-1] for line in _build_lines(build_cli)] == list(WOTLK_SERVICES)
+
+
+def test_a_panel_that_refuses_the_retry_line_does_not_stop_the_retry(
+    build_cli: Path, tmp_path: Path
+) -> None:
+    """`run_attached()`'s rule for a dead sink holds for Yu'lon's own line too (T733).
+
+    A panel closed while db-import's session died must not turn the second try
+    into an exception that ends the Rebuild.
+    """
+
+    def sink(line: str) -> None:
+        if line == docker.SESSION_RETRY_LINE:
+            raise RuntimeError("the panel is gone")
+
+    _session_dies(build_cli, "ac-db-import", 1)
+    run = docker.build_staged(_server_with(tmp_path, WOTLK_OVERLAY), THREE_FILES, sink=sink)
+    assert run.returncode == 0, run.tail
+    assert [line.split()[-1] for line in _build_lines(build_cli)].count("ac-db-import") == 2
+
+
+def _calls_around_the_retry(state: Path) -> list[str]:
+    """The fake's calls from the first db-import build on: builds by service, asks as `info`."""
+    seen = [
+        call.split()[-1] if call.startswith("compose ") else call.split()[0]
+        for call in fake_calls(state)
+        if call.startswith(("compose ", "info"))
+    ]
+    return seen[seen.index("ac-db-import") :]
+
+
+def test_the_second_try_waits_until_docker_answers_again(
+    build_cli: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T733 review N1: Docker was still not answering 55 s after the session died.
+
+    On yulon-win11 Yu'lon's own ask after the failure waited 16 s for an answer
+    (02:55:56 local). A second try sent into a Docker that does not answer dies
+    the same way, so the build asks Docker first, a pause apart, and builds again
+    only once it answers.
+    """
+    monkeypatch.setattr(docker, "SESSION_RETRY_POLL_S", 0.01)
+    _session_dies(build_cli, "ac-db-import", 1)
+    (build_cli / "info-unanswered").write_text("2", encoding="utf-8")
+    run = docker.build_staged(_server_with(tmp_path, WOTLK_OVERLAY), THREE_FILES)
+    assert run.returncode == 0, run.tail
+    assert _calls_around_the_retry(build_cli) == [
+        "ac-db-import",
+        "info",
+        "info",
+        "info",
+        "ac-db-import",
+        "ac-client-data-init",
+    ]
+
+
+def test_a_docker_that_never_answers_again_ends_the_build_with_the_first_failure(
+    build_cli: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Bounded (T733 review N1): no answer within the patience is the first try's answer.
+
+    Its status and lines are what the press reports, no second build is started
+    into a Docker that is not there, and no later service is built.
+    """
+    monkeypatch.setattr(docker, "SESSION_RETRY_POLL_S", 0.01)
+    monkeypatch.setattr(docker, "SESSION_RETRY_PATIENCE_S", 0.3)
+    _session_dies(build_cli, "ac-db-import", 1)
+    (build_cli / "info-unanswered").write_text("1000000", encoding="utf-8")
+    lines_seen: list[str] = []
+    run = docker.build_staged(
+        _server_with(tmp_path, WOTLK_OVERLAY), THREE_FILES, sink=lines_seen.append
+    )
+    assert run.returncode == 1
+    assert any("session healthcheck failed fatally" in line for line in run.tail)
+    around = _calls_around_the_retry(build_cli)
+    assert around[0] == "ac-db-import"
+    assert set(around[1:]) == {"info"}
+    assert len(around) >= 3
+    assert docker.SESSION_RETRY_LINE not in lines_seen
+
+
+def test_a_stop_during_the_ask_that_docker_answers_starts_no_second_try(
+    build_cli: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The wait honours Stop (T733 review N1): one pressed during the ask wins over its answer."""
+    cancel = threading.Event()
+    asked = docker.daemon_ready
+
+    def ask_then_stop(**kwargs: object) -> bool:
+        answer = asked(**kwargs)  # type: ignore[arg-type]
+        cancel.set()
+        return answer
+
+    monkeypatch.setattr(docker, "daemon_ready", ask_then_stop)
+    _session_dies(build_cli, "ac-db-import", 1)
+    run = docker.build_staged(_server_with(tmp_path, WOTLK_OVERLAY), THREE_FILES, cancel=cancel)
+    assert run.returncode == docker.CANCELLED_RETURNCODE
+    assert _calls_around_the_retry(build_cli) == ["ac-db-import", "info"]
+
+
+def test_a_stop_during_the_pause_ends_the_wait_at_once(
+    build_cli: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Stop between two asks lands at once, not after the pause (T733 review N1)."""
+    monkeypatch.setattr(docker, "SESSION_RETRY_POLL_S", 30.0)
+    cancel = threading.Event()
+    _session_dies(build_cli, "ac-db-import", 1)
+    (build_cli / "info-unanswered").write_text("1000000", encoding="utf-8")
+    asked = docker.daemon_ready
+
+    def ask_then_stop_soon(**kwargs: object) -> bool:
+        answer = asked(**kwargs)  # type: ignore[arg-type]
+        threading.Timer(0.2, cancel.set).start()  # after the ask: the Stop lands in the pause
+        return answer
+
+    monkeypatch.setattr(docker, "daemon_ready", ask_then_stop_soon)
+    started = time.monotonic()
+    run = docker.build_staged(_server_with(tmp_path, WOTLK_OVERLAY), THREE_FILES, cancel=cancel)
+    assert time.monotonic() - started < 10.0
+    assert run.returncode == docker.CANCELLED_RETURNCODE
+    assert _calls_around_the_retry(build_cli) == ["ac-db-import", "info"]
+
+
+def test_the_wait_for_docker_asks_the_installs_own_docker_each_ask_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every ask goes to the server's own Docker (a WSL distro's, T125) and has its own bound.
+
+    A `docker info` into a frozen Docker can hang, so no ask may run unbounded or
+    past the patience: each one gets at most `_SESSION_RETRY_ASK_S`, cut to what
+    is left, and none starts once the patience is spent (T733 review N1).
+    """
+    asks: list[tuple[str | None, float]] = []
+
+    def unanswered(*, wsl_distro: str | None = None, timeout: float = 30.0) -> bool:
+        asks.append((wsl_distro, timeout))
+        time.sleep(0.05)
+        return False
+
+    monkeypatch.setattr(docker, "daemon_ready", unanswered)
+    monkeypatch.setattr(docker, "SESSION_RETRY_POLL_S", 0.01)
+    monkeypatch.setattr(docker, "SESSION_RETRY_PATIENCE_S", 0.3)
+    started = time.monotonic()
+    assert docker._docker_answers_again("Ubuntu-24.04", None) is False
+    assert time.monotonic() - started < 0.3 + 0.05 + 1.0
+    assert len(asks) >= 2
+    assert {distro for distro, _ in asks} == {"Ubuntu-24.04"}
+    assert all(0 < timeout <= 0.3 for _, timeout in asks), asks
+    assert asks[0][1] == pytest.approx(0.3, abs=0.05)
+
+    asks.clear()
+    monkeypatch.setattr(docker, "SESSION_RETRY_PATIENCE_S", 600.0)
+    answers = iter([False, True])
+
+    def late(*, wsl_distro: str | None = None, timeout: float = 30.0) -> bool:
+        asks.append((wsl_distro, timeout))
+        return next(answers)
+
+    monkeypatch.setattr(docker, "daemon_ready", late)
+    assert docker._docker_answers_again(None, threading.Event()) is True
+    assert asks == [(None, docker._SESSION_RETRY_ASK_S), (None, docker._SESSION_RETRY_ASK_S)]
+
+
+def test_a_stop_that_ends_a_dead_session_is_not_tried_again(
+    build_cli: Path, tmp_path: Path
+) -> None:
+    """A Stop is the player's answer: a session that died under it is not built again (T733)."""
+    cancel = threading.Event()
+
+    def sink(line: str) -> None:
+        if "session healthcheck failed fatally" in line:
+            cancel.set()
+
+    _session_dies(build_cli, "ac-db-import", 1)
+    run = docker.build_staged(
+        _server_with(tmp_path, WOTLK_OVERLAY), THREE_FILES, sink=sink, cancel=cancel
+    )
+    assert run.returncode == docker.CANCELLED_RETURNCODE
+    assert [line.split()[-1] for line in _build_lines(build_cli)] == [
+        "ac-worldserver",
+        "ac-authserver",
+        "ac-db-import",
+    ]
+
+
+def _lines_and_asks(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """One list that the panel's lines and the asks of Docker both land in, in order (T742)."""
+    seen: list[str] = []
+    asked = docker.daemon_ready
+
+    def ask(**kwargs: object) -> bool:
+        seen.append("<ask>")
+        return asked(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(docker, "daemon_ready", ask)
+    return seen
+
+
+def test_the_panel_says_the_build_waits_for_docker_as_the_wait_starts(
+    build_cli: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T742: up to three minutes of wait must not read as the finished failure above it.
+
+    Without it the panel's last line during the wait is BuildKit's "failed to
+    solve ... session healthcheck failed fatally" while the press stays busy. The
+    waiting line goes out once, after the dead try's own lines and before the
+    first ask, so it is there whatever the asks answer; the retry line still
+    follows only once Docker answers and the second try runs.
+    """
+    monkeypatch.setattr(docker, "SESSION_RETRY_POLL_S", 0.01)
+    _session_dies(build_cli, "ac-db-import", 1)
+    (build_cli / "info-unanswered").write_text("1", encoding="utf-8")
+    seen = _lines_and_asks(monkeypatch)
+    run = docker.build_staged(_server_with(tmp_path, WOTLK_OVERLAY), THREE_FILES, sink=seen.append)
+    assert run.returncode == 0, run.tail
+    assert seen.count(docker.SESSION_WAIT_LINE) == 1, seen
+    waited = seen.index(docker.SESSION_WAIT_LINE)
+    assert "<ask>" not in seen[:waited], seen
+    assert any(docker.SESSION_DIED in line for line in seen[:waited]), seen
+    assert seen[waited + 1 :].count("<ask>") == 2, seen
+    retried = seen.index(docker.SESSION_RETRY_LINE)
+    assert retried > waited
+    assert "<ask>" not in seen[retried:], seen
+    assert seen.count(docker.SESSION_RETRY_LINE) == 1, seen
+
+
+def test_the_waiting_line_is_one_plain_sentence() -> None:
+    """The waiting line follows the retry line's rules (T742, T733 review N2).
+
+    It is said wherever the session died, so it names no service and no folder
+    and quotes none of BuildKit's words; one short sentence that fits a panel
+    line. The bound it states is the patience the wait really has.
+    """
+    said = docker.SESSION_WAIT_LINE
+    assert said != docker.SESSION_RETRY_LINE
+    assert said.count(".") == 1 and said.endswith(".") and len(said) <= 80, said
+    assert ";" not in said and "\n" not in said
+    assert "Docker" in said
+    lowered = said.lower()
+    for word in (*WOTLK_SERVICES, "db-import", "worldserver", "authserver", "ac-"):
+        assert word not in lowered, word
+    for word in ("buildkit", "buildx", "session", "healthcheck", "context", "solve", "folder"):
+        assert word not in lowered, word
+    assert docker.SESSION_DIED not in said
+    assert f"{docker.SESSION_RETRY_PATIENCE_S / 60:g} minutes" in said
+
+
+def test_no_waiting_line_when_no_session_died(build_cli: Path, tmp_path: Path) -> None:
+    """The line is told only when a wait really starts (T742).
+
+    Not for a build that passed (a session that died after the send costs
+    nothing, and nothing waits), and not for one that failed for its own reason.
+    """
+    (build_cli / "session-dies-late-ac-worldserver").write_text("", encoding="utf-8")
+    lines_seen: list[str] = []
+    run = docker.build_staged(
+        _server_with(tmp_path, WOTLK_OVERLAY), THREE_FILES, sink=lines_seen.append
+    )
+    assert run.returncode == 0, run.tail
+    assert docker.SESSION_WAIT_LINE not in lines_seen
+    assert docker.SESSION_RETRY_LINE not in lines_seen
+
+    (build_cli / "fail-build-ac-authserver").write_text("", encoding="utf-8")
+    lines_seen.clear()
+    run = docker.build_staged(
+        _server_with(tmp_path, WOTLK_OVERLAY, "failed"), THREE_FILES, sink=lines_seen.append
+    )
+    assert run.returncode == 17
+    assert docker.SESSION_WAIT_LINE not in lines_seen
+    assert docker.SESSION_RETRY_LINE not in lines_seen
+
+
+def test_a_docker_that_never_answers_leaves_the_waiting_line_and_no_retry_line(
+    build_cli: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The waiting line is not a promise of a retry (T742).
+
+    With no answer within the patience the first try's failure is the answer:
+    the panel was told the build waited, and never that it tried once more.
+    """
+    monkeypatch.setattr(docker, "SESSION_RETRY_POLL_S", 0.01)
+    monkeypatch.setattr(docker, "SESSION_RETRY_PATIENCE_S", 0.3)
+    _session_dies(build_cli, "ac-db-import", 1)
+    (build_cli / "info-unanswered").write_text("1000000", encoding="utf-8")
+    seen = _lines_and_asks(monkeypatch)
+    run = docker.build_staged(_server_with(tmp_path, WOTLK_OVERLAY), THREE_FILES, sink=seen.append)
+    assert run.returncode == 1
+    assert any(docker.SESSION_DIED in line for line in run.tail)
+    assert docker.SESSION_WAIT_LINE not in run.tail
+    assert seen.count(docker.SESSION_WAIT_LINE) == 1, seen
+    assert seen.index(docker.SESSION_WAIT_LINE) < seen.index("<ask>")
+    assert docker.SESSION_RETRY_LINE not in seen
+
+
+def test_a_panel_that_refuses_the_waiting_line_does_not_stop_the_wait_or_the_retry(
+    build_cli: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`run_attached()`'s rule for a dead sink holds for the waiting line too (T742)."""
+    monkeypatch.setattr(docker, "SESSION_RETRY_POLL_S", 0.01)
+    told: list[str] = []
+
+    def sink(line: str) -> None:
+        if line == docker.SESSION_WAIT_LINE:
+            raise RuntimeError("the panel is gone")
+        told.append(line)
+
+    _session_dies(build_cli, "ac-db-import", 1)
+    (build_cli / "info-unanswered").write_text("1", encoding="utf-8")
+    run = docker.build_staged(_server_with(tmp_path, WOTLK_OVERLAY), THREE_FILES, sink=sink)
+    assert run.returncode == 0, run.tail
+    assert _calls_around_the_retry(build_cli) == [
+        "ac-db-import",
+        "info",
+        "info",
+        "ac-db-import",
+        "ac-client-data-init",
+    ]
+    assert told.count(docker.SESSION_RETRY_LINE) == 1
+
+
 def test_a_wsl_build_sends_each_buildx_config_across_as_a_path(
     build_cli: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3876,10 +4285,14 @@ def test_the_builder_is_read_from_the_builder_lines_not_from_its_nodes() -> None
 def test_run_one_shot_keeps_the_argv_that_was_live_gated(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`--no-deps` is what makes an attached `up` terminate. Byte-identical since the gate."""
+    """`--no-deps` is what makes an attached `up` terminate; byte-identical to the gate since.
+
+    T678 added `--exit-code-from <importer>`: without it attached `compose up` exits 0
+    whatever the one-shot exits (measured on yulon-ubuntu, Compose 2.40.3, 2026-10-11).
+    """
     seen, merged = _stream_double(monkeypatch, ["importing"])
     docker.run_one_shot("ac-db-import", Path("/tmp/wow"))
-    assert seen == [["docker", "compose", "up", "--no-deps", "ac-db-import"]]
+    assert seen == [IMPORT_UP]
     assert merged == [False]
 
 
@@ -4396,7 +4809,7 @@ def test_docker_commands_for_a_wsl_install_go_through_that_distro(
     monkeypatch.setattr(docker.platform, "_which", lambda name, path=None: "wsl.exe")
 
     docker._docker(["ps"], wsl_distro="dml-arch")
-    assert seen[0][:5] == ["wsl.exe", "-d", "dml-arch", "--", "docker"]
+    assert seen[0][:5] == ["wsl.exe", "-d", "dml-arch", "--exec", "docker"]
     assert seen[0][-1] == "ps"
 
 
@@ -4424,12 +4837,13 @@ def test_a_wsl_install_sends_its_directory_as_a_distro_path_not_a_windows_cwd(
     cmd = seen[0]["cmd"]
     assert "--cd" in cmd, f"the distro path never reached the command: {cmd}"
     assert cmd[cmd.index("--cd") + 1] == "/home/dml/games/srv"
-    # WHERE it sits is the whole of the bug this caught. Everything after `--`
-    # is the command line for the distro's shell, so a `--cd` placed there
-    # reaches bash, which answers "--: invalid option". The first version of
-    # this test asserted only that the flag was present, and passed a command
-    # that could not run; a live run against a real distro found it.
-    assert cmd.index("--cd") < cmd.index("--"), f"--cd landed after the separator: {cmd}"
+    # WHERE it sits is the whole of the bug this caught. Everything after the
+    # separator is the command, so a `--cd` placed there reached bash, which
+    # answered "--: invalid option". The first version of this test asserted
+    # only that the flag was present, and passed a command that could not run;
+    # a live run against a real distro found it. The separator is `--exec`
+    # since T744.
+    assert cmd.index("--cd") < cmd.index("--exec"), f"--cd landed after the separator: {cmd}"
     assert seen[0]["cwd"] is None, "a UNC path was handed to the process as its cwd"
 
 
@@ -4853,7 +5267,13 @@ def _wsl_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         docker.platform,
         "docker_prefix",
-        lambda wsl_distro=None, *, inside=None: ("wsl.exe", "-d", str(wsl_distro), "--", "docker"),
+        lambda wsl_distro=None, *, inside=None: (
+            "wsl.exe",
+            "-d",
+            str(wsl_distro),
+            "--exec",
+            "docker",
+        ),
     )
 
 
@@ -5749,7 +6169,7 @@ def test_a_wsl_resident_database_is_asked_of_that_distros_docker(
         "wsl.exe",
         "-d",
         "dml-arch",
-        "--",
+        "--exec",
         "docker",
         "exec",
         "-i",
@@ -6165,7 +6585,7 @@ def test_a_wsl_resident_database_is_queried_through_that_distros_docker(
     monkeypatch.delenv("WSLENV", raising=False)
     docker.sql_query("db", "mariadb", "hunter2", "realmd", "SELECT 1", wsl_distro="dml-arch")
     spawned = _FakePopen.instances[-1]
-    assert spawned.command[:5] == ["wsl.exe", "-d", "dml-arch", "--", "docker"]
+    assert spawned.command[:5] == ["wsl.exe", "-d", "dml-arch", "--exec", "docker"]
     assert spawned.env is not None
     assert spawned.env["MYSQL_PWD"] == "hunter2"
     assert "MYSQL_PWD" in spawned.env["WSLENV"].split(":")
@@ -6612,6 +7032,29 @@ def test_apply_module_sql_runs_the_importer_with_the_modules_on_disk(
         "AC_UPDATES_ALLOWED_MODULES=mod-aoe-loot",
         "ac-db-import",
     ] in calls, calls
+
+
+def test_apply_module_sql_before_run_comes_after_the_database_is_up_and_before_the_importer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """T779: `before_run` is the last word; a raise from it leaves the importer unstarted."""
+    (tmp_path / "modules" / "mod-city-bots").mkdir(parents=True)
+    calls: list[list[str]] = []
+    _repair_doubles(monkeypatch, calls, running=set())
+
+    def refuse() -> None:
+        calls.append(["before_run"])
+        raise docker.DockerRefusal("an account is in the way")
+
+    with pytest.raises(docker.DockerRefusal, match="in the way"):
+        docker.apply_module_sql(SPEC, tmp_path, before_run=refuse)
+
+    assert ["before_run"] in calls
+    assert not any(c[:3] == ["docker", "compose", "run"] for c in calls), calls
+    started = [
+        i for i, c in enumerate(calls) if c[:5] == ["docker", "compose", "up", "-d", "--no-deps"]
+    ]
+    assert started and started[0] < calls.index(["before_run"]), calls
 
 
 def test_apply_module_sql_refuses_an_importer_that_cannot_see_the_modules_folder(

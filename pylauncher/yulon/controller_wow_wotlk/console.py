@@ -33,6 +33,7 @@ answer, and this one was handing back several times more log noise than reply.
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import subprocess
 import threading
@@ -523,9 +524,27 @@ def _send_inside_distro(
     # with no util-linux. Recognised rather than handed back as a reply,
     # because "script: command not found" in the console panel reads as the
     # SERVER refusing something.
-    if any("script" in line and "not found" in line for line in lines):
+    if any(_says_no_script(line) for line in lines):
         raise ConsoleError(NO_SCRIPT_HELP.format(distro=wsl_distro, container=container))
     return lines
+
+
+_EXEC_FAILED = re.compile(r"execvpe?\((?:[^()]*/)?script\) failed")
+"""wsl.exe's own words when `--exec script` finds no `script` in the distro (T744)."""
+
+
+def _says_no_script(line: str) -> bool:
+    """Whether `line` is the distro saying it has no `script` program.
+
+    Two spellings. Since T744 the attach starts `script` with `wsl --exec`, so
+    no shell sits in between and wsl.exe itself reports the failed exec:
+    `<3>WSL (26 - Relay) ERROR: CreateProcessCommon:818: execvpe(script) failed:
+    No such file or directory`, exit 1 (measured on yulon-win11, WSL 2.7.12,
+    2026-10-12). Before, the distro's shell said it: bash `script: command not
+    found`, ash `/bin/sh: script: not found` (exit 127, same box). Kept, because
+    a terminal or an older route can still answer that way.
+    """
+    return bool(_EXEC_FAILED.search(line)) or ("script" in line and "not found" in line)
 
 
 def _write(proc: subprocess.Popen[bytes], data: bytes) -> None:

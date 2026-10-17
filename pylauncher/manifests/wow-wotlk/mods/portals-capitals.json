@@ -16,7 +16,11 @@
     {
       "db": "world",
       "path": "portals-in-all-capitals.down.sql",
-      "when": "remove"
+      "when": "remove",
+      "undoes": [
+        "portals-in-all-capitals.up.sql"
+      ],
+      "note": "T751 round 2: it deletes every row the up file writes (gameobject_template, its _addon and _locale for entries 500000-500007, and their gameobject spawns), so Remove names nothing left behind."
     }
   ],
   "notes": [

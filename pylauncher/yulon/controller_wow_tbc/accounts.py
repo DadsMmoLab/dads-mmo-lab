@@ -39,6 +39,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from yulon import account_rules
 from yulon.apply import DockerSql
 from yulon.controller_wow_tbc import docker_ctl
 from yulon.controller_wow_wotlk import accounts as writer
@@ -56,9 +57,6 @@ from yulon.controller_wow_wotlk.accounts import (
     MAX_PASSWORD as MAX_PASSWORD,
 )
 from yulon.controller_wow_wotlk.accounts import (
-    MAX_USERNAME as MAX_USERNAME,
-)
-from yulon.controller_wow_wotlk.accounts import (
     NO_GM as NO_GM,
 )
 from yulon.controller_wow_wotlk.accounts import (
@@ -74,6 +72,9 @@ from yulon.controller_wow_wotlk.accounts import (
     create_account as _create_account,
 )
 from yulon.log import get_logger
+
+MAX_USERNAME = account_rules.NAME_MAX["mangos_srp6"]
+"""This core's own `MAX_ACCOUNT_STR` (16), not AzerothCore's 17 (T673, `account_rules`)."""
 
 SCHEME = docker_ctl.ENTRY.accounts.scheme
 """How this core stores an account, from the entry: `mangos_srp6` for TBC.
@@ -137,12 +138,13 @@ def sql_for_install(server_dir: Path, *, wsl_distro: str | None = None) -> Docke
 def create_account(
     sql: SqlSeam, username: str, password: str, *, gm_level: int = NO_GM
 ) -> AccountResult:
-    """Create one TBC game account, or bring an existing one up to `gm_level`.
+    """Create one TBC game account.
 
     The shared `create_account()` with this game's scheme bound. Every rule it
-    documents still holds and is not restated here: an existing account keeps
-    its password, `gm_level` is a floor and never a demotion, and a repeated
-    call finishes one that died half way.
+    documents still holds and is not restated here. Until T749 (2026-10-12) it also
+    brought an existing account up to `gm_level` and kept its password; since then a
+    name that exists is refused (`AccountExists`) unless it is Yu'lon's own `YULON_`
+    account, which still keeps its password and has its level raised (a floor).
 
     Raises:
         AccountError: everything the shared function raises, plus the case

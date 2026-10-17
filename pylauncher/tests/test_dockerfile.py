@@ -835,7 +835,9 @@ def test_the_containment_floor_is_at_or_below_every_secret_this_app_itself_produ
     for entry in load_catalog().games:
         folder = tmp_path / entry.id
         folder.mkdir()
-        produced[entry.id] = len(family_for(entry)(entry).resolve_secrets(folder).db_password)
+        produced[entry.id] = len(
+            family_for(entry)(entry).resolve_secrets(folder, mint=True).db_password
+        )
     assert produced, (
         "the shipped catalog produced no entry at all, so this test would pass vacuously; "
         "load_catalog() is what to look at, not the floor"

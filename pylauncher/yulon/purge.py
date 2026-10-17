@@ -74,20 +74,24 @@ discovered afterwards.
 from __future__ import annotations
 
 import os
+import shutil
 from collections.abc import Callable, Sequence
 from contextlib import AbstractContextManager, ExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from yulon import dbsecret, docker, forgetting, logsnap, platform, rmtree
+from yulon import dbsecret, docker, forgetting, links, logsnap, platform, rmtree
 from yulon.catalog import composegen
 from yulon.catalog.native import (
     PARKED_TAG_SUFFIX,
     ROLLBACK_TAG_SUFFIX,
+    STATE_FILE,
     forget_parked_build,
     forget_stopped_build,
 )
+from yulon.catalog.snapshot import BACKUPS_FOLDER
+from yulon.kept_backups import PARTIAL, kept_backups_path
 from yulon.log import get_logger
 from yulon.ownership import Ownership
 from yulon.said import SaidByYulon
@@ -153,16 +157,14 @@ behind is the surprise nobody wants. Until then the ticked press removed it
 
 
 LEFT_BEHIND = (
-    "your backups — an uninstall that deleted them would make "
-    '"Keep my characters" pointless in the one case it matters',
     "your WoW client folder. A file a module put into it is removed when it is still the "
     "file Yu'lon copied, and a file of yours a module set aside is put back",
     "firewall rules, port forwards and anything else on the host",
     "Docker, WSL, and every other dependency Yu'lon provisioned",
     "another install of this game in another folder — different path, "
     "different install id, different project",
-    "this install's saved log snapshots, its stored server credential, and — "
-    "if you keep your characters — the copy of the database password that "
+    "this install's saved log snapshots and — if you keep your characters — its "
+    "stored server credential, the copy of the database password that "
     "opens the volume they are in and the record of a command-channel account "
     "not yet proved, all under Yu'lon's own config directory",
 )
@@ -176,11 +178,12 @@ The last line is the one no document decided. The credential file
 (`credentials/<game>-<install_id>.json`) and the log snapshots are keyed by the
 same path-derived install id, so a reinstall to the same folder inherits both.
 After a TICKED purge that is right — same database, same account. After an
-unticked one the credential is a secret for a database that no longer exists.
-Removing it is not done here because owner answer 1 says "only the launcher's
-own state record", and this module does not widen an owner's answer on its own;
-it is named to the user instead, and named again in the gate plan as a question
-for the owner.
+unticked one the credential was a secret for a database that no longer exists:
+the reinstall loaded it, found no account row and asked for Repair (lifecycle
+audit L15). Since T682 an unticked purge removes it with the database, by the
+pending record's rule below (T682's recommended option, open to the owner; answer 1's "only
+the launcher's own state record" was about the server folder's contents, and
+this file is the channel's record of a row the purge has just deleted).
 
 The record of a command-channel account created and not yet proved
 (`credentials/pending/`, T138) is the exception, and it follows the database
@@ -225,6 +228,10 @@ class PurgePlan:
     folder_bytes: int = 0
     left_behind: tuple[str, ...] = LEFT_BEHIND
     problems: tuple[str, ...] = ()
+    backups_to: Path | None = None
+    """Where this install's backups will be moved to, or None when it has none (T677)."""
+    backups_linked_to: Path | None = None
+    """Where a backups folder that leads out of the install really is; it is not touched (T677)."""
 
 
 @dataclass(frozen=True)
@@ -246,6 +253,226 @@ class PurgeReport:
     folder_removed: bool = False
     record_forgotten: bool = False
     warnings: tuple[str, ...] = ()
+    backups_kept: Path | None = None
+    """The folder the install's backups were moved to before the server folder went (T677)."""
+    backups_linked_to: Path | None = None
+    """Where a backups folder that was a link out of the install really is; left as it was."""
+
+
+@dataclass(frozen=True)
+class BackupsFound:
+    """What this install's backups folder is, read off the disk (T677)."""
+
+    source: Path | None = None
+    """The real folder, inside the install, that holds backups to move; None when none."""
+    destination: Path | None = None
+    """Where `keep_backups()` will put it: beside the server folder, a name nobody has."""
+    linked_to: Path | None = None
+    """Where the backups folder really is when it leads OUT of the install; never touched."""
+
+
+def _strictly_inside(path: Path, root: Path) -> bool:
+    inside = os.path.normcase(str(root)).rstrip("\\/") + os.sep
+    return os.path.normcase(str(path)).startswith(inside)
+
+
+def find_backups(server_dir: Path) -> BackupsFound:
+    """Read, never write: where this install's backups are and what an uninstall will do with them.
+
+    The folder is `sql_scripts/backups` for every game (`snapshot.BACKUPS_FOLDER`). It can be
+    a link or a junction to another disk (`backup_shelf` lists that case and never deletes
+    from it), so it is judged by where it REALLY is: inside the install it is moved; outside
+    it is the player's own folder, and is reported and left alone. A folder with nothing in it
+    has nothing to keep.
+
+    Raises:
+        OSError: the folder could not be looked at; the uninstall then refuses.
+    """
+    folder = server_dir / BACKUPS_FOLDER
+    if not os.path.lexists(folder):
+        return BackupsFound()
+    real = Path(os.path.realpath(folder))
+    if not os.path.exists(real):
+        return BackupsFound()  # a link to nothing: no backups to lose
+    if not _strictly_inside(real, Path(os.path.realpath(server_dir))):
+        return BackupsFound(linked_to=real)
+    if real.is_dir():
+        with os.scandir(real) as listing:
+            if next(listing, None) is None:
+                return BackupsFound()
+    return BackupsFound(source=real, destination=kept_backups_path(server_dir))
+
+
+@dataclass
+class KeptState:
+    """Where the backups are once they have been kept, and how: a failure message needs both."""
+
+    where: Path | None = None
+    copied: bool = False
+    """True when `where` holds a copy and the originals are still in the server folder."""
+
+
+def rename_would_work(source: Path, destination: Path) -> bool:
+    """Whether renaming `source` to `destination` will work, asked without writing anything.
+
+    A rename needs both folders on one disk and write access to both parents. Any doubt, or a
+    look that fails, answers False, which is the copy path: a copy is always safe to attempt.
+    """
+    parent = destination.parent
+    try:
+        return (
+            os.stat(source).st_dev == os.stat(parent).st_dev
+            and os.access(parent, os.W_OK | os.X_OK)
+            and os.access(source.parent, os.W_OK | os.X_OK)
+        )
+    except OSError:
+        return False
+
+
+def prepare_backups(found: BackupsFound, state: KeptState) -> None:
+    """Before the first thing is removed: copy the backups now if they cannot simply be renamed.
+
+    The move itself waits until just before the server folder goes (`keep_backups`), so a Docker
+    failure leaves the server installed with its backups where its Maintenance tab lists them.
+    But a move that cannot work must stop the press while nothing has been removed, and only a
+    real attempt proves that, so a rename the preflight doubts is done as a checked copy here.
+    """
+    if found.source is None or found.destination is None:
+        return
+    if rename_would_work(found.source, found.destination):
+        return
+    _copy_backups(found.source, found.destination, state, nothing_removed=True)
+
+
+def keep_backups(found: BackupsFound, state: KeptState) -> None:
+    """Just before the server folder is removed: move the backups out, or copy and check them.
+
+    A rename that fails (a disk the preflight did not see coming) falls back to the checked
+    copy. If that fails too, this raises and the folder is NOT removed.
+    """
+    if found.source is None or found.destination is None or state.where is not None:
+        return
+    try:
+        os.rename(found.source, found.destination)
+    except OSError as exc:
+        logger.info(f"uninstall: could not rename {found.source} ({exc}); copying instead")
+        _copy_backups(found.source, found.destination, state, nothing_removed=False, why=exc)
+        return
+    state.where = found.destination
+
+
+def _copy_backups(
+    source: Path,
+    destination: Path,
+    state: KeptState,
+    *,
+    nothing_removed: bool,
+    why: OSError | None = None,
+) -> None:
+    """Copy `source` to `destination` through a `.partial` name, check it, and only then name it.
+
+    The check is the copy's own: the same files, folders and sizes as the original. A copy that
+    fails or does not match is discarded and the press refuses, in words that say where the
+    backups still are.
+    """
+    partial = Path(str(destination) + PARTIAL)
+    try:
+        if os.path.lexists(partial):
+            raise OSError(f"{partial} is already there")
+        try:
+            shutil.copytree(source, partial, symlinks=True)
+            problem = _differences(source, partial)
+            if problem:
+                raise OSError(problem)
+            os.rename(partial, destination)
+        except (OSError, shutil.Error):
+            _discard(partial)
+            raise
+    except (OSError, shutil.Error) as exc:
+        tried = f"they could not be moved ({why}), and " if why is not None else ""
+        where_things_are = (
+            "Nothing was removed and your backups are where they were."
+            if nothing_removed
+            else "The containers, volumes and images have already been removed; the server folder "
+            "and your backups are still where they were, so the uninstall can be run again."
+        )
+        raise PurgeRefusal(
+            f"Yu'lon could not keep your backups out of the folder this deletes: {tried}"
+            f"copying {source} to {destination} failed ({exc}). {where_things_are} Free some "
+            f"space or make the folder beside the server writable, or move the backups folder "
+            f"somewhere safe yourself, then uninstall again."
+        ) from exc
+    state.where = destination
+    state.copied = True
+
+
+def _discard(partial: Path) -> None:
+    """Remove a half-made copy this call started. Never raises: the refusal is the news."""
+    try:
+        if os.path.lexists(partial):
+            rmtree.remove_tree(partial)
+    except OSError as exc:
+        logger.warning(f"uninstall: could not remove the half-made copy {partial}: {exc}")
+
+
+def _items_under(root: Path) -> dict[str, int]:
+    """Every folder (-1) and file (its size) under `root`; links are listed, never entered."""
+    found: dict[str, int] = {}
+    for folder, dirs, files in os.walk(root, followlinks=False):
+        base = os.path.relpath(folder, root)
+        for name in dirs:
+            found[os.path.join(base, name)] = -1
+        for name in files:
+            found[os.path.join(base, name)] = os.lstat(os.path.join(folder, name)).st_size
+    return found
+
+
+def _differences(source: Path, copy: Path) -> str:
+    """ "" when `copy` holds exactly what `source` does (same names, same sizes), else why not."""
+    original, made = _items_under(source), _items_under(copy)
+    if original == made:
+        return ""
+    missing = sorted(set(original) - set(made))
+    different = sorted(name for name in original if name in made and original[name] != made[name])
+    first = (missing or different)[0] if (missing or different) else "an extra item"
+    return (
+        f"the copy does not match the original ({len(original)} items there, {len(made)} in the "
+        f"copy; first difference: {first})"
+    )
+
+
+def _telling_where_the_backups_went(exc: Exception, state: KeptState) -> PurgeError:
+    """The failure, with the folder the backups are in named in the sentence the player reads.
+
+    Yu'lon's own sentence (a refusal, a Docker refusal) is kept as written with the note after
+    it, and its Details stay. Anything else -- another program's words, a bug's -- goes under
+    Details and the line says the uninstall did not finish, because the line is the one place
+    the player is certain to read where their backups are. Always a `PurgeRefusal`, which is a
+    `PurgeError`, so every `except PurgeError` still catches it.
+    """
+    if state.copied:
+        note = f"A complete copy of your backups is in {state.where}."
+    else:
+        note = f"Your backups were moved to {state.where}."
+    if isinstance(exc, SaidByYulon):
+        wrapped = PurgeRefusal(f"{exc} {note}")
+        wrapped.detail = exc.detail
+    else:
+        wrapped = PurgeRefusal(f"The uninstall did not finish. {note}")
+        wrapped.detail = str(exc)
+    return wrapped
+
+
+def release_backups_link(server_dir: Path) -> None:
+    """Remove the link a backups path goes through, as a link, so the removal never follows it.
+
+    A link out of the install, or a link whose target `keep_backups()` has just moved, is
+    taken off by name here; what it pointed at is not read or touched. Only the two steps of
+    `sql_scripts/backups` are looked at.
+    """
+    for step in (server_dir / BACKUPS_FOLDER.parent, server_dir / BACKUPS_FOLDER):
+        if os.path.lexists(step) and links.is_link(step):
+            rmtree.remove_link(os.fspath(step))
 
 
 def refusal_for(
@@ -354,6 +581,7 @@ class Uninstaller:
         remove_image: Callable[[str], str] | None = None,
         remove_folder: Callable[[Path], None] | None = None,
         forget_pending: Callable[[], None] | None = None,
+        forget_credential: Callable[[], None] | None = None,
         remove_extraction_client: Callable[[], str] | None = None,
         stop_background_jobs: Callable[[], None] | None = None,
         take_back_client_files: Callable[[], tuple[list[str], list[str]]] | None = None,
@@ -386,6 +614,9 @@ class Uninstaller:
         self._remove_folder = remove_folder if remove_folder is not None else remove_tree
         self._forget_pending = (
             forget_pending if forget_pending is not None else self._real_forget_pending
+        )
+        self._forget_credential = (
+            forget_credential if forget_credential is not None else self._real_forget_credential
         )
         self._remove_extraction_client = (
             remove_extraction_client
@@ -458,6 +689,17 @@ class Uninstaller:
         from yulon import channel_setup
 
         channel_setup.remove_pending(self.game, composegen.install_id(self.server_dir))
+
+    def _real_forget_credential(self) -> None:
+        """Remove the channel's saved credential, or raise saying why not (T682)."""
+        from yulon import channel_setup
+
+        channel_setup.remove_credential(self.game, composegen.install_id(self.server_dir))
+
+    def _credential_file(self) -> Path:
+        from yulon import channel_setup
+
+        return channel_setup.credential_path(self.game, composegen.install_id(self.server_dir))
 
     def _real_remove_extraction_client(self) -> str:
         """A temporary extraction client a crashed TrinityCore install left beside a client (T179).
@@ -551,6 +793,12 @@ class Uninstaller:
         targets, refusal = self._resolve()
         if targets is None:
             return PurgePlan(game=self.game, server_dir=self.server_dir, refusal=refusal)
+        problems = list(targets.problems)
+        found = BackupsFound()
+        try:
+            found = find_backups(self.server_dir)
+        except OSError as exc:
+            problems.append(f"Yu'lon could not look at this install's backups folder ({exc})")
         return PurgePlan(
             game=self.game,
             server_dir=self.server_dir,
@@ -561,7 +809,9 @@ class Uninstaller:
             client_volume=targets.client_volume,
             images=self.image_refs,
             folder_bytes=self._folder_size(self.server_dir),
-            problems=targets.problems,
+            problems=tuple(problems),
+            backups_to=found.destination,
+            backups_linked_to=found.linked_to,
         )
 
     def _resolve(self) -> tuple[_Targets | None, str]:
@@ -572,6 +822,10 @@ class Uninstaller:
         because the census is scoped to it. The census before the listings,
         because a running server is a refusal and not a thing to enumerate.
         """
+        if (linked := _junction_refusal(self.server_dir)) is not None:
+            return None, linked
+        if (restoring := _restore_refusal(self.server_dir)) is not None:
+            return None, restoring
         ownership = self._claim(self.server_dir)
         refusal = refusal_for(
             ownership,
@@ -650,6 +904,10 @@ class Uninstaller:
         Update must not find the server half-removed between them. While another Yu'lon holds the
         server the press is refused with its sentence, and nothing is removed.
         """
+        # T720: before the hold, which writes .yulon-folder-id into the folder (through a link,
+        # into the real install behind it). `_resolve()` asks again inside `_run`.
+        if (linked := _junction_refusal(self.server_dir)) is not None:
+            raise PurgeRefusal(linked)
         if self._hold_server is None:
             return self._run(keep_characters=keep_characters)
         with ExitStack() as held:
@@ -676,7 +934,44 @@ class Uninstaller:
                 f"the characters. Nothing was removed."
             )
         secret_kept = self._keep_the_password(targets, keep_characters=keep_characters)
+        # T677: the backups live INSIDE the folder removed below. Moved out first, and a move
+        # that fails is a refusal here, before the first thing is removed.
+        try:
+            found = find_backups(self.server_dir)
+        except OSError as exc:
+            raise PurgeRefusal(
+                f"Yu'lon could not look at this install's backups folder ({exc}), so it cannot "
+                f"keep your backups out of the folder this deletes. Nothing was removed."
+            ) from exc
+        state = KeptState()
+        prepare_backups(found, state)
 
+        # Everything from here changes the machine. The backups move just before the server
+        # folder goes, so a Docker failure leaves them where they were; once they have moved or
+        # been copied, a failure must say where they are.
+        try:
+            return self._remove_the_rest(
+                targets,
+                keep_characters=keep_characters,
+                secret_kept=secret_kept,
+                found=found,
+                state=state,
+            )
+        except Exception as exc:
+            if state.where is None:
+                raise
+            raise _telling_where_the_backups_went(exc, state) from exc
+
+    def _remove_the_rest(
+        self,
+        targets: _Targets,
+        *,
+        keep_characters: bool,
+        secret_kept: Path | None,
+        found: BackupsFound,
+        state: KeptState,
+    ) -> PurgeReport:
+        """Everything `_run` does after the refusals and the backups' move; see `_run`."""
         # --- everything below this line changes the machine ---------------
         snapshot = self._snapshot()
         if snapshot.problem:
@@ -713,6 +1008,17 @@ class Uninstaller:
                     f"the command channel's un-proved account record {self._pending_record()} "
                     f"could not be removed ({exc}); delete that file before installing into "
                     f"this folder again, or the new server's command channel will be refused."
+                )
+            # T682 (lifecycle L15): the saved credential follows the database too. Its account
+            # row went with the auth database, and a reinstall here (same install id) loaded it
+            # and asked for Repair; without it the new server's channel makes a fresh one.
+            try:
+                self._forget_credential()
+            except OSError as exc:
+                warnings.append(
+                    f"the command channel's saved credential {self._credential_file()} could not "
+                    f"be removed ({exc}); delete that file before installing into this folder "
+                    f"again, or the new server's command channel will ask for Repair."
                 )
 
         removed_images: list[str] = []
@@ -800,6 +1106,17 @@ class Uninstaller:
             # Its own words, which never ask the person to delete the copy by hand.
             warnings.append(leftover)
 
+        # T677: the backups leave the folder only now, after every step that can fail and
+        # before the one that cannot be undone. A failure here stops the folder's removal.
+        keep_backups(found, state)
+        # T677: a backups link is taken off as a link, so the removal cannot walk through it.
+        try:
+            release_backups_link(self.server_dir)
+        except OSError as exc:
+            raise PurgeRefusal(
+                f"Yu'lon could not take off the link that is your backups folder ({exc}), so "
+                f"it did not delete {self.server_dir}. The rest of the uninstall has been done."
+            ) from exc
         try:
             self._remove_folder(self.server_dir)
         except PurgeError as exc:
@@ -829,6 +1146,8 @@ class Uninstaller:
             folder_removed=True,
             record_forgotten=forgotten,
             warnings=tuple(warnings),
+            backups_kept=state.where,
+            backups_linked_to=found.linked_to,
         )
 
     def _keep_the_password(self, targets: _Targets, *, keep_characters: bool) -> Path | None:
@@ -950,9 +1269,80 @@ def remove_tree(path: Path) -> None:
     is the failure this raise exists to make impossible.
     """
     try:
-        rmtree.remove_tree(path)
+        # T682: the records a second press reads go last (`REMOVED_LAST`), so a removal that
+        # stops part-way leaves an install the next Uninstall still knows as Yu'lon's.
+        rmtree.remove_tree_last(path, REMOVED_LAST)
     except rmtree.TreeRemovalError as exc:
         raise PurgeRefusal(_undeletable(path, _cause(exc))) from exc
+
+
+REMOVED_LAST = (".db_password", ".env", docker.FOLDER_ID_FILE, STATE_FILE)
+"""What the folder's removal takes last, in this order (T682): the files a second Uninstall reads.
+
+The database password a ticked box copies again, the `.env` that pins the compose project,
+the folder id the reservation is named by, and LAST the install record that proves the folder
+is Yu'lon's (`_default_claim`). Before T682 they went in listing order, usually first.
+"""
+
+
+def _junction_refusal(server_dir: Path) -> str | None:
+    """T717: the sentence for a server folder that is a link or junction, else None.
+
+    Asked first by `_resolve()`, so `plan()` and `run()` both refuse before any container,
+    volume or image is touched: the folder step would refuse a link too, but it runs last.
+    """
+    try:
+        if not links.is_link(server_dir):
+            return None
+    except OSError as exc:
+        # Fail closed: "could not tell" must not let the Docker steps run first.
+        return f"Yu'lon could not tell whether {server_dir} is a link ({exc}). Nothing was changed."
+    try:
+        target = os.readlink(server_dir)
+        where = f" to {target.removeprefix(chr(92) * 2 + '?' + chr(92))}"
+    except OSError:
+        where = ""  # a junction Python cannot read the target of: still a link
+    return (
+        f"{server_dir} is a link (a junction or symbolic link){where}, not the install's "
+        f"real folder, and Yu'lon will not delete through a link. Nothing was changed. "
+        f"Remove the link yourself, or point Yu'lon at the real folder, then uninstall again."
+    )
+
+
+def _restore_refusal(server_dir: Path) -> str | None:
+    """T715: the sentence while this server has a restore record, running or unfinished, else None.
+
+    Asked by `_resolve()`, so `plan()` and `run()` both refuse before anything is touched. A
+    load still writing would be cut off by the container removal. An unfinished one marks
+    databases that may be half-written, and the record lives in the backups folder that the
+    uninstall moves aside (T677), where nothing reads it: with "Keep my characters" a
+    reinstall into this folder would start on those databases with no warning. Refused, not
+    carried over: the way out is on the Maintenance tab, and it is one press.
+    """
+    from yulon.controller_wow_wotlk import maintenance  # noqa: PLC0415 - no family at import
+
+    try:
+        record = maintenance.interrupted_restore(server_dir)
+    except OSError as exc:  # fail closed: "could not tell" must not let the removal run
+        return f"Yu'lon could not read this server's restore record ({exc}). Nothing was removed."
+    if record is None:
+        return None
+    if record.load_running:
+        return (
+            "A restore from the last session is still writing into this server's databases "
+            "in Docker. Uninstalling now would cut it off. Wait for it to finish (the "
+            "Maintenance tab says when), then uninstall again. Nothing was removed."
+        )
+    return (
+        "A restore of this server did not finish, so its databases may be half-written. The "
+        "record that says so would not come back with a reinstall, and a reinstall that kept "
+        "the characters would start on them with no warning. On the Maintenance tab, restore "
+        "a backup again, or press Forget that record if you have put the databases right or "
+        "will not keep them, then uninstall again. Nothing was removed."
+    )
+
+
+_LINK_CAUSE = "it is a junction or link, which Yu'lon does not delete through"
 
 
 def _cause(exc: rmtree.TreeRemovalError) -> object:
@@ -961,7 +1351,14 @@ def _cause(exc: rmtree.TreeRemovalError) -> object:
     The leaf has already wrapped the original in a sentence of its own; the
     purge sentence wants the bare cause, not that sentence nested inside it.
     """
-    return exc.__cause__ if exc.__cause__ is not None else "it is still there afterwards"
+    link: BaseException | None = exc
+    while link is not None:  # T721: the leaf's refusal of a link root is a type, not a phrase
+        if isinstance(link, rmtree.LinkRootRefused):
+            return _LINK_CAUSE
+        link = link.__cause__
+    if exc.__cause__ is not None:
+        return exc.__cause__
+    return "it is still there afterwards"
 
 
 def _undeletable(path: Path, problem: object) -> str:
@@ -979,11 +1376,22 @@ def _undeletable(path: Path, problem: object) -> str:
     forgotten last, so it is still there, and a second press resumes from a
     folder that may itself be half-deleted rather than from the beginning.
     """
+    why = (
+        "Remove the link yourself, or point Yu'lon at the real folder; what it leads to was "
+        "not touched. "
+        if problem == _LINK_CAUSE
+        else "On Windows this is usually a read-only file inside .git, or a program holding "
+        "a file open in that folder. "
+    )
+    left = (
+        "Only the folder is left. "
+        if problem == _LINK_CAUSE
+        else "Only the folder is left, and it may be partly deleted. "
+    )
     return (
-        f"{path} could not be deleted ({problem}). On Windows this is usually a read-only "
-        f"file inside .git, or a program holding a file open in that folder. "
+        f"{path} could not be deleted ({problem}). {why}"
         f"EVERYTHING ELSE IN THE PLAN HAS ALREADY BEEN REMOVED — the containers, the "
-        f"volumes it named, and the images. Only the folder is left, and it may be "
-        f"partly deleted. This install is still recorded, so the uninstall can be run "
-        f"again once the folder can be removed; it will not put back what is gone."
+        f"volumes it named, and the images. {left}"
+        f"This install is still recorded, so the uninstall can be run again once "
+        f"the folder can be removed; it will not put back what is gone."
     )

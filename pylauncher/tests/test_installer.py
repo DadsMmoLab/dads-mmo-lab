@@ -211,6 +211,7 @@ MODULE_SURFACE_AFTER_7_2 = {
     # Added deliberately with T539: an importer a Stop or a retry could not end, still
     # writing. An exception type, not machinery.
     "OneShotLeftRunning",
+    "ImportWindowStopped",
     "ReadyWaitStopped",
     "cancelled_install_message",
     "compose_file",
@@ -221,6 +222,13 @@ MODULE_SURFACE_AFTER_7_2 = {
     "platform_names",
     "provision_lines",
     "unsupported_platform_message",
+    # T755, added deliberately: the record says an install never finished its import,
+    # the family's import gate asked of its databases, and Start's refusal of the two.
+    "IMPORT_STAGE",
+    "UNFINISHED_IMPORT_STATES",
+    "install_import_state",
+    "unfinished_import",
+    "unfinished_install_refusal",
     # what it imports, which is the other half of the evidence: the bash engine
     # needed `os`, `re`, `secrets`, `shutil`, `subprocess`, `sys`, `deque` and
     # `Mapping`, and none of them may come back unnoticed either.
@@ -254,6 +262,8 @@ MODULE_SURFACE_AFTER_7_2 = {
     "Collection",
     # T568. `InstallEngine.reserved()` returns a context manager.
     "AbstractContextManager",
+    # T755. The Start refusal names the "Remove from Yu'lon…" button by its constant.
+    "forgetting",
     "get_logger",
     # Added deliberately with the single-container servers (DDON): the one call the
     # Catalog tile and the harness make of either engine kind, and the entry type
@@ -288,7 +298,14 @@ def test_the_script_lineage_is_gone() -> None:
     assert {name for name in vars(installer_module) if not name.startswith("__")} == (
         MODULE_SURFACE_AFTER_7_2
     )
-    assert {f.name for f in fields(InstallOptions)} == {"server_dir", "client_dir"}
+    # `first_install` is T723's, the one press flag the install's channel switch reads
+    # (only the Install button and the install harness set it). Anything else added here
+    # is still a deliberate change this test must see.
+    assert {f.name for f in fields(InstallOptions)} == {
+        "server_dir",
+        "client_dir",
+        "first_install",
+    }
 
 
 # The names the bash engine owned, every one of them deleted by F.3 or by the

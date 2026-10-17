@@ -314,11 +314,15 @@ def test_the_server_tab_press_opens_this_games_places(
 ) -> None:
     from tests.test_controller_view import TORTOISE, _section_of, _server_view
     from yulon.ui import controller_view
+    from yulon.ui.widgets.job import run_inline
 
     asked: list[str] = []
     monkeypatch.setattr(
         controller_view, "show_help_places", lambda parent, entry: asked.append(entry.id)
     )
+    # The view's jobs run inline, as every `_server_view` test does under test_controller_view's
+    # `_inline_jobs`: the real runner left the view's startup reads unanswered (T771).
+    monkeypatch.setattr(controller_view, "threaded_job_runner", lambda _parent: run_inline)
     view = _server_view(TORTOISE, tmp_path)
     button = view.help_button
     assert button.text() == "Where to get help…"

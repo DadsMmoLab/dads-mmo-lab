@@ -29,6 +29,7 @@ from tests.test_controller_view import (
     _OptionsAsker,
     _play_view,
     _Ps,
+    _this_host_owns,
 )
 from yulon import client_packs, play_client, runner
 from yulon.catalog.catalog import CatalogEntry, load_catalog
@@ -899,6 +900,71 @@ def test_no_hint_when_the_realm_row_could_not_be_read(
     _type_address(window, "10.0.0.5")
 
     assert window.realm_mismatch_label.isHidden()
+
+
+# -- T667: a realm address that is another computer's -----------------------------
+
+
+def test_a_remote_address_does_not_promise_that_play_starts_the_local_server(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _this_host_owns(monkeypatch)
+    window, view, _ = _launcher(ps, tmp_path, launcher={"realm_address": "192.168.0.60"})
+    view.realm_badge.set_status("stopped")
+
+    banner = window.online_label.text()
+    reason = window.play_reason_label.text()
+    assert "192.168.0.60" in banner and "192.168.0.60" in reason
+    # Someone hosting for friends types their own public address: say where the server starts.
+    assert "start it on the Server tab first" in reason
+    assert banner != launcher_window.STOPPED_BANNER
+    assert reason != launcher_window.STOPPED_REASON
+    for text in (banner, reason):
+        assert "starts the server" not in text and "starts it" not in text, text
+        assert "waits for the realm" not in text, text
+    assert window.realm_badge.isHidden(), "the local server's badge under a remote login"
+    assert window.play_button.isEnabled()
+
+
+def test_a_remote_address_is_not_told_the_local_server_sends_it_on(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The local realm row (here 127.0.0.1) says nothing about the server at the typed address."""
+    _this_host_owns(monkeypatch)
+    window, view, _ = _launcher(ps, tmp_path, launcher={"realm_address": "192.168.0.60"})
+    _online(view)
+
+    assert window.realm_mismatch_label.isHidden()
+    assert "PLAY still works" not in window.realm_mismatch_label.text()
+
+
+@pytest.mark.parametrize("address", ["127.0.0.1", "192.168.0.60"])
+def test_this_computers_own_address_keeps_the_start_and_wait_promise(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, address: str
+) -> None:
+    _this_host_owns(monkeypatch, "192.168.0.60")
+    window, view, _ = _launcher(ps, tmp_path, launcher={"realm_address": address})
+    view.realm_badge.set_status("stopped")
+
+    assert window.online_label.text() == launcher_window.STOPPED_BANNER
+    assert window.play_reason_label.text() == launcher_window.STOPPED_REASON
+    assert not window.realm_badge.isHidden()
+
+
+def test_typing_another_computers_address_changes_the_banner_and_back_again(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _this_host_owns(monkeypatch)
+    window, view, _ = _launcher(ps, tmp_path)
+    view.realm_badge.set_status("stopped")
+    assert window.online_label.text() == launcher_window.STOPPED_BANNER
+
+    _type_address(window, "10.0.0.5")
+    assert "10.0.0.5" in window.online_label.text()
+
+    _type_address(window, "127.0.0.1")
+    assert window.online_label.text() == launcher_window.STOPPED_BANNER
+    assert not window.realm_badge.isHidden()
 
 
 # -- Review Focus 2: a saved account the server no longer has --------------------

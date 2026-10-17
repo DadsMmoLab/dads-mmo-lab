@@ -794,6 +794,33 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         },
         hits=("'azerothcore'", "'trinitycore'"),
     ),
+    Site(
+        "yulon.account_rules",
+        "<module>",
+        "NAME_MAX: the longest account name each core accepts, per scheme (T673)",
+        {
+            "azerothcore": supported("its MAX_ACCOUNT_STR, 17"),
+            "cmangos": supported("mangos_srp6 / mangos_sha, 16"),
+            "trinitycore": supported("its MAX_ACCOUNT_STR, 16"),
+        },
+        hits=("'azerothcore'", "'trinitycore'"),
+    ),
+    Site(
+        "yulon.controller_wow_wotlk.accounts",
+        "<module>",
+        "the WotLK controller's MAX_USERNAME is AzerothCore's scheme's ceiling (T673)",
+        {
+            "azerothcore": supported(),
+            "cmangos": not_applicable(
+                "the Vanilla and TBC controllers set their own MAX_USERNAME from mangos_srp6"
+            ),
+            "trinitycore": not_applicable(
+                "create_account checks a TrinityCore entry's name against its own scheme's ceiling "
+                "(account_rules.name_problem); this constant is the WotLK game's"
+            ),
+        },
+        hits=("'azerothcore'",),
+    ),
     # -- per-game controller packages that read their CMaNGOS block ---------------------
     Site(
         "yulon.controller_wow_tbc.docker_ctl",
@@ -945,6 +972,19 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
             "trinitycore": supported("on an install whose compose file declares the volume (T219)"),
         },
         hits=(".trinitycore",),
+    ),
+    Site(
+        "yulon.catalog.installer",
+        "install_import_state",
+        "Start asks the SQL plan's import gate of an install that did not finish installing (T755)",
+        {
+            "azerothcore": not_applicable(
+                "never asked: an import service's own record and probe refuse Start (T658/T678)"
+            ),
+            "cmangos": supported("the plan's `MarkerGate`, `native.cmangos.sql`"),
+            "trinitycore": supported("the inherited `MarkerGate`, `native.trinitycore.sql`"),
+        },
+        hits=(".cmangos", ".trinitycore"),
     ),
     Site(
         "yulon.catalog.preflight",

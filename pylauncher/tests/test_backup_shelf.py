@@ -1247,3 +1247,229 @@ def test_a_read_error_while_naming_the_database_keeps_the_label(
     assert r.item == "mod-x"
     assert r.unchecked is True
     assert r.kept_because
+
+
+# ------------------------------------------------- backups an uninstall kept (T677)
+
+
+def kept_beside(server: Path, suffix: str = "") -> Path:
+    """The folder an earlier uninstall of this server left beside it."""
+    folder = server.parent / f"{server.name} - kept backups{suffix}"
+    folder.mkdir()
+    (folder / "20261001_100000_acore_characters.sql").write_bytes(dump_of("acore_characters"))
+    return folder
+
+
+def test_backups_an_earlier_uninstall_kept_are_listed_so_a_reinstall_can_restore_them(
+    server: Path,
+) -> None:
+    """A "Keep my characters" reinstall into the same folder starts with NO backups of its own."""
+    kept = kept_beside(server)
+    folder_of(server).rmdir()
+    found = shelf(server)
+    assert found.rows == ()
+    (earlier,) = found.kept
+    assert earlier.folder == kept
+    (kept_row,) = earlier.rows
+    assert kept_row.name == "20261001_100000_acore_characters.sql"
+    assert kept_row.usable
+    assert "earlier uninstall" in (kept_row.cannot_delete or "")
+
+
+def test_every_numbered_kept_set_is_listed_and_another_servers_is_not(server: Path) -> None:
+    one = kept_beside(server)
+    two = kept_beside(server, " (2)")
+    stranger = server.parent / "other-server - kept backups"
+    stranger.mkdir()
+    (stranger / "20261001_100000_acore_world.sql").write_bytes(dump_of("acore_world"))
+    assert [k.folder for k in shelf(server).kept] == [one, two]
+
+
+def test_a_kept_name_that_is_a_file_a_link_or_a_half_made_copy_is_not_a_set(
+    server: Path,
+) -> None:
+    (server.parent / f"{server.name} - kept backups").write_text("not a folder")
+    elsewhere = server.parent / "elsewhere"
+    elsewhere.mkdir()
+    (server.parent / f"{server.name} - kept backups (2)").symlink_to(elsewhere)
+    (server.parent / f"{server.name} - kept backups (3).partial").mkdir()
+    assert shelf(server).kept == ()
+
+
+def test_a_kept_file_can_be_neither_deleted_nor_cleaned_up(server: Path) -> None:
+    kept_beside(server)
+    put(server, "20261001_100000", "acore_world")
+    found = shelf(server)
+    name = found.kept[0].rows[0].name
+    with pytest.raises(ShelfRefusal):
+        backup_shelf.plan_delete(found, name)
+    plan = backup_shelf.plan_clean_up(found, Rule(older_than_days=0), now=NOW)
+    assert name not in plan.names
+
+
+# ------------------------------------------------------------------ a pack's leftover (T747)
+
+
+def test_a_leftover_move_dump_reads_as_a_leftover_and_can_be_deleted(server: Path) -> None:
+    """A pack killed mid-zip left its auth dump (every verifier, no realmlist) in backups/."""
+    path = put(server, "20261012_090000", "acore_auth", label="move")
+    age(path)
+    r = row(shelf(server), path.name)
+    assert (r.label, r.database) == ("move", "acore_auth")
+    assert r.usable is False, "a move package's working copy is never a good copy"
+    assert r.problem and "not a backup" in r.problem
+    assert "move package" in backup_shelf.describe(r, GAME)
+    assert r.cannot_delete is None, r.cannot_delete
+    assert backup_shelf.plan_delete(shelf(server), r.name).names == (r.name,)
+    assert path.name in backup_shelf.plan_clean_up(shelf(server), Rule(include_unusable=True)).names
+
+
+def test_a_newer_move_leftover_never_takes_the_newest_good_copy_from_a_real_backup(
+    server: Path,
+) -> None:
+    mine = put(server, "20261001_100000", "acore_auth")
+    leftover = put(server, "20261012_090000", "acore_auth", label="move")
+    age(leftover)
+    found = shelf(server)
+    assert row(found, mine.name).kept_because == "it is the newest good copy of acore_auth."
+    assert row(found, mine.name).cannot_delete is not None
+    assert row(found, leftover.name).kept_because is None
+    plan = backup_shelf.plan_clean_up(found, Rule(keep_newest=1, include_unusable=True), now=NOW)
+    assert mine.name not in plan.names
+    assert leftover.name in plan.names
+
+
+def test_a_players_backup_of_a_database_named_move_something_is_still_a_good_copy(
+    server: Path,
+) -> None:
+    """The label is only read when the file's own `USE` line agrees (as for every label)."""
+    path = put(server, "20261001_100000", "move_stuff")
+    r = row(shelf(server), path.name)
+    assert (r.label, r.database, r.usable) == (None, "move_stuff", True)
+    assert r.kept_because == "it is the newest good copy of move_stuff."
+
+
+def test_a_broken_dump_of_a_database_named_move_something_is_not_read_as_a_leftover(
+    server: Path,
+) -> None:
+    """T765: a cut-short file has no verified reading, so the first one used to win: a
+    player's own `move_stuff` copy was named a move package's leftover of `stuff`. The `move`
+    reading is taken only when the file's own `USE` line names the database it would mean."""
+    path = put(server, "20261001_100000", "move_stuff", whole=False)
+    r = row(shelf(server), path.name)
+    assert (r.label, r.database) == (None, "move_stuff")
+    assert "move package" not in backup_shelf.describe(r, GAME)
+    assert "not a backup" not in backup_shelf.describe(r, GAME)
+
+
+def test_a_broken_move_leftover_whose_use_line_agrees_still_reads_as_one(server: Path) -> None:
+    path = put(server, "20261012_090000", "acore_auth", label="move", whole=False)
+    r = row(shelf(server), path.name)
+    assert (r.label, r.database, r.usable) == ("move", "acore_auth", False)
+    assert "move package" in backup_shelf.describe(r, GAME)
+
+
+def test_a_move_leftover_that_cannot_be_read_just_now_keeps_its_move_label(
+    server: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A read that failed proves nothing (T769): the T765 head check reads the file again, and
+    a read error there answered "the head does not name it", which dropped the `move` reading."""
+    path = put(server, "20261012_090000", "acore_auth", label="move")
+    age(path)
+
+    def busy(_path: Path, _offset: int) -> bytes:
+        raise OSError("busy")
+
+    monkeypatch.setattr(maintenance, "_read_edge", busy)
+    r = row(shelf(server), path.name)
+    assert r.unchecked is True
+    assert (r.label, r.database) == ("move", "acore_auth")
+    assert "move package" in backup_shelf.describe(r, GAME)
+    assert r.kept_because
+
+
+def test_a_read_error_while_naming_a_move_leftovers_database_keeps_the_move_label(
+    server: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The file is whole, then the read naming its database fails: "keep the first (label
+    included)", as the reading loop says, and the head check must not undo that (T769)."""
+    path = put(server, "20261012_090000", "acore_auth", label="move")
+    age(path)
+    real_verify, real_edge = maintenance.verify_dump, maintenance._read_edge
+    failing: list[bool] = []
+
+    def verify(p: Path, database: str | None = None) -> int:
+        if database is not None:
+            failing.append(True)
+        return real_verify(p, database)
+
+    def edge(p: Path, offset: int) -> bytes:
+        if failing:
+            raise OSError("busy")
+        return real_edge(p, offset)
+
+    monkeypatch.setattr(maintenance, "verify_dump", verify)
+    monkeypatch.setattr(maintenance, "_read_edge", edge)
+    r = row(shelf(server), path.name)
+    assert failing, "the reading loop never asked for a database"
+    assert r.unchecked is True
+    assert (r.label, r.database) == ("move", "acore_auth")
+    assert "move package" in backup_shelf.describe(r, GAME)
+
+
+def test_a_broken_move_leftover_whose_head_cannot_be_read_just_now_keeps_its_move_label(
+    server: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The file is read and found cut short, then the head check's own read fails (T771):
+    "could not read" is not "not named", so the `move` reading stays and the row is held back
+    as one that could not be checked, the same as for every other failed read."""
+    path = put(server, "20261012_090000", "acore_auth", label="move", whole=False)
+    real_verify, real_edge = maintenance.verify_dump, maintenance._read_edge
+    verified: list[bool] = []
+
+    def verify(p: Path, database: str | None = None) -> int:
+        try:
+            return real_verify(p, database)
+        finally:
+            verified.append(True)
+
+    def edge(p: Path, offset: int) -> bytes:
+        if verified:
+            raise OSError("busy")
+        return real_edge(p, offset)
+
+    monkeypatch.setattr(maintenance, "verify_dump", verify)
+    monkeypatch.setattr(maintenance, "_read_edge", edge)
+    r = row(shelf(server), path.name)
+    assert verified, "the file was never verified"
+    assert (r.label, r.database, r.usable) == ("move", "acore_auth", False)
+    assert r.unchecked is True
+    assert "busy" in (r.problem or "")
+    assert "move package" in backup_shelf.describe(r, GAME)
+
+
+def test_head_names_tells_a_failed_read_from_a_head_that_does_not_name_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "x.sql"
+    path.write_bytes(dump_of("acore_auth", whole=False))
+    assert maintenance.head_names(path, "acore_auth") is True
+    assert maintenance.head_names(path, "acore_world") is False
+
+    def busy(_path: Path, _offset: int) -> bytes:
+        raise OSError("busy")
+
+    monkeypatch.setattr(maintenance, "_read_edge", busy)
+    with pytest.raises(MaintenanceError, match="busy") as caught:
+        maintenance.head_names(path, "acore_auth")
+    assert isinstance(caught.value.__cause__, OSError)
+
+
+def test_a_use_line_above_no_banner_of_its_own_confirms_nothing(server: Path) -> None:
+    """Only the file's own head counts (as for `verify_dump`): text that merely holds a USE line
+    is not a pack's dump."""
+    path = folder_of(server) / "20261012_090000_move_acore_auth.sql"
+    path.write_bytes(b"a note of mine\nUSE `acore_auth`;\n")
+    age(path)
+    r = row(shelf(server), path.name)
+    assert (r.label, r.database) == (None, "move_acore_auth")

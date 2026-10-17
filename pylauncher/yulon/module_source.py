@@ -46,6 +46,7 @@ from typing import Protocol
 from pydantic import TypeAdapter, ValidationError
 
 from yulon import folder_swap, links
+from yulon.apply import updater_folder_dbs
 from yulon.log import get_logger
 from yulon.manifest import (
     ALLOWED_REPO_HOSTS,
@@ -59,6 +60,7 @@ from yulon.manifest import (
     Slug,
     Source,
     SqlStep,
+    is_inside_path,
     parse_manifest,
 )
 from yulon.manifest_store import FAMILY_FILES
@@ -114,7 +116,7 @@ No page names this rule; it is this module's, recorded here rather than assumed.
 _CONF_DIST_SUFFIX = ".conf.dist"
 _MODULE_CONF_DIR = "env/dist/etc/modules"
 
-_SQL_DBDIRS: dict[str, Db] = {
+_LEGACY_SQL_DBDIRS: dict[str, Db] = {
     "db-world": "world",
     "db_world": "world",
     "db-characters": "characters",
@@ -123,11 +125,24 @@ _SQL_DBDIRS: dict[str, Db] = {
     "db_auth": "auth",
     "playerbots": "playerbots",
 }
-"""`sql_dbdir_target` (`RUST modmgr.rs:2625-2633`), both spellings, verbatim.
+"""The fixed folder list derivations used until T752 (`sql_dbdir_target`, `RUST modmgr.rs`).
 
-Both because AzerothCore module repos use both in the wild. A directory that is in
-neither spelling gets no step at all rather than a guessed database.
+Read by `beyond_derived_shape()` alone, so a move package an older Yu'lon packed is still
+taken as a derivation. Install completes the manifest again from the copy it makes, and that
+pass uses the updater's rule (`_sql_steps()`).
 """
+
+_SQL_FOLDER = re.compile(r"[A-Za-z0-9_.-]{1,100}")
+"""A `data/sql/` folder name a derived step may carry: no glob character, no separator, no space.
+`_sql_steps()` derives only these and `beyond_derived_shape()` accepts only these."""
+
+_UNAPPLIED_NOTE = (
+    "Nothing applies the SQL under {folder}: the server's updater reads only the folders "
+    "whose names say auth, characters or world, and Apply module SQL runs the same updater. "
+    "If the module's instructions say to import it, do that by hand."
+)
+"""A derived note for each `data/sql/` folder holding SQL that no step will report (T752)."""
+_UNAPPLIED_PREFIX = _UNAPPLIED_NOTE.split("{folder}")[0]
 
 
 class Layout(Protocol):
@@ -332,6 +347,10 @@ def complete(manifest: Manifest, clone: Path) -> Manifest:
             **manifest.model_dump(),
             "conf": [c.model_dump() for c in _conf_steps(clone)],
             "sql": [s.model_dump() for s in _sql_steps(clone)],
+            "notes": [
+                *(n for n in manifest.notes if not n.startswith(_UNAPPLIED_PREFIX)),
+                *_unapplied(clone),
+            ],
         }
     )
 
@@ -354,19 +373,29 @@ def _conf_steps(clone: Path) -> tuple[ConfFile, ...]:
     file into the server's live `etc`.
     """
     conf_dir = clone / "conf"
-    return tuple(
-        ConfFile(
-            file=f"{_MODULE_CONF_DIR}/{dist.name[: -len(_CONF_DIST_SUFFIX)]}.conf",
-            template=f"conf/{dist.name}",
-            keys=(),
+    found: list[ConfFile] = []
+    for dist in sorted(conf_dir.glob(f"*{_CONF_DIST_SUFFIX}")):
+        if not dist.is_file():
+            continue
+        if not is_inside_path(f"conf/{dist.name}"):
+            # A colon or backslash in the name: no manifest takes that path (T683 S7).
+            logger.warning(
+                f"left out conf/{dist.name}: a settings file with a colon or a backslash in "
+                "its name cannot be set up; the module installs without it"
+            )
+            continue
+        found.append(
+            ConfFile(
+                file=f"{_MODULE_CONF_DIR}/{dist.name[: -len(_CONF_DIST_SUFFIX)]}.conf",
+                template=f"conf/{dist.name}",
+                keys=(),
+            )
         )
-        for dist in sorted(conf_dir.glob(f"*{_CONF_DIST_SUFFIX}"))
-        if dist.is_file()
-    )
+    return tuple(found)
 
 
 def _sql_steps(clone: Path) -> tuple[SqlStep, ...]:
-    """One deferred SQL step per mapped directory under the clone's `data/sql/`.
+    """One deferred SQL step per database the core updater walks a `data/sql/` folder for.
 
     `applied_by="db-import"` because that is the default the schema documents for
     a C++ module — AzerothCore's own importer ledgers what it applied in the
@@ -374,30 +403,52 @@ def _sql_steps(clone: Path) -> tuple[SqlStep, ...]:
     (`SqlStep`'s docstring). The step is therefore REPORTED as pending with the
     files the glob found and applied by the module-SQL route that already exists.
 
-    The glob is recursive (`**`) where the shipped manifests' is flat: a
-    derivation cannot know whether the author put files in `base/`/`updates/`
-    subfolders (rust-main read `updates/` only, `RUST modmgr.rs:2581-2608`), and
-    the only thing this glob decides is what the REPORT lists — whether the
-    importer applies a nested file is the importer's business and shows in its own
-    `>> Applying update` lines.
+    Which folders: `apply.updater_folder_dbs()`, the rule the updater itself has (T689,
+    T752). Until T752 this was a fixed list of its own, so `data/sql/playerbots/` got a
+    step no press ever applied and `data/sql/world/` or `characters/` (which the updater
+    does apply) got none. A folder the updater never opens gets no step; `_unapplied()`
+    writes the note for it.
 
-    One step per DIRECTORY rather than per database: a repository carrying both
-    `db-world/` and `db_world/` gets two steps naming the same database, which is
+    The glob is recursive (`**`) where the shipped manifests' is flat, because the
+    updater's walk is: a file in `base/` or `updates/` is applied like one at the top.
+
+    One step per DIRECTORY and database rather than per database: a repository carrying
+    both `db-world/` and `db_world/` gets two steps naming the same database, which is
     what its files actually are. Collapsing them would drop one directory's files
     from the report.
     """
+    steps: list[SqlStep] = []
+    for entry in _sql_folders(clone):
+        if updater_folder_dbs(entry.name) and not _SQL_FOLDER.fullmatch(entry.name):
+            # A glob character or a space in the name: no step can name it safely, and
+            # `beyond_derived_shape()` would refuse the one it made.
+            logger.warning(
+                f"data/sql/{entry.name}/ is applied by the server's updater, but Yu'lon cannot "
+                "list it as waiting SQL because of the characters in its name"
+            )
+            continue
+        for db in updater_folder_dbs(entry.name):
+            steps.append(
+                SqlStep(db=db, path=f"data/sql/{entry.name}/**/*.sql", applied_by="db-import")
+            )
+    return tuple(steps)
+
+
+def _sql_folders(clone: Path) -> list[Path]:
+    """The folders directly under the clone's `data/sql/`, sorted; none when it has none."""
     sql_dir = clone / "data" / "sql"
     if not sql_dir.is_dir():
-        return ()
-    steps: list[SqlStep] = []
-    for entry in sorted(sql_dir.iterdir()):
-        if not entry.is_dir():
-            continue
-        db = _SQL_DBDIRS.get(entry.name)
-        if db is None:
-            continue
-        steps.append(SqlStep(db=db, path=f"data/sql/{entry.name}/**/*.sql", applied_by="db-import"))
-    return tuple(steps)
+        return []
+    return [entry for entry in sorted(sql_dir.iterdir()) if entry.is_dir()]
+
+
+def _unapplied(clone: Path) -> tuple[str, ...]:
+    """A note for each `data/sql/` folder holding `.sql` files that nothing applies (T752)."""
+    return tuple(
+        _UNAPPLIED_NOTE.format(folder=f"data/sql/{entry.name}/")
+        for entry in _sql_folders(clone)
+        if not updater_folder_dbs(entry.name) and any(entry.rglob("*.sql"))
+    )
 
 
 _DERIVED_FIELDS = frozenset(
@@ -442,17 +493,14 @@ def beyond_derived_shape(manifest: Manifest) -> str | None:
         ):
             return "conf"
     for sql in manifest.sql:
-        found = re.fullmatch(r"data/sql/([a-z_-]+)/\*\*/\*\.sql", sql.path or "")
-        if (
-            found is None
-            or sql
-            != SqlStep(
-                db=_SQL_DBDIRS.get(found.group(1), "world"),
-                path=sql.path,
-                applied_by="db-import",
-            )
-            or found.group(1) not in _SQL_DBDIRS
-        ):
+        found = re.fullmatch(r"data/sql/([^/]+)/\*\*/\*\.sql", sql.path or "")
+        if found is None or not _SQL_FOLDER.fullmatch(found.group(1)):
+            return "sql"
+        folder = found.group(1)
+        dbs = {*updater_folder_dbs(folder)}
+        if folder in _LEGACY_SQL_DBDIRS:
+            dbs.add(_LEGACY_SQL_DBDIRS[folder])
+        if not any(sql == SqlStep(db=db, path=sql.path, applied_by="db-import") for db in dbs):
             return "sql"
     return None
 

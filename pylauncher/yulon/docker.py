@@ -24,6 +24,7 @@ import inspect
 import io
 import json
 import os
+import posixpath
 import re
 import socket
 import subprocess
@@ -35,7 +36,7 @@ import uuid
 from collections import deque
 from collections.abc import Callable, Collection, Generator, Iterator, Mapping, Sequence
 from contextlib import closing, contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import IO, Any, BinaryIO, Literal, NamedTuple, ParamSpec, Protocol, TypeVar
@@ -365,8 +366,8 @@ def _docker(
     """
     # A Windows process cannot cd into a distro, so for a WSL install the
     # location rides in the argv instead - `wsl --cd`, positioned by
-    # `docker_prefix()` because only it knows the flag belongs before the `--`
-    # separator. `--cd` rather than compose's `--project-directory`, because
+    # `docker_prefix()` because only it knows the flag belongs before the
+    # `--exec` that starts docker. `--cd` rather than compose's `--project-directory`, because
     # this function runs every docker subcommand and only compose understands
     # the latter.
     try:
@@ -467,6 +468,14 @@ _PORT_NOT_AVAILABLE = re.compile(
     r"ports are not available: exposing port TCP \S*?:(\d+) -> \S+: listen tcp\d*"
     r" \S+: bind: (?P<why>[^\r\n]*)"
 )
+_PORT_REFUSALS = (
+    _PORT_NOT_AVAILABLE,
+    # Linux Docker Engine 29.7.2 / Compose 5.5.0, measured on m910q (T671; audit lifecycle L1,
+    # usertest U-6), which never prints Desktop's words: a program holds the port ...
+    re.compile(r"failed to bind host port \S*?:(\d+)/tcp: (?P<why>[^\r\n]*)"),
+    # ... or another container publishes it.
+    re.compile(r"Bind for \S*?:(\d+) failed: (?P<why>port is already allocated)"),
+)
 
 
 def _daemon_lines(stderr: str) -> str:
@@ -485,7 +494,11 @@ def _daemon_lines(stderr: str) -> str:
 
 
 def _port_refusal(stderr: str) -> str | None:
-    """The plain sentence for the daemon's `ports are not available` error, or None (T574).
+    """The plain sentence for the daemon's own "port taken" error, or None (T574, T671).
+
+    Docker Desktop says `ports are not available`; Linux Docker Engine says `failed to
+    bind host port` (a program) or `Bind for ... failed: port is already allocated` (a
+    container). All three are read.
 
     The preflight bind check covers a port blocked when the install starts; this
     covers one that became blocked afterwards (a range Windows reserved at the
@@ -495,10 +508,13 @@ def _port_refusal(stderr: str) -> str | None:
     A message without the port number in the shape Docker prints it is left alone.
     """
     for line in _daemon_lines(stderr).split(" / "):
-        match = _PORT_NOT_AVAILABLE.search(line)
+        match = next((m for m in (p.search(line) for p in _PORT_REFUSALS) if m), None)
         if match is None:
             continue
         why = match.group("why").lower()
+        if why == "port is already allocated":
+            # Linux Engine's word for a port another CONTAINER publishes (T671 cold review).
+            return another_server_sentence(int(match.group(1)))
         windows = "forbidden by its access permissions" in why
         kind: Literal["reserved", "in_use"] = (
             "reserved" if windows or "permission denied" in why else "in_use"
@@ -539,6 +555,10 @@ SERVER_IN_MOTION = (
 _HOLD_LOCK = threading.Lock()
 _HELD: dict[str, list[str]] = {}
 _IN_FLIGHT: dict[str, int] = {}
+_PRESSES: dict[str, list[str]] = {}
+"""The presses of this process inside a reservation of each server right now (T681)."""
+_ALONE: dict[str, tuple[str, str]] = {}
+"""A server one job writes to alone: `(its press, what every other press is told)` (T681)."""
 
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
@@ -551,6 +571,42 @@ def _server_key(server_dir: Path | str) -> str:
     `\\\\wsl.localhost\\<distro>` starts a stopped distro (T133).
     """
     return os.path.normcase(os.path.abspath(os.fspath(server_dir)))
+
+
+@contextmanager
+def _press_on(server_dir: Path | str, press: str) -> Iterator[None]:
+    """Count `press` as inside a reservation of this server; refused while another writes alone.
+
+    T681: one process shares one reservation (`server_claim()` is re-entrant), so the
+    reservation itself could not keep a Modules job's SQL out of a Restore's load in the same
+    Yu'lon: the module's take simply joined the restore's. Every take in this process passes
+    here first, the cross-process ones and the spec-less ones alike, so a job that writes to the
+    server alone (`hold_the_server(alone=...)`) refuses every OTHER press by name, and is
+    itself refused while another press is inside.
+
+    Raises:
+        ServerHeldError: a job writes to this server alone, and `press` is not that job's.
+    """
+    key = _server_key(server_dir)
+    if press != forgetting.PRESS_STOP:
+        orphan = orphaned_restore_reason(server_dir)
+        if orphan is not None:
+            logger.warning(f"refused {press} on {server_dir}: {orphan}")
+            raise ServerHeldError(orphan)
+    with _HOLD_LOCK:
+        alone = _ALONE.get(key)
+        if alone is not None and alone[0] != press:
+            logger.warning(f"refused {press} on {server_dir}: {alone[0]} writes to it alone")
+            raise ServerHeldError(alone[1])
+        _PRESSES.setdefault(key, []).append(press)
+    try:
+        yield
+    finally:
+        with _HOLD_LOCK:
+            presses = _PRESSES[key]
+            presses.remove(press)
+            if not presses:
+                del _PRESSES[key]
 
 
 @contextmanager
@@ -567,8 +623,26 @@ def _reserved_for(
 
     A caller that names no `spec` (the headless harness, a test) holds in this process only,
     as before. A reservation that is `moot` (Docker not answering, an unwritable folder) is
-    skipped: the job meets that itself.
+    skipped: the job meets that itself. Either way the press is counted (`_press_on()`).
     """
+    with (
+        _press_on(server_dir, press),
+        _reserved_across(server_dir, press, spec, wsl_distro, label, budget, avoid_images),
+    ):
+        yield
+
+
+@contextmanager
+def _reserved_across(
+    server_dir: Path | str,
+    press: str,
+    spec: ContainerSpec | None,
+    wsl_distro: str | None,
+    label: str | None,
+    budget: float | None,
+    avoid_images: Sequence[str],
+) -> Iterator[None]:
+    """`_reserved_for()`'s cross-process half."""
     if spec is None or not RESERVATIONS_ON:
         yield
         return
@@ -649,6 +723,7 @@ def hold_the_server(
     press: str = "A backup or restore",
     spec: ContainerSpec | None = None,
     wsl_distro: str | None = None,
+    alone: str | None = None,
 ) -> Iterator[None]:
     """Keep every start, stop and recreate of this server away while the block runs (T216).
 
@@ -673,13 +748,12 @@ def hold_the_server(
     lifecycle commands and are not held.
 
     "Stop the other server and start this one" pressed on ANOTHER install is
-    not held here either, and does not need to be: its `stop_conflicting()`
-    stops only an install whose containers publish that install's auth or world
-    port (`ContainerSpec.ports`, never the database's), and a held install has
-    neither running -- the restore plan refuses while they are up, and this
-    hold refuses their start. Both Codex reviews of 2026-10-04 read the
-    sentence above as covering that cross-server press; it covers the press
-    made on the held install itself.
+    not held here. Since T671 its `stop_conflicting()` also stops an install whose
+    database alone publishes a port this one needs -- which a held install's can
+    (a restore, a backup of a stopped server) -- so it asks `held_reason()` of
+    that install's folder first and refuses with the holder's sentence. Both
+    Codex reviews of 2026-10-04 read the sentence above as covering that
+    cross-server press; it covers the press made on the held install itself.
 
     Taken only when no lifecycle command for this server is running: a Start
     waiting for the database to report healthy has a world container that
@@ -688,14 +762,26 @@ def hold_the_server(
     Given a `spec` it also reserves the server across processes (T568), under `press`, for
     the block: another Yu'lon's Start or Update then refuses with this job's name.
 
+    `alone` (T681, the Restore's) makes the block the only writer of this server in this
+    process: every other press that reserves the server here -- a Modules job's SQL, an account
+    or a network write, a bot rebuild, a second window's press -- is refused with `alone`, and
+    the block is refused while one of them is inside. Another Yu'lon is kept out by the
+    cross-process reservation above, as before.
+
     Raises:
         ServerHeldError: a start, stop or recreate of this server is running
-            (`SERVER_IN_MOTION`), or another Yu'lon holds the server (`ServerReserved`).
+            (`SERVER_IN_MOTION`), another Yu'lon holds the server (`ServerReserved`), or, with
+            `alone`, another press of this process is working on it.
     """
     key = _server_key(server_dir)
     with _HOLD_LOCK:
         if _IN_FLIGHT.get(key):
             raise ServerHeldError(SERVER_IN_MOTION)
+        if alone is not None:
+            inside = [p for p in _PRESSES.get(key, ()) if p != press]
+            if inside:
+                raise ServerHeldError(forgetting.another_press_writes(inside[-1]))
+            _ALONE[key] = (press, alone)
         _HELD.setdefault(key, []).append(reason)
     try:
         with _reserved_for(server_dir, press, spec, wsl_distro):
@@ -706,6 +792,53 @@ def hold_the_server(
             reasons.remove(reason)
             if not reasons:
                 del _HELD[key]
+            if alone is not None:
+                del _ALONE[key]
+
+
+def orphaned_restore_reason(server_dir: Path | str) -> str | None:
+    """The sentence of a restore load another Yu'lon left running here, or None (T730).
+
+    "Quit anyway" ends the Yu'lon that started a restore and leaves its load writing in
+    Docker (T690); only the restore record knows (`InterruptedRestore.load_running`: same
+    computer, start time matches). Nothing is answered while a job of THIS process holds the
+    server: that restore's load is its own, and its own hold speaks. A plain Stop is not
+    asked this ("Stop always stops": the Server tab asks first, T711).
+    """
+    key = _server_key(server_dir)
+    with _HOLD_LOCK:
+        if key in _HELD or key in _LEASED or key in _ALONE:
+            return None
+    from yulon.catalog import native  # noqa: PLC0415 - the spine names no game at import time
+
+    return native.orphaned_load_sentence(Path(server_dir))
+
+
+def held_reason(server_dir: Path | str) -> str | None:
+    """The sentence of the Maintenance job holding the server now, or None.
+
+    A job of THIS process, else (T730) a restore load another Yu'lon left running, which only
+    the restore record knows of (`orphaned_restore_reason()`).
+
+    "Stop the other server" asks it of the server it is about to stop (T671): that can be a
+    database a restore or a backup runs alone, and this process's own reservation of that
+    folder is re-entrant, so the reservation alone would not refuse.
+    """
+    with _HOLD_LOCK:
+        reasons = _HELD.get(_server_key(server_dir))
+        if reasons:
+            return reasons[-1]
+    return orphaned_restore_reason(server_dir)
+
+
+def held_here(server_dir: Path | str) -> bool:
+    """A Maintenance job of THIS process holds the server right now (`hold_the_server()`).
+
+    Only this process's: a restore load another Yu'lon left running (`held_reason()`, T730)
+    is exactly what callers of this tell apart from "did not finish".
+    """
+    with _HOLD_LOCK:
+        return bool(_HELD.get(_server_key(server_dir)))
 
 
 @contextmanager
@@ -770,6 +903,7 @@ def _in_flight(
     press: str = forgetting.PRESS_START,
     spec: ContainerSpec | None = None,
     wsl_distro: str | None = None,
+    cancel: threading.Event | None = None,
 ) -> Iterator[None]:
     """Mark a lifecycle command for this server as running, unless the server is held.
 
@@ -783,6 +917,11 @@ def _in_flight(
     folder): it fails on its own, in its own words.
     """
     key = _server_key(server_dir)
+    if press != forgetting.PRESS_STOP:
+        orphan = orphaned_restore_reason(server_dir)  # T730: a load another Yu'lon left running
+        if orphan is not None:
+            logger.warning(f"refused {press} of {server_dir}: {orphan}")
+            raise ServerHeldError(orphan)
     with _HOLD_LOCK:
         held = _HELD.get(key)
         if held:
@@ -800,6 +939,7 @@ def _in_flight(
                             press=press,
                             spec=spec,
                             wsl_distro=wsl_distro,
+                            cancel=cancel,
                             up_timeout=_STOP_RESERVE_TIMEOUT if stopping else None,
                         )
                     )
@@ -824,6 +964,7 @@ def lifecycle(
     press: str = "Restart the server",
     spec: ContainerSpec | None = None,
     wsl_distro: str | None = None,
+    cancel: threading.Event | None = None,
 ) -> contextlib.AbstractContextManager[None]:
     """One lifecycle command made of several: a restart, a recreate, a bot restart (T216).
 
@@ -834,10 +975,12 @@ def lifecycle(
     the composite, the mark lasts from its first step to its last; the marks
     nest, so the primitives inside run as before.
 
+    `cancel`: set, it ends the wait for a stopped WSL distro to boot (T775) and the reservation.
+
     Raises:
         ServerHeldError: the server is held, so not even the first step runs.
     """
-    return _in_flight(server_dir, press=press, spec=spec, wsl_distro=wsl_distro)
+    return _in_flight(server_dir, press=press, spec=spec, wsl_distro=wsl_distro, cancel=cancel)
 
 
 class MaintenanceLeaseTaken(RuntimeError, SaidByYulon):
@@ -881,6 +1024,9 @@ def maintenance_lease(
         MaintenanceLeaseTaken: a Backup or Restore of this server holds it.
     """
     key = _server_key(server_dir)
+    orphan = orphaned_restore_reason(server_dir)  # T730: a Backup would dump half a load
+    if orphan is not None:
+        raise MaintenanceLeaseTaken(orphan)
     with _HOLD_LOCK:
         holder = _LEASED.get(key)
         if holder is not None:
@@ -1551,11 +1697,17 @@ def staged_up_argv(spec: ContainerSpec, *, force_recreate: bool = False) -> list
     was measured to decide on (`start_staged()` below, Docker 29.1.3) is
     "a service whose CONFIGURATION changed". A rebuild changes neither the
     compose files nor the image TAG — `composegen.image_tag()` is derived from
-    the folder — only the image the tag points at, and nothing in this
-    repository records what compose does with that. So the rebuild asks for the
-    replacement outright rather than hoping: the failure mode of hoping is an
-    hour of correct compiler output followed by the old binary still running,
-    which is the exact report this control exists to answer.
+    the folder — only the image the tag points at. What compose did with that
+    was measured by T741 on m910q (2026-10-12, Docker 29.9.0 with Compose 5.6.0,
+    and again with the standalone Compose 2.10.0): with only the image under the
+    tag changed, `up -d --no-deps` recreated the stopped long-running container
+    and Repair's `up --no-deps --exit-code-from` recreated the one-shot, both
+    without `--force-recreate` (`.notes/gates/t741-compose-recreate-m910q-2026-10-12/`).
+    Docker Desktop's Compose was not measured. The rebuild still asks for the
+    replacement outright rather than relying on that: the failure mode of a
+    compose that did not would be an hour of correct compiler output followed by
+    the old binary still running, which is the exact report this control exists
+    to answer.
     """
     argv = ["compose", "up", "-d"]
     if force_recreate:
@@ -2228,6 +2380,8 @@ def remove_staged(
     # And no grace helps a CMaNGOS world that is still loading: it drops the
     # SIGTERM, so it is waited for first (T158). It is always this install's
     # container here -- the census above refused anything else.
+    # T754: a running importer is ended, and recorded, before `down` ends it unrecorded.
+    _end_the_import_first(spec, server_dir, wsl_distro=wsl_distro)
     if spec.world in before:
         heard = wait_for_the_world_to_load(spec, control, wsl_distro=wsl_distro)
         # T384: and saves, watched, before `down` and its fixed grace reach it.
@@ -2406,6 +2560,14 @@ class ImportState:
     by omission.
     """
 
+    characters: int | None = None
+    """Rows in the characters table, when the probe counted them; None = not counted (T678).
+
+    Read by Repair before it clears what an unfinished first import wrote: that import
+    seeds accounts (City Bots) but never a character, so a character means somebody
+    played. None is never read as zero.
+    """
+
     @property
     def repairable(self) -> bool:
         """True only where re-running the import can put something right.
@@ -2475,8 +2637,13 @@ def repair_import(
     output: OutputSink | None = None,
     db_timeout: float = _DB_HEALTHY_TIMEOUT_SECONDS,
     wsl_distro: str | None = None,
+    safety_copy: Callable[[], str] | None = None,
 ) -> bool:
     """Re-run this install's one-shot database import. For a BROKEN install only.
+
+    `safety_copy` (T678 review round 3): dumps the core databases and says where, as a
+    sentence. Asked before what an unfinished first import wrote is cleared, and that
+    clear is refused without one.
 
     The installer is the only thing that runs the import on a healthy path, and
     `start_staged()` exists precisely so an ordinary Start can never reach it.
@@ -2519,9 +2686,12 @@ def repair_import(
        compose brings up, so `up` returns when it exits. Without it, `up` would
        also attach to the database and wait for a container that never stops.
 
-    The exit code of that second command is not the answer, for the same reason
-    `remove_staged()` does not believe `compose down`'s: the probe is run again
-    afterwards, and only a database that is no longer repairable counts.
+    The exit code of that second command is not the whole answer, for the same
+    reason `remove_staged()` does not believe `compose down`'s: the probe is run
+    again afterwards, and only a database that is no longer repairable counts. But
+    a non-zero one is a failure on its own (T678): an importer that died part-way
+    leaves schemas the probe can read as `imported` (T658), so this until then
+    called a crashed import a finished repair.
 
     **Live-gated on yulon-ubuntu, 2026-08-23**, against a copy of a real
     AzerothCore + playerbots + city-bots install on a brand-new empty volume,
@@ -2631,7 +2801,50 @@ def repair_import(
     # schemas that can read as `imported`. They are cleared whole and imported again, as the
     # install's import stage does; player data still refuses, below and in `reset`.
     ended = one_shot_ended_marker(server_dir, service).is_file()
-    if ended and before.state in ("imported", "partial"):
+    if before.state == "populated" and import_record_is_from_empty(server_dir, service):
+        # T678 review round 2 (owner: "refuse + offer a clean redo"): rows written by an
+        # import that began over empty databases and never finished -- a module's seeded
+        # accounts. The record is why they are not a player's; without it, the refusal below.
+        if reset is None or safety_copy is None:
+            raise DockerRefusal(
+                "an earlier import of this install did not finish, and this game has no way to "
+                "copy and clear what it wrote. Nothing was run."
+            )
+        if before.characters != 0:
+            # Review round 3: such an import seeds accounts (City Bots), never a character.
+            # A server started by hand on it, whose own updater finished the world, can have
+            # players since, and the record still stands: those are never cleared.
+            counted = "could not be counted" if before.characters is None else "were found"
+            raise DockerRefusal(
+                f"an earlier import of this install did not finish, but characters {counted} in "
+                f"its databases ({before.detail}). A first import never writes a character, so "
+                "somebody may have played on this server since, and nothing was cleared or run. "
+                "To go back, restore one of its backups on the Maintenance tab."
+            )
+        logger.warning(
+            f"repair_import(): copying, then clearing, what an unfinished first import wrote "
+            f"({before.detail})"
+        )
+        try:
+            saved = safety_copy()
+        except Exception as exc:
+            raise DockerCommandError(
+                "a safety copy of the databases could not be taken, so nothing was cleared or "
+                f"run: {exc}"
+            ) from exc
+        logger.warning(f"repair_import(): safety copy taken first: {saved}")
+        if output is not None:
+            output(saved)
+        try:
+            dropped = reset(everything=True, seeded=True)
+        except Exception as exc:
+            raise DockerCommandError(
+                "what the unfinished import wrote could not be cleared, so the import was not "
+                f"re-run and nothing else was changed: {exc}"
+            ) from exc
+        logger.warning(f"repair_import(): dropped {', '.join(dropped)}; re-running the import")
+        before = ImportState("absent", "cleared after an unfinished first import")
+    elif ended and before.state in ("imported", "partial"):
         if reset is None:
             raise DockerRefusal(
                 "an earlier import of this install was ended before it finished, and this "
@@ -2697,7 +2910,12 @@ def repair_import(
         )
 
     logger.warning(f"repair_import(): `compose up --no-deps {service}` in {server_dir}")
+    # T678: recorded before it runs, so a run that does not finish leaves the record
+    # however it ends; and a non-zero exit is a failure whatever the probe reads after.
+    mark_import_under_way(server_dir, service)
     run = run_one_shot(service, server_dir, wsl_distro=wsl_distro, sink=output, record_ended=True)
+    if run.returncode != 0:
+        raise import_failed(service, server_dir, run)
     verify_import(probe, service, server_dir, run)
     # T658: a verified import; an earlier ended one no longer describes these databases.
     one_shot_ended_marker(server_dir, service).unlink(missing_ok=True)
@@ -3004,13 +3222,25 @@ def run_one_shot(
     shows nothing. The run's output is what there is — it arrives at `sink` and
     a bounded tail comes back on the result.
 
-    The exit status is returned rather than raised for the reason
-    `repair_import()` records: a one-shot that failed part-way and one that
-    failed having done nothing exit alike, and only a probe of the result can
-    tell them apart.
+    The exit status is returned rather than raised: what a failure means is the
+    caller's to say (an install, a Repair, a Rebuild and the Modules tab each say
+    it differently), and every caller of the database import refuses a non-zero
+    one (T678).
+
+    `--exit-code-from` (T678) is what makes that status the one-shot's own.
+    Measured on yulon-ubuntu, Compose 2.40.3, 2026-10-11, with a busybox one-shot
+    that printed an `ERROR 1146` line and exited 1: plain attached
+    `compose up --no-deps <svc>` printed "exited with code 1" and itself exited
+    **0**, every time; with `--exit-code-from <svc>` it exited 1, and 0 for a
+    one-shot that exited 0. The database the one-shot writes to, started before
+    by `compose up -d --no-deps <db>`, was still running afterwards, and a
+    SIGTERM to the CLI stopped the one-shot exactly as it did without the flag.
+    `compose run` always returned the container's status (it exited 1 there).
+    Until then the install's import, Repair and the server-data download never
+    saw a one-shot fail, only what the probe read afterwards.
     """
     argv = (
-        ["compose", "up", "--no-deps", service]
+        ["compose", "up", "--no-deps", "--exit-code-from", service, service]
         if allowed_modules is None
         else [
             "compose",
@@ -3034,13 +3264,47 @@ def run_one_shot(
             service, server_dir, wsl_distro=wsl_distro, record_ended=record_ended
         ),
     )
+    if allowed_modules is None:
+        run = replace(run, tail=_without_compose_epilogue(run.tail))
     if run.returncode != 0:
-        # Not raised here. See above — the probe is the only thing that can
-        # tell the two failures apart, so this only makes sure the reason is in
-        # the log.
+        # Not raised here (see above); this only makes sure the reason is in the log.
         words = " / ".join(importer_last_words(run.tail))
         logger.warning(f"{service} exited {run.returncode}: {words}")
     return run
+
+
+_COMPOSE_PREFIX = re.compile(r"^[\w.-]+\s+\|\s?")
+"""What attached `compose up` puts before each line a service prints: `ac-db-import  | `."""
+
+_COMPOSE_EPILOGUE = re.compile(
+    r"^(?:Aborting on container exit\.\.\.|Container \S+\s+(?:Stopping|Stopped))$"
+)
+"""What `compose up --exit-code-from` prints after the one-shot exits (yulon-ubuntu, 2026-10-11)."""
+
+
+_COMPOSE_OWN_LINE = re.compile(
+    r"^(?:\S+ exited with code \d+|Attaching to .+|Aborting on container exit\.\.\."
+    r"|Container \S+\s+\w+)$"
+)
+"""A line compose prints about the one-shot rather than one the one-shot printed (T678)."""
+
+
+def unprefixed(line: str) -> str:
+    """A line as the one-shot printed it, without compose's `<service>  | ` in front."""
+    return _COMPOSE_PREFIX.sub("", line.strip(), count=1)
+
+
+def _without_compose_epilogue(tail: tuple[str, ...]) -> tuple[str, ...]:
+    """`tail` without compose's own closing lines, so the one-shot's last words end it (T678).
+
+    Live on yulon-ubuntu (2026-10-11): with `--exit-code-from` the importer's last
+    lines were followed by "Aborting on container exit..." and the container's
+    Stopping/Stopped, which a five-line window then showed instead of its error.
+    """
+    kept = list(tail)
+    while kept and (not kept[-1].strip() or _COMPOSE_EPILOGUE.match(kept[-1].strip())):
+        kept.pop()
+    return tuple(kept)
 
 
 IMPORT_REST_UNDER_DETAILS = (
@@ -3051,6 +3315,155 @@ IMPORT_REST_UNDER_DETAILS = (
 Both callers show Details: Repair under its press, and the install engine's
 failure through `said.with_details()`.
 """
+
+
+_FAILED_UPDATE = re.compile(r"Applying of file '([^']+\.sql)' to database '([^']*)' failed")
+"""The importer's own failure line (`apply._FAILED_UPDATE`'s pattern, which the Modules
+tab's report reads), with the database it names."""
+
+
+def importer_failure(
+    run: AttachedRun, what: str, *, first_import: bool = False, install_dir: Path | None = None
+) -> str:
+    """Why an import one-shot failed, naming the file and the way past it.
+
+    T706 round 2, for a Rebuild's or an update's import: the pinned updater applies a
+    file again whenever its SHA1 changed since it was applied (`Updates.Redundancy` 1),
+    and tries a failed one again on every run, so one broken module file fails every
+    Rebuild and update until it applies. The sentence names that file, whose it is (the
+    module folder it is in), mysql's error, and the presses that get past it.
+
+    `first_import` (T678): the install's import or Repair's, on databases that held
+    nothing before it. Nothing was started then, and the databases are unfinished,
+    whatever the probe reads of them afterwards: the importer creates every schema's
+    `updates` tables before it applies the updates (T658).
+
+    `install_dir` (T757): the first import was the INSTALL's, into that folder. A game
+    has no tab until an install succeeds, so the sentence names Install again, or
+    "Use existing…" on the folder before the tabs it names, instead of a tab's press.
+    """
+    found: tuple[str, str, str] | None = None
+    error = ""
+    for line in run.tail:
+        plain = unprefixed(line)
+        if _MYSQL_ERROR.match(plain):
+            error = plain
+            continue
+        match = _FAILED_UPDATE.search(plain)
+        if match:
+            found = (match.group(1), match.group(2), error)
+            error = ""
+    outcome = (
+        "the databases are unfinished and nothing was started"
+        if first_import
+        else "the new build was not started"
+    )
+    if found is None:
+        if first_import and install_dir is not None:
+            return (
+                f"{what} failed (exit {run.returncode}), so {outcome}. Press Install again and "
+                f"choose {install_dir} to run it again. {IMPORT_REST_UNDER_DETAILS}"
+            )
+        if first_import:
+            # T214's rule for these presses: the importer's own words are under Details.
+            return (
+                f"{what} failed (exit {run.returncode}), so {outcome}. Press Repair on the "
+                f"Server tab to clear what it wrote and run it again. {IMPORT_REST_UNDER_DETAILS}"
+            )
+        return (
+            f"{what} failed (exit {run.returncode}), so {outcome}. Its last words were: "
+            f"{last_words(run.tail)}"
+        )
+    path, database, mysql = found
+    parts = posixpath.normpath(path).split("/")
+    module = parts[parts.index("modules") + 1] if "modules" in parts[:-2] else ""
+    whose = f"one of {module}'s" if module else "one of the server's own"
+    why = f" ({mysql})" if mysql else ""
+    if first_import:
+        # T678 review round 2: no "or the server without it" -- City Bots' accounts are
+        # in acore_auth by then, so only Repair's clean redo gets past it.
+        first = (
+            f"update or remove {module} on the Modules tab, then press Repair"
+            if module
+            else "press Repair"
+        )
+        # T757: Install again stops on the same file, and the install has no tab yet.
+        tab = (
+            f'press "Use existing…" and choose {install_dir} to get its tabs, then {first} on '
+            "the Server tab"
+            if install_dir is not None
+            else f"{first} on the Server tab"
+        )
+        return (
+            f"The database update {posixpath.basename(path)}, {whose}, could not be applied "
+            f"to {database}, so {outcome}. The importer tries that file again each time it "
+            f"runs, so every import stops there until it applies: {tab}, "
+            f"which clears what this import wrote and runs it again. {IMPORT_REST_UNDER_DETAILS}"
+        )
+    way = (
+        f"update or remove {module} on the Modules tab; “Apply module SQL” there, with the "
+        "server stopped, shows the importer's whole output."
+        if module
+        else "its whole output is under Details."
+    )
+    return (
+        f"The database update {posixpath.basename(path)}, {whose}, could not be applied to "
+        f"{database}{why}, so {outcome}. AzerothCore's importer applies "
+        "an update again whenever its file has changed since, and tries a failed one again "
+        f"each time it runs, which every rebuild and update does, so each of them stops here "
+        f"until that file applies: {way}"
+    )
+
+
+def import_failed(
+    service: str, server_dir: Path, run: AttachedRun, *, installing: bool = False
+) -> DockerRefusal:
+    """The refusal for a first import whose one-shot exited non-zero (T678), Details attached.
+
+    `installing` (T757): the install's own import, whose sentence names no tab.
+    """
+    return DockerRefusal(
+        importer_failure(
+            run,
+            "The database import",
+            first_import=True,
+            install_dir=server_dir if installing else None,
+        ),
+        detail=_import_details(service, server_dir, run),
+    )
+
+
+IMPORT_UNDER_WAY = "was started and not yet seen to finish"
+"""The words `mark_import_under_way()` writes; `import_record_is_from_empty()` looks for them."""
+
+
+def mark_import_under_way(server_dir: Path, service: str) -> None:
+    """Write `one_shot_ended_marker()` BEFORE a first import runs; a verified one removes it (T678).
+
+    So an import that does not finish, for any reason, leaves it: an exit of its own
+    (a module's SQL, a full disk, a database that restarted), Docker or WSL going
+    away under it, or Yu'lon or the machine ending mid-run, where no code of ours
+    runs afterwards to write anything. Only `stage_import()` and `repair_import()`
+    call this, and only once the databases read empty or were cleared, so the
+    record never stands over databases an import had finished.
+    """
+    _mark_one_shot_ended(server_dir, service, IMPORT_UNDER_WAY)
+
+
+def import_record_is_from_empty(server_dir: Path, service: str) -> bool:
+    """Whether the record standing is `mark_import_under_way()`'s (T678 review round 2).
+
+    That record is written only over databases that read empty or were just cleared,
+    and removed once an import is verified, so while it stands every row in them was
+    written by the import that did not finish -- City Bots' 400 accounts, say, which
+    land in acore_auth before a failing world update stops it. `end_one_shot()`'s own
+    record (T658) is written over whatever databases there are, so it is not this.
+    """
+    try:
+        said = one_shot_ended_marker(server_dir, service).read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return IMPORT_UNDER_WAY in said
 
 
 def _import_details(service: str, server_dir: Path, run: AttachedRun) -> str:
@@ -3134,6 +3547,7 @@ def apply_module_sql(
     db_timeout: float = _DB_HEALTHY_TIMEOUT_SECONDS,
     modules: str | None = None,
     wsl_distro: str | None = None,
+    before_run: Callable[[], None] | None = None,
 ) -> AttachedRun:
     """Run the one-shot importer for the modules on disk. The route nothing else takes.
 
@@ -3182,6 +3596,12 @@ def apply_module_sql(
     measurement). The three meanings of the value, `""` among them, are on
     `ALL_MODULES`; nothing is validated here, because upstream's own reading is
     the only one that counts.
+
+    `before_run` (T779) is called once every refusal above has passed and the
+    database is up, immediately before the importer starts. It raises to stop
+    the run with nothing applied: the per-module checks that need the database
+    (City Bots' account ids) cannot be asked earlier, and cannot be asked by
+    this function, which knows no module and no password.
 
     Raises:
         DockerCommandError: any of the refusals above, the database never became
@@ -3258,6 +3678,10 @@ def apply_module_sql(
     )
 
     allowed = allowed_modules(server_dir) if modules is None else modules
+    if before_run is not None:
+        # T779: the caller's last word, with every refusal above passed and the database up,
+        # and before the importer starts. A raise here means nothing was applied.
+        before_run()
     logger.warning(f"apply_module_sql(): running {service} for modules: {allowed!r}")
     run = run_one_shot(
         service, server_dir, allowed_modules=allowed, wsl_distro=wsl_distro, sink=output
@@ -3340,7 +3764,8 @@ def importer_left_sentence(left: OneShotLeft, nothing_done: str) -> str:
 def one_shot_ended_marker(server_dir: Path, service: str) -> Path:
     """The file that says a run of `service` in this folder was ended before it finished (T658).
 
-    Written by `end_one_shot()` when it has to kill one, and left until a later
+    Written by `end_one_shot()` when it has to kill one, and since T678 also
+    before a first import starts (`mark_import_under_way()`), and left until a later
     run of that one-shot is seen to finish. For the database import that is the
     only reliable record: AzerothCore's importer creates every schema's
     `updates` tables before it applies the updates, so one killed while it
@@ -3351,12 +3776,20 @@ def one_shot_ended_marker(server_dir: Path, service: str) -> Path:
     return Path(server_dir) / f".yulon-{service}-ended"
 
 
-def _mark_one_shot_ended(server_dir: Path, service: str) -> None:
-    """Write `one_shot_ended_marker()`; a folder that will not take it is logged, not raised."""
+def _mark_one_shot_ended(
+    server_dir: Path, service: str, what: str = "was ended before it finished"
+) -> None:
+    """Write `one_shot_ended_marker()`; a folder that will not take it is logged, not raised.
+
+    A kill's record never replaces one already there (T678 review round 2): a Stop
+    ending the import `mark_import_under_way()` recorded must leave that record, which
+    is the one that lets Repair clear the rows that import wrote.
+    """
+    marker = one_shot_ended_marker(server_dir, service)
+    if what != IMPORT_UNDER_WAY and marker.is_file():
+        return
     try:
-        one_shot_ended_marker(server_dir, service).write_text(
-            f"{service} was ended before it finished\n", encoding="utf-8"
-        )
+        marker.write_text(f"{service} {what}\n", encoding="utf-8")
     except OSError as exc:
         logger.warning(f"could not record that {service} was ended in {server_dir}: {exc}")
 
@@ -3455,6 +3888,25 @@ def end_one_shot(
         time.sleep(_ONE_SHOT_POLL_SECONDS)
 
 
+def _end_the_import_first(
+    spec: ContainerSpec, server_dir: Path, *, wsl_distro: str | None = None
+) -> None:
+    """End this install's running database import, recorded, before a stop ends it (T754).
+
+    `compose stop`/`down` end every service of the project, the importer too, and
+    write nothing: a server started by hand runs its importer for ~10 minutes, and
+    AzerothCore's half-imported schemas then read `imported`, so the next Start ran
+    on them. `end_one_shot(record_ended=True)` writes T658's record before its kill,
+    and only when it finds one running; an import that finished leaves none. One
+    that could not be ended is logged and the stop goes on: the stop ends it anyway.
+    """
+    if not spec.import_service:
+        return
+    left = end_one_shot(spec.import_service, server_dir, wsl_distro=wsl_distro, record_ended=True)
+    if left is not None:
+        logger.warning(f"the database import could not be ended before the stop: {left.reason}")
+
+
 _MYSQL_ERROR = re.compile(r"^ERROR \d+ \([0-9A-Z]+\)")
 """The mysql client's own error line: `ERROR 1064 (42000) at line 2: You have an error ...`."""
 _IMPORTER_APPLYING = re.compile(r"Applying update\b")
@@ -3473,7 +3925,11 @@ def importer_last_words(tail: Sequence[str]) -> list[str]:
     it that say what the importer made of it. Without one, the last five lines.
     Every line is kept whole; colour codes are already gone (`run_attached()`).
     """
-    said = [line.strip() for line in tail if line.strip()]
+    said = [
+        plain
+        for line in tail
+        if (plain := unprefixed(line)) and not _COMPOSE_OWN_LINE.match(line.strip())
+    ]
     errors = [i for i, line in enumerate(said) if _MYSQL_ERROR.match(line)]
     if not errors:
         return said[-_LAST_WORDS_LINES:] or ["it printed nothing at all"]
@@ -3722,9 +4178,9 @@ def _stranger_message(
 
 
 WORLD_STILL_LOADING = (
-    "The world is finishing its load before it can stop. A world server that is still loading "
-    "ignores a stop, so Yu'lon waits until it can hear one and then stops it cleanly. That is "
-    "usually under a minute; a first start can take much longer."
+    "The world server is finishing its load before it can stop. A world server that is still "
+    "loading ignores a stop, so Yu'lon waits until it can hear one and then stops it cleanly. "
+    "That is usually under a minute; a first start can take much longer."
 )
 """Said when a stop finds the world still loading and waits (T158), and again after a spell
 of `WORLD_LOAD_UNCHECKED`.
@@ -3735,8 +4191,8 @@ the caller's "Stop now anyway".
 """
 
 WORLD_LOAD_UNCHECKED = (
-    "Yu'lon can't check whether the world has finished loading: Docker is not answering the "
-    "question. It keeps checking and will not stop the world until it can hear the stop -- "
+    "Yu'lon can't check whether the world server has finished loading: Docker is not answering the "
+    "question. It keeps checking and will not stop the world server until it can hear the stop -- "
     'press "Stop now anyway" to stop it regardless.'
 )
 """Said when a look at a running world could not be read (T158, round 3: fail closed).
@@ -3746,7 +4202,7 @@ the stop, and not for one that is gone: the wait goes on, says so, and says
 the loading sentence again once a look reads.
 """
 
-WORLD_FINISHED_LOADING = "The world has finished loading; stopping it now."
+WORLD_FINISHED_LOADING = "The world server has finished loading; stopping it now."
 """Said once the world can hear the stop, if a wait was announced first (T158)."""
 
 WORLD_STUCK_AT_UPDATE_TAIL = (
@@ -3759,8 +4215,8 @@ _UPDATE_LOG_TAIL = 20
 """How many lines of a run's log a stop reads to see whether it ends on a failed update."""
 
 WORLD_STOPPED_ANYWAY = (
-    "Stopping the world now, as asked, although it had not finished loading. It may be "
-    "force-stopped: a world still loading ignores the stop and is killed when the "
+    "Stopping the world server now, as asked, although it had not finished loading. It may be "
+    "force-stopped: a world server still loading ignores the stop and is killed when the "
     f"{STOP_GRACE_SECONDS // 60}-minute grace ends, and anything since its last save is lost."
 )
 """Said when "Stop now anyway" ends the wait of a world not seen able to hear the stop (T158)."""
@@ -4937,6 +5393,9 @@ def stop_staged(
     # After the census, so a refusal is never kept waiting for a load; before
     # the command, because a CMaNGOS world signalled mid-load drops the SIGTERM
     # and sits out the whole grace to a SIGKILL (T158).
+    # T754: a running importer is ended, and recorded, before `compose stop` ends it
+    # unrecorded (a server started by hand runs its import for ~10 minutes).
+    _end_the_import_first(spec, server_dir, wsl_distro=wsl_distro)
     if spec.world in before.ours:
         heard = wait_for_the_world_to_load(spec, control, wsl_distro=wsl_distro)
         # T384: the world alone first, waited for while it saves. The fixed grace below
@@ -5607,6 +6066,36 @@ def wait_ready_for(spec: ContainerSpec, ready: ReadySpec, *, wsl_distro: str | N
     return wait_ready(spec.auth, spec.world, ready, wsl_distro=wsl_distro)
 
 
+def port_publishers(
+    ports: Sequence[int], *, wsl_distro: str | None = None
+) -> dict[int, tuple[str, ...]]:
+    """Each of `ports` that a running container publishes, with the containers publishing it.
+
+    One `docker ps`, parsed as `port_holders()` parses it, with no ownership asked:
+    `Controller.start()` reads it to name the ports another server holds (T671) and to
+    leave a port a container publishes to Docker rather than bind it itself.
+    """
+    wanted = set(ports)
+    if not wanted:
+        return {}
+    proc = _run(["ps", "--format", "{{.Names}}\t{{.Ports}}"], wsl_distro=wsl_distro)
+    found: dict[int, list[str]] = {}
+    for line in proc.stdout.splitlines():
+        if "\t" not in line:
+            continue
+        name, ports_field = line.split("\t", 1)
+        for part in ports_field.split(","):
+            if "->" not in part:
+                continue
+            _, _, port_text = part.split("->", 1)[0].rpartition(":")
+            port_text = port_text.strip()
+            if port_text.isdigit() and int(port_text) in wanted:
+                names = found.setdefault(int(port_text), [])
+                if name not in names:
+                    names.append(name)
+    return {port: tuple(names) for port, names in found.items()}
+
+
 def port_conflicts_for(spec: ContainerSpec, *, wsl_distro: str | None = None) -> list[str]:
     """`port_conflicts()` for `spec.ports` — the convenience form callers want."""
     return port_conflicts(spec.ports, wsl_distro=wsl_distro)
@@ -5641,7 +6130,12 @@ NETSH_RESERVED_RANGES = "netsh interface ipv4 show excludedportrange protocol=tc
 
 
 def blocked_port_sentence(
-    port: int, kind: Literal["reserved", "in_use"], *, windows: bool, what: str = ""
+    port: int,
+    kind: Literal["reserved", "in_use"],
+    *,
+    windows: bool,
+    what: str = "",
+    program: str = "",
 ) -> str:
     """Plain words for a host port that cannot be bound: the reason, then what to do (T574).
 
@@ -5649,11 +6143,13 @@ def blocked_port_sentence(
     probe, before the build, and the daemon's own `ports are not available`
     error from `up`, which covers a range reserved between the two (a reboot).
     `kind` is a definite fact in both; a refused or timed-out connect is not.
+    `program` is the holder's name where the OS told Start's probe (T671).
     """
     named = f"port {port} ({what})" if what else f"port {port}"
     if kind == "in_use":
+        holder = f" ({program})" if program else ""
         return (
-            f"Another program on this computer already uses {named}, so the server cannot "
+            f"Another program on this computer{holder} already uses {named}, so the server cannot "
             "start. Close that program or stop its service, then try again."
         )
     if windows:
@@ -5668,6 +6164,18 @@ def blocked_port_sentence(
     return (
         f"This computer will not let a program use {named} (permission denied), so the "
         "server cannot start. Free the port or change what reserves it, then try again."
+    )
+
+
+def another_server_sentence(port: int) -> str:
+    """Plain words for a port another server's container publishes, Docker's own refusal (T671).
+
+    Start's check before anything starts names that server and offers to stop it; this
+    is the same collision met by compose itself (a server started in between).
+    """
+    return (
+        f"Another server on this computer already uses port {port}, so this server cannot "
+        "start. Stop that server first, or press Start again to be offered to stop it."
     )
 
 
@@ -6683,6 +7191,24 @@ def build_staged(
     lines are what `_check_run()` and `base_image_unreachable()` read. A Stop
     between two calls starts no further one.
 
+    **One exception: a call whose BuildKit session died is made once more
+    (T733).** A service's first build on its folder sends its whole context,
+    because a new folder is a new buildx node: 1.5 GB for the world and auth
+    servers and 2.4 GB for db-import on WotLK, almost all of it the `.git` the
+    compile bind-mounts. On yulon-win11 that took 8 minutes, and Docker Desktop
+    froze during db-import's send. BuildKit's session check (`SESSION_DIED`)
+    failed through the freeze and the Rebuild was over. A send that dies keeps
+    nothing (measured on m910q and on the box), so without a retry the next
+    press is just as cold. The second try runs on the same folder, so a send
+    that does finish is kept for every later Rebuild. It waits until Docker
+    answers again (`_docker_answers_again()`, at most
+    `SESSION_RETRY_PATIENCE_S`, the panel told `SESSION_WAIT_LINE` as the wait
+    starts, T742); with no answer by then, the first try's run is
+    the answer, and a Stop during the wait ends the build as a Stop. It is made
+    only once, and never after a Stop; if it also fails, its run is the answer.
+    `.notes/tickets/T733-windows-rebuild-context-timeout-on-big-server-folder.md`
+    holds the measurements.
+
     Unbounded on purpose (rust-prior-art §1: probes are bounded, builds are
     not). Returns the run rather than raising, so the caller can tell a
     cancellation from a failure.
@@ -6732,7 +7258,8 @@ def build_staged(
             f"build_staged(): `docker {' '.join([*argv, service])}` in {server_dir}, "
             f"BUILDX_CONFIG={config}, on the {context} context's own builder"
         )
-        run = run_attached(
+        build_it = functools.partial(
+            run_attached,
             [*argv, service],
             server_dir,
             wsl_distro=wsl_distro,
@@ -6741,10 +7268,116 @@ def build_staged(
             merge_stderr=True,
             env=env,
         )
+        run = build_it()
+        if _session_died(run) and not (cancel is not None and cancel.is_set()):
+            with contextlib.suppress(Exception):  # run_attached()'s rule: a dead sink is dropped
+                if sink is not None:
+                    sink(SESSION_WAIT_LINE)
+            answered = _docker_answers_again(wsl_distro, cancel)
+            if answered is None:
+                logger.warning(f"build_staged(): stopped while waiting for Docker ({service})")
+                return AttachedRun(CANCELLED_RETURNCODE, run.tail)
+            if not answered:
+                logger.warning(
+                    f"build_staged(): Docker did not answer within {SESSION_RETRY_PATIENCE_S:g} s "
+                    f"after {service}'s build session died; not trying again"
+                )
+                return run
+            logger.warning(f"build_staged(): {service}'s build session died; building it again")
+            with contextlib.suppress(Exception):  # run_attached()'s rule: a dead sink is dropped
+                if sink is not None:
+                    sink(SESSION_RETRY_LINE)
+            run = build_it()
         if run.returncode != 0:
             return run
         tail.extend(run.tail)
     return AttachedRun(0, tuple(tail))
+
+
+SESSION_DIED = "session healthcheck failed fatally"
+"""BuildKit's words when the build's session with the docker client died (T733).
+
+The session carries the build context from the client to the daemon. Docker
+Desktop's VM log on yulon-win11 (2026-10-12) shows the daemon pinging it with a
+15 s timeout and giving up after the pings failed through a five-minute freeze
+of Docker Desktop. A session that dies after the context is sent costs nothing
+(the same night's worldserver compile went on and passed); one that dies while
+the context is sent fails the build, and that send is not kept.
+"""
+
+
+def _session_died(run: AttachedRun) -> bool:
+    """Whether this failed build call failed because BuildKit's session died (T733)."""
+    return run.returncode != 0 and any(SESSION_DIED in line for line in run.tail)
+
+
+SESSION_RETRY_LINE = "Docker stopped answering during the build; trying once more."
+"""What the build panel is told before the second try (T733).
+
+True whenever the retry runs: the session can die while the context is sent or
+later in the build, so the line names neither the folder nor the service.
+"""
+
+SESSION_RETRY_PATIENCE_S = 180.0
+"""How long the build waits for Docker to answer before the second try (T733 review N1).
+
+On yulon-win11 Docker was still not answering about 55 s after the session died
+(Yu'lon's own ask then waited 16 s, 02:55:56 local). The three minutes are the
+recreate's own patience for the same Docker (`native.DOCKER_PATIENCE_S`).
+"""
+
+SESSION_WAIT_LINE = (
+    f"Waiting up to {SESSION_RETRY_PATIENCE_S / 60:g} minutes for Docker to answer again."
+)
+"""What the build panel is told as the wait before the second try starts (T742).
+
+Without it the panel's last line for up to `SESSION_RETRY_PATIENCE_S` is
+BuildKit's "failed to solve", which reads as a finished failure while the press
+is still busy. It goes out before the first ask, so it promises no retry: if
+Docker does not answer, the first try's failure is the answer and
+`SESSION_RETRY_LINE` is never told. The same rules as that line: no service, no
+folder, no BuildKit words.
+"""
+
+SESSION_RETRY_POLL_S = 5.0
+"""The pause between two asks while waiting (T733 review N1)."""
+
+_SESSION_RETRY_ASK_S = 10.0
+"""One ask's own bound: `docker info` against a Docker that is not answering can hang."""
+
+
+def _docker_answers_again(wsl_distro: str | None, cancel: threading.Event | None) -> bool | None:
+    """Ask Docker until it answers: True once it does, False after the patience, None on a Stop.
+
+    Each ask is `daemon_ready()`, the question every rebuild asks of the Docker
+    the install lives on: for a WSL server that is the distro's own Docker
+    through `wsl.exe` (T125), not the local CLI that `platform._wait_docker_ready()`
+    polls. `native`'s recreate wait (`DOCKER_PATIENCE_S`) is a stage method on
+    its seams and yields panel lines, so it cannot be called from here.
+
+    Bounded by the clock: no ask starts once `SESSION_RETRY_PATIENCE_S` is spent,
+    and each ask is cut to what is left (at most `_SESSION_RETRY_ASK_S`, which
+    `runner.run()` enforces by killing the ask). The pause is `cancel.wait()`, so
+    a Stop ends it at once; a Stop during an ask is read when the ask returns.
+    """
+    started = time.monotonic()
+    while True:
+        left = SESSION_RETRY_PATIENCE_S - (time.monotonic() - started)
+        if left <= 0:
+            return False
+        answered = daemon_ready(wsl_distro=wsl_distro, timeout=min(_SESSION_RETRY_ASK_S, left))
+        if cancel is not None and cancel.is_set():
+            return None
+        if answered:
+            return True
+        left = SESSION_RETRY_PATIENCE_S - (time.monotonic() - started)
+        if left <= 0:
+            return False
+        pause = min(SESSION_RETRY_POLL_S, left)
+        if cancel is None:
+            time.sleep(pause)
+        elif cancel.wait(pause):
+            return None
 
 
 BUILDER_PROBE_TIMEOUT = 30.0
@@ -8948,6 +9581,45 @@ def server_claim(
     up_timeout: float | None = None,
     avoid_images: Sequence[str] = (),
 ) -> Iterator[ClaimHeld]:
+    """`_server_claim()`, counted as `press` in this process (`_press_on()`, T681).
+
+    Raises:
+        ServerHeldError: a job of this process writes to the server alone (a Restore).
+        ServerReserved: another process (or an earlier run of this Yu'lon) holds it.
+        ServerReservationUnavailable: no reservation could be made.
+    """
+    with (
+        _press_on(server_dir, press),
+        _server_claim(
+            server_dir,
+            press=press,
+            images=images,
+            spec=spec,
+            wsl_distro=wsl_distro,
+            cancel=cancel,
+            label=label,
+            this_press=this_press,
+            up_timeout=up_timeout,
+            avoid_images=avoid_images,
+        ) as held,
+    ):
+        yield held
+
+
+@contextmanager
+def _server_claim(
+    server_dir: Path | str,
+    *,
+    press: str,
+    images: Sequence[str] = (),
+    spec: ContainerSpec | None = None,
+    wsl_distro: str | None = None,
+    cancel: threading.Event | None = None,
+    label: str | None = None,
+    this_press: str | None = None,
+    up_timeout: float | None = None,
+    avoid_images: Sequence[str] = (),
+) -> Iterator[ClaimHeld]:
     """Reserve this server across processes while inside; a press goes ahead only inside one (T568).
 
     T543's claim, per server: a container `yulon-busy-<server folder id>` that the daemon
@@ -9101,6 +9773,28 @@ def _new_reservation(
     ]
     claim: _Claim | None = None
     last: ClaimUnavailable | None = None
+    if wsl_distro is not None:
+        booted = wsl.boot(
+            wsl_distro,
+            cancel=cancel,
+            timeout=None if budget_end is None else max(0.0, budget_end - time.monotonic()),
+        )
+        if booted != "up":
+            # T775/T776: the first command into a cold distro boots it, which takes longer than the
+            # seconds a reservation question gets, so its Docker was waited for. The advice fits
+            # the cause. `moot` (the press goes ahead and meets the failure itself) when no
+            # reservation can race with it: no Docker program, Docker Desktop off, a socket that
+            # refuses this user, a vanished distro, or a distro that was already running whose
+            # daemon never answered (stopped on purpose). Otherwise Uninstall, Backup and the
+            # other holds would refuse a broken install that must stay removable (T622). NOT moot
+            # after a boot was seen ("slow") or on Cancel: asking on would read "Docker is down"
+            # and let the press run unreserved into a daemon that is about to appear.
+            raise ServerReservationUnavailable(
+                forgetting.server_reservation_unavailable(
+                    label, forgetting.wsl_docker_unreachable(wsl_distro, booted)
+                ),
+                moot=booted not in ("slow", "cancelled"),
+            )
     chain = _reservation_images(spec, images, wsl_distro, budget_end, avoid_images)
     waited_for_a_dying_one = False
     while True:

@@ -572,6 +572,8 @@ def _default_conflicts(
 
 
 _LOOPBACK = "127.0.0.1"
+LOOPBACK = _LOOPBACK
+"""The address `bind_targets()` gives a loopback-only publish (the database, SOAP)."""
 _ALL_INTERFACES = "0.0.0.0"
 _PORT_OVERRIDES = {
     "auth port": "DOCKER_AUTH_EXTERNAL_PORT",
@@ -792,6 +794,67 @@ def _volume_of(path: Path, platform_id: str) -> object:
     return probe.stat().st_dev
 
 
+CANNOT_INSTALL_YET = "This machine cannot install the server yet:"
+"""The first words of the refusal preflight raises when a row refuses (T702).
+
+`CatalogView` titles a message that starts with this "Cannot install yet" rather than
+"Install failed", since nothing was started; the engine's raise and the view's test both
+use this constant, so they cannot drift apart.
+"""
+
+
+def cheap_data_root(platform_id: str) -> Path | None:
+    """Where Docker keeps its images, told without asking Docker. None = unknown.
+
+    The early check runs on the window's thread, before any folder is picked, so it must not
+    wait on a daemon. Windows and macOS name theirs in Docker Desktop's settings file. On
+    Linux nothing cheap is true: `/var/lib/docker` can be a leftover beside Docker Desktop,
+    a rootless engine, or a data-root moved by `daemon.json`, so it is unknown there and the
+    full preflight, which asks the daemon, keeps the one-drive sum.
+    """
+    if platform_id in ("windows", "macos"):
+        return platform.docker_desktop_data_root()
+    return None
+
+
+def early_space_refusal(
+    entry: CatalogEntry,
+    server_dir: Path,
+    *,
+    platform_id: str,
+    data_root: Path | None,
+    free: Callable[[Path], int | None] = free_bytes,
+) -> str | None:
+    """One plain sentence when `server_dir`'s drive cannot hold this install, else None (T702).
+
+    Asked as soon as the server folder is known, before the client folder is picked and
+    before any daemon is. It refuses on exactly the floor `evaluate()` refuses on and on
+    nothing softer, from the two numbers the answer needs: the free space where the server
+    will go and, when the images share that drive, the added need. Anything it cannot
+    measure is not a refusal; the full preflight still has the last word.
+    """
+    native = entry.install.native
+    if native is None:
+        return None
+    available = free(server_dir)
+    if available is None:
+        return None
+    shared = _same_volume(data_root, server_dir, platform_id) is True
+    if shared:
+        need = native.floors_gb(same_volume=True)[0] + world_data_gb(entry, platform_id)
+    else:
+        need = native.min_server_dir_gb
+    have = available / GIB
+    if have >= need:
+        return None
+    short, wanted = _short_of(have, need)
+    drive = "that drive, which also holds Docker's disk" if shared else "that drive"
+    return (
+        f"{short} GB is free on {drive}, and {entry.name} needs {wanted} GB. "
+        "Pick a folder on a drive with more room, or free some space there."
+    )
+
+
 def evaluate(
     entry: CatalogEntry, server_dir: Path, facts: Facts, spent: Spent = NOTHING_SPENT
 ) -> Report:
@@ -982,7 +1045,7 @@ def _docker_check(facts: Facts) -> Check:
     return Check(
         "Docker",
         "refuse",
-        "no Docker daemon answered, and it could not be started automatically",
+        "Docker did not answer, and it could not be started automatically",
         _daemon_remedy(facts),
     )
 
@@ -1002,7 +1065,7 @@ def _daemon_remedy(facts: Facts) -> str:
     reason `_WSL_IS_TWO_SHAPES` applies to the whole file rather than to two
     rows. Whatever probe might separate Docker Desktop from an engine installed
     inside the distro, it would have to ask the daemon — and this row exists
-    because the daemon did not answer. So the `wsl` arm names both, Desktop
+    because Docker did not answer. So the `wsl` arm names both, Desktop
     first, and `service` rather than `systemctl` in the second: a WSL distro
     usually boots without systemd, where `systemctl` answers "System has not
     been booted with systemd as init system" and reads as a broken machine
@@ -1021,7 +1084,7 @@ def _daemon_remedy(facts: Facts) -> str:
     if flavour == "wsl":
         return (
             "A WSL distro's Docker comes from one of two places and this check cannot tell "
-            "which, because the daemon did not answer. If Docker Desktop provides it: start "
+            "which, because Docker did not answer. If Docker Desktop provides it: start "
             "Docker Desktop on Windows, wait for the whale icon to stop animating, and check "
             "that this distro is ticked under Settings → Resources → WSL integration. Or, if "
             "this distro runs its own Docker Engine, start it with this (most WSL distros run "
@@ -1066,7 +1129,7 @@ def _compose_check(facts: Facts) -> Check:
         return Check(
             COMPOSE_CHECK,
             "unchecked",
-            "not asked, because no Docker daemon answered",
+            "not asked, because Docker did not answer",
         )
     if facts.compose_ready and platform.compose_too_old(facts.compose_version):
         # T658: a Compose that answers, but stops the import and every Start with "no such
@@ -1170,17 +1233,17 @@ def _ram_check(facts: Facts, refuse_gb: float, warn_gb: float) -> Check:
         return Check(
             "memory",
             "refuse",
-            f"Docker's VM has {gigabytes:.1f} GB, and the build needs {refuse_gb:.0f} GB",
+            f"Docker has {gigabytes:.1f} GB of memory, and the build needs {refuse_gb:.0f} GB",
             _memory_floor_remedy(facts),
         )
     if gigabytes < warn_gb:
         return Check(
             "memory",
             "warn",
-            f"Docker's VM has {gigabytes:.1f} GB, which is enough but not comfortable",
+            f"Docker has {gigabytes:.1f} GB of memory, which is enough but not comfortable",
             f"{warn_gb:.0f} GB makes the build markedly less likely to be killed.",
         )
-    return Check("memory", "pass", f"Docker's VM has {gigabytes:.1f} GB")
+    return Check("memory", "pass", f"Docker has {gigabytes:.1f} GB of memory")
 
 
 WSLCONFIG = "%UserProfile%\\.wslconfig"
@@ -1533,8 +1596,8 @@ def _docker_disk_remedy(facts: Facts) -> str:
     if flavour == "wsl":
         return (
             "This is Docker's own disk, not the install folder — moving the install will not "
-            "help. Free space on the drive Docker stores on. If Docker Desktop provides this "
-            "daemon (WSL integration) that drive is set in Docker Desktop → Settings → "
+            "help. Free space on the drive Docker stores on. If Docker Desktop provides "
+            "Docker here (WSL integration) that drive is set in Docker Desktop → Settings → "
             "Resources → Advanced → Disk image location; if this distro runs its own Docker "
             'Engine it is "data-root" in /etc/docker/daemon.json. Then try again.'
         )
@@ -1554,10 +1617,11 @@ def _space_remedy(what: str, facts: Facts) -> str:
     if what == ONE_VOLUME_SPACE:
         # One drive holds both, so either action frees the same pool and the
         # user should be told they have the choice.
+        # The same-drive point is made once, by the line this answers (T702): its note says
+        # the folder and Docker's disk share one drive, so "it" here is that drive.
         return (
-            "The install folder and Docker's disk are on the same drive, so both needs come "
-            "out of it. Free space on it, install to a drive that has room, or move Docker's "
-            "disk off it, then try again."
+            "Free space on it, install to a drive that has room, or move Docker's disk off it, "
+            "then try again."
         )
     # A row this function has not been taught. Matched explicitly above rather
     # than falling through, because the one-volume sentence asserts that two
@@ -1625,9 +1689,8 @@ def _space_check_macos_bounded(
     return Check(
         "free space on Docker's disk",
         "unchecked",
-        f"{gigabytes:.0f} GB free on the HOST drive — plentiful, but Docker's Linux VM caps "
-        "its own disk near 64 GB by default and can fill while the host has room to spare, "
-        "so this is not a pass",
+        f"{gigabytes:.0f} GB free on the host drive, but Docker's virtual disk has its own size "
+        "cap (about 64 GB by default) and can fill first, so this is not a pass",
         "If the build runs out of space, raise Docker's virtual-disk size in Docker Desktop "
         "before restarting.",
     )
@@ -1673,7 +1736,7 @@ def _bind_check(facts: Facts, server_dir: Path) -> Check:
     return Check(
         "sharing the folder with Docker",
         "refuse",
-        f"a container could not see {server_dir}, so the server files would be invisible to it",
+        f"a container could not see {server_dir}, so it cannot read the server files",
         _sentence(_bind_remedy(facts, server_dir)),
     )
 
@@ -1705,7 +1768,7 @@ def _client_bind_check(facts: Facts) -> Check:
     return Check(
         "sharing the client with Docker",
         "refuse",
-        "a container could not see the client folder, so its archives would be invisible to it",
+        "a container could not see the client folder, so it cannot read the client archives",
         _sentence(_client_bind_remedy(facts)),
     )
 
@@ -1849,7 +1912,7 @@ def _selinux_check(facts: Facts) -> Check:
         "SELinux",
         "warn",
         f"enforcing, and the server folder is on {facts.server_fs_type}, which cannot hold "
-        "SELinux labels, so the :z bind option is omitted; the daemon may refuse to create "
+        "SELinux labels, so the :z bind option is omitted; Docker may refuse to create "
         "containers on this drive",
         "If the server fails to start, pick a folder on the system drive (ext4, xfs or btrfs).",
     )

@@ -117,8 +117,9 @@ def same_build(marker_version: str, running: str) -> bool:
     done. **No case folding and no numeric reading**: this answers "is this the
     build the marker names", not "which of these is newer", so `0.8.7` and
     `0.8.70` stay different here even though `update.version_key` calls them
-    equal — a backup from an update to one is not the backup from an update to
-    the other.
+    equal (below 0.9 the last number is a decimal, so `.7 == .70`; from 0.9 on
+    it is a whole number and such a pair no longer arises) — a backup from an
+    update to one is not the backup from an update to the other.
     """
     return without_v(marker_version) == without_v(running)
 

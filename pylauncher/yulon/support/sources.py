@@ -204,12 +204,18 @@ def other_homes(installs: Iterable[InstallFacts]) -> list[str]:
 
 
 def public_passwords(catalog: Catalog) -> frozenset[str]:
-    """The catalog's fixed passwords: published, so never masked as secrets."""
-    return frozenset(
-        value
-        for entry in catalog.games
-        if entry.install.password.mode == "fixed" and (value := entry.install.password.value)
-    )
+    """The catalog's published passwords: a fixed value, or the `legacy` an old install keeps.
+
+    Published in `catalog.json`, so never masked as secrets. A generated value is a secret
+    and is not in this set (T748).
+    """
+    published: set[str] = set()
+    for entry in catalog.games:
+        plan = entry.install.password
+        value = plan.value if plan.mode == "fixed" else plan.legacy
+        if value:
+            published.add(value)
+    return frozenset(published)
 
 
 def sources_for_app(

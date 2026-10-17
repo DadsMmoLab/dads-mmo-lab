@@ -269,3 +269,211 @@ def test_a_folder_that_cannot_be_looked_at_is_not_entered_by_the_removal(
     with pytest.raises(OSError):  # the folder is not empty, so it is not removed as a link
         rmtree.remove_tree_stoppably(tree, lambda: False)
     assert keep.read_bytes() == b"MAPS", "a folder that could not be looked at was walked"
+
+
+# -- `remove_tree`, the plain removal: what its retry may reach (T705: R1, R2) -------------
+
+
+def _a_target_with_a_read_only_file_and_a_locked_folder(target: Path) -> Path:
+    """A folder the retry would change if it went there: a read-only file, a folder no walk enters.
+
+    `_clear_read_only()` adds the write bit to the file; `_remove_unenterable()` removes the
+    empty folder it cannot list. Returns the file.
+    """
+    target.mkdir()
+    keep = target / "keep.map"
+    keep.write_bytes(b"MAPS")
+    keep.chmod(0o444)
+    (target / "locked").mkdir()
+    (target / "locked").chmod(0)
+    return keep
+
+
+def _unlock(target: Path) -> None:
+    for path in (target / "locked", target / "keep.map"):
+        if path.exists():
+            path.chmod(0o755)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX modes stand for the read-only flag here")
+def test_remove_tree_refuses_a_root_that_is_a_symlink_and_leaves_its_target(
+    tmp_path: Path,
+) -> None:
+    """Mutation this catches (R1): the root-link refusal removed.
+
+    `shutil.rmtree` refuses a link root, and the retry then went through it: the target's
+    read-only file was made writable and its locked folder removed.
+    """
+    target = tmp_path / "shared"
+    keep = _a_target_with_a_read_only_file_and_a_locked_folder(target)
+    link = tmp_path / "server"
+    link.symlink_to(target, target_is_directory=True)
+    try:
+        with pytest.raises(rmtree.TreeRemovalError):
+            rmtree.remove_tree(link)
+        assert stat.S_IMODE(keep.stat().st_mode) == 0o444, "the retry chmodded through the link"
+        assert (target / "locked").is_dir(), "the retry removed a folder through the link"
+        assert link.is_symlink()
+    finally:
+        _unlock(target)
+
+
+def test_remove_tree_refuses_a_junction_given_as_the_root_and_its_target_survives(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T705: the root was checked with `Path.is_symlink()`, which calls a junction a folder.
+
+    On Windows `shutil.rmtree` refuses the junction and the retry's walks went through it.
+    Here the stand-in junction is a real folder to Linux's `shutil.rmtree`, so the same
+    missing check deletes it outright: either way the target must stay whole.
+    """
+    target = tmp_path / "shared"
+    target.mkdir()
+    (target / "keep.map").write_bytes(b"MAPS")
+    _junction(monkeypatch, target)
+    with pytest.raises(rmtree.TreeRemovalError, match="junction"):
+        rmtree.remove_tree(target)
+    assert (target / "keep.map").read_bytes() == b"MAPS"
+
+
+def test_remove_tree_last_refuses_a_junction_root_before_it_deletes_anything(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T713: `remove_tree_last` asked `Path.is_symlink()`, which calls a junction a folder.
+
+    It then emptied the junction's target, the install record included, and only then
+    let `remove_tree` refuse the root with "nothing was changed".
+    """
+    target = tmp_path / "shared"
+    (target / "src").mkdir(parents=True)
+    (target / "src" / "f.txt").write_bytes(b"CODE")
+    (target / ".yulon-install.json").write_bytes(b"{}")
+    _junction(monkeypatch, target)
+    with pytest.raises(rmtree.TreeRemovalError, match="junction"):
+        rmtree.remove_tree_last(target, (".yulon-install.json",))
+    assert (target / "src" / "f.txt").read_bytes() == b"CODE"
+    assert (target / ".yulon-install.json").read_bytes() == b"{}"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX modes stand for the read-only flag here")
+def test_the_retry_never_clears_a_flag_through_a_junction_inside_the_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T705: `_clear_read_only()` walked with `os.walk`, which enters a junction on 3.11.
+
+    Asked of the helper itself: Linux's `shutil.rmtree` does not know the stand-in junction,
+    so the first, plain delete would empty it before any retry ran. On Windows that delete
+    leaves a junction's target alone and the retry is the step that went through.
+    """
+    tree = tmp_path / "server"
+    tree.mkdir()
+    shared = tree / "shared"
+    keep = _a_target_with_a_read_only_file_and_a_locked_folder(shared)
+    _junction(monkeypatch, shared)
+    try:
+        rmtree._clear_read_only(tree)
+        assert stat.S_IMODE(keep.stat().st_mode) == 0o444, "a flag was cleared through it"
+    finally:
+        _unlock(shared)
+
+
+@pytest.mark.skipif(
+    os.name == "nt" or getattr(os, "geteuid", lambda: 0)() == 0,
+    reason="a mode-0 folder is unlistable to a user only",
+)
+def test_the_retry_never_removes_a_folder_through_a_junction_inside_the_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T705: `_remove_unenterable()` scandirred into a junction and `rmdir`-ed on its far side."""
+    tree = tmp_path / "server"
+    tree.mkdir()
+    shared = tree / "shared"
+    _a_target_with_a_read_only_file_and_a_locked_folder(shared)
+    _junction(monkeypatch, shared)
+    try:
+        rmtree._remove_unenterable(tree)
+        assert (shared / "locked").is_dir(), "a folder behind the junction was removed"
+    finally:
+        _unlock(shared)
+
+
+def test_a_folder_still_there_after_the_delete_is_never_reported_gone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mutation this catches (R2): the "still there afterwards" check removed.
+
+    `shutil.rmtree` answers and the folder is back: on Windows a file another program holds
+    is only marked for deletion, and a container writing to a bind mount makes the folder
+    again. The delete runs for real; the folder is made again right after it.
+    """
+    import shutil
+
+    tree = tmp_path / "server"
+    (tree / "src").mkdir(parents=True)
+    real = shutil.rmtree
+
+    def deleted_then_made_again(path: Path) -> None:
+        real(path)
+        path.mkdir()
+
+    monkeypatch.setattr(shutil, "rmtree", deleted_then_made_again)
+    with pytest.raises(rmtree.TreeRemovalError, match="still there afterwards"):
+        rmtree.remove_tree(tree)
+
+
+# -- T705 review notes: an unreadable root, a real symlink inside the tree ------------------
+
+_POSIX_USER = pytest.mark.skipif(
+    os.name == "nt" or getattr(os, "geteuid", lambda: 0)() == 0,
+    reason="POSIX modes refuse a user only",
+)
+
+
+@_POSIX_USER
+def test_a_root_that_cannot_be_looked_at_is_refused_as_unexamined_not_as_a_link(
+    tmp_path: Path,
+) -> None:
+    """A root whose `lstat` fails with EACCES is not a link: the refusal says what is true."""
+    parent = tmp_path / "locked"
+    tree = parent / "server"
+    (tree / "src").mkdir(parents=True)
+    parent.chmod(0o600)  # no search bit: nothing under it can be looked at
+    try:
+        with pytest.raises(rmtree.TreeRemovalError) as refused:
+            rmtree.remove_tree(tree)
+    finally:
+        parent.chmod(0o755)
+    said = str(refused.value)
+    assert "could not be examined" in said, said
+    assert "symbolic link" not in said, said
+    assert (tree / "src").is_dir(), "still refused: nothing was deleted"
+
+
+@_POSIX_USER
+def test_the_retry_never_clears_a_flag_through_a_real_symlink_inside_the_tree(
+    tmp_path: Path,
+) -> None:
+    """A real POSIX symlink to a read-only file outside, in a folder the first delete cannot empty.
+
+    The plain `shutil.rmtree` fails on the write-protected folder and leaves the link in it;
+    the retry's flag clearing then meets the link. `os.walk` + `os.chmod` (which follows
+    links) made the OUTSIDE file writable; the retry must clear the link's folder only.
+    """
+    outside = tmp_path / "elsewhere" / "realmlist.wtf"
+    outside.parent.mkdir()
+    outside.write_bytes(b"KEEP")
+    outside.chmod(0o444)
+    tree = tmp_path / "server"
+    held = tree / "held"
+    held.mkdir(parents=True)
+    (held / "realmlist.wtf").symlink_to(outside)
+    held.chmod(0o555)  # the first delete cannot unlink the link
+    try:
+        rmtree.remove_tree(tree)
+        assert not tree.exists() and not os.path.lexists(tree)
+        assert stat.S_IMODE(outside.stat().st_mode) == 0o444, "chmodded through the link"
+        assert outside.read_bytes() == b"KEEP"
+    finally:
+        if held.exists():
+            held.chmod(0o755)
+        outside.chmod(0o644)

@@ -961,3 +961,106 @@ def test_the_containerised_git_logs_a_bounded_argv(
         git.ContainerGit()._capture(dest, ["ls-tree", "-r", "HEAD", "--", *paths], writes=False)
     lines = [r.getMessage() for r in caplog.records if "containerized git" in r.getMessage()]
     assert lines and max(len(line) for line in lines) < 2000, max(len(x) for x in lines)
+
+
+# -- T767: a forward Return over files upstream removed is not a downgrade ------------------
+
+BOTS_WORLD_BASE = "data/sql/world/base"
+"""Where mod-playerbots keeps its world base files (7bae1b5 and 79bd428 alike)."""
+REMOVED_BASE = ("charsections_dbc.sql", "emotetextsound_dbc.sql")
+"""Undated base files mod-playerbots 79bd428 removed and 7bae1b5 shipped (yulon-ubuntu2)."""
+
+
+def _base_files_removed(rec: Recorder, server_dir: Path) -> None:
+    """The live case: the move takes away two undated world base files; acore_world holds both.
+
+    On the box it was mod-playerbots 7bae1b5 -> 79bd428, 79bd428 being the later commit; here
+    the running commit is `OLD` and the target the catalog's pin, the relationship faked at
+    the ancestry seam (or GitHub's compare) by each test.
+    """
+    rec.diffs[(server_dir / BOTS.dest, OLD, BOTS_PIN)] = tuple(
+        ("D", f"{BOTS_WORLD_BASE}/{name}") for name in REMOVED_BASE
+    )
+    _target_ships(rec, server_dir, BOTS_WORLD_BASE, "playerbots_world_base.sql")
+    rec.applied_updates["acore_world"] = "".join(f"{name}\n" for name in REMOVED_BASE)
+
+
+def test_a_forward_return_over_removed_undated_base_files_is_not_a_downgrade(
+    tmp_path: Path,
+) -> None:
+    """Git says the target descends from the running commit: nothing it removed is newer."""
+    rec, server_dir = _ready(tmp_path)
+    _base_files_removed(rec, server_dir)
+    rec.ancestors.add((server_dir / BOTS.dest, OLD, BOTS_PIN))
+
+    _said, raised, _fake = _return(rec, server_dir)
+
+    assert raised is None, raised
+    assert rec.heads[server_dir / BOTS.dest] == BOTS_PIN
+    assert _asked_updates(rec) == []
+
+
+def test_a_shallow_forward_return_over_removed_base_files_asks_github_and_goes_on(
+    tmp_path: Path,
+) -> None:
+    """A depth-1 checkout: git cannot tell, GitHub's compare says the target is ahead."""
+    rec, server_dir = _ready(tmp_path)
+    _base_files_removed(rec, server_dir)
+    rec.ancestry_undecided = True
+    rec.github[BOTS.repo] = 237
+
+    _said, raised, _fake = _return(rec, server_dir)
+
+    assert raised is None, raised
+    assert any("/compare/" in url for url in rec.gets), rec.gets
+    assert _asked_updates(rec) == []
+
+
+def test_a_backward_return_over_the_same_base_files_still_refuses(tmp_path: Path) -> None:
+    """Going back, the running commit's files the target lacks are newer, whatever the name."""
+    rec, server_dir = _ready(tmp_path)
+    _base_files_removed(rec, server_dir)
+
+    _said, raised, _fake = _return(rec, server_dir)
+
+    assert raised is not None
+    assert "acore_world has 2 updates the tested commit does not have" in str(raised), raised
+    assert all(name in str(raised) for name in REMOVED_BASE)
+
+
+def test_a_return_no_one_can_give_a_direction_still_asks_the_database(tmp_path: Path) -> None:
+    """Neither git nor GitHub can say: undated files count as before and the database decides."""
+    rec, server_dir = _ready(tmp_path)
+    _base_files_removed(rec, server_dir)
+    rec.ancestry_undecided = True
+
+    _said, raised, _fake = _return(rec, server_dir)
+
+    assert raised is not None
+    assert "acore_world has 2 updates the tested commit does not have" in str(raised), raised
+    assert _asked_updates(rec)
+
+
+def test_a_removal_the_target_still_ships_never_asks_the_direction(tmp_path: Path) -> None:
+    """T767: only a file the target lacks needs a direction; an archived one asks nothing."""
+    rec, server_dir = _ready(tmp_path)
+    rec.diffs[(server_dir / BOTS.dest, OLD, BOTS_PIN)] = (("D", f"{BOTS_UPDATES}/{SPEECH}"),)
+    _target_ships(rec, server_dir, "data/sql/playerbots/archive/2026", SPEECH)
+    rec.ancestry_undecided = True
+
+    _said, raised, _fake = _return(rec, server_dir)
+
+    assert raised is None, raised
+    assert not any(call.startswith("is-ancestor") for call in rec.calls)
+    assert rec.gets == []
+
+
+def test_a_direction_no_one_can_tell_is_asked_once_per_source(tmp_path: Path) -> None:
+    """T767: the forward question and the dated file's refusal share one answer."""
+    rec, server_dir = _ready(tmp_path)
+    _squash_in_a_shallow_clone(rec, server_dir)
+
+    _said, raised, _fake = _return(rec, server_dir)
+
+    assert raised is not None and "could not show whether" in str(raised)
+    assert len([url for url in rec.gets if "/compare/" in url]) == 1, rec.gets

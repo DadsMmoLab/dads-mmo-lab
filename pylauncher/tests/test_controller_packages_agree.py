@@ -629,8 +629,12 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
         # Windows folder has a DACL to lock, so every game has it there, the
         # reference included, and none has it anywhere else.
         unlocked = set() if serverlock.applies() else {"lock_folder"}
+        # T785: set only when the install's database password cannot be known; absent on every
+        # tab built over a folder that has one, the reference included.
+        undbrefused = {"db_refusal"}
         allowed = (
-            unrepaired
+            undbrefused
+            | unrepaired
             | unpathed
             | unowed
             | unlatest
@@ -657,7 +661,8 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
         )
         if game in ("wow-wotlk", "wow-unbound"):  # T554: Unbound is the same package
             reference = (
-                unprobed
+                undbrefused
+                | unprobed
                 | unpathed
                 | unowed
                 | unupdatable

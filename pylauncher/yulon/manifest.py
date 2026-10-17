@@ -26,7 +26,14 @@ from pathlib import PurePosixPath
 from typing import Annotated, Literal
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 SCHEMA_VERSION: Literal[1] = 1
 
@@ -255,6 +262,23 @@ class SqlStep(_Strict):
             "leaves none applied. Single files (templates ok), never globs; direct only."
         ),
     )
+    undoes: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "On a remove step: the install files (each `path` or `then` name of an install "
+            "step on the same database, spelled the same, templates included) this remove "
+            "step and the ones beside it take back IN FULL. Remove's report does not name "
+            "them as left behind; declare one only after reading both files."
+        ),
+    )
+    stands_in_for: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "On a remove step: the module's own uninstall files (clone-relative, single files) "
+            "whose work this step does instead. Remove's report does not name them as SQL "
+            "Yu'lon did not run, so nobody is sent to run them by hand."
+        ),
+    )
     migration_module: str | None = Field(
         default=None,
         pattern=r"^[A-Za-z0-9_.-]{1,255}$",
@@ -301,6 +325,14 @@ class SqlStep(_Strict):
                 "SqlStep.migration_module needs one direct `path` file: no glob, no `then`, "
                 "no inline statement, no precondition"
             )
+        if self.undoes and self.when != "remove":
+            # T751 round 2: only a step Remove runs can take an install file back.
+            raise ValueError("SqlStep.undoes is for a `when: remove` step")
+        if self.stands_in_for and self.when != "remove":
+            # T788: only a step Remove runs can do an uninstall file's work.
+            raise ValueError("SqlStep.stands_in_for is for a `when: remove` step")
+        if any(_glob_chars(name) for name in self.stands_in_for):
+            raise ValueError("SqlStep.stands_in_for names single files, never a glob")
         if self.applied_by != "direct" and (self.precondition is not None or self.verify):
             raise ValueError(
                 "SqlStep.precondition/verify need `applied_by='direct'`: a db-import step is run "
@@ -372,6 +404,21 @@ class ConfKey(_Strict):
         ),
     )
 
+    restore: bool = Field(
+        default=False,
+        description=(
+            "On Remove, the value this key had before the install goes back, when the key "
+            "still reads what the install wrote (T753). For a key in a file other things "
+            "share, such as the core's own worldserver.conf. Needs a `default`."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _restore_needs_a_default(self) -> ConfKey:
+        if self.restore and self.default is None:
+            raise ValueError(f"{self.key}: `restore` puts back what a `default` wrote; it has none")
+        return self
+
     @model_validator(mode="after")
     def _unsigned_belongs_to_an_int(self) -> ConfKey:
         if self.unsigned and self.type != "int":
@@ -403,6 +450,29 @@ class ConfKey(_Strict):
         return self
 
 
+def _stays_inside(value: str, what: str) -> str:
+    """`value`, a relative POSIX path that stays below its folder, or a refusal.
+
+    The applier joins it onto the server folder or the clone (`server_dir / dest`),
+    and pathlib makes an absolute `dest` the whole answer while `..` walks out. An
+    install would then write, and a Remove delete, outside the server folder (T683
+    S7), so a path that climbs out, starts at a root (`/etc`, `C:/x`) or spells a
+    Windows separator is refused when the manifest loads.
+    """
+    if not is_inside_path(value):
+        raise ValueError(f"{what}: {value!r} must be a relative POSIX path inside its folder")
+    return value
+
+
+def is_inside_path(value: str) -> bool:
+    """Whether `value` is a path `_stays_inside` accepts, for a caller that names files it
+    found on disk and has to say why one cannot go into a manifest."""
+    path = PurePosixPath(value)
+    return bool(path.parts) and not (
+        "\\" in value or ":" in value or path.is_absolute() or ".." in path.parts
+    )
+
+
 class ConfFile(_Strict):
     """A config file belonging to the item: where it lives, its template, its keys.
 
@@ -416,6 +486,11 @@ class ConfFile(_Strict):
     template: str | None = None
     keys: tuple[ConfKey, ...] = ()
 
+    @field_validator("file", "template")
+    @classmethod
+    def _inside(cls, value: str | None, info: ValidationInfo) -> str | None:
+        return None if value is None else _stays_inside(value, f"conf {info.field_name}")
+
 
 class Deploy(_Strict):
     """Copy `src` (relative to the clone) to `dest` (relative to the server dir)."""
@@ -425,6 +500,11 @@ class Deploy(_Strict):
     rename: tuple[tuple[str, str], ...] = Field(
         default=(), description="(from, to) basename renames applied after the copy."
     )
+
+    @field_validator("src", "dest")
+    @classmethod
+    def _inside(cls, value: str, info: ValidationInfo) -> str:
+        return _stays_inside(value, f"deploy {info.field_name}")
 
     @model_validator(mode="after")
     def _rename_needs_a_directory(self) -> Deploy:
@@ -466,6 +546,11 @@ class Patch(_Strict):
     in_clone: bool = False
     when: When = "install"
     note: str | None = None
+
+    @field_validator("file")
+    @classmethod
+    def _inside(cls, value: str) -> str:
+        return _stays_inside(value, "patch file")
 
 
 class ClientFile(_Strict):
@@ -746,17 +831,7 @@ class Manifest(_Strict):
         refused when the manifest loads, before either can run.
         """
         for folder in value:
-            path = PurePosixPath(folder)
-            if (
-                not path.parts
-                or "\\" in folder
-                or ":" in folder
-                or path.is_absolute()
-                or ".." in path.parts
-            ):
-                raise ValueError(
-                    f"folders: {folder!r} must be a relative POSIX path inside the server dir"
-                )
+            _stays_inside(folder, "folders")
         return value
 
     @property
@@ -782,6 +857,22 @@ class Manifest(_Strict):
             raise ValueError("type='keg' requires `source.sparse_path` (kegs live inside a repo)")
         if self.id in self.requires or self.id in self.conflicts_with:
             raise ValueError("an item cannot require or conflict with itself")
+        installs = {
+            (step.db, name)
+            for step in self.sql
+            if step.when == "install"
+            for name in (step.path, *step.then)
+            if name is not None
+        }
+        for step in self.sql:
+            for name in step.undoes:
+                if (step.db, name) not in installs:
+                    # T751 round 2: a declaration that names no install file would hide
+                    # nothing today and the wrong file after the next rename.
+                    raise ValueError(
+                        f"sql `undoes` names {name!r}, which no install step on the {step.db} "
+                        "database runs"
+                    )
         picked = {p.key for p in self.prompts if p.kind == "character" and p.follows is None}
         for prompt in self.prompts:
             if prompt.follows is not None and prompt.follows not in picked:

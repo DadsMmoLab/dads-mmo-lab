@@ -37,6 +37,7 @@ from tests.test_controller_view import _Ps, _services
 from tests.test_maintenance import good_dump
 from yulon import docker, forgetting, runner
 from yulon.catalog.catalog import load_catalog
+from yulon.controller import Controller
 from yulon.controller_wow_wotlk import maintenance
 from yulon.controller_wow_wotlk.maintenance import MaintenanceError, RestorePlan
 from yulon.ui import controller_view as controller_view_module
@@ -910,7 +911,11 @@ def test_a_lifecycle_command_that_fails_does_not_keep_the_server_marked(
 def test_the_server_buttons_work_again_once_a_failed_restore_has_ended(
     qapp: object, tmp_path: Path, ps: _Ps
 ) -> None:
-    """The hold is released by a restore that fails too: the next Start reaches compose."""
+    """The hold is released by a restore that fails too: the next Start reaches compose.
+
+    T681: once the half-written record is put down. Before that the Start is refused by the
+    record (not by a hold left behind), naming the way out.
+    """
     stack = _Stack()
     mysql = _Mysql(stack, fails_load="ERROR 2013 (HY000): Lost connection")
     view = _view(_real_maintenance(tmp_path, stack, mysql))
@@ -920,6 +925,12 @@ def test_the_server_buttons_work_again_once_a_failed_restore_has_ended(
     view.run_restore()
     assert failures and "failed part-way" in failures[-1], failures
 
+    view.start_server()
+    assert not any(c[:3] == ["docker", "compose", "up"] for c in ps.calls), ps.calls
+    said = " ".join(failures) + view.problem_label.text()
+    assert "did not finish" in said and forgetting.RESTORE_HOLDS_THE_SERVER not in said, said
+
+    assert maintenance.forget_interrupted_restore(tmp_path)
     view.start_server()
     assert any(c[:3] == ["docker", "compose", "up"] for c in ps.calls), ps.calls
 
@@ -1099,6 +1110,7 @@ def test_a_restore_cannot_begin_between_the_bot_rebuild_s_stop_and_start(tmp_pat
             """No start is refused here: the hold is what is under test (T197)."""
 
         refuse_before_a_stop = refuse_start  # T377: the restart asks this, the database included
+        restart = Controller.restart  # T761: the real composite, reserved first, over these steps
 
         def stop(self) -> bool:
             return True
@@ -1123,6 +1135,7 @@ def test_a_held_server_refuses_a_bot_restart_as_a_failed_stop(tmp_path: Path) ->
             """No start is refused here: the hold is what is under test (T197)."""
 
         refuse_before_a_stop = refuse_start  # T377: the restart asks this, the database included
+        restart = Controller.restart  # T761: the real composite, reserved first, over these steps
 
         def stop(self) -> bool:
             raise AssertionError("stopped a held server")

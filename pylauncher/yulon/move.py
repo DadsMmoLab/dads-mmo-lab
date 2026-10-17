@@ -49,7 +49,7 @@ from pydantic import (
 
 import yulon
 from yulon.catalog.catalog import LUA_SCRIPTS_DIR
-from yulon.controller_wow_wotlk.maintenance import MaintenanceError
+from yulon.controller_wow_wotlk.maintenance import MaintenanceError, _private_opener
 from yulon.log import get_logger
 from yulon.server_build_presses import UPDATE_TO_LATEST, under_server_build
 from yulon.support.sources import CONF_DIRS
@@ -555,9 +555,16 @@ def write_package(
     )
     partial = dest.with_name(dest.name + ".partial")
     try:
-        with zipfile.ZipFile(
-            partial, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6, allowZip64=True
-        ) as archive:
+        # Every account's verifier and salt, so as private as the dumps it carries (T683 S5,
+        # T745): created 0600, never reused. A leftover `.partial` from a crash goes first,
+        # because opening it again would keep the mode it was made with.
+        partial.unlink(missing_ok=True)
+        with (
+            open(partial, "w+b", opener=_private_opener) as zip_file,
+            zipfile.ZipFile(
+                zip_file, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6, allowZip64=True
+            ) as archive,
+        ):
             archive.writestr(MANIFEST_NAME, manifest.model_dump_json(by_alias=True, indent=2))
             for dump, member in zip(dumps, members, strict=True):
                 with (
@@ -656,7 +663,11 @@ class Package:
         size = 0
         try:
             with zipfile.ZipFile(self.path) as archive:
-                with archive.open(member.file, mode="r") as source, target.open("xb") as sink:
+                # 0600 (T745): the auth dump holds every verifier, as a backup of it does.
+                with (
+                    archive.open(member.file, mode="r") as source,
+                    open(target, "xb", opener=_private_opener) as sink,
+                ):
                     while chunk := source.read(_CHUNK):
                         digest.update(chunk)
                         size += len(chunk)

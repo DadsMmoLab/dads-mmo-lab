@@ -18,9 +18,10 @@ from datetime import date
 from pathlib import Path
 from typing import Protocol
 
-from yulon import docker, module_source, platform, resources
+from yulon import city_bots_guard, docker, module_source, platform, resources
 from yulon.apply import (
     Applier,
+    ApplyRefusal,
     ApplyReport,
     ComposeDbc,
     CountingGit,
@@ -30,6 +31,7 @@ from yulon.apply import (
     LedgerReader,
     ModuleUpdate,
     SqlRunner,
+    _default_git,
     applied_updates,
     failed_updates,
     module_sql_plan,
@@ -38,9 +40,10 @@ from yulon.apply import (
 )
 from yulon.apply import module_updates as apply_updates
 from yulon.apply import refresh_module_updates as refresh_cached
+from yulon.catalog.catalog import DbPasswordUnknown, load_catalog
 from yulon.catalog.upstream import github_slug
 from yulon.controller_wow_wotlk import docker_ctl
-from yulon.git import BehindReader, Git, RunnerGit
+from yulon.git import BehindReader, Git
 
 # Explicit re-export (the `as` form is what mypy's --no-implicit-reexport asks for):
 # the value lives in `install_wiring` since 7.1, and this name stays so no importer moves twice.
@@ -308,7 +311,7 @@ def applier(
     sql: SqlRunner | None = None,
     client_dir: Path | None = None,
     dbc: DbcCopier | None = None,
-    db_root_password: str = DEFAULT_DB_ROOT_PASSWORD,
+    db_root_password: str | None = None,
     db_container: str = docker_ctl.SPEC.db,
 ) -> Applier:
     """An `Applier` for the AzerothCore install at `server_dir`.
@@ -337,7 +340,16 @@ def applier(
     """
     runner: SqlRunner | None = sql
     if runner is None:
-        runner = DockerSql(db_container, db_root_password, client=docker_ctl.DB_CLIENT)
+        # This folder's own password (T748): an install made before generated passwords is
+        # answered its published one by `db_password()` itself, and a password no reader can
+        # know is a refusal, never that default (round 4).
+        password = db_root_password
+        if password is None:
+            try:
+                password = docker_ctl.ENTRY.install.known_db_password(server_dir)
+            except DbPasswordUnknown as exc:
+                raise ApplyRefusal(str(exc)) from exc
+        runner = DockerSql(db_container, password, client=docker_ctl.DB_CLIENT)
     return Applier(
         server_dir,
         git=git,
@@ -347,7 +359,49 @@ def applier(
         world_running=world_running,
         start_database=start_database,
         hold_server=hold_server,
+        before_direct_sql=_no_bot_accounts_in_the_roster_s_way(server_dir, db_container),
     )
+
+
+def _no_bot_accounts_in_the_roster_s_way(
+    server_dir: Path, db_container: str
+) -> Callable[[Manifest], None]:
+    """The City Bots Install press's check before `citizen_roster.sql` is sent (T787).
+
+    The roster writes `playerbots_account_type` for 12001-12400, so a real account on one of
+    those numbers would be typed a bot. T779's check, asked by the `Applier` with the
+    database up; every other module is asked nothing. The server is the catalog entry whose
+    database container this applier writes to (container names are handed out once,
+    `Catalog._every_container_name_is_handed_out_once`), so its password is that entry's
+    `known_db_password()`, never the published default (T748).
+    """
+
+    def check(manifest: Manifest) -> None:
+        if manifest.id != city_bots_guard.MODULE:
+            return
+        try:
+            entry = next(
+                (e for e in load_catalog().games if e.container_spec().db == db_container),
+                None,
+            )
+            if entry is None:
+                raise ApplyRefusal(
+                    "Yu'lon could not tell which server's database "
+                    f"{db_container} is, so it could not check City Bots' account numbers "
+                    "and nothing was applied."
+                )
+            city_bots_guard.refuse_before_the_roster(entry, server_dir)
+        except city_bots_guard.CityBotsAccountRefusal as exc:
+            raise ApplyRefusal(str(exc)) from exc
+        except ApplyRefusal:
+            raise
+        except Exception as exc:  # boundary: an unreadable catalog is a refusal, never a pass
+            raise ApplyRefusal(
+                "Yu'lon could not check whether real accounts sit on City Bots' account "
+                f"numbers, so nothing was applied. {exc}"
+            ) from exc
+
+    return check
 
 
 def module_updates(
@@ -379,7 +433,10 @@ def module_updates(
     client addons in `sql_scripts/clones/` behind the same "Check for updates"
     press, each against what its manifest follows, and keeps each row a day.
     """
-    reader: BehindReader = git if git is not None else RunnerGit()
+    # T772: the distro's git for a server inside WSL, whose checkouts host git refuses.
+    # T789: and the container where the PC has no git at all -- host git unconditionally
+    # failed this press with a raw [WinError 2]. `_default_git()` is Install's choice (T58).
+    reader: BehindReader = git if git is not None else _default_git(server_dir)  # type: ignore[assignment]
     branches, releases = _follows(user_game)
     return apply_updates(server_dir, git=reader, branches=branches, releases=releases)
 
@@ -507,8 +564,8 @@ def apply_module_sql(
 
     **What the updater is given, and what it is not (T78).** The importer is no
     longer handed every folder under `modules/`. A module whose manifest says
-    this app applies a `.sql` of its own under one of the three directories the
-    updater walks (`apply.IMPORTER_DB_DIRS`) is withheld, because the core
+    this app applies a `.sql` of its own in a folder the
+    updater walks (`apply.updater_walks()`) is withheld, because the core
     updater has no ledger row for a file this app ran with its own client and
     exits 1 over it — which is what the round-3 gate's press 9c read as
     "may be part-applied" on a world database this app had written itself. A
@@ -544,6 +601,22 @@ def apply_module_sql(
         seen.append(line)
         say(line)
 
+    def no_bot_accounts_in_the_way() -> None:
+        # T779: asked once the importer's own refusals are passed and the database is up.
+        if not city_bots_guard.city_bots_on(server_dir, plan.allowed):
+            return
+        try:
+            city_bots_guard.refuse_if_accounts_in_the_way(
+                load_catalog().get(user_game), server_dir, plan.allowed
+            )
+        except city_bots_guard.CityBotsAccountRefusal as exc:
+            raise docker.DockerRefusal(str(exc)) from exc
+        except Exception as exc:  # boundary: the catalog unreadable is a refusal, not a crash
+            raise docker.DockerRefusal(
+                "Yu'lon could not check whether real accounts sit on City Bots' account "
+                f"numbers, so nothing was applied. {exc}"
+            ) from exc
+
     try:
         run = docker.apply_module_sql(
             spec,
@@ -551,6 +624,7 @@ def apply_module_sql(
             output=collect,
             modules=plan.allowed,
             wsl_distro=wsl_distro,
+            before_run=no_bot_accounts_in_the_way,
         )
     except docker.DockerCommandError as refused:
         for line in module_sql_report(
@@ -574,6 +648,20 @@ def apply_module_sql(
     ):
         say(line)
     return run
+
+
+def importer_modules(server_dir: Path, *, user_game: str = GAME) -> str:
+    """Which modules a Rebuild's importer may update (T706): this press's own split (T78).
+
+    `apply_module_sql()` hands the importer `module_sql_plan().allowed`, and a Rebuild
+    runs the same importer before its new build first starts, so it is handed the same
+    list: a module whose own SQL this app applied with its own client stays withheld
+    there too, rather than failing the import (and the rebuild) over a file the
+    updater has no ledger row for.
+    """
+    return module_sql_plan(
+        server_dir, _module_manifests(user_game), docker.module_dir_names(server_dir)
+    ).allowed
 
 
 def _module_manifests(user_game: str = GAME) -> tuple[Manifest, ...]:

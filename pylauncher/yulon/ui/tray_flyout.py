@@ -3,17 +3,21 @@
 "Servers" and "N online" at the top. One 44 px row per server: a status dot
 (green online, amber ring starting or stopping, grey stopped, red when it needs
 attention), the name, a second line (players · bots when up, else its state),
-and one small square icon button: **Play** when the realm is online, **Start**
-when it is stopped (greyed, with the tab's own reason, whenever the tab's Start
-is), **Open** when it needs attention (its Server tab says what), none while it
-starts or stops. A Tortoise row has a second icon for its bot dashboard, in the
-three states T540 gave it. Then the tray's two switches, live (`TraySwitches`,
-the Settings dialog's own), and **Open Yu'lon** | **Quit tray…**.
+and small square icon buttons: `server_actions()`, the one list the tray's
+right-click menu shows too (T697). Online: **Play**, **Restart**, **Stop**.
+Stopped: **Play** (the tab's PLAY starts it, waits for the realm and plays,
+T694) and **Start**. Partly up: **Open** (its Server tab says what), **Restart**,
+**Stop**; crash-looping: **Open** and **Stop**. None while it starts or stops.
+Each press is greyed, with the tab's own reason, whenever the tab's own button
+is. A Tortoise row has a further icon for its bot dashboard, in the three states
+T540 gave it. Then the tray's two switches, live (`TraySwitches`, the Settings
+dialog's own), and **Open Yu'lon** | **Quit Yu'lon…**.
 
-Every button goes through `YulonTray`, which goes through the window: Play is the
-sidebar ▶'s `open_launcher`, Start is the tab's `start_server`. The rows are
-refilled from the tabs' badges each time the tray hears one change, so a Start
-reads "Starting" the moment it is pressed (T188's held badge).
+Every button goes through `YulonTray`, which goes through the window and the
+tab: Play is the tab's `play()`, Start/Stop/Restart its own presses behind
+T690's busy guard. The rows are refilled from the tabs' badges each time the
+tray hears one change, so a Start reads "Starting" the moment it is pressed
+(T188's held badge).
 
 **A controller reaches it** with no gamepad code here: it is an ordinary active
 window, so `gamepad.Navigator` finds it as its context, the D-pad moves between
@@ -26,6 +30,7 @@ from __future__ import annotations
 
 import functools
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, QSize, Qt, Signal
@@ -55,6 +60,7 @@ from yulon.ui.theme import (
     normalize_theme_name,
 )
 from yulon.ui.widgets.dadcraft_decorations import realm_tone
+from yulon.ui.widgets.reasons import reason_of
 
 FLYOUT_WIDTH = 340
 """Design C's narrow panel: a name and its second line beside one or two icons."""
@@ -76,9 +82,55 @@ DOT_COLOURS = {
 
 PLAY = "Play"
 START = "Start"
+STOP = "Stop"
+RESTART = "Restart"
 OPEN = "Open"
 OPEN_YULON = "Open Yu'lon"
-QUIT_TRAY = "Quit tray…"
+QUIT_YULON = "Quit Yu'lon…"
+"""The one way out (T697): the menu's, the flyout's and the first-close note's."""
+
+SERVER_PRESSES = (START, STOP, RESTART)
+"""The actions that are the tab's own Server presses, each greyed when the tab's is."""
+
+
+@dataclass(frozen=True)
+class ServerAction:
+    """One thing the tray offers to do to one server: its verb, live or not, and why not."""
+
+    name: str
+    enabled: bool
+    reason: str = ""
+
+
+def _gate(press: Any) -> tuple[bool, str]:
+    """The tab's button as the tray must show it: live, or greyed with the tab's reason."""
+    if press is None or press.isEnabled():
+        return True, ""
+    return False, reason_of(press) or press.toolTip()
+
+
+def server_actions(view: Any, status: str) -> tuple[ServerAction, ...]:
+    """What the tray offers for one server, in order: the menu's and the flyout's one list (T697).
+
+    Online: Play, Restart, Stop. Stopped: Play (the tab's PLAY starts it first, T694, so it is
+    greyed when Start is) and Start. Partly up: Open, Restart, Stop. A crash loop: Open, Stop.
+    "Update failed" or unknown: Open. Starting, stopping or restarting: nothing to press.
+    """
+    word = status.lower()
+    tone = dot_tone(status)
+    actions: list[ServerAction] = []
+    if tone == "up":
+        actions.append(ServerAction(PLAY, True))
+    elif tone == "down" and realm_tone(status) != "unknown":
+        enabled, why = _gate(getattr(view, "start_button", None))
+        actions += [ServerAction(PLAY, enabled, why), ServerAction(START, enabled, why)]
+    elif tone == "attention" or realm_tone(status) == "unknown":
+        actions.append(ServerAction(OPEN, True))
+    if tone == "up" or word == "partial":
+        actions.append(ServerAction(RESTART, *_gate(getattr(view, "restart_button", None))))
+    if tone == "up" or word in ("partial", "loop"):
+        actions.append(ServerAction(STOP, *_gate(getattr(view, "stop_button", None))))
+    return tuple(actions)
 
 
 def card_detail(verdict: Any) -> str:
@@ -179,7 +231,12 @@ def _icon_button(parent: QWidget) -> QToolButton:
 
 
 class ServerCard(QFrame):
-    """One server, one 44 px row: dot, name over a second line, and its icon buttons."""
+    """One server, one 44 px row: dot, name over a second line, and its icon buttons.
+
+    `action` is the row's first button (Play, or Open), rightmost, where the pad's focus
+    starts; `start`, `stop` and `restart` sit to its left, each shown only when
+    `server_actions()` offers it.
+    """
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -210,8 +267,21 @@ class ServerCard(QFrame):
         self.dashboard.setVisible(False)
         self.dashboard_kind = ""
         row.addWidget(self.dashboard, 0, Qt.AlignmentFlag.AlignVCenter)
+        # T697: the tab's own Server presses, the same ones the tray's menu offers.
+        self.stop = _icon_button(self)
+        self.restart = _icon_button(self)
+        self.start = _icon_button(self)
+        self.presses = {STOP: self.stop, RESTART: self.restart, START: self.start}
+        for press in self.presses.values():
+            press.setVisible(False)
+            row.addWidget(press, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.stop.setIcon(dadcraft_icon("stop", "#FFB8B8"))
+        self.restart.setIcon(dadcraft_icon("restart"))
+        self.start.setIcon(power_icon())
         self.action = _icon_button(self)
         row.addWidget(self.action, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.presses_armed: dict[str, Any] = {}
+        """Per press, the server it was pressed on (the same check as `armed`)."""
 
     armed: tuple[Any, str] | None = None
     """(server, action) as they were when the icon button was pressed."""
@@ -225,8 +295,15 @@ class ServerCard(QFrame):
     def arm_dashboard(self) -> None:
         self.dashboard_armed = (self.view, self.dashboard_kind)
 
+    def arm_press(self, name: str) -> None:
+        self.presses_armed[name] = self.view
+
+    def action_buttons(self) -> list[QToolButton]:
+        """Every button that acts on this server (not the dashboard), shown or not."""
+        return [self.action, *self.presses.values()]
+
     def show_server(self, view: Any, title: str, status: str, words: str, entry: Any = None) -> str:
-        """Fill the row; answers which button it shows (PLAY, START, OPEN or "")."""
+        """Fill the row; answers which first button it shows (PLAY, OPEN or "")."""
         self.view = view
         self.title.setText(title)
         self.title.setToolTip(f"{title}\n{view.services.controller.server_dir}")
@@ -245,26 +322,14 @@ class ServerCard(QFrame):
         counts = row_detail(verdict) if tone == "up" else ""
         self.detail.setText(counts or words)
         self.detail.setToolTip(card_detail(verdict) if tone == "up" else words)
-        which, enabled, why = "", False, ""
-        if tone == "up":
-            which, enabled, why = PLAY, True, f"Play {title}"
-        elif tone == "attention" or realm_tone(status) == "unknown":
-            which, enabled, why = OPEN, True, f"Open {title}"
-        elif tone == "down":
-            # The tab's own Start, greyed whenever the tab's is, with its reason (T195).
-            gate = view.start_button
-            which, enabled = START, gate.isEnabled()
-            why = f"Start {title}" if enabled else gate.toolTip()
+        offered = {action.name: action for action in server_actions(view, status)}
+        first = offered.get(PLAY) or offered.get(OPEN)
+        which = first.name if first is not None else ""
         self.which = which
-        self.action.setVisible(bool(which))
-        self.action.setEnabled(enabled)
-        self.action.setToolTip(why)
-        # Which server, not only the verb (cold review): "Play WoW WotLK".
-        self.action.setAccessibleName(f"{which} {title}" if which else "")
-        if which == START:
-            self.action.setIcon(power_icon())
-        else:
-            self.action.setIcon(dadcraft_icon(_ICONS[which]) if which else QIcon())
+        self._fill(self.action, first, title)
+        self.action.setIcon(dadcraft_icon(_ICONS[which]) if which else QIcon())
+        for name, press in self.presses.items():
+            self._fill(press, offered.get(name), title)
         self.dashboard.setVisible(entry is not None)
         self.dashboard_kind = ""
         if entry is not None:
@@ -274,9 +339,22 @@ class ServerCard(QFrame):
             self.dashboard_kind = entry.kind
         return which
 
+    @staticmethod
+    def _fill(button: QToolButton, action: ServerAction | None, title: str) -> None:
+        """Show `action` on `button` (greyed with the tab's reason, T195), or hide it."""
+        button.setVisible(action is not None)
+        if action is None:
+            button.setAccessibleName("")
+            return
+        button.setEnabled(action.enabled)
+        button.setToolTip(f"{action.name} {title}" if action.enabled else action.reason)
+        # Which server, not only the verb (cold review): "Play WoW WotLK".
+        button.setAccessibleName(f"{action.name} {title}")
+
 
 _ICONS = {PLAY: "play", OPEN: "wrench"}
-"""Play is the sidebar ▶'s icon and Open a wrench; Start is `power_icon()`."""
+"""Play is the sidebar ▶'s icon and Open a wrench; Start is `power_icon()`, Stop and
+Restart the Server tab's own icons."""
 
 
 @functools.cache
@@ -308,6 +386,8 @@ class TrayFlyout(QWidget):
 
     play_requested = Signal(object)
     start_requested = Signal(object)
+    stop_requested = Signal(object)
+    restart_requested = Signal(object)
     open_server_requested = Signal(object)
     open_requested = Signal()
     quit_requested = Signal()
@@ -364,7 +444,7 @@ class TrayFlyout(QWidget):
         self.open_button = QPushButton(OPEN_YULON, self)
         self.open_button.setProperty("primary", True)
         self.open_button.clicked.connect(self.open_requested)
-        self.quit_button = QPushButton(QUIT_TRAY, self)
+        self.quit_button = QPushButton(QUIT_YULON, self)
         self.quit_button.clicked.connect(self.quit_requested)
         # Split in two, as design C draws it.
         foot.addWidget(self.open_button, 1)
@@ -420,6 +500,9 @@ class TrayFlyout(QWidget):
             card.action.clicked.connect(lambda _c=False, c=card: self._pressed(c))
             card.dashboard.pressed.connect(card.arm_dashboard)
             card.dashboard.clicked.connect(lambda _c=False, c=card: self._dashboard_pressed(c))
+            for name, press in card.presses.items():
+                press.pressed.connect(lambda c=card, n=name: c.arm_press(n))
+                press.clicked.connect(lambda _c=False, c=card, n=name: self._press_pressed(c, n))
             self._cards_box.insertWidget(len(self._cards), card)
             self._cards.append(card)
         for card, (view, title, status, words, entry) in zip(self._cards, servers, strict=False):
@@ -445,6 +528,19 @@ class TrayFlyout(QWidget):
         if card.view is not None and card.dashboard_kind:
             self.dashboard_requested.emit(card.view, card.dashboard_kind)
 
+    def _press_pressed(self, card: ServerCard, name: str) -> None:
+        """Start, Stop or Restart: only on the server the press began on (T551's check)."""
+        view = card.view
+        armed = card.presses_armed.pop(name, None)
+        if view is None or armed is not view or card.presses[name].isHidden():
+            return
+        signal = {
+            START: self.start_requested,
+            STOP: self.stop_requested,
+            RESTART: self.restart_requested,
+        }[name]
+        signal.emit(view)
+
     def _pressed(self, card: ServerCard) -> None:
         view = card.view
         if view is None or card.armed != (view, card.which):
@@ -454,8 +550,6 @@ class TrayFlyout(QWidget):
             return
         if card.which == PLAY:
             self.play_requested.emit(view)
-        elif card.which == START:
-            self.start_requested.emit(view)
         elif card.which == OPEN:
             self.open_server_requested.emit(view)
 

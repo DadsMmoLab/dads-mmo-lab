@@ -34,7 +34,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Protocol
 
-from yulon import docker, platform, resources, runner
+from yulon import docker, forgetting, platform, resources, runner
 from yulon.after_stop import StopSaid, TrueAfterStop
 from yulon.catalog import composegen
 from yulon.catalog.catalog import CatalogEntry, EmulatorSource, SingleEntry
@@ -190,6 +190,15 @@ class InstallStopped(InstallerError, StopSaid):
     """
 
 
+class ImportWindowStopped(InstallStopped):
+    """Stop was pressed while a Rebuild's database updates ran, before its new build (T706).
+
+    Honoured once the importer is done, never part-way; the new build is not started and
+    the rebuild rolls back on it -- copy of the databases included -- as on a Stop in the
+    ready wait, so a clean put-back reads as "Stopped" the same way.
+    """
+
+
 class ReadyWaitStopped(InstallStopped):
     """Stop was pressed while the world server was being waited for (T247).
 
@@ -274,12 +283,25 @@ class UpdateRefused(InstallerError):
     `repo` and `commit` name the source and the upstream commit refused, so
     "Update the server to latest…" remembers it in the install record and the
     Server tab stops offering that same commit (`StagedInstaller.upstream_news`).
+    `also` names further `(repo, commit)` pairs the same press refused (T770: the
+    core and TortoiseBots can both change a migration), so none of them is offered.
     """
 
-    def __init__(self, *args: object, repo: str, commit: str) -> None:
+    def __init__(
+        self, *args: object, repo: str, commit: str, also: tuple[tuple[str, str], ...] = ()
+    ) -> None:
         super().__init__(*args)
         self.repo = repo
         self.commit = commit
+        self.also = also
+
+    @property
+    def pairs(self) -> tuple[tuple[str, str], ...]:
+        """Every `(repo, commit)` refused, the first one first; one commit per repo."""
+        found: dict[str, str] = {}
+        for repo, commit in ((self.repo, self.commit), *self.also):
+            found.setdefault(repo, commit)
+        return tuple(found.items())
 
 
 class DockerUnavailableError(InstallerError):
@@ -425,6 +447,14 @@ class InstallOptions:
 
     server_dir: Path | None = None
     client_dir: Path | None = None
+    first_install: bool = False
+    """This press is an install run: the Install button or the install harness.
+
+    The only press that may turn a command channel on at install (T723), handed to the
+    stages on `StageContext.first_install`. Nothing else sets it. A move ("Bring from
+    another computer") reaches `run()` through the same `_run_install()` and passes
+    False on purpose; Update, Rebuild and Repair never call `run()`.
+    """
 
 
 _PLATFORM_NAMES: dict[str, str] = {"windows": "Windows", "macos": "macOS", "linux": "Linux"}
@@ -614,6 +644,18 @@ def rebuild_confirmation(entry: CatalogEntry, server_dir: Path, *, kept_build: b
         if native_block is not None and native_block.dockerfile_dir is not None
         else ""
     )
+    # T740 round 2 (cold review): the press may write the build overlay again, and the
+    # Dockerfile's clause above was the only warning about a file replaced under a user's
+    # edit; WotLK and Unbound had none. Said statically: no folder is read on the GUI thread.
+    overlay = (
+        f"Before it compiles, Yu'lon may also write {composegen.BUILD_FILE} in that folder, "
+        "the file that tells Docker what to build, again from the template this version of "
+        "the app ships. While the line Yu'lon writes at its top is there, the file is "
+        "replaced, including anything you changed underneath it. If you stop the rebuild or it "
+        "fails before your server is replaced, it is put back as it was.\n\n"
+        if native_block is not None
+        else ""
+    )
     # T224: read off the record alone; no fingerprint is taken on the GUI thread.
     # `kept_build` False is a server inside a WSL distro, which keeps none (D4) and
     # whose folder a read would start (T133).
@@ -626,6 +668,57 @@ def rebuild_confirmation(entry: CatalogEntry, server_dir: Path, *, kept_build: b
         if record is not None
         else ""
     )
+    # T706: a family whose importer is a one-shot runs it before the new build starts.
+    imports = bool(entry.containers.db_import)
+    # T739: under an unfinished import's record the press compiles and starts nothing.
+    # Read off the record alone (no database is asked on the GUI thread), and not for a
+    # server inside a WSL distro (`kept_build` False), whose folder a read would start.
+    held = (
+        kept_build
+        and imports
+        and docker.import_record_is_from_empty(server_dir, entry.containers.db_import or "")
+    )
+    # T741: where the press MAY hold and the question cannot know, it says when. T658's kill
+    # record holds unless the databases hold accounts or characters, which only the press
+    # asks; a server inside WSL has its record unread (T133), so either record may stand.
+    may_hold = ""
+    if imports and not kept_build:
+        may_hold = f"{native.HELD_CONFIRMATION_IF_UNREAD}\n\n"
+    elif (
+        imports
+        and docker.one_shot_ended_marker(server_dir, entry.containers.db_import or "").is_file()
+    ):
+        # The record from empty never reaches the question below: `held` has its own.
+        may_hold = f"{native.HELD_CONFIRMATION_IF_CUT_OFF}\n\n"
+    database = (
+        "Before it starts, Yu'lon copies your databases, then applies the database updates "
+        "the server and its modules carry that are not applied yet, with AzerothCore's own "
+        "importer: it applies each one once, and again only if its file has changed since. "
+        "Nothing else in your databases is touched."
+        if imports
+        else "Your characters, accounts and databases are not touched."
+    )
+    rollback = (
+        "If the new build does not come up, or you stop the rebuild before it does, the old one "
+        "is put back automatically, your databases go back to that copy, and the server is "
+        "started on it again. Once the new build has come up and played, nothing is put back."
+        if imports
+        else "If the new build does not come up, the old one is put back automatically and the "
+        "server is started on it again. That rollback covers the server build only: anything "
+        "the new build writes into the database on its first start is not put back."
+    )
+    if held:
+        return (
+            f"Rebuild {entry.name} in {server_dir}?\n\n"
+            f"This compiles the server again from the source and modules in that folder. It is "
+            f"the same compile an install does, and it has taken "
+            f"{MEASURED_BUILD_TIMES}.\n\n"
+            f"{kept}"
+            f"{recipe}"
+            f"{overlay}"
+            f"{native.HELD_CONFIRMATION}\n\n"
+            f"Say no and nothing happens at all."
+        )
     return (
         f"Rebuild {entry.name} in {server_dir}?\n\n"
         f"This compiles the server again from the source and modules in that folder. It is "
@@ -634,16 +727,143 @@ def rebuild_confirmation(entry: CatalogEntry, server_dir: Path, *, kept_build: b
         f"predict it better than that range does.\n\n"
         f"{kept}"
         f"{recipe}"
+        f"{overlay}"
         f"Your server will be STOPPED and its containers replaced once the compile finishes, "
-        f"and it will be down until it reports ready. Your characters, accounts and databases "
-        f"are not touched.\n\n"
-        f"The build you have now is kept as a rollback while this runs. If the new build does "
-        f"not come up, the old one is put back automatically and the server is started on it "
-        f"again. That rollback covers the server build only: anything the new build writes "
-        f"into the database on its first start is not put back.\n\n"
+        f"and it will be down until it reports ready. {database}\n\n"
+        f"The build you have now is kept as a rollback while this runs. {rollback}\n\n"
+        f"{may_hold}"
         f"{native.no_rollback_confirmation(entry)}\n\n"
         f"Say no and nothing happens at all — the server you have now keeps running, exactly "
         f"as it is."
+    )
+
+
+IMPORT_STAGE = "import"
+"""The stage name every family records once its database import is verified (T755)."""
+
+
+def unfinished_import(entry: CatalogEntry, server_dir: Path) -> Path | None:
+    """The install record, when it says `entry`'s install never finished its import (T755).
+
+    For a game with no import service only: CMaNGOS (TBC, Vanilla, Tortoise) and
+    Centurion. An AzerothCore server has T658/T678's import record and Start's
+    probe; these had nothing, and their login tables read `present` once the auth
+    part of the SQL plan ran, long before the world content. So an install stopped
+    during `import` and taken with "Use existing…" started on a half-imported world.
+
+    The record's `completed` list is what says so: `import` goes into it only after
+    the plan verified (`_run_one()` writes it after the stage), and it is never
+    taken out again. A folder with no record, one that cannot be read, or another
+    game's, answers None: the refusal is for what Yu'lon itself recorded.
+    """
+    if entry.container_spec().import_service:
+        return None
+    # Local imports: `native` and the families import this module (see the top).
+    from yulon.catalog import native
+    from yulon.catalog.families import family_for
+
+    try:
+        family = family_for(entry)
+    except InstallerError:
+        return None
+    # The class's pinned tuple (each family's tests hold `stage_names() == STAGE_NAMES`
+    # for these two), read without building an engine; the base class declares none.
+    stages: tuple[str, ...] = getattr(family, "STAGE_NAMES", ())
+    if IMPORT_STAGE not in stages:
+        return None
+    claim = native.read_claim(server_dir, valid=stages)
+    state = claim.state
+    if claim.ownership is not native.Ownership.OWNED or state is None:
+        return None
+    if state.game_id != entry.id or state.has(IMPORT_STAGE):
+        return None
+    return server_dir / native.STATE_FILE
+
+
+def install_import_state(
+    entry: CatalogEntry, server_dir: Path, *, wsl_distro: str | None = None
+) -> docker.ImportState:
+    """What the family's own import gate reads in this install's databases (T755). Never raises.
+
+    The `sqlplan.MarkerGate` the install's `import` stage asks
+    (`CmangosInstaller._marker_gate()`, which Centurion inherits), built from the
+    entry: its SQL plan, its database container and client, the password the
+    install generated, and its schemas by name. Its `partial` is NOT turned into
+    `unreadable` the way `controller_wow_tbc.repair.import_state()` turns it: that
+    one reads folders "Use existing…" brought in from anywhere, while this is asked
+    only under Yu'lon's own record of an install that never finished its import,
+    which is exactly the state the gate's `partial` describes. Anything that
+    cannot be asked (no password file, a database that is down) is `unreadable`.
+    """
+    # Local import: the families import this module (see the top).
+    from yulon.catalog.families import sqlplan
+
+    native_block = entry.install.native
+    data = None if native_block is None else (native_block.cmangos or native_block.trinitycore)
+    if native_block is None or data is None:
+        return docker.ImportState("unreadable", f"{entry.name} has no SQL plan of its own")
+    password = entry.install.db_password(server_dir)
+    if password is None:
+        return docker.ImportState(
+            "unreadable", f"this install's database password could not be read in {server_dir}"
+        )
+    names = entry.databases
+    try:
+        gate = sqlplan.MarkerGate(
+            data.sql,
+            container=entry.container_spec().db,
+            client=native_block.db.client,
+            password=password,
+            schemas={n: n for n in (names.auth, names.characters, names.world, *names.extra)},
+            sql_query=docker.sql_query,
+            exec_stdin=docker.exec_stdin,
+            wsl_distro=wsl_distro,
+        )
+    except InstallerError as exc:
+        return docker.ImportState("unreadable", str(exc))
+    return gate.probe()
+
+
+UNFINISHED_IMPORT_STATES = ("absent", "partial")
+"""What the gate reads when Start refuses an unfinished install (T755 round 2).
+
+Exactly the two states the Install route clears and imports again (`stage_import()`).
+`populated` is player data: the old Stop popup sent players to "Use existing…" on
+such a folder, they may have played since, and the Install route refuses those
+databases ("already hold data"), so refusing Start would leave no way out.
+`imported` is a marker the import wrote after it verified, the record not yet
+written. `unreadable` refuses nothing, as Start's WotLK import check does not.
+"""
+
+
+def unfinished_install_refusal(
+    entry: CatalogEntry, server_dir: Path, *, wsl_distro: str | None = None
+) -> str | None:
+    """Start's refusal of an install that did not finish installing, or None (T755).
+
+    Two facts, both needed: Yu'lon's own record says the import never finished
+    (`unfinished_import()`), and the family's import gate reads the databases as
+    `absent` or `partial` (`install_import_state()`). The gate is asked only when
+    the record says so, and needs the database up: Start asks after
+    `refuse_a_missing_database()` has started it.
+    """
+    record = unfinished_import(entry, server_dir)
+    if record is None:
+        return None
+    state = install_import_state(entry, server_dir, wsl_distro=wsl_distro)
+    if state.state not in UNFINISHED_IMPORT_STATES:
+        logger.info(
+            f"{record} does not list the import as done, but the databases read "
+            f"{state.state} ({state.detail}); not refused"
+        )
+        return None
+    return (
+        f"{entry.name} was not started: it did not finish installing ({record} does not list "
+        f"the database import as done, and its databases read {state.state}: {state.detail}), "
+        f'so its world is not all there. Press "{forgetting.BUTTON_LABEL}" (it keeps the '
+        f"folder, the database and the images), then press Install on the {entry.name} tile in "
+        f"the Catalog and choose {server_dir}: the install carries on where it stopped, and "
+        "clears a half-written import before it imports again."
     )
 
 
@@ -897,7 +1117,10 @@ def cancelled_install_message(entry: CatalogEntry, server_dir: Path) -> str:
     # that have to agree with it — the "If it had not" opener and the remedy —
     # cannot drift from it. They did: `adoptable` alone gated the delete, and
     # `adoptable` alone is true in this branch too.
-    promised_nothing_lost = adoptable is not None and bool(ours)
+    # T755: a CMaNGOS or Centurion install whose record does not list `import` would be
+    # adopted on a half-imported world, so "Use existing…" is not offered for it.
+    import_unfinished = unfinished_import(entry, server_dir) is not None
+    promised_nothing_lost = adoptable is not None and bool(ours) and not import_unfinished
 
     if promised_nothing_lost:
         parts.append(
@@ -905,6 +1128,13 @@ def cancelled_install_message(entry: CatalogEntry, server_dir: Path) -> str:
             f'had already finished the server may be built and even running: press "Use '
             f'existing…", choose {server_dir}, and the app will manage it from a tab — nothing '
             "is lost."
+        )
+    elif ours and import_unfinished:
+        parts.append(
+            f"The compose files this app writes are there ({', '.join(ours)}), but {record} "
+            "shows the server had not finished installing (its database import is not recorded "
+            'as done), so do not take it with "Use existing…": its world would be only partly '
+            "there."
         )
     elif ours:
         parts.append(
@@ -1184,11 +1414,15 @@ def installer_for(
     reset_unfinished: docker.ResetUnfinished | None = None,
     seams: native.Seams | None = None,
     database_snapshot: snapshot.DatabaseSnapshot | None = None,
+    importer_modules: Callable[[Path], str] | None = None,
+    import_gate: native.ImportGateFor | None = None,
 ) -> InstallEngine:
     """The engine that installs `entry`. The only place that decides.
 
     `database_snapshot` is the update route's copy of the databases a new build
     can change (T217), supplied by `install_wiring` for `import_probe`'s reason.
+    `importer_modules` is which modules a Rebuild's importer may update (T706),
+    supplied the same way.
 
     `seams` replaces the engine's default seams whole, `platform_id` then
     included; only `install_wiring` passes it, for a server inside a WSL
@@ -1247,4 +1481,6 @@ def installer_for(
         reset_unfinished=reset_unfinished,
         seams=seams if seams is not None else native.Seams(platform_id=platform_id),
         database_snapshot=database_snapshot,
+        importer_modules=importer_modules,
+        import_gate=import_gate,
     )

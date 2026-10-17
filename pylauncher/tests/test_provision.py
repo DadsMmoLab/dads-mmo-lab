@@ -212,24 +212,29 @@ def test_linux_runs_under_sudo_n_and_reports_password_needs(
     monkeypatch.setattr(platform.sys, "platform", "linux")
     monkeypatch.setattr(platform, "is_steamos", lambda: False)
     run = _Run(fail={"sudo -n apt-get update"})
+
+    def yes_to_docker_no_to_the_rest(question: str) -> str | None:
+        # T700: the install is agreed to; the docker group and the password are not given.
+        return "y" if _is_the_root_question(question) else None
+
     report = platform.ensure_docker(
         run=run,
         which=lambda n: "/usr/bin/apt-get" if n == "apt-get" else None,
         user="pk",
         wait_seconds=0.0,
+        ask=yes_to_docker_no_to_the_rest,
+        run_input=_never_feeds,
     )
     assert report.platform == "linux"
     # `id -nG` comes first and needs no privilege: whether the user is already
     # a member is settled before anything runs under sudo.
     assert run.calls[1] == ["id", "-nG", "pk"]
     assert run.calls[2] == ["sudo", "-n", "apt-get", "update"]
-    assert any(s.startswith("apt-get update: exit 1") for s in report.skipped)
+    assert any(s.startswith("apt-get update: ") for s in report.skipped)
     assert any("needed a password" in m for m in report.manual_steps)
-    # No prompter, so nothing was asked and nothing was joined — the re-login
-    # advice would be false here, and used to be printed unconditionally.
-    assert report.docker_group == "not-asked"
+    # The group was declined, so the re-login advice would be false here.
+    assert report.docker_group == "declined"
     assert not [m for m in report.manual_steps if "Log out and back in" in m]
-    assert any("Skipped joining the docker group" in m for m in report.manual_steps)
     assert report.docker_ready is False and report.ok is False
 
 
@@ -1051,6 +1056,8 @@ def test_linux_does_not_blame_a_password_for_a_failure_that_was_not_one(
         which=lambda n: "/usr/bin/apt-get" if n == "apt-get" else None,
         user="dad",
         wait_seconds=0.0,
+        ask=lambda q: "y" if _is_the_root_question(q) else None,
+        run_input=_never_feeds,
     )
 
     assert any("systemctl" in s for s in report.skipped)
@@ -1177,10 +1184,12 @@ def test_linux_asks_before_it_escalates_and_joins_only_on_yes(
     assert joins == [["sudo", "-n", "usermod", "-aG", "docker", "pk"]]
     assert report.docker_group == "granted"
 
-    # Asked once, before the group was joined, and the question says what it costs.
-    assert len(asked) == 1
+    # Two questions (T700): the install first, then the group, which is asked once, before the
+    # group was joined, and says what it costs.
+    assert len(asked) == 2
+    assert _is_the_root_question(asked[0])
     assert run.calls.index(joins[0]) > run.calls.index(["id", "-nG", "pk"])
-    assert "root" in asked[0] and "pk" in asked[0]
+    assert "root" in asked[1] and "pk" in asked[1]
     assert any("Log out and back in" in m for m in report.manual_steps)
 
 
@@ -1198,7 +1207,11 @@ def test_linux_treats_anything_but_a_deliberate_yes_as_no(
     _linux(monkeypatch)
     run = _Run()
     report = platform.ensure_docker(
-        run=run, which=_which("apt-get"), user="pk", wait_seconds=0.0, ask=lambda _q: reply
+        run=run,
+        which=_which("apt-get"),
+        user="pk",
+        wait_seconds=0.0,
+        ask=lambda q: "y" if _is_the_root_question(q) else reply,
     )
 
     assert not _joins_the_docker_group(run.calls), run.calls
@@ -1215,7 +1228,9 @@ def test_linux_does_not_ask_a_user_who_is_already_a_member(
     """An existing member is not asked, and `dockerd` is not `docker`."""
     _linux(monkeypatch)
 
-    def never(_question: str) -> str:
+    def never(question: str) -> str:
+        if _is_the_root_question(question):
+            return "y"  # T700: installing Docker is its own question
         raise AssertionError("an existing member was asked anyway")
 
     run = _WithGroups("pk sudo docker")
@@ -1230,6 +1245,8 @@ def test_linux_does_not_ask_a_user_who_is_already_a_member(
     asked: list[str] = []
 
     def decline(question: str) -> str:
+        if _is_the_root_question(question):
+            return "y"
         asked.append(question)
         return "n"
 
@@ -1256,7 +1273,13 @@ def test_the_message_a_member_reads_says_the_one_thing_once(
     """
     _linux(monkeypatch)
     run = _WithGroups("pk sudo docker")
-    report = platform.ensure_docker(run=run, which=_which("apt-get"), user="pk", wait_seconds=0.0)
+    report = platform.ensure_docker(
+        run=run,
+        which=_which("apt-get"),
+        user="pk",
+        wait_seconds=0.0,
+        ask=lambda q: "y" if _is_the_root_question(q) else None,
+    )
     assert report.docker_group == "already-member" and not report.docker_ready
     message = str(installer.docker_unavailable(report))
     assert message.lower().count("log out and back in") == 1, message
@@ -1305,6 +1328,8 @@ def test_sudo_user_names_the_person_not_root(monkeypatch: pytest.MonkeyPatch) ->
     asked: list[str] = []
 
     def decline(question: str) -> str:
+        if _is_the_root_question(question):
+            return "y"
         asked.append(question)
         return "n"
 
@@ -1344,7 +1369,8 @@ def test_sudo_u_someone_else_names_the_account_that_will_run_docker(
     asked: list[str] = []
 
     def grant(question: str) -> str:
-        asked.append(question)
+        if not _is_the_root_question(question):
+            asked.append(question)
         return "y"
 
     platform.ensure_docker(run=run, which=_which("apt-get"), wait_seconds=0.0, ask=grant)
@@ -1370,6 +1396,8 @@ def test_doas_is_read_where_sudo_user_is(monkeypatch: pytest.MonkeyPatch) -> Non
     asked: list[str] = []
 
     def decline(question: str) -> str:
+        if _is_the_root_question(question):
+            return "y"
         asked.append(question)
         return "n"
 
@@ -1783,7 +1811,12 @@ def test_provisioning_bounds_the_probe_and_not_the_install(
 
     monkeypatch.setattr(platform.runner, "run", fake_run)
     monkeypatch.setattr(platform, "docker_programs", lambda: ("docker",))
-    platform.ensure_docker(which=_which("apt-get"), user="pk", wait_seconds=0.0, ask=lambda _q: "n")
+    platform.ensure_docker(
+        which=_which("apt-get"),
+        user="pk",
+        wait_seconds=0.0,
+        ask=lambda q: "y" if _is_the_root_question(q) else "n",
+    )
 
     probes = [bound for argv, bound in seen if argv[:2] == ["docker", "info"]]
     steps = [bound for argv, bound in seen if argv[:1] == ["sudo"]]
@@ -2012,12 +2045,19 @@ def test_the_default_run_with_input_feeds_stdin_and_pins_the_locale(
 # ------------------------------------ the session, threaded through provisioning (7.1, D.2)
 
 
+def _is_the_root_question(question: str) -> bool:
+    """T700's question: whether to install or start Docker Engine, asked before anything runs."""
+    return question.startswith(("Docker Engine is not installed", "Docker Engine is installed"))
+
+
 def _answers(group: str | None, password: str | None) -> Callable[[str], str | None]:
     """A prompter that tells the group question and the sudo question apart by identity."""
 
     def ask(question: str) -> str | None:
         if question == platform.SUDO_PASSWORD_QUESTION:
             return password
+        if _is_the_root_question(question):
+            return "y"  # T700: these tests are about the group and the password, not this one
         return group
 
     return ask
@@ -2117,18 +2157,18 @@ def test_a_wrong_sudo_password_three_times_is_reported_as_a_password_skip(
     assert not [argv for argv in run.calls if "wrong" in argv]
 
 
-def test_without_a_prompter_nothing_is_ever_fed_a_password(
+def test_without_a_prompter_nothing_is_ever_run_as_root_or_fed_a_password(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """No `ask`, no session: the `sudo -n` path is byte-identical to before 7.1."""
+    """No `ask`, nobody to say yes: since T700 not even `sudo -n` is tried."""
     _linux(monkeypatch)
     run = _Refuses("sudo -n")
     report = platform.ensure_docker(
         run=run, which=_which("apt-get"), user="pk", wait_seconds=0.0, run_input=_never_feeds
     )
     assert report.docker_group == "not-asked"
-    assert any("needed a password" in m for m in report.manual_steps)
-    assert all(argv[:2] == ["sudo", "-n"] for argv in run.calls if argv[0] == "sudo")
+    assert [argv for argv in run.calls if argv[0] == "sudo"] == []
+    assert any("sudo apt-get install -y docker.io" in m for m in report.manual_steps)
 
 
 def test_a_dry_run_never_builds_a_sudo_session(monkeypatch: pytest.MonkeyPatch) -> None:

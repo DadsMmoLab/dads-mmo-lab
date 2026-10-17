@@ -419,6 +419,34 @@ class GitContainerLeft(GitError):
     """
 
 
+_EXITED = re.compile(r" exited -?\d+: ")
+"""Where a `GitError` that carries git's own words says so: `... exited <code>: <stderr>` (T793).
+
+`_run_git()`, `_streamed_git()`, `RefreshGit._fetch_to_count()` and `ContainerGit._capture()`
+write that sentence. The ones Yu'lon words itself (no Docker, a folder no distro can reach)
+do not have it.
+"""
+
+
+def _git_reason(exc: GitError) -> str | None:
+    """The line git wrote that says why it refused, or None when it said nothing (T793).
+
+    Only the stderr after `exited <code>: ` is git's. The command and the folder it ran in
+    are not a reason, and a sentence Yu'lon wrote itself is not git's either, so neither
+    gives one. Of git's lines the first `fatal:` or `error:` is its verdict, and a warning
+    above it is not; without one, the first line that is not blank.
+    """
+    text = str(exc)
+    seam = _EXITED.search(text)
+    if seam is None:
+        return None
+    said = [line.strip() for line in text[seam.end() :].splitlines() if line.strip()]
+    if not said:
+        return None
+    verdict = [line for line in said if line.startswith(("fatal:", "error:"))]
+    return verdict[0] if verdict else said[0]
+
+
 @dataclass(frozen=True)
 class CloneSpec:
     """One source to materialize at `dest`.
@@ -796,6 +824,12 @@ class Counted:
     behind: BehindCount
     head: str | None = None
     fetched: str | None = None
+    why: str | None = None
+    """Git's first meaningful line when git refused the fetch or the count (T793), else None.
+
+    A figure, an answer git gave that did not parse, and a folder that is not a checkout
+    have none. See `_git_reason()`.
+    """
 
 
 @runtime_checkable
@@ -1929,13 +1963,16 @@ class RunnerGit:
         unless the only modified tracked files are ones this app wrote
         (`app_written_paths()`), and the caller writes those again immediately
         afterwards. It is not a general-purpose checkout, and a caller must make
-        its own check first. There are two. T64's route has the one above.
+        its own check first. There are three. T64's route has the one above.
         `Applier.put_back()` (T557) refuses unless the clone is clean apart from
         this app's own files (`_reset_cost(history=False)`) and its HEAD is still
         the update's `to`, re-read from the record or from a reflog that shows no
         hand commit (`last_update()`). (`_pin_args()`'s update
         checkout is `--force` too, since T166, and is no second caller of this:
         it replaces a `reset --hard` that discarded the same things.)
+        `native.folders_put_back_refusal()` (T766, "Put the folders back") is the third: it
+        refuses a folder with changes of the player's own, or one git cannot be asked about,
+        and asks every folder before any of them is checked out.
 
         It does not swallow a failure. A restore that did not happen leaves the
         source tree ahead of the image that was built from it, and the caller's
@@ -1990,17 +2027,15 @@ class RunnerGit:
         try:
             self._fetch_to_count(dest, ref)
         except GitError as exc:
-            logger.debug(
-                f"could not fetch origin {ref} in {dest} to count what it is behind: {exc}"
-            )
-            return Counted(None)
+            logger.info(f"could not fetch origin {ref} in {dest} to count what it is behind: {exc}")
+            return Counted(None, why=_git_reason(exc))
         try:
             return _behind_after_fetch(
                 lambda argv: _run_git(["git", *argv], cwd=dest).stdout, release=release
             )
         except GitError as exc:
-            logger.debug(f"could not ask git how far behind {dest} is: {exc}")
-            return Counted(None)
+            logger.info(f"could not ask git how far behind {dest} is: {exc}")
+            return Counted(None, why=_git_reason(exc))
 
     def _fetch_to_count(self, dest: Path, ref: str) -> None:
         """The fetch `counted_behind()` counts against; `GitError` if it fails.
@@ -2457,8 +2492,8 @@ class RefreshGit(RunnerGit):
     it carries git's own low-speed limits (a transfer that stalls gives up), a process timeout
     (a connection that never opens is ended too) and the `cancel` event of the run it belongs
     to (a Quit or a press that starts ends it within a fifth of a second). Every answer to
-    "could not fetch" is the same `Counted(None)` the Check press gives, and the caller keeps
-    the count it had.
+    "could not fetch" is the same `Counted` the Check press gives, reason and all (T793), and
+    the caller keeps the count it had.
     """
 
     def __init__(
@@ -2625,6 +2660,21 @@ class ContainerGit:
                 "git there as root: every file it wrote would then belong to root. Nothing was run."
             )
         return ["--user", found]
+
+    def _host_git_may_redo(self, exc: GitError) -> bool:
+        """May host git do what the container failed to? Not without a docker or a git, and
+        never inside a distro (T772).
+
+        Host git is the fallback for "containerised git cannot run here", and inside a
+        distro it cannot run either: Git for Windows refused the `\\\\wsl.localhost`
+        checkout as "dubious ownership" (yulon-win11, 2026-10-12), so handing it a failed
+        fetch there showed the player that refusal instead of the failure that happened.
+        """
+        return (
+            self.wsl_distro is None
+            and platform.DOCKER_CLI_MISSING_HELP not in str(exc)
+            and git_available()
+        )
 
     def _ask_filesystem(self, path: Path) -> str | None:
         ask = self.filesystem_type
@@ -2973,17 +3023,15 @@ class ContainerGit:
         try:
             self._capture(dest, ["fetch", "origin", ref], writes=True)
         except GitError as exc:
-            logger.debug(
-                f"could not fetch origin {ref} in {dest} to count what it is behind: {exc}"
-            )
-            return Counted(None)
+            logger.info(f"could not fetch origin {ref} in {dest} to count what it is behind: {exc}")
+            return Counted(None, why=_git_reason(exc))
         try:
             return _behind_after_fetch(
                 lambda argv: self._capture(dest, argv, writes=False).stdout, release=release
             )
         except GitError as exc:
-            logger.debug(f"could not ask git how far behind {dest} is: {exc}")
-            return Counted(None)
+            logger.info(f"could not ask git how far behind {dest} is: {exc}")
+            return Counted(None, why=_git_reason(exc))
 
     def clone(self, spec: CloneSpec, *, clear_only: bool = False) -> None:
         """See `RunnerGit.clone()` for what `clear_only` is and why it exists."""
@@ -3009,7 +3057,7 @@ class ContainerGit:
                 if _resets_to_the_tip(spec):
                     self._run(spec, ["reset", "--hard", "FETCH_HEAD"])
             except GitError as exc:
-                if platform.DOCKER_CLI_MISSING_HELP not in str(exc) and git_available():
+                if self._host_git_may_redo(exc):
                     logger.warning(
                         f"containerized git update failed in {spec.dest} ({exc}); "
                         "falling back to host git"
@@ -3040,7 +3088,7 @@ class ContainerGit:
                     spec, [*_excluding_clone_args(spec, progress=False), spec.url, "."]
                 )
             except GitError as exc:
-                if platform.DOCKER_CLI_MISSING_HELP not in str(exc) and git_available():
+                if self._host_git_may_redo(exc):
                     logger.warning(
                         f"containerized git clone failed in {spec.dest} ({exc}); "
                         "falling back to host git"
@@ -3070,7 +3118,7 @@ class ContainerGit:
         try:
             self._clone_with_mount_race_retry(spec, [*argv, spec.url, "."])
         except GitError as exc:
-            if platform.DOCKER_CLI_MISSING_HELP not in str(exc) and git_available():
+            if self._host_git_may_redo(exc):
                 logger.warning(
                     f"containerized git clone failed in {spec.dest} ({exc}); "
                     "falling back to host git"
@@ -3428,11 +3476,7 @@ class ContainerGit:
                 if _resets_to_the_tip(spec):
                     self._run(spec, ["reset", "--hard", "FETCH_HEAD"])
             except GitError as exc:
-                if (
-                    _falls_back(exc)
-                    and platform.DOCKER_CLI_MISSING_HELP not in str(exc)
-                    and git_available()
-                ):
+                if _falls_back(exc) and self._host_git_may_redo(exc):
                     logger.warning(
                         f"containerized git update failed in {spec.dest} ({exc}); "
                         "falling back to host git"
@@ -3449,11 +3493,7 @@ class ContainerGit:
                     spec, [*_excluding_clone_args(spec, progress=True), spec.url, "."], stage=stage
                 )
             except GitError as exc:
-                if (
-                    _falls_back(exc)
-                    and platform.DOCKER_CLI_MISSING_HELP not in str(exc)
-                    and git_available()
-                ):
+                if _falls_back(exc) and self._host_git_may_redo(exc):
                     logger.warning(
                         f"containerized git clone failed in {spec.dest} ({exc}); "
                         "falling back to host git"
@@ -3489,11 +3529,7 @@ class ContainerGit:
                 spec, [*argv, spec.url, "."], stage=stage
             )
         except GitError as exc:
-            if (
-                _falls_back(exc)
-                and platform.DOCKER_CLI_MISSING_HELP not in str(exc)
-                and git_available()
-            ):
+            if _falls_back(exc) and self._host_git_may_redo(exc):
                 logger.warning(
                     f"containerized git clone failed in {spec.dest} ({exc}); "
                     "falling back to host git"

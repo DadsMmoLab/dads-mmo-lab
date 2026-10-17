@@ -2189,6 +2189,8 @@ def test_a_rollback_that_stops_early_leaves_the_sources_with_the_new_build(
     assert raised.value.sources_kept is True, "the outcome the tab reads, typed"
     assert raised.value.touched is True and raised.value.mixed is False
     assert native.owed_start_refusal(server_dir) is None, "one build on the tags: Start may run"
+    # T680: the sources stay with the build the tags name, so no folder is off its build.
+    assert native.sources_still_off(server_dir) == (), "the sources went with the new build"
 
 
 @pytest.mark.parametrize("entry", SPINE_GAMES, ids=lambda entry: entry.id)
@@ -2252,7 +2254,7 @@ def test_a_rollback_that_stops_early_before_any_container_moved_leaves_the_new_s
     assert str(raised.value) == (
         f"{GIVEN_UP} Putting the build from before this rebuild back was not attempted, "
         f"because the new build could not be given a name to undo onto ({REFUSED}); the tags "
-        "still name the new build, all of them. The old images are on the daemon under their "
+        "still name the new build, all of them. The old images are in Docker under their "
         "-rollback tags. The source folders were left on the new commits, because the image "
         "tags name the new build made from them. None of your server's containers was "
         "replaced, so it is still running the build from before this update if it is up, and "
@@ -2306,7 +2308,7 @@ def test_a_rollback_that_leaves_the_tags_mixed_says_a_rebuild_is_needed_and_reco
         f"{GIVEN_UP} Putting the build from before this rebuild back failed part-way "
         f"({REFUSED}) and undoing it failed too, so the tags are MIXED: {refs[0]} name the old "
         "build and the rest name the new one. Do not start this server until they agree. The "
-        "old images are on the daemon under their -rollback tags. The source folders were put "
+        "old images are in Docker under their -rollback tags. The source folders were put "
         "back on the "
         "commits they were on before this update. None of your server's containers was "
         "replaced, so it is still running the build from before this update if it is up. Its "
@@ -2349,6 +2351,43 @@ MIXED_REFUSAL = (
     "rebuilt before it can start: press “Rebuild the server…” under “Server build ▾” on the "
     "Modules tab."
 )
+
+
+def test_mixed_tags_with_the_write_back_owed_name_the_put_back_before_the_rebuild(
+    tmp_path: Path,
+) -> None:
+    """T783 round 2: the rollback's patch half failed, so Rebuild refuses until the put-back.
+
+    The mixed-tags note must not send the player straight to Rebuild then: it names
+    "Put the folders back…" first, and Rebuild after it.
+    """
+    rec, server_dir = _ready(tmp_path)
+    rec.ready = False
+    made = engine(rec, **_mixed(rec))
+    carried = made.apply_carried_patches
+    calls: list[str] = []
+
+    def patch(folder: Path) -> Iterator[str]:
+        calls.append("patch")
+        if len(calls) > 1:
+            raise OSError("the disk is full")
+        yield from carried(folder)
+
+    made.apply_carried_patches = patch  # type: ignore[method-assign]
+    with pytest.raises(RollbackNotDone) as raised:
+        list(made.update_to_latest(InstallOptions(server_dir=server_dir)))
+    said = str(raised.value)
+
+    assert raised.value.mixed is True, said
+    assert len(calls) > 1, "the ground: the rollback's patch half ran and failed"
+    assert (server_dir / native.WRITE_BACK_OWED_FILE).exists(), "the ground: the record stays"
+    put_back = server_build_presses.under_server_build(server_build_presses.PUT_THE_FOLDERS_BACK)
+    rebuild = server_build_presses.under_server_build(server_build_presses.REBUILD)
+    assert native.SOURCES_MIXED_REBUILD not in said, said
+    assert put_back in said and rebuild in said, said
+    assert said.index(put_back) < said.index(rebuild), said
+    refused = made.rebuild_refusal_before_asking(server_dir)
+    assert refused is not None and server_build_presses.PUT_THE_FOLDERS_BACK in refused
 
 
 def _start_is_refused_for_a_rebuild(server_dir: Path) -> None:

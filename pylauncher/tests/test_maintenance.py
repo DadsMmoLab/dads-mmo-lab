@@ -9,7 +9,11 @@ from __future__ import annotations
 
 import functools
 import io
+import os
+import stat
 import subprocess
+import sys
+from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
 from typing import IO
@@ -119,6 +123,54 @@ def a_marker(
 
 
 # ------------------------------------------------------------------ backup
+
+
+_POSIX_ONLY = pytest.mark.skipif(
+    sys.platform == "win32", reason="POSIX file modes; Windows ignores them"
+)
+
+
+@pytest.fixture
+def shared_umask() -> Iterator[None]:
+    """The umask a desktop login has (Ubuntu, Fedora): new files 0664, folders 0775."""
+    old = os.umask(0o002)
+    try:
+        yield
+    finally:
+        os.umask(old)
+
+
+@_POSIX_ONLY
+def test_a_dump_is_readable_by_its_owner_alone(tmp_path: Path, shared_umask: None) -> None:
+    """An auth dump holds every account's login verifier and the realm session keys.
+
+    `.env` and the confs are 0600 on purpose; the dumps took the umask and were
+    measured 0664 on yulon-ubuntu (T683 S5).
+    """
+    report = backup(tmp_path, FakeMysql(("acore_auth",)), running=running(DB), now=AT)
+    (dump,) = report.dumps
+    assert stat.S_IMODE(dump.path.stat().st_mode) == 0o600
+
+
+@_POSIX_ONLY
+def test_a_leftover_partial_does_not_lend_its_mode_to_the_dump(
+    tmp_path: Path, shared_umask: None
+) -> None:
+    """A crash leaves a `.partial` behind at the old mode; truncating it would keep 0664."""
+    folder = backups_dir(tmp_path)
+    folder.mkdir(parents=True)
+    leftover = folder / "20260823_143005_acore_auth.sql.partial"
+    leftover.write_bytes(b"half")
+    leftover.chmod(0o664)
+    report = backup(tmp_path, FakeMysql(("acore_auth",)), running=running(DB), now=AT)
+    (dump,) = report.dumps
+    assert stat.S_IMODE(dump.path.stat().st_mode) == 0o600
+
+
+@_POSIX_ONLY
+def test_a_new_backups_folder_is_the_owners_alone(tmp_path: Path, shared_umask: None) -> None:
+    backup(tmp_path, FakeMysql(("acore_auth",)), running=running(DB), now=AT)
+    assert stat.S_IMODE(backups_dir(tmp_path).stat().st_mode) == 0o700
 
 
 def test_backup_dumps_the_databases_this_install_actually_has(tmp_path: Path) -> None:
@@ -991,7 +1043,11 @@ def test_a_marker_that_cannot_be_read_stands_in_for_no_safety_copy(
     report = restore(plan, mysql, confirm=plan.token, running=running(DB), now=AT)
 
     assert mysql.dumped == ["acore_world"]
-    assert [p.name for p in report.safety_backup] == ["20260823_143005_pre-restore_acore_world.sql"]
+    # T746: a record that cannot be read (or names nothing) cannot say the database is whole,
+    # so its copy is labelled as one that may be half-written, never counted as a good copy.
+    assert [p.name for p in report.safety_backup] == [
+        "20260823_143005_half-restored_acore_world.sql"
+    ]
     assert all(p.is_file() for p in report.safety_backup)
 
 
@@ -1045,8 +1101,10 @@ def test_a_carried_forward_safety_copy_that_is_not_there_is_not_reported_as_one(
     report = restore(plan, mysql, confirm=plan.token, running=running(DB), now=AT)
 
     assert mysql.dumped == ["acore_world"], "no copy was taken and none existed"
+    # T746: the marker says acore_world is part-written and its own copy is gone, so the copy
+    # taken now is of the half-written database and is labelled so.
     assert [(p.name, p.is_file()) for p in report.safety_backup] == [
-        ("20260823_143005_pre-restore_acore_world.sql", True)
+        ("20260823_143005_half-restored_acore_world.sql", True)
     ]
 
 
@@ -1373,7 +1431,7 @@ def test_backup_runs_mysqldump_in_the_distro_and_announces_the_password(
     mysql.dump_into("acore_auth", io.BytesIO())
 
     argv = seen["argv"]
-    assert argv[:5] == ["wsl.exe", "-d", "dml-arch", "--", "docker"]
+    assert argv[:5] == ["wsl.exe", "-d", "dml-arch", "--exec", "docker"]
     assert not any("hunter2" in part for part in argv), f"password in argv: {argv}"
     env = seen["env"]
     assert env.get("MYSQL_PWD") == "hunter2"
@@ -1505,7 +1563,33 @@ def _docker_exec_failing(monkeypatch: pytest.MonkeyPatch, *, fail: str) -> None:
             sink.write(good_dump(argv[-1]))  # type: ignore[union-attr]
         return subprocess.CompletedProcess(argv, 0, b"acore_world\n", b"")
 
+    class FakePopen:
+        """The restore's load starts with `Popen` so its pid can be recorded (T690).
+
+        Like a child, it "runs" at once and writes to the files it was given.
+        """
+
+        pid = 2**22 + 1  # above any pid a test box hands out
+
+        def __init__(self, argv: list[str], **kw: object) -> None:
+            done = fake_run(argv, **kw)
+            self.returncode = done.returncode
+            self._out, self._err = done.stdout, done.stderr
+            for stream, data in ((kw.get("stdout"), self._out), (kw.get("stderr"), self._err)):
+                if hasattr(stream, "write") and data:
+                    stream.write(data)  # type: ignore[union-attr]
+                    stream.flush()  # type: ignore[union-attr]
+
+        def communicate(self) -> tuple[bytes, bytes]:
+            return self._out, self._err
+
+        def kill(self) -> None: ...
+
+        def wait(self) -> int:
+            return self.returncode
+
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", FakePopen)
 
 
 @pytest.mark.parametrize("fail", ["list", "dump", "load"])

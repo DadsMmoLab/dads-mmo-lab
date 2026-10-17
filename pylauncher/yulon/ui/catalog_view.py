@@ -32,7 +32,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from yulon import docker, platform, wsl
+from yulon import docker, platform, teardown, wsl
 from yulon.catalog.catalog import Catalog, CatalogEntry, SingleEntry
 from yulon.catalog.installer import (
     FORMER_DEFAULT_DIRS,
@@ -47,6 +47,7 @@ from yulon.catalog.installer import (
     platform_names,
     unsupported_platform_message,
 )
+from yulon.catalog.preflight import CANNOT_INSTALL_YET
 from yulon.log import get_logger
 from yulon.ui import folder_picker, single_instance
 from yulon.ui.answers import said_yes
@@ -65,6 +66,16 @@ QWIDGETSIZE_MAX = 16777215
 
 BRING_FROM_ANOTHER = "Bring from another computer…"
 """The tile press that builds a whole server from a move package (T601 level 2)."""
+
+
+def another_game_message(name: str) -> str:
+    """What a package of a different game is told, on any tile (T702: before the folders)."""
+    return f"This file holds a {name} server. Use the {name} tile's {BRING_FROM_ANOTHER}"
+
+
+CANNOT_INSTALL_TITLE = "Cannot install yet"
+"""The title of a refusal that came before anything was started (T702), not "Install failed"."""
+
 MOVE_IN_FILE = ".yulon-move-in.json"
 """`catalog.native.MOVE_IN_FILE` (pinned equal by a test): a folder a whole-server move is building.
 
@@ -74,6 +85,19 @@ MOVE_PACKAGE_FILTER = "Move packages (*.zip)"
 
 PackagePicker = Callable[[QWidget, str, Path], Path | None]
 YesNo = Callable[[QWidget, str, str], bool]
+
+
+def _unfinished_move_in(server_dir: Path) -> bool:
+    """`MOVE_IN_FILE` is there and its move did not finish (T682): a finished one is a server.
+
+    Read through `move_server` only when the record is there, so this view does not import the
+    move engine at module scope for every folder it is shown.
+    """
+    if not (server_dir / MOVE_IN_FILE).exists():
+        return False
+    from yulon import move_server  # noqa: PLC0415
+
+    return move_server.unfinished_move_in(server_dir)
 
 
 def _unfinished_move(server_dir: Path) -> str:
@@ -490,10 +514,15 @@ class CatalogView(QWidget):
         move_in: object | None = None,
         pick_package: PackagePicker = _qt_package_picker,
         ask_yes: YesNo = ask_yes_no,
+        ready_check: Callable[[CatalogEntry, Path], str | None] | None = None,
         single_installer_factory: SingleInstallerFactory | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
+        # T702: `(entry, server_dir) -> a sentence, or None`. Asked as soon as the server
+        # folder is known, so a drive that cannot hold the install is said before the client
+        # folder is asked for. None draws no early check (the full preflight still runs).
+        self._ready_check = ready_check
         # The single-container servers' engine factory. Their tiles are drawn only when
         # one is given: a view built without it shows the WoW cores alone.
         self._make_single_installer = single_installer_factory
@@ -931,6 +960,9 @@ class CatalogView(QWidget):
         button.setText("Install")
         button.setToolTip("")
         button.setEnabled(game_id not in self._gated)
+        bring = self._move_buttons.get(game_id)
+        if bring is not None:
+            bring.setEnabled(game_id not in self._gated)
 
     def button_for(self, game_id: str) -> QPushButton:
         """The Install button of a tile (tests / accessibility)."""
@@ -972,7 +1004,7 @@ class CatalogView(QWidget):
         )
         if server_dir is None:
             return False
-        if (server_dir / MOVE_IN_FILE).exists():
+        if _unfinished_move_in(server_dir):
             show_information(self, "A move that did not finish", _unfinished_move(server_dir))
             return False
         if compose_file(server_dir) is None:
@@ -1200,6 +1232,20 @@ class CatalogView(QWidget):
 
     # -- install --------------------------------------------------------
 
+    def busy_reason(self) -> str | None:
+        """Why the window must not close now, or None (T690). Read by `main._busy_reasons()`.
+
+        An install runs on the Catalog's own log and belongs to no server tab, so no
+        tab's guard saw it: Quit, Update now and the window's close cancelled it
+        without a word. The install can be stopped from its log, so the reason says
+        to do that first, or wait.
+
+        `_current`, not `self._log.running`: that is set for exactly an install's run
+        (`_run_install()` to `_on_run_finished()`), while the log panel is also
+        "running" when it is merely following a stream.
+        """
+        return teardown.CATALOG_INSTALL if self._current is not None else None
+
     def start_install(self, entry: CatalogEntry) -> bool:
         """Ask for folders, then run the installer into the log panel. False if not started."""
         if self._log.running:
@@ -1217,12 +1263,14 @@ class CatalogView(QWidget):
         if folders is None:
             return False
         server_dir, client_dir = folders
-        if (server_dir / MOVE_IN_FILE).exists():
+        if _unfinished_move_in(server_dir):
             # T601 level 2: a plain install would finish the build and never put the modules,
             # settings or data in, and then the tile could no longer bring the server in.
             show_information(self, "A move that did not finish", _unfinished_move(server_dir))
             return False
-        return self._run_install(entry, server_dir, client_dir, self._make_installer(entry))
+        return self._run_install(
+            entry, server_dir, client_dir, self._make_installer(entry), first_install=True
+        )
 
     def start_single_install(self, entry: SingleEntry) -> bool:
         """`start_install()` for a single-container server. False if not started.
@@ -1250,7 +1298,9 @@ class CatalogView(QWidget):
             server_dir = self._pick_dir(self, f"Where should {entry.name} be installed?", suggested)
         if server_dir is None:
             return False
-        return self._run_install(entry, server_dir, None, self._make_single_installer(entry))
+        return self._run_install(
+            entry, server_dir, None, self._make_single_installer(entry), first_install=True
+        )
 
     def _ask_folders(self, entry: CatalogEntry) -> tuple[Path, Path | None] | None:
         """The server folder (the suggestion, or a pick) and, where needed, the client folder."""
@@ -1270,6 +1320,12 @@ class CatalogView(QWidget):
             server_dir = self._pick_dir(self, f"Where should {entry.name} be installed?", suggested)
         if server_dir is None:
             return None
+        if self._ready_check is not None:
+            refusal = self._ready_check(entry, server_dir)
+            if refusal is not None:
+                logger.info(f"{entry.id} refused before the client folder: {refusal}")
+                show_information(self, CANNOT_INSTALL_TITLE, refusal)
+                return None
         client_dir: Path | None = None
         if entry.install.requires_client_dir:
             client_dir = self._pick_dir(
@@ -1303,6 +1359,14 @@ class CatalogView(QWidget):
         path = self._pick_package(self, "Choose the file packed on the other computer", self._home)
         if path is None:
             return False
+        # T702: the file itself is judged before either folder is asked for. A wrong file
+        # used to be reported only after both pickers.
+        check = getattr(self._move_in, "check", None)
+        if check is not None:
+            refused = check(path, entry)
+            if refused is not None:
+                show_information(self, refused[0], refused[1])
+                return False
         folders = self._ask_folders(entry)
         if folders is None:
             return False
@@ -1313,11 +1377,7 @@ class CatalogView(QWidget):
             return False
         if plan.entry is None or plan.entry.id != entry.id:
             name = plan.entry.name if plan.entry is not None else "another game"
-            show_information(
-                self,
-                "Another game",
-                f"This file holds a {name} server. Use the {name} tile's {BRING_FROM_ANOTHER}",
-            )
+            show_information(self, "Another game", another_game_message(name))
             return False
         if not self._ask_yes(self, "Bring this server in?", plan.text()):
             return False
@@ -1328,6 +1388,7 @@ class CatalogView(QWidget):
             client_dir,
             installer,
             title=f"Bringing {entry.name} from another computer",
+            first_install=False,
         )
 
     def _run_install(
@@ -1338,8 +1399,14 @@ class CatalogView(QWidget):
         installer: InstallRun,
         *,
         title: str | None = None,
+        first_install: bool,
     ) -> bool:
-        options = InstallOptions(server_dir=server_dir, client_dir=client_dir)
+        # `first_install` is the caller's word, never a default (T723): the Install button
+        # says True and may switch a WotLK or Unbound command channel on at install; the move
+        # ("Bring from another computer") says False, so the server it fills stays as sent.
+        options = InstallOptions(
+            server_dir=server_dir, client_dir=client_dir, first_install=first_install
+        )
         # No synchronous preflight here: `run()` re-preflights on the worker
         # thread, and preflight can mean full Docker provisioning — minutes of
         # work that used to freeze the window (review finding, 2026-08-21).
@@ -1462,7 +1529,11 @@ class CatalogView(QWidget):
             )
             logger.info(f"{game_id} exited 0 with no compose file in {server_dir}; not remembered")
         if not ok and not self._offer_a_restart_instead(message):
-            show_warning(self, "Install failed", message)
+            # Nothing was started when preflight refused, so it is not a failure (T702).
+            title = (
+                CANNOT_INSTALL_TITLE if message.startswith(CANNOT_INSTALL_YET) else "Install failed"
+            )
+            show_warning(self, title, message)
         self.install_finished.emit(game_id, ok, message)
         if ok:
             if not process_install_done:
@@ -1541,6 +1612,12 @@ class CatalogView(QWidget):
             button.setEnabled(enabled)
 
 
+def _restart_refusal(parent: QWidget) -> str | None:
+    """Why the window cannot be replaced by a restart now (`main.close_refusal`, strictly)."""
+    refusing = getattr(parent.window(), "yulon_close_refusal", None)
+    return refusing(strict=True) if refusing is not None else None
+
+
 def offer_a_docker_group_restart(parent: QWidget, message: str, *, failed_title: str) -> bool:
     """`CatalogView._offer_a_restart_instead()`'s offer, for any view that needs it (T160).
 
@@ -1558,6 +1635,19 @@ def offer_a_docker_group_restart(parent: QWidget, message: str, *, failed_title:
     # seconds were a window in which another launch could take the lock.
     argv = platform.docker_group_reexec()
     if argv is None:
+        return False
+    # T690: the exec replaces this process at once -- no job is joined, no Stop is left to
+    # carry on -- so it waits for ALL running work, strictly. Said instead of offered: the
+    # restart is one press away when the work has finished.
+    if (reason := _restart_refusal(parent)) is not None:
+        show_information(
+            parent,
+            "Yu'lon is still working",
+            f"{reason}\n\nYu'lon needs to restart to finish setting up Docker. Do that when "
+            "this is finished: choose Quit Yu'lon… from the tray icon's menu, then open Yu'lon "
+            "again.",
+        )
+        # Not handled: the caller still shows its own failure (the Catalog's "Install failed").
         return False
     if said_yes(
         QMessageBox.question(

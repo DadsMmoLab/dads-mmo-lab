@@ -39,8 +39,12 @@ name. That is the wrong shape for a docker that is not local. It becomes a
 
 ```python
 docker_prefix(None)         -> ["docker"]
-docker_prefix("dml-arch")   -> ["wsl", "-d", "dml-arch", "--", "docker"]
+docker_prefix("dml-arch")   -> ["wsl", "-d", "dml-arch", "--exec", "docker"]
 ```
+
+`--exec`, not `--`, since T744 (2026-10-12): after `--` wsl.exe handed the command line to
+the distro's shell, which expanded `$1`, `$f` and `$(...)` in scripts meant for the container.
+The `--` spellings below are the measurements this design was built on.
 
 Callers splice rather than prepend a name. Four places build docker argv today
 and each takes the prefix:

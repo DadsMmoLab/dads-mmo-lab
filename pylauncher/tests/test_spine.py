@@ -1226,7 +1226,10 @@ def test_the_prompter_the_spine_forwards_is_the_one_the_sudo_dialog_asks_with(
 
     def prompter(question: str) -> str:
         asked.append(question)
-        return SUDO_CANARY if question == platform.SUDO_PASSWORD_QUESTION else "n"
+        if question == platform.SUDO_PASSWORD_QUESTION:
+            return SUDO_CANARY
+        # T700: the install is asked first and agreed to; the group is the one declined.
+        return "y" if question.startswith("Docker Engine is not installed") else "n"
 
     fed: list[tuple[list[str], str]] = []
 
@@ -1245,7 +1248,8 @@ def test_the_prompter_the_spine_forwards_is_the_one_the_sudo_dialog_asks_with(
         installer.preflight(InstallOptions(server_dir=tmp_path / "wow"), ask=prompter)
 
     assert built == [prompter], "the session was built with something other than the forwarded ask"
-    assert asked[0] == platform.DOCKER_GROUP_QUESTION.format(user="pk")
+    assert asked[0].startswith("Docker Engine is not installed")
+    assert asked[1] == platform.DOCKER_GROUP_QUESTION.format(user="pk")
     assert platform.SUDO_PASSWORD_QUESTION in asked
     assert asked.count(platform.SUDO_PASSWORD_QUESTION) == 1  # one dialog per run, still
     # The answer went to sudo, on stdin, and never as an argv element.
@@ -1303,7 +1307,10 @@ def test_every_sudo_outcome_survives_the_trip_up_to_the_sentence_the_user_reads(
 
     def message(run: _LinuxBox, run_input: platform.RunWithInput, password: str | None) -> str:
         def prompter(question: str) -> str | None:
-            return password if question == platform.SUDO_PASSWORD_QUESTION else "n"
+            if question == platform.SUDO_PASSWORD_QUESTION:
+                return password
+            # T700: yes to the install itself, no to the docker group.
+            return "y" if question.startswith("Docker Engine is not installed") else "n"
 
         rec = Recorder(images=False)
         installer = _build(
@@ -1348,10 +1355,21 @@ def test_every_sudo_outcome_survives_the_trip_up_to_the_sentence_the_user_reads(
 # -- secrets ------------------------------------------------------------------
 
 
-def test_a_fixed_password_is_the_catalog_value(tmp_path: Path) -> None:
-    assert _build(Recorder(), AzerothCoreInstaller).resolve_secrets(tmp_path) == native.Secrets(
-        ENTRY.install.password.value or ""
+def test_a_new_wotlk_folder_mints_its_password_and_an_old_one_keeps_the_published_value(
+    tmp_path: Path,
+) -> None:
+    """T748: resolved before stage 1. A folder whose record says it is a new install mints
+    `wotlk-` plus 16 hex; one whose record predates T748 keeps the published `password`."""
+    engine = _build(Recorder(), AzerothCoreInstaller)
+    new = tmp_path / "new"
+    state = native.InstallState(
+        game_id=ENTRY.id, install_id="x", family="azerothcore", db_password="generated"
     )
+    fresh = engine.resolve_secrets(new, state, mint=True).db_password
+    assert fresh.startswith("wotlk-") and len(fresh) == len("wotlk-") + 16, fresh
+    old = tmp_path / "old"
+    native.write_state(old, replace(state, db_password=""))
+    assert engine.resolve_secrets(old) == native.Secrets("password")
 
 
 def test_a_generated_password_is_read_from_its_file_or_minted_with_the_prefix(
@@ -1361,7 +1379,7 @@ def test_a_generated_password_is_read_from_its_file_or_minted_with_the_prefix(
     plan = TBC.install.password
     assert plan.mode == "generated" and plan.file is not None
     installer = AzerothCoreInstaller(TBC, seams=Recorder().seams())
-    minted = installer.resolve_secrets(tmp_path).db_password
+    minted = installer.resolve_secrets(tmp_path, mint=True).db_password  # the install run
     assert minted.startswith(plan.prefix) and len(minted) == len(plan.prefix) + 16
     assert re.fullmatch(r"[0-9a-f]{16}", minted[len(plan.prefix) :])
     (tmp_path / plan.file).write_text("tbc-kept\n", encoding="utf-8")
@@ -2364,6 +2382,13 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "THIS install's marker -- a directory this app made -- so what an unreadable "
         "backup can cost is the app's own backup, never a folder of the player's"
     ),
+    ("selfupdate/fetch.py", "sweep_stale_parts"): (
+        "T765. Lists the folder a download-only update saves into (the player's Downloads) "
+        "for the hidden `.<name>.yulon-part` a download killed outright left. It decides a "
+        "DELETE, so it is narrow: only that hidden name with Yu'lon's own suffix, only a plain "
+        "file (lstat: never a link or a folder), and only one unchanged for 15 minutes, which "
+        "a live download never is. An unreadable folder answers nothing removed"
+    ),
     ("selfupdate/stage.py", "staged_entries"): (
         "T90 plan 3. Lists the STAGING directory this app filled moments earlier, to find the "
         "top-level names the new build ships. It decides no write of its own; what it feeds is "
@@ -2628,6 +2653,23 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "be listed answers None - 'could not be established' - which the caller renders "
         "*unchecked*, never a guessed drive"
     ),
+    ("purge.py", "find_backups"): (
+        "T677. Asks whether the install's `sql_scripts/backups` has anything in it (the first "
+        "entry only) so an uninstall moves a folder that holds backups and skips an empty one. "
+        "It writes nothing: it picks whether a rename or a copy is attempted beside the server "
+        "folder, and an OSError makes the uninstall refuse before anything is removed"
+    ),
+    ("purge.py", "_items_under"): (
+        "T677. Lists a backups folder and the copy made of it, to compare names and sizes "
+        "before the uninstall relies on the copy. It decides no write: a difference only "
+        "refuses the press and discards the half-made `.partial` copy, which that call "
+        "itself created. Links are listed and never entered"
+    ),
+    ("kept_backups.py", "earlier_sets"): (
+        "T677. Lists the PARENT of the server folder for the folders earlier uninstalls kept "
+        "beside it, so the Backups list can show them. It decides no write and no delete: the "
+        "rows are marked undeletable, and an OSError answers an empty list"
+    ),
     ("purge.py", "folder_bytes"): (
         "measures the server folder for the uninstall dialog; every OSError per entry is "
         "skipped and the total is short rather than absent, because a folder whose size "
@@ -2651,6 +2693,13 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "delete has already failed once, and an rmdir it cannot do is left for the retry "
         "to name against the tree"
     ),
+    ("rmtree.py", "remove_tree_last"): (
+        "lists the top of a folder the caller asked to delete (an Uninstall's server folder) "
+        "only to ORDER the deletion: every sub-folder first, then the other files, then the "
+        "names the caller wants last (the install record a second Uninstall proves ownership "
+        "from, T682). It decides no write on its own; a link at the top is unlinked, never "
+        "entered, and a root that is a link is `remove_tree()`'s to refuse"
+    ),
     ("rmtree.py", "_empty_stoppably"): (
         "walks the tree a press is deleting (the old map data, the pathfinding tiles) so it "
         "can ask the claim's `stop()` before each unlink and rmdir. It IS a write, and it is "
@@ -2668,7 +2717,7 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "- so an unreadable folder is treated as occupied rather than empty: a false refusal "
         "costs a message, a false pass costs a build that dies at the linker an hour in"
     ),
-    ("party.py", "deploy"): (
+    ("party.py", "_bundle"): (
         "lists the app's OWN bundled `lua/` tree to find the bridge families in it, not "
         "anything of the user's, and the folder it goes on to write is created by the same "
         "call - so no emptiness verdict about somebody's directory is reached. Its OSError is "
@@ -2683,9 +2732,15 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "precondition's own sentence; reporting a scripts-are-there when the folder could not "
         "be read is the one thing that would be worse, and this cannot"
     ),
-    ("apply.py", "_undeploy"): (
-        "re-derives what a `deploy` step put on disk from the clone's own `src` listing, so it "
-        "removes exactly those names; reads a folder this app filled, decides no write into it"
+    ("apply.py", "_deploy_files"): (
+        "lists the clone's own `src` folder (links never walked) to name the files a `deploy` "
+        "step will write, for the deploy record (T684); reads a folder this app just cloned, "
+        "and what is written or removed is decided by that record, not by this listing"
+    ),
+    ("platform.py", "_proc_listener"): (
+        "lists `/proc` to name the program holding a taken port in Start's sentence (T671); "
+        "best effort and read-only, an unreadable entry is skipped, and it never decides a "
+        "write or a refusal: the refusal comes from the bind probe, not from this name"
     ),
     ("apply.py", "_patches"): (
         "resolves a manifest's `patch.file` glob to real paths; a pattern that matches nothing "
@@ -2733,13 +2788,15 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "mount from an empty mount point; its own `except OSError` logs and answers None, "
         "which is the honest 'cannot tell' this probe is allowed to give"
     ),
-    ("networking.py", "_realmlist_candidates"): (
-        "lists a client's `Data/` (found whatever its case, T261) for its locale folders, "
-        "and finds `realmlist.wtf` in each the same way, to find the file(s) to write: the "
-        "first for `write_client_realmlist()`, every one for T181's "
+    ("networking.py", "_data_subfolders"): (
+        "lists a client's `Data/` (found whatever its case, T261) for its locale folders; "
+        "`_realmlist_candidates()` finds `realmlist.wtf` in each the same way, to find the "
+        "file(s) to write: the first for `write_client_realmlist()`, every one for T181's "
         "`write_ready_to_play_realmlists()`, which is only ever handed a ready-to-play "
-        "client. Finding none falls back to `Data/enUS/` under the names already on disk, "
-        "and each write is to a named file. A `Data/` that cannot be listed offers none"
+        "client, and which also gives a retail locale folder without one a new file "
+        "(T665, never inside a link). Finding none falls back to `Data/enUS/` under the "
+        "names already on disk, and each write is to a named file. A `Data/` that cannot "
+        "be listed offers none"
     ),
     ("logsnap.py", "_prune"): (
         "lists this install's own snapshots in the app's logs directory to keep the newest "
@@ -2814,10 +2871,22 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "manifest will name; decides no write, and a conf it cannot see is simply one "
         "Applier._conf() never activates"
     ),
-    ("module_source.py", "_sql_steps"): (
-        "lists a derived module's data/sql/ to map each database directory to a deferred "
-        "db-import step; its emptiness verdict is deliberate and is NOT a refusal - a module "
-        "that brought no SQL is normal, the same argument apply.py::_pending_sql already makes"
+    ("module_source.py", "_sql_folders"): (
+        "lists a derived module's data/sql/ for the folders `_sql_steps()` maps to deferred "
+        "db-import steps by the updater's own rule (T752); its emptiness verdict is deliberate "
+        "and is NOT a refusal - a module that brought no SQL is normal, the same argument "
+        "apply.py::_pending_sql already makes"
+    ),
+    ("module_source.py", "_unapplied"): (
+        "T752. Globs one data/sql/ folder the updater never opens for any .sql file, to write "
+        "a NOTE that nothing applies it. Decides no write and no refusal: a folder it cannot "
+        "see is one the note leaves out, and nothing is applied either way"
+    ),
+    ("apply.py", "_uninstall_sentences"): (
+        "T751. Globs a module's clone for its own uninstall SQL during Remove, before the clone "
+        "is deleted, to NAME each file in the report. It decides no write and runs nothing: "
+        "its caller `_uninstall_scripts()` logs any OSError and answers no sentence, which "
+        "leaves the report as it was before T751 and the Remove going on"
     ),
     ("tuning.py", "backups_of"): (
         "lists the directory a conf file lives in to find the backups the Tuning tab has "
@@ -2875,6 +2944,28 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "T187: `update_state._sweep_stale_temporaries` for `ui.json` - lists the config dir "
         "for `ui.json.*.tmp` a killed save left, and deletes only a file this app named "
         "itself, in its own directory, more than a day old. Nothing of a server's"
+    ),
+    ("ui/theme.py", "_load_bundled_themes"): (
+        "Theme engine (#444). Globs the theme `.json` files shipped inside the app "
+        "(`resources.themes_dir()`) to build the built-in theme list. Read only, in the "
+        "app's own bundle; it decides which colours are offered and writes nothing, and it "
+        "touches no server or game folder"
+    ),
+    ("ui/theme.py", "sync_user_themes"): (
+        "Theme engine (#444). Globs the bundled theme files to copy each into the player's "
+        "own `<config dir>/themes` folder when that name is not there yet. It writes only "
+        "into this app's config directory, never replaces a file that exists (a player's "
+        "edited theme stays), and has nothing to do with a server's or a game's folder"
+    ),
+    ("ui/theme.py", "load_available_themes"): (
+        "Theme engine (#444). Globs `<config dir>/themes/*.json` to offer the player's own "
+        "themes next to the built-in ones. Read only, this app's own directory; an OSError "
+        "answers an empty listing, which leaves the built-in themes"
+    ),
+    ("ui_settings.py", "clean_theme"): (
+        "Theme engine (#444). Globs `<config dir>/themes/*.json` to check that a saved theme "
+        "id names a theme file the player has. Read only, this app's own directory; an "
+        "unknown id falls back to the default theme, and nothing is written or deleted"
     ),
     ("play_client.py", "plan"): (
         "T181a. Walks the player's own client to sort its files into hard-linked (`*.MPQ`, "
@@ -3165,13 +3256,6 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "T624. Walks a folder module's own clone folder under `modules/` (links refused, `.git` "
         "and Yu'lon's records skipped) to READ its files into a move package. It decides no "
         "write: the files are read, never changed, and the package is written elsewhere"
-    ),
-    ("move_flows.py", "_backup_for_the_package"): (
-        "T601. Lists the server's own `sql_scripts/backups/` before and after a pack's backup, "
-        "to delete the dumps THAT backup wrote when it fails part-way (only names that were "
-        "not there before, and only `*_move_*`, the label the pack gives them). It decides no "
-        "write outside the install: those files are the run's own, in the install's own "
-        "backups folder, and an auth dump with every verifier must not stay behind"
     ),
     ("catalog/families/mmaps.py", "_keep_finished"): (
         "T209. Lists `data/mmaps` -- the pathfinding job's own output folder, refused when it "
@@ -3557,7 +3641,7 @@ def test_the_install_ends_by_advertising_the_address_the_seam_detected(
 
     assert _statements(rec) == [networking.realmlist_sql(ENTRY, "100.64.0.10", "100.64.0.10")]
     assert "127.0.0.1" not in _statements(rec)[0], "the loopback was written as the realm address"
-    assert rec.sql_secrets[-1] == "password", "it asked the database with no password"
+    assert rec.sql_secrets[-1].startswith("wotlk-"), "it asked without the install's password"
     assert [line for line in said if "now advertises 100.64.0.10" in line], said
 
 
@@ -4316,3 +4400,201 @@ def test_a_real_run_writes_those_two_shapes_and_no_marker_ever_carries_a_prefix(
     assert {log_lines.parse(line).kind for line in steps} == {"stage"}
     assert {log_lines.parse(line).kind for line in markers} == {"marker"}
     assert [log_lines.parse(line).text for line in steps + markers] == steps + markers
+
+
+def test_the_install_advertises_the_address_the_owner_chose_on_a_vpn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A chosen VPN address survives an install; the detected LAN address does not return (T674).
+
+    The intent file is written in the shape `record_network_intent()` gives it when a chosen
+    address is recorded. Against code that ignores that key, the closing step detects the LAN
+    address and writes it, which is the assertion that fails. The machine is faked whole (not WSL,
+    the address binds, no program runs), so the warning's absence is asserted, not host-dependent.
+    """
+    monkeypatch.setattr(platform, "in_wsl", lambda: False)
+    monkeypatch.setattr(networking, "_can_bind", lambda ip: True)
+
+    def no_program(argv: list[str], *_a: object, **_k: object) -> object:
+        raise AssertionError(f"the test ran {argv[0]} on this machine")
+
+    monkeypatch.setattr(runner, "run", no_program)
+    server = tmp_path / "wow"
+    server.mkdir()
+    (server / networking.INTENT_FILE).write_text(
+        '{"mode": "lan", "address": "100.64.0.10", "recorded_unix": 1}\n', encoding="utf-8"
+    )
+    rec = Recorder(realm_row=f"{native.INSTALL_REALM_HOST}\t{native.INSTALL_REALM_HOST}\n")
+    asked: list[str] = []
+
+    def detect() -> str:
+        asked.append("the LAN address was detected")
+        return "192.168.1.25"
+
+    said = _advertising(rec, server, lan_ip=detect)
+    assert asked == [], "a LAN address was detected although the owner chose one"
+    assert _statements(rec) == [networking.realmlist_sql(ENTRY, "100.64.0.10", "100.64.0.10")]
+    assert [line for line in said if "now advertises 100.64.0.10" in line], said
+    assert not [line for line in said if line.startswith("Warning:")], said
+
+
+def _recorded_address(server: Path, address: str) -> None:
+    (server / networking.INTENT_FILE).write_text(
+        f'{{"mode": "lan", "address": "{address}", "recorded_unix": 1}}\n', encoding="utf-8"
+    )
+
+
+@pytest.mark.parametrize(
+    "token", ["0:0:0:0:0:0:0:1", "::ffff:127.0.0.1", "fe80::1", "fd7a:115c:a1e0::1", "foo"]
+)
+def test_a_recorded_token_that_is_not_a_usable_ipv4_is_never_written(
+    token: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T674 round 3: the recorded path refuses what the chosen path refuses. The token reads as no
+    choice, so the detected LAN address is what the closing step writes, and the token never is."""
+    monkeypatch.setattr(platform, "in_wsl", lambda: False)
+    monkeypatch.setattr(networking, "_can_bind", lambda ip: True)
+    server = tmp_path / "wow"
+    server.mkdir()
+    _recorded_address(server, token)
+    rec = Recorder(realm_row=f"{native.INSTALL_REALM_HOST}\t{native.INSTALL_REALM_HOST}\n")
+    _advertising(rec, server, lan_ip=lambda: "192.168.1.25")
+    statements = _statements(rec)
+    assert not [sql for sql in statements if token in sql], statements
+    assert statements == [networking.realmlist_sql(ENTRY, "192.168.1.25", "192.168.1.25")]
+
+
+def test_under_wsl_a_recorded_tailscale_address_the_vm_holds_gets_no_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Lead ruling, T674 round 3: a Tailscale inside the WSL distro is the VM's own tailnet node.
+    Its address is held when the VM binds it, so no false "no longer held" warning is printed."""
+
+    def listings(argv: list[str], *_a: object, **_k: object) -> subprocess.CompletedProcess[str]:
+        out = (
+            "Wi-Fi 2|192.168.1.210\n"
+            if argv[0] == "powershell.exe"
+            else "2: eth0    inet 172.24.144.5/20 scope global eth0\n"
+            "3: tailscale0    inet 100.86.248.75/32 scope global tailscale0\n"
+        )
+        return subprocess.CompletedProcess(argv, 0, out, "")
+
+    monkeypatch.setattr(platform, "in_wsl", lambda: True)
+    monkeypatch.setattr(runner, "run", listings)
+    monkeypatch.setattr(networking, "_can_bind", lambda ip: ip == "100.86.248.75")
+    server = tmp_path / "wow"
+    server.mkdir()
+    _recorded_address(server, "100.86.248.75")
+    rec = Recorder(realm_row="192.168.1.210\t192.168.1.210\n")
+    said = _advertising(rec, server, lan_ip=lambda: "192.168.1.210")
+    assert not [line for line in said if line.startswith("Warning:")], said
+    assert _statements(rec) == [networking.realmlist_sql(ENTRY, "100.86.248.75", "100.86.248.75")]
+
+
+def test_a_recorded_address_when_the_windows_listing_cannot_be_read_says_so_and_is_still_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T674 round 3, item 2. Interop off is "the list could not be read", not "not this computer's".
+
+    The warning names the unreadable list and the address is written anyway, as it always was.
+    The VM's own listing is empty and `_can_bind` answers False, so nothing here is held by a bind.
+    """
+    monkeypatch.setattr(platform, "in_wsl", lambda: True)
+    monkeypatch.setattr(networking, "_can_bind", lambda ip: False)
+
+    def no_windows(argv: list[str], *_a: object, **_k: object) -> subprocess.CompletedProcess[str]:
+        if argv[0] == "powershell.exe":
+            raise FileNotFoundError(argv[0])
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(runner, "run", no_windows)
+    server = tmp_path / "wow"
+    server.mkdir()
+    _recorded_address(server, "100.72.215.6")
+    rec = Recorder(realm_row="192.168.1.210\t192.168.1.210\n")
+    said = _advertising(rec, server, lan_ip=lambda: "192.168.1.210")
+    warnings = [line for line in said if line.startswith("Warning:")]
+    assert len(warnings) == 1 and "could not be read" in warnings[0], said
+    assert "not one of this computer" not in warnings[0], said
+    assert _statements(rec) == [networking.realmlist_sql(ENTRY, "100.72.215.6", "100.72.215.6")]
+
+
+def test_a_recorded_address_replaces_a_lan_row_from_an_earlier_install(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Route (b): a recorded address that differs from the row is written over it (T674 round 2).
+
+    The row holds the LAN address an earlier install wrote and the owner has since recorded a
+    Tailscale address. Round 1 left any reachable row alone, so the recorded choice never took
+    effect, and the line said the LAN address was reachable.
+    """
+    monkeypatch.setattr(platform, "in_wsl", lambda: False)
+    monkeypatch.setattr(networking, "_can_bind", lambda ip: True)
+    server = tmp_path / "wow"
+    server.mkdir()
+    _recorded_address(server, "100.64.0.10")
+    rec = Recorder(realm_row="192.168.1.25\t192.168.1.25\n")
+    said = _advertising(rec, server, lan_ip=lambda: "192.168.1.25")
+    assert _statements(rec) == [networking.realmlist_sql(ENTRY, "100.64.0.10", "100.64.0.10")]
+    assert [line for line in said if "now advertises 100.64.0.10" in line], said
+    assert not [line for line in said if line.startswith("Warning:")], said
+
+
+def test_a_recorded_address_is_written_when_only_its_local_column_differs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The address column matches the choice but `localAddress` does not, so the row changes."""
+    monkeypatch.setattr(platform, "in_wsl", lambda: False)
+    monkeypatch.setattr(networking, "_can_bind", lambda ip: True)
+    server = tmp_path / "wow"
+    server.mkdir()
+    _recorded_address(server, "100.64.0.10")
+    rec = Recorder(realm_row="100.64.0.10\t192.168.1.25\n")
+    said = _advertising(rec, server, lan_ip=lambda: "192.168.1.25")
+    assert _statements(rec) == [networking.realmlist_sql(ENTRY, "100.64.0.10", "100.64.0.10")]
+    assert not [line for line in said if line.startswith("Warning:")], said
+
+
+def test_a_recorded_address_the_row_already_holds_is_left_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(platform, "in_wsl", lambda: False)
+    monkeypatch.setattr(networking, "_can_bind", lambda ip: True)
+    server = tmp_path / "wow"
+    server.mkdir()
+    _recorded_address(server, "100.64.0.10")
+    rec = Recorder(realm_row="100.64.0.10\t100.64.0.10\n")
+    said = _advertising(rec, server, lan_ip=lambda: "192.168.1.25")
+    assert _statements(rec) == []
+    assert [line for line in said if "already advertises 100.64.0.10" in line], said
+    assert not [line for line in said if line.startswith("Warning:")], said
+
+
+def test_a_recorded_address_this_computer_no_longer_holds_is_warned_about_and_still_advertised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One plain warning line; the address is still written, because it is the owner's choice."""
+    monkeypatch.setattr(platform, "in_wsl", lambda: False)
+    monkeypatch.setattr(networking, "_can_bind", lambda ip: False)
+    server = tmp_path / "wow"
+    server.mkdir()
+    _recorded_address(server, "100.64.0.10")
+    rec = Recorder(realm_row="192.168.1.25\t192.168.1.25\n")
+    said = _advertising(rec, server, lan_ip=lambda: "192.168.1.25")
+    warnings = [line for line in said if line.startswith("Warning:")]
+    assert len(warnings) == 1 and "100.64.0.10" in warnings[0], said
+    assert _statements(rec) == [networking.realmlist_sql(ENTRY, "100.64.0.10", "100.64.0.10")]
+
+
+def test_a_recorded_address_this_computer_still_holds_gets_no_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(platform, "in_wsl", lambda: False)
+    monkeypatch.setattr(networking, "_can_bind", lambda ip: True)
+    server = tmp_path / "wow"
+    server.mkdir()
+    _recorded_address(server, "100.64.0.10")
+    rec = Recorder(realm_row="192.168.1.25\t192.168.1.25\n")
+    said = _advertising(rec, server, lan_ip=lambda: "192.168.1.25")
+    assert not [line for line in said if line.startswith("Warning:")], said
+    assert _statements(rec) == [networking.realmlist_sql(ENTRY, "100.64.0.10", "100.64.0.10")]

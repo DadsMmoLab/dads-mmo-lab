@@ -34,7 +34,7 @@ from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, S
 from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path, PurePosixPath
-from typing import Any, NamedTuple, Protocol, TypeVar, assert_never, cast
+from typing import Any, NamedTuple, NoReturn, Protocol, TypeVar, assert_never, cast
 
 import shiboken6
 from PySide6.QtCore import QEvent, QObject, QPoint, QSize, Qt, QTimer, QUrl, Signal, Slot
@@ -70,6 +70,7 @@ from PySide6.QtWidgets import (
 )
 
 from yulon import (
+    account_rules,
     addon_archive,
     backup_shelf,
     botlist,
@@ -103,12 +104,14 @@ from yulon import (
     purge,
     reset_defaults,
     resources,
+    seeded_accounts,
     server_build_gone,
     server_build_presses,
     server_rates,
     server_time_zone,
     serverlock,
     sql_log_offer,
+    teardown,
     tuning,
     unbound_settings,
     useraccounts,
@@ -131,7 +134,7 @@ from yulon.apply import (
     required_prompts,
 )
 from yulon.catalog import bot_dashboard, composegen, native, preflight, time_zone, upstream
-from yulon.catalog.catalog import CatalogEntry, Client, ClientPack, ConfigWtf
+from yulon.catalog.catalog import CatalogEntry, Client, ClientPack, ConfigWtf, DbPasswordUnknown
 from yulon.catalog.families import azerothcore, clientdir, decisions, mmaps, trinitycore
 from yulon.catalog.installer import (
     InstallerError,
@@ -148,6 +151,7 @@ from yulon.controller import (
     ImportEnded,
     InstallStatus,
     PortConflictError,
+    unfinished_import_wrote,
 )
 from yulon.controller_wow_centurion import accounts as centurion_accounts
 from yulon.controller_wow_centurion import characters as centurion_characters
@@ -183,6 +187,7 @@ from yulon.manifest import ConfKey, Manifest, ManifestType, Prompt, When
 from yulon.manifest_store import FAMILY_FILES, ManifestStore
 from yulon.networking import Mode, NetworkPlan, NetworkReport
 from yulon.said import SaidByYulon, split_details
+from yulon.support.redact import hide_account_passwords
 from yulon.ui import lines, single_instance
 from yulon.ui.answers import said_yes
 from yulon.ui.catalog_view import DirPicker, _qt_dir_picker, offer_a_docker_group_restart
@@ -411,6 +416,8 @@ class MyPartySeam(Protocol):
 
     def link_account(self, master: str, account: str) -> party.AccountLink: ...
 
+    def deploy_bridge(self) -> party.Deployment: ...
+
 
 class Uninstall(Protocol):
     """What the Uninstall control needs (8.9a): a plan, and a run that takes the checkbox.
@@ -539,6 +546,56 @@ class _RestoredWithNote:
 
     report: wotlk_maintenance.RestoreReport
     note: str | None
+
+
+@dataclass(frozen=True)
+class _BackedUpWithNote:
+    """A backup's report, and the line saying the database it started is still running (T681).
+
+    `report` is whatever the backup answered: a `BackupReport` normally, and the note is kept
+    when it is not, because the database was left running either way (review of T681).
+    """
+
+    report: object
+    note: str
+
+
+DATABASE_LEFT_RUNNING = (
+    "The database was started on its own for this and could not be stopped again ({problem}), "
+    "so it is still running. Stop the server on the Server tab when you are done with it."
+)
+"""T681: the note a Backup or Restore that worked carries when its database would not stop."""
+
+
+@dataclass(frozen=True)
+class _PutBack:
+    result: object
+    stop_note: str | None
+
+
+def _put_back_after(work: Callable[[], object], alone: DatabaseAlone) -> _PutBack:
+    """Run `work`, then stop the database the press started; the job's own outcome is the report.
+
+    T681 (lifecycle L10): the stop ran in a `finally`, so a stop that raised replaced the
+    job's answer -- a restore or backup that WORKED was reported as failed, the Tortoise bot
+    note was lost and the backup's automatic keep did not run. Now a job that worked keeps its
+    report, with `DATABASE_LEFT_RUNNING` as a note; a job that failed raises its own failure,
+    and a stop that fails after it is logged, not raised over it.
+    """
+    try:
+        result = work()
+    except BaseException:
+        try:
+            alone.take_down()
+        except Exception as exc:  # noqa: BLE001 - the job's own failure is the report
+            logger.warning(f"the database started for this job could not be stopped again: {exc}")
+        raise
+    try:
+        alone.take_down()
+    except Exception as exc:  # noqa: BLE001 - a note on a job that worked, never its failure
+        logger.warning(f"the database started for this job could not be stopped again: {exc}")
+        return _PutBack(result, DATABASE_LEFT_RUNNING.format(problem=exc))
+    return _PutBack(result, None)
 
 
 class ChannelSetup(Protocol):
@@ -937,6 +994,7 @@ def ask_to_set_client_dir(parent: QWidget, manifest: Manifest) -> bool:
 
 MAKE_PLAY_CLIENT_LABEL = "Make a ready-to-play client…"
 PLAY_LABEL = "Play"
+LAUNCHER_LABEL = "Launcher…"
 REFRESH_PLAY_CLIENT_LABEL = "Refresh from your original client"
 DELETE_PLAY_CLIENT_LABEL = "Delete ready-to-play client…"
 CLIENT_OPTIONS_LABEL = "Client options…"
@@ -989,6 +1047,36 @@ def _address_written_elsewhere(cfg: ConfigWtf | None) -> bool:
 
 
 PLAY_START_FAILED = "The server did not start, so World of Warcraft was not started."
+
+PLAY_REALM_WAIT_SECONDS = 600.0
+"""How long Play waits for the realm after starting the server (T672), ten minutes.
+
+The shared ready check (`services.ready_after_start`, the Tuning tab's) can run for
+hours on a first boot; a Play after a Start on an installed server needs one to three
+minutes. Past this the game is not started and the player is told, not left waiting."""
+PLAY_WAITING_FOR_THE_REALM = (
+    "The server is starting. Waiting for the realm to come up before starting the game…"
+)
+PLAY_REALM_TIMED_OUT = (
+    "The realm was not up after {minutes} minutes, so World of Warcraft was not started. "
+    "The Server tab shows when it is up; press Play again then."
+)
+PLAY_REALM_WAIT_STOPPED = (
+    "Stopped waiting for the realm, so World of Warcraft was not started. "
+    "The Server tab shows when it is up; press Play again then."
+)
+PLAY_REALM_WAIT_STOPPED_BY_ACTION = (
+    "Stopped waiting for the realm because you started another action on this server, so World "
+    "of Warcraft was not started. Press Play again when it is up."
+)
+PLAY_REALM_WAIT_BROKE = (
+    "The server was started, but Yu'lon could not wait for the realm, so World of Warcraft was "
+    "not started. The Server tab shows whether it is up; press Play again then."
+)
+PLAY_AT_ANOTHER_COMPUTER = (
+    "Starting World of Warcraft at {address}. The server on this computer is not started or "
+    "checked for it."
+)
 
 PLAY_PENDING = (
     "Play is still starting World of Warcraft from this server's ready-to-play client. "
@@ -1707,6 +1795,18 @@ class _Compared:
 
 
 @dataclass(frozen=True)
+class _PlayTarget:
+    """Where a Play logs in, read off the GUI thread (T667).
+
+    `remote` is the launcher's realm address when it names another computer, and
+    then `status` is None: that computer's server is not this one's to check.
+    """
+
+    remote: str | None
+    status: object | None
+
+
+@dataclass(frozen=True)
 class _UninstallOutcome:
     """An uninstall's report, and what became of its ready-to-play client (None: not asked)."""
 
@@ -1854,6 +1954,14 @@ class ControllerServices:
     The Tuning tab saves and reverts its conf files as jobs (T622) and takes this around the
     write, on the job's thread; the account and character writes take it inside their own seams.
     `None` (a harness) holds nothing.
+    """
+    db_refusal: str | None = None
+    """Why nothing on this tab may touch the database, in player words, or None (T785).
+
+    Set when `Install.known_db_password()` cannot answer for this folder: its password file
+    is gone and its `.env` has no line either, or the line is one Docker reads otherwise.
+    Start and Stop need no database and stay; the view greys what does need it, with this
+    as the reason, and every database seam refuses with it instead of trying `password`.
     """
     shelf: backup_shelf.Seam | None = None
     """This install's backups folder as the tab lists, deletes from and cleans up (T604).
@@ -2228,6 +2336,11 @@ class ControllerServices:
     `native.LatestRoute` for why the way BACK must not be able to arrive without
     the way forward.
     """
+    put_the_folders_back: native.PutFoldersBackRoute | None = None
+    """T786's "Put the folders back…" for this install; None where there is no engine for it.
+
+    `install_wiring.put_the_folders_back_for_app()`. The entry is shown exactly when
+    `offered()` says so, and the press runs the engine's, which holds the reservation."""
 
     adopt: native.AdoptRoute | None = None
     """Record these databases as a finished import, on the person's word; None when it cannot.
@@ -2402,7 +2515,13 @@ class ControllerServices:
                 _with_the_ready_wait(
                     _with_take_back(
                         _knowing_its_server_sources(
-                            factory(entry, server_dir, client_dir, wsl_distro), entry
+                            _with_the_database_refusal(
+                                factory(entry, server_dir, client_dir, wsl_distro),
+                                entry,
+                                server_dir,
+                                wsl_distro=wsl_distro,
+                            ),
+                            entry,
                         )
                     ),
                     entry,
@@ -2412,7 +2531,13 @@ class ControllerServices:
                 client_dir,
             )
         services = _knowing_its_server_sources(
-            factory(entry, server_dir, play_client_dir, wsl_distro), entry
+            _with_the_database_refusal(
+                factory(entry, server_dir, play_client_dir, wsl_distro),
+                entry,
+                server_dir,
+                wsl_distro=wsl_distro,
+            ),
+            entry,
         )
         origins = _originals_of(play_client_dir, client_dir)
         if services.applier is not None:
@@ -2710,24 +2835,26 @@ def forget_record(game: str, server_dir: Path) -> Callable[[], None]:
 def _db_password(
     entry: CatalogEntry, server_dir: Path, *, wsl_distro: str | None = None
 ) -> apply_module.RootPassword:
-    """This install's database root password, with the last-resort default.
+    """This install's database root password: its value, or a reader that refuses (T785).
 
     The entry may carry the password, or name a file the installer generated it
-    into; `db_password()` knows both. The three CMaNGOS games generate one, so
-    before it was read they authenticated as root with the literal "password" -
-    Start and Stop need no database, which is why it surfaced later, on Create
-    account and Backup. The default stays as a last resort so an install whose
-    password file has gone missing still gets a tab that can start and stop,
-    rather than no tab at all.
+    into; `Install.known_db_password()` knows both, and the `.env` line a new install
+    was given when its file is gone (T748 round 4). When none of them can answer, the
+    answer is NOT the published default: a login with it only ends in "Access denied"
+    (or, on a server that does use it, in a login nobody chose). The tab is still
+    built, because Start and Stop need no database and no tab at all is worse, and
+    every database seam is handed a reader that raises `DbPasswordUnknown` in player
+    words when it is first asked. `ControllerServices.db_refusal` carries the same
+    words so the view greys what needs the database.
 
     **A server inside a WSL distro gets a reader, not the value (T133).** Every
     tab is built when the app opens, and reading `.db_password` under
     `\\\\wsl.localhost\\` then started a stopped distro. Nothing needs the password
     before something talks to the database, which starts the distro anyway, so
     the file is read at that first use (`apply.mysql_env()`), and kept once a
-    read has found it: a first read that fell back to the default (the distro's
-    share not reachable yet, the file briefly missing) is asked again the next
-    time rather than remembered (T133 review).
+    read has found it: a first read that could not know it (the distro's share
+    not reachable yet, the file briefly missing) is asked again the next time
+    rather than remembered (T133 review).
     """
     if wsl_distro is None:
         return _read_db_password(entry, server_dir)
@@ -2735,39 +2862,90 @@ def _db_password(
 
     def read_when_asked() -> str:
         if not found:
-            password = entry.install.db_password(server_dir)
-            if password is None:
-                return _password_unknown(entry, server_dir)
-            found.append(password)
+            found.append(entry.install.known_db_password(server_dir))
         return found[0]
 
     return read_when_asked
 
 
-def _read_db_password(entry: CatalogEntry, server_dir: Path) -> str:
-    """`_db_password()`'s reading: the entry's password, or the default with a warning."""
-    password = entry.install.db_password(server_dir)
-    if password is not None:
-        return password
-    return _password_unknown(entry, server_dir)
+def _read_db_password(entry: CatalogEntry, server_dir: Path) -> apply_module.RootPassword:
+    """`_db_password()`'s reading: the password, or a reader that refuses with the reason."""
+    try:
+        return entry.install.known_db_password(server_dir)
+    except DbPasswordUnknown as exc:
+        return _password_unknown(entry, server_dir, exc)
 
 
-def _password_unknown(entry: CatalogEntry, server_dir: Path) -> str:
-    """The last-resort default, said in the log when a generated password could not be read."""
-    # `db_password()` says None when the entry NAMES a password file and that
-    # file cannot be read - which is not the same as "use the default", and
-    # silently defaulting here would rebuild the bug this seam exists to close.
-    # The tab is still built, because Start and Stop need no database and no tab
-    # at all is worse; but the reason every SQL-backed control is about to fail
-    # is written down once, here, instead of arriving as "access denied" six
-    # clicks later.
-    if entry.install.password.mode == "generated":
-        logger.warning(
-            f"{entry.id}: cannot read {entry.install.password.file} in "
-            f"{server_dir}, so the database password is unknown - accounts, backup "
-            f"and restore will fail until that file is restored"
-        )
-    return wotlk_modules.DEFAULT_DB_ROOT_PASSWORD
+def _password_unknown(
+    entry: CatalogEntry, server_dir: Path, why: DbPasswordUnknown
+) -> Callable[[], str]:
+    """A reader that refuses with `why`, after saying in the log that the password is unknown."""
+    # Not "use the default": `known_db_password()` says no when the entry NAMES a
+    # password file that cannot be read (and its `.env` has no line either), which is
+    # not the same as "use the default", and silently defaulting here would rebuild
+    # the bug this seam exists to close (T785). The reason every database-backed
+    # control is about to refuse is written down once, here, instead of arriving as
+    # "access denied" six clicks later.
+    logger.warning(
+        f"{entry.id}: the database password is unknown in {server_dir}, so accounts, "
+        f"backup, restore and module SQL refuse until it is restored: {why}"
+    )
+
+    def refuse() -> str:
+        raise DbPasswordUnknown(str(why))
+
+    return refuse
+
+
+def _database_refusal(
+    entry: CatalogEntry, server_dir: Path, *, wsl_distro: str | None
+) -> str | None:
+    """Why the database controls cannot work on this tab, or None.
+
+    None for a server inside a WSL distro: nothing may read its folder until something
+    talks to the database (T133), so its refusal arrives from the seam when it is
+    first asked.
+    """
+    if wsl_distro is not None:
+        return None
+    try:
+        entry.install.known_db_password(server_dir)
+    except DbPasswordUnknown as exc:
+        return str(exc)
+    return None
+
+
+def _with_the_database_refusal(
+    services: ControllerServices,
+    entry: CatalogEntry,
+    server_dir: Path,
+    *,
+    wsl_distro: str | None,
+) -> ControllerServices:
+    """`services` that say, and keep to, "the database password is unknown" (T785).
+
+    In `for_entry()` rather than in each game's factory so no game can be left with a
+    control that logs in anyway. The seams a factory built over the refusing reader
+    already refuse when asked; the three below are replaced so that the refusal is the
+    first thing they say, ahead of whatever Docker would be asked on the way there.
+    """
+    refusal = _database_refusal(entry, server_dir, wsl_distro=wsl_distro)
+    if refusal is None:
+        return services
+
+    def refuse_maintenance(*_args: object, **_kwargs: object) -> NoReturn:
+        raise wotlk_maintenance.MaintenanceError(refusal)
+
+    def refuse_account(*_args: object, **_kwargs: object) -> NoReturn:
+        raise DbPasswordUnknown(refusal)
+
+    return replace(
+        services,
+        db_refusal=refusal,
+        backup=refuse_maintenance,
+        restore=refuse_maintenance,
+        create_account=refuse_account,
+    )
 
 
 def _db_client(entry: CatalogEntry) -> str | None:
@@ -3282,6 +3460,10 @@ def _assemble(
         update_to_latest=install_wiring.update_to_latest_for_app(
             entry, server_dir, wsl_distro=wsl_distro
         ),
+        # T786: the press T766 built, in the same menu; the engine holds its reservation.
+        put_the_folders_back=install_wiring.put_the_folders_back_for_app(
+            entry, server_dir, wsl_distro=wsl_distro
+        ),
         # T94. HERE for the rebuild's reason: the file set and how each default
         # is made are catalog facts every game's tab reads the same way. The
         # WSL refusal lives in the route, where the distro is known.
@@ -3552,12 +3734,12 @@ def _for_wotlk(
     # for this tab, the Catalog tab and the CLI. `wsl_distro=` because that
     # function builds its own two seams and they address a daemon too.
     #
-    # Its password is `fixed_db_password(entry)` and NOT the file read above,
-    # which is right and is not an oversight: a gate is built only for an entry
-    # that names an import service, wow-wotlk is the only one, and its plan is
-    # `fixed`. The reverse substitution — this function's `sql`/`mysql`/applier
-    # taking the fixed value — is the closed bug `_db_password()` describes.
-    probe, reset = install_wiring.import_gate_for(entry, wsl_distro=wsl_distro)
+    # Its password is this folder's own (T748: a new WotLK or Unbound install
+    # generates one), read when the database is first asked, so a tab built for a
+    # server inside a stopped distro does not start it.
+    probe, reset = install_wiring.import_gate_for(
+        entry, server_dir=server_dir, wsl_distro=wsl_distro
+    )
     # 8.1a. Both are WotLK's alone for now: the counts need per-tree facts the
     # catalog only carries for this entry, and 8.1b, 8.1c and 8.1d gate their
     # own. The SAME recorder object is the controller's pre-stop hook and the
@@ -3770,6 +3952,18 @@ def _for_wotlk(
             reset_unfinished=reset,
             pre_stop=recorder,
             before_servers=_realm_port_keeper(entry, spec, server_dir, sql, wsl_distro=wsl_distro),
+            # T678 review round 3: a copy before Repair clears an unfinished first import.
+            safety_copy=lambda: wotlk_maintenance.safety_copy_sentence(
+                wotlk_maintenance.backup(
+                    server_dir,
+                    mysql,
+                    game=wotlk_maintenance.game_of(entry),
+                    label="before-repair",
+                    spec=spec,
+                    core_databases=entry.core_databases(),
+                    wsl_distro=wsl_distro,
+                )
+            ),
         ),
         sql=sql,
         # Three facts, from three different places, and the command needs all of
@@ -5081,6 +5275,9 @@ a multi-hour compile of code nobody has tested.
 RETURN_TO_PIN_BUTTON_LABEL = server_build_presses.RETURN_TO_PIN
 """The way back off an untested commit, shown only once there is one to go back from."""
 
+PUT_THE_FOLDERS_BACK_BUTTON_LABEL = server_build_presses.PUT_THE_FOLDERS_BACK
+"""T766's press, in the same menu (T786); shown while `put_the_folders_back_offered()` is True."""
+
 
 class UpdateChoice(enum.Enum):
     """What the one T64 dialog can be answered with. Three, and `CANCEL` is the default.
@@ -5271,6 +5468,14 @@ STOP_ANYWAY_TIP = (
 
 STOP_OVER_ANOTHER_TITLE = "Another Yu'lon is working on this server"
 STOP_OVER_ANOTHER_BUTTON = "Stop anyway"
+STOP_OVER_A_LOAD_TITLE = "A restore is still running"
+STOP_OVER_A_LOAD = (
+    "A restore from the last session is still writing into {name}'s databases in Docker. "
+    "Stopping the server now stops its database under that restore and leaves those "
+    "databases half-written. Wait for it to finish (the Maintenance tab says when), or stop "
+    "anyway."
+)
+"""T711: the question before a Stop over a restore load that outlived the last Yu'lon."""
 CLEAR_RESERVATION_LABEL = "Clear it"
 CLEAR_RESERVATION_TIP = (
     "Remove the reservation an earlier run of this Yu'lon left in Docker. Only offered "
@@ -5681,6 +5886,23 @@ def dashboard_on_question(*, lan: bool) -> str:
         "If the server is running, it is then restarted so the bots module starts sending. "
         "Anyone playing is disconnected for a few minutes.\n\n"
         f"{where}\n\nSwitch it on?"
+    )
+
+
+def repair_armed_unfinished(state: docker.ImportState) -> str:
+    """Repair's armed paragraph over rows an unfinished first import wrote (T678 review round 3).
+
+    `state.detail` carries what the probe counted, in brackets after the reason.
+    """
+    counted = state.detail.partition(" (")[2].rstrip(")") or "rows it wrote"
+    return (
+        "This clears what the first database import wrote before it stopped, and runs the "
+        f"import again. The auth, characters and world databases are DELETED: they hold "
+        f"{counted}, written by that import, and no characters. A copy of all three is saved "
+        "in the server's backups folder first, and the Repair is refused if any character is "
+        "found. If people have played on this server, press Cancel now and restore a backup "
+        "from the Maintenance tab instead. The server must be stopped; a full import takes "
+        "10-30 minutes and cannot be stopped once it starts.\n\n"
     )
 
 
@@ -8199,6 +8421,14 @@ class ControllerView(QWidget):
         # Play's two waits: a Start it asked for, and a Refresh it asked for.
         self._play_after_start = False
         self._play_after_refresh = False
+        # T672: the wait for the realm between that Start and the game, which no button waits on.
+        self._play_realm_wait: threading.Event | None = None
+        self._play_realm_number = 0
+        self._play_realm_timed_out = False
+        self._play_realm_ended_by = ""
+        self._play_realm_deadline = QTimer(self)
+        self._play_realm_deadline.setSingleShot(True)
+        self._play_realm_deadline.timeout.connect(self._play_realm_gave_up)
         # Whether the uninstall plan on screen offered to delete the
         # ready-to-play client (its marker was this server's when it was read).
         self._play_delete_offered = False
@@ -8275,6 +8505,12 @@ class ControllerView(QWidget):
         self._status_ask_out = 0
         self._status_pending = False
         self._verdict_pending = False
+        # T668: whether the built-in accounts were asked about since the database last came
+        # up, and whether that ask is out.
+        self._seeded_asked = False
+        self._seeded_retries = 0
+        self._seeded_wait = 0
+        self._seeded_pending = False
         # What the dashboard last failed with, logged once per change (T194).
         self._verdict_said: str | None = None
         # T124's count: one ask in flight at a time, for `_status_pending`'s reason.
@@ -8516,6 +8752,8 @@ class ControllerView(QWidget):
         self._build_modules_tab()
         self._build_tuning_tab()
         self._build_networking_tab()
+        # T785: after every tab exists, before anything reads from one.
+        self._grey_for_the_database()
 
         # T106: asked once now, whether or not this tab polls -- it reads files
         # and asks no daemon.
@@ -9011,6 +9249,7 @@ class ControllerView(QWidget):
             b
             for b in (
                 self.play_button,
+                self.launcher_button,
                 self.play_menu_button,
                 self.play_cancel_button,
                 self.steam_button,
@@ -9258,6 +9497,7 @@ class ControllerView(QWidget):
         # T382: the Tuning restart's wait for the world ends at its next look,
         # so the join below is not held for a world's whole load.
         self._end_the_world_wait()
+        self._end_the_play_realm_wait()  # T672: Play's wait for the realm, the same way
         self._timer.stop()
         if self._docker_repair_cancel is not None:
             # T160: a repair waiting on a question stops rather than holding
@@ -10093,6 +10333,18 @@ class ControllerView(QWidget):
         if status.distro is not None:
             self._distro_answered(status.distro)
         self._ask_about_the_import(status)
+        # T668: once each time the database is found running; asked again after it was down.
+        if not status.db:
+            self._seeded_asked = False
+            self._seeded_retries = 0
+            self._seeded_wait = 0
+            seeded_accounts.forget_failures()
+        elif not stale and not self._seeded_asked:
+            if self._seeded_wait > 0:
+                self._seeded_wait -= 1
+            else:
+                self._seeded_asked = True
+                self.refresh_seeded_accounts()
         self.status_changed.emit(status)
         self._ask_again_if_superseded(superseded)
 
@@ -10168,44 +10420,104 @@ class ControllerView(QWidget):
             return None
         return self._last_status.any_running
 
+    def teardown_work(self, *, quitting: bool = False) -> str | None:
+        """THE predicate: which kind of work on this tab must not be cut off now, or None (T690).
+
+        One list, asked by every door that tears this tab down -- through
+        `teardown_refusal()` (the window's close, the tray's Quit, the
+        self-update's restart, a changed WSL distro, a changed client folder, a
+        made or deleted ready-to-play client) and `forget_refusal()` (Remove from
+        Yu'lon). Three guards each held a shorter list before, and a Restore, a
+        backup or a Start/Stop/Restart went unseen by most of the doors; a client
+        folder changed during a backup froze the window for 7 minutes and lost the
+        backup (measured live). A new kind of work that must not be cut off is
+        added HERE and nowhere else; `test_teardown_guard.py` fails for a door that
+        does not reach this method.
+
+        Answers a `yulon.teardown` kind. The jobs `busy_reason()` lists (import,
+        reset, uninstall, play client...) are asked before it by both callers.
+        The order is the order the removal's sentences always had: the jobs that
+        run through `_run()` with nothing but their own flag (a backup, a
+        restore, a Modules job, a network apply, a Tuning write), then the Modules
+        tab's panel, last any Server action, including the stop a removal is
+        already waiting for.
+
+        `quitting` is the one door a Stop does not refuse (`teardown.STOP_JOB`): the quit
+        joins the Stop, so the window closes at once and the process ends when the Stop
+        has, which is what the tray's "Quit now" box says. Nothing else is exempt, and a
+        Stop beside a restore is still refused for the restore.
+        """
+        if self._backup_before_update:
+            return teardown.UPDATE_BACKUP
+        if self._backup_running:
+            return teardown.BACKUP
+        if self._restore_running:
+            return teardown.RESTORE
+        if self._move_panel is not None and self._move_panel.running:
+            return teardown.MOVE
+        if self._module_job_running():
+            return teardown.MODULE
+        if self._network_applying:
+            return teardown.NETWORK
+        if self._tuning_writing or self._put_back_running:
+            return teardown.TUNING
+        if self.rebuild_log.running:
+            return teardown.PANEL
+        if self._busy and not (quitting and self._busy_job == teardown.STOP_JOB):
+            return teardown.ACTION
+        return None
+
+    def action_in_progress(self) -> str | None:
+        """The Server tab's name for the action holding the tab ("Restart"), or None."""
+        if not self._busy:
+            return None
+        return self._busy_job or "Another action"
+
+    def teardown_refusal(self, *, quitting: bool = False) -> str | None:
+        """Why this tab may not be torn down now, in plain words, or None (T690).
+
+        `busy_reason()`'s sentences first (the long ones the close guard has always
+        shown), then `teardown_work()`'s, naming what is running. A refusal, not a
+        question: see `yulon.teardown` for why.
+        """
+        if (reason := self.busy_reason()) is not None:
+            return reason
+        if (kind := self.teardown_work(quitting=quitting)) is None:
+            return None
+        return teardown.sentence(
+            kind,
+            module_job=self._module_pending or "",
+            server_job=self._busy_job,
+        )
+
     def forget_refusal(self) -> str | None:
         """Why this server may not be removed from Yu'lon right now, or None (T95).
 
-        Removing drops this tab through `drop_controller()`, which is a teardown
-        that joins this tab's jobs for a bounded time only. So everything that
-        refuses a teardown refuses this too, and so does every job that would
-        be cut off in the middle. `busy_reason()` comes first because its
-        sentences are the long ones the close guard already shows. Then the
-        jobs that run through `_run()` with nothing but their own flag: the
-        T64 backup, a manual backup, a restore (stopped half-way it leaves the
-        databases half-written), a Modules tab job (`_module_pending`, which a
-        custom-module install sets too) and a network apply. Then the Modules
-        tab's panel, which a rebuild, a database update or an adopt runs in.
-        Last is any Server action, including the stop a removal is already
-        waiting for. The sentences are `forgetting`'s; the import is local
-        so this module's import block stays as it is.
+        Removing drops this tab through `drop_controller()`, a teardown that joins
+        this tab's jobs for a bounded time only. It asks `teardown_work()` like every
+        other door and words the answer as `forgetting`'s sentences, which end in
+        "Nothing was removed." The import is local so this module's import block stays
+        as it is.
         """
         from yulon import forgetting
 
         if (reason := self.busy_reason()) is not None:
             return reason
-        if self._backup_before_update:
-            return forgetting.UPDATE_BACKUP_RUNNING
-        if self._backup_running:
-            return forgetting.BACKUP_RUNNING
-        if self._restore_running:
-            return forgetting.RESTORE_RUNNING
-        if self._move_panel is not None and self._move_panel.running:
-            return forgetting.MOVE_RUNNING
-        if self._module_job_running():
+        kind = self.teardown_work()
+        if kind is None:
+            return None
+        if kind == teardown.MODULE:
             return forgetting.module_running(self._module_pending or "a Modules tab action")
-        if self._network_applying:
-            return forgetting.NETWORK_RUNNING
-        if self.rebuild_log.running:
-            return forgetting.PANEL_RUNNING
-        if self._busy:
-            return forgetting.SERVER_ACTION_RUNNING
-        return None
+        return {
+            teardown.UPDATE_BACKUP: forgetting.UPDATE_BACKUP_RUNNING,
+            teardown.BACKUP: forgetting.BACKUP_RUNNING,
+            teardown.RESTORE: forgetting.RESTORE_RUNNING,
+            teardown.MOVE: forgetting.MOVE_RUNNING,
+            teardown.NETWORK: forgetting.NETWORK_RUNNING,
+            teardown.TUNING: forgetting.TUNING_RUNNING,
+            teardown.PANEL: forgetting.PANEL_RUNNING,
+            teardown.ACTION: forgetting.SERVER_ACTION_RUNNING,
+        }[kind]
 
     def _ask_about_the_import(self, status: InstallStatus) -> None:
         """Put the import question once per time the database comes up.
@@ -10507,6 +10819,7 @@ class ControllerView(QWidget):
         if busy:
             self._stop_update_refresh()  # T621
             self._end_the_world_wait()  # T382: the press that starts now owns the server
+            self._end_the_play_realm_wait("busy")  # T672: and Play's wait for it ends too
         self._busy = busy
         self._busy_job = job if busy else ""
         # T179: the movement-map job's Start is held while any press runs.
@@ -10550,6 +10863,7 @@ class ControllerView(QWidget):
             # greys "Server build ▾" itself (`_set_server_build_button`, T89).
             self.update_to_latest_action.setEnabled(False)
             self.return_to_pin_action.setEnabled(False)
+            self.put_the_folders_back_action.setEnabled(False)
             # And the updates press, for the importer's reason above rather than
             # for symmetry: it reaches the same `import` stage against the same
             # databases, so one while another action is live is two writers.
@@ -10626,7 +10940,7 @@ class ControllerView(QWidget):
             # with no import service has no route, and re-enabling it here
             # would hand the three CMaNGOS games a live button the moment any
             # action of theirs finished.
-            self.module_sql_button.setEnabled(self.services.module_sql is not None)
+            self.module_sql_button.setEnabled(self._module_sql_available())
             # Back to what this install can do, never unconditionally: a game
             # with no store or no applier must not be handed live row buttons by
             # a job of its own finishing, and neither must a row the ROW itself
@@ -10676,6 +10990,7 @@ class ControllerView(QWidget):
             # this runs.
             self._set_update_buttons()
             self._refresh_source_version()
+            self._refresh_put_the_folders_back()
             # And the count, which the update route drops when it moves a
             # source: re-asked here so the line does not outlive the press.
             self._refresh_upstream_news()
@@ -10707,7 +11022,15 @@ class ControllerView(QWidget):
 
     @Slot()
     def start_server(self) -> None:
-        """Start the install; a README §12 conflict is shown, never a raw Docker error."""
+        """Start the install; a README §12 conflict is shown, never a raw Docker error.
+
+        Refused while another action holds the tab, like `restart_from_server_tab()`
+        (T690): the tray's and the flyout's Start reach this after their row was built,
+        and a Start on top of a running job unlocks the tab when it ends while the first
+        job still runs.
+        """
+        if self._busy:
+            return
         self._disarm_actions()
         self._nothing_to_remove = False
         self._update_forget_visibility()
@@ -10719,7 +11042,24 @@ class ControllerView(QWidget):
         self._run(self.services.controller.start, self._server_action_done, self._start_failed)
 
     @Slot()
-    def stop_server(self) -> None:
+    def stop_server(self) -> bool:
+        """Stop the server on the job runner. False when no Stop began (T711 review).
+
+        The one way it does not begin: the player kept a restore load from the last session
+        running (`agrees_to_stop()`). A caller that waits for several Stops (the tray's
+        stop-then-quit) asks `agrees_to_stop()` of each first and then `stop_agreed()`.
+        """
+        if not self.agrees_to_stop():
+            return False
+        self.stop_agreed()
+        return True
+
+    def agrees_to_stop(self) -> bool:
+        """The T711 question, alone: False when the player keeps a restore load running."""
+        return self._stop_over_a_running_load_agreed()
+
+    def stop_agreed(self) -> None:
+        """`stop_server()` once `agrees_to_stop()` has been answered yes (or had nothing to ask)."""
         self._disarm_actions()
         self.problem_label.setText("")
         self._stop_forced = ""
@@ -10729,6 +11069,32 @@ class ControllerView(QWidget):
         self.status_label.setText("Stopping…")
         self._hold_badge("stopping")
         self._run(self.services.controller.stop, self._stop_done, self._stop_failed)
+
+    def _stop_over_a_running_load_agreed(self) -> bool:
+        """False when a restore load from the last session still writes and the player keeps it.
+
+        T711: "Quit anyway" leaves the restore's load running in Docker (T690), and the server
+        hold that made a Stop ask first ends with the quitting Yu'lon. Restart is refused by the
+        record (`refuse_before_a_stop()`); a plain Stop stopped the database under the load and
+        left it half-written. Asked once, "Stop always stops" (owner, 2026-10-09). A restore of
+        THIS process is not asked about here: its own hold refuses the Stop in its words.
+        """
+        if self._restore_running or docker.held_here(self.services.controller.server_dir):
+            return True
+        try:
+            record = self.services.interrupted_restore()
+        except Exception as exc:  # noqa: BLE001 - a record that cannot be read asks nothing new
+            logger.warning(f"could not read the restore record before a Stop: {exc}")
+            return True
+        if record is None or not record.load_running:
+            return True
+        answer = _ask_with(
+            self,
+            STOP_OVER_A_LOAD_TITLE,
+            STOP_OVER_A_LOAD.format(name=self.entry.name),
+            STOP_OVER_ANOTHER_BUTTON,
+        )
+        return answer == "yes"
 
     def _offer_to_stop_over_another(self, exc: object) -> bool:
         """T568: another Yu'lon holds this server: ask once, then stop anyway if told to.
@@ -10892,7 +11258,110 @@ class ControllerView(QWidget):
         if self._play_after_start:
             # T181: Play asked for this Start ("Start and play"); it is done.
             self._play_after_start = False
+            self._play_wait_for_the_realm()
+
+    # -- the wait for the realm after Play's own Start (T672) ---------------
+
+    def _play_wait_for_the_realm(self) -> None:
+        """Hold the game until the Tuning tab's ready check says the realm is up.
+
+        `start_staged()` returns once the containers run, and only the database has a
+        healthcheck: the world takes a minute or three more, and the game started in
+        that gap meets a realm that is offline. The SAME check as the Tuning tab's
+        restart (`services.ready_after_start`), on the worker, bounded by
+        `PLAY_REALM_WAIT_SECONDS`. None (a test's fake services) goes on at once.
+        """
+        wait = self.services.ready_after_start
+        if wait is None:
             self._play_check_stale()
+            return
+        self._end_the_play_realm_wait()
+        self._play_realm_number += 1
+        number, cancel = self._play_realm_number, threading.Event()
+        self._play_realm_wait = cancel
+        self._play_cancel.clear()
+        self._show_cancel(True)
+        self._say_play(PLAY_WAITING_FOR_THE_REALM)
+        # The deadline is a GUI-thread timer that sets the wait's own `cancel`, so the check
+        # ends at its next look: no thread of its own to outlive the view.
+        self._play_realm_timed_out = False
+        self._play_realm_ended_by = ""
+        self._play_realm_deadline.start(round(PLAY_REALM_WAIT_SECONDS * 1000))
+        self._run(
+            partial(_waited_for_the_world, number, "Play", wait, cancel),
+            self._play_realm_answered,
+            self._play_realm_failed,
+        )
+
+    @Slot()
+    def _play_realm_gave_up(self) -> None:
+        """`PLAY_REALM_WAIT_SECONDS` passed with the realm not up: end the wait, as a timeout."""
+        if self._play_realm_wait is not None:
+            self._play_realm_timed_out = True
+            self._play_realm_wait.set()
+
+    def _end_the_play_realm_wait(self, by: str = "") -> None:
+        """End a realm wait still out; its answer then says it was stopped and starts nothing.
+
+        `by` is "busy" for a Server action of the player's (Stop, Restart...), "cancel" for
+        Play's Cancel button, "" for a new wait or the tab closing. The Event stays set until
+        the answer is handled: an answer that already says "ready" is read AFTER this, and a
+        set Event outranks it (`_play_realm_answered`).
+        """
+        self._play_realm_deadline.stop()
+        if self._play_realm_wait is not None:
+            self._play_realm_ended_by = by
+            self._play_realm_wait.set()
+
+    @Slot(object)
+    def _play_realm_answered(self, answer: object) -> None:
+        number, _job, world = cast(tuple[int, str, "native.StartAnswer | Exception"], answer)
+        if number != self._play_realm_number:
+            return  # a newer Play's wait owns the label
+        timed_out = self._play_realm_timed_out
+        ended_by = self._play_realm_ended_by
+        ended = self._play_realm_wait is not None and self._play_realm_wait.is_set()
+        self._play_realm_deadline.stop()
+        self._play_realm_wait = None
+        self._show_cancel(False)
+        if getattr(self, "_closed", False):
+            self._play_end()
+            return
+        if isinstance(world, Exception):
+            logger.warning(f"{self.entry.id}: Play: the wait for the realm broke: {world}")
+            self._play_end()
+            self._play_refused(PLAY_REALM_WAIT_BROKE)
+            return
+        if ended and not timed_out and ended_by == "busy":
+            # The player's own Stop/Restart took the server: the reason on the label, no box
+            # over their press. Whatever the wait had found, nothing is started over it.
+            self._play_end(PLAY_REALM_WAIT_STOPPED_BY_ACTION)
+            return
+        if world.ready and not ended:
+            self._play_check_stale()
+            return
+        if ended or world.verdict == "cancelled":
+            said = (
+                PLAY_REALM_TIMED_OUT.format(minutes=round(PLAY_REALM_WAIT_SECONDS / 60))
+                if timed_out
+                else PLAY_REALM_WAIT_STOPPED
+            )
+        else:
+            said, details = _what_the_start_did("Play", world, self.services.controller)
+            said = said.replace(_SEE_DETAILS, "") + " World of Warcraft was not started."
+            logger.warning(f"{self.entry.id}: Play: the realm did not come up: {details}")
+        self._play_end()
+        self._play_refused(said)
+
+    @Slot(object)
+    def _play_realm_failed(self, exc: object) -> None:
+        """Only a BaseException `_waited_for_the_realm()` let through reaches here."""
+        logger.warning(f"{self.entry.id}: Play: the wait for the realm broke: {exc!r}")
+        self._play_realm_deadline.stop()
+        self._play_realm_wait = None
+        self._show_cancel(False)
+        self._play_end()
+        self._play_refused(PLAY_REALM_WAIT_BROKE)
 
     def _say_zone_problem(self) -> str | None:
         """T171: what the last Start could not put right about the zone file, on the Server tab.
@@ -10912,15 +11381,76 @@ class ControllerView(QWidget):
         ]
         # T657: the one line a Start says when it renamed the bot settings for the module, as
         # a note and not a problem; the next Start that renames nothing takes it away.
-        renamed = getattr(self.services.controller, "bot_settings_renamed", None)
-        renamed = renamed if isinstance(renamed, str) and renamed else ""
-        self.notice_label.setText(renamed)
-        self.notice_label.setVisible(bool(renamed))
+        self._show_the_notice()
         if said:
             text = "The server started, but " + " Also, ".join(said)
             self.problem_label.setText(text)
             return text
         return None
+
+    def _show_the_notice(self) -> None:
+        """The Server tab's notes: the bot settings renamed (T657), the built-in accounts (T668).
+
+        Notes and not problems: what a Start did on its own, or that the built-in accounts
+        were locked -- or could not be, which says they still log in with their own name.
+        """
+        notes = [
+            note
+            for note in (
+                getattr(self.services.controller, "bot_settings_renamed", None),
+                getattr(self.services.controller, "seeded_accounts_locked", None),
+            )
+            if isinstance(note, str) and note
+        ]
+        text = " ".join(notes)
+        self.notice_label.setText(text)
+        self.notice_label.setVisible(bool(text))
+
+    @Slot()
+    def refresh_seeded_accounts(self) -> None:
+        """T668: lock CMaNGOS's built-in accounts on a server whose database is already up.
+
+        For a server Docker restarted by itself (`restart: unless-stopped`), which would
+        otherwise serve the seeded logins until the player pressed Start. Off the GUI thread;
+        it starts nothing, asks nothing while the database is down, and a second ask does
+        nothing (the rows are no longer seeded). A game whose controller has no such method,
+        or whose accounts are not seeded, asks nothing.
+        """
+        lock = getattr(self.services.controller, "lock_seeded_accounts_if_up", None)
+        if not callable(lock) or self._seeded_pending:
+            return
+        # It reads the install's password file: a stopped WSL distro is not read (T133).
+        if self._waits_for_the_distro("seeded accounts", self.refresh_seeded_accounts):
+            return
+        self._seeded_pending = True
+        self._run(_quiet(lock), self._seeded_done, self._seeded_failed)
+
+    @Slot(object)
+    def _seeded_done(self, result: object) -> None:
+        self._seeded_pending = False
+        if isinstance(result, _DockerSilent):
+            if isinstance(result.exc, docker.ServerHeldError):
+                self._seeded_asked = False  # T716: a job holds the server; the next poll asks
+            return  # Docker away: the poll says so; the next time the database is up asks again
+        if seeded_accounts.is_not_locked(result if isinstance(result, str) else None):
+            # T718: the database is up but not answering yet: ask every poll for RETRY_POLLS
+            # tries, then every SLOW_EVERY-th poll, and never give up while the accounts are open.
+            self._seeded_retries += 1
+            self._seeded_asked = False
+            self._seeded_wait = (
+                0
+                if self._seeded_retries < seeded_accounts.RETRY_POLLS
+                else seeded_accounts.SLOW_EVERY - 1
+            )
+        else:
+            self._seeded_retries = 0
+            self._seeded_wait = 0
+        self._show_the_notice()
+
+    @Slot(object)
+    def _seeded_failed(self, exc: object) -> None:
+        self._seeded_pending = False
+        logger.warning(f"could not lock the built-in accounts: {exc}")
 
     def _check_the_channel(self) -> None:
         """Ask whether the saved credential still works, off the GUI thread.
@@ -11728,6 +12258,16 @@ class ControllerView(QWidget):
         else:
             lines.append(f"  volumes removed: {', '.join(plan.volumes) or 'none'}")
             lines.append("  your characters go with the database volume.")
+        if plan.backups_to is not None:
+            lines.append(
+                f"  your backups are moved to {plan.backups_to} first, and stay there after "
+                "the uninstall."
+            )
+        elif plan.backups_linked_to is not None:
+            lines.append(
+                f"  your backups folder is a link to {plan.backups_linked_to}; only the link "
+                "goes, and that folder and its files stay exactly as they are."
+            )
         lines.append("It does not touch " + "; ".join(plan.left_behind) + ".")
         play = self.services.play_client_dir
         if self._play_delete_offered and play is not None:
@@ -11834,6 +12374,13 @@ class ControllerView(QWidget):
                 f"Its database password was kept at {report.secret_kept}, because the folder "
                 f"holding it is gone — the reinstall reads it from there."
             )
+        if report.backups_kept is not None:
+            said.append(f"Your backups were kept: they are now in {report.backups_kept}.")
+        elif report.backups_linked_to is not None:
+            said.append(
+                f"Your backups folder was a link to {report.backups_linked_to}; that folder "
+                "and your backups in it were not touched."
+            )
         if report.snapshot.path is not None:
             said.append(f"The server's last log was saved to {report.snapshot.path}.")
         elif report.snapshot.problem:
@@ -11911,26 +12458,30 @@ class ControllerView(QWidget):
         )
 
     def _client_dir_busy(self) -> bool:
-        """The round-2 review's guard, in `rebuild_server()`'s own words and shape.
+        """The round-2 review's guard, now the one teardown predicate (T690).
 
-        A write here does two things a running action must not race: it
-        replaces `state.json`'s record, and it makes `main.py` drop this tab
-        and rebuild it. `_set_busy()` locks the buttons; this is the second
-        half a disabled `QPushButton` does not give for free -- a press
-        already queued in Qt's event loop, or one this method is called from
-        directly in a test, still has to be told no.
+        A write here does two things a running job must not race: it replaces
+        `state.json`'s record, and it makes `main.py` drop this tab and rebuild it.
+        `_set_busy()` locks the buttons, but only for what sets `_busy`: a Restore,
+        a backup, a network apply and a Modules job do not, and the press went
+        through (measured: the rebuild froze the window for 7 minutes and the
+        backup was lost). So this asks `teardown_refusal()`, as every other door
+        does, and says what is running. It is also the half a disabled
+        `QPushButton` does not give for free -- a press already queued in Qt's
+        event loop, or one this method is called from directly in a test, still has
+        to be told no.
 
         Make… counts too (T181): from its press it plans, asks and builds from
         the client folder this press would change, and the tab rebuild this
         press ends in would cut it off.
         """
-        if not self._busy and not self._play_client_running:
+        reason = self.teardown_refusal()
+        if reason is None:
             return False
         show_information(
             self,
             "Something else is running",
-            "This server is busy with another action — wait for it to finish on the "
-            "Server tab, then press this again. Nothing was changed.",
+            f"{reason}\n\nNothing was changed.",
         )
         return True
 
@@ -12091,6 +12642,7 @@ class ControllerView(QWidget):
         self.play_cancel_button.clicked.connect(self._cancel_play_download)
         self._made: _MadePlayClient | None = None
         self.play_button: QPushButton | None = None
+        self.launcher_button: QPushButton | None = None
         self.play_menu_button: QPushButton | None = None
         self.play_menu = QMenu(tab)
         self.play_menu.setToolTipsVisible(True)
@@ -12125,11 +12677,11 @@ class ControllerView(QWidget):
         self.play_button.setProperty("primary", True)
         if has_play:
             self.play_button.setIcon(dadcraft_icon("play", COLOR_GOLD_LIGHT, 14))
-            # T187 made this press open the launcher; the tooltip still said it
-            # started the game (T189).
+            # T694: PLAY plays; the launcher is its own button beside it.
             self.play_button.setToolTip(
-                "Open this server's launcher, where you choose the realm address, the "
-                "account and the display, and press PLAY to start World of Warcraft."
+                "Start this server if it is stopped, wait for the realm, then start World of "
+                "Warcraft logged in at the launcher's realm address. The address, account and "
+                "display are chosen under Launcher…."
             )
         else:
             self.play_button.setToolTip(
@@ -12138,6 +12690,13 @@ class ControllerView(QWidget):
             )
         self.play_button.clicked.connect(self._play_pressed)
         self.play_button.setVisible(has_play or self.services.client_dir is not None)
+        self.launcher_button = QPushButton(LAUNCHER_LABEL, tab)
+        self.launcher_button.setToolTip(
+            "Open this server's launcher: the realm address, the account, the display and "
+            "the add-ons for World of Warcraft, and its own PLAY."
+        )
+        self.launcher_button.clicked.connect(self._open_the_launcher)
+        self.launcher_button.setVisible(has_play)
         self.play_menu_button = QPushButton("▾", tab)
         # Its label is the arrow: the style's own indicator would be a second (T187).
         self.play_menu_button.setObjectName(PLAY_MENU_BUTTON)
@@ -12164,17 +12723,21 @@ class ControllerView(QWidget):
 
     @Slot()
     def _play_pressed(self) -> None:
-        """The tab's Play opens the server's launcher window (T187); its Make… stays a Make….
+        """The tab's PLAY plays (T694); without a ready-to-play client it is "Make…" and makes one.
 
-        Without a ready-to-play client the button reads "Make a ready-to-play
-        client…" and does exactly that. With one, PLAY is in the launcher, which
-        is where the realm address, the account and the display are chosen.
+        `play()` starts a stopped server first, waits for the realm, writes the realm address
+        and starts the game. The launcher window, where the address, the account and the
+        display are chosen, is the "Launcher…" button beside it (`_open_the_launcher`).
         """
         self.dialog_host = None
-        if self.services.play_client_dir is not None and self.open_launcher is not None:
-            self.open_launcher()
-            return
         self.play()
+
+    @Slot()
+    def _open_the_launcher(self) -> None:
+        """The tab's "Launcher…": open this server's launcher window and start nothing (T694)."""
+        self.dialog_host = None
+        if self.open_launcher is not None:
+            self.open_launcher()
 
     def _play_parent(self) -> QWidget:
         """Where a Make…/Play/Refresh/Delete dialog opens: the launcher that pressed, or this tab.
@@ -12667,7 +13230,20 @@ class ControllerView(QWidget):
             return
         self._play_pending = True
         self._say_play("Checking that the server is running…")
-        self._run(self.services.controller.status, self._play_status_read, self._play_failed)
+        self._run(self._play_read_target, self._play_status_read, self._play_failed)
+
+    def _play_read_target(self) -> _PlayTarget:
+        """Off the GUI thread: the address Play logs in at, and the local server only if it is ours.
+
+        T667: a realm address that is another computer's is that computer's business. The
+        local server is neither read, started nor waited for, so a stopped one here does
+        not stand between the player and a game that logs in elsewhere.
+        """
+        play = self.services.play_client_dir
+        address = _realm_address(client_packs.read_record(play)) if play is not None else None
+        if address is not None and not networking.is_this_computer(address):
+            return _PlayTarget(address, None)
+        return _PlayTarget(None, self.services.controller.status())
 
     def _play_end(self, said: str | None = None) -> None:
         """The Play under way is over, started or not."""
@@ -12704,8 +13280,13 @@ class ControllerView(QWidget):
         return True
 
     @Slot(object)
-    def _play_status_read(self, status: object) -> None:
+    def _play_status_read(self, target: object) -> None:
         if self._play_stopped_by_another_action():
+            return
+        status = target.status if isinstance(target, _PlayTarget) else target
+        if isinstance(target, _PlayTarget) and target.remote is not None:
+            self._say_play(PLAY_AT_ANOTHER_COMPUTER.format(address=target.remote))
+            self._play_check_stale()
             return
         if isinstance(status, InstallStatus) and status.all_running:
             self._play_check_stale()
@@ -12812,6 +13393,7 @@ class ControllerView(QWidget):
     def _cancel_play_download(self) -> None:
         """Stop the whole preparation; it is checked between steps, so a stalled read waits."""
         self._play_cancel.set()
+        self._end_the_play_realm_wait("cancel")  # T672: Cancel also ends the wait for the realm
         self.play_cancel_button.setEnabled(False)
         self.play_cancel_button.setText("Cancelling…")
         self.play_state_changed.emit()
@@ -13044,6 +13626,15 @@ class ControllerView(QWidget):
             catalog_always=catalog_always,
             default_address_written=written_elsewhere,
         )
+        auth_port = self.entry.ports.auth
+        catalogs = {key.casefold() for key in catalog_always}
+        if auth_port != networking.STANDARD_AUTH_PORT and "realmlist" not in catalogs:
+            # T665: off 3724, Config.wtf's realmList is where a client with no locale
+            # realmlist goes, and a copy keeps the player's old server there; it gets this
+            # server's address, so it can name neither the old server nor WotLK's 3724.
+            picked.setdefault(
+                "realmList", networking.realmlist_value(_realm_address(record), auth_port)
+            )
         if cfg is None and (picked or removed):
             # An entry without `config_wtf` still gets the launcher's picks (T187); its
             # realmlist stays `_launch`'s, and no seed was written, so none is used up.
@@ -13878,16 +14469,22 @@ class ControllerView(QWidget):
 
         The armed paragraph says what is overwritten rather than what is kept —
         the opposite of the teardown's, and the honest way round. Everything the
-        import writes is replaced, and the only reason this is offered at all is
-        that the probe has already found no accounts and no characters to lose.
-        `docker.repair_import()` asks the database again itself and refuses if
-        that has changed since, so this text is a warning and not the guard.
+        import writes is replaced. It is offered in two states: the probe found no
+        accounts and no characters to lose, or (T678) the accounts it found were
+        written by a first import that never finished, under the record of that import.
+        `docker.repair_import()` asks the database again itself and refuses if the
+        state is not one of those two (it refuses any character in the second), so
+        this text is a warning and not the guard.
         """
         if not self._repair_armed:
             self._disarm_remove()
             self._repair_armed = True
             self.repair_button.setText(REPAIR_ARMED)
             self.arm_cancel_button.setVisible(True)
+            state = self._import_state
+            if state is not None and unfinished_import_wrote(state):
+                self._say_under_the_presses(repair_armed_unfinished(state) + ARMED_LAST_LINE)
+                return
             self._say_under_the_presses(
                 "This re-runs the database import that never finished. Everything in the auth, "
                 "characters and world databases is OVERWRITTEN. It is offered because those "
@@ -14056,7 +14653,7 @@ class ControllerView(QWidget):
         """
         if self._console_pending:
             return
-        shown = command if not command.startswith("account create") else "account create ****"
+        shown = hide_account_passwords(command)
         self.console_log.append(f"> {shown}")
         self._console_pending = True
         set_enabled_why(self.send_button, wait_for("the last command"))
@@ -14888,7 +15485,13 @@ class ControllerView(QWidget):
 
     @Slot()
     def refresh_accounts(self) -> None:
-        """Read the list, off the GUI thread: it is a `docker exec` and a query."""
+        """Read the list, off the GUI thread: it is a `docker exec` and a query.
+
+        T668: first lock CMaNGOS's built-in accounts if the database is up and they are
+        still seeded (a no-op on every other game), so the Accounts tab never loads beside
+        a server that still takes ADMINISTRATOR as its own password.
+        """
+        self.refresh_seeded_accounts()
         admin = self.services.accounts
         if admin is None:
             return
@@ -15061,6 +15664,10 @@ class ControllerView(QWidget):
         the only way to make the FIRST one anywhere — SOAP needs an account
         before it will authenticate, so it cannot bootstrap itself.
         """
+        if (refusal := self.services.db_refusal) is not None:
+            self.account_report.setText(refusal)
+            self.action_failed.emit(refusal)
+            return
         name = self.account_name.text().strip()
         password = self.account_password.text()
         if not name or not password:
@@ -15068,6 +15675,13 @@ class ControllerView(QWidget):
             # (review, 2026-08-22), so the tab says it as well.
             self.account_report.setText("Username and password are required.")
             self.action_failed.emit("username and password are required")
+            return
+        # T673: the one rule (`account_rules`), so nothing is made that Delete, Set password
+        # or Set GM level would then refuse, or that the list would hide as the app's own.
+        problem = account_rules.create_problem(self.entry, name, password)
+        if problem:
+            self.account_report.setText(problem)
+            self.action_failed.emit(problem)
             return
         gm_level = self.account_gm.value()
         self.account_report.setText(f"Creating {name}…")
@@ -16474,6 +17088,8 @@ class ControllerView(QWidget):
         Or the backups not listed yet, because they wait for a stopped WSL
         distro (T194 F9): "Pick a backup" over a list nobody has read is untrue.
         """
+        if self.services.db_refusal is not None:
+            return self.services.db_refusal
         if "backups" in self._waiting_on_distro:
             return RESTORE_WAITS_FOR_DISTRO
         if self._shelf_reading:
@@ -16568,11 +17184,27 @@ class ControllerView(QWidget):
             if r.kept_because or r.cannot_delete:
                 item.setForeground(QColor(COLOR_TEXT_MUTED))
             self.backup_list.addItem(item)
+        # T677: what earlier uninstalls kept beside the server folder, for Restore only.
+        for index, earlier in enumerate(shelf.kept):
+            for r in earlier.rows:
+                text = backup_shelf.describe(r, shelf.game_id)
+                item = QListWidgetItem(f"{text} \u00b7 kept from an earlier uninstall")
+                item.setData(Qt.ItemDataRole.UserRole, str(earlier.folder / r.name))
+                item.setData(Qt.ItemDataRole.UserRole + 2, [index, r.name])
+                item.setToolTip(f"{earlier.folder / r.name}\n{r.cannot_delete or ''}".strip())
+                item.setForeground(QColor(COLOR_TEXT_MUTED))
+                self.backup_list.addItem(item)
 
     def _selected_row(self) -> backup_shelf.ShelfRow | None:
         item = self.backup_list.currentItem()
         shelf = self._shelf
         if item is None or shelf is None:
+            return None
+        kept_at = item.data(Qt.ItemDataRole.UserRole + 2)
+        if kept_at:
+            index, kept_name = kept_at
+            if 0 <= index < len(shelf.kept):
+                return next((r for r in shelf.kept[index].rows if r.name == kept_name), None)
             return None
         name = item.data(Qt.ItemDataRole.UserRole + 1)
         return next((r for r in shelf.rows if r.name == name), None)
@@ -16600,7 +17232,9 @@ class ControllerView(QWidget):
         clean = waits
         delete = waits
         if clean is None and (shelf is None or not shelf.rows):
-            clean = delete = "There are no backups to delete."
+            clean = "There are no backups to delete."
+            if shelf is None or not shelf.kept:
+                delete = clean
         elif clean is None and shelf is not None and shelf.delete_refused:
             clean = delete = shelf.delete_refused
         if delete is None:
@@ -16741,6 +17375,17 @@ class ControllerView(QWidget):
             self.interrupted_label.setVisible(False)
             self.forget_button.setVisible(False)
             return
+        if record.load_running:
+            # The last session quit over this restore and its load carries on in Docker (T690):
+            # not an interrupted restore, and nothing here is offered until it ends.
+            named = ", ".join(record.databases) or "the databases"
+            self.interrupted_label.setText(
+                f"A restore of {named} from the last session is still running in Docker. "
+                "Wait for it to finish, then look at this tab again."
+            )
+            self.interrupted_label.setVisible(True)
+            self.forget_button.setVisible(False)
+            return
         if record.readable:
             named = ", ".join(record.databases) or "an unknown database"
             text = (
@@ -16848,14 +17493,18 @@ class ControllerView(QWidget):
             started = alone.bring_up("no backup was taken")
             if not started:
                 held.close()
-            try:
                 return self.services.backup()
-            finally:
-                if started:
-                    alone.take_down()
+            backed_up = _put_back_after(self.services.backup, alone)
+            if backed_up.stop_note is None:
+                return backed_up.result
+            # Kept whatever the backup answered: the database is running either way (review).
+            return _BackedUpWithNote(backed_up.result, backed_up.stop_note)
 
     @Slot()
     def back_up(self) -> None:
+        if (refusal := self.services.db_refusal) is not None:
+            self.maintenance_report.setPlainText(refusal)
+            return
         if self._refused_during_bot_rebuild():
             return
         set_enabled_why(self.backup_button, wait_for("the backup"))
@@ -16872,13 +17521,28 @@ class ControllerView(QWidget):
         self._maintenance_failed(exc, MAINTENANCE_BACKUP_FAILED)
         self._settle_shelf_buttons()
 
+    def _give_back_the_backup_button(self) -> None:
+        """Back up is live again after a job, unless the database password is unknown (T785 note).
+
+        A job finishing used to hand the button back whatever `_grey_for_the_database()` had
+        said; it is still grey while `services.db_refusal` is set, with its reason intact.
+        """
+        if self.services.db_refusal is None:
+            self.backup_button.setEnabled(True)
+
     @Slot(object)
     def _backup_done(self, result: object) -> None:
         self._backup_running = False
         retain = self._retain_after_backup
         self._retain_after_backup = False
-        self.backup_button.setEnabled(True)
+        self._give_back_the_backup_button()
+        stop_note = None
+        if isinstance(result, _BackedUpWithNote):
+            stop_note = result.note
+            result = result.report
         if not isinstance(result, wotlk_maintenance.BackupReport):
+            if stop_note:
+                self.maintenance_report.setPlainText(stop_note)
             self._settle_shelf_buttons()
             return
         lines = [f"Backed up to {result.directory}:"]
@@ -16890,6 +17554,8 @@ class ControllerView(QWidget):
             lines.append(f"  !! expected but absent: {', '.join(result.missing_core)}")
         if result.server_was_running:
             lines.append("  note: the server was running, so this is a hot copy.")
+        if stop_note:
+            lines.append(stop_note)
         # Re-list BEFORE writing the report: refresh_backups() writes its own
         # message when the directory is empty, so refreshing afterwards wipes
         # the one thing the user just asked for (caught by its own test).
@@ -16902,6 +17568,9 @@ class ControllerView(QWidget):
 
     @Slot()
     def show_restore_plan(self) -> None:
+        if (refusal := self.services.db_refusal) is not None:
+            self.maintenance_report.setPlainText(refusal)
+            return
         path = self._selected_backup()
         if path is None:
             self.maintenance_report.setPlainText("Select a backup first.")
@@ -17017,6 +17686,9 @@ class ControllerView(QWidget):
                         press=forgetting.PRESS_RESTORE,
                         spec=self.services.controller.spec,
                         wsl_distro=self.services.controller.wsl_distro,
+                        # T681: the only writer for the whole load; a Modules job's SQL, an
+                        # account or a network write of this Yu'lon is refused meanwhile.
+                        alone=forgetting.RESTORE_WRITES_ALONE,
                     )
                 )
             except docker.ServerHeldError as exc:
@@ -17030,11 +17702,19 @@ class ControllerView(QWidget):
                         "Nothing was restored: the database could not be started on its own "
                         f"for it. {exc}"
                     ) from exc
-            try:
+            if not started:
                 return self._restore_with_the_bot_request(plan)
-            finally:
-                if started:
-                    alone.take_down()  # type: ignore[union-attr]
+            restored = _put_back_after(
+                lambda: self._restore_with_the_bot_request(plan),
+                alone,  # type: ignore[arg-type]
+            )
+            if restored.stop_note is None:
+                return restored.result
+            result = restored.result
+            if isinstance(result, _RestoredWithNote):
+                note = " ".join(n for n in (result.note, restored.stop_note) if n)
+                return _RestoredWithNote(result.report, note)
+            return _RestoredWithNote(result, restored.stop_note)  # type: ignore[arg-type]
 
     def _restore_with_the_bot_request(self, plan: wotlk_maintenance.RestorePlan) -> object:
         """T144: take a pending `once:` bot rebuild back, THEN restore (worker thread).
@@ -17164,6 +17844,9 @@ class ControllerView(QWidget):
 
     @Slot()
     def run_restore(self) -> None:
+        if (refusal := self.services.db_refusal) is not None:
+            self.maintenance_report.setPlainText(refusal)
+            return
         plan = self._restore_plan
         if plan is None:
             # Belt and braces: the button is disabled without a plan, but a
@@ -17243,12 +17926,17 @@ class ControllerView(QWidget):
         in Details. Any other failure is not: the Restore box says `said`, and the
         raw text goes in Details. Both reach the app log through `action_failed`.
         """
-        self.backup_button.setEnabled(True)
+        self._give_back_the_backup_button()
         if not self.restore_button.isEnabled():
             # A plan or a restore that failed: a fresh plan is what Restore waits for.
             set_enabled_why(self.restore_button, self._restore_waits_for())
         ours = isinstance(
-            exc, (wotlk_maintenance.MaintenanceError, tortoise_poolreset.PoolResetError)
+            exc,
+            (
+                wotlk_maintenance.MaintenanceError,
+                tortoise_poolreset.PoolResetError,
+                DbPasswordUnknown,
+            ),
         )
         detail = getattr(exc, "detail", "") if ours else str(exc)
         # Either write takes the last Details down (`maintenance_report.textChanged`).
@@ -17405,6 +18093,18 @@ class ControllerView(QWidget):
             "undo anything the newer server wrote into your databases."
         )
         self.return_to_pin_action.setVisible(False)
+        # T786: T766's press, the way out of the Start and Rebuild refusals that name it. Hidden
+        # until the engine says the press is offered (`_refresh_put_the_folders_back()`).
+        self._put_back_offered = False
+        self.put_the_folders_back_action = self.server_build_menu.addAction(
+            PUT_THE_FOLDERS_BACK_BUTTON_LABEL
+        )
+        self.put_the_folders_back_action.triggered.connect(self.put_the_folders_back)
+        self.put_the_folders_back_action.setToolTip(
+            "Put the source folders back on the build they were made from and write this app's "
+            "own files back. Asks first; compiles nothing, and the server must be stopped."
+        )
+        self.put_the_folders_back_action.setVisible(False)
         self.server_build_button.setMenu(self.server_build_menu)
         # The button greys when every entry it SHOWS is dead, and only then, so
         # the bar still says "nothing here can act" without a press -- one of
@@ -17614,6 +18314,7 @@ class ControllerView(QWidget):
         # the app opens, which is what lets an install that was updated in an
         # earlier session say so without anybody pressing anything.
         self._refresh_source_version()
+        self._refresh_put_the_folders_back()
         # T124's count, off the GUI thread: the cached reading on every open
         # but the day's first, which asks GitHub.
         self._refresh_upstream_news()
@@ -17647,9 +18348,10 @@ class ControllerView(QWidget):
         # The gate that used to grey two toolbar buttons now greys every row's
         # own press: there is no other control left for it to act on.
         self.modules_panel.set_enabled_actions(self._module_actions_allowed())
-        self.module_sql_button.setEnabled(self.services.module_sql is not None)
+        self.module_sql_button.setEnabled(self._module_sql_available())
         self.module_sql_button.setToolTip(
-            MODULE_SQL_TIP if self.services.module_sql is not None else MODULE_SQL_NO_IMPORTER
+            self.services.db_refusal
+            or (MODULE_SQL_TIP if self.services.module_sql is not None else MODULE_SQL_NO_IMPORTER)
         )
         self.module_updates_button.setEnabled(self.services.module_updates is not None)
         self.module_updates_button.setToolTip(
@@ -17715,6 +18417,49 @@ class ControllerView(QWidget):
         return (
             self.services.store is not None and self.services.applier is not None and not self._busy
         )
+
+    @staticmethod
+    def _module_needs_the_database(manifest: Manifest) -> bool:
+        """Whether installing, updating or removing `manifest` runs SQL as root (T785).
+
+        Direct steps only: a `db-import` step is applied by the importer on its next start, with
+        the password compose already holds, and a module of files and conf keys touches no
+        database at all.
+        """
+        return any(step.applied_by == "direct" for step in manifest.sql)
+
+    def _module_sql_available(self) -> bool:
+        """Whether Apply module SQL may be pressed: a route, and a database password to ask with."""
+        return self.services.module_sql is not None and self.services.db_refusal is None
+
+    def _grey_for_the_database(self) -> None:
+        """T785: grey every control that needs the database when its password cannot be known.
+
+        Start and Stop need no database and are left alone. Each grey press carries the
+        refusal as its reason (tooltip, and the tab's reason line), and the place its
+        result would have appeared says it too. The handlers repeat the refusal for a
+        press that arrives by another road (a menu, a shortcut), so this is the sight of
+        it and not the only guard.
+        """
+        refusal = self.services.db_refusal
+        if refusal is None:
+            return
+        for press in (
+            self.create_account_button,
+            self.set_password_button,
+            self.set_gm_button,
+            self.delete_account_button,
+            self.refresh_accounts_button,
+        ):
+            set_enabled_why(press, refusal, self.account_reasons)
+        self.account_report.setText(refusal)
+        # Not the module rows: a module that only copies files or sets a conf key needs no
+        # database (`_module_needs_the_database()`); one that runs SQL is refused at its press.
+        for press in (self.backup_button, self.plan_restore_button, self.restore_button):
+            set_enabled_why(press, refusal, self.restore_reasons)
+        self.maintenance_report.setPlainText(refusal)
+        self.module_sql_button.setEnabled(False)
+        self.module_sql_button.setToolTip(refusal)
 
     def _installed_clones(self) -> Mapping[str, frozenset[str]] | None:
         """What is in this install's clone folders per family, or `None` for no reader.
@@ -18145,6 +18890,18 @@ class ControllerView(QWidget):
             self.module_report.setPlainText(UNCATALOGUED_PRESS)
             return
         if manifest is None or applier is None:
+            return
+        if (refusal := self.services.db_refusal) is not None and (
+            self._module_needs_the_database(manifest)
+        ):
+            # T785: its SQL would log in with a password nobody can know. Nothing is run, so
+            # no half of the module is applied: the files of a module whose SQL then failed
+            # would be on disk for a database that never got its rows.
+            self._module_pending = None
+            self.module_report.setPlainText(
+                f"{action} {manifest.id}: not started — {refusal} "
+                "Nothing on this machine was changed."
+            )
             return
         row = self.modules_panel.selected_row()
         if (
@@ -19079,6 +19836,16 @@ class ControllerView(QWidget):
         a press already in flight are not, and a module job writes the record of
         module updates that a failing Rebuild also writes (T557).
         """
+        if self._restore_running:
+            # T681: a Modules job's SQL must not interleave with a restore's load. The docker
+            # layer refuses it too (`hold_the_server(alone=...)`), for every window; this says
+            # so before anything is asked.
+            self.module_report.setPlainText(
+                REBUILD_BLOCKS_MODULE_JOB.format(
+                    what=what[:1].upper() + what[1:], wait=wait_for("the restore")
+                )
+            )
+            return True
         if not (self._busy or self.rebuild_log.running):
             return False
         job = self._busy_job if self._busy and self._busy_job else "the server build"
@@ -19339,6 +20106,9 @@ class ControllerView(QWidget):
         route = self.services.module_sql
         if route is None:
             return
+        if (refusal := self.services.db_refusal) is not None:
+            self.module_report.setPlainText(refusal)
+            return
         # One call, not a second copy: `_set_busy(True)` is what locks this
         # button as well as the Server tab's, so the two cannot drift into
         # disagreeing about whether an importer is running.
@@ -19375,7 +20145,7 @@ class ControllerView(QWidget):
         self._set_busy(False)
         self._module_sql_running = False
         self._module_pending = None
-        self.module_sql_button.setEnabled(self.services.module_sql is not None)
+        self.module_sql_button.setEnabled(self._module_sql_available())
         # Deliberately not "N modules applied". This tab cannot count that: the
         # importer applies a FILE at a time and says so itself, and a module
         # whose SQL was already in `updates` is a module that correctly gets
@@ -19400,7 +20170,7 @@ class ControllerView(QWidget):
         self._set_busy(False)
         self._module_sql_running = False
         self._module_pending = None
-        self.module_sql_button.setEnabled(self.services.module_sql is not None)
+        self.module_sql_button.setEnabled(self._module_sql_available())
         # The refusal verbatim and under whatever the importer had already
         # printed, because a run that got part-way is a different situation
         # from one that never started and only its own output can tell them
@@ -19525,6 +20295,34 @@ class ControllerView(QWidget):
         offered = self.services.update_to_latest is not None and not self._backup_before_update
         self.update_to_latest_action.setEnabled(offered)
         self.return_to_pin_action.setEnabled(offered)
+        self.put_the_folders_back_action.setEnabled(
+            self._put_back_offered and not self._backup_before_update
+        )
+
+    def _refresh_put_the_folders_back(self) -> None:
+        """Show "Put the folders back…" exactly when the engine offers it, and read it again (T786).
+
+        The one condition is `route.offered()` (`native.put_the_folders_back_offered()`): files
+        only, so it is affordable on the GUI thread as `_refresh_source_version()` is, and it
+        never raises; a reading that did is taken as not offered, because a press shown over
+        a folder nobody could read is the worse mistake. Called on the tab's first draw and
+        after every job, so a Rebuild, an Update, a Return to the pin or this press itself
+        moves the entry. Never enabled while a job or a backup runs.
+        """
+        route = self.services.put_the_folders_back
+        offered = False
+        if route is not None and not self._waits_for_the_distro(
+            "folders to put back", self._refresh_put_the_folders_back
+        ):
+            try:
+                offered = route.offered()
+            except OSError as exc:
+                logger.warning(f"could not read whether {self.entry.id} owes a put-back: {exc}")
+        self._put_back_offered = offered
+        self.put_the_folders_back_action.setVisible(offered)
+        self.put_the_folders_back_action.setEnabled(
+            offered and not self._busy and not self._backup_before_update
+        )
 
     @Slot()
     def _set_server_build_button(self) -> None:
@@ -19649,6 +20447,15 @@ class ControllerView(QWidget):
         failed — the update was not started" about a backup the user was
         watching succeed.
         """
+        held = docker.held_reason(self.services.controller.server_dir)
+        if self._restore_running or held is not None:
+            # T681 review: a restore of this server is loading (here, or in another window).
+            show_information(
+                self,
+                "A restore is running",
+                f"{held or forgetting.RESTORE_HOLDS_THE_DATABASES} Nothing was started.",
+            )
+            return True
         if self._backup_before_update:
             show_information(
                 self,
@@ -19718,6 +20525,8 @@ class ControllerView(QWidget):
         route = self.services.update_to_latest
         if route is None:
             return False
+        if self._refused_over_an_unfinished_restore(f"Update {self.entry.name}"):
+            return False
         if self._update_route_busy():
             # FALSE, like every other refusal on this tab and like
             # `_start_update_to_latest()` and `return_to_the_tested_pin()`: the
@@ -19746,6 +20555,7 @@ class ControllerView(QWidget):
         set_enabled_why(self.backup_button, wait_for("the backup before the update"))
         self.update_to_latest_action.setEnabled(False)
         self.return_to_pin_action.setEnabled(False)
+        self.put_the_folders_back_action.setEnabled(False)
         self.maintenance_report.setPlainText(
             "Backing up before the update… this can take minutes on a full world."
         )
@@ -19771,12 +20581,15 @@ class ControllerView(QWidget):
         # lock, and a lock still held while its own handler blocks on a dialog
         # would refuse the very press that dialog is asking for.
         self._backup_before_update = False
-        self.backup_button.setEnabled(True)
+        self._give_back_the_backup_button()
         self._set_update_buttons()
-        if not isinstance(result, wotlk_maintenance.BackupReport):
-            self._backup_before_update_failed("the backup did not say what it wrote")
+        report = result.report if isinstance(result, _BackedUpWithNote) else result
+        if not isinstance(report, wotlk_maintenance.BackupReport):
+            note = f" {result.note}" if isinstance(result, _BackedUpWithNote) else ""
+            self._backup_before_update_failed(f"the backup did not say what it wrote.{note}")
             return
         self._backup_done(result)
+        result = report
         if not said_yes(
             QMessageBox.question(
                 self,
@@ -19800,13 +20613,35 @@ class ControllerView(QWidget):
         # What the database said rides on `detail` (T194 R1): folded, and logged.
         detail = getattr(exc, "detail", "")
         self._backup_before_update = False
-        self.backup_button.setEnabled(True)
+        self._give_back_the_backup_button()
         self._set_update_buttons()
         self.maintenance_report.setPlainText(message)
         self.maintenance_details.set_text(detail)
         self.action_failed.emit(f"{message} ({detail})" if detail else message)
         show_warning(self, f"{self.entry.name}", message)
         self._show_interrupted()
+
+    def _refused_over_an_unfinished_restore(self, title: str) -> bool:
+        """Say no, before any question or backup, while a restore is recorded unfinished (T681).
+
+        The engine refuses too (`native.unfinished_restore_refusal`); asked here first so the
+        update's backup is not taken of half-written databases and then refused anyway.
+        """
+        if self._restore_running or docker.held_here(self.services.controller.server_dir):
+            # The record is the restore running NOW (this tab's or another window's), not one
+            # from the last session: `_update_route_busy()` says so in the restore's words.
+            return False
+        try:
+            record = self.services.interrupted_restore()
+        except Exception as exc:  # noqa: BLE001 - a record that cannot be read: the engine asks
+            logger.warning(f"could not read the restore record before {title}: {exc}")
+            return False
+        if record is None:
+            return False
+        said = wotlk_maintenance.unfinished_restore_sentence(record)
+        self.maintenance_report.setPlainText(said)
+        show_warning(self, title, said)
+        return True
 
     def _start_update_to_latest(self) -> bool:
         """Run the update in the shared panel. The one place either answer ends up.
@@ -19865,6 +20700,37 @@ class ControllerView(QWidget):
         return self.rebuild_log.run(
             lambda: self._watch_for_load_wait(self._noting_kept_sources(route.to_pin(cancel))),
             title=f"Returning {self.entry.name} to the tested commit",
+            cancel=cancel,
+            record_as=self._run_record_kind(),
+        )
+
+    @Slot()
+    def put_the_folders_back(self) -> bool:
+        """Ask, then run the engine's "Put the folders back…" in the build panel (T786).
+
+        False if nothing ran.
+
+        The engine holds the server's reservation and refuses a running world with its own
+        remedy; both arrive as the panel's FAILED line and `action_failed`, and nothing has
+        moved. This takes no reservation of its own (a second one would refuse the first), and
+        it compiles nothing, so `_rebuild_owed` is left as it is. It does move the sources, so
+        the finish drops what the move made stale and reads the server files again.
+        """
+        route = self.services.put_the_folders_back
+        if route is None or self._update_route_busy():
+            return False
+        if not ask_yes_no(
+            self, f"Put the folders of {self.entry.name} back?", route.confirmation()
+        ):
+            logger.info(f"put the folders back of {self.entry.id} declined at the question")
+            return False
+        cancel = self._rebuild_cancel()
+        self._rebuild_is_compile = False
+        self._rebuild_moves_sources = True
+        self._update_sources_kept = False
+        return self.rebuild_log.run(
+            lambda: route.press(cancel),
+            title=f"Putting the folders of {self.entry.name} back",
             cancel=cancel,
             record_as=self._run_record_kind(),
         )

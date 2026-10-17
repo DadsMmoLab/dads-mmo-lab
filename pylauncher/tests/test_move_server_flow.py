@@ -9,7 +9,10 @@ move's own, and every refusal comes from the move's own guard.
 from __future__ import annotations
 
 import hashlib
+import os
+import stat
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
@@ -396,7 +399,11 @@ class FakeApplier:
     world_up: Callable[[], bool] = staticmethod(lambda: False)  # type: ignore[assignment]
 
     def install(
-        self, manifest: Manifest, values: Mapping[str, str] | None = None
+        self,
+        manifest: Manifest,
+        values: Mapping[str, str] | None = None,
+        *,
+        defer_exists: bool = False,
     ) -> apply.ApplyReport:
         if self.world_up():
             # The real applier's refusal of a module's SQL while the world runs.
@@ -591,6 +598,28 @@ def test_the_run_installs_then_puts_everything_in_in_order(tmp_path: Path) -> No
     assert "It is stopped" in lines[-2]
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX modes; Windows has the folder's ACL")
+def test_the_folder_a_whole_server_unpacks_into_is_owner_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """It holds the unpacked auth dump with every verifier: 0700 under any umask (T745)."""
+    mv = Move(tmp_path)
+    seen: list[int] = []
+    real = move_flows._checked_plans
+
+    def recording(world: object, package: object, schemas: object, folder: Path) -> object:
+        seen.append(stat.S_IMODE(folder.stat().st_mode))
+        return real(world, package, schemas, folder)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(move_flows, "_checked_plans", recording)
+    old = os.umask(0o002)
+    try:
+        mv.run()
+    finally:
+        os.umask(old)
+    assert seen == [0o700], [oct(m) for m in seen]
+
+
 def test_the_module_goes_back_at_its_commit_with_its_old_answers(tmp_path: Path) -> None:
     mv = Move(tmp_path)
     mv.run()
@@ -665,15 +694,31 @@ def test_the_old_channel_account_is_removed_after_the_load(tmp_path: Path) -> No
 
 
 def test_the_steps_are_recorded_and_a_second_press_does_them_once(tmp_path: Path) -> None:
+    """Each step is recorded as it is done; a press that finds them all done does none again.
+
+    T682: a finished move removes its record, so the all-done record here is the one a move
+    that stopped after its last step (or a build before T682) left; it is read as a server.
+    """
     mv = Move(tmp_path)
-    mv.run()
-    marker = move_server.read_marker(mv.target.server_dir)
-    assert marker is not None and marker["done"] == list(move_server.STEPS)
+    saved: list[list[str]] = []
+    real_write = move_server.write_marker
+
+    def write(server_dir: Path, digest: str, done: object, **more: object) -> None:
+        saved.append(list(done))  # type: ignore[call-overload]
+        real_write(server_dir, digest, done, **more)  # type: ignore[arg-type]
+
+    move_server.write_marker = write  # type: ignore[assignment]
+    try:
+        mv.run()
+    finally:
+        move_server.write_marker = real_write  # type: ignore[assignment]
+    assert saved[-1] == list(move_server.STEPS)
+    assert move_server.read_marker(mv.target.server_dir) is None
     before = list(mv.events)
-    lines = mv.run()
+    with pytest.raises(MoveError, match="already holds a server"):
+        mv.run()
     added = mv.events[len(before) :]
     assert not [e for e in added if e.startswith(("module:", "load:")) or e in ("rebuild", "rows")]
-    assert sum(1 for line in lines if line.startswith("Already done:")) == len(move_server.STEPS)
 
 
 def test_a_press_stopped_after_the_modules_carries_on_with_the_rebuild(tmp_path: Path) -> None:
@@ -838,11 +883,13 @@ def test_a_module_that_failed_is_asked_again_and_its_rebuild_is_not_lost(tmp_pat
     real = mv.applier.install
     calls = {"n": 0}
 
-    def fail_once(manifest: Manifest, values: Mapping[str, str] | None = None) -> apply.ApplyReport:
+    def fail_once(
+        manifest: Manifest, values: Mapping[str, str] | None = None, **kw: bool
+    ) -> apply.ApplyReport:
         calls["n"] += 1
         if calls["n"] == 1:
             raise apply.ApplyRefusal("the clone was cut off")
-        return real(manifest, values)
+        return real(manifest, values, **kw)
 
     mv.applier.install = fail_once  # type: ignore[method-assign]
     with pytest.raises(MoveError, match="could not be installed again"):
@@ -890,7 +937,9 @@ def test_a_module_that_declares_a_rebuild_gets_one_even_if_its_report_says_none(
     mv = Move(tmp_path)
     assert mv.plan.modules[0].manifest.build.rebuild
 
-    def install(manifest: Manifest, values: Mapping[str, str] | None = None) -> apply.ApplyReport:
+    def install(
+        manifest: Manifest, values: Mapping[str, str] | None = None, **kw: bool
+    ) -> apply.ApplyReport:
         return apply.ApplyReport(
             action="install", item_id=manifest.id, family=manifest.type, rebuild_required=False
         )
@@ -937,7 +986,8 @@ def test_an_install_that_fails_leaves_a_folder_this_file_carries_on_in(tmp_path:
     assert again.allowed and again.resuming, again.refusals
     mv.engine.run = real_run  # type: ignore[method-assign]
     mv.run()
-    assert move_server.read_marker(mv.target.server_dir)["done"] == list(move_server.STEPS)  # type: ignore[index]
+    # T682: the finished move took its record with it.
+    assert move_server.read_marker(mv.target.server_dir) is None
 
 
 def test_a_carried_on_load_uses_the_address_read_before_the_first_load(tmp_path: Path) -> None:
@@ -1001,11 +1051,13 @@ def test_a_second_module_failing_does_not_redo_the_first(tmp_path: Path) -> None
     real = mv.applier.install
     failed = {"once": False}
 
-    def flaky(manifest: Manifest, values: Mapping[str, str] | None = None) -> apply.ApplyReport:
+    def flaky(
+        manifest: Manifest, values: Mapping[str, str] | None = None, **kw: bool
+    ) -> apply.ApplyReport:
         if manifest.id == "mod-aoe-loot" and not failed["once"]:
             failed["once"] = True
             raise apply.ApplyRefusal("cut off")
-        return real(manifest, values)
+        return real(manifest, values, **kw)
 
     mv.applier.install = flaky  # type: ignore[method-assign]
     with pytest.raises(MoveError):
@@ -1197,3 +1249,354 @@ def test_a_folder_module_with_no_folder_route_here_is_refused(tmp_path: Path) ->
     mv.server_for = lambda d, c: replace(original(d, c), install_folder=None)  # type: ignore[method-assign]
     with pytest.raises(MoveError, match="has no module installer here"):
         mv.run()
+
+
+# =============================================================== T679: mod-ah-bot on a move-in
+
+AHBOT_COMMIT = "b" * 40
+
+
+def ahbot_facts(
+    module_id: str = "mod-ah-bot", answers: str = '"bot_guid": "42", "bot_account": "7"'
+) -> ServerFacts:
+    """The whole server of `whole_facts`, with an AH bot module (and its answers) instead."""
+    base = whole_facts()
+    ahbot = STORE.load("module", module_id)
+    return ServerFacts(
+        spec=replace(
+            base.spec,
+            modules=(
+                PackedModule(
+                    type="module",
+                    id=module_id,
+                    origin="catalog",
+                    repo=ahbot.source.repo,  # type: ignore[union-attr]
+                    commit=AHBOT_COMMIT,
+                ),
+            ),
+        ),
+        files=tuple(
+            (
+                replace(
+                    f,
+                    data=(
+                        f'{{"version": 1, "modules": {{"module/{module_id}": {{{answers}}}}}}}'
+                    ).encode(),
+                )
+                if f.kind == "answers"
+                else f
+            )
+            for f in base.files
+        ),
+    )
+
+
+class RealApplierOverTheMove:
+    """The REAL `apply.Applier` (its does-it-exist check included) in a move's order.
+
+    Only the clone and the database are doubles. The reader answers like the new server's
+    characters database: no row until the `data` step has loaded `acore_characters`, a row
+    for the packed bot character after it -- so the check passes or refuses on the order the
+    move really runs the steps in, not on a canned answer.
+    """
+
+    install_folder = None
+    world_up: Callable[[], bool] = staticmethod(lambda: False)  # type: ignore[assignment]
+
+    def __init__(self, events: list[str], server_dir: Path, *, guarded: bool = False) -> None:
+        from tests.test_apply import AHBOT_DIST, _FakeGit, _FakeReader
+
+        self.guarded = guarded
+
+        self.events = events
+        self.server_dir = server_dir
+        self.reader = _FakeReader()
+        self.git = _FakeGit({"conf/mod_ahbot.conf.dist": AHBOT_DIST})
+        self.asked: list[str] = []
+        events_ = events
+        reader = self.reader
+        asked = self.asked
+
+        def query(db: str, statement: str) -> str:
+            asked.append(statement)
+            return "Ahbot\n" if "load:acore_characters" in events_ else ""
+
+        reader.query = query  # type: ignore[method-assign]
+
+    def install(
+        self,
+        manifest: Manifest,
+        values: Mapping[str, str] | None = None,
+        **kw: bool,
+    ) -> apply.ApplyReport:
+        self.events.append(f"module:{manifest.id}")
+        if self.guarded:
+            # Tortoise's applier: a subclass whose `install()` names every keyword itself.
+            from yulon.controller_wow_tortoise import autoupdate
+
+            applier: apply.Applier = autoupdate.GuardedApplier(
+                self.server_dir,
+                arming=lambda: autoupdate.Arming(enabled=False),
+                world_running=lambda: False,
+                git=self.git,
+                sql=self.reader,
+            )
+        else:
+            applier = apply.Applier(self.server_dir, git=self.git, sql=self.reader)  # type: ignore[arg-type]
+        return applier.install(manifest, values, **kw)
+
+
+def ahbot_move(tmp_path: Path, *, guarded: bool = False) -> tuple[Move, RealApplierOverTheMove]:
+    # Tortoise's guard refuses a module that hands SQL to the server's updater (mod-ah-bot
+    # does); mod-ah-bot-plus carries the same does-it-exist question and no SQL.
+    module_id = "mod-ah-bot-plus" if guarded else "mod-ah-bot"
+    answers = '"bot_guid": "42"' if guarded else '"bot_guid": "42", "bot_account": "7"'
+    mv = Move(tmp_path, facts=lambda: ahbot_facts(module_id, answers))
+    real = RealApplierOverTheMove(mv.events, mv.target.server_dir, guarded=guarded)
+    mv.applier = real  # type: ignore[assignment]
+    return mv, real
+
+
+def test_a_server_with_the_ah_bot_is_moved_in_although_its_characters_load_last(
+    tmp_path: Path,
+) -> None:
+    """T679: the GUID check read the still-empty characters database and refused every press."""
+    mv, real = ahbot_move(tmp_path)
+    lines = mv.run()
+    order = [e for e in mv.events if e == "module:mod-ah-bot" or e == "load:acore_characters"]
+    assert order == ["module:mod-ah-bot", "load:acore_characters"]  # the step order is unchanged
+    assert real.asked == []  # nothing asked of the empty database
+    marker = move_server.read_marker(mv.target.server_dir)
+    assert marker is None  # T682: the finished move took its record with it
+    skipped = [line for line in lines if line.startswith("  skipped: ") and "bot_guid=42" in line]
+    assert skipped and apply.DEFERRED_EXISTS_NOTE in skipped[0]
+    assert any("bot_account=7" in line for line in lines if line.startswith("  skipped: "))
+    conf = mv.target.server_dir / "env/dist/etc/modules/mod_ahbot.conf"
+    assert "AuctionHouseBot.GUID = 42\n" in conf.read_text(encoding="utf-8")
+
+
+def test_the_move_in_says_the_skipped_check_is_never_made_and_what_to_check_after(
+    tmp_path: Path,
+) -> None:
+    """The skipped line must not promise a later check nothing makes (T679 review).
+
+    The move never asks the question again once the characters are in, so "not checked
+    yet" was a promise with nothing behind it. The line says it is not checked, that
+    nothing checks it later, and what the player looks at after the move.
+    """
+    mv, _ = ahbot_move(tmp_path)
+    lines = mv.run()
+    shown = [line for line in lines if line.startswith("  skipped: bot_guid=42: ")]
+    assert len(shown) == 1, lines
+    said = shown[0].removeprefix("  skipped: bot_guid=42: ")
+    assert " yet" not in said, said
+    assert "nothing checks it later" in said, said
+    assert "Characters tab" in said, said
+
+
+def test_the_same_server_is_refused_when_the_check_is_not_deferred(tmp_path: Path) -> None:
+    """The fixture is honest: ask the question in this order and it does refuse, by name."""
+    mv, real = ahbot_move(tmp_path)
+    installed = real.install
+
+    def asks(
+        manifest: Manifest, values: Mapping[str, str] | None = None, **kw: bool
+    ) -> apply.ApplyReport:
+        return installed(manifest, values)  # the check, as every normal install makes it
+
+    real.install = asks  # type: ignore[method-assign]
+    with pytest.raises(MoveError, match="no character in this server's own database has GUID 42"):
+        mv.run()
+    assert not [e for e in mv.events if e.startswith("load:")]
+
+
+def test_a_move_in_over_tortoises_guarded_applier_passes_the_deferral_through(
+    tmp_path: Path,
+) -> None:
+    """The move's module step over the REAL `GuardedApplier`, whose `install()` lists its keywords.
+
+    Without the keyword there it is a `TypeError`, not an `ApplyError`, so the move gave no
+    "press again" message at all. The deferral must reach the base applier's check.
+    """
+    mv, real = ahbot_move(tmp_path, guarded=True)
+    lines = mv.run()
+    assert real.asked == []
+    assert "module:mod-ah-bot-plus" in mv.events
+    assert any(apply.DEFERRED_EXISTS_NOTE in line for line in lines if "bot_guid=42" in line)
+    marker = move_server.read_marker(mv.target.server_dir)
+    assert marker is None  # T682: the finished move took its record with it
+
+
+# ============================================================ a carry-on over a running load
+
+
+def _cut_off_move(tmp_path: Path) -> Move:
+    """A whole-server move whose data step failed part-way: the restore record is left."""
+    from yulon.controller_wow_wotlk import maintenance
+
+    mv = Move(
+        tmp_path, fresh_db=Db([], realm="10.0.0.7\t127.0.0.1", fail_load_of="acore_characters")
+    )
+    with pytest.raises(MoveError):
+        mv.run()
+    assert maintenance.interrupted_restore(mv.target.server_dir) is not None
+    mv.target.db.fail_load_of = None
+    return mv
+
+
+def _carry_on(mv: Move) -> tuple[list[str], Exception]:
+    """Press Bring from another computer… again; the lines said and what refused it."""
+    lines: list[str] = []
+    options = InstallOptions(server_dir=mv.target.server_dir)
+    with pytest.raises(MoveError) as raised:
+        for line in mv.install().run(options):
+            lines.append(line)
+    return lines, raised.value
+
+
+def test_a_carry_on_while_a_restore_load_still_runs_says_only_to_wait(tmp_path: Path) -> None:
+    """T735: the T730 sentence alone, before the record is touched.
+
+    The load another Yu'lon left running (Quit anyway) is a real child process the record
+    names. Before the fix the press first said "The last press stopped while the databases
+    were being put in..." and saved the move-in record, and only then was refused.
+    Mutation: drop the hold check at the top of `MovedInInstall.run`.
+    """
+    from tests.test_restore_load_pid import _marker_with
+
+    mv = _cut_off_move(tmp_path)
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        _marker_with(mv.target.server_dir, child.pid)
+        record = mv.target.server_dir / move_server.MOVE_IN_FILE
+        before = (record.read_bytes(), record.stat().st_mtime_ns)
+        events, installs = list(mv.events), mv.engine.runs
+        lines, refused = _carry_on(mv)
+    finally:
+        child.kill()
+        child.wait()
+    said = str(refused)
+    assert "is still loading its databases in Docker" in said, said
+    assert "Wait for it to finish" in said, said
+    assert "did not finish" not in said and "put in again" not in said, said
+    assert not any("last press stopped" in line for line in lines), lines
+    assert (record.read_bytes(), record.stat().st_mtime_ns) == before, "the record was written"
+    assert mv.events == events and mv.engine.runs == installs
+
+
+def test_a_carry_on_while_this_yulons_own_restore_holds_the_folder_names_the_restore(
+    tmp_path: Path,
+) -> None:
+    """The same door while a job of THIS Yu'lon holds the server: its own sentence, first."""
+    mv = _cut_off_move(tmp_path)
+    record = mv.target.server_dir / move_server.MOVE_IN_FILE
+    before = (record.read_bytes(), record.stat().st_mtime_ns)
+    with docker.hold_the_server(
+        mv.target.server_dir,
+        forgetting.RESTORE_HOLDS_THE_SERVER,
+        press=forgetting.PRESS_RESTORE,
+        alone=forgetting.RESTORE_WRITES_ALONE,
+    ):
+        lines, refused = _carry_on(mv)
+    assert str(refused) == forgetting.RESTORE_HOLDS_A_MOVE  # T737: a move's own reason
+    assert not any("last press stopped" in line for line in lines), lines
+    assert (record.read_bytes(), record.stat().st_mtime_ns) == before, "the record was written"
+
+
+# ================================================== another window during a whole-server load
+
+
+def test_another_window_during_a_whole_server_load_is_told_a_server_is_being_brought_in(
+    tmp_path: Path,
+) -> None:
+    """T737: a whole-server bring-in's load names itself, not "Accounts and characters ...
+    on this server's Maintenance tab", which is the per-account Pack and Bring in.
+
+    Each press runs on a thread of its own (another window's), during the real run's first
+    load, under the hold, lease and `alone` the run itself took.
+    Mutation: `load_the_data` passes the per-account sentences (`_database_session`'s defaults).
+
+    T738: a move (Pack, Bring in, a second Bring from another computer… on the same folder)
+    is told the hold in a move's words, `MOVE_IN_HOLDS_A_MOVE` ("Nothing was packed or
+    brought in."); the Start keeps "Nothing was started or stopped."
+    Mutation: drop the MOVE_IN entry from `move_flows._FOR_A_MOVE`.
+    """
+    from tests.test_move_flows import packed
+
+    mv = Move(tmp_path)
+    server_dir = mv.target.server_dir
+    (tmp_path / "accounts").mkdir()
+    accounts = packed(tmp_path / "accounts")
+    said: dict[str, object] = {}
+    load = mv.target.db.load_from
+
+    def answer(name: str, press: Callable[[], object]) -> None:
+        try:
+            said[name] = press()
+        except Exception as exc:  # noqa: BLE001 - the press's answer, whatever it is
+            said[name] = exc
+
+    def start() -> object:
+        with docker._in_flight(server_dir, press=forgetting.PRESS_START):
+            return "started"
+
+    def backup() -> object:
+        with docker.maintenance_lease(
+            server_dir, forgetting.BACKUP_HOLDS_THE_DATABASES, press=forgetting.PRESS_BACKUP
+        ):
+            return "backed up"
+
+    def module_sql() -> object:
+        with docker.server_hold(server_dir, "Install mod-transmog", spec=None):
+            return "written"
+
+    def bring_in_again() -> object:
+        options = InstallOptions(server_dir=server_dir)
+        return list(mv.install().run(options))
+
+    presses: dict[str, Callable[[], object]] = {
+        "pack": lambda: move_flows.plan_export(mv.target.world),
+        "bring in": lambda: move_flows.plan_import(mv.target.world, accounts),
+        "bring in again": bring_in_again,
+        "start": start,
+        "backup": backup,
+        "module": module_sql,
+    }
+
+    def load_and_press(source: object) -> None:
+        if not said:
+            for name, press in presses.items():
+                worker = threading.Thread(target=answer, args=(name, press))
+                worker.start()
+                worker.join(30)
+        load(source)  # type: ignore[arg-type]
+
+    mv.target.db.load_from = load_and_press  # type: ignore[method-assign]
+    mv.run()
+    assert set(said) == set(presses), said
+
+    pack, bring_in = said["pack"], said["bring in"]
+    assert isinstance(pack, move_flows.ExportPlan), pack
+    assert pack.refusals == (forgetting.MOVE_IN_HOLDS_A_MOVE,), pack.refusals
+    assert isinstance(bring_in, move_flows.ImportPlan), bring_in
+    assert forgetting.MOVE_IN_HOLDS_A_MOVE in bring_in.refusals, bring_in.refusals
+    assert forgetting.MOVE_IN_HOLDS_THE_SERVER not in bring_in.refusals, bring_in.refusals
+    again = said["bring in again"]
+    assert isinstance(again, MoveError), again
+    assert str(again) == forgetting.MOVE_IN_HOLDS_A_MOVE
+    assert forgetting.MOVE_IN_HOLDS_A_MOVE.endswith(" Nothing was packed or brought in.")
+    assert "started or stopped" not in forgetting.MOVE_IN_HOLDS_A_MOVE
+    assert isinstance(said["start"], docker.ServerHeldError), said["start"]
+    assert str(said["start"]) == forgetting.MOVE_IN_HOLDS_THE_SERVER
+    assert isinstance(said["backup"], docker.MaintenanceLeaseTaken), said["backup"]
+    assert str(said["backup"]) == forgetting.MOVE_IN_HOLDS_THE_DATABASES
+    assert isinstance(said["module"], docker.ServerHeldError), said["module"]
+    assert str(said["module"]) == forgetting.MOVE_IN_WRITES_ALONE
+    for sentence in (
+        forgetting.MOVE_IN_HOLDS_THE_SERVER,
+        forgetting.MOVE_IN_HOLDS_A_MOVE,
+        forgetting.MOVE_IN_HOLDS_THE_DATABASES,
+        forgetting.MOVE_IN_WRITES_ALONE,
+    ):
+        assert "brought in from another computer" in sentence, sentence
+        assert "Accounts and characters" not in sentence and "Maintenance" not in sentence

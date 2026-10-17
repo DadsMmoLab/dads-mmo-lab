@@ -61,7 +61,7 @@ services:
       # DOCKER_DB_EXTERNAL_PORT=13306 to .env when 3306 is taken.
       - "127.0.0.1:${DOCKER_DB_EXTERNAL_PORT:-{{DB_PORT}}}:3306"
     environment:
-      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-{{DB_PASSWORD}}}
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?Yu'lon .env is missing}
     volumes:
       - db-data:/var/lib/mysql
     restart: unless-stopped
@@ -171,7 +171,9 @@ services:
       # `MYSQL_ROOT_HOST: localhost` here — a plausible hardening — deletes
       # `root@%`, and this healthcheck then never passes, so every waiter hangs
       # on a database that is running and fine.
-      test: "/usr/bin/mysql -h {{DB_HOST}} --protocol=TCP --user=root --password=$$MYSQL_ROOT_PASSWORD --execute \"SHOW DATABASES;\""
+      # The password rides MYSQL_PWD, never `--password=` (T748): a container's
+      # processes are in the host's `ps`, and argv is readable by every local user.
+      test: "MYSQL_PWD=\"$$MYSQL_ROOT_PASSWORD\" /usr/bin/mysql -h {{DB_HOST}} --protocol=TCP --user=root --execute \"SHOW DATABASES;\""
       interval: 5s
       timeout: 10s
       retries: 40
@@ -183,14 +185,14 @@ services:
     environment:
       AC_DATA_DIR: "/azerothcore/env/dist/data"
       AC_LOGS_DIR: "/azerothcore/env/dist/logs"
-      AC_LOGIN_DATABASE_INFO: "{{DB_HOST}};3306;root;${DB_ROOT_PASSWORD:-{{DB_PASSWORD}}};acore_auth"
-      AC_WORLD_DATABASE_INFO: "{{DB_HOST}};3306;root;${DB_ROOT_PASSWORD:-{{DB_PASSWORD}}};acore_world"
-      AC_CHARACTER_DATABASE_INFO: "{{DB_HOST}};3306;root;${DB_ROOT_PASSWORD:-{{DB_PASSWORD}}};acore_characters"
+      AC_LOGIN_DATABASE_INFO: "{{DB_HOST}};3306;root;${DB_ROOT_PASSWORD:?Yu'lon .env is missing};acore_auth"
+      AC_WORLD_DATABASE_INFO: "{{DB_HOST}};3306;root;${DB_ROOT_PASSWORD:?Yu'lon .env is missing};acore_world"
+      AC_CHARACTER_DATABASE_INFO: "{{DB_HOST}};3306;root;${DB_ROOT_PASSWORD:?Yu'lon .env is missing};acore_characters"
       # The playerbots schema. Its absence is the gap this file was written to
       # close: the one-shot creates only the databases it is told about, and an
       # import that never heard of acore_playerbots leaves a worldserver that
       # cannot start its bots.
-      AC_PLAYERBOTS_DATABASE_INFO: "{{DB_HOST}};3306;root;${DB_ROOT_PASSWORD:-{{DB_PASSWORD}}};acore_playerbots"
+      AC_PLAYERBOTS_DATABASE_INFO: "{{DB_HOST}};3306;root;${DB_ROOT_PASSWORD:?Yu'lon .env is missing};acore_playerbots"
       # WHICH modules' SQL this import may apply, and it is not the ones in the
       # folder next to this file. Upstream's default is "all", and "all" means
       # AC_MODULES_LIST - a macro modules/CMakeLists.txt:371 bakes from a glob
@@ -298,7 +300,7 @@ services:
     environment:
       AC_LOGS_DIR: "/azerothcore/env/dist/logs"
       AC_TEMP_DIR: "/azerothcore/env/dist/temp"
-      AC_LOGIN_DATABASE_INFO: "{{DB_HOST}};3306;root;${DB_ROOT_PASSWORD:-{{DB_PASSWORD}}};acore_auth"
+      AC_LOGIN_DATABASE_INFO: "{{DB_HOST}};3306;root;${DB_ROOT_PASSWORD:?Yu'lon .env is missing};acore_auth"
     {{CONTAINER_USER}}
     volumes:
       - ./env/dist/etc:/azerothcore/env/dist/etc{{BIND_LABEL}}
@@ -333,10 +335,10 @@ services:
     environment:
       AC_DATA_DIR: "/azerothcore/env/dist/data"
       AC_LOGS_DIR: "/azerothcore/env/dist/logs"
-      AC_LOGIN_DATABASE_INFO: "{{DB_HOST}};3306;root;${DB_ROOT_PASSWORD:-{{DB_PASSWORD}}};acore_auth"
-      AC_WORLD_DATABASE_INFO: "{{DB_HOST}};3306;root;${DB_ROOT_PASSWORD:-{{DB_PASSWORD}}};acore_world"
-      AC_CHARACTER_DATABASE_INFO: "{{DB_HOST}};3306;root;${DB_ROOT_PASSWORD:-{{DB_PASSWORD}}};acore_characters"
-      AC_PLAYERBOTS_DATABASE_INFO: "{{DB_HOST}};3306;root;${DB_ROOT_PASSWORD:-{{DB_PASSWORD}}};acore_playerbots"
+      AC_LOGIN_DATABASE_INFO: "{{DB_HOST}};3306;root;${DB_ROOT_PASSWORD:?Yu'lon .env is missing};acore_auth"
+      AC_WORLD_DATABASE_INFO: "{{DB_HOST}};3306;root;${DB_ROOT_PASSWORD:?Yu'lon .env is missing};acore_world"
+      AC_CHARACTER_DATABASE_INFO: "{{DB_HOST}};3306;root;${DB_ROOT_PASSWORD:?Yu'lon .env is missing};acore_characters"
+      AC_PLAYERBOTS_DATABASE_INFO: "{{DB_HOST}};3306;root;${DB_ROOT_PASSWORD:?Yu'lon .env is missing};acore_playerbots"
       # Runtime settings live in docker-compose.override.yml.
     ports:
       - "${DOCKER_WORLD_EXTERNAL_PORT:-{{WORLD_PORT}}}:8085"

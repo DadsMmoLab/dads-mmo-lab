@@ -209,6 +209,74 @@ def test_nowhere_writable_at_all_still_leaves_a_running_app(
     assert problem is not None and "no log file" in problem
 
 
+_POSIX_ONLY = pytest.mark.skipif(sys.platform == "win32", reason="the per-user %TEMP% is private")
+
+
+def _log_into_the_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    elsewhere = tmp_path / "temp"
+    elsewhere.mkdir(exist_ok=True)
+    monkeypatch.setattr(log_module.tempfile, "gettempdir", lambda: str(elsewhere))
+    configure(config_dir=_a_directory_nothing_can_be_created_under(tmp_path / "appdata"))
+    get_logger("yulon.tests.fallback").info("a line for the fallback")
+    for handler in logging.getLogger().handlers:
+        handler.flush()
+    return elsewhere / "yulon"
+
+
+@_POSIX_ONLY
+def test_the_temp_dir_fallback_is_the_users_own_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`/tmp` is shared by every user on the machine (T683 S2b): the folder is 0700."""
+    old = os.umask(0o002)
+    try:
+        folder = _log_into_the_fallback(tmp_path, monkeypatch)
+    finally:
+        os.umask(old)
+    assert (folder / "yulon.log").exists()
+    assert folder.stat().st_mode & 0o777 == 0o700
+
+
+@_POSIX_ONLY
+def test_a_fallback_folder_another_user_made_first_is_not_logged_into(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Another local user can make `/tmp/yulon` before Yu'lon does, and would then own
+    the log. Asked as "who owns it": the folder says its owner is not this user."""
+    (tmp_path / "temp" / "yulon").mkdir(parents=True)
+    someone_else = os.getuid() + 1
+    monkeypatch.setattr(log_module.os, "getuid", lambda: someone_else)
+    folder = _log_into_the_fallback(tmp_path, monkeypatch)
+    assert not (folder / "yulon.log").exists()
+    problem = file_log_problem()
+    assert problem is not None and "no log file" in problem
+
+
+@_POSIX_ONLY
+def test_a_fallback_folder_that_is_a_link_is_not_logged_into(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A link planted at `/tmp/yulon` points the log wherever its maker likes."""
+    target = tmp_path / "theirs"
+    target.mkdir()
+    (tmp_path / "temp").mkdir()
+    (tmp_path / "temp" / "yulon").symlink_to(target, target_is_directory=True)
+    _log_into_the_fallback(tmp_path, monkeypatch)
+    assert not (target / "yulon.log").exists()
+
+
+@_POSIX_ONLY
+def test_an_open_fallback_folder_of_the_users_own_is_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One left 0777 by an older Yu'lon or a loose umask is ours, so it is made private."""
+    (tmp_path / "temp" / "yulon").mkdir(parents=True)
+    (tmp_path / "temp" / "yulon").chmod(0o777)
+    folder = _log_into_the_fallback(tmp_path, monkeypatch)
+    assert (folder / "yulon.log").exists()
+    assert folder.stat().st_mode & 0o777 == 0o700
+
+
 def test_a_config_dir_that_works_reports_no_problem(tmp_path: Path) -> None:
     """The happy path must not learn to complain: this is what keeps the notice rare."""
     configure(config_dir=tmp_path)

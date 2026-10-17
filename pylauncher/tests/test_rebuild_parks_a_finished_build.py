@@ -339,7 +339,8 @@ def test_the_opening_note_mentions_the_kept_build_only_when_one_is_recorded(
     kept = "if the folder has not changed since the kept build was made, uses that build"
     assert kept in notes[0], notes[0]
     assert kept not in notes[1], notes[1]
-    assert "three things" in notes[0] and "three things" in notes[1], notes
+    # T706: WotLK's Rebuild imports with its servers stopped, the fourth thing it does.
+    assert "four things" in notes[0] and "four things" in notes[1], notes
 
 
 def test_the_next_rebuild_after_an_edit_removes_the_parked_build_before_compiling(
@@ -744,7 +745,7 @@ def test_a_mismatched_kept_build_keeps_its_record_while_docker_keeps_its_names(
 
 # -- WotLK in normal use: only what its Dockerfile reads counts (T230) --------
 
-WOTLK_DATA = Path(__file__).resolve().parent / "data" / "azerothcore-wotlk-2a2211cd"
+WOTLK_DATA = Path(__file__).resolve().parent / "data" / "azerothcore-wotlk-8a4e76ea"
 """mod-playerbots/azerothcore-wotlk at commit 2a2211cd8f3d157da432ec0175ddd4b8a191931f (the
 catalog's pin for wow-wotlk; read at 7f12e89e 2026-10-05, the same bytes at f19a1879
 2026-10-08 and at 2a2211cd 2026-10-10), byte for byte: the root `.dockerignore`,

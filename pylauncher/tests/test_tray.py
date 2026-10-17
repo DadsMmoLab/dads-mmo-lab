@@ -85,7 +85,10 @@ class FakeView(QObject):
     def __init__(self, name: str, server_dir: str, status: str = "stopped") -> None:
         super().__init__()
         self.entry = SimpleNamespace(id=f"game-{name.lower()}", name=name)
-        self.services = SimpleNamespace(controller=SimpleNamespace(server_dir=Path(server_dir)))
+        self.services = SimpleNamespace(
+            controller=SimpleNamespace(server_dir=Path(server_dir)),
+            play_client_dir=Path(server_dir) / "play-client",
+        )
         self.realm_badge = FakeBadge(status)
         self.start_button = QPushButton("Start")
         self.stop_button = QPushButton("Stop")
@@ -94,6 +97,11 @@ class FakeView(QObject):
         self.starts = 0
         self.stops = 0
         self.restarts = 0
+        self.played = 0
+
+    def play(self) -> None:
+        # T694: the tab's PLAY -- starts the server if needed, waits, starts the game.
+        self.played += 1
 
     def start_server(self) -> None:
         # The real one holds the badge at "starting" before its job runs (T188).
@@ -234,6 +242,25 @@ def test_a_start_from_the_tray_shows_starting_at_once(tray: YulonTray, window: F
     tray.start(view)
     assert view.starts == 1
     assert tray.state == "between"
+
+
+def test_a_start_over_a_running_action_says_why_instead_of_doing_nothing(
+    tray: YulonTray, window: FakeWindow
+) -> None:
+    """T690 (F-4): Start from the tray after its row was built, while the tab runs a job.
+
+    Mutation: drop the `action_in_progress()` check from `YulonTray.start()`: the press
+    reaches the tab, which refuses silently (the player sees nothing happen).
+    """
+    view = _add(window, FakeView("WotLK", "/srv/a"))
+    view.action_in_progress = lambda: "Restart"  # type: ignore[attr-defined]
+    told: list[tuple[str, str]] = []
+    tray.tell = lambda title, text: told.append((title, text))  # type: ignore[method-assign]
+
+    tray.start(view)
+
+    assert view.starts == 0, "Start ran on top of a running action"
+    assert len(told) == 1 and "Restart" in told[0][1] and "WotLK" in told[0][1], told
 
 
 def test_a_tab_rebuilt_is_followed_and_the_old_one_let_go(
@@ -405,18 +432,18 @@ def _texts(menu: QMenu) -> list[str]:
     return [action.text() for action in menu.actions() if not action.isSeparator()]
 
 
-def test_the_menu_lists_the_servers_and_plays_only_an_online_one(
+def test_the_menu_lists_the_servers_and_plays_an_online_or_a_stopped_one(
     tray: YulonTray, window: FakeWindow
 ) -> None:
-    _add(window, FakeView("WotLK", "/srv/a", "running"))
+    wotlk = _add(window, FakeView("WotLK", "/srv/a", "running"))
     _add(window, FakeView("TBC", "/srv/b", "starting"))
-    _add(window, FakeView("Vanilla", "/srv/c", "stopped"))
+    vanilla = _add(window, FakeView("Vanilla", "/srv/c", "stopped"))
     menu = tray.build_menu()
     texts = _texts(menu)
     assert texts[0] == "Yu'lon — 1 of 3 servers online"
     assert "Open Yu'lon" in texts
     assert "Logs" in texts
-    assert "Quit tray…" in texts
+    assert "Quit Yu'lon…" in texts
     open_action = next(a for a in menu.actions() if a.text() == "Open Yu'lon")
     assert open_action.font().bold()
     assert menu.defaultAction() is open_action
@@ -424,8 +451,34 @@ def test_the_menu_lists_the_servers_and_plays_only_an_online_one(
     sub = play.menu()
     assert sub is not None
     rows = {a.text(): a.isEnabled() for a in sub.actions()}
-    assert rows == {"WotLK": True, "TBC (starting)": False, "Vanilla (stopped)": False}
-    next(a for a in sub.actions() if a.isEnabled()).trigger()
+    assert rows == {"WotLK": True, "TBC (starting)": False, "Vanilla (stopped)": True}
+    next(a for a in sub.actions() if a.text() == "WotLK").trigger()
+    # T694: Play plays (the tab starts a stopped server first); it does not open the launcher.
+    assert (wotlk.played, vanilla.played, window.opened) == (1, 0, [])
+    next(a for a in sub.actions() if a.text() == "Vanilla (stopped)").trigger()
+    assert (wotlk.played, vanilla.played, window.opened) == (1, 1, [])
+
+
+def test_the_menu_does_not_play_a_server_that_is_crashing_or_unknown(
+    tray: YulonTray, window: FakeWindow
+) -> None:
+    for name, state in (("Loop", "loop"), ("Unk", "unknown"), ("Part", "partial")):
+        _add(window, FakeView(name, f"/srv/{name}", state))
+    menu = tray.build_menu()  # kept: the submenu dies with it
+    play = next(a for a in menu.actions() if a.text() == "Play")
+    sub = play.menu()
+    assert sub is not None
+    assert [a.isEnabled() for a in sub.actions()] == [False, False, False]
+
+
+def test_play_for_a_server_with_no_ready_to_play_client_opens_its_launcher(
+    tray: YulonTray, window: FakeWindow
+) -> None:
+    """Nothing to play yet: the launcher is where "Make a ready-to-play client" is."""
+    view = _add(window, FakeView("WotLK", "/srv/a", "running"))
+    view.services.play_client_dir = None
+    tray.play(view)
+    assert view.played == 0
     assert window.opened == [("game-wotlk", Path("/srv/a"))]
 
 

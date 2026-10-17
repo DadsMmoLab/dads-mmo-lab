@@ -207,6 +207,28 @@ def test_a_stopped_project_is_found_and_reported_as_stopped() -> None:
     assert server.project == "wow-server-playerbots"
 
 
+def test_a_running_server_with_finished_one_shots_is_reported_as_running() -> None:
+    """T773: the picker labelled the running Unbound server in WSL "(stopped)".
+
+    Seen on yulon-win11 (2026-10-12, live-t744-t756 gate): its stack was Up, and its two
+    one-shots (db-import, client-data init) had finished with Exited (0). `docker compose
+    ls` folds a project's containers into one count per state, with the states in
+    alphabetical order (compose's `combinedStatus`), so "exited" comes first and a test
+    for a status STARTING with "running" read that project as stopped. A one-shot never
+    stays running, so a running container is one of the long-lived services (database,
+    auth, world) and the project is up.
+    """
+    mixed = COMPOSE_LS.replace('"running(1)"', '"exited(2), running(3)"')
+    assert wsl.parse_compose_ls("Ubuntu", mixed)[0].running is True
+
+
+def test_a_project_with_only_finished_or_restarting_containers_is_not_running() -> None:
+    """The other side of T773: no part of the status says a container is running."""
+    for status in ("exited(5)", "created(1), exited(2)", "exited(2), restarting(1)", ""):
+        stated = COMPOSE_LS.replace('"running(1)"', f'"{status}"')
+        assert wsl.parse_compose_ls("Ubuntu", stated)[0].running is False, status
+
+
 def test_compose_output_that_is_not_json_is_no_servers_rather_than_a_crash() -> None:
     """An older compose, or an error on stdout, must not take the dialog down."""
     assert wsl.parse_compose_ls("dml-arch", "") == ()

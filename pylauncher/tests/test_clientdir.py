@@ -376,12 +376,20 @@ def test_a_present_locale_folder_is_named_back_to_the_user(tmp_path: Path) -> No
 def test_realmlist_at_the_root_with_no_locale_smells_like_a_repack(tmp_path: Path) -> None:
     folder = client(tmp_path, locale=None)
     (folder / clientdir.REPACK_FILE).write_text("set realmlist 127.0.0.1\n", encoding="utf-8")
-    checks = clientdir.validate(folder, VANILLA, free_bytes=lambda _p: PLENTY)
+    checks = clientdir.validate(folder, TBC, free_bytes=lambda _p: PLENTY)
     assert verdicts(checks)[clientdir.REPACK_CHECK] == "warn"
     assert details(checks)[clientdir.REPACK_CHECK] == (
         f"{clientdir.REPACK_FILE} sits at the root of {folder} and there is no locale folder, "
-        "which is how a repack looks"
+        "which is how a repack looks."
     )
+
+
+def test_a_genuine_vanilla_client_is_not_called_a_repack(tmp_path: Path) -> None:
+    """1.12.1 ships `realmlist.wtf` at the root and no `Data/<locale>/`: the stock layout."""
+    folder = client(tmp_path, locale=None)
+    (folder / clientdir.REPACK_FILE).write_text("set realmlist 127.0.0.1\n", encoding="utf-8")
+    checks = clientdir.validate(folder, VANILLA, free_bytes=lambda _p: PLENTY)
+    assert clientdir.REPACK_CHECK not in verdicts(checks)
 
 
 def test_the_repack_smell_needs_both_halves(tmp_path: Path) -> None:
@@ -393,7 +401,7 @@ def test_the_repack_smell_needs_both_halves(tmp_path: Path) -> None:
     """
     full = client(tmp_path / "full", locale="enUS")
     (full / clientdir.REPACK_FILE).write_text("x", encoding="utf-8")
-    with_locale = clientdir.validate(full, VANILLA, free_bytes=lambda _p: PLENTY)
+    with_locale = clientdir.validate(full, TBC, free_bytes=lambda _p: PLENTY)
     assert verdicts(with_locale)[clientdir.REPACK_CHECK] == "pass"
     assert details(with_locale)[clientdir.REPACK_CHECK] == "nothing suggests a repack"
 
@@ -554,7 +562,7 @@ def test_every_warning_and_unchecked_row_says_what_to_do_next(
     assert len(seen) == 8, seen  # four rules, each seen warning and each seen unchecked
 
 
-def test_the_warn_table_is_the_four_rules_in_reading_order(tmp_path: Path) -> None:
+def test_the_warn_table_is_the_rules_in_reading_order(tmp_path: Path) -> None:
     """The names are the user-visible column, so they are pinned as text, once.
 
     Reading order matters: the count is the rule that decides an install, the
@@ -578,7 +586,6 @@ def test_the_warn_table_is_the_four_rules_in_reading_order(tmp_path: Path) -> No
         "the client folder",
         "the client's game data",
         "the client's archives",
-        "the client's origin",
         "free space next to the client",
     ]
 

@@ -161,7 +161,7 @@ class MoveWorld:
     server_dir: Path
     mysql: FlowMysql
     backup: BackupFn
-    """`(only=, label=, ignore_tables=) -> BackupReport`, bound by `engine_for`."""
+    """`(only=, label=, ignore_tables=, directory=) -> BackupReport`, bound by `engine_for`."""
     plan_restore: PlanRestoreFn
     restore: RestoreFn
     """`(plan, safety_label) -> RestoreReport`."""
@@ -200,6 +200,7 @@ def engine_for(
         only: Sequence[str] | None = None,
         label: str | None = None,
         ignore_tables: Mapping[str, Sequence[str]] | None = None,
+        directory: Path | None = None,
     ) -> BackupReport:
         return maintenance.backup(
             server_dir,
@@ -208,6 +209,7 @@ def engine_for(
             only=only,
             label=label,
             ignore_tables=ignore_tables,
+            directory=directory,
             spec=spec,
             core_databases=core,
             running=running,
@@ -264,11 +266,54 @@ def _server_is_up(world: MoveWorld) -> bool:
     return spec.world in names or spec.auth in names
 
 
+_FOR_A_MOVE = {
+    forgetting.RESTORE_HOLDS_THE_SERVER: forgetting.RESTORE_HOLDS_A_MOVE,
+    forgetting.MOVE_IN_HOLDS_THE_SERVER: forgetting.MOVE_IN_HOLDS_A_MOVE,  # T738
+}
+"""A hold's sentence that is about starting and stopping -> what a move is told instead (T737)."""
+
+
+def move_held_reason(server_dir: Path | str) -> str | None:
+    """`docker.held_reason()` in a move's words, or None when nothing holds the server.
+
+    T737: the Maintenance tab's Restore holds the server with the sentence a Start or Stop is
+    told (why starting or stopping would harm the restore). A Pack or Bring in is told
+    `RESTORE_HOLDS_A_MOVE` instead. T738: likewise a whole-server bring-in's load
+    (`MOVE_IN_HOLDS_THE_SERVER` -> `MOVE_IN_HOLDS_A_MOVE`). Every other holder's sentence is
+    passed as it is.
+    """
+    held = docker.held_reason(server_dir)
+    return None if held is None else _FOR_A_MOVE.get(held, held)
+
+
 def _refuse_if_unsafe(world: MoveWorld) -> None:
+    """Refuse a move out of or into a server whose databases cannot be trusted right now.
+
+    A hold on the server is asked before the restore record (`docker.held_reason()`): a job of
+    THIS Yu'lon (T736: the Maintenance tab's own Restore, whose record is in place while it
+    loads), else a restore load another Yu'lon left running (T734, the T730 sentence). Either
+    way the record is there too, but "did not finish ... Restore again" would have the player
+    fight the load. They are told the holder's sentence instead, in a move's words
+    (`move_held_reason()`, T737): wait for it.
+    """
     if world.ownership() is Ownership.UNKNOWN:
         raise MoveError(INSTALL_RECORD_DAMAGED)
+    held = move_held_reason(world.server_dir)
+    if held is not None:
+        raise MoveError(held)
     if maintenance.interrupted_restore(world.server_dir) is not None:
         raise MoveError(_UNFINISHED_RESTORE)
+
+
+def refuse_over_a_running_load(world: MoveWorld) -> None:
+    """Refuse (T730) when a restore load another Yu'lon left running still writes here.
+
+    Asked just before a move stops this server: `docker.orphaned_restore_reason()`'s answer
+    from the restore record, so the stop cannot cut the load off. Never raises anything else.
+    """
+    said = docker.orphaned_restore_reason(world.server_dir)
+    if said is not None:
+        raise MoveError(f"{said} Nothing was stopped.")
 
 
 def _present_roles(world: MoveWorld, wanted: Sequence[Role] = ROLES) -> dict[Role, str]:
@@ -440,8 +485,20 @@ PRESS_BRING_IN = "Bring in a move"
 
 
 @contextlib.contextmanager
-def _database_session(world: MoveWorld, *, because: str, undone: str, press: str) -> Iterator[None]:
+def _database_session(
+    world: MoveWorld,
+    *,
+    because: str,
+    undone: str,
+    press: str,
+    alone: str | None = None,
+    leased: str = forgetting.MOVE_HOLDS_THE_DATABASES,
+    held: str = forgetting.MOVE_HOLDS_THE_SERVER,
+) -> Iterator[None]:
     """The leased, held, database-up stretch a move works in. `undone` names what did not happen.
+
+    `leased` and `held` are what another press is told while it runs: the Maintenance tab's
+    Pack and Bring in by default, the whole-server bring-in's own sentences from its load (T737).
 
     The same four steps the Maintenance tab's Backup and Restore take, in the same order: the
     lease (one Backup, Restore or move of a server at a time), the hold (no Start, Stop or
@@ -452,19 +509,19 @@ def _database_session(world: MoveWorld, *, because: str, undone: str, press: str
     """
     with contextlib.ExitStack() as stack:
         try:
-            stack.enter_context(
-                docker.maintenance_lease(world.server_dir, forgetting.MOVE_HOLDS_THE_DATABASES)
-            )
+            stack.enter_context(docker.maintenance_lease(world.server_dir, leased, press=press))
         except docker.MaintenanceLeaseTaken as exc:
             raise MoveError(f"{exc} {undone}") from exc
         try:
             stack.enter_context(
                 docker.hold_the_server(
                     world.server_dir,
-                    forgetting.MOVE_HOLDS_THE_SERVER,
+                    held,
                     press=press,
                     spec=world.spec,
                     wsl_distro=world.wsl_distro,
+                    # A load passes `alone` (T681 review): no Modules SQL mid-load.
+                    alone=alone,
                 )
             )
         except docker.ServerHeldError as exc:
@@ -571,6 +628,7 @@ def export_package(
     stopped = False
     try:
         if _server_is_up(world):
+            refuse_over_a_running_load(world)
             stopped = True  # set first: a stop that fails half-way still leaves it to start again
             world.stop_server()
         result = _export_locked(world, folder, facts)
@@ -673,8 +731,8 @@ def _export_locked(
                 files=facts.files if facts is not None else (),
             )
         finally:
-            for dump in report.dumps:
-                dump.path.unlink(missing_ok=True)
+            # The working folder goes with them (T747), whether the pack worked or not.
+            shutil.rmtree(pack_folder(world.server_dir), ignore_errors=True)
     return ExportResult(path=dest, manifest=manifest, restarted=None)
 
 
@@ -686,16 +744,54 @@ def _tables_of(schema: str, path: Path) -> tuple[str, ...]:
     return tables
 
 
+PACK_FOLDER = ".move-out"
+"""The pack's working folder in `backups/` (T747): the Backups list shows top-level files only."""
+
+
+def pack_folder(server_dir: Path) -> Path:
+    """Where a pack writes the dumps it zips: never where the Backups list reads."""
+    return maintenance.backups_dir(server_dir) / PACK_FOLDER
+
+
+def clear_pack_folder(server_dir: Path) -> None:
+    """Take away what a pack killed before its clean-up left in its working folder (T765).
+
+    That folder holds the pack's dumps, an auth one with every account's login verifier, and
+    the Backups list never shows it. A link or file at its name is unlinked, never followed.
+    The caller holds the server: a pack holds it from start to clean-up, so under the hold
+    whatever is there is a dead pack's. Every pack calls this first; an uninstall that keeps
+    the backups should call it before it moves them (`purge.py` is waiting on its redesign).
+
+    Raises:
+        OSError: it could not be removed.
+    """
+    work = pack_folder(server_dir)
+    if work.is_symlink() or work.is_file():
+        work.unlink()
+    elif work.exists():
+        shutil.rmtree(work)
+
+
 def _backup_for_the_package(
     world: MoveWorld, wanted: Sequence[str], auth: str | None
 ) -> BackupReport:
-    """The engine's backup of the packed schemas, and no stray dump if it fails part-way.
+    """The engine's backup of the packed schemas, into the pack's own working folder.
 
-    The dumps are this run's own files in `backups/`, and an auth dump among them holds every
-    account's verifier: left behind after a failure, Restore would list it as an ordinary backup.
+    An auth dump among them holds every account's verifier and, for accounts and characters,
+    leaves out the realm row. Written into `backups/` itself, a pack killed before its clean-up
+    left it there as an ordinary backup the list kept and would not delete (T747). The working
+    folder is the owner's alone, emptied before this pack and removed after it; what a killed
+    pack left there goes at the next one.
     """
-    directory = maintenance.backups_dir(world.server_dir)
-    before = {p.name for p in directory.glob("*")} if directory.is_dir() else set()
+    work = pack_folder(world.server_dir)
+    try:
+        clear_pack_folder(world.server_dir)
+        maintenance.backups_dir(world.server_dir).mkdir(parents=True, exist_ok=True, mode=0o700)
+        work.mkdir(mode=0o700)
+    except OSError as exc:
+        raise MoveError(
+            f"Yu'lon could not clear its working folder {work} ({exc}). Nothing was packed."
+        ) from exc
     try:
         return world.backup(
             only=wanted,
@@ -703,11 +799,10 @@ def _backup_for_the_package(
             # A whole server keeps its realm row (the old name travels; the address is put
             # right on the new computer). Accounts and characters leave it with the server.
             ignore_tables={auth: (world.entry.realmlist.table,)} if auth is not None else None,
+            directory=work,
         )
     except BaseException:
-        for path in directory.glob("*_move_*"):
-            if path.name not in before:
-                path.unlink(missing_ok=True)
+        shutil.rmtree(work, ignore_errors=True)
         raise
 
 
@@ -1058,9 +1153,14 @@ def run_import(
     if running and not stop_allowed:
         raise MoveError(RUNNING_NEEDS_A_YES_IMPORT)
     if running:
+        refuse_over_a_running_load(world)
         world.stop_server()
     with _database_session(
-        world, because="nothing was brought in", undone=_NOT_IN, press=PRESS_BRING_IN
+        world,
+        because="nothing was brought in",
+        undone=_NOT_IN,
+        press=PRESS_BRING_IN,
+        alone=forgetting.MOVE_WRITES_ALONE,
     ):
         return _import_locked(world, plan, package, use_old_realm_name, stopped=running)
 
@@ -1106,7 +1206,9 @@ def _import_locked(
     folder = maintenance.backups_dir(world.server_dir) / (
         ".move-in-" + world.now().strftime("%Y%m%d-%H%M%S")
     )
-    folder.mkdir(parents=True, exist_ok=False)
+    # The owner's alone (T745): the auth dump unpacked here holds every verifier, and a
+    # backups folder made before T683 S5 is 0775.
+    folder.mkdir(parents=True, exist_ok=False, mode=0o700)
     try:
         plans = _checked_plans(world, package, plan.schemas, folder)
         loaded: list[str] = []
@@ -1290,9 +1392,12 @@ __all__ = [
     "MoveError",
     "MoveServices",
     "MoveWorld",
+    "PACK_FOLDER",
     "Replaces",
+    "clear_pack_folder",
     "engine_for",
     "export_package",
+    "pack_folder",
     "plan_export",
     "plan_import",
     "run_import",

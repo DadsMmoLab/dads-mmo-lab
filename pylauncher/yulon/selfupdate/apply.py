@@ -119,6 +119,8 @@ def apply_update(
     pressed Cancel. Both leave the install untouched and remove what was
     staged.
     """
+    # T765: a download killed outright left its hidden part in the player's Downloads.
+    fetch.sweep_stale_parts(downloads_dir)
     name, size = _what_to_ask_for(result, install)
     tag = str(result.latest)
     _stop_if_cancelled(cancelled)
@@ -218,8 +220,13 @@ def _fetch_and_verify(
     stage_changed: StageChanged,
     cancelled: IsCancelled,
     io: ApplyIO,
+    keep_existing: bool = False,
 ) -> Path:
-    """Download to `dest` and refuse unless it hashes to `digest`."""
+    """Download to `dest` and refuse unless it hashes to `digest`.
+
+    The digest is checked on the `.part` before it is renamed (T745) and once more on what
+    landed; `keep_existing` saves beside a file already at `dest` rather than over it.
+    """
     stage_changed(DOWNLOADING)
     archive = io.download(
         fetch.artifact_url(tag, name),
@@ -227,6 +234,8 @@ def _fetch_and_verify(
         expected_size=size,
         progress=progress,
         cancelled=cancelled,
+        digest=digest,
+        keep_existing=keep_existing,
     )
     _stop_if_cancelled(cancelled)
     io.verify(archive, digest)
@@ -333,7 +342,9 @@ def _download_only(
 
     The file is still checked against `SHA256SUMS` — a download the player is
     about to run by hand deserves the same proof as one this app would install
-    — and then it is theirs.
+    — and then it is theirs. The folder is the player's too, so nothing in it is
+    replaced (T745): a file they already have under the artifact's name stays, and
+    this one takes the next free name.
     """
     digest = _digest_for(tag, name, io, stage_changed)
     _stop_if_cancelled(cancelled)
@@ -347,6 +358,7 @@ def _download_only(
         stage_changed=stage_changed,
         cancelled=cancelled,
         io=io,
+        keep_existing=True,
     )
     stage_changed(READY)
     logger.info(f"self-update: {tag} saved to {saved} for the player to install")

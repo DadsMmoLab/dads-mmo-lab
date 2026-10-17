@@ -180,6 +180,12 @@
           "default": null,
           "title": "Note"
         },
+        "restore": {
+          "default": false,
+          "description": "On Remove, the value this key had before the install goes back, when the key still reads what the install wrote (T753). For a key in a file other things share, such as the core's own worldserver.conf. Needs a `default`.",
+          "title": "Restore",
+          "type": "boolean"
+        },
         "type": {
           "anyOf": [
             {
@@ -758,6 +764,15 @@
           "default": null,
           "description": "Must return a row or this step is skipped, unrun, with `missing` said."
         },
+        "stands_in_for": {
+          "default": [],
+          "description": "On a remove step: the module's own uninstall files (clone-relative, single files) whose work this step does instead. Remove's report does not name them as SQL Yu'lon did not run, so nobody is sent to run them by hand.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Stands In For",
+          "type": "array"
+        },
         "statement": {
           "anyOf": [
             {
@@ -778,6 +793,15 @@
             "type": "string"
           },
           "title": "Then",
+          "type": "array"
+        },
+        "undoes": {
+          "default": [],
+          "description": "On a remove step: the install files (each `path` or `then` name of an install step on the same database, spelled the same, templates included) this remove step and the ones beside it take back IN FULL. Remove's report does not name them as left behind; declare one only after reading both files.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Undoes",
           "type": "array"
         },
         "verify": {

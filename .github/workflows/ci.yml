@@ -45,6 +45,14 @@ on:
     branches: [main, Yulon, "release/**"]
     tags: ["v*"]
   pull_request:
+  # T687: release.yml calls this whole file as its first job and builds nothing
+  # unless every job here is green on the commit it is about to ship. Measured
+  # on v0.9.16 (669eaaba): SHA256SUMS was attached at 21:32:57Z and Discord had
+  # announced the release at 21:38Z, while this workflow's tests on that same
+  # SHA finished at 21:55Z - a red tag would have shipped through self-update.
+  # A call adds no workflow file (DadsMmoLab never registers a new one) and
+  # keeps one list of what "green" means.
+  workflow_call:
 
 # Five pushes to `Yulon` inside three minutes each started their own 42-minute
 # run (2026-08-28 00:20-00:23). Only the newest tree's verdict is worth having,
@@ -55,6 +63,14 @@ on:
 # would get both a `push` run and a `pull_request` run per commit. `Yulon` is
 # the branch other work is merged INTO rather than one that is PR'd out of, so
 # the case is unreached today; it is written down so it is not re-discovered.
+#
+# `github.workflow` is what keeps release.yml's call of this file (T687) out of
+# this file's own run on the same tag. In a called workflow the github context
+# is the CALLER's, so the call's group is `ci-release-<ref>` and the tag push's
+# own run is `ci-ci-<ref>` - read off a cancel message on fork run 38129724266.
+# Without it the two would share one group on every release and cancel each
+# other. A second release run on the same ref does cancel the first one's CI,
+# which ends that release run without building: the safe side.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -86,11 +102,20 @@ jobs:
     # stayed green. README §2 says 3.11+, so CI has to mean it. Ends are cheaper
     # than the middle: 3.11 is the floor we promise, 3.13 is what a developer
     # actually has installed.
-    name: lint-type-test (py${{ matrix.python-version }})
+    #
+    # FOUR SHARDS per version (eight jobs): pytest alone took 19 min on 3.13 and 31 min on
+    # 3.11 with `-n auto` on four cores, and the setup is about 40 s, so caching is not the
+    # lever and more jobs are. Shard N runs the tests whose node id hashes to N mod 4
+    # (`tests/conftest.py`, `--shard-id` / `--num-shards`; the node id, not the file, so the
+    # big files spread). Together the four run every test exactly once
+    # (`tests/test_ci_shards.py`). The checkers run on shard 0 only: they do not depend on
+    # the shard, and four copies would only spend the minutes the split saves.
+    name: lint-type-test (py${{ matrix.python-version }}, shard ${{ matrix.shard }}/4)
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.11", "3.13"]
+        shard: [0, 1, 2, 3]
     steps:
       - uses: actions/checkout@v4
 
@@ -114,9 +139,11 @@ jobs:
       - run: pip install -r requirements-dev.txt
 
       - name: ruff (lint)
+        if: matrix.shard == 0
         run: python -m ruff check .
 
       - name: black (format check)
+        if: matrix.shard == 0
         run: python -m black --check .
 
       # Three platforms, because a POSIX-only or Windows-only import is red on
@@ -126,12 +153,15 @@ jobs:
       # and once without one (green here, red for every Windows developer).
       # Neither could be caught by a checker that runs Linux only.
       - name: mypy (types, this platform)
+        if: matrix.shard == 0
         run: python -m mypy yulon main.py
 
       - name: mypy (types, as Windows)
+        if: matrix.shard == 0
         run: python -m mypy --platform win32 yulon main.py
 
       - name: mypy (types, as macOS)
+        if: matrix.shard == 0
         run: python -m mypy --platform darwin yulon main.py
 
       # `not integration` is the whole point of the split - see the header.
@@ -143,8 +173,86 @@ jobs:
       # 2026-10-01. Every test still runs in both legs; only the wall clock
       # changes. `loadfile` is not used: it pins a whole file to one worker,
       # and the biggest file alone is a large share of the suite.
+      #
+      # `--shard-id`/`--num-shards` (T-shards, `tests/conftest.py`): this job's quarter of the
+      # suite. Every test still runs in both legs; the four shards of a leg run all of it.
       - name: pytest (tests)
-        run: python -m pytest -q -m "not integration" -n auto
+        run: python -m pytest -q -m "not integration" -n auto --shard-id ${{ matrix.shard }} --num-shards 4
+
+  # T687: THE OTHER TWO PLATFORMS THE RELEASE SHIPS. `lint-type-test` runs on
+  # Linux only, so until this job the Windows zip and the macOS dmg went out
+  # with no test ever run on either OS - Windows behaviour was covered only by
+  # fakes on Linux (test_winacl, test_winjob), and the mypy passes above can
+  # only SIMULATE the other platforms' imports. Not the whole suite: most of it
+  # drives POSIX paths, shells and Docker fakes written on Linux and was never
+  # meant to run elsewhere. What runs is the code that branches on the OS
+  # (paths, ACLs, Job objects, self-update, autostart, the single-instance
+  # lock) plus an import of every module on the real interpreter.
+  #
+  # ONE LIST PER OS, MEASURED. Fork run 38129724266 ran all thirteen files on
+  # both runners. macOS: 887 passed, 2 failed, both in test_single_instance's
+  # Docker-group restart (`sg`, a Linux-only path). Windows: 809 passed, 25
+  # failed, every one a test that assumes POSIX - a `/bin/sh` helper, chmod,
+  # os.geteuid/killpg, a temp path under C:\Users that trips a "Users" check,
+  # fakes with no `stdin` - in six files. So Windows runs the files that were
+  # green there, plus test_platform and test_selfupdate_detect minus the two
+  # POSIX-only tests in each (`--deselect` matches a node id prefix, so a
+  # parametrized test goes as a whole). A file or test leaves a list only with
+  # a reason written here; one joins once it is green on that runner.
+  #
+  # Python 3.11 because that is what release.yml builds the artifacts with.
+  platform-smoke:
+    name: platform-smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            tests: >-
+              tests/test_every_module_imports.py
+              tests/test_platform.py
+              tests/test_winacl.py
+              tests/test_winjob.py
+              tests/test_selfupdate_layout.py
+              tests/test_selfupdate_detect.py
+              tests/test_single_instance.py
+              tests/test_wsl.py
+              tests/test_support_machine.py
+              --deselect tests/test_platform.py::test_wsl_integration_with_one_profile_whose_settings_cannot_be_read_is_unchecked
+              --deselect tests/test_selfupdate_detect.py::test_the_real_probe_says_no_for_a_folder_nobody_may_write
+              --deselect tests/test_selfupdate_detect.py::test_the_fixed_firejail_mount_counts_as_a_runtime_mount
+          - os: macos-latest
+            tests: >-
+              tests/test_every_module_imports.py
+              tests/test_platform.py
+              tests/test_winacl.py
+              tests/test_winjob.py
+              tests/test_selfupdate_layout.py
+              tests/test_selfupdate_swap.py
+              tests/test_selfupdate_detect.py
+              tests/test_serverlock.py
+              tests/test_autostart.py
+              tests/test_runner.py
+              tests/test_wsl.py
+              tests/test_support_machine.py
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            pylauncher/requirements-dev.txt
+            pylauncher/requirements.txt
+
+      - run: pip install -r requirements-dev.txt
+
+      - name: pytest (the OS-specific set, on the real OS)
+        shell: bash
+        run: python -m pytest -q -m "not integration" -n auto ${{ matrix.tests }}
 
   # The Discord notifier (.github/scripts) lives outside pylauncher/, so the job
   # above never sees it. Linux only: it is a stdlib script run by GitHub Actions

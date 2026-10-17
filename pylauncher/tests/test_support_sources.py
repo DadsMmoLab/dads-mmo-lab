@@ -463,3 +463,39 @@ def test_a_folder_named_like_a_log_is_not_offered_as_one() -> None:
     (runs / "odd.log").mkdir(parents=True)
     (runs / "install-wow-tbc-20260922T101010Z.log").write_text("run\n", encoding="utf-8")
     assert [path.name for path in run_logs(config)] == ["install-wow-tbc-20260922T101010Z.log"]
+
+
+def test_a_new_wotlk_password_is_masked_and_the_published_one_is_not(tmp_path: Path) -> None:
+    """T748: a NEW WotLK install's generated password is a secret to mask. `password` is
+    published, so an old folder's value is not, and a support file keeps its English words."""
+    from yulon.support import sources as sources_module
+
+    entry = load_catalog().get("wow-wotlk")
+    server_dir = tmp_path / "wow"
+    server_dir.mkdir()
+    generated = "wotlk-" + secrets.token_hex(8)
+    (server_dir / ".db_password").write_text(generated + "\n", encoding="utf-8")
+    install = InstallFacts(
+        game="wow-wotlk",
+        install_id="0badc0de",
+        server_dir=server_dir,
+        wsl_distro=None,
+        entry=entry,
+    )
+    sources = Sources(
+        config_dir=platform.config_dir(),
+        app_log=None,
+        installs=(install,),
+        public_passwords=sources_module.public_passwords(load_catalog()),
+    )
+    known = gather_known(sources)
+    assert generated in known.values, "a new install's password must be masked"
+    assert "password" not in known.values, "the published word is not a secret to hunt for"
+    assert known.missing == ()
+
+
+def test_the_published_password_of_an_old_wotlk_folder_is_public_not_a_secret() -> None:
+    """The catalog's published values include an old folder's `password`, so it is never masked."""
+    from yulon.support import sources as sources_module
+
+    assert "password" in sources_module.public_passwords(load_catalog())

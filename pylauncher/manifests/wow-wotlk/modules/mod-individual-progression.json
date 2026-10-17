@@ -14,12 +14,7 @@
   "sql": [
     {
       "db": "world",
-      "path": "data/sql/db-world/*.sql",
-      "applied_by": "db-import"
-    },
-    {
-      "db": "characters",
-      "path": "data/sql/db-characters/*.sql",
+      "path": "data/sql/world/base/*.sql",
       "applied_by": "db-import"
     }
   ],
@@ -59,6 +54,29 @@
         }
       ],
       "template": "conf/individualProgression.conf.dist"
+    },
+    {
+      "file": "env/dist/etc/worldserver.conf",
+      "keys": [
+        {
+          "key": "EnablePlayerSettings",
+          "default": "1",
+          "restore": true,
+          "note": "module README: progress is saved in player settings, or not at all; the core ships 0",
+          "label": "Character settings",
+          "explain": "Enables the usage of character specific settings.",
+          "type": "bool"
+        },
+        {
+          "key": "DBC.EnforceItemAttributes",
+          "default": "0",
+          "restore": true,
+          "note": "module README: 0 lets the module give items their Vanilla stats; the core ships 1",
+          "label": "Enforce DBC item attributes",
+          "explain": "Disallow overriding item attributes stored in DBC files with values from the database",
+          "type": "bool"
+        }
+      ]
     }
   ]
 }

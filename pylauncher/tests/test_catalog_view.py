@@ -2365,6 +2365,8 @@ def test_the_suggested_folder_is_offered_by_name_before_any_picker_opens(
     entry = CATALOG.get("wow-wotlk")
     view, asked, titles = _view(tmp_path, take_suggestion=True, picked=None)
     assert view.start_install(entry) is True
+    # The job it started runs on the panel's thread: let it end here (T771).
+    wait_for_panel(view._log)
     assert asked == [(entry.name, tmp_path / entry.install.default_server_dir)]
     assert titles == [], "the picker opened even though the suggestion was accepted"
 
@@ -2384,6 +2386,8 @@ def test_saying_no_opens_the_picker_and_that_answer_is_what_installs(
     started: list[tuple[str, object, object]] = []
     view.installed.connect(lambda g, s, c: started.append((g, s, c)))
     assert view.start_install(entry) is True
+    # The job it started runs on the panel's thread: let it end here (T771).
+    wait_for_panel(view._log)
     assert asked, "the suggestion was never offered"
     assert len(titles) == 1, "the picker did not open after the suggestion was declined"
 
@@ -2406,6 +2410,8 @@ def test_the_picker_title_no_longer_carries_the_instruction_the_user_must_act_on
     entry = CATALOG.get("wow-wotlk")
     view, _asked, titles = _view(tmp_path, take_suggestion=False, picked=tmp_path)
     assert view.start_install(entry) is True
+    # The install it started runs on the panel's thread: let it end here (T771).
+    wait_for_panel(view._log)
     (title,) = titles
     assert len(title) <= 60, f"the picker title is {len(title)} characters: {title!r}"
     assert entry.install.default_server_dir not in title, (
@@ -3120,6 +3126,8 @@ def _suggested(tmp_path: Path) -> Path:
     entry = CATALOG.get("wow-wotlk")
     view, asked, _titles = _view(tmp_path, take_suggestion=True, picked=None, installs=False)
     assert view.start_install(entry) is True
+    # The install it started runs on the panel's thread: let it end here (T771).
+    wait_for_panel(view._log)
     ((_game, suggested),) = asked
     return suggested
 

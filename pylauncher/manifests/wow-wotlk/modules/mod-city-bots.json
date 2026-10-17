@@ -54,6 +54,23 @@
           "missing": "the 400 city-bot accounts 12001-12400 are not all marked playerbots account type 3, and a stage-cast account marked type 2 makes playerbots load all 400 into its addclass cache"
         }
       ]
+    },
+    {
+      "db": "playerbots",
+      "statement": "START TRANSACTION; DELETE FROM `playerbots_random_bots` WHERE `bot` BETWEEN 9000001 AND 9000400 AND `event` IN ('add', 'logout', 'citizen', 'citizen_burst', 'citizen_home', 'randomize', 'teleport', 'update'); DELETE FROM `playerbots_account_type` WHERE `account_id` BETWEEN 12001 AND 12400 AND `account_type` = 3; COMMIT; DROP TABLE IF EXISTS `citizen_roster`;",
+      "when": "remove",
+      "note": "T788: the module's own playerbots take-back, inline so a Remove does not depend on the clone holding it. Only the roster's marks go: type 3 (City Bots' own; mod-playerbots uses 1 and 2) on 12001-12400 is DELETED, and a row of another type in the range stays. Deleted and not set to 0, as upstream's data/sql/uninstall/playerbots/uninstall_mod_city_bots.sql does: mod-playerbots reads type 0 as an unassigned random-bot account (RandomPlayerbotFactory CalculateTotalAccountCount counts every type-0 row, and CreateRandomBots runs at each start), so 400 type-0 rows would make it create random-bot accounts and characters; a missing row reads as not a bot (IsAccountType), and AssignAccountTypes only adds rows for its own prefix accounts. The stage cast's queue rows (bot guids 9000001-9000400) go and citizen_roster is dropped. Nothing in auth or characters is touched: the 400 accounts and characters are named as left behind. The roster file's own DELETE of earlier rows in the range cannot be put back.",
+      "precondition": {
+        "db": "playerbots",
+        "query": "SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN ('playerbots_account_type', 'playerbots_random_bots') HAVING COUNT(*) = 2",
+        "missing": "mod-playerbots' tables are not there, so City Bots' citizen_roster and account marks were not looked for: the roster import needs those same tables, so it cannot have written any"
+      },
+      "undoes": [
+        "data/sql/playerbots/updates/2026_07_15_00_citizen_roster.sql"
+      ],
+      "stands_in_for": [
+        "data/sql/uninstall/playerbots/uninstall_mod_city_bots.sql"
+      ]
     }
   ],
   "conf": [

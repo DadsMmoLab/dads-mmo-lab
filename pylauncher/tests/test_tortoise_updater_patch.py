@@ -8,9 +8,10 @@ exist, and the failure line that would say why is never printed. Shyalya's fork
 dropped the read in `b405b10adb`; tortoise-wow never did. The fix is carried as
 a catalog patch (`wow-tortoise/patches/updater-no-wait-for-enter.patch`).
 
-The fixture under `tests/fixtures/tortoise-6131a26f/` is that one file, byte for
+The fixture under `tests/fixtures/tortoise-10393426/` is that one file, byte for
 byte, from tortoise-wow at `187af788`, read on 2026-10-09; the file is byte-identical at
-`6131a26f`, the pin since T656 (compared 2026-10-10), so the folder carries the new pin's name.
+`6131a26f` (T656, compared 2026-10-10) and at `10393426`, the pin since v0.9.18 (read on
+GitHub 2026-10-17), so the folder carries the new pin's name.
 """
 
 from __future__ import annotations
@@ -28,13 +29,14 @@ from yulon.catalog.families import patch
 from yulon.catalog.families.cmangos import CmangosInstaller
 from yulon.catalog.installer import InstallerError
 
-FIXTURE = Path(__file__).resolve().parent / "fixtures" / "tortoise-6131a26f"
+FIXTURE = Path(__file__).resolve().parent / "fixtures" / "tortoise-10393426"
 REL = Path("src") / "shared" / "Database" / "AutoUpdater.cpp"
 PATCH_FILE = "wow-tortoise/patches/updater-no-wait-for-enter.patch"
 CORE_DEST = "src/tortoise-wow"
-AUDITED_PIN = "6131a26f91d60e64f6d58c7f0a9b6333f2d9f25a"
+AUDITED_PIN = "10393426efe4bbe1de3a31fd071ca36fae358bb6"
 """The core commit whose `AutoUpdater.cpp` was read for this patch (187af788 on 2026-10-09,
-6131a26f on 2026-10-10 for T656: the same bytes, the read still there).
+6131a26f on 2026-10-10 for T656, 10393426 on 2026-10-17 for v0.9.18: the same bytes, the
+read still there).
 
 A pin bump must fail `test_the_pin_is_the_one_whose_updater_was_read`
 until somebody re-reads the file at the new pin: still has the read -> keep the
@@ -71,7 +73,7 @@ def test_wow_tortoise_carries_the_updater_patch_against_the_core() -> None:
     _entry, block = _native()
     assert [(p.file, p.source) for p in block.patches] == [(PATCH_FILE, CORE_DEST)]
     reason = block.patches[0].reason
-    assert "AutoUpdater.cpp" in reason and "6131a26f" in reason and "b405b10" in reason
+    assert "AutoUpdater.cpp" in reason and "10393426" in reason and "b405b10" in reason
 
 
 def test_the_patch_leaves_no_read_of_stdin_after_a_failed_migration(tmp_path: Path) -> None:

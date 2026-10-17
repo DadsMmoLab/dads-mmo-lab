@@ -92,18 +92,57 @@ class Emulator(_Strict):
     sources: tuple[EmulatorSource, ...] = Field(min_length=1)
 
 
+INSTALL_RECORD = ".yulon-install.json"
+"""This app's own record of an install, written by the install spine (`native.STATE_FILE`)."""
+
+RECORD_PASSWORD_KEY = "db_password"
+"""The install record's key that says how the install's database password came to exist (T748).
+
+`"generated"` in a record the spine wrote when it claimed a fresh folder for a game whose plan is
+`generated`. Absent from every record written before T748, which is exactly the fact a legacy
+WotLK or Unbound install is told apart by: like `family` (7.1), the key is additive, and a
+record without it was written by a build that predates it."""
+
+RECORD_GENERATED = "generated"
+
+
+def record_says_generated(server_dir: Path) -> bool:
+    """Whether the install record in `server_dir` says its password was generated (T748).
+
+    The install's OWN record decides, never a missing password file: a new install writes this
+    key before its folder holds anything else, so a new install whose `.db_password` has gone
+    missing still says so here and is never mistaken for an old one. A folder with no readable
+    record answers False -- it is not provably a new install.
+    """
+    try:
+        parsed = json.loads((server_dir / INSTALL_RECORD).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(parsed, dict) and parsed.get(RECORD_PASSWORD_KEY) == RECORD_GENERATED
+
+
+class DbPasswordUnknown(RuntimeError):
+    """A reader cannot know an install's database password (T748 round 4); the text says why."""
+
+
 class PasswordPlan(_Strict):
     """How this game's database root password comes to exist (phase7-decisions "Password").
 
-    `fixed` is WotLK's `"password"` — a contract with backup, the console and
-    every archived guide, spliced into the base compose file as the
-    `${DB_ROOT_PASSWORD:-…}` default. `generated` is the CMaNGOS entries':
-    resolved by the install spine before stage 1 as `prefix + token_hex(8)`,
-    persisted at `file` under the server dir, and reaching compose only
-    through `.env`, never the compose text. One model rather than two optional
-    strings because the old pair (`db_root_password`,
-    `db_root_password_file`) let an entry say both or neither, and nothing
-    refused either.
+    `generated` is the shape every shipped entry has (T748 moved WotLK and Unbound onto
+    it): the install spine resolves the value before stage 1 as `prefix + token_hex(8)`,
+    persists it at `file` under the server dir, and it reaches compose only through
+    `.env` (`DB_ROOT_PASSWORD`), never the compose text. The templates spell that as
+    `${DB_ROOT_PASSWORD:?…}`.
+
+    `legacy` is the password an install made BEFORE this plan carries, and it is what
+    such an install keeps: WotLK's and Unbound's published `password`. Only a generated
+    plan names one. Which install is which is the install's own record
+    (`record_says_generated()`): a new one reads its `file`; one whose record predates
+    generated passwords keeps `legacy` (or the `DB_ROOT_PASSWORD` its own `.env` already
+    sets). Nothing is migrated and nothing is written for an old install.
+
+    `fixed` is a game that publishes one password in `value` and has no record at all. No
+    shipped entry uses it any more; the model keeps it for the games that will.
     """
 
     mode: Literal["fixed", "generated"]
@@ -113,6 +152,13 @@ class PasswordPlan(_Strict):
         description=(
             "File under the server dir holding the generated value, e.g. `.db_password`; "
             "required when generated."
+        ),
+    )
+    legacy: str | None = Field(
+        default=None,
+        description=(
+            "The password an install made before this plan has, when it has no `file`: WotLK's "
+            "published `password`. Generated plans only; an old folder keeps it (T748)."
         ),
     )
     prefix: str = Field(
@@ -152,6 +198,10 @@ class PasswordPlan(_Strict):
             raise ValueError("a fixed password plan needs a non-empty `value`")
         if self.mode == "generated" and not self.file:
             raise ValueError("a generated password plan needs `file`")
+        if self.mode == "fixed" and self.legacy is not None:
+            raise ValueError("a fixed password plan has no `legacy`: its `value` is the password")
+        if self.legacy is not None and not self.legacy:
+            raise ValueError("`legacy` names the published password, so it cannot be empty")
         return self
 
 
@@ -1947,18 +1997,12 @@ class Install(_Strict):
     def db_password(self, server_dir: Path) -> str | None:
         """The database root password for an install at `server_dir`, if knowable.
 
-        Not every game has a fixed one: the TBC and Vanilla installers GENERATE
-        a password (`tbc$(openssl rand -hex 8)`) and write it to a file under the
-        server dir, which is what a `generated` plan's `file` names. That fact was
-        declared here and read NOWHERE, so every caller fell back to the shared
-        default and authenticated as root with the literal string "password".
-        Start and Stop need no database, which is why it would have surfaced
-        later - on Create account, Backup and Restore.
-
-        Returns None when the entry names a file that cannot be read. That is
-        deliberately not the same answer as the default: it means this install's
-        password is not knowable from here, and a caller should decide what to
-        do about that rather than be handed a guess.
+        A `fixed` plan answers its value. A `generated` plan answers what its file holds.
+        With no file, a folder whose record predates generated passwords answers its
+        `legacy_password()`, and a new install whose file is gone answers None. None also
+        means the entry names a file that cannot be read, or an old folder's `.env` sets a value
+        compose reads otherwise (`legacy_password()`), which is deliberately not the same
+        answer as a guess: a caller decides what to do about it rather than being handed one.
         """
         if self.password.mode == "fixed":
             return self.password.value
@@ -1968,14 +2012,83 @@ class Install(_Strict):
         if self.password.file:
             try:
                 text = (server_dir / self.password.file).read_text(encoding="utf-8")
+            except FileNotFoundError:
+                return self._legacy_or_unknown(server_dir)
             except (OSError, ValueError):
                 # ValueError covers UnicodeDecodeError, which is what a file
                 # written in another encoding raises - it is not an OSError, so
                 # it used to escape this handler and crash the caller rather
                 # than being reported as "not knowable from here".
                 return None
-            return text.strip() or None
+            # Blank is missing, as for the engine: a write cut short (T748 round 4).
+            return text.strip() or self._legacy_or_unknown(server_dir)
         return None
+
+    def known_db_password(self, server_dir: Path) -> str:
+        """`db_password()`, else the `.env` line, else a refusal. Never the published default.
+
+        For a reader that is about to log in as root (module SQL, the update's database copy):
+        None from `db_password()` means "not knowable", and `password` handed on in its place
+        only ever ends in "Access denied" (T748 round 4). A new install whose file is gone
+        still has the value `generate-compose` wrote into `.env`, which is read and never
+        written back here (that is the engine's `resolve_secrets()`).
+
+        Raises:
+            DbPasswordUnknown: in player words; for a `.env` value compose reads otherwise,
+                `composegen.dotenv_secret()`'s own.
+        """
+        from yulon.catalog import composegen  # noqa: PLC0415 - composegen imports this module
+
+        known = self.db_password(server_dir)
+        if known is not None:
+            return known
+        try:
+            recovered = composegen.dotenv_secret(server_dir, "DB_ROOT_PASSWORD")
+        except composegen.DotenvSecretError as exc:
+            raise DbPasswordUnknown(str(exc)) from exc
+        if recovered:
+            return recovered
+        file = self.password.file or "the password file"
+        raise DbPasswordUnknown(
+            f"This server's {file} is missing, empty or cannot be read, and its .env does not "
+            "hold the database password either, so Yu'lon cannot know it and tried none. "
+            f"Put {file} back from a backup of this server folder if you have one."
+        )
+
+    def _legacy_or_unknown(self, server_dir: Path) -> str | None:
+        """`legacy_password()`, or None when its `.env` value is one compose reads otherwise.
+
+        `db_password()`'s None is "not knowable from here", and a guess at compose's reading
+        of that line is the wrong password for every reader (T748 round 3).
+        """
+        from yulon.catalog import composegen  # noqa: PLC0415 - composegen imports this module
+
+        try:
+            return self.legacy_password(server_dir)
+        except composegen.DotenvSecretError:
+            return None
+
+    def legacy_password(self, server_dir: Path) -> str | None:
+        """The password an install made before generated passwords has, if `server_dir` is one.
+
+        None unless the plan names a `legacy` value AND the folder's own record does not say
+        its password was generated (`record_says_generated()`). A folder with no record at all
+        (one adopted where it is, or made by a script) answers the legacy value too: that is
+        what every reader answered for it before T748, and a NEW install always has a record
+        before it has a password. An old folder whose own `.env` already sets
+        `DB_ROOT_PASSWORD` keeps that value, the one compose has been using; otherwise it keeps
+        the published `legacy`. Nothing is written here.
+
+        Raises:
+            composegen.DotenvSecretError: that `.env` value is one compose reads otherwise
+                (a `$`, an escape), so which password the database has is not knowable here.
+        """
+        legacy = self.password.legacy
+        if legacy is None or record_says_generated(server_dir):
+            return None
+        from yulon.catalog import composegen  # noqa: PLC0415 - composegen imports this module
+
+        return composegen.dotenv_secret(server_dir, "DB_ROOT_PASSWORD") or legacy
 
     platforms: tuple[PlatformId, ...] = Field(
         default=("linux",),
@@ -4328,10 +4441,11 @@ class Catalog(_Strict):
     def _entries_that_run_together_share_no_host_port(self) -> Catalog:
         """Two entries with no auth or world port in common share no host port at all (T552).
 
-        `Controller.port_conflicts()` looks at auth and world only, so two entries
-        that share one of those are the "stop the other one first" pair (WotLK and
-        TBC share all of theirs, on purpose). Two that share neither are meant to
-        run at once, and any other overlap would then fail late, at a Docker bind
+        Two entries that share an auth or world port are the "stop the other one
+        first" pair (WotLK and TBC share all of theirs, on purpose), and
+        `Controller.port_conflicts()` sees every port either publishes (T671).
+        Two that share neither are meant to run at once, and any other overlap
+        would then fail late, at a Docker bind
         error after the first server's containers were up (Codex adversarial
         reviews). Docker binds the number whatever the entry calls it, so every
         port an entry publishes is compared with every port of the other: its

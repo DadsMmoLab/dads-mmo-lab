@@ -21,7 +21,11 @@
       "db": "world",
       "path": "Hearthstone_30_Min.sql",
       "when": "remove",
-      "note": "upstream's own undo, back to the 30-minute default"
+      "note": "upstream's own undo, back to the 30-minute default. T751 round 2: every choice only moves item 6948's two cooldowns off the stock -1, and this reset puts any value from 1 to 900000 back to -1.",
+      "undoes": [
+        "Hearthstone_30_Min.sql",
+        "Hearthstone_{cooldown}.sql"
+      ]
     }
   ],
   "prompts": [

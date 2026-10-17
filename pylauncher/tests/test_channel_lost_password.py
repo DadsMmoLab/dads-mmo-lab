@@ -205,6 +205,8 @@ class _Soap:
 
     auth: _Auth
     loading: bool = False
+    unproven: bool = False
+    """It replies with HTTP 200 and no result: the world answered, and it is no proof (T723)."""
     asked_as: list[str] = field(default_factory=list)
     port: int = 0
 
@@ -218,6 +220,12 @@ class _Soap:
                     # What a world busy logging its bots in looks like from
                     # here: a connection, and nothing back.
                     self.close_connection = True
+                    return
+                if stand_in.unproven:
+                    self.send_response(200)
+                    self.send_header("Content-Length", "4")
+                    self.end_headers()
+                    self.wfile.write(b"<x/>")
                     return
                 header = self.headers.get("Authorization", "")
                 name, _, password = (
@@ -844,11 +852,17 @@ def _gave_up(box: _Box) -> None:
     up … it is over to you" for the rest of the app run.
     """
     box.view._settle_the_channel()
-    box.wire.loading = True  # a world whose channel is off answers nobody
+    # T723: only a reply spends a try, so the world replies, with something that
+    # is no proof; a world that is silent or not listening no longer gives up.
+    box.wire.loading = True
     box.view.repair_channel_button.click()
     assert "waiting to be proved" in _line(box), "the ground: a row that waits"
+    box.wire.loading = False
+    box.wire.unproven = True
     for _ in range(3):
         box.view._settle_the_channel()
+    box.wire.unproven = False
+    box.wire.loading = True  # a world whose channel is off answers nobody
     assert GAVE_UP in _line(box), "the ground: the setup gave up"
 
 

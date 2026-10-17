@@ -86,11 +86,13 @@ def create_account(
     *,
     gm_level: int = NO_GM,
 ) -> AccountResult:
-    """Create one Centurion account, or bring an existing one up to `gm_level`.
+    """Create one Centurion account.
 
-    The shared `create_account()` with this entry's scheme and level ceiling bound;
-    every rule it documents holds (an existing account keeps its password, the
-    level is a floor and never a demotion, a repeated call finishes a half one).
+    The shared `create_account()` with this entry's scheme and level ceiling bound; every
+    rule it documents holds. Until T749 (2026-10-12) it also brought an existing account up
+    to `gm_level` and kept its password; since then a name that exists is refused
+    (`AccountExists`) unless it is Yu'lon's own `YULON_` account, which still keeps its
+    password and has its level raised (a floor, never a demotion).
     """
     level = entry.accounts.level
     return writer.create_account(

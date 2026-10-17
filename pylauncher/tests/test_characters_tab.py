@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 from PySide6.QtCore import QMetaObject, QObject, Qt, Slot
 
-from tests.conftest import HANG_BOUND_MS, pump_until
+from tests.conftest import HANG_BOUND_MS, pump_until, take_every_held_answer
 from yulon import play as play_module
 from yulon.catalog.catalog import load_catalog
 from yulon.play import Character
@@ -479,6 +479,8 @@ def test_the_character_list_is_written_on_the_gui_thread_by_a_real_threaded_runn
     view.refresh_characters()
     pump_until(lambda: listing.count() == len(_people()), "the refreshed list")
     assert runner[0].wait(HANG_BOUND_MS) is True
+    # Joined directly, the last answers may still be queued: take them here (T771).
+    take_every_held_answer()
 
     assert writes, "the refresh never wrote the list"
     off_thread = [name for name, on_gui in writes if not on_gui]

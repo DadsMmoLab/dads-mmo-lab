@@ -166,14 +166,30 @@ HttpFetch = Callable[[str, str | None], HttpAnswer]
 """`(url, if_none_match) -> HttpAnswer`. The seam `check_with_cache` is tested through."""
 
 
+WHOLE_NUMBER_FROM = (0, 9)
+"""The first `(major, minor)` whose LAST number is a whole number (owner, 2026-10-11).
+
+Below it the last number is a decimal fraction (0.8.65 < 0.8.7); from it on it
+is an ordinary integer (0.9.9 < 0.9.10 < 0.9.16). `build/release_notes.py`
+carries the same constant and `test_the_build_script_orders_versions_exactly_as_
+the_app_does` pins the two keys equal.
+"""
+
+
 def version_key(text: str) -> tuple[int, int, Fraction] | None:
     """What orders two Yu'lon versions. `v1.2.3` / `1.2.3` / `1.2.3-beta`; else None.
 
-    **Major and minor are whole numbers; the LAST number is a decimal fraction
-    of its digits** (owner, 2026-09-21). `65` is 65/100 and `7` is 7/10, so
-    `.6 < .65 < .66 < .69 < .7`, and `.7 == .70` — equal, therefore not newer.
+    **Major and minor are whole numbers. The LAST number is read by a HYBRID
+    rule** (owner, 2026-10-11, which amends the decimal rule of 2026-09-21):
 
-    This is not a house style, it is what this project's tags MEAN, and the
+    * **Before 0.9 it is a decimal fraction of its digits.** `65` is 65/100 and
+      `7` is 7/10, so `.6 < .65 < .66 < .69 < .7`, and `.7 == .70` — equal,
+      therefore not newer.
+    * **From 0.9 on it is a whole number.** `.9 < .10 < .16`, so `0.9.9 <
+      0.9.10 < 0.9.16`, and `0.10.9 < 0.10.10`. Baerthe's releases since 0.9
+      count up this way (0.9.13, .14, .15, .16), and no new duty falls on him.
+
+    The decimal half is what this project's early tags MEAN, and the
     measurement is the tag dates: `v0.8.7-Public` was cut on **2026-09-19**,
     after `v0.8.65-Public` on **2026-09-13**. The whole history reads the same
     way —
@@ -187,24 +203,32 @@ def version_key(text: str) -> tuple[int, int, Fraction] | None:
     the first-in-feed rule it replaced, because it actively named v0.8.65 the
     newest release in a feed that had v0.8.7 in it.
 
-    The bump that proves the rule is upstream's own: commit `3534587b` sets
-    `__version__ = "0.8.70-Public"` and its tag is **`v0.8.7-Public`**. To the
-    person cutting the release those are one release, which is exactly what
-    `.7 == .70` says — and it is why a build calling itself `0.8.70-Public` is
-    correctly offered nothing (measured: `current=0.8.70-Public
+    The bump that proves the decimal half is upstream's own: commit `3534587b`
+    sets `__version__ = "0.8.70-Public"` and its tag is **`v0.8.7-Public`**. To
+    the person cutting the release those are one release, which is exactly
+    what `.7 == .70` says — and it is why a build calling itself
+    `0.8.70-Public` is correctly offered nothing (measured: `current=0.8.70-Public
     latest=v0.8.7-Public newer=False`).
+
+    **Why the decimal rule could not go on past 0.9 (T669).** Read as a
+    decimal, `.10 == .1 < .9`: a feed holding v0.10.0 to v0.10.10 named
+    v0.10.9 the newest, so a player on 0.10.10 was offered v0.10.9 as an
+    update — a downgrade the self-updater would install — and a player on
+    0.10.1 was never offered 0.10.10. A stray `v0.9.2-Public` outranked 0.9.16.
+    Both are wrong as whole numbers, which is how the releases are counted.
+
+    The boundary needs no special care in the key: it is a tuple, so
+    `(0, 8, …) < (0, 9, …)` whatever the last numbers are (0.8.90 < 0.9.0 <
+    0.9.13). The third part is a `Fraction` on both sides of it so every key
+    stays comparable with every other. A launcher built before this change
+    reads 0.9.17 to 0.9.99 the same way; once one minor holds both X.Y.9 and
+    X.Y.10 it needs two hops (to X.Y.9, which carries this rule, then X.Y.10).
 
     `Fraction`, never a float: `0.65` and `0.7` are both inexact in binary, and
     an ordering that decides releases may not be decided by a rounding.
 
-    **A leading zero is meant literally:** `.05` is five hundredths, so
-    `0.8.0 < 0.8.05 < 0.8.1`. The digits ARE the number — that is the whole
-    rule — and a zero is a digit like any other.
-
-    **The known cost, stated rather than worked around:** `0.8.10` orders
-    BEFORE `0.8.9`, because `.10` is a tenth and `.9` is nine tenths. This
-    scheme has never produced a tag like that, and every rule that would
-    special-case it also changes the meaning of the tags that do exist.
+    **A leading zero is meant literally below 0.9:** `.05` is five hundredths,
+    so `0.8.0 < 0.8.05 < 0.8.1`. From 0.9 on `0.9.05` is simply 5.
 
     What `_VERSION` refuses — a fourth number, a tenth digit — is refused
     rather than read as something smaller; its docstring has each case.
@@ -216,8 +240,10 @@ def version_key(text: str) -> tuple[int, int, Fraction] | None:
     match = _VERSION.match(text.strip())
     if not match:
         return None
-    last = match.group(3)
-    return int(match.group(1)), int(match.group(2)), Fraction(int(last), 10 ** len(last))
+    major, minor, last = int(match.group(1)), int(match.group(2)), match.group(3)
+    if (major, minor) >= WHOLE_NUMBER_FROM:
+        return major, minor, Fraction(int(last))
+    return major, minor, Fraction(int(last), 10 ** len(last))
 
 
 def is_newer(latest: str, current: str) -> bool:
@@ -569,7 +595,8 @@ def _public_releases(feed: object) -> list[tuple[VersionKey, str, dict[str, obje
     newest-first *by creation date*, which is not the same thing: a re-cut of an
     old tag arrives at the top, and so does every test build. Sorted by
     `version_key`, so `v0.8.7` outranks `v0.8.65` — which is what their dates
-    say and what an integer comparison got backwards.
+    say and what an integer comparison got backwards — and `v0.10.10` outranks
+    `v0.10.9`, which a decimal comparison from 0.9 on got backwards.
     """
     if not isinstance(feed, list):
         return []

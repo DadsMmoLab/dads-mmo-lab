@@ -24,13 +24,14 @@ import pytest
 
 from yulon import apply as apply_module
 from yulon import git as git_module
-from yulon import module_answers
+from yulon import module_answers, module_deploys
 from yulon.apply import Applier, ApplyError, ApplyRefusal, ApplyReport, DockerSql, _set_conf_key
 from yulon.catalog import composegen, native, upstream
 from yulon.git import (
     Behind,
     BehindCount,
     CloneSpec,
+    ContainerGit,
     Counted,
     RunnerGit,
     git_available,
@@ -400,6 +401,125 @@ def test_module_install_touches_include_sh_activates_conf_and_writes_keys(tmp_pa
     # db-import SQL is NOT run here. Until 2026-09-07 that fact was in `done`.
     assert not any("sql" in step for step in report.done)
     assert [p.db for p in report.pending_sql] == ["world"]
+
+
+def test_a_claim_in_a_folder_yulon_cannot_write_is_told_without_the_raw_errno(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """U-7: `[Errno 13] Permission denied: '...'` was the whole sentence; now it names the
+    folder and what to do."""
+
+    def refused(clone: Path, **_kw: object) -> None:
+        raise PermissionError(13, "Permission denied", str(clone / apply_module.CLAIM_FILE))
+
+    monkeypatch.setattr(apply_module, "write_clone_claim", refused)
+    git = _FakeGit({"conf/mod_ahbot.conf.dist": "AuctionHouseBot.GUID = 0\n"})
+    report = Applier(tmp_path, git=git, sql=_FakeSql()).install(
+        parse_manifest(MODULE), {"bot_guid": "42"}
+    )
+    clone = tmp_path / "modules" / "mod-ah-bot"
+    said = " ".join(report.skipped)
+    assert "Errno" not in said and "Permission denied" not in said, said
+    assert str(clone) in said and "cannot write" in said, said
+    assert "write access" in said, said
+
+
+def _assert_plain(said: str, folder: Path) -> None:
+    assert "Errno" not in said and "Permission denied" not in said, said
+    assert str(folder) in said and "cannot write" in said and "write access" in said, said
+
+
+def _denied(folder: Path, name: str) -> PermissionError:
+    return PermissionError(13, "Permission denied", str(folder / name))
+
+
+def test_a_clone_folder_yulon_cannot_write_does_not_fail_the_install_with_a_raw_errno(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 2: `include.sh` is touched in the clone, and that touch was unguarded."""
+    clone = tmp_path / "modules" / "mod-ah-bot"
+    real_touch = Path.touch
+
+    def touch(self: Path, *a: Any, **k: Any) -> None:
+        if self.name == "include.sh":
+            raise _denied(clone, "include.sh")
+        real_touch(self, *a, **k)
+
+    monkeypatch.setattr(Path, "touch", touch)
+    git = _FakeGit({"conf/mod_ahbot.conf.dist": "AuctionHouseBot.GUID = 0\n"})
+    report = Applier(tmp_path, git=git, sql=_FakeSql()).install(
+        parse_manifest(MODULE), {"bot_guid": "42"}
+    )
+    _assert_plain(" ".join(report.skipped), clone)
+    assert "touch include.sh" not in report.done
+
+
+def _finished_claim_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, client_files: tuple[Any, ...]
+) -> tuple[list[str], Path]:
+    clone = tmp_path / "modules" / "mod-ah-bot"
+    clone.mkdir(parents=True)
+
+    def refused(folder: Path, **_kw: object) -> None:
+        raise _denied(folder, apply_module.CLAIM_FILE)
+
+    monkeypatch.setattr(apply_module, "write_clone_claim", refused)
+    log = apply_module._Log()
+    applier = Applier(tmp_path, git=_FakeGit({}), sql=_FakeSql())
+    applier._finish_claim(parse_manifest(MODULE), clone, "u", True, log, client_files)
+    return log.skipped, clone
+
+
+def test_the_finished_mark_in_an_unwritable_folder_is_told_plainly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    skipped, clone = _finished_claim_refused(tmp_path, monkeypatch, ())
+    mark = [line for line in skipped if "finished mark" in line]
+    assert len(mark) == 1, skipped
+    _assert_plain(mark[0], clone)
+
+
+def test_the_client_record_in_an_unwritable_folder_is_told_plainly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    copy = apply_module.ClientCopy(step="s", path=str(tmp_path / "f"), sha256="0")
+    skipped, clone = _finished_claim_refused(tmp_path, monkeypatch, (copy,))
+    record = [line for line in skipped if "went into your game client" in line]
+    assert len(record) == 1, skipped
+    _assert_plain(record[0], clone)
+
+
+def test_a_conf_that_cannot_be_set_aside_is_told_plainly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conf = tmp_path / "env" / "mod_x.conf"
+    conf.parent.mkdir(parents=True)
+    conf.write_text("x", encoding="utf-8")
+
+    def refused(*_a: object, **_k: object) -> None:
+        raise _denied(conf.parent, "mod_x.conf")
+
+    monkeypatch.setattr(apply_module.os, "replace", refused)
+    log = apply_module._Log()
+    applier = Applier(tmp_path, git=_FakeGit({}), sql=_FakeSql())
+    applier._set_an_earlier_conf_aside(parse_manifest(MODULE), "mod_x.conf", conf, log)
+    _assert_plain(" ".join(log.skipped), conf.parent)
+
+
+def test_a_folder_that_cannot_be_taken_back_is_told_plainly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "scripts" / "x").mkdir(parents=True)
+
+    def refused(self: Path) -> None:
+        raise _denied(self.parent, self.name)
+
+    monkeypatch.setattr(Path, "rmdir", refused)
+    log = apply_module._Log()
+    applier = Applier(tmp_path, git=_FakeGit({}), sql=_FakeSql())
+    manifest = parse_manifest(MODULE).model_copy(update={"folders": ("scripts/x",)})
+    applier._unfolders(manifest, log)
+    _assert_plain(" ".join(log.skipped), tmp_path / "scripts")
 
 
 def test_a_module_conf_is_activated_without_the_lines_the_server_refuses(tmp_path: Path) -> None:
@@ -897,9 +1017,12 @@ def test_remove_of_a_shared_dir_deploy_leaves_other_scripts_alone(tmp_path: Path
     assert report.skipped == ()
 
     # Clone already gone: a directory deploy cannot be undone safely → skipped, not guessed.
+    # Without the deploy record, that is (an install from before T684): with it, the
+    # record is the list (test_module_deploys.py).
     applier.install(m)
 
     shutil.rmtree(applier.clone_dir(m))
+    (tmp_path / module_deploys.DEPLOYS_FILE).unlink()
     report = applier.remove(m)
     assert foreign.exists() and (tmp_path / LUA / "battlepass").exists()
     assert any("left in place" in s for s in report.skipped)
@@ -2452,6 +2575,69 @@ def test_without_a_reader_the_report_says_the_guid_was_not_checked(tmp_path: Pat
     )
     report2 = second.install(plus, {"bot_guid": "42"})
     assert any("not checked" in s.lower() for s in report2.skipped), report2.skipped
+
+
+def test_a_deferred_exists_check_asks_nothing_starts_nothing_and_says_so(tmp_path: Path) -> None:
+    """T679: a move-in installs the module before its characters are loaded."""
+    git = _FakeGit({"conf/mod_ahbot.conf.dist": AHBOT_DIST})
+    reader = _FakeReader(rows="")  # an empty characters database: the check would refuse
+    started: list[int] = []
+
+    def start() -> bool:
+        started.append(1)
+        return True
+
+    report = Applier(tmp_path, git=git, sql=reader, start_database=start).install(
+        _shipped("mod-ah-bot"), {"bot_guid": "42", "bot_account": "7"}, defer_exists=True
+    )
+
+    assert reader.queries == []
+    assert started == []
+    said = [s for s in report.skipped if apply_module.DEFERRED_EXISTS_NOTE in s]
+    assert [s.split(":")[0] for s in said] == ["bot_guid=42", "bot_account=7"]
+    conf = (tmp_path / "env/dist/etc/modules/mod_ahbot.conf").read_text(encoding="utf-8")
+    assert "AuctionHouseBot.GUID = 42\n" in conf
+
+
+def test_a_deferred_check_covers_every_guid_of_a_list(tmp_path: Path) -> None:
+    """mod-ah-bot-plus takes a list; each GUID is deferred, none is asked."""
+    git = _FakeGit({"conf/mod_ahbot.conf.dist": AHBOT_DIST})
+    reader = _FakeReader(rows="")
+    report = Applier(tmp_path, git=git, sql=reader).install(
+        _shipped("mod-ah-bot-plus"), {"bot_guid": "42,43"}, defer_exists=True
+    )
+    assert reader.queries == []
+    said = [s for s in report.skipped if apply_module.DEFERRED_EXISTS_NOTE in s]
+    assert [s.split(":")[0] for s in said] == ["bot_guid=42", "bot_guid=43"]
+
+
+def test_a_deferred_check_still_refuses_an_answer_that_cannot_be_used(tmp_path: Path) -> None:
+    """Only the does-it-exist question waits: the shape of the answer is still checked now."""
+    git = _FakeGit({"conf/mod_ahbot.conf.dist": AHBOT_DIST})
+    with pytest.raises(ApplyRefusal, match="is not"):
+        Applier(tmp_path, git=git, sql=_FakeReader(rows="")).install(
+            _shipped("mod-ah-bot"), {"bot_guid": "4 2", "bot_account": "7"}, defer_exists=True
+        )
+    assert git.calls == []
+    with pytest.raises(ApplyRefusal, match="no value for"):
+        Applier(tmp_path, git=git, sql=_FakeReader(rows="")).install(
+            _shipped("mod-ah-bot"), {"bot_account": "7"}, defer_exists=True
+        )
+    assert git.calls == []
+
+
+def test_the_normal_install_still_refuses_a_guid_that_names_no_character(tmp_path: Path) -> None:
+    """T679: the guard is only waived when the move asks; the default install is unchanged."""
+    git = _FakeGit({"conf/mod_ahbot.conf.dist": AHBOT_DIST})
+    reader = _FakeReader(rows="")
+    with pytest.raises(
+        ApplyRefusal, match="no character in this server's own database has GUID 999"
+    ):
+        Applier(tmp_path, git=git, sql=reader).install(
+            _shipped("mod-ah-bot"), {"bot_guid": "999", "bot_account": "7"}
+        )
+    assert [db for db, _ in reader.queries] == ["characters"]
+    assert git.calls == []
 
 
 class _StoppedThenStarted(_FakeReader):
@@ -4046,6 +4232,42 @@ def test_the_check_asks_github_by_default(tmp_path: Path, monkeypatch: pytest.Mo
     assert [r.behind for r in rows] == [50]
 
 
+def test_a_pc_without_git_counts_the_wotlk_check_through_the_container(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A PC with no Git counts the WotLK press through the container, not host git (T789).
+
+    The Modules tab's press hands `module_updates()` no seam, and its default was
+    `RunnerGit()`. On a machine with no git.exe the count's `git fetch` raised
+    `[WinError 2]`, and the view showed that raw. T58 moved Install and the Tortoise count
+    to `_default_git()`, which picks the container where there is no host git; this press
+    takes the same seam.
+    """
+    from yulon.controller_wow_wotlk import modules as wotlk_modules
+
+    clone = _one_module(tmp_path)
+    monkeypatch.setattr(apply_module, "git_available", lambda: False)
+    asked: list[Path] = []
+
+    class _ContainerStandIn:
+        def counted_behind(
+            self, dest: Path, branch: str | None, *, release: bool = False
+        ) -> git_module.Counted:
+            asked.append(dest)
+            return git_module.Counted(7)
+
+    def _host_git_that_is_not_installed(*args: object, **kwargs: object) -> None:
+        raise FileNotFoundError(2, "The system cannot find the file specified")
+
+    monkeypatch.setattr(apply_module, "ContainerGit", _ContainerStandIn)
+    monkeypatch.setattr(git_module.RunnerGit, "counted_behind", _host_git_that_is_not_installed)
+
+    rows = wotlk_modules.module_updates(tmp_path)
+
+    assert asked == [clone], asked
+    assert [r.behind for r in rows] == [7]
+
+
 def test_the_tortoise_check_asks_github_for_its_uncounted_addon(tmp_path: Path) -> None:
     """Tortoise's own press (`cached_module_updates`) settles an uncounted clone the same way."""
     from yulon.controller_wow_tortoise import modules as tortoise_modules
@@ -5369,6 +5591,13 @@ def test_the_shipped_manifests_this_guard_stands_in_front_of() -> None:
     base game's ids, and the put-back of the 19 base rows between them.
     53 after T634: upstream renumbered its menus itself (38078d1d), so the two relocation
     steps are gone.
+    54 after T684: Battle Pass's Remove takes back the vendor creature its install made.
+    64 after T763: Level One Mounts backs up the rows it changes (two tables, two fills) before
+    its file, and on Remove creates, puts back and drops both around upstream's revert.
+    69 after its review round 2: five Remove steps put an install from before the backups back to
+    the pinned core's stock prices (four item groups, one trainer row).
+    70 after T788: City Bots' Remove takes its roster and account-type marks back out of
+    `playerbots`.
 
     Catches `WORLD_HELD_DBS` narrowed and the `applied_by` default flipped to
     `db-import`: either would empty this guard's blast radius without a word,
@@ -5389,7 +5618,7 @@ def test_the_shipped_manifests_this_guard_stands_in_front_of() -> None:
             games.add(path.parent.parent.name)
 
     assert (steps, len(files), sorted(games)) == (
-        53,
+        70,
         19,
         ["wow-tbc", "wow-tortoise", "wow-vanilla", "wow-wotlk"],
     )
@@ -5815,30 +6044,22 @@ def test_a_git_that_cannot_be_started_is_reported_as_git(tmp_path: Path) -> None
     assert "Nothing was changed" in said or "install" in said.lower()
 
 
-def test_a_wsl_backed_install_is_refused_precisely_rather_than_failed_slowly(
+def test_a_wsl_backed_install_clones_through_the_distro_with_no_host_git(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """The container fallback cannot reach a `\\\\wsl.localhost` path (T58 review).
+    """A server inside WSL gets the distro's git, with or without host git (T58 review, T772).
 
-    `ContainerGit` bind-mounts the destination, and Docker Desktop refuses a
-    `\\\\wsl.localhost\\...` mount source. One of the two reporters has exactly
-    that: his server is at `\\\\wsl.localhost\\dml-arch\\home\\dml\\games\\Wowbots`.
-
-    Falling back there would trade a fast host-git failure for a slow
-    containerised one, after pulling an image, and still not install anything.
-    A refusal that names the reason and a remedy is worth more than a fallback
-    that cannot work.
+    T58's review refused here: the containerised git of that day bind-mounted the
+    `\\\\wsl.localhost\\...` path and Docker Desktop refuses that mount source. One of
+    the two reporters has exactly that: his server is at
+    `\\\\wsl.localhost\\dml-arch\\home\\dml\\games\\Wowbots`. The distro's own docker
+    (`ContainerGit(wsl_distro=)`, T125) mounts the distro's spelling instead, and T772
+    measured host git refusing those checkouts, so that route is the one either way.
     """
     monkeypatch.setattr(apply_module, "git_available", lambda: False)
     unc = Path(r"\\wsl.localhost\dml-arch\home\dml\games\Wowbots")
-    monkeypatch.setattr(
-        apply_module.platform, "wsl_linux_path", lambda path: "/home/dml/games/Wowbots"
-    )
-    with pytest.raises(ApplyError) as caught:
-        apply_module._default_git(unc)
-    said = str(caught.value)
-    assert "WSL" in said and "git" in said.lower(), said
-    assert "Nothing was changed" in said
+    seam = apply_module._default_git(unc)
+    assert isinstance(seam, ContainerGit) and seam.wsl_distro == "dml-arch"
 
 
 def test_building_an_applier_does_not_probe_for_git(tmp_path: Path, monkeypatch) -> None:
@@ -7280,13 +7501,14 @@ def test_the_shipped_city_bots_manifest_imports_only_the_roster_itself() -> None
     """
     manifest = _shipped(CITY_BOTS_ID)
 
-    assert [(s.db, s.applied_by) for s in manifest.sql] == [
-        ("auth", "db-import"),
-        ("characters", "db-import"),
-        ("world", "db-import"),
-        ("playerbots", "direct"),
+    assert [(s.db, s.applied_by, s.when) for s in manifest.sql] == [
+        ("auth", "db-import", "install"),
+        ("characters", "db-import", "install"),
+        ("world", "db-import", "install"),
+        ("playerbots", "direct", "install"),
+        ("playerbots", "direct", "remove"),  # T788: the roster's take-back
     ]
-    roster = manifest.sql[-1]
+    roster = manifest.sql[3]
     assert roster.path == ROSTER_REL
     assert roster.when == "install"
     assert roster.precondition is not None and len(roster.verify) == 2
@@ -8204,12 +8426,12 @@ def test_the_withheld_sentence_names_the_file_for_a_module_with_only_one_step(
 
 
 def test_every_shipped_db_import_step_names_a_directory_the_updater_actually_walks() -> None:
-    """A `db-import` step outside `IMPORTER_DB_DIRS` would be a promise nobody keeps.
+    """A `db-import` step outside the updater's folders would be a promise nobody keeps.
 
     The catalog's own data, not a fixture. `applied_by: "db-import"` means "this
-    app runs none of it, the core updater will" -- and the core updater walks
-    `data/sql/db-auth`, `data/sql/db-characters` and `data/sql/db-world` and
-    nothing else. A shipped manifest naming, say, `data/sql/playerbots/` as
+    app runs none of it, the core updater will" -- and the core updater walks the
+    folders under `data/sql/` whose name holds `auth`, `characters` or `world`
+    (`updater_walks()`) and nothing else. A shipped manifest naming, say, `data/sql/playerbots/` as
     db-import would leave that file applied by no route at all, which is exactly
     the trap City Bots' manifest avoids by declaring its roster `direct`.
     """
@@ -8219,8 +8441,8 @@ def test_every_shipped_db_import_step_names_a_directory_the_updater_actually_wal
         for step in manifest.sql:
             if step.applied_by != "db-import" or step.path is None:
                 continue
-            assert step.path.startswith(
-                apply_module.IMPORTER_SQL_DIRS
+            assert apply_module.updater_walks(
+                step.path
             ), f"{manifest.id} leaves {step.path} to the updater, which never walks it"
             checked += 1
     assert checked, "no shipped db-import step was examined, so this asserted nothing"

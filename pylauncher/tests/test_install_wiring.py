@@ -29,7 +29,7 @@ from tests.support_native import engine as native_engine
 from yulon import docker, install_wiring, platform
 from yulon import log as log_module
 from yulon.apply import DockerSql
-from yulon.catalog.catalog import CatalogEntry, load_catalog
+from yulon.catalog.catalog import CatalogEntry, PasswordPlan, load_catalog
 from yulon.catalog.installer import InstallEngine, InstallerError, InstallOptions
 from yulon.controller_wow_wotlk import repair as wotlk_repair
 from yulon.controller_wow_wotlk.maintenance import DockerMysql
@@ -62,15 +62,16 @@ def _without_import_service(entry: CatalogEntry) -> CatalogEntry:
 
 def test_the_fixed_password_is_the_entry_value_or_the_acore_default() -> None:
     assert install_wiring.DEFAULT_DB_ROOT_PASSWORD == "password"
-    assert install_wiring.fixed_db_password(WOTLK) == WOTLK.install.password.value
-    blank = WOTLK.model_copy(
+    fixed = WOTLK.model_copy(
         update={
             "install": WOTLK.install.model_copy(
-                update={"password": WOTLK.install.password.model_copy(update={"value": None})}
+                update={"password": PasswordPlan(mode="fixed", value="published-1")}
             )
         }
     )
-    assert install_wiring.fixed_db_password(blank) == "password"
+    assert install_wiring.fixed_db_password(fixed) == "published-1"
+    # A generated plan (WotLK's since T748) has no value: the published default.
+    assert install_wiring.fixed_db_password(WOTLK) == "password"
 
 
 def test_the_import_gate_exists_only_for_a_one_shot_import_service() -> None:
@@ -93,7 +94,7 @@ def test_the_probe_reaches_repair_through_this_entry_s_db_container(
         return docker.ImportState("imported", "every acore_* schema has tables", complete=True)
 
     def fake_reset(
-        sql: DockerSql, mysql: DockerMysql, *, everything: bool = False
+        sql: DockerSql, mysql: DockerMysql, *, everything: bool = False, seeded: bool = False
     ) -> tuple[str, ...]:
         seen.append((sql.db_container, mysql.db_container))
         return ("acore_world",)
@@ -199,12 +200,16 @@ def test_installer_for_app_hands_the_gate_to_the_dispatcher(
 
     install_wiring.installer_for_app(WOTLK, platform_id=lambda: "linux", installers_root=tmp_path)
     assert kwargs_seen[-1]["installers_root"] == tmp_path
-    assert kwargs_seen[-1]["import_probe"] is not None
-    assert kwargs_seen[-1]["reset_unfinished"] is not None
+    # T785: only the folder's gate. An engine-wide pair had no folder to ask for, so it could
+    # only ever hold the published `password`, which a new install does not have.
+    assert "import_probe" not in kwargs_seen[-1] and "reset_unfinished" not in kwargs_seen[-1]
+    gate = kwargs_seen[-1]["import_gate"]
+    assert callable(gate)
+    probe, reset = gate(tmp_path)
+    assert probe is not None and reset is not None
 
     install_wiring.installer_for_app(_without_import_service(WOTLK), platform_id=lambda: "linux")
-    assert kwargs_seen[-1]["import_probe"] is None
-    assert kwargs_seen[-1]["reset_unfinished"] is None
+    assert kwargs_seen[-1]["import_gate"](tmp_path) == (None, None)  # type: ignore[operator]
 
 
 def test_main_streams_the_engine_and_maps_failures_to_exit_codes(
@@ -242,6 +247,8 @@ def test_main_streams_the_engine_and_maps_failures_to_exit_codes(
     out = capsys.readouterr()
     assert out.out.splitlines() == ["cloning", "ready"]
     assert options_seen[-1].server_dir == tmp_path and options_seen[-1].client_dir is None
+    # T723: the harness is an install run, so it asks for the channel switch like the button.
+    assert options_seen[-1].first_install is True
 
     monkeypatch.setattr(install_wiring, "installer_for_app", lambda entry, **_k: _Engine(fail=True))
     assert install_wiring.main(["wow-wotlk"]) == 1

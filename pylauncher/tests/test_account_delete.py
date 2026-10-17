@@ -880,7 +880,14 @@ def test_yulon_makes_an_all_digit_account_only_where_the_server_looks_names_up(
     from yulon.controller_wow_wotlk import accounts as writer
 
     _writer_reaches_the_database(monkeypatch)
-    services = ControllerServices.for_entry(CATALOG.get(game), tmp_path / game)
+    entry = CATALOG.get(game)
+    # A folder with the password file an install leaves; without one the tab refuses (T785).
+    (tmp_path / game).mkdir()
+    if entry.install.password.file:
+        (tmp_path / game / entry.install.password.file).write_text(
+            "pw-0123456789\n", encoding="utf-8"
+        )
+    services = ControllerServices.for_entry(entry, tmp_path / game)
 
     if game in NAME_ONLY:
         with pytest.raises(_Stop):
@@ -1116,3 +1123,10 @@ def test_a_delete_that_lands_at_once_does_not_wait(wotlk: _Server) -> None:
     assert outcome.done is True
     assert wotlk.slept == []
     assert "still removing" not in outcome.text
+
+
+@pytest.fixture(autouse=True)
+def _no_database_container_running(monkeypatch: pytest.MonkeyPatch) -> None:
+    """T668: loading the list first asks which containers run (to lock CMaNGOS's built-in
+    accounts when the database is up); nothing here runs one, and no test shells out to Docker."""
+    monkeypatch.setattr(docker, "status", lambda **_k: [])

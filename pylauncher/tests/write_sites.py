@@ -86,6 +86,8 @@ _QUALIFIED = {
     # from its own audit would be the failure `guards-that-prove-declarations`
     # is about, not a refactor.
     ("rmtree", "remove_tree"),
+    # T682: the Uninstall's delete, ordered so its own records go last; visible for the same reason.
+    ("rmtree", "remove_tree_last"),
     ("shutil", "copy"),
     ("shutil", "copy2"),
     ("shutil", "copyfile"),

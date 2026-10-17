@@ -74,7 +74,7 @@ stdin is EOF, and the live Centurion press exited 255 (T241).
 VMAP_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "cmangos-vmap-8ec338a1"
 """`contrib/vmap_extractor/vmapextract/` of `mangos-classic` at `8ec338a1`; see `test_patch.py`."""
 
-TORTOISE_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "tortoise-6131a26f"
+TORTOISE_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "tortoise-10393426"
 """`AutoUpdater.cpp` of tortoise-wow at the pin, laid by its full path (T600)."""
 
 
@@ -141,6 +141,8 @@ class Recorder:
     folder_asked: list[Path] = field(default_factory=list)
     build_result: docker.AttachedRun = docker.AttachedRun(0, ("built",))
     one_shot_result: docker.AttachedRun = docker.AttachedRun(0, ("ran",))
+    one_shot_modules: list[str | None] = field(default_factory=list)
+    """The `allowed_modules` every `one_shot` was handed, in order (T706); None = not given."""
     one_shot_left: docker.OneShotLeft | None = None
     """What `end_one_shot()` answers (T539): None, nothing of the one-shot is running."""
     one_shots_running: list[str] = field(default_factory=list)
@@ -152,6 +154,8 @@ class Recorder:
     """The entries whose realm row the engine marked offline (T577), apart from `calls`."""
     realm_clears: list[str] = field(default_factory=list)
     """The entries whose offline bit it took off again after a replace gave up (T577)."""
+    account_locks: list[str] = field(default_factory=list)
+    """The entries whose built-in accounts the engine asked to lock (T668)."""
     probe_answers: list[docker.ImportState] = field(default_factory=lambda: [ABSENT, IMPORTED])
     reset_answer: tuple[str, ...] = ("acore_world",)
     reset_error: Exception | None = None
@@ -234,6 +238,8 @@ class Recorder:
     answer `docker image inspect` does."""
     image_ids: dict[str, str | None] = field(default_factory=dict)
     """T225: what `image_id` answers for these names instead (a tag a stopped build moved)."""
+    remove_service_refused: set[str] = field(default_factory=set)
+    """T741: services whose `compose rm --stop --force` Docker refuses (recorded, then raised)."""
 
     world_output: native.WorldOutput = native.WorldOutput(
         text="mangosd loading\nready...\nAvg Diff: 15ms\nWorld server is up and running",
@@ -741,11 +747,14 @@ class Recorder:
 
     def start_db(
         self, spec: docker.ContainerSpec, server_dir: Path, *, because: str = "nothing was run"
-    ) -> None:
+    ) -> bool:
         self.calls.append("start-db")
         if self.db_start_error:
             raise docker.DockerCommandError(self.db_start_error)
+        # `docker.start_database()`'s answer: True only when it had to start it.
+        was = self.db_started
         self.db_started = True
+        return not was
 
     def run_container(
         self,
@@ -948,8 +957,10 @@ class Recorder:
             sink: object = None,
             cancel: object = None,
             record_ended: bool = False,
+            allowed_modules: str | None = None,
         ) -> docker.AttachedRun:
             self.calls.append(f"one-shot:{service}")
+            self.one_shot_modules.append(allowed_modules)
             if callable(sink):
                 sink(f"{service} said something")
             return self.one_shot_result
@@ -1025,6 +1036,10 @@ class Recorder:
                 entry.id
             ),
             clear_realm_offline=lambda entry, spec, server_dir: self.realm_clears.append(entry.id),
+            # T668: bound like the realm marks -- the default writes to the auth database.
+            lock_seeded_accounts=lambda entry, spec, server_dir, **_k: self.account_locks.append(
+                entry.id
+            ),
             # T158: the rollback's stop of the failed build. Bound like T64's six:
             # its default asks `docker exec`, and a world that loads on a script is
             # `test_stop_waits_for_the_world.py`'s.
@@ -1068,6 +1083,8 @@ class Recorder:
             stop_world=lambda containers, **_kw: self.calls.append(
                 f"stop-world:{','.join(containers)}"
             ),
+            # T739: a Rebuild under an unfinished import removes its old servers' containers.
+            remove_service=self.remove_service,
         )
         # T170's two, bound after construction like an override, the two
         # readings a test states through `folder_projects`/`project_images`.
@@ -1134,6 +1151,12 @@ class Recorder:
         if self.start_error is not None:
             raise self.start_error
         return True
+
+    def remove_service(self, server_dir: Path, service: str, **_kw: object) -> None:
+        """`docker.compose_remove_service()`: recorded; refused for `remove_service_refused`."""
+        self.calls.append(f"remove_service:{service}")
+        if service in self.remove_service_refused:
+            raise docker.DockerCommandError(f"compose rm {service} exited 1: daemon refused")
 
     def tag_image(self, src: str, dst: str) -> str:
         """`docker.tag_image()`: recorded as `tag:<src>-><dst>`, refused as `tag_problem`."""
@@ -1270,4 +1293,7 @@ def engine(rec: Recorder, **overrides: object) -> AzerothCoreInstaller:
 
 
 def install(rec: Recorder, server_dir: Path, **overrides: object) -> list[str]:
-    return list(engine(rec, **overrides).run(InstallOptions(server_dir=server_dir)))
+    """The install the Install button runs: a first install, so `first_install` is set (T723)."""
+    return list(
+        engine(rec, **overrides).run(InstallOptions(server_dir=server_dir, first_install=True))
+    )

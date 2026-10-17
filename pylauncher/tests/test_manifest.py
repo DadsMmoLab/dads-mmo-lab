@@ -335,9 +335,10 @@ def test_no_shipped_sql_step_check_carries_a_template_field() -> None:
                 if "{" in check["query"] or "{" in check["missing"]:
                     offenders.append(f"{path.relative_to(MANIFESTS_DIR)}: {check['query']!r}")
     assert offenders == [], offenders
-    # mod-city-bots' precondition and its two verify entries, and npc-teleporter's three verify
-    # entries (T634: no capital NPC, a stale copy on the base game's ids, an Onyxia row that moved)
-    assert len(seen) == 6, seen
+    # mod-city-bots' install precondition, its two verify entries and its remove precondition
+    # (T788), and npc-teleporter's three verify entries (T634: no capital NPC, a stale copy on
+    # the base game's ids, an Onyxia row that moved)
+    assert len(seen) == 7, seen
 
 
 def test_prompt_choice_rules() -> None:
@@ -951,3 +952,40 @@ def test_every_sit_means_rest_patch_lands_on_the_shipped_script() -> None:
     # every declared key is one the installer asks about, and the reverse
     asked = {key.default.strip("{}") for conf in manifest.conf for key in conf.keys if key.default}
     assert asked == prompts
+
+
+_ESCAPES = (
+    "/etc/cron.d/x",
+    "../../.ssh/authorized_keys",
+    "env/../../x",
+    "C:/Windows/x",
+    "a\\..\\..\\b",
+)
+
+
+def _with(example: dict[str, Any], section: str, field: str, value: str) -> dict[str, Any]:
+    data = json.loads(json.dumps(example))
+    data[section][0][field] = value
+    return data
+
+
+@pytest.mark.parametrize("value", _ESCAPES)
+@pytest.mark.parametrize(
+    ("example", "section", "field"),
+    [
+        (ALE_EXAMPLE, "deploy", "dest"),
+        (ALE_EXAMPLE, "deploy", "src"),
+        (ALE_EXAMPLE, "patches", "file"),
+        (README_EXAMPLE, "conf", "file"),
+        (README_EXAMPLE, "conf", "template"),
+    ],
+)
+def test_a_path_that_leaves_its_folder_is_refused_when_the_manifest_loads(
+    example: dict[str, Any], section: str, field: str, value: str
+) -> None:
+    """`server_dir / dest` with an absolute dest IS the dest, and `..` walks out; Remove
+    then deletes that path. Each path is relative to the server folder or the clone, and
+    one that leaves it is refused at parse time, before an install or a Remove (T683 S7)."""
+    parse_manifest(_with(example, section, field, "ok/x"))  # the same field, inside: loads
+    with pytest.raises(ValidationError, match="inside"):
+        parse_manifest(_with(example, section, field, value))

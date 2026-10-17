@@ -60,12 +60,13 @@ def test_a_command_carrying_a_newline_is_refused() -> None:
 # -- the validators ---------------------------------------------------------
 
 
-@pytest.mark.parametrize("name", ["bob", "Bob_2", "a" * 20, "YULON_AB12CD34"])
+@pytest.mark.parametrize("name", ["bob", "Bob_2", "a" * 17, "YULON_AB12CD34"])
 def test_account_names_the_server_accepts(name: str) -> None:
     assert commands.valid_account_name(name)
 
 
-@pytest.mark.parametrize("name", ["ab", "a" * 21, "bob smith", "bob;drop", "bób", ""])
+# 18: no core takes a longer name than AzerothCore's 17 (T673, `account_rules`).
+@pytest.mark.parametrize("name", ["ab", "a" * 18, "bob smith", "bob;drop", "bób", ""])
 def test_account_names_the_server_would_refuse(name: str) -> None:
     assert not commands.valid_account_name(name)
 
@@ -234,6 +235,16 @@ def test_the_level_ceiling_is_the_trees_and_not_a_number_in_this_file() -> None:
         ("serverr shutdown 1", False),
         ("server", False),
         ("", False),
+        # T745: every core's console strips one leading `.` OR `!`, as `line()` does.
+        ("!server shutdown 1", True),
+        ("!ser exit", True),
+        ("! server shutdown 1", True),
+        (". ser shut 1", True),
+        ("!SERVER IDLE 5", True),
+        ("!server shutdown cancel", False),
+        ("!server restart 5", False),
+        ("!server info", False),
+        ("!", False),
     ],
 )
 def test_a_line_that_shuts_the_world_down_for_good_is_recognised(typed: str, ends: bool) -> None:

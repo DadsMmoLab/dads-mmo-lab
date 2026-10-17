@@ -32,12 +32,25 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import ClassVar
 
-from yulon import ale_playerbots, docker, git, networking, server_build_presses
+from yulon import (
+    ale_playerbots,
+    city_bots_guard,
+    docker,
+    git,
+    networking,
+    party,
+    server_build_presses,
+)
 from yulon.catalog import snapshot
 from yulon.catalog.catalog import AzerothCoreData, CatalogEntry, EmulatorSource
 from yulon.catalog.families import carried, scriptdeploy
 from yulon.catalog.families.direction import moves_forward
-from yulon.catalog.installer import InstallerError, InstallStopped, OneShotLeftRunning
+from yulon.catalog.installer import (
+    ImportWindowStopped,
+    InstallerError,
+    InstallStopped,
+    OneShotLeftRunning,
+)
 from yulon.catalog.native import (
     DOWNLOAD_CANCEL_NOTE,
     IMPORT_STAGE_CANCEL_NOTE,
@@ -155,21 +168,30 @@ class _Direction:
     dest: Path
     old: str
     new: str
+    _asked: bool = False
     _said: bool | None = None
+    _why: str = ""
+
+    def peek(self) -> bool | None:
+        """True / False when git or GitHub can say; None when neither can (T767). Never refuses."""
+        if not self._asked:
+            self._said, self._why = moves_forward(
+                self.seams, self.repo, self.dest, self.old, self.new
+            )
+            self._asked = True
+        return self._said
 
     def known(self) -> bool:
         """True when forward; refuses (fail closed) when neither git nor GitHub can say."""
-        if self._said is None:
-            said, why = moves_forward(self.seams, self.repo, self.dest, self.old, self.new)
-            if said is None:
-                raise InstallerError(
-                    updates_unread(
-                        f"the move takes away in {self.repo}",
-                        f"{why}, so the direction of the move is unknown",
-                    )
+        said = self.peek()
+        if said is None:
+            raise InstallerError(
+                updates_unread(
+                    f"the move takes away in {self.repo}",
+                    f"{self._why}, so the direction of the move is unknown",
                 )
-            self._said = said
-        return self._said
+            )
+        return said
 
 
 def updates_unread(source: str, why: str) -> str:
@@ -389,6 +411,7 @@ class AzerothCoreInstaller(StagedInstaller):
     STAGE_NAMES: ClassVar[tuple[str, ...]] = (
         "clone-core",
         "clone-modules",
+        "db-password",
         "generate-compose",
         "build",
         "client-data",
@@ -397,7 +420,10 @@ class AzerothCoreInstaller(StagedInstaller):
         "up",
         "ready",
     )
-    """Pinned by `test_wotlk_stage_names_are_the_historical_tuple`; see the module docstring."""
+    """Pinned by `test_wotlk_stage_names_are_the_historical_tuple`; see the module docstring.
+
+    `db-password` (T748) is never recorded, so no state file names it and an older build reading
+    a newer folder's record meets nothing it does not know."""
 
     PATCH_STAGE: ClassVar[str] = "patch-sources"
     LUA_STAGE: ClassVar[str] = "lua-and-sql"
@@ -422,6 +448,10 @@ class AzerothCoreInstaller(StagedInstaller):
             Stage("clone-core", self._clone_core),
             Stage("clone-modules", self._clone_modules),
             *patch_stage,
+            # T748: never recorded, and before `generate-compose` writes `.env` and before the
+            # database is first started, so the password exists on disk before anything uses
+            # it. After the clones, which need an empty folder or their own checkout.
+            Stage("db-password", self._db_password, recorded=False),
             Stage("generate-compose", self.stage_generate_compose),
             Stage("build", self.stage_build, cancel_note=build_cancel_note()),
             Stage("client-data", self._client_data, cancel_note=DOWNLOAD_CANCEL_NOTE),
@@ -539,6 +569,7 @@ class AzerothCoreInstaller(StagedInstaller):
                 self.entry.name,
             )
         yield from scriptdeploy.lay(ctx.server_dir, block.lua_scripts)
+        yield from self.lay_party_bridge(ctx.server_dir)
 
     def _carried(self, server_dir: Path, *, quiet: bool) -> Iterator[str]:
         """Write the carried patches; what an update and a rebuild need before the compile."""
@@ -601,9 +632,14 @@ class AzerothCoreInstaller(StagedInstaller):
         """Does this install have Lua scripts to lay, or lay again, or remove (T562)?
 
         True for an entry with `lua_scripts`, and for one that dropped them while the
-        record of what an earlier press laid is still there.
+        record of what an earlier press laid is still there. Also for a server with the Lua
+        engine cloned (T792): My Party's bridge scripts are laid in the same window.
         """
-        return bool(self._block().lua_scripts) or scriptdeploy.record_path(server_dir).exists()
+        return (
+            bool(self._block().lua_scripts)
+            or scriptdeploy.record_path(server_dir).exists()
+            or party.engine_cloned(server_dir)
+        )
 
     def lay_scripts(self, server_dir: Path, *, quiet: bool) -> Iterator[str]:
         """Lay the entry's Lua scripts from the checkout as it stands now (T562).
@@ -614,6 +650,113 @@ class AzerothCoreInstaller(StagedInstaller):
         the old binary. A rollback calls this again from the put-back sources.
         """
         yield from scriptdeploy.lay(server_dir, self._block().lua_scripts, quiet=quiet)
+
+    def lay_party_bridge(self, server_dir: Path) -> Iterator[str]:
+        """My Party's bridge scripts, for a server that has `modules/mod-ale` (T792).
+
+        WotLK gets the engine from the Modules tab and WoW Unbound builds it in; both read the
+        same script folder, so one call serves both. A rebuild, an update and a return reach it
+        through `stage_recreate()`, the fresh install through `_lua_and_sql()`. A failure is a
+        line and the press goes on: `party.lay_bridge()` does not raise.
+        """
+        laid = party.lay_bridge(server_dir)
+        if isinstance(laid, str):
+            yield laid
+            return
+        if laid is None:
+            return
+        if laid.changed:
+            yield "My Party's bridge scripts are in the server folder."
+        if laid.kept:
+            yield party.kept_sentence(laid.kept)
+
+    def imports_with_the_servers_down(self) -> bool:
+        """True for an entry whose databases are imported by a compose one-shot (T706)."""
+        return bool(self.entry.containers.db_import)
+
+    def import_with_the_servers_down(self, ctx: StageContext) -> Iterator[str]:
+        """The importer one-shot on the new build, before its first start: a Rebuild's (T706).
+
+        Live on yulon-ubuntu (2026-10-11, v0.9.16 WotLK and Unbound): Install City Bots,
+        then Rebuild, and the new world aborted on `Table 'acore_world.city_bot_poi'
+        doesn't exist`. A module's `data/sql/db-world` files reach the database only
+        through this one-shot -- the world server runs with `Updates.EnableDatabases` 0
+        -- and the install runs it in its `import` stage, the update route in its own
+        window (`servers_down_work()`, T220), while a Rebuild ran it nowhere. Running it
+        by hand (`docker compose up -d`) applied six files and the world came up.
+
+        The same one-shot, on the image the tags now name, with the servers stopped and
+        the database up. What upstream's updater does with each file, read from the pinned
+        source (`UpdateFetcher.cpp` at 2a2211cd, the WotLK and Unbound core pin) and
+        `dbimport.conf.dist`, neither of which this app overrides: a file its `updates`
+        table does not hold is applied; one it holds with the same SHA1 is skipped; one
+        whose SHA1 changed is applied AGAIN (`Updates.Redundancy` 1, "Reapplying update
+        ... (it changed)"), except an archived core file (`ArchivedRedundancy` 0). So a
+        Rebuild with nothing new applies nothing, and a module file edited after it was
+        applied runs again -- and if it then fails, every Rebuild and update fails on it
+        until the file applies, which `docker.importer_failure()` says by name.
+
+        The modules it may update are the Modules tab's own split (`importer_modules`,
+        T78), which every engine the app builds is handed (`installer_for_app()`; the
+        reviewed exceptions in `test_rebuild_import_copy` build no engine that imports);
+        without one, what the compose file says. Not cancellable part-way, for T220's
+        reason; a Stop is honoured once the updates are in, before the new build starts.
+        A failure raises, and the rebuild puts the build from before back -- with the copy
+        of its databases taken just before this (`_rebuild_import_work()`).
+        """
+        service = self.entry.containers.db_import
+        if not service:
+            return
+        yield (
+            f"Applying the database updates of the server and its modules ({service}) with the "
+            "servers stopped, before the new build first starts. Updates already applied are "
+            "not run again."
+        )
+        try:
+            self._seams.start_db(
+                self.entry.container_spec(),
+                ctx.server_dir,
+                because="no database update was applied and the new build was not started",
+            )
+        except docker.DockerCommandError as exc:
+            raise InstallerError(
+                f"The database could not be started to apply the new build's database updates, "
+                f"so the new build was not started: {exc}"
+            ) from exc
+        allowed = (
+            self._importer_modules(ctx.server_dir) if self._importer_modules is not None else None
+        )
+        self._refuse_bot_accounts_in_the_way(ctx.server_dir, allowed)
+        run = yield from self._pump(
+            lambda sink: self._seams.one_shot(
+                service, ctx.server_dir, sink=sink, cancel=None, allowed_modules=allowed
+            ),
+            cancel=None,
+            stage="import",
+        )
+        if run.returncode != 0:
+            raise InstallerError(docker.importer_failure(run, "Applying the database updates"))
+        if ctx.cancel is not None and ctx.cancel.is_set():
+            raise ImportWindowStopped(
+                "The rebuild was stopped once the database updates were in, before the new "
+                "build started."
+            )
+        yield "The database updates are in."
+
+    def _refuse_bot_accounts_in_the_way(self, server_dir: Path, allowed: str | None) -> None:
+        """Before an importer run that carries City Bots' SQL: no real account on a bot's id (T779).
+
+        The Modules tab's button asks the same question in `docker.apply_module_sql()`. Here the
+        database is up and the servers are down; `allowed` None is the compose file's default,
+        which is every module in the folder. Raises `InstallerError` in the player's words, with
+        nothing applied.
+        """
+        try:
+            city_bots_guard.refuse_if_accounts_in_the_way(
+                self.entry, server_dir, docker.ALL_MODULES if allowed is None else allowed
+            )
+        except city_bots_guard.CityBotsAccountRefusal as exc:
+            raise InstallerError(str(exc)) from exc
 
     def before_rebuild(
         self, server_dir: Path, route: str, press: str = server_build_presses.REBUILD
@@ -725,13 +868,17 @@ class AzerothCoreInstaller(StagedInstaller):
           an update upstream moved to its archive), never one for another database --
           `db_characters/2026_09_21_00.sql` is not `db_world/2026_09_21_00.sql`; or
         * the move goes forward in history (`direction.moves_forward()`: git, else GitHub's
-          compare; when neither can say the Return refuses), and it and a file the target
-          ships in the same folder are both dated (`YYYY_MM_DD_NN`, how AzerothCore and
-          mod-playerbots name their updates) and the target's sorts at or after it: it is
-          older than what the target has, which a Return that moves forward (T588) over a
-          squash removes. Going back the name says nothing: an update written before the
-          target's newest but merged after it is newer. A name that is not dated says
-          nothing about order (cold review of a72e048f).
+          compare), whatever the file is called (T767): the target descends from the
+          running commit, so upstream removed the file after the database met it, as
+          mod-playerbots 79bd428 removed 7bae1b5's undated `world/base/charsections_dbc.sql`.
+          A Return that moves forward (T588) is an update, which asks nothing of the kind.
+
+        Going back, or when neither git nor GitHub can give the direction, the name says
+        nothing: an update written before the target's newest but merged after it is
+        newer, so every such file counts and the database is asked. One exception keeps
+        the T632 refusal: with no direction, a dated (`YYYY_MM_DD_NN`) file the target
+        ships a later-dated file beside refuses and says why, as it may be a squash or a
+        newer update (cold review of a72e048f).
         """
         lacked: dict[str, None] = {}
         for source, dest, old in moved:
@@ -774,15 +921,27 @@ class AzerothCoreInstaller(StagedInstaller):
             for path in tracked:
                 if path.endswith(".sql"):
                     beside.setdefault(posixpath.dirname(path), []).append(posixpath.basename(path))
-            # Only a move FORWARD in history can have a squashed-away file: going back,
-            # every update the running commit added since is one the target lacks, however
-            # its name is dated (mod-playerbots names one by the day it was written).
+            unshipped = [
+                path
+                for path in removed
+                if (_database_part(path), posixpath.basename(path)) not in shipped
+            ]
+            if not unshipped:
+                continue
+            # T767: a target that descends from the running commit removed these files
+            # itself, whatever they are called (mod-playerbots 79bd428 removed 7bae1b5's
+            # undated base files): nothing it lacks is newer. Going back, every update the
+            # running commit added since is one the target lacks, however its name is dated
+            # (mod-playerbots names one by the day it was written).
             forward = _Direction(self._seams, source.repo, dest, old, new)
+            if forward.peek():
+                continue
             left: list[str] = []
-            for path in removed:
+            for path in unshipped:
                 name = posixpath.basename(path)
-                if (_database_part(path), name) in shipped:
-                    continue
+                # With no direction (`known()` refuses), a dated file older than one the
+                # target ships beside it may be a squash or a newer update: say so. Going
+                # back (`known()` is False) it counts like any other.
                 if (
                     _DATED.match(name)
                     and any(
@@ -947,14 +1106,27 @@ class AzerothCoreInstaller(StagedInstaller):
                 f"Applying the new build's own database updates ({service}) with the servers "
                 "stopped, before it first starts."
             )
+            # T707: the Modules tab's own split, as a Rebuild's import is given.
+            allowed = (
+                self._importer_modules(ctx.server_dir)
+                if self._importer_modules is not None
+                else None
+            )
+            self._refuse_bot_accounts_in_the_way(ctx.server_dir, allowed)
             run = yield from self._pump(
-                lambda sink: self._seams.one_shot(service, ctx.server_dir, sink=sink, cancel=None),
+                lambda sink: self._seams.one_shot(
+                    service, ctx.server_dir, sink=sink, cancel=None, allowed_modules=allowed
+                ),
                 cancel=None,
                 stage="import",
             )
             # `cancel=None`, then the press by name: `_check_run()`'s own check
             # says "the install was stopped", and this is an update (cold review).
-            self._check_run(run, "Applying the new build's database updates", None, "")
+            # T706 round 2: a failure names the file and the way past it.
+            if run.returncode != 0:
+                raise InstallerError(
+                    docker.importer_failure(run, "Applying the new build's database updates")
+                )
             if ctx.cancel is not None and ctx.cancel.is_set():
                 raise InstallStopped(f"{press} was stopped. {CORE_UPDATES_NOTE}")
             yield "The new build's database updates are in."
@@ -1239,10 +1411,11 @@ class AzerothCoreInstaller(StagedInstaller):
         service" are the same skip, worded here and not in the spine (A7).
         """
         service = self.entry.containers.db_import
-        if self._probe is None or not service:
+        probe, reset = self._gate_for(ctx.server_dir)
+        if probe is None or not service:
             yield "This server has no separate database import step."
             return
-        yield from self.stage_import(ctx, CallableGate(self._probe, self._reset), service)
+        yield from self.stage_import(ctx, CallableGate(probe, reset), service)
 
 
 def _sql_of(lines: Sequence[str]) -> tuple[str, ...]:

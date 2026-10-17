@@ -2138,7 +2138,82 @@ def test_commits_behind_counts_what_the_update_would_bring_in(
     assert impl.commits_behind(dest, None) is None
     assert impl.commits_behind(tmp_path / "not-a-checkout", None) is None
     answers.append(_completed(returncode=128, stderr="Could not resolve host"))
+    assert impl.counted_behind(dest, None) == git.Counted(None, why="Could not resolve host")
+
+
+@pytest.mark.parametrize(
+    "impl",
+    [
+        git.RunnerGit(),
+        git.ContainerGit(selinux_enforcing=lambda: False, filesystem_type=lambda _path: "ext4"),
+    ],
+    ids=["host", "containerized"],
+)
+def test_counted_behind_says_why_git_could_not_answer(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    impl: git.CountedReader,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """T793: a "could not ask" carries git's own first line, on the fetch and on the count.
+
+    The Modules tab printed "could not ask (no answer from git)" for every refusal, and the
+    reason went only to the debug log, so a player's "detected dubious ownership" could not be
+    told from a dead network. Both classes build their `GitError` from the same stderr, so both
+    are asked here. A git that wrote nothing keeps the bare answer.
+    """
+    dest = tmp_path / "mod-x"
+    (dest / ".git").mkdir(parents=True)
+    answers: list[subprocess.CompletedProcess[str]] = []
+
+    def fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return answers.pop(0)
+
+    monkeypatch.setattr(runner, "run", fake_run)
+    caplog.set_level("INFO", logger=git.logger.name)
+    full = _completed(stdout=f"false\n{HEAD_SHA}\n{FETCHED_SHA}\n")
+    dubious = (
+        "fatal: detected dubious ownership in repository at "
+        "'//wsl.localhost/dml-arch/home/dml/games/wow-server-playerbots/modules/mod-playerbots'"
+    )
+
+    # The fetch is refused. The warning above git's fatal line is not the reason, and neither
+    # is the advice under it.
+    refused = f"warning: unable to read the attributes file\n{dubious}\nTo add an exception:\n"
+    answers.append(_completed(returncode=128, stderr=refused))
+    assert impl.counted_behind(dest, None) == git.Counted(None, why=dubious)
+    logged = [r for r in caplog.records if r.levelname == "INFO" and dubious in r.getMessage()]
+    assert logged, "the refusal was not logged at INFO, so the app's log would not say why"
+
+    # The fetch lands and the count is refused.
+    count_refused = _completed(returncode=128, stderr="fatal: bad object 5555\n")
+    answers += [_completed(), full, count_refused]
+    assert impl.counted_behind(dest, None) == git.Counted(None, why="fatal: bad object 5555")
+
+    # A refusal with nothing written in it is the bare answer, as it always was.
+    answers.append(_completed(returncode=128, stderr="\n"))
     assert impl.counted_behind(dest, None) == git.Counted(None)
+    assert not answers
+
+
+def test_a_git_error_carries_only_the_words_git_wrote() -> None:
+    """T793: the reason is what git wrote after `exited <code>: `, and nothing Yu'lon wrote.
+
+    A refusal Yu'lon words itself (no Docker, a folder no distro can reach) and one with no
+    words in it give no reason. Of git's own lines, the first `fatal:` or `error:` is its verdict.
+    """
+    assert git._git_reason(git.GitError("git fetch origin HEAD exited 128: ")) is None
+    assert git._git_reason(git.GitError("git fetch exited 128: \n   \n")) is None
+    docker = "Docker is not installed. Install it and try again."
+    assert git._git_reason(git.GitError(docker)) is None
+    cut = git.GitError("git fetch exited 1:   Could not resolve host\n")
+    assert git._git_reason(cut) == "Could not resolve host"
+    remote = git.GitError("git fetch exited 1: remote: Not Found\nfatal: repo gone")
+    assert git._git_reason(remote) == "fatal: repo gone"
+    container = git.GitError(
+        "containerized git fetch origin x in /w exited 1: error: RPC failed\nfatal: early EOF\n"
+    )
+    assert git._git_reason(container) == "error: RPC failed"
 
 
 @pytest.mark.parametrize(
@@ -2468,7 +2543,9 @@ def test_counted_behind_names_the_two_real_commits_it_counted_between(tmp_path: 
     tip = up.publish()
 
     assert impl.counted_behind(spec.dest, None) == git.Counted(2, installed, tip)
-    assert impl.counted_behind(spec.dest, "no-such-branch") == git.Counted(None)
+    missing = impl.counted_behind(spec.dest, "no-such-branch")
+    assert missing.behind is None
+    assert missing.why == "fatal: couldn't find remote ref no-such-branch", missing
 
 
 @pytest.mark.skipif(not git.git_available(), reason="needs a host git to make a real checkout")

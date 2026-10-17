@@ -19,7 +19,7 @@ from __future__ import annotations
 import os
 import shutil
 import stat
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from yulon import links
@@ -34,6 +34,13 @@ class TreeRemovalError(OSError):
     An `OSError` rather than a bare `RuntimeError` so a caller that already
     catches `OSError` around a delete keeps catching this one, and the two
     `shutil.rmtree` failures it wraps stay the same kind of thing they were.
+    """
+
+
+class LinkRootRefused(TreeRemovalError):
+    """The root given to `remove_tree` is a symbolic link or junction (T721).
+
+    A subclass so a caller tells this refusal by type, never by its wording.
     """
 
 
@@ -63,6 +70,11 @@ def _unlink_link(path: str) -> None:
         # A directory link on Windows can need `rmdir`, which removes the link and
         # refuses (never empties) a real directory.
         os.rmdir(path)
+
+
+def remove_link(path: str) -> None:
+    """Remove a link or junction itself, never what it points at (T677)."""
+    _unlink_link(path)
 
 
 def _empty_stoppably(path: str, root: Path, stop: Callable[[], bool]) -> None:
@@ -131,17 +143,24 @@ def remove_tree(path: Path) -> None:
     success having deleted nothing is the failure this function exists to make
     impossible.
     """
-    if path.is_symlink():
-        # `shutil.rmtree` REFUSES a top-level directory symlink; the retry below
-        # would not. `_clear_read_only()` walks with `os.walk()` and chmods
-        # THROUGH the link, and `_remove_unenterable()` scandirs through it and
-        # can `os.rmdir()` on the far side -- so the recovery added for
-        # read-only git packs would reach outside the tree it was handed
-        # (review, 2026-09-13). Refused here rather than in each caller: this is
-        # the function that knows it is about to walk.
+    try:
+        linked = links.is_link(path)
+    except OSError as exc:
+        # Not `_is_link()`, whose cautious "a link" is right for a walk that then
+        # touches only the name, and false as a sentence about a root it could not see.
         raise TreeRemovalError(
-            f"{path} is a symbolic link, not a directory this app may delete through. "
-            f"Remove the link itself if that is what was meant; nothing was changed."
+            f"{path} could not be examined ({exc}), so it was not deleted; nothing was changed."
+        ) from exc
+    if linked:
+        # `shutil.rmtree` REFUSES a top-level directory symlink, and before the
+        # review of 2026-09-13 the retry below then walked through it and chmodded
+        # and `rmdir`-ed on the far side. A junction too (T705): `Path.is_symlink()`
+        # calls one a folder, so this asks `links`. The retry's own walks no longer
+        # enter a link either; the root is still refused here, by the function that
+        # knows it is about to walk, rather than in each caller.
+        raise LinkRootRefused(
+            f"{path} is a symbolic link or junction, not a directory this app may delete "
+            f"through. Remove the link itself if that is what was meant; nothing was changed."
         )
     try:
         shutil.rmtree(path)
@@ -155,6 +174,63 @@ def remove_tree(path: Path) -> None:
             raise TreeRemovalError(_undeletable(path, exc)) from exc
     if path.exists():
         raise TreeRemovalError(_undeletable(path, "it is still there afterwards"))
+
+
+def remove_tree_last(path: Path, last: Sequence[str]) -> None:
+    """`remove_tree(path)`, its folders first and the top-level names in `last` after all else.
+
+    T682: `shutil.rmtree` works in listing order, and on NTFS that is alphabetical, so an
+    install's own records at the top (`.yulon-install.json` among them) went before `src/`
+    and `.git`, where a removal actually stops (a held file, a read-only pack). The next
+    Uninstall then found no record and refused the folder as not Yu'lon's. Here every folder
+    goes first, then the other files at the top, then `last` in the order given, then the
+    folder itself: a removal that stops part-way leaves the records a second press reads.
+
+    A link or junction at the top is removed as a link, never entered. A root that is a link,
+    or not a folder, is `remove_tree()`'s to refuse.
+
+    Raises:
+        TreeRemovalError: as `remove_tree()`.
+    """
+    # `links`, not `Path.is_symlink()`: that calls a junction a folder (T713), and the walk
+    # below would empty the junction's target before `remove_tree` refused the root.
+    if _is_link(os.fspath(path)) or not path.is_dir():
+        remove_tree(path)
+        return
+    try:
+        with os.scandir(path) as listing:
+            entries = [entry for entry in listing if entry.name not in last]
+        folders = [e for e in entries if not _is_link(e.path) and e.is_dir(follow_symlinks=False)]
+    except OSError as exc:
+        raise TreeRemovalError(_undeletable(path, exc)) from exc
+    rest = [e for e in entries if e not in folders]
+    for entry in folders:
+        remove_tree(Path(entry.path))
+    for name in (*(e.name for e in rest), *last):
+        _remove_one(path / name)
+    remove_tree(path)
+
+
+def _remove_one(path: Path) -> None:
+    """Remove one top-level entry of `remove_tree_last()`; a name that is not there is fine."""
+    try:
+        if not os.path.lexists(path):
+            return
+        if _is_link(os.fspath(path)):
+            _unlink_link(os.fspath(path))
+        elif path.is_dir():
+            remove_tree(path)
+        else:
+            try:
+                os.unlink(path)
+            except PermissionError:
+                # Windows: a read-only file refuses its unlink until the bit is cleared.
+                os.chmod(path, stat.S_IREAD | stat.S_IWRITE)
+                os.unlink(path)
+    except TreeRemovalError:
+        raise
+    except OSError as exc:
+        raise TreeRemovalError(_undeletable(path, exc)) from exc
 
 
 def _undeletable(path: Path, problem: object) -> str:
@@ -209,6 +285,14 @@ def _remove_unenterable(path: Path) -> None:
                 logger.info(f"could not remove {current}, leaving it for the retry: {exc}")
             continue
         for entry in children:
+            if _is_link(entry.path):
+                # Never entered (T705): a junction answers `is_dir` and scandirs on its far
+                # side. `rmdir` takes the link itself, the `0xa000001d` case above included.
+                try:
+                    os.rmdir(entry.path)
+                except OSError:
+                    pass
+                continue
             try:
                 is_dir = entry.is_dir(follow_symlinks=False)
             except OSError:
@@ -226,7 +310,9 @@ def _clear_read_only(path: Path) -> None:
     walk, and a failure on any single entry is left for the retry to report
     against the tree rather than raised against one file.
     """
-    for root, dirs, files in os.walk(path):
+    # `links.walk`, not `os.walk` (T705): on Python 3.11 under Windows `os.walk` goes
+    # through a junction and would clear the flags of the files it points at.
+    for root, dirs, files, _linked in links.walk(path):
         for name in (*dirs, *files):
             target = Path(root) / name
             try:

@@ -18,6 +18,8 @@ Phase 2.3's `modules.py`, layered on later, never stubbed in this class.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,10 +30,11 @@ from yulon import (
     forgetting,
     platform,
     playerbots_rename,
+    seeded_accounts,
     server_build_gone,
     wsl,
 )
-from yulon.catalog import composegen, native, time_zone, world_data
+from yulon.catalog import composegen, installer, native, preflight, time_zone, world_data
 from yulon.catalog.catalog import CatalogEntry, load_catalog
 from yulon.log import get_logger
 from yulon.said import SaidByYulon
@@ -42,6 +45,18 @@ logger = get_logger(__name__)
 # auth/world. Shorter than a first-boot import (that path goes through
 # `compose up` instead): this is a restart of containers that already exist.
 _START_DB_HEALTH_TIMEOUT = 120.0
+
+_REBIND_PAUSE = 1.0
+"""How long Start's port probe waits before it binds a refused port a second time (T671).
+
+A server stopped a moment ago (a Restart's own stop, "Stop the other server") may
+not have handed its listener back yet; a port still taken after this is taken."""
+
+PRESS_RESTART = "Restart the server"
+"""How `Controller.restart()`'s reservation names it to another Yu'lon (T761)."""
+
+PRESS_RECREATE = "Remove the server's containers"
+"""How `Controller.recreate()`'s reservation names it to another Yu'lon (T761)."""
 
 
 def _catalog_specs() -> tuple[docker.ContainerSpec, ...]:
@@ -128,6 +143,24 @@ class StartRefused(RuntimeError, SaidByYulon):
     """
 
 
+class PortTaken(StartRefused):
+    """A Start refused because a host port this server publishes cannot be bound (T671).
+
+    Found by binding each port no container publishes BEFORE anything starts, so the
+    refusal leaves nothing half up. The message names the port, what it is for and,
+    where the OS says, the program holding it; `detail` is the bind's own answer.
+    """
+
+    def __init__(self, message: str, *, detail: str) -> None:
+        super().__init__(message)
+        self.detail = detail
+
+
+def bind_host_port(host: str, port: int) -> platform.PortBind:
+    """Bind `host:port` and let go: Start's probe of a port no container holds (T671)."""
+    return platform.bind_tcp(host, port)
+
+
 class ComposeTooOld(StartRefused):
     """A Start refused because this machine's Docker Compose cannot run it (T658).
 
@@ -164,6 +197,24 @@ IMPORT_ENDED = (
     "unfinished. Nothing was started. Press **Repair** to clear them and import again."
 )
 
+UNFINISHED_IMPORT_WROTE_DETAIL = (
+    "the first database import did not finish, and what it wrote before it stopped is "
+    "cleared and imported again"
+)
+"""The import state's detail when that import left rows (T678 review round 2)."""
+
+FIRST_IMPORT_UNFINISHED = (
+    "This server's first database import did not finish, so its databases are unfinished, "
+    "whatever rows it wrote before it stopped. Nothing was started. Press **Repair** to clear "
+    "what it wrote and import again."
+)
+"""Start's refusal for that case (owner decision, 2026-10-11: refuse and offer a clean redo)."""
+
+
+def unfinished_import_wrote(state: docker.ImportState) -> bool:
+    """Whether `Controller.import_state()` read rows an unfinished first import wrote (T678)."""
+    return state.detail.startswith(UNFINISHED_IMPORT_WROTE_DETAIL)
+
 
 class DatabaseMissing(StartRefused):
     """Raised by `Controller.start()` when Docker no longer has this server's database (T377).
@@ -194,8 +245,12 @@ class Controller:
         pre_stop: Callable[[], object] | None = None,
         start_guard: Callable[[], str | None] | None = None,
         before_servers: Callable[[], str | None] | None = None,
+        safety_copy: Callable[[], str] | None = None,
     ) -> None:
         self.spec = spec
+        # T678 review round 3: dumps the core databases and says where, before Repair
+        # clears what an unfinished first import wrote; that clear is refused without it.
+        self.safety_copy = safety_copy
         # A family's last word before its servers start, asked once every
         # refusal has passed -- the port check and the missing database (T377)
         # included, so it may write to the database without recreating one
@@ -255,6 +310,9 @@ class Controller:
         # The line the last `start()` said when it renamed the server's bot settings to
         # the prefix its mod-playerbots reads (T657): `None` when there was nothing to do.
         self.bot_settings_renamed: str | None = None
+        # The line the last `start()` said about CMaNGOS's built-in accounts (T668): they were
+        # locked, or could not be and still log in with their own name. `None` when nothing.
+        self.seeded_accounts_locked: str | None = None
         # The catalog entry this install is, where the subclass knows it (T179).
         # `None` reads it off the shipped catalog by container names
         # (`_entry_for`), which every game but one in the making can answer.
@@ -334,8 +392,33 @@ class Controller:
             return
         self._hold = wsl.hold(self.wsl_distro, self.spec.world)
 
+    def host_ports(self) -> list[tuple[str, int, str]]:
+        """`(address, port, what)` for every host port this server publishes (T671).
+
+        The install preflight's own list (`preflight.bind_targets()`): auth, world,
+        SOAP or command channel, and the database, with a port `.env` moves (the
+        port-conflict remedy's `DOCKER_DB_EXTERNAL_PORT`) moved with it. Every
+        database but WoW Unbound's publishes 3306, so a database another server
+        left up alone blocks this one as surely as its world does. A game the
+        catalog does not know is its `ContainerSpec.ports`, as before.
+        """
+        entry = self.entry or _entry_for(self.spec)
+        if entry is None:
+            return [("0.0.0.0", port, "") for port in self.spec.ports]
+        targets, problems = preflight.bind_targets(entry, self.server_dir)
+        for problem in problems:
+            logger.info(f"port check: {problem}")
+        return targets
+
+    def _port_numbers(self) -> tuple[int, ...]:
+        return tuple(dict.fromkeys(port for _host, port, _what in self.host_ports()))
+
     def port_conflicts(self) -> list[str]:
         """Return *foreign* running containers binding this install's ports.
+
+        Every host port it publishes (`host_ports()`), the database's too (T671):
+        another server's database running alone is a conflict, and the one
+        "Stop the other server" has to stop.
 
         `yulon.docker.port_conflicts_for()` is a global scan that also reports
         this install's own containers (e.g. mid-restart). Those are not a
@@ -354,11 +437,73 @@ class Controller:
         then reports the daemon's own "container name is already in use".
         """
         own = {self.spec.db, self.spec.auth, self.spec.world}
+        every = dataclasses.replace(self.spec, ports=self._port_numbers())
         return [
             name
-            for name in docker.port_conflicts_for(self.spec, wsl_distro=self.wsl_distro)
+            for name in docker.port_conflicts_for(every, wsl_distro=self.wsl_distro)
             if name not in own
         ]
+
+    def _ports_taken_by(self, containers: list[str]) -> tuple[int, ...]:
+        """The ports of ours that `containers` publish, for the sentence; all of them if unread."""
+        ports = self._port_numbers()
+        try:
+            published = docker.port_publishers(ports, wsl_distro=self.wsl_distro)
+        except docker.DockerCommandError:
+            return ports
+        taken = tuple(p for p in ports if set(published.get(p, ())) & set(containers))
+        return taken or ports
+
+    def refuse_a_taken_port(self) -> None:
+        """Raise `PortTaken` when the OS will not let a port of this server be bound (T671).
+
+        Asked before anything starts, so a refusal leaves nothing half up: compose
+        used to start the database and world and then fail on the login port. Each
+        port is bound and let go (`bind_host_port()`, the install preflight's own
+        probe); one a container publishes is Docker's, not a program's, and is left
+        alone (a foreign container was refused by name already). A refused port is
+        bound once more after `_REBIND_PAUSE`. The sentence names the port, what it
+        is for and, where the OS says, the program holding it.
+
+        A server inside a WSL distro publishes inside that distro: a loopback port
+        there (the database, SOAP, the channel) is the distro's own and is not this
+        host's to bind, so a Windows program on 3306 never stopped such a server and
+        is not asked about. Its auth and world ports, on every interface, still are
+        (cold review of T671). A Docker that cannot say who publishes a refused port
+        is "cannot tell": that port refuses nothing here, and compose says the rest.
+        """
+        windows = platform.detect() == "windows"
+        published: dict[int, tuple[str, ...]] | None = None
+        targets = self.host_ports()
+        if self.wsl_distro is not None:
+            targets = [t for t in targets if t[0] != preflight.LOOPBACK]
+        for host, port, what in targets:
+            got = bind_host_port(host, port)
+            if got.status not in ("in_use", "reserved"):
+                continue
+            if published is None:
+                try:
+                    published = docker.port_publishers(
+                        [p for _h, p, _w in targets], wsl_distro=self.wsl_distro
+                    )
+                except docker.DockerCommandError as exc:
+                    logger.info(f"port check: cannot tell who holds {port}: {exc}")
+                    return
+            if port in published:
+                continue
+            time.sleep(_REBIND_PAUSE)
+            got = bind_host_port(host, port)
+            if got.status not in ("in_use", "reserved"):
+                continue
+            program = platform.listening_program(port) if got.status == "in_use" else None
+            sentence = docker.blocked_port_sentence(
+                port, got.status, windows=windows, what=what, program=program or ""
+            )
+            logger.warning(f"start() refused: binding {host}:{port} answered {got.status}")
+            # "bind" and the port on one line: the Server tab's channel rollback reads it.
+            raise PortTaken(
+                sentence, detail=f"binding {host}:{port} ({what or 'port'}): {got.detail}"
+            )
 
     # -- lifecycle -------------------------------------------------------
 
@@ -373,7 +518,8 @@ class Controller:
 
         Raises:
             PortConflictError: A container that is not part of this install
-                already binds one of `spec.ports`. Nothing is started.
+                already binds one of its host ports (`host_ports()`). Nothing is started.
+            PortTaken: A program holds one of them. Nothing is started.
             docker.DockerCommandError: The `docker` CLI itself failed.
             StartRefused: `start_guard` gave a reason. Nothing is started.
             DatabaseMissing: Docker no longer has this server's database
@@ -389,16 +535,23 @@ class Controller:
             press=forgetting.PRESS_START,
             spec=self.spec,
             wsl_distro=self.wsl_distro,
+            # T775: the app's give-up ends a wait for a stopped distro to boot. A Start has no
+            # Cancel button of its own yet; `stop_control.abandon` is the only event it can hear.
+            cancel=None if self.stop_control is None else self.stop_control.abandon,
         ):
             self.refuse_start()
             self.refuse_an_old_compose()
             conflicts = self.port_conflicts()
             if conflicts:
-                logger.warning(f"start() refused: ports {self.spec.ports} bound by {conflicts}")
-                raise PortConflictError(conflicts, self.spec.ports, self._owners_of(conflicts))
+                taken = self._ports_taken_by(conflicts)
+                logger.warning(f"start() refused: ports {taken} bound by {conflicts}")
+                raise PortConflictError(conflicts, taken, self._owners_of(conflicts))
+            self.refuse_a_taken_port()
             self.bot_settings_renamed = None
+            self.seeded_accounts_locked = None
             self.refuse_a_missing_image()
             self.refuse_a_missing_database()
+            self.refuse_an_unfinished_install()
             self.refuse_an_ended_import()
             if not asked_before_the_servers:
                 self._ask_before_the_servers()
@@ -407,6 +560,8 @@ class Controller:
             # cannot be written refuses here, with the database `refuse_a_missing_database`
             # started left up, as a refused `before_servers` answer leaves it.
             self.bot_settings_renamed = self._rename_bot_settings()
+            # T668: the database is up (`refuse_a_missing_database`); never refuses a start.
+            self.seeded_accounts_locked = self._lock_seeded_accounts()
             self._before_the_servers_start()
             self.zone_problem = self._put_back_the_zone_file()
             # The map-data fingerprint was written by `refuse_start()` above (T219).
@@ -436,6 +591,66 @@ class Controller:
             logger.warning(f"start() refused: {exc}")
             raise StartRefused(str(exc)) from exc
 
+    def _lock_seeded_accounts(self) -> str | None:
+        """T668: CMaNGOS's four built-in accounts given random passwords; the line to say or None.
+
+        TBC and Vanilla only (`seeded_accounts.settle()` asks no other core anything), and
+        only rows still holding the seeded password. Never raises.
+        """
+        entry = self.entry or _entry_for(self.spec)
+        if entry is None:
+            return None
+        return seeded_accounts.settle(entry, self.spec, self.server_dir, wsl_distro=self.wsl_distro)
+
+    def lock_seeded_accounts_if_up(self) -> str | None:
+        """T668: the same lock for a server whose database is already running; the line or None.
+
+        For the app opening on a server Docker restarted by itself. Asks `status()` (the read
+        the status poll makes, a stopped WSL distro included) and does nothing while the
+        database is down; starts nothing. A note said earlier stays on `seeded_accounts_locked`
+        until the next Start. Nothing for a core that does not seed the accounts.
+
+        Raises:
+            docker.ServerHeldError: a job or another Yu'lon holds the server (T716); nothing
+            was written and the poll asks again.
+        """
+        entry = self.entry or _entry_for(self.spec)
+        if entry is None or entry.accounts.scheme != seeded_accounts.SCHEME:
+            return None
+        if not self.status().db:
+            return None
+        # T716: a write to the auth database is a press on the server like the Accounts tab's.
+        # A job of this process holding it is asked first, so the poll's expected refusal is
+        # not logged as a warning every five seconds.
+        held = docker.held_reason(self.server_dir)
+        if held is not None:
+            raise docker.ServerHeldError(held)
+        try:
+            with docker.server_hold(
+                self.server_dir,
+                "Locking the built-in accounts",
+                spec=self.spec,
+                wsl_distro=self.wsl_distro,
+            ):
+                said = seeded_accounts.settle(
+                    entry,
+                    self.spec,
+                    self.server_dir,
+                    wsl_distro=self.wsl_distro,
+                    start_database=False,
+                )
+        except docker.ServerReservationUnavailable as exc:
+            # No reservation could be made: not a wait, so the player is told as before.
+            logger.warning(f"{entry.id}: the seeded accounts were not locked: {exc}")
+            first = str(exc).strip().splitlines()
+            said = seeded_accounts.NOT_LOCKED.format(why=first[0] if first else "no reservation")
+        if said is not None:
+            self.seeded_accounts_locked = said
+        elif seeded_accounts.is_not_locked(self.seeded_accounts_locked):
+            # T718: an earlier try failed (database not ready); this one found nothing seeded.
+            self.seeded_accounts_locked = None
+        return said
+
     def refuse_an_old_compose(self) -> None:
         """Raise `StartRefused` when this machine's Compose is one that stops every Start (T658).
 
@@ -458,6 +673,27 @@ class Controller:
                 reason, offer=platform.compose_update_offered(wsl_distro=self.wsl_distro)
             )
 
+    def refuse_an_unfinished_install(self) -> None:
+        """Raise `StartRefused` for a CMaNGOS or Centurion install that did not finish installing.
+
+        T755. "Use existing…" could take a folder whose install was stopped during
+        its import, and these games' login tables read `present` long before the
+        world is in, so Start ran on a half-imported world. Refused only when Yu'lon's
+        own record says the import never finished AND the family's import gate reads
+        the databases `absent` or `partial` (`installer.unfinished_install_refusal()`);
+        a played world, a finished import or a database that cannot be asked starts as
+        before. After `refuse_a_missing_database()`, which has the database up.
+        """
+        entry = self.entry or _entry_for(self.spec)
+        if entry is None:
+            return
+        reason = installer.unfinished_install_refusal(
+            entry, self.server_dir, wsl_distro=self.wsl_distro
+        )
+        if reason:
+            logger.warning(f"start() refused: {reason}")
+            raise StartRefused(reason)
+
     def refuse_an_ended_import(self) -> None:
         """Raise `ImportEnded` while this server's last import stands cut off (T658).
 
@@ -474,6 +710,11 @@ class Controller:
         if state.detail == ENDED_IMPORT_DETAIL:
             logger.warning(f"start() refused: {IMPORT_ENDED}")
             raise ImportEnded(IMPORT_ENDED, state=state)
+        if unfinished_import_wrote(state):
+            # T678 review round 2: rows a first import wrote before it died (City Bots'
+            # accounts), with the world half-imported; never a player's (see Repair).
+            logger.warning(f"start() refused: {FIRST_IMPORT_UNFINISHED}")
+            raise ImportEnded(FIRST_IMPORT_UNFINISHED, state=state)
 
     def refuse_a_missing_image(self) -> None:
         """Raise `StartRefused` when Docker no longer has this server's built image (T627).
@@ -611,13 +852,27 @@ class Controller:
             for candidate in siblings if siblings is not None else [name]:
                 if candidate not in to_stop:
                     to_stop.append(candidate)
-        logger.info(f"stopping the server(s) holding {self.spec.ports}: {to_stop}")
+        in_the_way = self._servers_in_the_way(to_stop)
+        for folder in in_the_way:
+            # T671: a database left up alone may be a restore's or a backup's of this
+            # process, whose reservation of that folder would let this stop through.
+            held = docker.held_reason(folder)
+            if held:
+                logger.warning(f"not stopping {folder}: {held}")
+                raise docker.ServerHeldError(held)
+            # T714: a restore load another Yu'lon left running ("Quit anyway") holds nothing
+            # here, and only its record says it is still writing.
+            loading = native.restore_still_loading(folder)
+            if loading:
+                logger.warning(f"not stopping {folder}: {loading}")
+                raise docker.ServerHeldError(loading)
+        logger.info(f"stopping the server(s) holding {self._port_numbers()}: {to_stop}")
         self._fresh_stop()
         # T568: the OTHER server is another Yu'lon's to be working on too. Its folder is
         # reserved for the stop, so a rebuild running there is refused with its holder's
         # sentence, and nothing is stopped.
         with contextlib.ExitStack() as reserved:
-            for folder, container in self._servers_in_the_way(to_stop).items():
+            for folder, container in in_the_way.items():
                 try:
                     reserved.enter_context(
                         docker.server_claim(
@@ -634,6 +889,9 @@ class Controller:
                     if not unavailable.moot:
                         raise
                     logger.warning(f"stopping {folder} unreserved: {unavailable}")
+            # T754: a database import that server runs is ended, and recorded in ITS
+            # folder, before the stop below ends it unrecorded.
+            self._end_their_imports(to_stop)
             # The catalogue's specs, so a blocker that is another game's world is
             # waited for if it is still loading (T158): a server started a minute
             # ago is the likeliest one to be holding the ports.
@@ -652,6 +910,34 @@ class Controller:
                     f"the hold that kept {self.wsl_distro} open for {to_stop} may still be in place"
                 )
         return to_stop
+
+    def _end_their_imports(self, containers: list[str]) -> None:
+        """End each running database import among `containers`, recorded in its folder (T754).
+
+        `docker.stop_containers()` ends an importer with `docker stop` and writes
+        nothing, so the other server's next Start ran on half-imported schemas that
+        read `imported`. `end_one_shot(record_ended=True)` writes T658's record into
+        the folder compose stamped on the importer, where that server's own tab reads
+        it, and only for one it finds running: `containers` lists exited ones too.
+        Its compose names the container after the service (`ac-db-import`), which is
+        how one is told among `containers`. Never raises; a folder this host cannot
+        see is logged and the stop goes on.
+        """
+        importers = {spec.import_service for spec in _catalog_specs() if spec.import_service}
+        for name in containers:
+            if name not in importers:
+                continue
+            try:
+                working = docker.container_working_dir(name, wsl_distro=self.wsl_distro)
+            except docker.DockerCommandError:
+                working = None
+            folder = self._visible_folder(working)
+            if folder is None:
+                logger.warning(f"no folder this host can see for {name} ({working!r}); unrecorded")
+                continue
+            left = docker.end_one_shot(name, folder, wsl_distro=self.wsl_distro, record_ended=True)
+            if left is not None:
+                logger.warning(f"{name} could not be ended before the stop: {left.reason}")
 
     def _servers_in_the_way(self, containers: list[str]) -> dict[Path, str]:
         """The server folders (by compose working dir) of `containers`, each with one container.
@@ -742,6 +1028,7 @@ class Controller:
         self.refuse_an_old_compose()
         self.refuse_a_missing_image()
         self.refuse_a_missing_database()
+        self.refuse_an_unfinished_install()
         self.refuse_an_ended_import()
         self._ask_before_the_servers()
 
@@ -773,6 +1060,7 @@ class Controller:
             self.refuse_an_old_compose()
             self.refuse_a_missing_image()
             self.refuse_a_missing_database()
+            self.refuse_an_unfinished_install()
             self.refuse_an_ended_import()
             asked = not self.port_conflicts()
             if asked:
@@ -837,6 +1125,69 @@ class Controller:
             self.spec, self.server_dir, wsl_distro=self.wsl_distro, control=self.stop_control
         )
         self._let_the_distro_go(removed)
+        return removed
+
+    def restart(
+        self,
+        *,
+        stopping: Callable[[], None] | None = None,
+        stopped: Callable[[], None] | None = None,
+    ) -> bool:
+        """Stop, then start, as ONE lifecycle command reserved before anything is asked (T761).
+
+        The reservation comes first, as `start()`'s does (T568): `refuse_before_a_stop()`
+        starts the database and sends `before_servers` (the realm-port UPDATE), so asked
+        outside it, a Restart under another Yu'lon's job wrote to that server before it was
+        refused. Then every start refusal, before the stop, so a refusal leaves a running
+        world running (T179, T377). One command from the stop to the start (T216 review
+        round 3), so a restore cannot take its hold between them.
+
+        `stopping` is called once every refusal has passed, just before the stop; `stopped`
+        once the stop has returned, before the start. Both on the calling thread. They tell a
+        caller which half raised: neither called, nothing changed; `stopping` only, the stop
+        raised and nothing was started; both, the start raised.
+
+        Returns:
+            What `stop()` returned: True if something of this install was running.
+
+        Raises:
+            docker.ServerHeldError: a job of this process or another Yu'lon holds the
+                server; nothing was asked or changed.
+            StartRefused, DatabaseMissing, ImportEnded: a start refusal; nothing was stopped.
+        """
+        with docker.lifecycle(
+            self.server_dir, press=PRESS_RESTART, spec=self.spec, wsl_distro=self.wsl_distro
+        ):
+            self.refuse_before_a_stop()
+            if stopping is not None:
+                stopping()
+            was_up = self.stop()
+            if stopped is not None:
+                stopped()
+            self.start()
+        return was_up
+
+    def recreate(self) -> bool:
+        """Remove the containers, then start: `restart()` with `remove()` for its stop (T761).
+
+        `remove()` keeps every volume, so the characters are not touched and the start
+        creates the containers again with the current environment and conf files.
+        Reserved before anything is asked, and one lifecycle command, as `restart()` is:
+        a gap between the two would leave the server removed.
+
+        Returns:
+            What `remove()` returned: True if this install had containers.
+
+        Raises:
+            docker.ServerHeldError: the server is held; nothing was asked or changed.
+            StartRefused, DatabaseMissing, ImportEnded: a start refusal; nothing was removed.
+        """
+        with docker.lifecycle(
+            self.server_dir, press=PRESS_RECREATE, spec=self.spec, wsl_distro=self.wsl_distro
+        ):
+            self.refuse_before_a_stop()
+            removed = self.remove()
+            self.start()
         return removed
 
     def _fresh_stop(self) -> None:
@@ -904,6 +1255,18 @@ class Controller:
             # T658: a cut-off import can read `imported`; it is `partial`, so Repair is offered,
             # and Repair clears it whole (`docker.repair_import()` reads the same record).
             return docker.ImportState("partial", ENDED_IMPORT_DETAIL)
+        if (
+            service
+            and state.state == "populated"
+            and docker.import_record_is_from_empty(self.server_dir, service)
+        ):
+            # T678 review round 2: rows written by a first import that never finished, so
+            # Repair is offered; `docker.repair_import()` clears them under the same record.
+            return docker.ImportState(
+                "partial",
+                f"{UNFINISHED_IMPORT_WROTE_DETAIL} ({state.detail})",
+                characters=state.characters,
+            )
         return state
 
     def repair_import(self, output: docker.OutputSink | None = None) -> bool:
@@ -934,6 +1297,7 @@ class Controller:
             self.import_probe,
             reset=self.reset_unfinished,
             output=output,
+            safety_copy=self.safety_copy,
             wsl_distro=self.wsl_distro,
         )
 

@@ -9,8 +9,12 @@ the download for ever — and even that is measured rather than asserted tightly
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import http.server
+import threading
 import time
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -289,6 +293,56 @@ def test_a_stale_part_file_from_an_earlier_attempt_is_overwritten(tmp_path: Path
     assert not part.exists()
 
 
+def test_a_digest_is_checked_on_the_part_before_anything_wears_the_real_name(
+    tmp_path: Path,
+) -> None:
+    """T745: unverified bytes never sit under the real name, and what was there is kept."""
+    dest = tmp_path / "Yulon.tar.gz"
+    dest.write_bytes(b"what was here before")
+    with pytest.raises(UpdateError, match="checksum does not match"):
+        download(
+            "https://github.com/x/y/releases/download/v1/Yulon.tar.gz",
+            dest,
+            expected_size=3,
+            progress=_nothing,
+            cancelled=_never,
+            open_url=_opener(_Response([b"bad"])),
+            digest=hashlib.sha256(b"new").hexdigest(),
+        )
+    assert dest.read_bytes() == b"what was here before"
+    assert sorted(p.name for p in tmp_path.iterdir()) == [dest.name], "the .part was left"
+
+
+@pytest.mark.parametrize(
+    ("name", "free"),
+    [
+        ("Yulon-v1-x86_64.tar.gz", "Yulon-v1-x86_64 (1).tar.gz"),
+        ("Yulon-v1-macos.dmg", "Yulon-v1-macos (1).dmg"),
+        ("Yulon-v1-x86_64.AppImage", "Yulon-v1-x86_64 (1).AppImage"),
+        ("Yulon-v1-windows-x64.zip", "Yulon-v1-windows-x64 (1).zip"),
+    ],
+)
+def test_keeping_what_is_there_saves_under_the_next_free_name(
+    tmp_path: Path, name: str, free: str
+) -> None:
+    dest = tmp_path / name
+    dest.write_bytes(b"the player's")
+    out = download(
+        f"https://github.com/x/y/releases/download/v1/{name}",
+        dest,
+        expected_size=3,
+        progress=_nothing,
+        cancelled=_never,
+        open_url=_opener(_Response([b"new"])),
+        digest=hashlib.sha256(b"new").hexdigest(),
+        keep_existing=True,
+    )
+    assert out == tmp_path / free
+    assert out.read_bytes() == b"new"
+    assert dest.read_bytes() == b"the player's"
+    assert sorted(p.name for p in tmp_path.iterdir()) == sorted([name, free])
+
+
 # -- sha256 and verify -------------------------------------------------------
 
 
@@ -452,3 +506,65 @@ def test_a_name_listed_twice_with_the_SAME_digest_is_not_a_conflict() -> None:
 
 def test_a_duplicate_is_an_update_error_so_the_dialog_can_show_it() -> None:
     assert issubclass(DuplicateName, UpdateError)
+
+
+# -- the real opener, against a real server: a redirect off https (T705: S4) ---------------
+
+
+@contextlib.contextmanager
+def _a_server_that_redirects_to(target_path: str) -> Iterator[str]:
+    """A plain-http server on loopback: `/release` answers 302 to `target_path`, which serves.
+
+    The 302 names a plain `http://` address, as a captive portal or anyone on the path would.
+    """
+    served: list[str] = []
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802 - the stdlib's name
+            served.append(self.path)
+            if self.path == "/release":
+                self.send_response(302)
+                self.send_header("Location", f"http://127.0.0.1:{port}{target_path}")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            body = b"NOT THE RELEASE"
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args: object) -> None:
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{port}/release"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(5)
+    assert "/mirror/x.zip" not in served, "the redirect off https was followed"
+
+
+def test_the_self_updater_never_follows_a_redirect_off_https(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mutation this catches (S4): the `scheme != "https"` refusal removed from the redirect rule.
+
+    The real opener `download()` uses (`fetch._open`), and a real server whose 302 names a
+    plain `http://` address. urllib's own handler follows http, https and ftp. The first
+    address is plain http too, only because a loopback server has no certificate the
+    verified context would take; the rule judges the redirect's target alone.
+    """
+    # The loopback server must be asked directly: a proxy in the environment (urllib's
+    # `getproxies()`, `http_proxy` with no `no_proxy`) would answer instead of it.
+    for name in ("http_proxy", "https_proxy", "all_proxy", "no_proxy"):
+        monkeypatch.delenv(name, raising=False)
+        monkeypatch.delenv(name.upper(), raising=False)
+    with _a_server_that_redirects_to("/mirror/x.zip") as url:
+        with pytest.raises(fetch.UpdateError, match="off https"):
+            fetch._open(url, _Deadline(10.0))

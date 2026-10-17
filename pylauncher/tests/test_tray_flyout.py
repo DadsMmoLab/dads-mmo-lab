@@ -94,12 +94,13 @@ def test_the_flyout_sits_by_the_icon_and_inside_the_screen() -> None:
 # ----------------------------------------------------------------- the cards
 
 
-def test_play_opens_that_servers_client_launcher(tray: YulonTray, window: FakeWindow) -> None:
-    _add(window, FakeView("WotLK", "/srv/a", "running"))
+def test_play_plays_that_server(tray: YulonTray, window: FakeWindow) -> None:
+    view = _add(window, FakeView("WotLK", "/srv/a", "running"))
     flyout = _open(tray)
     _card(flyout, "WotLK").action.click()
-    assert window.opened == [("game-wotlk", Path("/srv/a"))]
-    assert not flyout.isVisible(), "the flyout stayed over the launcher it opened"
+    assert view.played == 1
+    assert window.opened == [], "T694: Play opened the launcher instead of playing"
+    assert not flyout.isVisible(), "the flyout stayed over the game it started"
 
 
 def test_the_footer_opens_yulon_and_quits(tray: YulonTray, window: FakeWindow) -> None:
@@ -151,9 +152,10 @@ def test_the_flyout_is_driven_by_the_pad(tray: YulonTray, window: FakeWindow) ->
     assert navigator.navigate(Direction.DOWN)
     assert QApplication.focusWidget() is _card(flyout, "Vanilla").action
     navigator.perform(Action.CONFIRM)
-    assert window.yulon_controllers[1].starts == 1
-    assert navigator.perform(Action.BACK)
-    assert not flyout.isVisible()
+    # T697: a stopped server's first button is Play (it starts the server, then plays).
+    assert window.yulon_controllers[1].played == 1
+    # B closing it is `test_tray_panel.py`'s pad test; Play has closed it here already.
+    assert not flyout.isVisible(), "Play leaves the flyout, like the online row's Play"
     navigator.deleteLater()
 
 

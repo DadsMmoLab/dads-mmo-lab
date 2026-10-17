@@ -11,6 +11,9 @@ AzerothCore's environment override follows the key (`Config.cpp` IniKeyToEnvVarK
 79bd4281 (887 and 888 assignment keys, commented ones included), with `AiPlayerbot.`
 read as `Playerbots.`, differ in three keys and none is a rename: `FleeingEnabled`
 went (2bd0f91b), `ReactStrategies` and `RandomBotReactStrategies` came (7fa0623c).
+The tip the catalog pins since v0.9.18, d750b4b3 (891 keys), adds three more and renames
+none: `RandomBotJoinLfgOutleveledExpansion`, `AllowBattlegroundCommands` and
+`RpgStatusProbWeight.DoGather`, all under `Playerbots.`.
 The `GetOption` literals in `src/` agree (395 and 396). So a key's own name is kept
 and its prefix is swapped, in both directions.
 

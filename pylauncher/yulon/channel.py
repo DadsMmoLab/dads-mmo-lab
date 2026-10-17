@@ -74,6 +74,15 @@ class Answer:
     rotation and change nothing.
     """
 
+    reached: bool = True
+    """False only when nothing was listening: the connect was refused or reset (T723).
+
+    Such an ask never reached the world, so the setup does not count it as one
+    of its proving tries. A timeout and a "took it and hung up" DO reach it (a
+    listener accepted; on CMaNGOS the second is what a refusal looks like), so
+    they stay counted and a channel that never answers still gives up.
+    """
+
     @property
     def known(self) -> bool:
         return self.outcome in ("yes", "no")
@@ -252,6 +261,7 @@ class SoapChannel:
             reply.text,
             reason=self._why(reply.outcome),
             indeterminate=reply.outcome == "timeout",
+            reached=reply.outcome != "unreachable",
         )
 
     def _why(self, outcome: str) -> str:

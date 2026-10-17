@@ -77,6 +77,15 @@ RESTORE_HOLDS_THE_SERVER = (
     "would leave the databases half-written. Wait for the restore to finish, then try "
     "again. Nothing was started or stopped."
 )
+# T737: what a Pack or Bring in is told while that restore holds the server (`move_flows`'s
+# `move_held_reason()`). The sentence above is about starting and stopping, which a move asks
+# neither of; a move's own reason is what it would read or write.
+RESTORE_HOLDS_A_MOVE = (
+    "A restore is writing into this server's databases on its Maintenance tab. Packing them "
+    "now would take a half-restored copy, and bringing a move in would write over what is "
+    "being restored. Wait for the restore to finish, then try again. Nothing was packed or "
+    "brought in."
+)
 BACKUP_HOLDS_THE_SERVER = (
     "A backup is running on this server's Maintenance tab with the database started on its "
     "own for it, and the database is stopped again when the backup ends. Wait for the "
@@ -92,6 +101,32 @@ RESTORE_HOLDS_THE_DATABASES = (
     "A restore is writing into this server's databases on its Maintenance tab. Wait for "
     "it to finish, then try again."
 )
+# T681: what every other press of this Yu'lon that would write to the server is told while a
+# Restore loads (`docker.hold_the_server(alone=...)`): a Modules job's SQL, an account, a network
+# change, a bot rebuild. Nothing it would have written was written.
+RESTORE_WRITES_ALONE = (
+    "A restore is writing into this server's databases on its Maintenance tab, and nothing "
+    "else may write to them until it has finished. Wait for the restore to finish, then try "
+    "again. Nothing was changed."
+)
+
+
+MOVE_WRITES_ALONE = (
+    "Accounts and characters are being brought in on this server's Maintenance tab, and "
+    "nothing else may write to its databases until that has finished. Wait for it to finish, "
+    "then try again. Nothing was changed."
+)
+"""T681 review: a bring-in's load is a restore's load; every other writer waits for it."""
+
+
+def another_press_writes(press: str) -> str:
+    """Why a Restore is refused while another press of this Yu'lon works on the server (T681)."""
+    return (
+        f"{press} is working on this server right now, and a restore must be the only thing "
+        "writing to its databases. Wait for it to finish, then try again."
+    )
+
+
 MOVE_HOLDS_THE_SERVER = (
     "Accounts and characters are being packed or brought in on this server's Maintenance tab, "
     "with the database started on its own for it. Wait for that to finish, then try again. "
@@ -100,6 +135,32 @@ MOVE_HOLDS_THE_SERVER = (
 MOVE_HOLDS_THE_DATABASES = (
     "Accounts and characters are being packed or brought in on this server's Maintenance "
     "tab. Wait for that to finish, then try again."
+)
+# T737: the same three for a whole-server bring-in (the Catalog tile's "Bring from another
+# computer…") while it puts the databases in: it is not on the Maintenance tab, and it brings
+# in the whole server, not accounts and characters.
+MOVE_IN_HOLDS_THE_SERVER = (
+    "This server is being brought in from another computer, and its databases are being put "
+    "in with the database started on its own for it. Wait for that to finish, then try again. "
+    "Nothing was started or stopped."
+)
+# T738: what a Pack, a Bring in, or a second "Bring from another computer…" on the same folder
+# is told during that load (`move_flows.move_held_reason()`). The sentence above ends in a
+# Start's or Stop's words; a move neither starts nor stops anything.
+MOVE_IN_HOLDS_A_MOVE = (
+    "This server is being brought in from another computer, and its databases are being put "
+    "in. Packing them now would take a half-made copy, and bringing a move in would write "
+    "over what is being put in. Wait for that to finish, then try again. Nothing was packed "
+    "or brought in."
+)
+MOVE_IN_HOLDS_THE_DATABASES = (
+    "This server is being brought in from another computer, and its databases are being put "
+    "in. Wait for that to finish, then try again."
+)
+MOVE_IN_WRITES_ALONE = (
+    "This server is being brought in from another computer, and nothing else may write to its "
+    "databases while they are being put in. Wait for that to finish, then try again. Nothing "
+    "was changed."
 )
 MOVE_RUNNING = (
     "Accounts and characters are being packed or brought in on this server's Maintenance "
@@ -112,6 +173,10 @@ PRESS_DELETE_BACKUPS = "Delete backups"
 DELETE_HOLDS_THE_DATABASES = (
     "Old backups are being deleted on this server's Maintenance tab. Wait for that to "
     "finish, then try again."
+)
+TUNING_RUNNING = (
+    "A Tuning change is being saved or put back on this server's Tuning tab. Wait for it "
+    "to finish, then try again. Nothing was removed."
 )
 NETWORK_RUNNING = (
     "A network change is being applied on this server's Networking tab. Wait for it to "
@@ -227,6 +292,39 @@ ACTION_HOLD_LOST = (
 def server_reservation_unavailable(label: str, said: str) -> str:
     """No reservation could be made at all: no Docker, no image, a daemon that would not answer."""
     return f"Yu'lon could not reserve {label} in Docker. {said} Nothing was changed."
+
+
+def wsl_docker_unreachable(distro: str, why: str) -> str:
+    """Why a WSL distro's Docker did not answer, and what fits that cause (`wsl.BootResult`)."""
+    if why == "no-docker":
+        return (
+            f"The WSL distro {distro} has no Docker program. If it uses Docker Desktop, start "
+            f"Docker Desktop and turn on its WSL integration for {distro}; otherwise install "
+            "Docker in it."
+        )
+    if why == "desktop":
+        return (
+            f"The WSL distro {distro} needs Docker Desktop. Start Docker Desktop and turn on its "
+            f"WSL integration for {distro} (Settings, Resources, WSL integration)."
+        )
+    if why == "permission":
+        return (
+            f"The WSL distro {distro} will not let your user use Docker (permission denied). Add "
+            "your user to the docker group in that distro, then open a new session and try again."
+        )
+    if why == "silent":
+        return (
+            f"Docker is not running in the WSL distro {distro}. Start it there "
+            "(for example: sudo systemctl start docker), then try again."
+        )
+    if why == "gone":
+        return f"Windows says the WSL distro {distro} no longer exists."
+    if why == "cancelled":
+        return f"Yu'lon stopped waiting for the WSL distro {distro}."
+    return (
+        f"The WSL distro {distro} was starting and its Docker did not answer in time; wait a "
+        "moment and try again."
+    )
 
 
 def module_running(what: str) -> str:

@@ -2164,12 +2164,15 @@ def test_with_both_records_the_rebuild_goes_first_and_then_the_finish(box: Box) 
     assert box.pending() is None and box.world.running is True
 
 
-def test_inside_a_wsl_distro_the_engine_names_the_update_press(box: Box) -> None:
+def test_inside_a_wsl_distro_the_engine_names_the_finish_press_its_tab_offers(box: Box) -> None:
+    """T757: the WSL tab offers "Finish the world update" (`world_reimport_for_app`), so a
+    Start refused for it names that press, not an hour-long Update to latest."""
     box.leave_pending([f"{WORLD_SQL}/creature.sql"])
     box.distro = "Ubuntu"
+    assert world_reimport_for_app(ENTRY, box.server_dir, wsl_distro="Ubuntu") is not None
     refused = box.engine().start_refusal(box.server_dir)
-    assert refused is not None and "“Update the server to latest…”" in refused
-    assert "Finish the world update" not in refused
+    assert refused is not None and "“Finish the world update”" in refused, refused
+    assert "Update the server to latest" not in refused, refused
 
 
 # -- the movement-map job of a server inside a WSL distro (T179 final round) ------------------
@@ -2320,7 +2323,7 @@ def test_a_rollback_that_leaves_the_servers_stopped_never_says_they_run(box: Box
         f"be put back for the build from before this update: {stopped} If you took the backup "
         "offered before the update, it has them as they were (Restore on the Maintenance tab). "
         "The source folders were put back on the commits they were on, so what is on disk is "
-        "the build that was put back; it stays stopped until its world tables are in."
+        "the build that was put back; it stays stopped for the reason given above."
     )
     assert "running" not in str(failed.value)
     assert box.world.running is False
@@ -2440,7 +2443,7 @@ def test_a_rollback_that_stops_early_before_the_servers_stopped_leaves_the_table
         "Docker did not answer for 3 minutes after the build finished. Check that Docker is "
         "running. Putting the build from before this rebuild back was not attempted, because "
         "the new build could not be given a name to undo onto (read-only layer store); the tags "
-        "still name the new build, all of them. The old images are on the daemon under their "
+        "still name the new build, all of them. The old images are in Docker under their "
         "-rollback tags. The source folders were left on the new commits, because the image "
         "tags name the new build made from them. None of your server's containers was "
         "replaced, so it is still running the build from before this update if it is up, and "

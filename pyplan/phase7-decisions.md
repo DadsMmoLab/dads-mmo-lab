@@ -693,6 +693,27 @@ landed 2026-08-24 and has waited for this caller since). The templates spell
 Tortoise's time-derived, unpersisted password is gone. Plaintext in the CMaNGOS confs is
 unavoidable (the emulator reads files) and those are 0600.
 
+**T748 (2026-10-12, owner decision "do t748 also").** WotLK and Unbound are `generated` now,
+with `legacy: "password"`. A fresh folder mints `wotlk-` or `unbound-` plus 16 hex, written to
+`.db_password` by a `db-password` stage that runs after the clones and before `generate-compose`.
+Which install is old is read from its own record, never from a missing file: the guard's fresh
+`.yulon-install.json` carries `"db_password": "generated"` (additive, like `family` in 7.1), and
+a record without that key was written before T748. Such an install keeps `password`, or the
+`DB_ROOT_PASSWORD` already in its own `.env`; nothing is migrated and the key is never added to
+it. A folder with no record at all (adopted where it is) reads as before, `password`. A new
+install whose `.db_password` is gone has no knowable password: readers answer None and the
+CMaNGOS refusal applies. A database volume kept with no copy of its password (an install removed
+before T748) opens with `password`, and the reinstall writes that down, but only while the
+record has not got past `db-password`: a record that has is a new install whose own file went
+missing, and it gets the refusal. Round 2 (cold review): only the install's own `run()` may
+mint (`resolve_secrets(mint=True)`); every other caller (Update, Rebuild, checks) recovers a
+missing `.db_password` from the `.env` `DB_ROOT_PASSWORD` line and writes it back, or refuses
+when neither is there. An old install's own `.env` value is read as compose reads it
+(unquoted), is left as written, and skips the compose-scalar check, since it reaches no
+compose, conf or SQL text. The compose text names
+`${DB_ROOT_PASSWORD:?…}` only, so an old folder's compose text changes when the app next renders
+it and its `.env` gains `DB_ROOT_PASSWORD=password`; its password does not change.
+
 ### Ready
 
 `docker.wait_ready(ReadySpec)` keeps the measured mechanics — `StartedAt` + `logs --since`,

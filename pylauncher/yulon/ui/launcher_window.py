@@ -77,6 +77,7 @@ from yulon import (
     docker,
     docker_advice,
     launcher_reads,
+    networking,
     play_client,
     ui_settings,
     wsl,
@@ -122,6 +123,14 @@ PARTIAL_BANNER = "The server is partly up: PLAY starts the rest"
 LOOP_BANNER = "The world server keeps crashing"
 FAILED_BANNER = "The world server is stuck at a failed update"
 STOPPED_REASON = "The server is stopped: PLAY starts it, waits for the realm, then starts the game."
+REMOTE_BANNER = "Logs in at {address}, another computer"
+REMOTE_REASON = (
+    "PLAY starts the game, which logs in at {address}. The server on this computer is not "
+    "started or checked for it. If this is your own server's internet address, start it on "
+    "the Server tab first."
+)
+"""T667: a realm address that is another computer's. PLAY writes it and starts the game; the
+Server tab's badge and the local server's words say nothing about the server it names."""
 STOPPING_REASON = (
     "The server is stopping. Once it has stopped, PLAY starts it again, waits for the "
     "realm, then starts the game."
@@ -1273,6 +1282,8 @@ class LauncherWindow(QWidget):
                 f"Make a ready-to-play client first (“{MAKE_PLAY_CLIENT_LABEL}” above): "
                 "PLAY starts the game from it."
             )
+        elif (remote := self._remote_address()) is not None:
+            self.play_reason_label.setText(REMOTE_REASON.format(address=remote))
         elif self.realm_badge.status == "running":
             self.play_reason_label.setText(
                 "Starts World of Warcraft from this server's ready-to-play client."
@@ -1285,6 +1296,12 @@ class LauncherWindow(QWidget):
     def _render_banner(self) -> None:
         status = self.realm_badge.status
         server = self._server
+        remote = self._remote_address()
+        # The badge is the local server's; it says nothing about the one this logs in at.
+        self.realm_badge.setVisible(remote is None)
+        if remote is not None:
+            self.online_label.setText(REMOTE_BANNER.format(address=remote))
+            return
         if status == "running":
             online = server.online if server is not None else None
             if online is None:
@@ -1337,6 +1354,11 @@ class LauncherWindow(QWidget):
             status.setText("✓ Up to date with your own client")
             status.setStyleSheet(f"color: {spec.uncommon};")
 
+    def _remote_address(self) -> str | None:
+        """The saved realm address when it names another computer, else None (T667)."""
+        saved = self._saved_address()
+        return saved if saved and not networking.is_this_computer(saved) else None
+
     def _saved_address(self) -> str | None:
         record = self._record()
         address = record.launcher.get("realm_address") if record is not None else None
@@ -1372,7 +1394,12 @@ class LauncherWindow(QWidget):
     def _render_mismatch(self, typed: str) -> None:
         """Review Focus 1: the realm row will send the game elsewhere -- say so, and where."""
         announced = self._server.announced if self._server is not None else None
-        if announced is None or announced.casefold() == typed.casefold():
+        if (
+            announced is None
+            or announced.casefold() == typed.casefold()
+            # T667: the local realm row is not the server at another computer's address.
+            or not networking.is_this_computer(typed)
+        ):
             self.realm_mismatch_label.setText("")
             self.realm_mismatch_label.setVisible(False)
             return

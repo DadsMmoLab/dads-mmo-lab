@@ -65,7 +65,7 @@ from typing import Any, TypeVar, cast
 
 from yulon import bot_population, commands, docker, platform, playerbots_keys, soap, winacl
 from yulon.catalog import bot_count, composegen, time_zone
-from yulon.catalog.catalog import CatalogEntry, ConfPatch
+from yulon.catalog.catalog import CatalogEntry, ConfPatch, DbPasswordUnknown
 from yulon.catalog.families import conf
 from yulon.log import get_logger
 from yulon.said import SaidByYulon
@@ -433,7 +433,8 @@ def enable(
     # the channel's own configuration, and a rollback would then restore a file
     # with the channel still in it.
     if not backup.exists():
-        backup.write_text(before, encoding="utf-8", newline="\n")
+        # The compose files' own writer: whole or absent, never a cut-off copy (T780).
+        composegen._replace_whole(backup, before)
     # The claim is written even though it equals the compose default, because a
     # default cannot be given back: the base file publishes SOAP at
     # `127.0.0.1:7878` through `${DOCKER_SOAP_EXTERNAL_PORT:-127.0.0.1:7878}`,
@@ -447,7 +448,10 @@ def enable(
         # The player's bot count, off the file this replaces (T117): the press
         # rendered the catalog's 500 until then.
         world_env=bot_count.world_env(entry, server_dir, _world_env(entry, operations.enable_env)),
-        db_password=db_password,
+        # The folder's own password unless the caller names one (T748).
+        db_password=(
+            db_password if db_password is not None else entry.install.db_password(server_dir)
+        ),
         bind_label=bind_label,
     )
     if plan.override == before:
@@ -461,7 +465,8 @@ def enable(
             f"the server's time zone file could not be copied ({exc}), so the command channel "
             "was not turned on and the override was not written."
         ) from exc
-    target.write_text(plan.override, encoding="utf-8", newline="\n")
+    # The compose files' own writer: whole, or the file is left as it was (T790).
+    composegen._replace_whole(target, plan.override)
     logger.info(f"wrote {entry.id}'s command channel into {target}")
     return Enabled(path=target, changed=True)
 
@@ -495,12 +500,16 @@ def _write_the_conf(entry: CatalogEntry, server_dir: Path) -> bool:
     before = target.read_text(encoding="utf-8")
     backup = target.with_name(target.name + BACKUP_SUFFIX)
     if not backup.exists():
-        backup.write_text(before, encoding="utf-8", newline="\n")
+        # Owner-only, as the conf is: this copy holds the same database password, and it
+        # is renamed into place only once whole (T780).
+        platform.write_private_atomically(backup, before.encode("utf-8"))
     after = conf.patch(before, ConfPatch(keys=dict(operations.enable_conf.keys)), tokens={})
     if after == before:
         logger.info(f"{entry.id}'s channel keys were already in {target.name}")
         return False
-    target.write_text(after, encoding="utf-8", newline="\n")
+    # The conf family's writer: whole, or left as it was, and it keeps the conf's own mode
+    # (the owner-only one an install gives it, or whatever the file has) (T790).
+    conf.replace_file(target, after)
     logger.info(f"wrote {entry.id}'s command channel into {target}")
     return True
 
@@ -539,7 +548,8 @@ def _restore_the_conf(entry: CatalogEntry, server_dir: Path) -> bool:
     if drop:
         after = _without_keys(after, drop)
     if after != now:
-        target.write_text(after, encoding="utf-8", newline="\n")
+        # The same writer as the press's: whole, or left as it was, and its mode kept (T790).
+        conf.replace_file(target, after)
     logger.info(f"put {entry.id}'s own keys in {target.name} back where the press found them")
     return True
 
@@ -618,10 +628,10 @@ def roll_back(entry: CatalogEntry, server_dir: Path, *, expected: str | None = N
         )
         composegen.write_dotenv(server_dir, {HOST_PORT_VAR: RELEASED_HOST_PORT})
         return True
-    target.write_text(
-        _keep_the_bot_count(entry, now, backup.read_text(encoding="utf-8")),
-        encoding="utf-8",
-        newline="\n",
+    # Whole, or the override is left as the press left it, so the backup can simply be
+    # restored again (T790).
+    composegen._replace_whole(
+        target, _keep_the_bot_count(entry, now, backup.read_text(encoding="utf-8"))
     )
     # The `.env` before the unlink, and the unlink last. An interruption then
     # leaves the backup on disk with the override already restored, and running
@@ -1000,6 +1010,23 @@ def remove_pending(game: str, install_id: str, *, config_dir: Path | None = None
     _sync_folder(path.parent)
 
 
+def remove_credential(game: str, install_id: str, *, config_dir: Path | None = None) -> None:
+    """Remove the saved credential for good, or raise saying why it is still there (T682).
+
+    `remove_pending()`'s strict twin, for an uninstall that has just removed the database the
+    credential's account row lived in. Left behind, a reinstall into the same folder (same
+    install id) loaded it, found no row, and every channel feature said Repair until Repair
+    was pressed. No credential is the ordinary case and is fine.
+    """
+    path = credential_path(game, install_id, config_dir=config_dir)
+    try:
+        # A call, not `path.unlink` handed over, so the write ledger's walk sees it.
+        _tried_again_on_windows(lambda: path.unlink())
+    except FileNotFoundError:
+        return
+    _sync_folder(path.parent)
+
+
 def _forget_credential(game: str, install_id: str, *, config_dir: Path | None = None) -> None:
     """Remove a saved credential a Repair has just made wrong. Never raises (T386).
 
@@ -1140,6 +1167,15 @@ def ensure(
             ),
         )
     if getattr(answer, "outcome", "") != "yes":
+        if getattr(answer, "reached", True) is False and isinstance(current, Pending):
+            # T723: the ask never got an HTTP reply (refused or reset while the
+            # channel is off or the world still loads, or a timeout). That says
+            # nothing about the account, so it spends no try: the row stays
+            # `Pending`, which the tab shows as waiting, and the next ask proves it.
+            logger.info(
+                f"the command channel for {game} was not reached; no try spent, still pending"
+            )
+            return current
         logger.info(f"the command channel for {game} did not answer yet; not saving anything")
         return current.verify_failed()
 
@@ -1413,8 +1449,19 @@ class InstallChannel:
         return cast(_C, held)
 
     def _password(self) -> str | None:
-        """The install's database password, read now if it was handed over as a reader."""
+        """The install's database password: the one handed over (a reader is read now), else this
+        folder's own (T748: a generated WotLK install has no published value to fall back to).
+
+        The folder's own is asked as `known_db_password()` (T785 note), so a password nobody can
+        know is a `DbPasswordUnknown` in player words and never `None` handed on to be guessed
+        at. `enable()` reports that sentence; the readers below treat it as "cannot tell".
+
+        Raises:
+            DbPasswordUnknown: nothing was handed over and the folder cannot say.
+        """
         given = self._db_password
+        if given is None:
+            return self.entry.install.known_db_password(self.server_dir)
         return given() if callable(given) else given
 
     def _from_disk(self) -> State:
@@ -1537,16 +1584,35 @@ class InstallChannel:
             return gave_up
         return self._state
 
-    def _rearm(self, why: str) -> None:
+    def _rearm(self, why: str, *, waiting_too: bool = False) -> None:
         """End a gave-up state on what the disk keeps, as a relaunch would (T427, T497).
 
         The pending record holds the row's own password, so what follows
         re-verifies that row and never makes another; with no record it is
         `Idle`, whose `create` keeps an existing row's password and says so.
+
+        `waiting_too` is the press of "Turn on the command channel" (T723): it
+        also gives a `Pending` row its tries back. A Start does not, so a world
+        that keeps replying with something that is not a proof still ends in
+        `GaveUp` within the Start's own tries.
         """
         if isinstance(self._state, GaveUp):
             self._state = self._from_disk()
             logger.info(f"{self.entry.id}: the command channel is asked again after {why}")
+        elif waiting_too and isinstance(self._state, Pending) and self._state.tries:
+            # T723: a waiting row gets its tries back too, or a press leaves the
+            # budget the asks made while the channel was off. The disk first; with
+            # no record (it could not be written) the row in hand is kept, reset.
+            kept = self._state
+            loaded = self._from_disk()
+            self._state = (
+                Pending(account=kept.account, password=kept.password)
+                if isinstance(loaded, Idle)
+                else loaded
+            )
+            logger.info(
+                f"{self.entry.id}: the waiting command channel has its tries back after {why}"
+            )
 
     def _noted(self, state: State) -> State:
         """Remember, for the tab, whether a waiting row waits on a channel that is off (T423).
@@ -1843,7 +1909,10 @@ class InstallChannel:
                 )
         except ServerHeldElsewhere as held:
             raise EnableRefused(str(held)) from held
-        self._rearm("Turn on")
+        except DbPasswordUnknown as unknown:
+            # Nothing was written: the password is read before `enable()` writes anything.
+            raise EnableRefused(str(unknown)) from unknown
+        self._rearm("Turn on", waiting_too=True)
         return done
 
     def setup_state(self) -> State:

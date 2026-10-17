@@ -325,24 +325,26 @@ def test_the_rebuild_reports_through_the_installers_own_staged_reporting(
 def test_the_rebuild_ends_by_saying_what_it_did_and_what_it_did_not(tmp_path: Path) -> None:
     """The closing line is the answer to "nothing changes when I log back in".
 
-    It has to name the server as running on the new build, and it must not
-    imply the database was touched: this press compiles and recreates, and the
-    module SQL an AzerothCore module carries is applied by the emulator's own
-    updater for modules in `AC_MODULES_LIST`, which nothing here runs.
+    It has to name the server as running on the new build. Since T706 a WotLK
+    Rebuild runs the importer before the new build starts, so its closing note
+    says the database updates were applied -- said only after the importer
+    exited 0 and the world reported ready -- and the note that says no SQL ran
+    is the one for the families that run none. Neither claims the module is
+    "installed": that is the world's own startup line to say.
     """
     rec = Recorder(images=True)
     server_dir = a_finished_install(rec, tmp_path)
     said = list(engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
     assert said[-1] == f"{ENTRY.name} was rebuilt and is running in {server_dir}"
-    assert native.REBUILD_CLOSING_NOTE in said
-    # The claim it must NOT make. "Applied", "installed" or any past-tense verb
-    # about the database would be this feature's own bug repeated one layer up:
-    # telling a user something took effect when nobody checked.
+    assert native.REBUILD_CLOSING_NOTE_IMPORTED in said
+    assert native.REBUILD_CLOSING_NOTE not in said
     assert "ran no SQL" in native.REBUILD_CLOSING_NOTE
-    for promise in ("SQL was applied", "fully installed", "module is now installed"):
-        assert promise not in native.REBUILD_CLOSING_NOTE
-    # And nothing anywhere in the run went near a database.
+    for note in (native.REBUILD_CLOSING_NOTE, native.REBUILD_CLOSING_NOTE_IMPORTED):
+        for promise in ("SQL was applied", "fully installed", "module is now installed"):
+            assert promise not in note
+    # The importer is the only database work the run did.
     assert "sql" not in rec.calls and "query" not in rec.calls, rec.calls
+    assert rec.calls.count("one-shot:ac-db-import") == 1, rec.calls
 
 
 def test_the_recreate_argv_does_not_rely_on_compose_noticing_a_new_image() -> None:

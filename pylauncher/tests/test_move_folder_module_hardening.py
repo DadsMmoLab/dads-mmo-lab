@@ -446,7 +446,7 @@ def test_a_description_completed_by_the_real_derivation_is_plain(tmp_path: Path)
         clone, "wow-wotlk", today=__import__("datetime").date(2026, 10, 9)
     )
     done = module_source.complete(derived, clone)
-    assert done.conf and len(done.sql) == 2
+    assert done.conf and len(done.sql) == 1, "playerbots/ is no step since T752"
     assert module_source.beyond_derived_shape(done) is None
 
 

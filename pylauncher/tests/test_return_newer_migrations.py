@@ -843,17 +843,16 @@ def test_an_install_destination_that_is_not_a_conf_folder_refuses(tmp_path: Path
 
 
 def test_an_update_to_latest_is_not_asked(tmp_path: Path) -> None:
+    """Going forward, a file the target lacks is older, not newer. T770 reads the same trees
+    for a file the target CHANGED (`tests/test_changed_migrations.py`); none changed here."""
     rec, server_dir, made = _ready(tmp_path)
     _core_newer(rec, server_dir)
 
-    _said, raised = _return(made, server_dir, to_pin=False)
+    said, raised = _return(made, server_dir, to_pin=False)
 
     assert raised is None, raised
-    # No migration folder or install rule is read. T656 reads the bots' conf templates
-    # on every move (their changed defaults), which is not this check.
-    read = [call for call in rec.calls if call.startswith("tree-bytes:")]
-    assert all(call.endswith((".conf.dist.in", ".conf.dist")) for call in read), read
     assert not _asked(rec)
+    assert not any("database migration" in line for line in said), said
 
 
 def test_a_return_that_moves_nothing_asks_nothing(tmp_path: Path) -> None:
@@ -960,3 +959,52 @@ def test_real_git_lists_a_commits_files_not_the_disks(tmp_path: Path) -> None:
     assert impl.tree_bytes(repo, first, "sql/none") == {}
     assert impl.tree_bytes(repo, "f" * 40, "sql/u") is None
     assert impl.tree_bytes(tmp_path, first, "sql/u") is None
+
+
+def test_a_migration_changed_on_a_forward_return_is_not_one_the_target_lacks(
+    tmp_path: Path,
+) -> None:
+    """T767: the target descends from the running commit, so the bytes it changed are newer.
+
+    T770: but the server would run the new bytes again, so the press refuses that instead.
+    """
+    rec, server_dir, made = _ready(tmp_path)
+    dest = server_dir / CORE.dest
+    ran = b"-- the bytes the server ran\n"
+    rec.byte_trees[(dest, OLD, CORE_WORLD)] = {OLDER_NAME: ran}
+    rec.migrations["tw_world"] = f":{_hash(ran)}\n"
+    rec.byte_trees[(dest, CORE_PIN, CORE_WORLD)] = {OLDER_NAME: b"-- new bytes\n"}
+    rec.ancestors.add((dest, OLD, CORE_PIN))
+
+    said, raised = _return(made, server_dir)
+
+    assert raised is not None
+    assert "the tested commit does not have" not in str(raised), raised
+    assert "would run it again with the new bytes" in str(raised), raised
+    assert not any("does not ship" in line for line in said), said
+
+
+def test_a_changed_migration_no_one_can_give_a_direction_still_counts(tmp_path: Path) -> None:
+    """T767: neither git nor GitHub can say, so the changed file counts as it always did."""
+    rec, server_dir, made = _ready(tmp_path)
+    dest = server_dir / CORE.dest
+    ran = b"-- the bytes the server ran\n"
+    rec.byte_trees[(dest, OLD, CORE_WORLD)] = {OLDER_NAME: ran}
+    rec.migrations["tw_world"] = f":{_hash(ran)}\n"
+    rec.byte_trees[(dest, CORE_PIN, CORE_WORLD)] = {OLDER_NAME: b"-- new bytes\n"}
+    rec.ancestry_undecided = True
+
+    _said, raised = _return(made, server_dir)
+
+    assert raised is not None and "has 1 migration" in str(raised), raised
+
+
+def test_a_direction_no_one_can_tell_is_asked_once_per_source(tmp_path: Path) -> None:
+    """T767: the forward question and the deleted file's refusal share one answer."""
+    rec, server_dir, made = _ready(tmp_path)
+    _squash_case(rec, server_dir)
+
+    _said, raised = _return(made, server_dir)
+
+    assert raised is not None and "could not show whether" in str(raised)
+    assert len([url for url in rec.gets if "/compare/" in url]) == 1, rec.gets
