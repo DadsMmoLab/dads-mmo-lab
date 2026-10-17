@@ -5698,6 +5698,39 @@ def test_the_catalog_pin_stays_put_and_visible_with_the_last_server_current(
     assert not catalog.isChecked() and not pins.buttons[1].isChecked()
 
 
+@pytest.mark.parametrize("width", [(960, 640), (1280, 800)], ids=lambda w: f"{w[0]}")
+def test_the_header_keeps_the_same_slot_with_and_without_a_server_page(
+    shown_window: Any, five_servers: list[Any], width: tuple[int, int]
+) -> None:
+    """The name and badge hold their room on every page, so the top menu never jumps sideways.
+
+    The server's name and badge show on a server page and hide on the Catalog; hiding used to
+    hand their room to the header's stretch and move the menu about 330 px. Their places are
+    kept now: the group's width, and the menu's x, are the same in both states.
+    """
+    _at_width(shown_window, width)
+    tabs = shown_window.property("tabs")
+    header = shown_window.property("header")
+    menu = shown_window.yulon_top_menu
+
+    def reading() -> tuple[int, int, int]:
+        process_events(20)
+        slot = header._badge.geometry().right() - header._realm_title.geometry().left() + 1
+        return menu.geometry().x(), menu.geometry().width(), slot
+
+    tabs.setCurrentIndex(0)
+    on_the_catalog = reading()
+    assert header._realm_title.isHidden() and header._badge.isHidden()
+    tabs.setCurrentWidget(five_servers[-1])
+    on_a_server = reading()
+    assert not header._realm_title.isHidden() and not header._badge.isHidden()
+    tabs.setCurrentIndex(1)
+    on_the_logs = reading()
+
+    assert on_the_catalog == on_a_server == on_the_logs
+    assert on_a_server[2] >= 150, "the slot kept no room for a name and a badge"
+
+
 def test_pressing_the_catalog_pin_shows_the_catalog(
     shown_window: Any, five_servers: list[Any]
 ) -> None:

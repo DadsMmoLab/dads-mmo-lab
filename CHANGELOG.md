@@ -38,6 +38,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - **Set up My Party** on the My Party tab puts the bridge scripts into the server when they are missing.
 
 ### Fixed
+- The top menu no longer jumps sideways when you open a server's page.
 - **Add to Steam…** on a Steam Deck with two Steam accounts uses the one signed in last, instead of refusing.
 - **Check for updates** says why git could not answer for a module, instead of only that it did not.
 - **Remove** on City Bots now takes back its roster and bot account marks.
