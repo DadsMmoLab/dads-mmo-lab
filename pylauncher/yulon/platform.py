@@ -3672,7 +3672,7 @@ def _run_with_input(argv: list[str], text: str) -> subprocess.CompletedProcess[s
     `apply.DockerSql._mysql()` documents. Output is captured, never streamed:
     a package install under `sudo -S` is a fire-and-collect call whose exit
     code is the answer. `_c_locale_env()` for the same reason `ensure_docker()`
-    uses it: sudo's own stderr is read for "password is required".
+    uses it: sudo's own stderr is read by `_needs_password()`.
 
     `check=False` is deliberate and load-bearing, not a default written out for
     tidiness: `check=True` raises `CalledProcessError`, whose `repr()` renders
@@ -3853,15 +3853,26 @@ def _may_open_a_dialog(dry_run: bool, cancel: threading.Event | None) -> bool:
     return not dry_run and not (cancel is not None and cancel.is_set())
 
 
+_SUDO_NEEDS_PASSWORD_WORDS = ("password is required", "interactive authentication is required")
+"""How `sudo -n` says it would have had to prompt, lower-cased, in the C locale.
+
+Classic sudo says "sudo: a password is required". sudo-rs, the default sudo on
+Ubuntu 25.10 and later (Kubuntu included), says "sudo: interactive
+authentication is required" for the same case; a player on Kubuntu got no
+password dialog and a list of failed steps until this read both.
+"""
+
+
 def _needs_password(stderr: str) -> bool:
     """`sudo -n`'s own verdict, read in the C locale `_c_locale_env()` pins.
 
-    Sudo says "sudo: a password is required" when it would have had to prompt.
-    Read from sudo rather than guessed from the exit code, because a package
-    step can exit non-zero for a hundred reasons and only this one is worth
-    opening a dialog for.
+    True when sudo (or sudo-rs) says it would have had to prompt; see
+    `_SUDO_NEEDS_PASSWORD_WORDS`. Read from sudo rather than guessed from the
+    exit code, because a package step can exit non-zero for a hundred reasons
+    and only this one is worth opening a dialog for.
     """
-    return "password is required" in stderr.lower()
+    said = stderr.lower()
+    return any(words in said for words in _SUDO_NEEDS_PASSWORD_WORDS)
 
 
 def _sudo_skip_reason(outcome: SudoOutcome) -> str:
@@ -4186,7 +4197,9 @@ def _ensure_docker_linux(
     # failed first decides what the docker-group sentence may say: `skipped` is
     # in execution order (package steps, then `usermod`), so `failed[0]` is the
     # first link of the chain and everything after it is a consequence (T57).
-    password = [] if dry_run else [s for s in skipped if "password" in s.lower()]
+    password = (
+        [] if dry_run else [s for s in skipped if "password" in s.lower() or _needs_password(s)]
+    )
     failed = [] if dry_run else [s for s in skipped if s not in password]
     group_blocked = bool(failed) and not _step_command(failed[0]).startswith("usermod ")
 
@@ -4686,7 +4699,7 @@ def set_own_password(
 
 
 def _sudo_needs_password(do: RunCmd) -> bool:
-    """Would a privileged step stop at "a password is required"? `sudo -n true` asks."""
+    """Would a privileged step stop for a password (`_needs_password()`)? `sudo -n true` asks."""
     try:
         proc = do(["sudo", "-n", "true"])
     except OSError as exc:
