@@ -22344,15 +22344,18 @@ def test_the_main_menu_is_a_few_presses_from_the_modules_list(
     window, _tab = _controller_in_the_real_window(view, "Modules")
     _at(window, size)
     nav, keyboard, gamepad = install_gamepad_navigation(window)
-    menu = _main_menu(window)
+    menu = _main_menu(window).parentWidget()
     area = view.modules_panel._area
     try:
         _scroll_home(window)
         area.setFocus()
         process_events()
         routes = _pad_routes(nav, area)
-        assert menu in routes, "the main menu is out of the pad's reach from the Modules list"
-        assert len(routes[menu]) <= 4, f"the main menu is {len(routes[menu])} presses from the list"
+        # Any of the menu's buttons is the menu: which one the pad lands on first depends on
+        # where the header puts them.
+        presses = [len(route) for stop, route in routes.items() if menu.isAncestorOf(stop)]
+        assert presses, "the main menu is out of the pad's reach from the Modules list"
+        assert min(presses) <= 4, f"the main menu is {min(presses)} presses from the list"
     finally:
         keyboard.stop()
         gamepad.stop()
