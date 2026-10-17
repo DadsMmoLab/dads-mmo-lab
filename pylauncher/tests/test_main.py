@@ -6102,12 +6102,14 @@ def test_a_long_server_name_is_shortened_in_a_narrow_header_and_whole_again_wide
 
     Mutation: answer `_RealmTitle.sizeHint` from the text on screen and the
     name is still shortened at 1920.
+
+    The name is one that fits the header's name slot (`REALM_TITLE_SLOT_PX`), which a wide
+    window shows whole; a name past the slot stays shortened at any width, the whole of it on
+    hover (`test_a_name_past_the_slot_is_shortened_at_any_width`).
     """
     header = shown_window.property("header")
     tabs = shown_window.property("tabs")
-    folder_name = (
-        "A very long server folder name that cannot fit beside the badge on a narrow window"
-    )
+    folder_name = "Long server dir"
     server_dir = tmp_path / folder_name
     _catalog_view(shown_window).installed.emit("wow-wotlk", server_dir, None)
     view = _tab_for(shown_window, server_dir)
@@ -6124,6 +6126,28 @@ def test_a_long_server_name_is_shortened_in_a_narrow_header_and_whole_again_wide
         _at_width(shown_window, (1920, 1080))
         assert title.text() == whole, f"still cut at 1920: {title.text()!r}"
         assert not title.geometry().intersects(header._badge.geometry())
+    finally:
+        _drop(shown_window, "wow-wotlk", server_dir)
+
+
+def test_a_name_past_the_slot_is_shortened_at_any_width(shown_window: Any, tmp_path: Any) -> None:
+    """The slot does not grow for a long name: it is cut, with the whole name on hover."""
+    from yulon.ui.widgets.dadcraft_decorations import REALM_TITLE_SLOT_PX
+
+    header = shown_window.property("header")
+    tabs = shown_window.property("tabs")
+    folder_name = "A very long server folder name that cannot fit beside the badge on any window"
+    server_dir = tmp_path / folder_name
+    _catalog_view(shown_window).installed.emit("wow-wotlk", server_dir, None)
+    view = _tab_for(shown_window, server_dir)
+    try:
+        tabs.setCurrentWidget(view)
+        title = header._realm_title
+        for size in ((960, 640), (1920, 1080)):
+            _at_width(shown_window, size)
+            assert title.text() != title.full_text and title.text().endswith("…"), title.text()
+            assert title.toolTip() == f"WoW WotLK — {server_dir}"
+            assert title.width() <= REALM_TITLE_SLOT_PX
     finally:
         _drop(shown_window, "wow-wotlk", server_dir)
 
