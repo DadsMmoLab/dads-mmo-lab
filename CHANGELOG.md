@@ -16,6 +16,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ### New
 
 ### Fixed
+- When Docker cannot fetch the git image, the Modules tab now shows Docker's reason instead of an unhelpful line.
 
 ### Changed
 
