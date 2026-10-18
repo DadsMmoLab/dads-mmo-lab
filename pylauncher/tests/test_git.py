@@ -2216,6 +2216,67 @@ def test_a_git_error_carries_only_the_words_git_wrote() -> None:
     assert git._git_reason(container) == "error: RPC failed"
 
 
+def test_a_docker_daemon_refusal_is_the_reason_not_the_line_above_it() -> None:
+    """T794: a containerized git whose image pull fails writes `Unable to find image` first.
+
+    That line says nothing; the daemon's `Error response from daemon` line under it is the reason,
+    with or without the `docker: ` the CLI puts in front of it.
+    """
+    pulled = git.GitError(
+        "containerized git fetch origin HEAD in /w exited 125: "
+        "Unable to find image 'alpine/git:v2' locally\n"
+        "docker: Error response from daemon: pull access denied for alpine/git.\n"
+        "See 'docker run --help'.\n"
+    )
+    assert git._git_reason(pulled) == (
+        "docker: Error response from daemon: pull access denied for alpine/git."
+    )
+    bare = git.GitError(
+        "containerized git fetch origin HEAD in /w exited 125: "
+        "Unable to find image 'alpine/git:v2' locally\n"
+        'Error response from daemon: Get "https://registry-1.docker.io/v2/": '
+        "dial tcp: i/o timeout\n"
+    )
+    assert git._git_reason(bare) == (
+        'Error response from daemon: Get "https://registry-1.docker.io/v2/": dial tcp: i/o timeout'
+    )
+
+
+def test_containerized_count_says_why_docker_could_not_start_git(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """T794: the Modules tab's "could not ask" carries the daemon's refusal, not the pull notice."""
+    impl = git.ContainerGit(selinux_enforcing=lambda: False, filesystem_type=lambda _path: "ext4")
+    dest = tmp_path / "mod-x"
+    (dest / ".git").mkdir(parents=True)
+    answers: list[subprocess.CompletedProcess[str]] = []
+
+    def fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return answers.pop(0)
+
+    monkeypatch.setattr(runner, "run", fake_run)
+    refused = (
+        "Unable to find image 'alpine/git:v2' locally\n"
+        "docker: Error response from daemon: pull access denied for alpine/git.\n"
+        "See 'docker run --help'.\n"
+    )
+    answers.append(_completed(returncode=125, stderr=refused))
+    assert impl.counted_behind(dest, None) == git.Counted(
+        None, why="docker: Error response from daemon: pull access denied for alpine/git."
+    )
+    assert not answers
+
+
+def test_gits_own_verdict_wins_over_a_daemon_line() -> None:
+    """T794: git's own `fatal:` is the reason even above a daemon refusal line."""
+    both = git.GitError(
+        "containerized git fetch origin HEAD in /w exited 125: "
+        "Error response from daemon: x\n"
+        "fatal: repository not found\n"
+    )
+    assert git._git_reason(both) == "fatal: repository not found"
+
+
 @pytest.mark.parametrize(
     "impl",
     [

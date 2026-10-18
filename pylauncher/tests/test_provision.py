@@ -2482,3 +2482,93 @@ def test_a_sudo_n_failure_that_is_not_about_a_password_never_opens_the_dialog(
     assert any("not in the sudoers file" in s for s in report.skipped), report.skipped
     assert not [m for m in report.manual_steps if "needed a password" in m], report.manual_steps
     assert any("Some steps did not run" in m for m in report.manual_steps), report.manual_steps
+
+
+_SUDO_RS_NEEDS_PASSWORD = "sudo: interactive authentication is required"
+"""What sudo-rs (Ubuntu 25.10+, Kubuntu) says for `sudo -n` with no cached credential."""
+
+
+@pytest.mark.parametrize(
+    ("stderr", "needs"),
+    [
+        ("sudo: a password is required", True),
+        (_SUDO_RS_NEEDS_PASSWORD, True),
+        ("SUDO: Interactive Authentication Is Required\n", True),
+        ("sudo: systemctl: command not found", False),
+        ("sudo: pk is not in the sudoers file.  This incident will be reported.", False),
+        ("E: Unable to locate package docker.io", False),
+        ("", False),
+    ],
+    ids=["sudo", "sudo-rs", "sudo-rs any case", "missing command", "not a sudoer", "apt", "empty"],
+)
+def test_both_sudos_password_verdicts_are_read_as_needing_a_password(
+    stderr: str, needs: bool
+) -> None:
+    """Classic sudo and sudo-rs word the same verdict differently; both mean "ask"."""
+    assert platform._needs_password(stderr) is needs
+
+
+def test_the_sudo_n_true_probe_reads_sudo_rs_as_needing_a_password() -> None:
+    def sudo_rs(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        assert argv == ["sudo", "-n", "true"], argv
+        return subprocess.CompletedProcess(argv, 1, "", _SUDO_RS_NEEDS_PASSWORD)
+
+    assert platform._sudo_needs_password(sudo_rs) is True
+
+
+def test_sudo_rs_opens_the_password_dialog_instead_of_failing_every_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Kubuntu report: every `sudo -n` step answered sudo-rs's wording, the
+    dialog never opened, and each step was listed as a failure."""
+    _linux(monkeypatch)
+    sudo_questions: list[str] = []
+
+    def ask(question: str) -> str:
+        if question == platform.SUDO_PASSWORD_QUESTION:
+            sudo_questions.append(question)
+            return "hunter2"
+        return "y"
+
+    run = _Refuses("sudo -n", stderr=_SUDO_RS_NEEDS_PASSWORD)
+    feed = _FeedRecorder("hunter2")
+    report = platform.ensure_docker(
+        run=run, which=_which("apt-get"), user="pk", wait_seconds=0.0, ask=ask, run_input=feed
+    )
+
+    assert len(sudo_questions) == 1
+    fed = [argv for argv, _text in feed.calls]
+    assert fed[0] == ["sudo", "-S", "-p", "", "-v"]
+    assert ["sudo", "-S", "-p", "", "apt-get", "update"] in fed
+    assert ["sudo", "-S", "-p", "", "usermod", "-aG", "docker", "pk"] in fed
+    assert "apt-get update" in report.done
+    assert report.skipped == (), report.skipped
+    assert not [m for m in report.manual_steps if "did not run" in m], report.manual_steps
+
+
+def test_a_sudo_rs_skip_with_no_dialog_is_reported_as_a_password_skip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No session (Cancel pressed after the install was agreed to): the skips carry
+    sudo-rs's own words, and they must land under "needed a password", not "did not run"."""
+    _linux(monkeypatch)
+    cancel = threading.Event()
+
+    def ask(question: str) -> str:
+        cancel.set()  # pressed right after answering: no dialog may open from here on
+        return "y"
+
+    report = platform.ensure_docker(
+        run=_Refuses("sudo -n", stderr=_SUDO_RS_NEEDS_PASSWORD),
+        which=_which("apt-get"),
+        user="pk",
+        wait_seconds=0.0,
+        ask=ask,
+        cancel=cancel,
+        run_input=_never_feeds,
+    )
+
+    assert any("apt-get update" in s for s in report.skipped), report.skipped
+    lead = [m for m in report.manual_steps if m.startswith("Some steps needed a password")]
+    assert lead and "apt-get update" in lead[0], report.manual_steps
+    assert not [m for m in report.manual_steps if "did not run" in m], report.manual_steps

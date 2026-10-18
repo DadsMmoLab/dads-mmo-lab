@@ -428,13 +428,30 @@ do not have it.
 """
 
 
+_GIT_VERDICT_STARTS = ("fatal:", "error:")
+"""How a line that gives git's own verdict starts (T793)."""
+
+
+_DAEMON_VERDICT_STARTS = (
+    "docker: Error response from daemon",
+    "Error response from daemon",
+)
+"""How a line that gives the Docker daemon's refusal starts (T794).
+
+A containerized git whose image could not be pulled writes
+`Unable to find image '…' locally` above it, and that line says nothing.
+"""
+
+
 def _git_reason(exc: GitError) -> str | None:
     """The line git wrote that says why it refused, or None when it said nothing (T793).
 
     Only the stderr after `exited <code>: ` is git's. The command and the folder it ran in
     are not a reason, and a sentence Yu'lon wrote itself is not git's either, so neither
-    gives one. Of git's lines the first `fatal:` or `error:` is its verdict, and a warning
-    above it is not; without one, the first line that is not blank.
+    gives one. Git's own verdict wins: the first line starting with `_GIT_VERDICT_STARTS`,
+    above or below any daemon line. Else the first line starting with
+    `_DAEMON_VERDICT_STARTS` (T794); a warning above either verdict is not the reason,
+    and without one, the first line that is not blank.
     """
     text = str(exc)
     seam = _EXITED.search(text)
@@ -443,8 +460,11 @@ def _git_reason(exc: GitError) -> str | None:
     said = [line.strip() for line in text[seam.end() :].splitlines() if line.strip()]
     if not said:
         return None
-    verdict = [line for line in said if line.startswith(("fatal:", "error:"))]
-    return verdict[0] if verdict else said[0]
+    for starts in (_GIT_VERDICT_STARTS, _DAEMON_VERDICT_STARTS):
+        verdict = [line for line in said if line.startswith(starts)]
+        if verdict:
+            return verdict[0]
+    return said[0]
 
 
 @dataclass(frozen=True)
