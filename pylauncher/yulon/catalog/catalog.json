@@ -1295,6 +1295,8 @@
                     "GameType": "0",
                     "GM.LoginState": "0",
                     "GM.StartLevel": "1",
+                    "GM.Visible": "1",
+                    "GM.StartOnGMIsland": "0",
                     "AutoHonorRestart": "0",
                     "AutoRestart.MaxServerUptime": "0",
                     "Console.Enable": "1",
