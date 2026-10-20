@@ -21,6 +21,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - On Bazzite and other image-based Fedora systems without Docker, the install now says how to get Docker.
 - A refused import now says which server is behind and what to do, instead of pointing at a button that refuses.
 - LAN mode now advertises the wired network's address instead of a VPN adapter's, so other computers can connect.
+- Installing WoW Tortoise no longer runs every CPU core flat out while making movement maps, which could restart some PCs.
 - When Docker cannot fetch the git image, the Modules tab now shows Docker's reason instead of an unhelpful line.
 - Docker setup now asks for your password on Ubuntu 25.10+ and Kubuntu (sudo-rs) instead of failing every step.
 - **Return to the tested pin** no longer refuses because Windows changed a server file's permissions and nothing else.

@@ -7553,6 +7553,13 @@ class Seams:
     exec_stdin: Callable[..., subprocess.CompletedProcess[str]] = docker.exec_stdin
     sql_query: Callable[[str, str, str, str | None, str], str] = docker.sql_query
     volume_exists: Callable[[str], bool] = docker.volume_exists
+    engine_size: Callable[..., tuple[int, int] | None] = docker.engine_size
+    """The daemon's CPU count and memory (T636), or None when it would not say.
+
+    A seam for T801: the Tortoise mmaps cap is computed from what the ENGINE
+    reports, not from the host, and a test that could not fake the answer could
+    not pin the cap at all — it would assert whatever box the test ran on.
+    """
     read_database: Callable[[CatalogEntry, Path], database_presence.Reading] = (
         database_presence.take_reading
     )

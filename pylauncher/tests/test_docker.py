@@ -5477,6 +5477,32 @@ def test_a_run_that_never_started_is_told_apart_from_one_that_exited_127() -> No
     assert not docker.cli_missing_run(docker.AttachedRun(0, (help_text,)))
 
 
+def test_container_run_cpus_emits_flag_before_image() -> None:
+    """T801: a `cpus` ceiling reaches docker as `--cpus <n>`, among the options.
+
+    Docker stops reading its own options at the image name, so the flag must sit
+    beside the other limits and BEFORE the image and mounts; `None` spells
+    nothing, because "uncapped" is a decision a caller takes and the argv should
+    not carry an option nobody asked for. Both argv forms carry it: the mmaps
+    generation this exists for is the detached one.
+    """
+    spec = docker.ContainerRun(
+        image="busybox:1.36",
+        argv=("true",),
+        ulimits=("stack=unlimited",),
+        mounts=(docker.Mount(Path("/srv/data"), "/out"),),
+        cpus=8,
+    )
+    argv = spec.to_argv()
+    assert argv[argv.index("--cpus") + 1] == "8"
+    assert argv.index("--cpus") > argv.index("--ulimit")  # beside the limits
+    assert argv.index("--cpus") < argv.index("-v")  # before the mounts
+    assert argv.index("--cpus") < argv.index("busybox:1.36")  # an option, not a tool arg
+    assert "--cpus" in spec.to_detached_argv(name="yulon-extract-0123456789ab")
+    uncapped = docker.ContainerRun(image="busybox:1.36", argv=("true",))
+    assert "--cpus" not in uncapped.to_argv()
+
+
 def test_a_relative_mount_source_is_refused_before_docker_sees_it() -> None:
     """Docker rejects a relative bind source daemon-side; the message should name our caller."""
     spec = docker.ContainerRun(

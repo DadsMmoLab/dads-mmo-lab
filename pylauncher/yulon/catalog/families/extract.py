@@ -2006,6 +2006,7 @@ def run_mmaps(
     user_args: Sequence[str],
     sink: docker.OutputSink,
     cancel: threading.Event | None,
+    cpus: int | None = None,
 ) -> Iterator[str]:
     """Generate `data/mmaps` from the extracted maps and vmaps, unless the evidence vouches for it.
 
@@ -2107,6 +2108,7 @@ def run_mmaps(
             workdir=OUT_MOUNT,
             user_args=tuple(user_args),
             security_args=EXTRACT_HARDENING,
+            cpus=cpus,
         ),
         sink=sink,
         cancel=cancel,

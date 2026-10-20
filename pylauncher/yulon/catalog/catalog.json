@@ -1239,7 +1239,8 @@
               ],
               "min_files": 500,
               "required": false,
-              "success_codes": [1]
+              "success_codes": [1],
+              "cpu_cap": "half"
             },
             "conf": {
               "source_dir": "/opt/tortoise/etc",

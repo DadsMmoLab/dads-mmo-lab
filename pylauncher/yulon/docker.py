@@ -8115,6 +8115,15 @@ class ContainerRun:
     env: Mapping[str, str] = field(default_factory=dict)
     user_args: tuple[str, ...] = ()
     ulimits: tuple[str, ...] = ()
+    cpus: int | None = None
+    """A `--cpus` ceiling on the container, in whole CPUs, or None for no ceiling.
+
+    A whole CPU, not a fraction: Docker accepts `1.5`, but the only caller today
+    caps a movement-map generator by halving what the engine reports, and a
+    half-core more of that tool buys nothing worth a second spelling of the
+    rounding rule. `None` is "the tool may use the engine whole" — the decision
+    a caller that states nothing has taken — and nothing is emitted for it.
+    """
     security_args: tuple[str, ...] = ()
     """The caller's container-level security decision, verbatim, or nothing.
 
@@ -8216,6 +8225,8 @@ class ContainerRun:
         argv = [*self.user_args, *self.security_args]
         for limit in self.ulimits:
             argv += ["--ulimit", limit]
+        if self.cpus is not None:
+            argv += ["--cpus", str(self.cpus)]
         for mount in self.mounts:
             if not mount.host.is_absolute():
                 raise ValueError(f"bind mount source must be absolute, got {mount.host!r}")

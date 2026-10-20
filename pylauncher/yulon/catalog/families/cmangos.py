@@ -2657,12 +2657,26 @@ class CmangosInstaller(StagedInstaller):
         asserts the order over a live install, because a guard whose
         correctness is its position in a sequence is disarmed silently by a
         reordering that looks unrelated.
+
+        **The CPU cap (T801).** Tortoise's MoveMapGen starts one worker per
+        core the container can see — the fork's generator has NO `--threads`
+        option, and passing it one makes the tool reject "--threads" as a map
+        id — so a plan saying `cpu_cap: half` is the only lever we have: the
+        container itself is capped with Docker's `--cpus` at half what the
+        engine reports, bounded by half its memory too (a compile job is ~2 GB;
+        a machine with many cores and little RAM must be bounded by the RAM).
+        An engine that would not say is capped at 2, the same number the
+        CMaNGOS generators spell themselves.
         """
         data = self._data()
         data_dir = self._data_dir(ctx)
         image_ref = self._image_ref(ctx, data.extract.image)
         user_args = self._user_args()
         yield "Generating movement maps (this can take an hour or more)."
+        cap: int | None = None
+        if data.mmaps.cpu_cap == "half":
+            cap = _half_engine_cap(self._seams.engine_size())
+            yield f"mmaps: limited to {cap} CPUs"
         yield from self._stream(
             lambda sink: extract.run_mmaps(
                 data.mmaps,
@@ -2672,6 +2686,7 @@ class CmangosInstaller(StagedInstaller):
                 user_args=user_args,
                 sink=sink,
                 cancel=ctx.cancel,
+                cpus=cap,
             ),
             cancel=ctx.cancel,
             stage="mmaps",
@@ -4526,6 +4541,23 @@ def _assignments(text: str) -> dict[str, int]:
         if key:
             counts[key] = counts.get(key, 0) + 1
     return counts
+
+
+def _half_engine_cap(size: tuple[int, int] | None) -> int:
+    """`--cpus` for a `cpu_cap: half` generator: half the engine's CPUs AND memory, floor 1.
+
+    `size` is what the engine reported (`docker.engine_size()`): `(CPUs, bytes)`
+    or None when it would not say. Halving the MEMORY is not decoration — a
+    movement-map worker is ~2 GB, so a many-core box with little RAM must be
+    bounded by the memory, not the cores. An engine that would not say is
+    capped at 2: the same number the CMaNGOS generators spell themselves in
+    `--threads 2`, and low enough that "we don't know" cannot mean "flat out".
+    """
+    if size is None:
+        return 2
+    cpus, mem_bytes = size
+    mem_gib = mem_bytes // (1024 * 1024 * 1024)
+    return max(1, min(cpus // 2, mem_gib // 2))
 
 
 @dataclass(frozen=True)
