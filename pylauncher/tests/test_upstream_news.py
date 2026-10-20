@@ -263,6 +263,26 @@ def test_the_route_the_tab_holds_carries_the_count(
     assert bare is not None and bare.upstream_news is not None
 
 
+def test_the_route_marks_a_server_without_an_install_record_as_not_built_here(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T802: the press refuses there, so the line must not send the player to it."""
+    from yulon import install_wiring
+    from yulon.catalog.catalog import INSTALL_RECORD, load_catalog
+
+    monkeypatch.setattr(install_wiring, "installer_for", lambda _entry: _CountingEngine([]))
+    entry = load_catalog().get("wow-wotlk")
+    server_dir = tmp_path / "server"
+    server_dir.mkdir()
+    route = install_wiring.update_to_latest_for_app(entry, server_dir)
+    assert route is not None and route.upstream_news is not None
+    adopted = upstream.line(route.upstream_news())
+    assert adopted.endswith("Update it with the launcher that built it.")
+    assert "Update the server to latest" not in adopted
+    (server_dir / INSTALL_RECORD).write_text("{}", encoding="utf-8")
+    assert "Update the server to latest" in upstream.line(route.upstream_news())
+
+
 # -- dropped when a press moves the sources ---------------------------------
 
 

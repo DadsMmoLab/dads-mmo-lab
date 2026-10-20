@@ -21,6 +21,7 @@ and never reaches the GUI, which passes `ui/widgets/prompt.py` instead.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import getpass
 import logging
 import sys
@@ -38,7 +39,13 @@ from yulon.catalog import script_built, upstream
 # `native` in a walrus (`entry.install.native`), and a module of the same name
 # imported at the top of the file is exactly the kind of shadow that type-checks
 # in one function and not in the other.
-from yulon.catalog.catalog import CatalogEntry, DbPasswordUnknown, SingleEntry, load_catalog
+from yulon.catalog.catalog import (
+    INSTALL_RECORD,
+    CatalogEntry,
+    DbPasswordUnknown,
+    SingleEntry,
+    load_catalog,
+)
 from yulon.catalog.families import azerothcore, trinitycore
 from yulon.catalog.installer import (
     DEFAULT_INSTALLERS_ROOT,
@@ -1000,8 +1007,11 @@ def update_to_latest_for_app(
             # read of the folder boots the distro as well) and no git.
             return upstream.UpstreamNews(checked_unix=upstream.now_unix(), sources=())
         if wsl_distro is None:
-            return installer_for(entry).upstream_news(options)
-        return installer_for(entry, seams=Seams.in_wsl(wsl_distro)).upstream_news(options)
+            found = installer_for(entry).upstream_news(options)
+        else:
+            found = installer_for(entry, seams=Seams.in_wsl(wsl_distro)).upstream_news(options)
+        # T802: no install record = built by another launcher; the press refuses there.
+        return dataclasses.replace(found, adopted=not (server_dir / INSTALL_RECORD).is_file())
 
     return LatestRoute(
         confirmation=confirmation,
