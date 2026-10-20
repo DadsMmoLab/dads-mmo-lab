@@ -103,6 +103,7 @@ from yulon.catalog import (
     build_context,
     composegen,
     preflight,
+    script_built,
     snapshot,
     time_zone,
     upstream,
@@ -13452,6 +13453,31 @@ class StagedInstaller:
                 "before."
             )
 
+    def _script_built_clause(self, server_dir: Path) -> str:
+        """T804: for a server inside a WSL distro, why it is not one the old script built.
+
+        The Rebuild press asks the script-built question first where the folder matches
+        (`install_wiring.script_built_rebuild_for_app()`); a press that got here anyway
+        names the rule that did not match, so the refusal says what to look at. Empty
+        outside a distro, and when the check itself could not run.
+        """
+        distro = self._seams.distro
+        if not distro:
+            return ""
+        try:
+            verdict = script_built.check(
+                server_dir, distro, seams=script_built.ScriptBuiltSeams.in_wsl(distro)
+            )
+        except Exception as exc:  # noqa: BLE001 - a clause must never hide the refusal itself
+            logger.warning(f"could not check {server_dir} against the old script's layout: {exc}")
+            return ""
+        if verdict.refusal is None:
+            return (
+                " This folder matches a server built by the old Dad's MMO Lab script: press "
+                "Rebuild again to be asked to rebuild it the way that script did."
+            )
+        return f" {verdict.refusal}"
+
     def _refuse_unless_rebuildable(self, server_dir: Path) -> InstallState:
         """The two folders this button cannot help, refused by name before anything runs.
 
@@ -13486,7 +13512,7 @@ class StagedInstaller:
                 f"server there and cannot rebuild one. Nothing was started. A server this "
                 f'app installed carries that file; one adopted through "Use existing…", or '
                 f"built by another launcher, does not — rebuild that one the way it was "
-                f"built."
+                f"built.{self._script_built_clause(server_dir)}"
             )
         ours = generated_compose_files(server_dir)
         missing = [name for name in composegen.COMPOSE_FILES if name not in ours]

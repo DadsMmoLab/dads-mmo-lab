@@ -133,7 +133,15 @@ from yulon.apply import (
     reapplies_on_top,
     required_prompts,
 )
-from yulon.catalog import bot_dashboard, composegen, native, preflight, time_zone, upstream
+from yulon.catalog import (
+    bot_dashboard,
+    composegen,
+    native,
+    preflight,
+    script_built,
+    time_zone,
+    upstream,
+)
 from yulon.catalog.catalog import CatalogEntry, Client, ClientPack, ConfigWtf, DbPasswordUnknown
 from yulon.catalog.families import azerothcore, clientdir, decisions, mmaps, trinitycore
 from yulon.catalog.installer import (
@@ -2269,6 +2277,14 @@ class ControllerServices:
 
     `install_wiring.rebuild_note_for_app()`: files only, never blocks the press; None asks nothing.
     """
+    script_built_rebuild: install_wiring.ScriptBuiltRebuild | None = None
+    """T804: Rebuild for a WotLK server the old bash script built inside WSL; None elsewhere.
+
+    `install_wiring.script_built_rebuild_for_app()`. When set and its `applies()` says the
+    folder looks like that server, the Rebuild press asks `script_built.question()` instead
+    of the ordinary confirmation and runs this route's source on Yes. It writes nothing in
+    the folder and does not take the server over.
+    """
     updates: native.UpdateRoute | None = None
     """Apply the install plan's re-runnable phases to this server; None when it has none.
 
@@ -3448,6 +3464,10 @@ def _assemble(
             entry, server_dir, wsl_distro=wsl_distro
         ),
         rebuild_note=install_wiring.rebuild_note_for_app(entry, server_dir, wsl_distro=wsl_distro),
+        # T804: beside the rebuild, for the folder the old bash script built in WSL.
+        script_built_rebuild=install_wiring.script_built_rebuild_for_app(
+            entry, server_dir, wsl_distro=wsl_distro
+        ),
         # HERE for the same reason the rebuild is, and offered to far fewer
         # installs: the phases exist or they do not, and that is a fact about
         # `catalog.json` which every game's tab reads the same way.
@@ -20265,7 +20285,20 @@ class ControllerView(QWidget):
             logger.info(f"rebuild of {self.entry.id} refused before its question: {refused}")
             show_warning(self, f"Rebuild {self.entry.name}", refused)
             return False
-        if not ask_yes_no(
+        as_built = self.services.script_built_rebuild
+        distro = self.services.controller.wsl_distro
+        if as_built is not None and distro is not None and as_built.applies():
+            # T804: the old bash script's server. Its own question, its own press; No is the
+            # default and closing the box declines (`ask_yes_no()`).
+            if not ask_yes_no(
+                self,
+                script_built.QUESTION_TITLE,
+                script_built.question(self.services.controller.server_dir, distro),
+            ):
+                logger.info(f"rebuild of {self.entry.id} declined at the script-built question")
+                return False
+            source = as_built.source
+        elif not ask_yes_no(
             self,
             f"Rebuild {self.entry.name}?",
             rebuild_confirmation(

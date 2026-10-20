@@ -28,11 +28,11 @@ import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from yulon import docker, module_moves, platform, server_build_presses, wsl
 from yulon.after_stop import TrueAfterStop, stop_took_effect
-from yulon.catalog import upstream
+from yulon.catalog import script_built, upstream
 
 # By name and not as the module. `import_gate_for()` below binds a local called
 # `native` in a walrus (`entry.install.native`), and a module of the same name
@@ -743,6 +743,46 @@ def rebuild_for_app(
         )
 
     return rebuild
+
+
+class ScriptBuiltRebuild(NamedTuple):
+    """T804's second Rebuild route: the question's gate and the press it runs on Yes."""
+
+    applies: Callable[[], bool]
+    """Cheap and file-only (the GUI thread asks it): may this folder be a script-built server?"""
+    source: RebuildSource
+    """`script_built.rebuild_as_built()`, which checks every rule again before it compiles."""
+
+
+SCRIPT_BUILT_ENTRY_ID = "wow-wotlk"
+
+
+def script_built_rebuild_for_app(
+    entry: CatalogEntry,
+    server_dir: Path,
+    *,
+    wsl_distro: str | None = None,
+) -> ScriptBuiltRebuild | None:
+    """ "Rebuild it the way it was built" for a WotLK server the old script built in WSL (T804).
+
+    None unless the tab's server lives in a WSL distro and the entry is WotLK: the only
+    place that script ran. `applies()` is the cheap file half (`script_built.looks_script_built()`)
+    and never reads a distro WSL did not say is running (`_distro_down()`, T133); the press
+    runs all of `script_built.check()` on its worker before anything is compiled.
+    """
+    if wsl_distro is None or entry.id != SCRIPT_BUILT_ENTRY_ID:
+        return None
+    distro = wsl_distro
+
+    def applies() -> bool:
+        if not _in_the_distro(server_dir, distro) or _distro_down(distro):
+            return False
+        return script_built.looks_script_built(server_dir)
+
+    def source(cancel: threading.Event | None = None) -> Iterator[str]:
+        return script_built.rebuild_as_built(server_dir, distro, cancel)
+
+    return ScriptBuiltRebuild(applies, source)
 
 
 def repair_database_for_app(

@@ -1134,6 +1134,29 @@ def compose_project_name(server_dir: Path, *, wsl_distro: str | None = None) -> 
     return name if isinstance(name, str) and name else None
 
 
+def compose_config(server_dir: Path, *, wsl_distro: str | None = None) -> dict[str, Any] | None:
+    """`docker compose config --format json` of this folder, parsed; None if it cannot say (T804).
+
+    The whole document, for the one reader that checks several facts of it at once
+    (`catalog.script_built.check()`); the narrower readers above each ask for one.
+    """
+    proc = _docker(
+        ["compose", "config", "--format", "json"],
+        cwd=server_dir,
+        timeout=_COMPOSE_CONFIG_TIMEOUT_SECONDS,
+        wsl_distro=wsl_distro,
+    )
+    if proc.returncode != 0:
+        logger.debug(f"compose config failed in {server_dir}: {proc.stderr.strip()}")
+        return None
+    try:
+        parsed = json.loads(proc.stdout)
+    except ValueError:
+        logger.debug("compose config did not return JSON")
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
 def compose_service_images(
     server_dir: Path, services: Sequence[str], *, wsl_distro: str | None = None
 ) -> dict[str, str] | None:
