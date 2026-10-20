@@ -1484,6 +1484,12 @@ def _no_prompt_env() -> dict[str, str]:
     env["GIT_ASKPASS"] = ""
     env["SSH_ASKPASS"] = ""
     env["GCM_INTERACTIVE"] = "never"
+    # git translates its `fatal:` / `error:` prefixes on a non-English system, and
+    # the refusal reasons are read by those prefixes: pin the C locale so they are English.
+    # git translates its `fatal:` / `error:` prefixes on a non-English system, and
+    # the refusal reasons are read by those prefixes: pin the C locale so they are English.
+    env["LC_ALL"] = "C"
+    env["LANGUAGE"] = "C"
     return env
 
 
