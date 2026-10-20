@@ -602,6 +602,7 @@ def build_window() -> object:
     from yulon.ui.answers import said_yes
     from yulon.ui.catalog_view import CatalogView
     from yulon.ui.controller_view import ControllerServices, ControllerView
+    from yulon.ui.friend_launcher import FriendLauncher
     from yulon.ui.icons import get_app_icon, get_tab_icon
     from yulon.ui.launcher_window import LauncherWindow
     from yulon.ui.logs_view import LogsView
@@ -992,6 +993,24 @@ def build_window() -> object:
         _bring_to_front(window)
 
     window.yulon_show_logs = show_logs
+
+    def show_friend_launcher() -> None:
+        """The top bar's **Launcher** (T807): the friend-server window, one at a time.
+
+        Built lazily — the window is for exactly the machine that has no server
+        installed, so the button must not have cost anything before it is
+        pressed — and raised when it is already open instead of doubled.
+        """
+        launcher = getattr(window, "yulon_friend_launcher", None)
+        if launcher is None or not shiboken6.isValid(launcher):
+            launcher = FriendLauncher(catalog)
+            launcher.closed.connect(lambda: setattr(window, "yulon_friend_launcher", None))
+            window.yulon_friend_launcher = launcher
+        launcher.show()
+        _bring_to_front(window)
+
+    window.yulon_show_friend_launcher = show_friend_launcher
+    top_menu.launcher_button.clicked.connect(lambda _checked=False: show_friend_launcher())
 
     def drop_controller(key: tuple[str, Path]) -> None:
         """Tear one live tab down completely, mirroring `_stop_background_threads()`.

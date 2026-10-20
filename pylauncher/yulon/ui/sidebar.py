@@ -308,6 +308,13 @@ class TopMenuBar(QWidget):
         self.servers_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         row.addWidget(self.servers_button)
 
+        # T807: reachable with an empty server list too — the launcher window is
+        # for exactly the machine that has no server installed yet.
+        self.launcher_button = self._make_button("Launcher", TOP_MENU_BUTTON)
+        self.launcher_button.setCheckable(False)
+        self.launcher_button.setToolTip("Play on a friend's server without installing one here")
+        row.addWidget(self.launcher_button)
+
         self.log_button = self._make_button("Log", TOP_MENU_BUTTON)
         self.log_button.setToolTip(
             "Yu'lon's own logs, and a file to send when something goes wrong"
