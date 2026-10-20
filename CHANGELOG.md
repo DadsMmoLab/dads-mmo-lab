@@ -18,6 +18,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ### Fixed
 - A failed build in a module you just installed now says the module is new and your server still runs its old build.
 - **Rebuild the server…** now warns when a new module may not build on a server that is off the tested commits.
+- On Bazzite and other image-based Fedora systems without Docker, the install now says how to get Docker.
 - When Docker cannot fetch the git image, the Modules tab now shows Docker's reason instead of an unhelpful line.
 - Docker setup now asks for your password on Ubuntu 25.10+ and Kubuntu (sudo-rs) instead of failing every step.
 - **Return to the tested pin** no longer refuses because Windows changed a server file's permissions and nothing else.

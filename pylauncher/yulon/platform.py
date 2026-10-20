@@ -172,6 +172,15 @@ def in_wsl() -> bool:
         return False
 
 
+OSTREE_BOOTED_PATH = "/run/ostree-booted"
+"""Exists on a system booted from an ostree image (Bazzite, Silverblue, Kinoite). A test points it elsewhere."""
+
+
+def is_image_based() -> bool:
+    """True on an image-based Fedora system (rpm-ostree), where dnf cannot install Docker."""
+    return Path(OSTREE_BOOTED_PATH).exists()
+
+
 def is_steamos() -> bool:
     """True on SteamOS (whose root filesystem is read-only until unlocked)."""
     try:
@@ -2327,6 +2336,13 @@ DOCKER_OTHER_ENGINE_STEP = (
     "another copy over it. Start Docker (or fix it), then press Install again."
 )
 
+DOCKER_IMAGE_BASED_STEP = (
+    "This is an image-based system (rpm-ostree, such as Bazzite) and it has no Docker. It has "
+    "Podman, which Yu'lon does not use, and the usual Docker setup does not apply here, so "
+    "nothing was run. Bazzite-DX ships Docker already (switch to it with ujust). Otherwise "
+    "layer Docker with rpm-ostree, reboot, then start Yu'lon again and press Install."
+)
+
 DOCKER_NO_ASKER_STEP = (
     "Yu'lon needs your yes before it runs anything as root, and there was nobody to ask. "
     "To do it yourself, run these in a terminal, then press Install again:\n{commands}"
@@ -4112,6 +4128,11 @@ def _ensure_docker_linux(
             cancel,
             ask,
         )
+
+    if on_board == "none" and is_image_based():
+        # No dnf install and no usermod here (T796): the root filesystem is an image, and
+        # the advice for a Docker service on a normal Fedora is wrong. Say so, run nothing.
+        return ProvisionReport("linux", manual_steps=(DOCKER_IMAGE_BASED_STEP,))
 
     steamos = is_steamos()
     pm = linux_package_manager(which)

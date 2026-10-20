@@ -253,6 +253,45 @@ def test_linux_dry_run_runs_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
     assert report.docker_ready is False
 
 
+def test_an_image_based_system_without_docker_gets_the_bazzite_message(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    marker = tmp_path / "ostree-booted"
+    marker.write_text("")
+    monkeypatch.setattr(platform, "OSTREE_BOOTED_PATH", str(marker))
+    monkeypatch.setattr(platform.sys, "platform", "linux")
+    run = _Run()
+    report = platform.ensure_docker(
+        run=run,
+        which=lambda n: "/usr/bin/dnf" if n == "dnf" else None,
+        user="pk",
+        ask=lambda q: "y",
+    )
+    # Nothing but the daemon probe ran: no dnf, no sudo, no usermod.
+    assert run.calls == [["docker", "info"]]
+    assert report.manual_steps == (platform.DOCKER_IMAGE_BASED_STEP,)
+    refusal = str(installer.docker_unavailable(report))
+    assert "rpm-ostree" in refusal and "Bazzite-DX" in refusal and "reboot" in refusal
+    assert "systemctl start docker" not in refusal and "usermod" not in refusal
+
+
+def test_without_the_ostree_marker_the_dnf_route_is_unchanged(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(platform, "OSTREE_BOOTED_PATH", str(tmp_path / "absent"))
+    monkeypatch.setattr(platform.sys, "platform", "linux")
+    monkeypatch.setattr(platform, "is_steamos", lambda: False)
+    run = _Run()
+    report = platform.ensure_docker(
+        run=run,
+        which=lambda n: "/usr/bin/dnf" if n == "dnf" else None,
+        dry_run=True,
+        user="pk",
+    )
+    assert platform.DOCKER_IMAGE_BASED_STEP not in report.manual_steps
+    assert report.skipped[0].startswith("(dry run) dnf")
+
+
 def test_linux_without_a_package_manager_gives_manual_steps(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

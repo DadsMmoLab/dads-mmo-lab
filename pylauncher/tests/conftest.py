@@ -600,6 +600,16 @@ def _no_docker_is_installed_on_this_linux_box(monkeypatch: pytest.MonkeyPatch) -
 
 
 @pytest.fixture(autouse=True)
+def _this_linux_box_is_not_image_based(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`platform.is_image_based()` reads `/run/ostree-booted`; point it at nothing (T796)."""
+    monkeypatch.setattr(
+        platform, "OSTREE_BOOTED_PATH", str(tmp_path_factory.mktemp("no-ostree") / "ostree-booted")
+    )
+
+
+@pytest.fixture(autouse=True)
 def _compose_is_new_enough(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every Start asks `docker compose version` first (T658); a unit test's Compose is new enough.
 
