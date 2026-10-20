@@ -69,6 +69,7 @@ from yulon.catalog.native import (
     ale_playerbots_note,
     core_off_its_moved_pin_note,
     correction_phases,
+    module_before_rebuild_note,
     module_order_note,
     moved_pin_confirmation,
     moved_pins,
@@ -654,6 +655,34 @@ def _core_note(entry: CatalogEntry, server_dir: Path, wsl_distro: str | None) ->
             return ""
         moved = moved_pins(read_state(server_dir, valid=()), pins)
         return core_off_its_moved_pin_note(moved, named) if moved else ""
+
+    return note
+
+
+def rebuild_note_for_app(
+    entry: CatalogEntry, server_dir: Path, *, wsl_distro: str | None = None
+) -> Callable[[], str]:
+    """The note the Rebuild question carries before the compile, or "" for none (T795).
+
+    Said when the core is off a pin that moved AND a module went in or was updated since
+    the last build: the compile that follows is the one T586 failed in. Files only
+    (`.git/HEAD` and the module records), no git run, and a server inside a WSL distro that
+    is stopped is not read. A heuristic: the build is never refused for it.
+    """
+
+    def note() -> str:
+        pins = _catalog_pins(entry, server_dir, wsl_distro)
+        if not pins:
+            return ""
+        moved = moved_pins(read_state(server_dir, valid=()), pins)
+        if not moved:
+            return ""
+        # Local: the module engine is not otherwise needed here (it is a type-only import above).
+        from yulon.apply import rebuilds_owed_now  # noqa: PLC0415
+
+        owed = rebuilds_owed_now(server_dir)
+        named = tuple(sorted({key.partition("/")[2] for key in owed} - {""}))
+        return module_before_rebuild_note(moved, named) if named else ""
 
     return note
 

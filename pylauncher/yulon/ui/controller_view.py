@@ -2264,6 +2264,11 @@ class ControllerServices:
     """What the Rebuild press would refuse, asked BEFORE its question (T217 live proof).
 
     `install_wiring.rebuild_refusal_for_app()`; None asks nothing first."""
+    rebuild_note: Callable[[], str] | None = None
+    """A heads-up the Rebuild question carries, or "" for none (T795).
+
+    `install_wiring.rebuild_note_for_app()`: files only, never blocks the press; None asks nothing.
+    """
     updates: native.UpdateRoute | None = None
     """Apply the install plan's re-runnable phases to this server; None when it has none.
 
@@ -3442,6 +3447,7 @@ def _assemble(
         rebuild_refusal=install_wiring.rebuild_refusal_for_app(
             entry, server_dir, wsl_distro=wsl_distro
         ),
+        rebuild_note=install_wiring.rebuild_note_for_app(entry, server_dir, wsl_distro=wsl_distro),
         # HERE for the same reason the rebuild is, and offered to far fewer
         # installs: the phases exist or they do not, and that is a fact about
         # `catalog.json` which every game's tab reads the same way.
@@ -20266,6 +20272,7 @@ class ControllerView(QWidget):
                 self.entry,
                 self.services.controller.server_dir,
                 kept_build=self.services.kept_build is not None,
+                note=self._rebuild_note(),
             ),
         ):
             logger.info(f"rebuild of {self.entry.id} declined at the confirmation")
@@ -20282,6 +20289,17 @@ class ControllerView(QWidget):
             cancel=cancel,
             record_as=self._run_record_kind(),
         )
+
+    def _rebuild_note(self) -> str:
+        """The wiring's heads-up for the Rebuild question; "" when none, and never raises (T795)."""
+        asked = self.services.rebuild_note
+        if asked is None:
+            return ""
+        try:
+            return asked()
+        except Exception as exc:  # noqa: BLE001 - a guess must never stop the press it warns about
+            logger.warning(f"could not read the rebuild note for {self.entry.id}: {exc}")
+            return ""
 
     def _set_update_buttons(self) -> None:
         """Both T64 presses, back to what this install can do and what is running.

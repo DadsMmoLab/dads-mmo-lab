@@ -1928,6 +1928,29 @@ def core_off_its_moved_pin_note(moved: Sequence[CatalogPin], named: Sequence[str
     )
 
 
+def module_before_rebuild_note(moved: Sequence[CatalogPin], named: Sequence[str]) -> str:
+    """Said in the Rebuild question when a new module meets a core off its moved pin (T795).
+
+    The Discord player's case again, but before the compile instead of after it:
+    mod-ale installed fresh on a core that sits behind the commits this version
+    of Yu'lon was tested with, and a seven-minute build that was bound to stop in
+    the module. This is a guess from two facts the app already keeps (the core's
+    commits and which modules went in since the last build), not a reading of the
+    module's code, so it only names the order and never stops the build.
+    """
+    mods = _listed(named)
+    one = len(named) == 1
+    return (
+        f"This server is not on the commits this version of Yu'lon was tested with "
+        f"({_on_and_tested(moved)}), and {mods} {'was' if one else 'were'} installed or updated "
+        f"since your last build. {'It' if one else 'They'} may have been written for the tested "
+        f"commits and fail to build on yours. If you would rather build the tested commits with "
+        f"your modules, say no and press "
+        f"{server_build_presses.under_server_build(server_build_presses.RETURN_TO_PIN)} "
+        f"instead. This is only a guess, and a yes here still builds what is on your server now."
+    )
+
+
 def module_order_note(named: Sequence[str], press: str) -> str:
     """Said after "Update the server to latest…" or "Return to the tested pin…" failed in a module.
 
