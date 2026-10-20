@@ -161,7 +161,7 @@ def page(
     online = ops.characters.online
     where = f"({clause})"
     if name_like:
-        where += f" AND name LIKE {literal(escape_like(name_like) + '%')} ESCAPE '{ESCAPE}'"
+        where += f" AND name LIKE {literal('%' + escape_like(name_like) + '%')} ESCAPE '{ESCAPE}'"
     counted = where
     if after is not None:
         # The row comparison, not `name > x OR (name = x AND guid > y)`: it is
@@ -241,7 +241,7 @@ def _why_zero(sql: SqlReader, table: str, clause: str, marker: Marker, name_like
         bots = _count(sql, table, clause)
         if bots:
             return (
-                f"no bot's name begins with {name_like!r} — this server has "
+                f"no bot's name contains {name_like!r} — this server has "
                 f"{bots} {'bot' if bots == 1 else 'bots'}"
             )
     characters = _count(sql, table, "")

@@ -109,7 +109,7 @@ def test_the_filter_is_escaped_with_a_character_a_stricter_sql_mode_keeps() -> N
     # The whole pattern, not a substring of it: asserting that "%" appears is
     # true whether or not it was escaped, which is how the first version of
     # this test survived a mutation that turned the escaping off.
-    assert _like_pattern(rows) == "10!%!_o'brien%"
+    assert _like_pattern(rows) == "%10!%!_o'brien%"
     assert "\\" not in rows, "a backslash escape stops escaping under NO_BACKSLASH_ESCAPES"
 
 
@@ -135,7 +135,7 @@ def test_a_typed_backslash_quote_cannot_end_the_filter_literal() -> None:
 
     for _db, statement in sql.asked:
         assert "DROP TABLE" not in statement.upper(), statement
-    assert _like_pattern(sql.asked[1][1]) == typed + "%"
+    assert _like_pattern(sql.asked[1][1]) == "%" + typed + "%"
 
 
 def test_a_database_that_cannot_be_read_says_so() -> None:

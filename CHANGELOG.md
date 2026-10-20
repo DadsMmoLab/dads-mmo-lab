@@ -15,6 +15,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 
 ### New
 - A WotLK or Unbound server's Bots tab has **Delete every random bot…**, with a confirmation and a backup first.
+- Filter the Characters and Bots lists by name as you type; the X clears the filter.
 
 ### Fixed
 - A failed build in a module you just installed now says the module is new and your server still runs its old build.
