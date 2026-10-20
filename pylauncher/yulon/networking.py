@@ -3625,9 +3625,9 @@ def advertisable(address: str | None) -> str | None:
       bug-checklist §35: a realm advertising `127.0.0.1` tells every client that
       the world server is on the CLIENT's own machine, so the client hangs at
       "Connecting" and says nothing useful. `detect_lan_ip()` filters `127.` on
-      its local branch and its WSL branch does NOT — it takes whatever
-      `Get-NetIPConfiguration` printed — so the filter has to exist somewhere
-      both branches pass through, and this is it. **The way to advertise the
+      every branch now that its WSL branch answers named pairs (T800), but this
+      predicate is still what every caller passes through, and it stays the
+      single place the rule lives. **The way to advertise the
       loopback ON PURPOSE is `Mode` `loopback`, not a hole in this refusal**
       (bug-checklist §41): this predicate is asked about addresses a DETECTOR
       produced, and widening it would hand the §35 outage back to every machine

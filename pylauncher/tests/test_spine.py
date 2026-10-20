@@ -3681,8 +3681,9 @@ def test_no_detectable_address_is_a_sentence_and_never_a_guess(
     they can reach and no idea why.
 
     `127.0.0.1` is in the list because it is an address a detector really
-    returns: `platform.detect_lan_ip()` filters it on its local branch and its
-    WSL branch, which asks Windows, does not.
+    returns: `platform.detect_lan_ip()` filters it on every branch now (T800
+    gave its WSL branch named pairs), and a detector that cannot read its
+    routes answers None.
 
     Mutations this catches: treating `None` as "already correct" and skipping
     silently (no line is said), writing whatever was detected (a statement

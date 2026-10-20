@@ -624,15 +624,79 @@ def portproxy_commands(listen_address: str, ports: Iterable[int]) -> list[list[s
     ]
 
 
-def detect_lan_ip() -> str | None:
-    """The host's LAN IPv4 — the address other players on the same network use.
+_DEFAULT_ROUTE_WINDOWS_QUERY = (
+    "Get-NetIPConfiguration | Where-Object { $_.IPv4DefaultGateway -ne $null } | "
+    "ForEach-Object { $_.InterfaceAlias + '|' + $_.IPv4Address.IPAddress }"
+)
+"""The (interface|address) pairs of every adapter Windows gives a default gateway (T800).
 
-    Uses the routing table (a connected UDP socket to a public address; no
-    packet is sent). Inside WSL that answers with the 172.x guest address,
-    which the guide says never to use, so WSL asks the Windows side instead.
+One PowerShell read, and a read only. A full-tunnel VPN (WireGuard's, Tailscale's)
+holds a default gateway too, so the pairs are filtered for VPN/virtual names before
+any of them is preferred; see `_detect_excluded()`."""
+
+def _parse_ip_route_default(text: str) -> tuple[str, ...]:
+    """The `dev` interface of every default route line of `ip -4 route show default`."""
+    names: list[str] = []
+    for line in text.splitlines():
+        parts = line.split()
+        for i, part in enumerate(parts[:-1]):
+            if part == "dev":
+                names.append(parts[i + 1])
+                break
+    return tuple(names)
+
+
+def _parse_route_get_default(text: str) -> str | None:
+    """macOS `route -n get default`'s `interface:` value, or None."""
+    for line in text.splitlines():
+        key, sep, value = line.partition(":")
+        if sep and key.strip() == "interface":
+            return value.strip() or None
+    return None
+
+
+def _route_pairs(do: RunCmd, where: PlatformId) -> tuple[tuple[str, str], ...]:
+    """(interface, address) for the adapter(s) holding the default route (T800).
+
+    An empty answer means the OS would not say (the command could not run, or there is no
+    default route) — never that the routes were read and hold nothing.
     """
-    if in_wsl():
-        return _windows_lan_ip_from_wsl()
+    if where == "windows":
+        pairs = _listing(do, ["powershell.exe", "-NoProfile", "-Command", _DEFAULT_ROUTE_WINDOWS_QUERY], _parse_powershell_addresses)
+        return pairs or ()
+    if where == "macos":
+        name = _route_get_default_macos(do)
+        if not name:
+            return ()
+        pairs = _listing(do, ["ifconfig"], _parse_ifconfig)
+        return () if pairs is None else tuple(p for p in pairs if p[0] == name)
+    devs = _listing(do, ["ip", "-4", "route", "show", "default"], _parse_ip_route_default)
+    if not devs:
+        return ()
+    pairs = _listing(do, ["ip", "-4", "-o", "addr", "show"], _parse_ip_addr)
+    if pairs is None:
+        return ()
+    return tuple((interface, address) for interface, address in pairs if interface in devs)
+
+
+def _route_get_default_macos(do: RunCmd) -> str | None:
+    """The interface macOS's routing table sends the default route to, or None."""
+    try:
+        proc = do(["route", "-n", "get", "default"])
+    except OSError:
+        return None
+    if proc.returncode != 0:
+        return None
+    return _parse_route_get_default(proc.stdout)
+
+
+def _socket_lan_ip() -> str | None:
+    """The address a connected UDP socket to a public address answers (no packet is sent).
+
+    The routing table's own choice, with no adapter name attached — so a VPN that is the
+    default route cannot be told apart from the wired one. `detect_lan_ip()` keeps this as
+    its last answer, exactly as it answered before T800; a test stands in for it.
+    """
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
             sock.connect(("1.1.1.1", 53))
@@ -643,19 +707,79 @@ def detect_lan_ip() -> str | None:
     return None if ip.startswith("127.") else ip
 
 
-def _windows_lan_ip_from_wsl() -> str | None:
-    """Ask Windows (via powershell.exe) for the IPv4 of the adapter with a default gateway."""
-    proc = runner.run(
-        [
-            "powershell.exe",
-            "-NoProfile",
-            "-Command",
-            "(Get-NetIPConfiguration | Where-Object {$_.IPv4DefaultGateway -ne $null} "
-            "| Select-Object -First 1).IPv4Address.IPAddress",
-        ]
+def _real_route_candidates(do: RunCmd, where: PlatformId) -> tuple[tuple[str, str], ...]:
+    """The default-route pairs that a LAN player could dial (`_plain_lan_address`)."""
+    return tuple(
+        (interface, address)
+        for interface, address in _route_pairs(do, where)
+        if _plain_lan_address(interface, address)
     )
-    ip = proc.stdout.strip().splitlines()[0].strip() if proc.stdout.strip() else ""
-    return ip or None
+
+
+def _one_address(pairs: Iterable[tuple[str, str]]) -> str | None:
+    """The one address the pairs share, or None when they hold none, two or more."""
+    addresses = {address for _, address in pairs}
+    return addresses.pop() if len(addresses) == 1 else None
+
+
+def detect_lan_ip(
+    run: RunCmd | None = None, *, system: PlatformId | None = None, wsl: bool | None = None
+) -> str | None:
+    """The host's LAN IPv4 — the address other players on the same network use (T800).
+
+    Three answers, best first. The adapter that holds the default route, when it is not a
+    VPN's or a virtual one (a full-tunnel VPN holds the default route too, and a connected
+    UDP socket cannot tell its address from the wired one — that is how a Tailscale or
+    WireGuard 10.x/100.x address was advertised to a LAN that could not reach it). Then the
+    one address left once every VPN/virtual, loopback and link-local one is set aside, when
+    it is exactly one. Then the routing table's own choice, as always: a connected UDP
+    socket to a public address, no packet sent.
+
+    Inside WSL that socket answers with the 172.x guest address, which the guide says never
+    to use, so WSL asks the Windows side instead. The `system`/`wsl` keywords pin what
+    `detect()`/`in_wsl()` would answer, so a test reads no host of its own.
+    """
+    where = detect() if system is None else system
+    if in_wsl() if wsl is None else wsl:
+        return _windows_lan_ip_from_wsl(run)
+    do: RunCmd = run if run is not None else (lambda argv: runner.run(argv, timeout=8.0))
+    found = _one_address(_real_route_candidates(do, where))
+    if found is not None:
+        return found
+    listing = local_ipv4_listing(do, system=where, wsl=False)
+    found = _one_address(
+        tuple(
+            (a.interface, a.address)
+            for a in listing.addresses
+            if not a.vpn and not _detect_excluded(a.interface)
+        )
+    )
+    if found is not None:
+        return found
+    return _socket_lan_ip()
+
+
+def _windows_lan_ip_from_wsl(run: RunCmd | None = None) -> str | None:
+    """Ask Windows (via powershell.exe) for the IPv4 of the adapter with a default gateway.
+
+    Every default-gateway adapter's (interface|address) is read in one go, and a VPN's or a
+    virtual one is passed over when that leaves exactly one real address (T800). When it
+    does not — no real one, or two real ones — the FIRST default-gateway adapter's address
+    wins, which is what this asked before T800; under WSL the UDP socket is no fallback
+    (it answers the VM's 172.x guest address, which the guide says never to use).
+    """
+    do: RunCmd = run if run is not None else (lambda argv: runner.run(argv, timeout=8.0))
+    pairs = _listing(
+        do,
+        ["powershell.exe", "-NoProfile", "-Command", _DEFAULT_ROUTE_WINDOWS_QUERY],
+        _parse_powershell_addresses,
+    )
+    if not pairs:
+        return None
+    found = _one_address(
+        (interface, address) for interface, address in pairs if _plain_lan_address(interface, address)
+    )
+    return found if found is not None else pairs[0][1]
 
 
 ADDRESS_LISTING_QUERY = (
@@ -705,6 +829,45 @@ def _vpn_like(interface: str, address: IPv4Address) -> bool:
         or any(part in name for part in _VPN_NAME_PARTS)
         or name.startswith(_VPN_NAME_PREFIXES)
     )
+
+
+_LAN_EXCLUDED_NAME_PARTS = _VPN_NAME_PARTS + (
+    "wintun",
+    "hyper-v",
+    "hyperv",
+    "vmware",
+    "vmnet",
+    "virtualbox",
+    "wsl",
+)
+_LAN_EXCLUDED_NAME_PREFIXES = _VPN_NAME_PREFIXES + _CONTAINER_BRIDGE_PREFIXES
+"""Names LAN detection may not prefer (T800): the VPN adapters' names, plus the
+virtual ones — Wintun, Hyper-V, VMware (and its VMnet adapters), VirtualBox,
+Docker's bridges, WSL's switch. Deliberately NOT the tag `_vpn_like()` puts on
+the player's choice list, which keeps a Hyper-V EXTERNAL switch
+(`vEthernet (External)`) as the real LAN it measured to be (T674 round 3): an
+exclusion that broad would only push those machines to the same UDP-socket
+answer they get today, so it would fix nothing and relabel a working choice."""
+
+
+def _detect_excluded(interface: str) -> bool:
+    """Whether `interface`'s name is a VPN's or a virtual adapter's, so no LAN player reaches it."""
+    name = interface.casefold()
+    return name.startswith(_LAN_EXCLUDED_NAME_PREFIXES) or any(
+        part in name for part in _LAN_EXCLUDED_NAME_PARTS
+    )
+
+
+def _plain_lan_address(interface: str, address: str) -> bool:
+    """Whether (interface, address) is a candidate a LAN player could dial: real IPv4, no
+    loopback, no link-local (169.254/16, T800), no VPN or virtual adapter."""
+    try:
+        ip = IPv4Address(address)
+    except ValueError:
+        return False
+    if ip.is_loopback or ip.is_link_local or ip.is_unspecified:
+        return False
+    return not _detect_excluded(interface)
 
 
 def _parse_ip_addr(text: str) -> tuple[tuple[str, str], ...]:
@@ -816,9 +979,10 @@ def local_ipv4_addresses(
 ) -> tuple[LocalAddress, ...]:
     """Every usable IPv4 address this computer holds, with the interface that holds it (T674).
 
-    Not what `detect_lan_ip()` answers. That is the address of the default route, and a Tailscale
-    or other VPN interface is never the default route, so the address a friend on that network has
-    to type exists only in this listing. Under WSL it is the Windows adapters, which a server in
+    Not what `detect_lan_ip()` answers. That is the address of the adapter holding the default
+    route — a full-tunnel VPN holds that route too (T800), which is why `detect_lan_ip()` now
+    reads the adapters' names — so the address a friend on that network has to type exists only
+    in this listing. Under WSL it is the Windows adapters, which a server in
     WSL is reached on through the Windows forwarder, plus the VM's VPN interfaces (`LocalSide`);
     the VM's NAT eth0 is left out. The choice list and `networking.holds_here()` both read this
     listing under WSL, so the guard accepts what is offered, and refuses the VM's eth0. Loopback and
