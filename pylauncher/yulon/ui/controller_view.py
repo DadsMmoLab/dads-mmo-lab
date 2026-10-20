@@ -102,6 +102,7 @@ from yulon import (
     play_client,
     play_launch,
     purge,
+    realm_name,
     reset_defaults,
     resources,
     seeded_accounts,
@@ -1955,6 +1956,13 @@ class ControllerServices:
     write, on the job's thread; the account and character writes take it inside their own seams.
     `None` (a harness) holds nothing.
     """
+    realm_name_current: Callable[[], realm_name.NameState] | None = None
+    """The realm name the Networking tab's field shows: the realm row's, else the saved one (T808).
+
+    `None` for a harness, and for a server with no realm row: the field is then absent.
+    """
+    realm_name_save: Callable[[str], realm_name.SaveResult] | None = None
+    """Check, remember and apply a new realm name (T808); a job, under the server's hold."""
     db_refusal: str | None = None
     """Why nothing on this tab may touch the database, in player words, or None (T785).
 
@@ -3310,6 +3318,22 @@ def _assemble(
     function object in all four packages.
     """
     spec = entry.container_spec()
+    names = realm_name.RealmNames(entry, server_dir, sql)
+    # T808: every Start puts a saved realm name back (an import seeds the catalog's own), through
+    # the step the controller already asks before the servers; it never refuses a start.
+    if hasattr(controller, "before_servers"):
+        controller.before_servers = realm_name.keep_at_start(
+            entry,
+            server_dir,
+            sql,
+            lambda: docker.start_database(
+                spec,
+                server_dir,
+                because="the saved realm name could not be applied",
+                wsl_distro=wsl_distro,
+            ),
+            controller.before_servers,
+        )
     if spec.save_first is not None and channel_setup is not None:
         # T496: where the console needs a terminal this host cannot open (Windows), the save
         # a Stop asks for first goes through this install's command channel, on every route.
@@ -3332,6 +3356,13 @@ def _assemble(
             _server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
             "Apply the network plan",
             lambda plan: networking.apply(plan, sql=sql, server_dir=server_dir),
+        ),
+        # T808: the realm name; the write goes under the same hold as the network apply.
+        realm_name_current=names.current,
+        realm_name_save=_under_the_hold(
+            _server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
+            "Change the realm name",
+            names.save,
         ),
         # T610: the account row is written under the server's cross-process hold, in the shared
         # half so that every game's factory gets it (five of them pass their own writer).
@@ -8286,6 +8317,14 @@ class _ToldLine(QLabel):
         self.said.emit()
 
 
+REALM_NAME_LABEL = "Realm name"
+"""The Networking tab's field for the name players see in the game's realm list (T808)."""
+REALM_NAME_BUTTON = "Save name"
+REALM_NAME_PLACEHOLDER = "Up to 32 characters"
+REALM_NAME_SAVING = "Saving the realm name…"
+REALM_NAME_NOT_READ = "The realm name could not be read from this server."
+REALM_NAME_NOT_SAVED = "The realm name could not be saved. Nothing was changed."
+
 _PAGES_THAT_FIT_THEMSELVES = frozenset({"Tuning"})
 """Sub-tabs `_add_panel_tab` leaves out of a `ScrollPage` (T191).
 
@@ -8786,6 +8825,7 @@ class ControllerView(QWidget):
             # polled at all, here included.
             self.refresh_status()
             self.refresh_verdict()
+            self.refresh_realm_name()
             # T127: what the files say about the bot dashboard, once. It changes
             # only through the switch, whose job re-reads it when it ends.
             self.refresh_bot_dashboard()
@@ -23150,6 +23190,28 @@ class ControllerView(QWidget):
         row.flow().addWidget(self.apply_button)
         box.addWidget(row)
         box.addWidget(self.network_reasons)
+        # T808: the realm name players see in the game's realm list. One row, and absent for a
+        # server with no realm row.
+        self.realm_name_row = flow_bar(tab)
+        self.realm_name_edit = QLineEdit(tab)
+        self.realm_name_edit.setPlaceholderText(REALM_NAME_PLACEHOLDER)
+        self.realm_name_edit.setAccessibleName(REALM_NAME_LABEL)
+        self.realm_name_button = QPushButton(REALM_NAME_BUTTON, tab)
+        self.realm_name_label = QLabel(REALM_NAME_LABEL, tab)
+        self.realm_name_label.setBuddy(self.realm_name_edit)
+        self.realm_name_report = QLabel("", tab)
+        self.realm_name_report.setWordWrap(True)
+        self.realm_name_row.flow().addWidget(self.realm_name_label)
+        self.realm_name_row.flow().addWidget(self.realm_name_edit)
+        self.realm_name_row.flow().addWidget(self.realm_name_button)
+        self._realm_name_typed = False
+        self.realm_name_edit.textEdited.connect(self._realm_name_was_typed)
+        self.realm_name_button.clicked.connect(self.save_realm_name)
+        has_name = self.services.realm_name_save is not None
+        self.realm_name_row.setVisible(has_name)
+        self.realm_name_report.setVisible(has_name)
+        box.addWidget(self.realm_name_row)
+        box.addWidget(self.realm_name_report)
         box.addWidget(self.network_text, 1)
         box.addWidget(self.network_details)
         self._add_panel_tab(tab, "networking", "Networking")
@@ -23168,6 +23230,70 @@ class ControllerView(QWidget):
         if self.loopback_radio.isChecked():
             return "loopback"
         return "internet" if self.internet_radio.isChecked() else "lan"
+
+    @Slot(str)
+    def _realm_name_was_typed(self, _text: str) -> None:
+        """A reading that lands later must not overwrite what the player is typing."""
+        self._realm_name_typed = True
+
+    @Slot()
+    def refresh_realm_name(self) -> None:
+        """Fill the field with the realm row's name, else the saved one; a job (T808)."""
+        current = self.services.realm_name_current
+        if current is None:
+            return
+        if self._waits_for_the_distro("realm name", self.refresh_realm_name):
+            return
+        if (refusal := self.services.db_refusal) is not None:
+            # No database password to ask with: only the saved name can be shown.
+            self.realm_name_report.setText(refusal)
+        self._run(current, self._realm_name_read, self._realm_name_read_failed)
+
+    @Slot(object)
+    def _realm_name_read(self, result: object) -> None:
+        if not isinstance(result, realm_name.NameState):
+            return
+        if not self._realm_name_typed and result.shown:
+            self.realm_name_edit.setText(result.shown)
+        self.realm_name_report.setText(result.note)
+
+    @Slot(object)
+    def _realm_name_read_failed(self, exc: object) -> None:
+        logger.info(f"the realm name could not be read: {exc}")
+        self.realm_name_report.setText(REALM_NAME_NOT_READ)
+
+    @Slot()
+    def save_realm_name(self) -> None:
+        """Check the typed name here (a refusal needs no job), then save and apply it (T808)."""
+        save = self.services.realm_name_save
+        if save is None:
+            return
+        typed = self.realm_name_edit.text()
+        try:
+            name = realm_name.check(typed)
+        except realm_name.RealmNameError as exc:
+            self.realm_name_report.setText(str(exc))
+            return
+        self.realm_name_button.setEnabled(False)
+        self.realm_name_report.setText(REALM_NAME_SAVING)
+        self._run(lambda: save(name), self._realm_name_saved, self._realm_name_save_failed)
+
+    @Slot(object)
+    def _realm_name_saved(self, result: object) -> None:
+        self.realm_name_button.setEnabled(True)
+        if isinstance(result, realm_name.SaveResult):
+            self.realm_name_report.setText(result.text)
+            if result.remembered or result.applied:
+                self._realm_name_typed = False
+
+    @Slot(object)
+    def _realm_name_save_failed(self, exc: object) -> None:
+        """Said in words (a held server, say); what broke goes to the app log."""
+        self.realm_name_button.setEnabled(True)
+        logger.info(f"the realm name could not be saved: {exc}")
+        self.realm_name_report.setText(
+            str(exc) if isinstance(exc, docker.ServerHeldError) else REALM_NAME_NOT_SAVED
+        )
 
     @Slot()
     def show_network_plan(self) -> None:

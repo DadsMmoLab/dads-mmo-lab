@@ -88,6 +88,7 @@ from yulon import (
     networking,
     platform,
     realm_flag,
+    realm_name,
     resources,
     runner,
     seeded_accounts,
@@ -222,6 +223,7 @@ OUR_OWN_FILES = (
     STATE_FILE,
     networking.INTENT_FILE,
     module_answers.ANSWERS_FILE,
+    realm_name.REALM_NAME_FILE,
     docker.FOLDER_ID_FILE,
     MOVE_IN_FILE,
 )
@@ -8461,6 +8463,8 @@ class StagedInstaller:
         # make a working server time out. Before the closing line, because that
         # line is asserted to be LAST.
         yield from self._advertise_realm(replace(ctx, state=state))
+        # T808: the name the owner chose for the realm list, which the import's seed just replaced.
+        yield from self._apply_realm_name(replace(ctx, state=state))
         # After the realm row, for `_advertise_realm()`'s reason: a background job
         # is a sentence, never a failed install (T179's movement maps).
         yield from self.after_ready(server_dir)
@@ -16717,6 +16721,27 @@ class StagedInstaller:
             "was already running when this was set, so if a client is still sent to the old "
             "address, stop and start it again on the Server tab."
         )
+
+    def _apply_realm_name(self, ctx: StageContext) -> Iterator[str]:
+        """Put the realm name the owner chose back in the realm row, if one was saved (T808).
+
+        A rebuild's import seeds the catalog's own name over the row, so without this the
+        choice made on the Networking tab would be undone by the next install press. Nothing
+        saved means nothing is sent and nothing is said. Like `_advertise_realm()`, it can
+        never fail the install: a refusal is a sentence.
+        """
+        saved = realm_name.read_saved_name(ctx.server_dir)
+        if saved is None:
+            return
+        failed = self._run_auth_statement(realm_name.name_sql(self.entry, saved), ctx)
+        if failed:
+            yield (
+                f"The install is finished and the server is running, but the realm name you "
+                f"chose ('{saved}') could not be set ({failed}). It is still saved: open this "
+                "server's Networking tab and press Save name."
+            )
+            return
+        yield f"The realm is called '{saved}' in the game's realm list, the name you chose."
 
     def _detected_lan_ip(self) -> str | None:
         """The seam's answer, or None — including when the seam itself blew up.
