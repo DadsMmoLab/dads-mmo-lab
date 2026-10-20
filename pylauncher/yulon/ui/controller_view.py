@@ -189,6 +189,7 @@ from yulon.controller_wow_wotlk import accounts as wotlk_accounts
 from yulon.controller_wow_wotlk import console as wotlk_console
 from yulon.controller_wow_wotlk import maintenance as wotlk_maintenance
 from yulon.controller_wow_wotlk import modules as wotlk_modules
+from yulon.controller_wow_wotlk import rndbots as wotlk_rndbots
 from yulon.git import Behind, RunnerGit, is_behind
 from yulon.log import get_logger
 from yulon.manifest import ConfKey, Manifest, ManifestType, Prompt, When
@@ -2064,6 +2065,15 @@ class ControllerServices:
     `None` everywhere else, which leaves the button absent: the setting it
     writes is TortoiseBots', and the other games' bot modules do not read it.
     """
+    bot_rndbot_delete: wotlk_rndbots.RndbotDelete | None = None
+    """T805's "Delete every random bot…", on the AzerothCore trees only.
+
+    `None` everywhere else, which leaves the button absent: the delete goes
+    through `DockerSql`'s write half against THIS core's schemas, and a
+    CMaNGOS install's schemas are not the ones these statements name. Both
+    seams never hold at once: `_build_bot_rebuild` draws the Tortoise button
+    when the first is here and this one when it is not.
+    """
     steam: steam_module.SteamShortcuts | None = None
     """8.8's two Steam library entries, on Linux and the Steam Deck only.
 
@@ -3303,6 +3313,7 @@ def _assemble(
     my_party: MyPartySeam | None = None,
     play: object | None = None,
     bots: BotBrowser | None = None,
+    bot_rndbot_delete: wotlk_rndbots.RndbotDelete | None = None,
     console_probe: Callable[[str], object] | None = None,
     uninstall: Uninstall | None = None,
     module_sql: ModuleSqlRoute | None = None,
@@ -3395,6 +3406,7 @@ def _assemble(
         my_party=my_party,
         play=play,
         bots=bots,
+        bot_rndbot_delete=bot_rndbot_delete,
         console_probe=console_probe,
         # Defaulted to None here rather than demanded from every factory: three
         # of the four games name no import service at all, and a keyword they
@@ -3970,6 +3982,22 @@ def _for_wotlk(
         # it lives in a conf file the user can change while the app is open,
         # and a list built on a stale marker is a list of the wrong characters.
         bots=_BotBrowser(entry, server_dir, sql),
+        # T805: the Bots tab's "Delete every random bot…", which deletes the bots'
+        # characters and rndbot accounts itself, over the same DockerSql every read
+        # here goes through. `alone` is the database-alone pair Backup uses, so the
+        # delete can start the database of a stopped server and put it back; the
+        # world-stopped guard asks `docker.world_running()` for the SAME answer the
+        # Server tab draws from.
+        bot_rndbot_delete=wotlk_rndbots.for_entry(
+            entry,
+            server_dir,
+            sql=sql,
+            world_running=lambda: docker.world_running(spec.world, wsl_distro=wsl_distro),
+            alone=_database_alone(spec, server_dir, wsl_distro=wsl_distro),
+            hold_server=lambda press: docker.server_hold(
+                server_dir, press, spec=spec, wsl_distro=wsl_distro, label=entry.name
+            ),
+        ),
         controller=Controller(
             spec,
             server_dir,
@@ -5754,6 +5782,14 @@ CONSOLE_SHUTDOWN_REFUSED = (
 
 BOTS_FIRST_PAGE = "This is the first page of bots."
 BOTS_LAST_PAGE = "This is the last page of bots."
+
+_BOT_FILTER_DEBOUNCE_MS = 400
+"""T806: how long a keystroke in the bots' filter waits for company before it re-reads.
+
+A keystroke burst becomes one read, not one per key; the last keystroke wins. 400 ms
+is short enough to feel live and long enough that "sindorei" is one query, not nine.
+"""
+
 BOT_COUNT_READING = "Wait: Yu'lon is reading the bot count from this server's settings."
 BOT_COUNT_UNREADABLE = "Yu'lon can't change the bot count here; the line above says why."
 BOT_COUNT_NO_ROUTE = "This game has no bot count Yu'lon can set."
@@ -7849,6 +7885,19 @@ REBUILD_BOTS_TEXT = (
     "player in it."
 )
 """T144's one dialog. Its three buttons are `ask_backup_choice()`'s, relabelled."""
+
+DELETE_BOTS_LABEL = "Delete every random bot…"
+DELETE_BOTS_TITLE = "Delete every random bot?"
+DELETE_BOTS_TEXT = (
+    "Every random bot's character and its rndbot account are deleted from the server's "
+    "databases, so the bots lose their level, gear, bags, bank, quests and professions. "
+    "Also lost: companions you hired from the bots, and the bots' auctions.\n\n"
+    "What stays: your own accounts and characters, and the AddClass and city bots. The "
+    "bots module makes its accounts again when the server starts.\n\n"
+    "The server must be stopped: the press refuses while it is running, and nothing is "
+    "deleted until it is."
+)
+"""T805's one dialog. Its three buttons are `ask_backup_choice()`'s, relabelled."""
 
 REBUILD_BOTS_AFTER_UPDATE = (
     "TortoiseBots changed. Rebuild the random bots so they get the new behaviour? They lose "
@@ -14886,6 +14935,16 @@ class ControllerView(QWidget):
         self.character_list.currentRowChanged.connect(self._character_chosen)
         self.refresh_characters_button = QPushButton("Refresh the list", people)
         self.refresh_characters_button.clicked.connect(self.refresh_characters)
+        # T806: the filter above the roster. Narrowing is LOCAL — the rows in the list
+        # are what the server said, and the filter only hides the ones that do not
+        # match — so a keystroke costs no database read and works while the server is
+        # down. Matches the NAME only, case-insensitive substring; the built-in clear
+        # button is the X that empties it again.
+        self.character_filter = QLineEdit(people)
+        self.character_filter.setPlaceholderText("Filter by name…")
+        self.character_filter.setClearButtonEnabled(True)
+        self.character_filter.textChanged.connect(self._apply_character_filter)
+        people_box.addWidget(self.character_filter)
         people_box.addWidget(self.character_list, 1)
         people_box.addWidget(self.refresh_characters_button)
 
@@ -15363,12 +15422,32 @@ class ControllerView(QWidget):
                 self.character_list.setCurrentItem(item)
         if self.character_list.currentRow() < 0:
             self._character_chosen(-1)
+        # The filter survives the refresh and is applied to the new rows: a filtered
+        # list that Refresh empties back to every character is a filter that lies.
+        self._apply_character_filter()
         # A23 (T195): an empty roster says how to get a character into it; the
         # hint goes again with the first character, and only the hint does.
         if self.character_list.count() == 0:
             self.character_report.setText(CHARACTERS_EMPTY)
         elif self.character_report.text() == CHARACTERS_EMPTY:
             self.character_report.setText("")
+
+    def _apply_character_filter(self) -> None:
+        """T806: hide the roster rows whose NAME does not contain the filter.
+
+        Case-insensitive substring, against the name the row carries (`UserRole`),
+        not against the whole row text — "search" on the tab asks for names. A
+        chosen row the filter hid is no longer the choice: the actions grey out
+        rather than act on a character the player cannot see.
+        """
+        text = self.character_filter.text().strip().lower()
+        for row in range(self.character_list.count()):
+            item = self.character_list.item(row)
+            name = item.data(Qt.ItemDataRole.UserRole)
+            item.setHidden(bool(text) and (not isinstance(name, str) or text not in name.lower()))
+        current = self.character_list.currentItem()
+        if current is not None and current.isHidden():
+            self.character_list.setCurrentItem(None)
 
     @Slot(object)
     def _characters_failed(self, exc: object) -> None:
@@ -15800,7 +15879,12 @@ class ControllerView(QWidget):
         self.bot_list.customContextMenuRequested.connect(self._show_bot_context_menu)
         row = QHBoxLayout()
         self.bot_filter = QLineEdit(browse)
-        self.bot_filter.setPlaceholderText("name begins with…")
+        # T806: a keystroke re-reads the first page a beat after typing stops
+        # (`_bot_filter_typed`); the Find button still re-reads it now, and the
+        # built-in clear button empties the filter and so re-reads it too.
+        self.bot_filter.setPlaceholderText("Filter by name…")
+        self.bot_filter.setClearButtonEnabled(True)
+        self.bot_filter.textChanged.connect(self._bot_filter_typed)
         self.bot_filter.returnPressed.connect(self.filter_bots)
         self.filter_bots_button = QPushButton("Find", browse)
         self.filter_bots_button.clicked.connect(self.filter_bots)
@@ -15829,6 +15913,11 @@ class ControllerView(QWidget):
         self._bot_cursors: list[tuple[str, int] | None] = [None]
         self._bot_next: tuple[str, int] | None = None
         self._bot_total: int | None = None
+        # T806: the live filter's beat. One shot per keystroke burst, armed here
+        # where the tab exists; a game without the browse seam never arms one.
+        self._bot_filter_timer = QTimer(self)
+        self._bot_filter_timer.setSingleShot(True)
+        self._bot_filter_timer.timeout.connect(self.filter_bots)
         self._show_page_buttons()
         # Two panels side by side: the bot roster on the left, My Party on the
         # right. Both are group boxes already; giving them equal columns lets a
@@ -15907,26 +15996,36 @@ class ControllerView(QWidget):
     def _build_bot_rebuild(self, inside: QVBoxLayout) -> None:
         """T144: "Rebuild random bots…", its report line and its own log, under the count.
 
-        Absent -- not greyed -- without the seam, which is every game but
-        Tortoise: nothing would ever enable it there. Its own log panel rather
-        than the Modules tab's, because the press is made on this tab and the
-        job runs for minutes; the panel's start and finish lock and unlock the
-        Server tab through `_set_busy`, like every long job of ours.
+        T805: the AzerothCore trees get the SAME panel with "Delete every random bot…"
+        instead, whose job deletes the rows itself rather than asking a bots module for
+        a rebuild. Absent -- not greyed -- without either seam: nothing would ever
+        enable it there. Its own log panel rather than the Modules tab's, because the
+        press is made on this tab and the job runs for minutes; the panel's start and
+        finish lock and unlock the Server tab through `_set_busy`, like every long job
+        of ours.
         """
         self.bot_rebuild_button: QPushButton | None = None
         self.bot_rebuild_report: QLabel | None = None
         self.bot_rebuild_log: _IdleLogPanel | None = None
         self._bots_tab = None
-        if self.services.bot_pool_rebuild is None:
+        if self.services.bot_pool_rebuild is None and self.services.bot_rndbot_delete is None:
             return
         group = self.bot_count_group
         row = QHBoxLayout()
-        self.bot_rebuild_button = QPushButton(REBUILD_BOTS_LABEL, group)
+        tortoise = self.services.bot_pool_rebuild is not None
+        self.bot_rebuild_button = QPushButton(
+            REBUILD_BOTS_LABEL if tortoise else DELETE_BOTS_LABEL, group
+        )
         self.bot_rebuild_button.setToolTip(
             "Delete every random bot and let the bots module make them again, so they get the "
             "module's newest behaviour. Asks first, offers a backup, and restarts the server."
+            if tortoise
+            else "Delete every random bot's character and its rndbot account from the server's "
+            "databases. Asks first and offers a backup; the server must be stopped."
         )
-        self.bot_rebuild_button.clicked.connect(self.rebuild_random_bots)
+        self.bot_rebuild_button.clicked.connect(
+            self.rebuild_random_bots if tortoise else self.delete_random_bots
+        )
         row.addWidget(self.bot_rebuild_button)
         row.addStretch(1)
         self.bot_rebuild_report = QLabel("", group)
@@ -16008,6 +16107,47 @@ class ControllerView(QWidget):
             title=f"Rebuilding {self.entry.name}'s random bots",
             cancel=cancel,
             record_as=f"rebuild-bots-{self.entry.id}-"
+            f"{composegen.install_id(self.services.controller.server_dir)}",
+        )
+
+    @Slot()
+    def delete_random_bots(self) -> bool:
+        """T805's press: ask the one question, then delete in this group's log. False if not run.
+
+        The same three answers as the rebuild's (`ask_backup_choice()`), Cancel the
+        default and the Escape button. The backup, when asked for, is the first step OF
+        the job -- `_backup_with_the_database()`, which starts the database alone if the
+        server is down -- and a failed one stops it before anything is written. The
+        world-stopped rule is inside the job, so a world started between the press and
+        the deletes is still refused before any row goes.
+        """
+        seam = self.services.bot_rndbot_delete
+        log = self.bot_rebuild_log
+        if seam is None or log is None:
+            return False
+        refusal = self._bot_rebuild_refusal()
+        if refusal is not None:
+            show_information(self, "Something else is running", refusal)
+            return False
+        choice = ask_backup_choice(
+            self,
+            DELETE_BOTS_TITLE,
+            DELETE_BOTS_TEXT,
+            back_up_first="Back up first, then delete",
+            without_backup="Delete without a backup",
+        )
+        if choice is UpdateChoice.CANCEL:
+            logger.info(f"deleting {self.entry.id}'s random bots declined at the confirmation")
+            return False
+        backup = self._backup_with_the_database if choice is UpdateChoice.BACK_UP_FIRST else None
+        cancel = threading.Event()
+        if self.bot_rebuild_report is not None:
+            self.bot_rebuild_report.setText("")
+        return log.run(
+            lambda: seam.delete(backup=backup, cancel=cancel),
+            title=f"Deleting {self.entry.name}'s random bots",
+            cancel=cancel,
+            record_as=f"delete-bots-{self.entry.id}-"
             f"{composegen.install_id(self.services.controller.server_dir)}",
         )
 
@@ -16595,12 +16735,20 @@ class ControllerView(QWidget):
         )
 
     @Slot()
+    def _bot_filter_typed(self) -> None:
+        """T806: one re-read a beat after the keystrokes stop, not one per keystroke."""
+        self._bot_filter_timer.start(_BOT_FILTER_DEBOUNCE_MS)
+
+    @Slot()
     def filter_bots(self) -> None:
         """A new filter starts at the first page.
 
         Otherwise a filter typed on page nine shows page nine of a list that may
         now be one page long, which reads as "no bots match".
         """
+        timer = getattr(self, "_bot_filter_timer", None)
+        if timer is not None:
+            timer.stop()
         self._bot_cursors = [None]
         self.refresh_bots()
 

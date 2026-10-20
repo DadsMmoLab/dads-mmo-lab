@@ -48,6 +48,7 @@ than as zero, so it surfaces as a question instead of a wrong number.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -223,11 +224,18 @@ def _conf_values(text: str, key: str) -> list[str]:
     return found
 
 
-def bot_clause(entry: CatalogEntry, marker: Marker) -> str:
+def bot_clause(
+    entry: CatalogEntry, marker: Marker, *, only_types: Sequence[int] | None = None
+) -> str:
     """The SQL that is true of a bot's character row, for THIS install's schemas.
 
     Written against the characters table's account column, so it composes into
     any query over `characters` as `(<clause>)` or `NOT (<clause>)`.
+
+    `only_types` narrows the registry arm to those account types (T805: a delete that
+    is for the random bots only keeps the AddClass and city-bot accounts, which the
+    broad arm would take). None — the arm of every existing caller — uses the
+    catalog's own types, as it always has.
     """
     ops = entry.observability
     if ops is None:  # pragma: no cover - resolve_marker refuses first
@@ -240,7 +248,8 @@ def bot_clause(entry: CatalogEntry, marker: Marker) -> str:
     ]
     registry = ops.bots.registry
     if registry is not None and registry.database in schemas:
-        types = ", ".join(str(t) for t in registry.types)
+        chosen = registry.types if only_types is None else only_types
+        types = ", ".join(str(t) for t in chosen)
         arms.insert(
             0,
             f"{account} IN (SELECT {registry.account_column} FROM "
