@@ -17,6 +17,7 @@ pass against a route that fetched, failed and walked away.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import threading
 from collections.abc import Callable, Iterator, Sequence
@@ -1439,6 +1440,30 @@ def test_real_local_edits_reports_the_users_file_and_skips_the_one_we_patch(
     assert "untracked.txt" not in (
         real.local_edits(dest) or ()
     ), "an untracked file reset --hard never touches was counted as an edit"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a POSIX mode bit is what a bind mount flips")
+def test_a_mode_only_change_is_not_an_edit_and_a_content_change_still_is(
+    origin: Path, tmp_path: Path
+) -> None:
+    """T797: a Windows bind mount flips 644 -> 755 and the user has changed nothing.
+
+    `local_edits()` read a mode-only change as "changes of your own" and refused
+    "Return to the tested pin" over a 9 MB SQL file the player never touched.
+    Mutation: drop `-c core.fileMode=false` from `_STATUS_ARGS` and the first
+    assertion fails, because `status` lists the chmod'd file.
+    """
+    if not git.git_available():
+        pytest.skip("no host git")
+    dest = tmp_path / "work"
+    real = git.RunnerGit()
+    real.clone(git.CloneSpec(url=f"file://{origin}", dest=dest, branch="main", depth=None))
+
+    (dest / "README").chmod(0o755)
+    assert real.local_edits(dest) == (), "a mode-only flip was counted as an edit"
+
+    (dest / "README").write_text("edited\n", encoding="utf-8", newline="\n")
+    assert real.local_edits(dest) == ("README",), "a real content edit was not counted"
 
 
 def test_restoring_a_source_asks_the_remote_for_nothing(tmp_path: Path) -> None:

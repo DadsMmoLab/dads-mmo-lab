@@ -18,6 +18,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ### Fixed
 - When Docker cannot fetch the git image, the Modules tab now shows Docker's reason instead of an unhelpful line.
 - Docker setup now asks for your password on Ubuntu 25.10+ and Kubuntu (sudo-rs) instead of failing every step.
+- **Return to the tested pin** no longer refuses because Windows changed a server file's permissions and nothing else.
 
 ### Changed
 
