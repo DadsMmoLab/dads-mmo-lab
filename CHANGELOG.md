@@ -14,6 +14,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ## Unreleased
 
 ### New
+- The Catalog's Installed button now opens that server's tab.
 
 ### Fixed
 - When Docker cannot fetch the git image, the Modules tab now shows Docker's reason instead of an unhelpful line.

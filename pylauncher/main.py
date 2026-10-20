@@ -1945,6 +1945,9 @@ def build_window() -> object:
     catalog_view.installed.connect(on_installed)
     catalog_view.fresh_install.connect(on_fresh_install)
     catalog_view.adopted.connect(on_adopted)
+    # T807: the tile's "Open server" press — the window already knows how to find a
+    # server's tab (the launcher's "Server tab…" uses it).
+    catalog_view.open_server.connect(show_server_tab)
 
     # README §10: non-blocking update check on a background thread; the bar only
     # if a `-Public` release is newer than this build and has not been skipped.

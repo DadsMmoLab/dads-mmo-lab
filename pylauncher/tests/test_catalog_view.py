@@ -421,7 +421,8 @@ def test_use_existing_adopts_a_finished_ddon_install_without_reinstalling(
     )
     assert view.attach_existing_single(ddon) is True
     assert got == [("ddon", server, None)]
-    assert not view.button_for("ddon").isEnabled(), "the tile now reads Installed"
+    assert view.button_for("ddon").text() == "Open server", "the tile now opens the server"
+    assert view.button_for("ddon").isEnabled() is True
 
 
 def test_install_asks_for_folders_then_streams_the_installer(
@@ -1280,9 +1281,10 @@ def test_unlocking_after_a_job_never_re_enables_a_gated_tile(
     process_events(50)
 
     # Disabled now for the OTHER reason, and the text is what tells them apart:
-    # this one installed, so its tile reads "Installed" (2026-09-04). The gate is
-    # what this test is about, and the gate is asserted on tbc below.
-    assert view.button_for("wow-wotlk").text() == "Installed"
+    # this one installed, so its tile reads "Open server" (2026-09-04; live since
+    # T807). The gate is what this test is about, and the gate is asserted on
+    # tbc below.
+    assert view.button_for("wow-wotlk").text() == "Open server"
     assert view.button_for("wow-tbc").text() == "Install"
     assert view.button_for("wow-tbc").isEnabled() is False  # STILL gated
     assert view.existing_button_for("wow-tbc").isEnabled() is True  # never gated
@@ -2710,12 +2712,15 @@ def test_escape_on_the_install_folder_question_closes_it_and_opens_no_picker(
 # -- "Installed" on a tile whose server the app already knows (owner, 2026-09-04)
 
 
-def test_a_game_already_installed_opens_greyed_and_says_so(qapp: object, tmp_path: Path) -> None:
-    """The state the app starts in after a restart: the tile must not offer again.
+def test_a_game_already_installed_opens_with_a_live_open_server_button(
+    qapp: object, tmp_path: Path
+) -> None:
+    """The state the app starts in after a restart: no more dead grey "Installed".
 
-    The folder is in the tooltip, not just "already installed", because two
-    installs of one game on one machine is a real case here and then the useful
-    question is which one this tile means.
+    The button stopped offering a second install (owner, 2026-09-04) and opens
+    the server's tab instead (T807). The folder is in the tooltip, not just
+    "already installed", because two installs of one game on one machine is a
+    real case here and then the useful question is which one this tile means.
     """
     panel = LogPanel()
     view = CatalogView(
@@ -2726,8 +2731,8 @@ def test_a_game_already_installed_opens_greyed_and_says_so(qapp: object, tmp_pat
         installed_games={"wow-wotlk": tmp_path / "wotlk"},
     )
     installed = view.button_for("wow-wotlk")
-    assert installed.text() == "Installed"
-    assert installed.isEnabled() is False
+    assert installed.text() == "Open server"
+    assert installed.isEnabled() is True
     assert str(tmp_path / "wotlk") in installed.toolTip()
     # Every other tile is untouched: this is per game, not a mode the view is in.
     assert view.button_for("wow-tbc").text() == "Install"
@@ -2736,15 +2741,58 @@ def test_a_game_already_installed_opens_greyed_and_says_so(qapp: object, tmp_pat
     assert view.existing_button_for("wow-wotlk").isEnabled() is True
 
 
-def test_a_finished_install_greys_its_own_button_and_leaves_the_others(
+def test_pressing_open_server_asks_the_window_for_that_servers_tab(
+    qapp: object, tmp_path: Path
+) -> None:
+    """The press's whole job: hand (game id, folder) to the tab opener.
+
+    The window's `show_server_tab` is what the signal reaches (the launcher's
+    "Server tab…" uses the same path); this test drives the view the way the
+    window connects it.
+    """
+    panel = LogPanel()
+    view = CatalogView(
+        CATALOG,
+        lambda e: _FakeInstaller(e, []),
+        panel,
+        pick_dir=lambda *_: None,
+        installed_games={"wow-wotlk": tmp_path / "wotlk"},
+    )
+    opened: list[tuple[str, object]] = []
+    view.open_server.connect(lambda game_id, server_dir: opened.append((game_id, server_dir)))
+    view.button_for("wow-wotlk").click()
+    assert opened == [("wow-wotlk", tmp_path / "wotlk")], opened
+
+
+def test_pressing_an_installed_tile_starts_no_install(qapp: object, tmp_path: Path) -> None:
+    """The grey-button removal must not resurrect the offer it replaced.
+
+    A second install of one game cannot run beside the first (container names
+    are global per game), so the press of an installed tile may not fall through
+    to `start_install()` even if the signal found no receiver.
+    """
+    panel = LogPanel()
+    view = CatalogView(
+        CATALOG,
+        lambda e: _FakeInstaller(e, []),
+        panel,
+        pick_dir=lambda *_: None,
+        installed_games={"wow-wotlk": tmp_path / "wotlk"},
+    )
+    view.open_server.connect(lambda *_: None)
+    assert view.button_for("wow-wotlk").click() is None
+    assert view.button_for("wow-wotlk").text() == "Open server"
+
+
+def test_a_finished_install_makes_its_own_button_open_the_server(
     qapp: object, tmp_path: Path, the_compose_project_is_not_pinned: list[Path]
 ) -> None:
     """Ordering test as much as a feature test.
 
     `_on_run_finished` calls `_set_buttons_enabled(True)` to unlock the tiles
-    the job locked, and THEN greys the one that just installed. Written the
-    other way round the unlock silently undoes it, and nothing else in the suite
-    would have failed.
+    the job locked, and THEN turns the one that just installed into "Open
+    server". Written the other way round the unlock silently undoes it, and
+    nothing else in the suite would have failed.
     """
     panel = LogPanel()
     view = CatalogView(
@@ -2757,8 +2805,8 @@ def test_a_finished_install_greys_its_own_button_and_leaves_the_others(
     )
     assert view.start_install(CATALOG.get("wow-wotlk")) is True
     wait_for_panel(panel)
-    assert view.button_for("wow-wotlk").text() == "Installed"
-    assert view.button_for("wow-wotlk").isEnabled() is False
+    assert view.button_for("wow-wotlk").text() == "Open server"
+    assert view.button_for("wow-wotlk").isEnabled() is True
     assert view.button_for("wow-tbc").isEnabled() is True, "the unlock must still reach the rest"
 
 
@@ -2805,8 +2853,8 @@ def test_using_an_existing_install_greys_the_tile_too(
     )
     (tmp_path / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
     assert view.attach_existing(CATALOG.get("wow-wotlk")) is True
-    assert view.button_for("wow-wotlk").text() == "Installed"
-    assert view.button_for("wow-wotlk").isEnabled() is False
+    assert view.button_for("wow-wotlk").text() == "Open server"
+    assert view.button_for("wow-wotlk").isEnabled() is True
 
 
 def test_no_wall_clock_bound_in_this_file_is_written_as_a_bare_number() -> None:
@@ -2845,12 +2893,12 @@ def _installed_view(tmp_path: Path, installed: dict[str, Path]) -> CatalogView:
 def test_a_purged_install_puts_its_tile_back_to_install(qapp: object, tmp_path: Path) -> None:
     """The visible effect the box asks for: the tile reads Install again."""
     view = _installed_view(tmp_path, {"wow-wotlk": tmp_path / "wotlk"})
-    assert view.button_for("wow-wotlk").text() == "Installed"
+    assert view.button_for("wow-wotlk").text() == "Open server"
     view.forget_installed("wow-wotlk", {})
     button = view.button_for("wow-wotlk")
     assert button.text() == "Install"
     assert button.isEnabled() is True
-    assert "Already installed" not in button.toolTip()
+    assert "Installed in" not in button.toolTip()
 
 
 def test_purging_one_of_two_installs_of_a_game_leaves_the_tile_installed(
@@ -2866,8 +2914,8 @@ def test_purging_one_of_two_installs_of_a_game_leaves_the_tile_installed(
     view = _installed_view(tmp_path, {"wow-wotlk": tmp_path / "first"})
     view.forget_installed("wow-wotlk", {"wow-wotlk": tmp_path / "second"})
     button = view.button_for("wow-wotlk")
-    assert button.text() == "Installed"
-    assert button.isEnabled() is False
+    assert button.text() == "Open server"
+    assert button.isEnabled() is True
     assert str(tmp_path / "second") in button.toolTip()
 
 
@@ -2891,7 +2939,7 @@ def test_forgetting_a_game_that_was_never_installed_changes_nothing(
     """A signal can arrive for a tab opened before the tile knew about it."""
     view = _installed_view(tmp_path, {"wow-wotlk": tmp_path / "wotlk"})
     view.forget_installed("wow-tbc", {"wow-wotlk": tmp_path / "wotlk"})
-    assert view.button_for("wow-wotlk").text() == "Installed"
+    assert view.button_for("wow-wotlk").text() == "Open server"
     assert view.button_for("wow-tbc").text() == "Install"
 
 
