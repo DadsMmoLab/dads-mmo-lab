@@ -470,6 +470,26 @@ def test_yulons_own_files_at_the_root_do_not_count(tmp_path: Path) -> None:
     assert _fp(root) != before
 
 
+def test_a_crash_left_conf_temp_does_not_count_and_a_normal_env_does(tmp_path: Path) -> None:
+    """T791: `conf._write` names its temp `..env.yulon-tmp-XXXX`, and a crash leaves it behind.
+
+    The temp sits beside the conf, here inside `conf/`, which is a folder a recipe
+    reads, so the root-only `.yulon` rule does not reach it. It must not change the
+    fingerprint; a normal `.env` next to it must. Mutation: drop `TEMP_MARK in
+    entry.name` from `_walk` and the first assertion fails.
+    """
+    root = _plain_server(tmp_path, "")
+    _write(root / "src/main.c", "one")
+    _write(root / "conf/worldserver.conf", "LogLevel=1\n")
+    before = _fp(root)
+    _write(root / "conf/..worldserver.conf.yulon-tmp-a1b2c3d4", "half a conf")
+    _write(root / "..env.yulon-tmp-a1b2c3d4", "half an env")
+    _write(root / "conf/worldserver.conf.yulon-tmp", "half again")
+    assert _fp(root) == before, "a crash-left conf temp was counted as build context"
+    _write(root / ".env", "KEY=1\n")
+    assert _fp(root) != before, "a normal .env was left out of the build context"
+
+
 def test_the_refs_are_part_of_it(tmp_path: Path) -> None:
     root = _centurion_server(tmp_path)
     assert fingerprint(root, refs=["a:local"]) != fingerprint(root, refs=["b:local"])
