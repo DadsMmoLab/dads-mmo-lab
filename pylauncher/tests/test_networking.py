@@ -7775,7 +7775,9 @@ T800_SENTINEL = "203.0.113.7"
 """What the UDP-socket seam answers in these tests, so a fallback is visible as such."""
 
 
-def _pin_t800_seams(monkeypatch: pytest.MonkeyPatch, socket_answer: str | None = T800_SENTINEL) -> None:
+def _pin_t800_seams(
+    monkeypatch: pytest.MonkeyPatch, socket_answer: str | None = T800_SENTINEL
+) -> None:
     """Stand in for the answers that would read the test host: the UDP socket, and the WSL
     branch a reverted `detect_lan_ip()` would take on a WSL host (the branch ignores the
     `wsl` keyword the fix added). Either seam firing means the detection did not settle."""
@@ -7816,7 +7818,10 @@ def test_lan_detection_picks_the_wired_adapter_over_a_full_tunnel_vpn(
         raise AssertionError(f"unexpected command: {joined}")
 
     assert platform.detect_lan_ip(run=run, system="linux", wsl=False) == "192.168.50.49"
-    assert seen == [["ip", "-4", "route", "show", "default"], ["ip", "-4", "-o", "addr", "show"]], seen
+    assert seen == [
+        ["ip", "-4", "route", "show", "default"],
+        ["ip", "-4", "-o", "addr", "show"],
+    ], seen
 
 
 def test_lan_detection_with_only_a_vpn_keeps_the_answer_it_always_gave(
@@ -7830,7 +7835,8 @@ def test_lan_detection_with_only_a_vpn_keeps_the_answer_it_always_gave(
         if joined == "ip -4 route show default":
             return subprocess.CompletedProcess(argv, 0, "default via 10.2.0.1 dev wg0\n", "")
         if joined == "ip -4 -o addr show":
-            return subprocess.CompletedProcess(argv, 0, "5: wg0    inet 10.2.0.2/24 scope global wg0\n", "")
+            out = "5: wg0    inet 10.2.0.2/24 scope global wg0\n"
+            return subprocess.CompletedProcess(argv, 0, out, "")
         raise AssertionError(f"unexpected command: {joined}")
 
     _pin_t800_seams(monkeypatch, socket_answer="10.2.0.2")

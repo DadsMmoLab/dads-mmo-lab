@@ -14,7 +14,6 @@ from pathlib import Path
 import pytest
 
 from tests.conftest import pump_until
-
 from yulon.catalog.catalog import load_catalog
 from yulon.controller_wow_wotlk import rndbots
 from yulon.manifest import Db
@@ -165,11 +164,7 @@ def test_the_registry_rows_of_the_deleted_accounts_go_too(tmp_path: Path) -> Non
     sql = _Sql()
     seam = _seam(tmp_path, sql)
     _delete(seam)
-    registry = [
-        s
-        for s in sql.sqls()
-        if "`playerbots_account_type`" in s and "DELETE FROM" in s
-    ]
+    registry = [s for s in sql.sqls() if "`playerbots_account_type`" in s and "DELETE FROM" in s]
     assert len(registry) == 1, registry
     assert "`account_id` IN (SELECT id FROM `acore_auth`.`account`" in registry[0]
 
@@ -208,7 +203,7 @@ def test_a_missing_playerbots_table_is_skipped_not_a_failure(tmp_path: Path) -> 
     """An install whose playerbots schema was never created loses only what it has."""
     sql = _Sql(exists="0")
     seam = _seam(tmp_path, sql)
-    lines = _delete(seam)
+    _delete(seam)
     assert not any("`playerbots_random_bots`" in s for s in sql.sqls())
     assert any("`playerbots_account_type`" in s for s in sql.sqls()), "the registry is separate"
 
@@ -341,7 +336,7 @@ def test_a_cancel_part_way_says_what_ran(tmp_path: Path) -> None:
 
 def test_a_broken_prefix_is_a_refusal_not_a_write(tmp_path: Path) -> None:
     sql = _Sql()
-    _conf(tmp_path, "AiPlayerbot.RandomBotAccountPrefix = \"rnd'bot\"\n")
+    _conf(tmp_path, 'AiPlayerbot.RandomBotAccountPrefix = "rnd\'bot"\n')
     seam = rndbots.RndbotDelete(
         entry=WOTLK,
         server_dir=tmp_path,
@@ -436,7 +431,9 @@ def test_the_delete_is_wired_on_the_azerothcore_trees_not_the_cmangos_ones(
             assert label == "Rebuild random bots…", entry.id
 
 
-def test_the_real_wotlk_factory_wires_the_delete_and_the_button(qapp: object, tmp_path: Path) -> None:
+def test_the_real_wotlk_factory_wires_the_delete_and_the_button(
+    qapp: object, tmp_path: Path
+) -> None:
     """The press rides the REAL `ControllerServices.for_entry()` wiring, not a test's replace.
 
     The factory's wiring is what a player gets; a seam only ever handed to the view by a
@@ -560,9 +557,7 @@ def test_a_refusal_is_put_where_the_player_is_looking(
     assert failures and "press Stop" in failures[0]
 
 
-def test_a_press_without_the_seam_is_false_and_draws_nothing(
-    qapp: object, tmp_path: Path
-) -> None:
+def test_a_press_without_the_seam_is_false_and_draws_nothing(qapp: object, tmp_path: Path) -> None:
     view = _view(tmp_path, None)
     assert view.bot_rebuild_button is None
     assert view.delete_random_bots() is False

@@ -62,6 +62,12 @@ class SqlWriter(Protocol):
     def run_statement(self, db: Db, statement: str) -> None: ...
 
 
+class _Cancel(Protocol):
+    """What the press hands in to stop a delete: a `threading.Event` or anything shaped like one."""
+
+    def is_set(self) -> bool: ...
+
+
 @dataclass(frozen=True)
 class DatabaseAlone:
     """`ui.controller_view.DatabaseAlone`, carried as its two callables (no import cycle)."""
@@ -88,7 +94,7 @@ class RndbotDelete:
         self,
         *,
         backup: Callable[[], object] | None = None,
-        cancel: object = None,
+        cancel: _Cancel | None = None,
     ) -> Iterator[str]:
         """The confirmation already answered: take the bots out, one stage a line.
 
@@ -148,11 +154,11 @@ class RndbotDelete:
 
     # -- the counts and the deletes -----------------------------------------------
 
-    def delete_under_the_hold(self, marker: Marker, cancel: object) -> Iterator[str]:
+    def delete_under_the_hold(self, marker: Marker, cancel: _Cancel | None) -> Iterator[str]:
         """Public to the tests only: the held block, counts before and summary after."""
         yield from self._delete_under_the_hold(marker, cancel)
 
-    def _delete_under_the_hold(self, marker: Marker, cancel: object) -> Iterator[str]:
+    def _delete_under_the_hold(self, marker: Marker, cancel: _Cancel | None) -> Iterator[str]:
         with self.hold_server(PRESS_DELETE_BOTS):
             bots, accounts = self._counts(marker)
             if cancel is not None and cancel.is_set():
@@ -164,9 +170,7 @@ class RndbotDelete:
             )
             yield from self._delete_everything(marker, cancel)
             if self._cancelled(cancel):
-                yield (
-                    "Stopped. The deletions above are what ran; the backup is the way back."
-                )
+                yield ("Stopped. The deletions above are what ran; the backup is the way back.")
                 return
             bots_after, accounts_after = self._counts(marker)
             if bots_after == 0 and accounts_after == 0:
@@ -181,7 +185,7 @@ class RndbotDelete:
                     "are still there; the log above says which delete did not run."
                 )
 
-    def _delete_everything(self, marker: Marker, cancel: object) -> Iterator[str]:
+    def _delete_everything(self, marker: Marker, cancel: _Cancel | None) -> Iterator[str]:
         """Every statement, oldest reference first.
 
         `playerbots_random_bots` first (its subqueries need the rows still there), then
@@ -193,7 +197,7 @@ class RndbotDelete:
         auth, chars, bots = schemas["auth"], schemas["characters"], schemas.get("playerbots")
         clause = self._characters_clause(marker)
         prefix = self._prefix_clause(marker)
-        if bots is not None and self._table_exists(auth, bots, RANDOM_BOTS_TABLE):
+        if bots is not None and self._table_exists("auth", bots, RANDOM_BOTS_TABLE):
             yield "Deleting the module's random-bots rows…"
             self.sql.run_statement(
                 "playerbots",
@@ -215,7 +219,8 @@ class RndbotDelete:
         if self._cancelled(cancel):
             return
         yield "Deleting the bots' account rows…"
-        registry = self.entry.observability.bots.registry
+        observability = self.entry.observability
+        registry = observability.bots.registry if observability is not None else None
         if registry is not None and bots is not None:
             self.sql.run_statement(
                 "playerbots",
@@ -229,9 +234,7 @@ class RndbotDelete:
                 f"DELETE FROM `{auth}`.`{level.table}` WHERE `{level.account_column}` IN "
                 f"(SELECT id FROM `{auth}`.`account` WHERE {prefix});",
             )
-        self.sql.run_statement(
-            "auth", f"DELETE FROM `{auth}`.`account` WHERE {prefix};"
-        )
+        self.sql.run_statement("auth", f"DELETE FROM `{auth}`.`account` WHERE {prefix};")
 
     # -- the SQL parts, shared with the counts ------------------------------------
 
@@ -253,7 +256,7 @@ class RndbotDelete:
         chars = self._one_number(
             self.sql.query(
                 "characters",
-                f"SELECT COUNT(*) FROM `{schemas["characters"]}`.`{self._characters_table()}` "
+                f"SELECT COUNT(*) FROM `{schemas['characters']}`.`{self._characters_table()}` "
                 f"WHERE ({self._characters_clause(marker)});",
             ),
             "the bot characters",
@@ -261,7 +264,7 @@ class RndbotDelete:
         accounts = self._one_number(
             self.sql.query(
                 "auth",
-                f"SELECT COUNT(*) FROM `{schemas["auth"]}`.`account` "
+                f"SELECT COUNT(*) FROM `{schemas['auth']}`.`account` "
                 f"WHERE {self._prefix_clause(marker)};",
             ),
             "the bot accounts",
@@ -295,8 +298,8 @@ class RndbotDelete:
         return answer == "1"
 
     @staticmethod
-    def _cancelled(cancel: object) -> bool:
-        return cancel is not None and bool(getattr(cancel, "is_set") and cancel.is_set())
+    def _cancelled(cancel: _Cancel | None) -> bool:
+        return cancel is not None and cancel.is_set()
 
 
 def for_entry(

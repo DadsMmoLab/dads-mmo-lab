@@ -3993,7 +3993,9 @@ def _for_wotlk(
             server_dir,
             sql=sql,
             world_running=lambda: docker.world_running(spec.world, wsl_distro=wsl_distro),
-            alone=_database_alone(spec, server_dir, wsl_distro=wsl_distro),
+            alone=(lambda a: wotlk_rndbots.DatabaseAlone(a.bring_up, a.take_down))(
+                _database_alone(spec, server_dir, wsl_distro=wsl_distro)
+            ),
             hold_server=lambda press: docker.server_hold(
                 server_dir, press, spec=spec, wsl_distro=wsl_distro, label=entry.name
             ),
@@ -15447,7 +15449,7 @@ class ControllerView(QWidget):
             item.setHidden(bool(text) and (not isinstance(name, str) or text not in name.lower()))
         current = self.character_list.currentItem()
         if current is not None and current.isHidden():
-            self.character_list.setCurrentItem(None)
+            self.character_list.setCurrentRow(-1)
 
     @Slot(object)
     def _characters_failed(self, exc: object) -> None:

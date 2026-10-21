@@ -108,9 +108,7 @@ def test_the_clear_button_empties_the_filter_and_restores_the_rows(
     assert len(_shown(view)) == 4
 
 
-def test_a_choice_the_filter_hides_is_no_longer_the_choice(
-    qapp: object, tmp_path: Path
-) -> None:
+def test_a_choice_the_filter_hides_is_no_longer_the_choice(qapp: object, tmp_path: Path) -> None:
     """The actions grey out rather than act on a character the player cannot see."""
     view = _roster_view(tmp_path)
     view.character_list.setCurrentRow(1)  # Ganaar
@@ -143,9 +141,7 @@ def test_the_filter_survives_a_refresh_of_the_roster(qapp: object, tmp_path: Pat
     assert _shown(view) == ["Guglu"], "a refresh is not the filter's undo"
 
 
-def test_typing_in_the_filter_does_not_switch_the_sub_tab(
-    qapp: object, tmp_path: Path
-) -> None:
+def test_typing_in_the_filter_does_not_switch_the_sub_tab(qapp: object, tmp_path: Path) -> None:
     """T221, again from the new field: keys typed into it type, they do not navigate."""
     view = _roster_view(tmp_path)
     view._tabs.setCurrentIndex(view._tabs.count() - 1)  # whatever page the lists sit on
@@ -200,17 +196,12 @@ class _Bot:
 def _browser_view(tmp_path: Path, browser: _Browser) -> object:
     from tests.test_controller_view import _Ps, _services
 
-    services = replace(
-        _services(_Ps(), tmp_path, []), bots=browser, play=_Play(characters=())
-    )
-    return _build(
-        WOTLK, services
-    )
+    services = replace(_services(_Ps(), tmp_path, []), bots=browser, play=_Play(characters=()))
+    return _build(WOTLK, services)
 
 
 def _build(entry: object, services: object) -> object:
     from yulon.ui import controller_view as controller_view_module
-    from yulon.ui.controller_view import ControllerView
 
     return controller_view_module.ControllerView(
         entry, services, status_poll_ms=0, job_runner=run_inline  # type: ignore[arg-type]

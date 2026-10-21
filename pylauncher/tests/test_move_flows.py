@@ -1712,9 +1712,7 @@ def ledger_package(tmp_path: Path, names: dict[str, tuple[str, ...]]) -> Path:
         role = (
             "auth"
             if schema.endswith("auth")
-            else "playerbots"
-            if schema.endswith("playerbots")
-            else "characters"
+            else "playerbots" if schema.endswith("playerbots") else "characters"
         )
         dumps.append(DumpFile(schema, role, path, ("t",)))  # type: ignore[arg-type]
     header = Header(

@@ -30,7 +30,7 @@ from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from ipaddress import IPv4Address, IPv4Network
 from pathlib import Path, PureWindowsPath
-from typing import Any, Literal, NamedTuple, Protocol
+from typing import Any, Literal, NamedTuple, Protocol, TypeVar
 
 from yulon import runner
 from yulon.log import get_logger
@@ -173,7 +173,9 @@ def in_wsl() -> bool:
 
 
 OSTREE_BOOTED_PATH = "/run/ostree-booted"
-"""Exists on a system booted from an ostree image (Bazzite, Silverblue, Kinoite). A test points it elsewhere."""
+"""Exists on a system booted from an ostree image (Bazzite, Silverblue, Kinoite).
+
+A test points it elsewhere."""
 
 
 def is_image_based() -> bool:
@@ -634,6 +636,7 @@ One PowerShell read, and a read only. A full-tunnel VPN (WireGuard's, Tailscale'
 holds a default gateway too, so the pairs are filtered for VPN/virtual names before
 any of them is preferred; see `_detect_excluded()`."""
 
+
 def _parse_ip_route_default(text: str) -> tuple[str, ...]:
     """The `dev` interface of every default route line of `ip -4 route show default`."""
     names: list[str] = []
@@ -662,7 +665,11 @@ def _route_pairs(do: RunCmd, where: PlatformId) -> tuple[tuple[str, str], ...]:
     default route) — never that the routes were read and hold nothing.
     """
     if where == "windows":
-        pairs = _listing(do, ["powershell.exe", "-NoProfile", "-Command", _DEFAULT_ROUTE_WINDOWS_QUERY], _parse_powershell_addresses)
+        pairs = _listing(
+            do,
+            ["powershell.exe", "-NoProfile", "-Command", _DEFAULT_ROUTE_WINDOWS_QUERY],
+            _parse_powershell_addresses,
+        )
         return pairs or ()
     if where == "macos":
         name = _route_get_default_macos(do)
@@ -777,7 +784,9 @@ def _windows_lan_ip_from_wsl(run: RunCmd | None = None) -> str | None:
     if not pairs:
         return None
     found = _one_address(
-        (interface, address) for interface, address in pairs if _plain_lan_address(interface, address)
+        (interface, address)
+        for interface, address in pairs
+        if _plain_lan_address(interface, address)
     )
     return found if found is not None else pairs[0][1]
 
@@ -941,9 +950,10 @@ def _parse_powershell_addresses(text: str) -> tuple[tuple[str, str], ...]:
 
 
 _PairParser = Callable[[str], tuple[tuple[str, str], ...]]
+_T = TypeVar("_T")
 
 
-def _listing(do: RunCmd, argv: list[str], parse: _PairParser) -> tuple[tuple[str, str], ...] | None:
+def _listing(do: RunCmd, argv: list[str], parse: Callable[[str], _T]) -> _T | None:
     """What one listing command says, or None if it cannot be run or exits non-zero.
 
     None and () are different answers (T674 round 3): an empty listing was read and holds

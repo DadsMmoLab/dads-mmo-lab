@@ -770,7 +770,9 @@ def test_a_gm_account_logs_in_as_a_player_and_starts_where_its_race_does() -> No
     Yu'lon wrote: no DB write here, conf keys only.
     """
     keys = _native().cmangos.conf.files["mangosd.conf"].keys  # type: ignore[union-attr]
-    assert keys["GM.LoginState"] == "0", "the core reads this one; a ranked account must not ask for GM at login"
+    assert (
+        keys["GM.LoginState"] == "0"
+    ), "the core reads this one; a ranked account must not ask for GM at login"
     assert keys["GM.Visible"] == "1", (
         "the core ships 0 and 0 forces SetGameMode(true) at login even with GM.LoginState = 0, "
         "which is the invisible-in-GM-mode report"
