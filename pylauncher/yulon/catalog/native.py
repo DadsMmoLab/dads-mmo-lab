@@ -8464,7 +8464,9 @@ class StagedInstaller:
         # line is asserted to be LAST.
         yield from self._advertise_realm(replace(ctx, state=state))
         # T808: the name the owner chose for the realm list, which the import's seed just replaced.
-        yield from self._apply_realm_name(replace(ctx, state=state))
+        yield from self._apply_realm_name(
+            replace(ctx, state=state), "The install is finished and the server is running"
+        )
         # After the realm row, for `_advertise_realm()`'s reason: a background job
         # is a sentence, never a failed install (T179's movement maps).
         yield from self.after_ready(server_dir)
@@ -8845,6 +8847,8 @@ class StagedInstaller:
         )
         ctx = self._update_context(server_dir, cancel)
         yield from self._staged(stages, ctx)
+        # T808: an update may write the realm row again (the shared post-import step).
+        yield from self._apply_realm_name(ctx, "The database updates are applied")
 
     def repair_database_stages(self) -> tuple[Stage, ...]:
         """What Repair runs on a database Docker no longer has (T377): the install's own four.
@@ -8902,6 +8906,8 @@ class StagedInstaller:
         self._check_cancel(cancel)
         ctx = replace(self._update_context(server_dir, cancel), updates_only=False)
         yield from self._staged(self.repair_database_stages(), ctx)
+        # T808: the import just seeded the catalog's realm name into the new login database.
+        yield from self._apply_realm_name(ctx, "The database was made again")
         yield (
             f"{self.entry.name}'s database was made again from the server files and the server "
             f"is running. If you have a backup, restore it on the Maintenance tab."
@@ -9130,6 +9136,8 @@ class StagedInstaller:
             for stage in (self.stage_named("start-db"), self.stage_named("import"))
         )
         yield from self._staged(stages, ctx)
+        # T808: a corrected phase may write the realm row again (the shared post-import step).
+        yield from self._apply_realm_name(ctx, "The corrections are applied")
         if stopped:
             yield (
                 f"The world server was stopped for this and is still stopped. Press Start on "
@@ -10634,6 +10642,10 @@ class StagedInstaller:
         if own_copy is not None:
             # T633's rule, on the Rebuild's own copy: older copies go only after a success.
             self._forget_older_copies(server_dir, own_copy)
+        if held is None:
+            # T808: the rebuild's import may have seeded the catalog's realm name over the row.
+            # A held press started nothing; its next Start puts the name back (`before_servers`).
+            yield from self._apply_realm_name(ctx, "The rebuild is finished")
         yield from self.after_ready(server_dir)
         if held is not None:
             yield held_rebuild_ending(self.entry.name, server_dir)
@@ -16722,26 +16734,56 @@ class StagedInstaller:
             "address, stop and start it again on the Server tab."
         )
 
-    def _apply_realm_name(self, ctx: StageContext) -> Iterator[str]:
+    def _apply_realm_name(self, ctx: StageContext, done: str) -> Iterator[str]:
         """Put the realm name the owner chose back in the realm row, if one was saved (T808).
 
-        A rebuild's import seeds the catalog's own name over the row, so without this the
-        choice made on the Networking tab would be undone by the next install press. Nothing
-        saved means nothing is sent and nothing is said. Like `_advertise_realm()`, it can
-        never fail the install: a refusal is a sentence.
+        THE ONE post-import step for the realm name, run by every press that can import or
+        make the login database again once its stages have finished: the install, Rebuild
+        (and "Update the server to latest…", which ends in one), Repair of a missing
+        database, "Apply pending database updates…" and the corrections press. An import
+        seeds the catalog's own name over the row, so without this the choice made on the
+        Networking tab would be undone until the next Start (whose `before_servers` step
+        puts it back too). Every caller is a `_reserving` press, so the server is held.
+
+        Nothing saved means nothing is sent and nothing is said. The row is read back:
+        an UPDATE that matched nothing also exits 0. Like `_advertise_realm()`, it can
+        never fail the press: a refusal is a sentence, which starts with `done`.
         """
         saved = realm_name.read_saved_name(ctx.server_dir)
         if saved is None:
             return
         failed = self._run_auth_statement(realm_name.name_sql(self.entry, saved), ctx)
+        if not failed:
+            reads = self._stored_realm_name(ctx)
+            if reads != saved:
+                failed = (
+                    "the realm row could not be read back"
+                    if reads is None
+                    else f"the realm row reads '{reads}'"
+                )
         if failed:
             yield (
-                f"The install is finished and the server is running, but the realm name you "
-                f"chose ('{saved}') could not be set ({failed}). It is still saved: open this "
-                "server's Networking tab and press Save name."
+                f"{done}, but the realm name you chose ('{saved}') could not be set ({failed}). "
+                "It is still saved, and the next Start puts it back; or open this server's "
+                "Networking tab and press Save name."
             )
             return
         yield f"The realm is called '{saved}' in the game's realm list, the name you chose."
+
+    def _stored_realm_name(self, ctx: StageContext) -> str | None:
+        """The realm row's name now, or None if it would not say (one readable row only)."""
+        try:
+            answer = self._seams.sql_query(
+                self.entry.container_spec().db,
+                self._native().db.client,
+                ctx.secrets.db_password,
+                None,
+                realm_name.name_query(self.entry),
+            )
+        except docker.DockerCommandError as exc:
+            logger.debug(f"the realm name could not be read back: {exc}")
+            return None
+        return realm_name.name_from_answer(answer)
 
     def _detected_lan_ip(self) -> str | None:
         """The seam's answer, or None — including when the seam itself blew up.

@@ -993,6 +993,69 @@ def test_the_old_realm_name_comes_over_only_when_asked_for(tmp_path: Path) -> No
     )
 
 
+def test_the_old_realm_name_brought_in_becomes_this_servers_saved_choice(tmp_path: Path) -> None:
+    """T808: the person chose the old name; a name saved earlier must not come back at Start.
+
+    Mutation: drop `_keep_the_imported_realm_name()` from `_fix_ups()` and the record still says
+    "Chosen Here", which the next Start writes over the name just brought in.
+    """
+    from yulon import realm_name
+
+    box, _package, plan = ready(tmp_path)
+    assert realm_name.record_name(box.world.server_dir, "Chosen Here") == ""
+    result = move_flows.run_import(
+        box.world, plan, confirm=None, use_old_realm_name=True, stop_allowed=False
+    )
+    assert realm_name.read_saved_name(box.world.server_dir) == "Source Realm"
+    assert not [n for n in result.notes if "realm" in n.lower()], result.notes
+
+
+def test_keeping_this_servers_realm_name_keeps_its_saved_choice(tmp_path: Path) -> None:
+    from yulon import realm_name
+
+    box, _package, plan = ready(tmp_path)
+    assert realm_name.record_name(box.world.server_dir, "Chosen Here") == ""
+    move_flows.run_import(
+        box.world, plan, confirm=None, use_old_realm_name=False, stop_allowed=False
+    )
+    assert realm_name.read_saved_name(box.world.server_dir) == "Chosen Here"
+
+
+def test_an_old_realm_name_that_could_not_be_written_is_not_kept(tmp_path: Path) -> None:
+    """The UPDATE failed, so the row did not change: the earlier choice stands."""
+    from yulon import realm_name
+
+    class Refusing(Db):
+        def execute(self, sql: str) -> None:
+            if "SET `name`" in sql:
+                raise MaintenanceError("ERROR 2013: lost connection")
+            super().execute(sql)
+
+    package = packed(tmp_path)
+    box = target(tmp_path, db=Refusing([]))
+    plan = move_flows.plan_import(box.world, package)
+    assert realm_name.record_name(box.world.server_dir, "Chosen Here") == ""
+    result = move_flows.run_import(
+        box.world, plan, confirm=None, use_old_realm_name=True, stop_allowed=False
+    )
+    assert "The realm name could not be changed to the old one." in result.notes
+    assert realm_name.read_saved_name(box.world.server_dir) == "Chosen Here"
+
+
+@pytest.mark.parametrize("old", ["x" * 40, " Padded Realm"])
+def test_an_old_realm_name_the_record_cannot_hold_drops_the_record(
+    tmp_path: Path, old: str
+) -> None:
+    """Too long for `check()`, or trimmed by it: kept, the record would put its own name back."""
+    from yulon import realm_name
+
+    server = tmp_path / "server"
+    server.mkdir()
+    assert realm_name.record_name(server, "Chosen Here") == ""
+    assert move_flows._keep_the_imported_realm_name(server, old) == ()
+    assert not (server / realm_name.REALM_NAME_FILE).exists()
+
+
 def test_a_realm_name_with_a_quote_cannot_break_out_of_the_statement() -> None:
     sql = move_flows.realm_name_sql(entry("wow-wotlk"), "Bob's \\ Realm")
     assert sql == "UPDATE `acore_auth`.`realmlist` SET `name` = 'Bob''s \\\\ Realm' WHERE `id` = 1;"

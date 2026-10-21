@@ -189,6 +189,21 @@ def record_name(server_dir: Path, name: str) -> str:
     return ""
 
 
+def forget_name(server_dir: Path) -> str:
+    """Drop the saved choice; `""` if there is none now, else why it could not be dropped.
+
+    For a press that has just put a name in the row which this record cannot hold (one
+    `check()` refuses): left behind, the record would put its own name back at the next Start.
+    """
+    path = server_dir / REALM_NAME_FILE
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        logger.warning(f"could not forget the realm name in {path}: {exc}")
+        return str(exc)
+    return ""
+
+
 # -- what the Networking tab calls ---------------------------------------
 
 
