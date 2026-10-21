@@ -14,6 +14,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ## Unreleased
 
 ### New
+- Change the realm name players see in the game's realm list on the Networking tab.
 
 ### Fixed
 - When Docker cannot fetch the git image, the Modules tab now shows Docker's reason instead of an unhelpful line.

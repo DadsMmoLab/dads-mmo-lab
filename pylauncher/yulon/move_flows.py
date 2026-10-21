@@ -41,7 +41,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import IO, Protocol
 
-from yulon import docker, forgetting, move
+from yulon import docker, forgetting, move, realm_name
 from yulon.catalog.catalog import CatalogEntry, load_catalog
 from yulon.catalog.composegen import INSTALL_ID_LENGTH
 from yulon.controller_wow_wotlk import maintenance
@@ -1107,11 +1107,22 @@ def _session_key_columns(world: MoveWorld) -> list[tuple[str, bool]]:
 
 
 def realm_name_sql(entry: CatalogEntry, name: str) -> str:
-    rl = entry.realmlist
-    return (
-        f"UPDATE `{entry.databases.auth}`.`{rl.table}` SET `name` = '{_literal(name)}' "
-        f"WHERE `id` = {rl.realm_id};"
-    )
+    """The old realm name into this server's realm row, as a hex literal (T808 review).
+
+    It was a quoted text literal: under `NO_BACKSLASH_ESCAPES` a backslash in the name was
+    stored doubled. The hex literal means the same under every `sql_mode`.
+    """
+    return realm_name.row_name_sql(entry, name)
+
+
+def _row_realm_name(world: MoveWorld) -> str | None:
+    """The configured realm row's name now, exactly; None when it could not be read as one row."""
+    try:
+        answer = world.mysql.query(realm_name.name_query(world.entry))
+    except Exception as exc:  # noqa: BLE001 - unread is an answer: the choice is not kept
+        logger.info(f"could not read the realm name back: {exc}")
+        return None
+    return realm_name.name_from_answer(answer)
 
 
 def channel_account_sql(entry: CatalogEntry, packed_account: str | None) -> str:
@@ -1320,11 +1331,52 @@ def _fix_ups(
         "The stored session keys could not be cleared; they are harmless and expire.",
     )
     if use_old_realm_name and manifest.realm_name:
+        failed = len(notes)
         run(
             realm_name_sql(world.entry, manifest.realm_name),
             "The realm name could not be changed to the old one.",
         )
+        if len(notes) == failed:
+            # An UPDATE that matched no row exits 0 too: kept only when the row says it.
+            reads = _row_realm_name(world)
+            if reads == manifest.realm_name:
+                notes.extend(_keep_the_imported_realm_name(world.server_dir, manifest.realm_name))
+            else:
+                said = "could not be read back" if reads is None else f"reads '{reads}'"
+                notes.append(
+                    f"The realm name could not be changed to the old one: the realm row {said}. "
+                    "This server's own realm name stays its choice."
+                )
     return tuple(notes)
+
+
+def _keep_the_imported_realm_name(server_dir: Path, name: str) -> tuple[str, ...]:
+    """The old realm name the person chose to bring in becomes this server's saved choice (T808).
+
+    Otherwise a name saved on the Networking tab earlier would be put back over it by the next
+    Start (`realm_name.keep_at_start()`), undoing the choice just made. A name the record cannot
+    hold (`realm_name.check()` refuses it) drops the record instead, so nothing puts another name
+    back. Inside the move's hold, like the UPDATE before it. Returns notes, never raises.
+    """
+    saved = realm_name.read_saved_name(server_dir)
+    if saved == name:
+        return ()
+    try:
+        holdable = realm_name.check(name) == name  # blanks around it would be trimmed
+    except realm_name.RealmNameError:
+        holdable = False
+    unkept = (
+        realm_name.record_name(server_dir, name) if holdable else realm_name.forget_name(server_dir)
+    )
+    if not unkept:
+        return ()
+    lead = f"The realm is called '{name}' now, but that could not be kept as its saved name"
+    if saved is not None:
+        return (
+            f"{lead} ({unkept}), so the next Start may put '{saved}' back. "
+            "Set it on the Networking tab.",
+        )
+    return (f"{lead} ({unkept}). Set it on the Networking tab so a rebuild keeps it.",)
 
 
 # --------------------------------------------------------------- what the tab calls
