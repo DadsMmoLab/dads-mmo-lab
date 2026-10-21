@@ -51,7 +51,7 @@ from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from yulon.catalog.catalog import BotRegistry, CatalogEntry
-from yulon.dbreads import Marker, resolve_marker
+from yulon.dbreads import Marker, prefix_match, resolve_marker
 from yulon.manifest import Db
 
 PRESS_DELETE_BOTS = "Delete the random bots"
@@ -405,8 +405,8 @@ class RndbotDelete:
     # -- which accounts -----------------------------------------------------------
 
     def _prefix_where(self, marker: Marker) -> str:
-        """The account-name test. `resolve_marker` refused any prefix unsafe in a string."""
-        return f"UPPER(`username`) LIKE '{marker.prefix.upper()}%'"
+        """The account-name test: starts with the prefix, `_` meaning `_` (`prefix_match`)."""
+        return prefix_match("`username`", marker.prefix)
 
     def _registry_where(self) -> str:
         """The account-id test: registered by the module as a RANDOM bot (type 1)."""

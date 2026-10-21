@@ -68,6 +68,27 @@ an escaping rule that has to be right on four cores and two SQL modes.
 """
 
 
+PREFIX_ESCAPE = "!"
+"""The LIKE escape for a prefix match: `botlist.ESCAPE`'s reasoning (a backslash means nothing
+under `NO_BACKSLASH_ESCAPES`), and a character `_SAFE_PREFIX` never lets into a prefix."""
+
+
+def prefix_match(column: str, prefix: str) -> str:
+    """SQL true when `column` STARTS WITH `prefix`, case-insensitively, and nothing more.
+
+    A bare `LIKE 'RNDBOT_%'` is not that: `_` is LIKE's one-character wildcard and
+    `_SAFE_PREFIX` allows it, so `RNDBOT_` would also match `RNDBOTX…` -- and the Bots
+    tab's delete writes by this test. The wildcards (and the escape itself) are escaped
+    and the escape is named, so every reader and the delete ask the one literal question.
+    The prefix has passed `_SAFE_PREFIX` (no quote, no backslash) before it gets here.
+    """
+    escaped = "".join(
+        PREFIX_ESCAPE + char if char in ("%", "_", PREFIX_ESCAPE) else char
+        for char in prefix.upper()
+    )
+    return f"UPPER({column}) LIKE '{escaped}%' ESCAPE '{PREFIX_ESCAPE}'"
+
+
 @runtime_checkable
 class SqlReader(Protocol):
     """The read half of `apply.DockerSql`, and deliberately only that half.
@@ -409,7 +430,7 @@ def bot_clause(entry: CatalogEntry, marker: Marker) -> str:
     account = ops.characters.account
     arms = [
         f"{account} IN (SELECT id FROM {schemas['auth']}.account "
-        f"WHERE UPPER(username) LIKE '{marker.prefix.upper()}%')"
+        f"WHERE {prefix_match('username', marker.prefix)})"
     ]
     registry = ops.bots.registry
     if registry is not None and registry.database in schemas:

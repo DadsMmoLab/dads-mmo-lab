@@ -630,3 +630,15 @@ def test_a_blank_environment_prefix_is_refused(tmp_path: Path) -> None:
     answer = dbreads.resolve_marker(WOTLK, server_dir)
 
     assert answer.marker is None and "blank" in answer.problem
+
+
+def test_the_prefix_match_is_literal_about_underscores_and_percents() -> None:
+    """`_` and `%` in a prefix are letters: LIKE's wildcards are escaped, the escape named."""
+    import sqlite3
+
+    conn = sqlite3.connect(":memory:")
+    clause = dbreads.prefix_match("u", "rnd_b%t")
+    assert clause.endswith("ESCAPE '!'")
+    for name, matches in (("RND_B%T1", True), ("rnd_b%tx", True), ("RNDXBXT1", False)):
+        got = conn.execute(f"SELECT {clause} FROM (SELECT ? AS u)", (name,)).fetchone()[0]
+        assert bool(got) is matches, (name, clause)

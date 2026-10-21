@@ -138,7 +138,8 @@ def bot_problem(name: str, bot_prefix: str | None) -> str:
     """Why `name` is the random bots' to have, or "": it starts with their account prefix (T749).
 
     `bot_prefix` is `bot_prefix()`'s answer. Yu'lon's population count reads every
-    account whose name starts with it as a bot (`dbreads`: `UPPER(username) LIKE 'PREFIX%'`),
+    account whose name starts with it as a bot (`dbreads.prefix_match`:
+    `UPPER(username) LIKE 'PREFIX%' ESCAPE '!'`),
     so a player's account named so would be counted as one.
     """
     if bot_prefix and name.strip().upper().startswith(bot_prefix.upper()):

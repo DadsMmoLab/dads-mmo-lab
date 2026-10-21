@@ -28,7 +28,7 @@ from yulon import account_rules, commands, passwordcheck
 from yulon.actions import Outcome, ServerHold, holding, outcome_of
 from yulon.actions import send as _send
 from yulon.catalog.catalog import CatalogEntry
-from yulon.dbreads import Marker, SqlReader, bot_clause, resolve_marker
+from yulon.dbreads import Marker, SqlReader, bot_clause, prefix_match, resolve_marker
 from yulon.log import get_logger
 
 logger = get_logger(__name__)
@@ -128,7 +128,7 @@ def _bot_accounts_clause(entry: CatalogEntry, marker: Marker) -> str:
     `username` instead of a character's `account` column.
     """
     ops = entry.observability
-    arms = [f"UPPER(a.username) LIKE '{marker.prefix.upper()}%'"]
+    arms = [prefix_match("a.username", marker.prefix)]
     if ops is not None:
         registry = ops.bots.registry
         schemas = entry.schema_map()

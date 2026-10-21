@@ -462,6 +462,30 @@ def test_the_environment_prefix_is_the_one_deleted_by(tmp_path: Path) -> None:
     assert {RB1, RB2} <= _guids(db, AUTH, "account", "id"), "the conf's prefix is not in force"
 
 
+def test_an_underscore_in_the_prefix_is_a_letter_not_a_wildcard(tmp_path: Path) -> None:
+    """`rnd_bot` deletes `RND_BOT1`, never `RNDXBOT1`, though both are registered type 1.
+
+    Run on SQLite, whose LIKE also reads `_` as any one character: a bare `LIKE 'RND_BOT%'`
+    deletes both, so this fails if the predicate goes back to plain LIKE.
+    """
+    db = _seeded()
+    for account, name, guid in ((50, "RND_BOT1", 160), (51, "RNDXBOT1", 161)):
+        db.insert(AUTH, "account", id=account, username=name)
+        db.insert(BOTS, "playerbots_account_type", account_id=account, account_type=1)
+        db.insert(CHARS, "characters", guid=guid, account=account, name=f"c{guid}")
+    _conf(tmp_path, "AiPlayerbot.RandomBotAccountPrefix = rnd_bot\n")
+    lines = _delete(_seam(tmp_path, db))
+
+    accounts = _guids(db, AUTH, "account", "id")
+    assert 50 not in accounts and 160 not in _guids(db, CHARS, "characters", "guid")
+    assert 51 in accounts, "an account matched only through `_` as a wildcard was deleted"
+    assert 161 in _guids(db, CHARS, "characters", "guid")
+    assert {RB1, RB2} <= accounts, "the `rndbot` accounts are not under `rnd_bot`"
+    assert any(
+        line.startswith("Deleted 1 random-bot character and 1 bot account") for line in lines
+    )
+
+
 def test_an_environment_prefix_it_cannot_read_refuses_every_write(tmp_path: Path) -> None:
     db = _seeded()
     world = WOTLK.container_spec().world
