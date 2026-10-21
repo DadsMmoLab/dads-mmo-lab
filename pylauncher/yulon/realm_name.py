@@ -102,10 +102,19 @@ def name_sql(entry: CatalogEntry, name: str) -> str:
     Restricted to the one row this app owns: the same `WHERE id=` that
     `networking.realmlist_sql()` uses.
     """
-    cleaned = check(name)
+    return row_name_sql(entry, check(name))
+
+
+def row_name_sql(entry: CatalogEntry, name: str) -> str:
+    """`name_sql()`'s UPDATE for a name exactly as given, unchecked.
+
+    For a name read out of another realm row (a move's "use the old realm name"), which
+    the row already held. The hex literal is what makes it safe, not `check()`: the name
+    means the same under every `sql_mode`, `NO_BACKSLASH_ESCAPES` included.
+    """
     rl = entry.realmlist
     return (
-        f"UPDATE {entry.databases.auth}.{rl.table} SET {NAME_COLUMN}={text_literal(cleaned)} "
+        f"UPDATE {entry.databases.auth}.{rl.table} SET {NAME_COLUMN}={text_literal(name)} "
         f"WHERE id={rl.realm_id};"
     )
 

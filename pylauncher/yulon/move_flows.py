@@ -1107,11 +1107,22 @@ def _session_key_columns(world: MoveWorld) -> list[tuple[str, bool]]:
 
 
 def realm_name_sql(entry: CatalogEntry, name: str) -> str:
-    rl = entry.realmlist
-    return (
-        f"UPDATE `{entry.databases.auth}`.`{rl.table}` SET `name` = '{_literal(name)}' "
-        f"WHERE `id` = {rl.realm_id};"
-    )
+    """The old realm name into this server's realm row, as a hex literal (T808 review).
+
+    It was a quoted text literal: under `NO_BACKSLASH_ESCAPES` a backslash in the name was
+    stored doubled. The hex literal means the same under every `sql_mode`.
+    """
+    return realm_name.row_name_sql(entry, name)
+
+
+def _row_realm_name(world: MoveWorld) -> str | None:
+    """The configured realm row's name now, exactly; None when it could not be read as one row."""
+    try:
+        answer = world.mysql.query(realm_name.name_query(world.entry))
+    except Exception as exc:  # noqa: BLE001 - unread is an answer: the choice is not kept
+        logger.info(f"could not read the realm name back: {exc}")
+        return None
+    return realm_name.name_from_answer(answer)
 
 
 def channel_account_sql(entry: CatalogEntry, packed_account: str | None) -> str:
@@ -1326,7 +1337,16 @@ def _fix_ups(
             "The realm name could not be changed to the old one.",
         )
         if len(notes) == failed:
-            notes.extend(_keep_the_imported_realm_name(world.server_dir, manifest.realm_name))
+            # An UPDATE that matched no row exits 0 too: kept only when the row says it.
+            reads = _row_realm_name(world)
+            if reads == manifest.realm_name:
+                notes.extend(_keep_the_imported_realm_name(world.server_dir, manifest.realm_name))
+            else:
+                said = "could not be read back" if reads is None else f"reads '{reads}'"
+                notes.append(
+                    f"The realm name could not be changed to the old one: the realm row {said}. "
+                    "This server's own realm name stays its choice."
+                )
     return tuple(notes)
 
 

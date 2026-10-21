@@ -72,8 +72,14 @@ class Db:
         module_rows: dict[str, tuple[tuple[str, str], ...]] | None = None,
         updates_by_schema: dict[str, tuple[str, ...]] | None = None,
         no_ledger: tuple[str, ...] = (),
+        realm_row: bool = True,
+        no_backslash_escapes: bool = False,
     ) -> None:
         self.events = events
+        self.realm_row = realm_row
+        """False: the realm row's id is not there, so an UPDATE of it matches nothing (exit 0)."""
+        self.no_backslash_escapes = no_backslash_escapes
+        """The server's `sql_mode` has NO_BACKSLASH_ESCAPES: a backslash in a text literal stays."""
         self.present = present
         self.updates = updates
         self.counts = counts
@@ -112,6 +118,19 @@ class Db:
     def execute(self, sql: str) -> None:
         self.events.append("exec")
         self.executed.append(sql)
+        # The realm row's name, as MariaDB would store it from either literal (T808).
+        hexed = re.search(r"SET name=_utf8mb4 X'([0-9A-F]*)'", sql)
+        quoted = re.search(r"SET `name` = '((?:[^']|'')*)'", sql)
+        if hexed is not None:
+            value = bytes.fromhex(hexed.group(1)).decode("utf-8")
+        elif quoted is not None:
+            value = quoted.group(1).replace("''", "'")
+            if not self.no_backslash_escapes:
+                value = re.sub(r"\\(.)", r"\1", value)
+        else:
+            return
+        if self.realm_row:
+            self.realm = value
 
     def tables(self, database: str) -> tuple[tuple[str, str], ...]:
         own = (("t", "BASE TABLE"),) if database != "acore_playerbots" else (("t", "BASE TABLE"),)
@@ -136,6 +155,8 @@ class Db:
             return f"{self.version_table}\n" if self.version_table else ""
         if "COUNT(*)" in sql:
             return "\t".join(str(n) for n in self.counts) + "\n"
+        if sql.startswith("SELECT HEX(CONVERT(name USING utf8mb4))"):
+            return self.realm.encode("utf-8").hex().upper() + "\n" if self.realm_row else ""
         if "realmlist" in sql:
             return f"{self.realm}\n"
         if "`updates`" in sql:
@@ -979,7 +1000,9 @@ def test_the_realm_name_stays_this_servers_by_default(tmp_path: Path) -> None:
     move_flows.run_import(
         box.world, plan, confirm=None, use_old_realm_name=False, stop_allowed=False
     )
-    assert "SET `name`" not in "\n".join(box.db.executed)
+    sent = "\n".join(box.db.executed)
+    assert "SET `name`" not in sent and " SET name=" not in sent
+    assert box.db.realm == "Local Realm"
 
 
 def test_the_old_realm_name_comes_over_only_when_asked_for(tmp_path: Path) -> None:
@@ -988,9 +1011,12 @@ def test_the_old_realm_name_comes_over_only_when_asked_for(tmp_path: Path) -> No
         box.world, plan, confirm=None, use_old_realm_name=True, stop_allowed=False
     )
     assert (
-        "UPDATE `acore_auth`.`realmlist` SET `name` = 'Source Realm' WHERE `id` = 1"
+        "UPDATE acore_auth.realmlist SET name=_utf8mb4 X'"
+        + b"Source Realm".hex().upper()
+        + "' WHERE id=1;"
         in "\n".join(box.db.executed)
     )
+    assert box.db.realm == "Source Realm"
 
 
 def test_the_old_realm_name_brought_in_becomes_this_servers_saved_choice(tmp_path: Path) -> None:
@@ -1027,7 +1053,7 @@ def test_an_old_realm_name_that_could_not_be_written_is_not_kept(tmp_path: Path)
 
     class Refusing(Db):
         def execute(self, sql: str) -> None:
-            if "SET `name`" in sql:
+            if " SET name=" in sql:
                 raise MaintenanceError("ERROR 2013: lost connection")
             super().execute(sql)
 
@@ -1057,8 +1083,51 @@ def test_an_old_realm_name_the_record_cannot_hold_drops_the_record(
 
 
 def test_a_realm_name_with_a_quote_cannot_break_out_of_the_statement() -> None:
-    sql = move_flows.realm_name_sql(entry("wow-wotlk"), "Bob's \\ Realm")
-    assert sql == "UPDATE `acore_auth`.`realmlist` SET `name` = 'Bob''s \\\\ Realm' WHERE `id` = 1;"
+    """No quote, backslash or other text of the name reaches the statement: it is hex."""
+    name = "Bob's \\ Realm"
+    sql = move_flows.realm_name_sql(entry("wow-wotlk"), name)
+    assert sql == (
+        f"UPDATE acore_auth.realmlist SET name=_utf8mb4 X'{name.encode().hex().upper()}' "
+        "WHERE id=1;"
+    )
+    assert "Bob" not in sql and "\\" not in sql
+
+
+def test_an_old_realm_name_with_a_backslash_is_stored_exactly_under_no_backslash_escapes(
+    tmp_path: Path,
+) -> None:
+    """T808 review round 2. Mutation: put back the quoted text literal (`_literal()`): the row
+    then holds the backslash doubled, the read-back disagrees, and the name is not kept."""
+    from yulon import realm_name
+
+    name = "Bob's \\ Realm"
+    package = packed(tmp_path, realm=name)
+    box = target(tmp_path, db=Db([], no_backslash_escapes=True))
+    plan = move_flows.plan_import(box.world, package)
+    assert plan.manifest is not None and plan.manifest.realm_name == name
+    result = move_flows.run_import(
+        box.world, plan, confirm=None, use_old_realm_name=True, stop_allowed=False
+    )
+    assert box.db.realm == name
+    assert realm_name.read_saved_name(box.world.server_dir) == name
+    assert not [n for n in result.notes if "realm" in n.lower()], result.notes
+
+
+def test_an_old_realm_name_update_that_matched_no_row_is_not_kept(tmp_path: Path) -> None:
+    """The UPDATE exits 0 but the configured realm row is not there. Mutation: keep the choice
+    without the read-back and the record names a realm no row has."""
+    from yulon import realm_name
+
+    package = packed(tmp_path)
+    box = target(tmp_path, db=Db([], realm_row=False))
+    plan = move_flows.plan_import(box.world, package)
+    assert realm_name.record_name(box.world.server_dir, "Chosen Here") == ""
+    result = move_flows.run_import(
+        box.world, plan, confirm=None, use_old_realm_name=True, stop_allowed=False
+    )
+    assert realm_name.read_saved_name(box.world.server_dir) == "Chosen Here"
+    note = next(n for n in result.notes if "could not be changed to the old one" in n)
+    assert "could not be read back" in note, note
 
 
 def test_the_result_says_what_stayed_behind_and_what_to_do_next(tmp_path: Path) -> None:
