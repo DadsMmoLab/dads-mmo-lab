@@ -15485,7 +15485,10 @@ def test_the_upstream_count_runs_on_a_worker_thread_with_the_real_runner(
     view = ControllerView(WOTLK, services, status_poll_ms=0)
     pump_until(lambda: not view.upstream_label.isHidden(), "the upstream line")
     assert threads and all(t is not threading.main_thread() for t in threads)
-    view._jobs.wait()  # type: ignore[attr-defined]
+    # Every job the view started at build, not only the upstream count: the Tuning tab's
+    # undo lookup (`_look_up_undo`) is one, and joining the threads (`_jobs.wait()`) left its
+    # answer queued, a T771 leak whenever it had not landed while the line was awaited.
+    pump_until_every_job_has_answered("the jobs the view started when it was built")
 
 
 def test_the_upstream_line_is_asked_again_when_a_job_finishes(

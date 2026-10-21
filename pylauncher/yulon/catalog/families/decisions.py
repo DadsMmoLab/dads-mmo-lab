@@ -577,6 +577,22 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         ),
     ),
     Site(
+        "yulon.dbreads",
+        "_env_prefix",
+        "the bot account prefix the world container's environment sets (`AC_*`), which "
+        "beats the conf and the default when the Bots tab counts or deletes bots (T805)",
+        {
+            "azerothcore": supported("the world service's compose environment and env_file"),
+            "cmangos": not_applicable(
+                "CMaNGOS reads no `AC_*` environment: its prefix is aiplayerbot.conf's alone"
+            ),
+            "trinitycore": not_applicable(
+                "Centurion's bot accounts are fixed rows with no prefix setting (T179)"
+            ),
+        },
+        hits=("'azerothcore'",),
+    ),
+    Site(
         "yulon.channel_setup",
         "_world_env",
         "the world environment the command channel is enabled through",
