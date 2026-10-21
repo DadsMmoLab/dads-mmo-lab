@@ -496,6 +496,12 @@ class CatalogView(QWidget):
     existing emitter and receiver of that signal means "there is no distro" and
     widening it would make all of them say so explicitly for no benefit.
     """
+    open_server = Signal(str, object)
+    """Open a tile's installed server: game id, server_dir (T807).
+
+    The tile's button stops being a dead grey "Installed" and becomes "Open server";
+    the receiver (the window's `show_server_tab`) switches to that server's tab.
+    """
 
     def __init__(
         self,
@@ -722,7 +728,7 @@ class CatalogView(QWidget):
         button.setObjectName(f"install-{entry.id}")
         button.setProperty("primary", True)
         button.setToolTip(f"Install {entry.name} server into your chosen directory.")
-        button.clicked.connect(lambda _checked=False, e=entry: self.start_install(e))
+        button.clicked.connect(lambda _checked=False, e=entry: self._tile_button_pressed(e))
         box.addWidget(button)
         self._buttons[entry.id] = button
         if not entry.install.supports(self._platform_id()):
@@ -837,7 +843,7 @@ class CatalogView(QWidget):
         button.setObjectName(f"install-{entry.id}")
         button.setProperty("primary", True)
         button.setToolTip(f"Install {entry.name} server into your chosen directory.")
-        button.clicked.connect(lambda _checked=False, e=entry: self.start_single_install(e))
+        button.clicked.connect(lambda _checked=False, e=entry: self._tile_button_pressed(e))
         box.addWidget(button)
         self._buttons[entry.id] = button
         if not entry.install.supports(self._platform_id()):
@@ -862,21 +868,39 @@ class CatalogView(QWidget):
         self._existing_buttons[entry.id] = existing
         return frame
 
+    def _tile_button_pressed(self, entry: CatalogEntry | SingleEntry) -> None:
+        """One press, two meanings the tile's own state decides (T807).
+
+        Not installed, the button offers the install it always offered. Installed, it has
+        been "Open server" since this ticket, so the press asks the window for that server's
+        tab — a second install of one game cannot run beside the first (container names are
+        global per game), which is why the button stopped offering one.
+        """
+        installed = self._installed_dirs.get(entry.id)
+        if installed is not None:
+            self.open_server.emit(entry.id, installed)
+            return
+        if isinstance(entry, SingleEntry):
+            self.start_single_install(entry)
+        else:
+            self.start_install(entry)
+
     def _show_installed(self, game_id: str) -> None:
-        """Say "Installed" and go grey on a tile whose server the app already knows.
+        """Make a tile whose server the app already knows read "Open server" (T807).
 
-        Owner-asked, 2026-09-04. An Install button that still looks pressable on
-        a game that is already installed is an offer the app does not mean: the
-        second press asks for a folder, and then either `_guard()` refuses the
-        first install’s folder for being non-empty, or a SECOND server is built
-        for the same game — which cannot run beside the first, because container
-        names are global per game and `_refuse_foreign_containers` refuses
-        exactly that. Both outcomes are a minutes-long detour to reach a no.
+        The owner asked, 2026-09-04, that an Install button that still looks pressable on a
+        game that is already installed be taken out of the way — the second press asked for a
+        folder and then either `_guard()` refused the first install's folder for being
+        non-empty, or a SECOND server was built for the same game, which cannot run beside
+        the first, because container names are global per game and
+        `_refuse_foreign_containers` refuses exactly that. Both outcomes are a minutes-long
+        detour to reach a no. With T807 the offer became a door: the same press opens the
+        server's tab, and the tooltip names the FOLDER, because two boxes of the same game on
+        one machine is a real case here, and then the useful question is which one this tile
+        is remembering.
 
-        The tooltip names the FOLDER rather than saying only "already
-        installed", because two boxes of the same game on one machine is a real
-        case here, and then the useful question is which one this tile is
-        remembering.
+        "Bring a whole server…" stays greyed here: it exists to build a server, and a second
+        one cannot run beside the first (same rule as above).
 
         Called once per tile at build time and again at each of the three points
         that produce an install, so one function decides how an installed tile
@@ -885,16 +909,14 @@ class CatalogView(QWidget):
         if game_id not in self._installed_dirs:
             return
         button = self._buttons[game_id]
-        button.setText("Installed")
-        button.setEnabled(False)
+        button.setText("Open server")
+        button.setEnabled(True)
         # A second server of one game cannot run beside the first (container names are
         # global per game), so a whole server brought in is offered only where Install is.
         bring = getattr(self, "_move_buttons", {}).get(game_id)
         if bring is not None:
             bring.setEnabled(False)
-        button.setToolTip(
-            f"Already installed in {self._installed_dirs[game_id]} — its own tab manages it."
-        )
+        button.setToolTip(f"Installed in {self._installed_dirs[game_id]} — open its tab.")
 
     def _show_tile_context_menu(self, pos: QPoint, entry: CatalogEntry, frame: QWidget) -> None:
         menu = QMenu(self)
@@ -1594,13 +1616,12 @@ class CatalogView(QWidget):
 
         Unlocking must never re-enable an Install button the platform gate
         disabled (roadmap 6.1) — the tile's own note says it cannot be installed
-        here — nor one that already reads "Installed" (owner, 2026-09-04). Same
-        shape of bug in both: those are standing facts about the TILE, and this
-        function knows only whether a job is running. The gate half was latent
-        while every catalog entry was Linux-only and armed the moment 6.2
-        widened WotLK; the installed half is armed immediately, because
-        `_on_run_finished` calls this and then greys the tile that just
-        installed. "Use existing…" is deliberately outside both rules: managing
+        here. Same shape of bug in that: it is a standing fact about the TILE,
+        and this function knows only whether a job is running. The gate half
+        was latent while every catalog entry was Linux-only and armed the
+        moment 6.2 widened WotLK; an installed tile's "Open server" (T807) is
+        re-armed right after by `_show_installed`. "Use existing…" is
+        deliberately outside both rules: managing
         a server someone else installed works on every platform, and pointing
         the app at a second copy of a known game is not an install.
         """
@@ -1608,6 +1629,12 @@ class CatalogView(QWidget):
             button.setEnabled(
                 enabled and game_id not in self._gated and game_id not in self._installed_dirs
             )
+        if enabled:
+            # An unlocked pass sweeps every tile, installed ones included: their
+            # "Open server" is not an install offer and comes back with the
+            # unlock (`_show_installed` decides, early-returning for the rest).
+            for game_id in self._installed_dirs:
+                self._show_installed(game_id)
         for button in self._existing_buttons.values():
             button.setEnabled(enabled)
 

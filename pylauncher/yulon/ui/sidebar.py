@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from yulon.ui.icons import dadcraft_icon
 from yulon.ui.theme import (
     COLOR_GOLD_BRIGHT,
     COLOR_RARE,
@@ -307,6 +308,21 @@ class TopMenuBar(QWidget):
         self.servers_button.setMenu(self.servers_menu)
         self.servers_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         row.addWidget(self.servers_button)
+
+        # T807: reachable with an empty server list too — the launcher window is
+        # for exactly the machine that has no server installed yet.
+        # An icon, not a word: a word-wide button took the room the header's server name
+        # needs ("WoW Wo…" at the 960px window), and the name must stay readable.
+        self.launcher_button = self._make_button("", TOP_MENU_BUTTON)
+        self.launcher_button.setCheckable(False)
+        self.launcher_button.setIcon(dadcraft_icon("play", COLOR_GOLD_BRIGHT, 16))
+        self.launcher_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        self.launcher_button.setAccessibleName("Launcher")
+        self.launcher_button.setStyleSheet("QToolButton { min-width: 0px; padding: 0px 6px; }")
+        self.launcher_button.setToolTip(
+            "Launcher: play on a friend's server without installing one here"
+        )
+        row.addWidget(self.launcher_button)
 
         self.log_button = self._make_button("Log", TOP_MENU_BUTTON)
         self.log_button.setToolTip(

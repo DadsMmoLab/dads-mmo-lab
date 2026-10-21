@@ -379,7 +379,8 @@ def test_every_realmlist_writer_call_passes_its_entrys_auth_port() -> None:
             assert port is not None and ast.unparse(port).endswith(
                 "entry.ports.auth"
             ), f"{path.name}:{node.lineno}"
-    assert found == 3
+    # Three in the Server tab, one in the friend-server launcher (its `_write_realmlists`).
+    assert found == 4
 
 
 # -- P1b: the AzerothCore tab works on the server it was opened for -----------

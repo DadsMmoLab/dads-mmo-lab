@@ -14,6 +14,8 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ## Unreleased
 
 ### New
+- The Catalog's Installed button now opens that server's tab.
+- New Launcher button (the play icon in the top bar): play on a friend's server with a ready-to-play client, without installing a server.
 
 ### Fixed
 - When Docker cannot fetch the git image, the Modules tab now shows Docker's reason instead of an unhelpful line.

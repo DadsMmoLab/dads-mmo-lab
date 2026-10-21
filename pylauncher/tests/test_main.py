@@ -6805,3 +6805,136 @@ def test_the_window_hands_the_catalog_its_early_checks(window: Any) -> None:
     view = _catalog_view(window)
     assert view._ready_check is native.early_refusal
     assert view._move_in is not None and view._move_in.check is not None
+
+
+# ------------------------------------------- T807: Open server and the Launcher button
+
+
+def _single_view_server(window: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
+    """A single-entry server (DDON) installed into the window, the way an install ends.
+
+    The view's status poll and its jobs are kept off the host: this is about which tab the
+    press reaches, not about Docker.
+    """
+    from yulon.ui.single_server_view import SingleServerView
+    from yulon.ui.widgets.job import run_inline
+
+    real_init = SingleServerView.__init__
+
+    def _quiet(self: Any, entry: Any, controller: Any, **kwargs: Any) -> None:
+        kwargs.setdefault("run_job", run_inline)
+        real_init(self, entry, controller, **kwargs)
+
+    monkeypatch.setattr(SingleServerView, "__init__", _quiet)
+    monkeypatch.setattr(SingleServerView, "poll", lambda self: None)
+    server_dir = tmp_path / "ddon-server"
+    _catalog_view(window).installed.emit("ddon", server_dir, None)
+    view = next(v for v in window.yulon_single_views if v.controller.server_dir == server_dir)
+    return view, server_dir
+
+
+def _tile_press(window: Any, game: str, server_dir: Path) -> None:
+    """The Catalog tile's real button, installed-looking, pressed."""
+    catalog_view = _catalog_view(window)
+    catalog_view._remember_installed(game, server_dir)
+    try:
+        catalog_view.button_for(game).click()
+    finally:
+        catalog_view.forget_installed(game, {})
+
+
+def test_open_server_on_a_wow_tile_shows_that_controller_tab(window: Any, tmp_path: Path) -> None:
+    first = _server(window, tmp_path, "t807-wow-one")
+    second = _server(window, tmp_path, "t807-wow-two")
+    tabs = window.property("tabs")
+    tabs.setCurrentWidget(second)
+
+    _tile_press(window, "wow-wotlk", first.services.controller.server_dir)
+
+    assert tabs.currentWidget() is first
+
+
+def test_open_server_on_a_single_entry_tile_shows_that_single_view(
+    window: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The review finding: the press hit `controllers` only and silently did nothing here."""
+    view, server_dir = _single_view_server(window, tmp_path, monkeypatch)
+    other = _server(window, tmp_path, "t807-wow-other")
+    tabs = window.property("tabs")
+    tabs.setCurrentWidget(other)
+    assert tabs.currentWidget() is not view
+
+    _tile_press(window, "ddon", server_dir)
+
+    assert tabs.currentWidget() is view
+
+
+def test_open_server_for_a_server_with_no_tab_says_so(
+    window: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yulon.ui import message_box
+
+    said: list[tuple[object, ...]] = []
+    monkeypatch.setattr(message_box, "show_information", lambda *a, **k: said.append(a))
+    other = _server(window, tmp_path, "t807-wow-none")
+    tabs = window.property("tabs")
+    tabs.setCurrentWidget(other)
+
+    _tile_press(window, "ddon", tmp_path / "nowhere")
+
+    assert len(said) == 1, "a press that finds no tab must say so, not do nothing"
+    assert tabs.currentWidget() is other
+
+
+def test_the_open_server_signal_is_wired_to_the_windows_tab_opener(
+    window: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The signal itself, emitted at the real window, for both kinds of server."""
+    view, server_dir = _single_view_server(window, tmp_path, monkeypatch)
+    wow = _server(window, tmp_path, "t807-wow-signal")
+    tabs = window.property("tabs")
+
+    _catalog_view(window).open_server.emit("ddon", server_dir)
+    assert tabs.currentWidget() is view
+    _catalog_view(window).open_server.emit("wow-wotlk", wow.services.controller.server_dir)
+    assert tabs.currentWidget() is wow
+
+
+@pytest.fixture
+def friend_launcher_closed(window: Any) -> Iterator[None]:
+    yield
+    launcher = getattr(window, "yulon_friend_launcher", None)
+    if launcher is not None:
+        launcher.close()
+        launcher.deleteLater()
+    process_events()
+
+
+def test_the_top_bar_launcher_button_opens_the_friend_launcher_and_raises_it_itself(
+    window: Any, friend_launcher_closed: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The button on the real top bar; the launcher (a window of its own) is what comes forward.
+
+    The main window being raised instead left the launcher behind it, and a second
+    press did not bring an already-open launcher forward either.
+    """
+    raised: list[Any] = []
+    real = main._bring_to_front
+    monkeypatch.setattr(
+        main, "_bring_to_front", lambda target, *a, **k: raised.append(target) or real(target)
+    )
+    window.yulon_friend_launcher = None
+
+    window.yulon_top_menu.launcher_button.click()
+
+    launcher = window.yulon_friend_launcher
+    assert launcher is not None and launcher.isVisible()
+    assert launcher.isWindow() and launcher.parent() is None
+    assert raised == [launcher], "the launcher itself comes forward, not the main window"
+
+    window.yulon_top_menu.launcher_button.click()  # already open: raised, not doubled
+
+    assert window.yulon_friend_launcher is launcher
+    assert raised == [launcher, launcher]
+    launcher.close()
+    assert window.yulon_friend_launcher is None, "closing drops the reference"
