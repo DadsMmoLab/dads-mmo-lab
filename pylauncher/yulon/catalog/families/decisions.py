@@ -587,7 +587,7 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
                 "CMaNGOS reads no `AC_*` environment: its prefix is aiplayerbot.conf's alone"
             ),
             "trinitycore": not_applicable(
-                "Centurion's bot accounts are fixed rows with no prefix setting (T179)"
+                "this family's bot accounts are fixed rows with no prefix setting (T179)"
             ),
         },
         hits=("'azerothcore'",),
