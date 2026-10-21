@@ -139,8 +139,12 @@ class SingleServerView(QWidget):
         layout.addLayout(self._build_server_buttons())
         layout.addWidget(self._section("Who can connect"))
         self.apply_network_button: QPushButton | None = None
+        # The LAN answer is NOT asked here: `detect_lan_ip()` runs powershell.exe (8 s
+        # timeout) on Windows/WSL, and this is the GUI thread. The box starts with this
+        # computer only; `read_address()` asks for the rest on the job runner.
+        self._reaches = reaches
         if entry.advertise is not None:
-            layout.addLayout(self._build_network(reaches()))
+            layout.addLayout(self._build_network(single_network.reaches(lambda: None)))
         else:
             layout.addWidget(self._meta(THIS_COMPUTER_ONLY))
         if entry.play is not None:
@@ -467,8 +471,37 @@ class SingleServerView(QWidget):
 
     @Slot()
     def read_address(self) -> None:
-        """Read the address clients are told to connect to, off the GUI thread."""
-        self._run(self.controller.advertised, self._on_address, self._on_address_failed)
+        """Read the choices and the address clients are told to connect to, off the GUI thread.
+
+        One job for both, so the LAN choice is in the box before the address is matched
+        against it: read apart, an address that IS the LAN's could arrive first and be
+        shown as "another address".
+        """
+        self._run(self._read_network, self._on_network, self._on_address_failed)
+
+    def _read_network(self) -> tuple[tuple[Reach, ...], object, BaseException | None]:
+        """Worker thread: the reaches (a LAN lookup may take seconds), then the address."""
+        found = self._reaches()
+        try:
+            return found, self.controller.advertised(), None
+        except Exception as exc:  # noqa: BLE001 - reported as the address read's failure
+            return found, None, exc
+
+    @Slot(object)
+    def _on_network(self, answer: object) -> None:
+        found: tuple[Reach, ...]
+        address: object
+        failed: BaseException | None
+        found, address, failed = answer  # type: ignore[misc]
+        other = self.reach_box.findData(None)
+        for reach in found:
+            if self.reach_box.findData(reach.address) == -1:
+                self.reach_box.insertItem(other, reach.label, reach.address)
+                other += 1
+        if failed is not None:
+            self._on_address_failed(failed)
+        else:
+            self._on_address(address)
 
     @Slot(object)
     def _on_address(self, address: object) -> None:

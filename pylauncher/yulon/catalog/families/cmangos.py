@@ -2659,24 +2659,28 @@ class CmangosInstaller(StagedInstaller):
         reordering that looks unrelated.
 
         **The CPU cap (T801).** Tortoise's MoveMapGen starts one worker per
-        core the container can see — the fork's generator has NO `--threads`
-        option, and passing it one makes the tool reject "--threads" as a map
-        id — so a plan saying `cpu_cap: half` is the only lever we have: the
-        container itself is capped with Docker's `--cpus` at half what the
-        engine reports, bounded by half its memory too (a compile job is ~2 GB;
-        a machine with many cores and little RAM must be bounded by the RAM).
-        An engine that would not say is capped at 2, the same number the
-        CMaNGOS generators spell themselves.
+        core `std::thread::hardware_concurrency()` reports — the fork's generator
+        has NO `--threads` option, and passing it one makes the tool reject
+        "--threads" as a map id — so a plan saying `cpu_cap: half` caps the
+        container instead (`_half_engine_cap`), three ways, because each bounds
+        one thing: `--cpus` its CPU time, `--cpuset-cpus` the cores its workers
+        run on (the first N), and `--memory` its RAM, at half the engine's. The
+        worker COUNT is not bounded: under glibc 2.35+ the tool counts the host's
+        online cores whatever the container is pinned to, so the memory ceiling
+        is what keeps it from taking the machine down -- past it the generator
+        is killed inside its container. An engine that would not say is given
+        `--cpus 2` alone, the number the CMaNGOS generators spell themselves,
+        and no core or memory ceiling it could not size.
         """
         data = self._data()
         data_dir = self._data_dir(ctx)
         image_ref = self._image_ref(ctx, data.extract.image)
         user_args = self._user_args()
         yield "Generating movement maps (this can take an hour or more)."
-        cap: int | None = None
+        cap = _MmapCap()
         if data.mmaps.cpu_cap == "half":
             cap = _half_engine_cap(self._seams.engine_size())
-            yield f"mmaps: limited to {cap} CPUs"
+            yield cap.said()
         yield from self._stream(
             lambda sink: extract.run_mmaps(
                 data.mmaps,
@@ -2686,7 +2690,9 @@ class CmangosInstaller(StagedInstaller):
                 user_args=user_args,
                 sink=sink,
                 cancel=ctx.cancel,
-                cpus=cap,
+                cpus=cap.cpus,
+                cpuset=cap.cpuset,
+                memory=cap.memory,
             ),
             cancel=ctx.cancel,
             stage="mmaps",
@@ -4543,21 +4549,43 @@ def _assignments(text: str) -> dict[str, int]:
     return counts
 
 
-def _half_engine_cap(size: tuple[int, int] | None) -> int:
-    """`--cpus` for a `cpu_cap: half` generator: half the engine's CPUs AND memory, floor 1.
+@dataclass(frozen=True)
+class _MmapCap:
+    """A generator container's ceilings (`docker.ContainerRun`'s three fields); none by default."""
 
-    `size` is what the engine reported (`docker.engine_size()`): `(CPUs, bytes)`
-    or None when it would not say. Halving the MEMORY is not decoration — a
-    movement-map worker is ~2 GB, so a many-core box with little RAM must be
-    bounded by the memory, not the cores. An engine that would not say is
-    capped at 2: the same number the CMaNGOS generators spell themselves in
-    `--threads 2`, and low enough that "we don't know" cannot mean "flat out".
+    cpus: int | None = None
+    cpuset: str | None = None
+    memory: int | None = None
+
+    def said(self) -> str:
+        cores = f" (cores {self.cpuset})" if self.cpuset is not None else ""
+        ram = (
+            f" and {self.memory / (1024 * 1024 * 1024):.1f} GiB of memory"
+            if self.memory is not None
+            else ""
+        )
+        return f"mmaps: limited to {self.cpus} CPUs{cores}{ram}"
+
+
+def _half_engine_cap(size: tuple[int, int] | None) -> _MmapCap:
+    """The ceilings for a `cpu_cap: half` generator, from the engine's `(CPUs, bytes)` or None.
+
+    CPUs: half the engine's cores, but no more than half its memory in GiB (a
+    movement-map worker is ~2 GB, so a many-core box with little RAM is bounded by the
+    RAM), at least 1 -- as `--cpus` (CPU time) and as `--cpuset-cpus 0-(N-1)`, the
+    first N cores, which exist on any engine that reported more than N. Memory: half the
+    engine's, as `--memory`, the one ceiling that bounds the generator's RAM whatever
+    number of workers it starts. An engine that would not say gets `--cpus 2` only: low
+    enough that "we don't know" cannot mean "flat out", and no pin or ceiling sized
+    against a machine nobody measured.
     """
     if size is None:
-        return 2
+        return _MmapCap(cpus=2)
     cpus, mem_bytes = size
     mem_gib = mem_bytes // (1024 * 1024 * 1024)
-    return max(1, min(cpus // 2, mem_gib // 2))
+    cap = max(1, min(cpus // 2, mem_gib // 2))
+    cores = "0" if cap == 1 else f"0-{cap - 1}"
+    return _MmapCap(cpus=cap, cpuset=cores, memory=max(1, mem_bytes // 2))
 
 
 @dataclass(frozen=True)

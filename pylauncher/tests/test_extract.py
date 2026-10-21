@@ -2700,8 +2700,15 @@ def test_the_wipe_target_is_built_from_the_data_dir_and_a_constant_no_catalog_na
         # reports). It is an int that docker.py renders as `--cpus N`, so it cannot spell a
         # folder: pinned to that type, not just allowed by name.
         "cpus",
+        # T801 review: the cores to pin (`--cpuset-cpus 0-3`, a core list docker validates)
+        # and the RAM ceiling in bytes (`--memory N`). Neither is a path: a str of a core
+        # range and an int, each rendered as one option value before the image.
+        "cpuset",
+        "memory",
     }
     assert parameters["cpus"].annotation == "int | None"
+    assert parameters["cpuset"].annotation == "str | None"
+    assert parameters["memory"].annotation == "int | None"
     assert "client" not in " ".join(parameters)
     folder = Path(extract.MMAPS_DIR)
     assert folder.parts == (extract.MMAPS_DIR,)

@@ -5503,6 +5503,25 @@ def test_container_run_cpus_emits_flag_before_image() -> None:
     assert "--cpus" not in uncapped.to_argv()
 
 
+def test_container_run_cpuset_and_memory_emit_their_flags_before_image() -> None:
+    """T801 review: the cores are pinned and the RAM ceilinged, not only the CPU time.
+
+    `--memory-swap` carries the same number as `--memory`, so the ceiling is not
+    stretched by swap; None spells neither.
+    """
+    spec = docker.ContainerRun(
+        image="busybox:1.36", argv=("true",), cpus=4, cpuset="0-3", memory=8 * 1024**3
+    )
+    argv = spec.to_argv()
+    image = argv.index("busybox:1.36")
+    assert argv[argv.index("--cpuset-cpus") + 1] == "0-3" and argv.index("--cpuset-cpus") < image
+    assert argv[argv.index("--memory") + 1] == str(8 * 1024**3) and argv.index("--memory") < image
+    assert argv[argv.index("--memory-swap") + 1] == str(8 * 1024**3)
+    assert "--cpuset-cpus" in spec.to_detached_argv(name="yulon-extract-0123456789ab")
+    plain = docker.ContainerRun(image="busybox:1.36", argv=("true",)).to_argv()
+    assert "--cpuset-cpus" not in plain and "--memory" not in plain
+
+
 def test_a_relative_mount_source_is_refused_before_docker_sees_it() -> None:
     """Docker rejects a relative bind source daemon-side; the message should name our caller."""
     spec = docker.ContainerRun(

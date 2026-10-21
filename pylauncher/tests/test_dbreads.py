@@ -517,3 +517,116 @@ def test_a_cmangos_trees_counts_address_its_own_schemas(game: str, tmp_path: Pat
     statement = sql.statements[0][1]
     assert f"FROM {entry.databases.characters}.{entry.observability.characters.table}" in statement
     assert "acore_" not in statement
+
+
+# -- the environment layer (T805 review) -------------------------------------------
+
+
+def _compose(server_dir: Path, file: str, env_lines: str, *, extra: str = "") -> None:
+    """A compose file whose world service carries `env_lines` under `environment:`."""
+    world = WOTLK.container_spec().world
+    (server_dir / file).write_text(
+        f"services:\n  {world}:\n{extra}    environment:\n{env_lines}", encoding="utf-8"
+    )
+
+
+def test_the_world_environment_beats_the_conf_and_the_default(tmp_path: Path) -> None:
+    """AzerothCore reads `AC_<KEY>` over the conf and the default: so does the marker."""
+    server_dir = _install(tmp_path, "AiPlayerbot.RandomBotAccountPrefix = confbot")
+    _compose(
+        server_dir,
+        "docker-compose.override.yml",
+        '      AC_AI_PLAYERBOT_RANDOM_BOT_ACCOUNT_PREFIX: "envbot"\n',
+    )
+
+    answer = dbreads.resolve_marker(WOTLK, server_dir)
+
+    assert answer.problem == ""
+    assert answer.marker == dbreads.Marker("envbot", "env")
+
+
+def test_the_environment_beats_the_default_with_no_conf_key(tmp_path: Path) -> None:
+    server_dir = _install(tmp_path, prefix_line=None)
+    _compose(
+        server_dir, "docker-compose.yml", "      AC_PLAYERBOTS_RANDOM_BOT_ACCOUNT_PREFIX: basebot\n"
+    )
+
+    answer = dbreads.resolve_marker(WOTLK, server_dir)
+
+    assert answer.marker == dbreads.Marker("basebot", "env"), answer
+
+
+def test_the_override_beats_the_base_file(tmp_path: Path) -> None:
+    """Compose merges the override's environment over the base's."""
+    server_dir = _install(tmp_path)
+    _compose(
+        server_dir,
+        "docker-compose.yml",
+        "      AC_AI_PLAYERBOT_RANDOM_BOT_ACCOUNT_PREFIX: basebot\n",
+    )
+    _compose(
+        server_dir,
+        "docker-compose.override.yml",
+        "      AC_AI_PLAYERBOT_RANDOM_BOT_ACCOUNT_PREFIX: overbot\n",
+    )
+
+    assert dbreads.resolve_marker(WOTLK, server_dir).marker == dbreads.Marker("overbot", "env")
+
+
+def test_an_env_file_and_its_substitution_are_followed(tmp_path: Path) -> None:
+    server_dir = _install(tmp_path)
+    (server_dir / ".env").write_text("AC_ENV=conf/env.ac\n", encoding="utf-8")
+    (server_dir / "conf").mkdir()
+    (server_dir / "conf/env.ac").write_text(
+        "AC_AI_PLAYERBOT_RANDOM_BOT_ACCOUNT_PREFIX=filebot\n", encoding="utf-8"
+    )
+    _compose(
+        server_dir,
+        "docker-compose.yml",
+        "      OTHER: 1\n",
+        extra="    env_file: ${AC_ENV:-conf/dist/env.ac}\n",
+    )
+
+    assert dbreads.resolve_marker(WOTLK, server_dir).marker == dbreads.Marker("filebot", "env")
+
+
+@pytest.mark.parametrize(
+    ("env_lines", "extra"),
+    [
+        # a list-form entry this reader does not parse
+        ("      - AC_AI_PLAYERBOT_RANDOM_BOT_ACCOUNT_PREFIX=listbot\n", ""),
+        # two spellings that disagree
+        (
+            "      AC_AI_PLAYERBOT_RANDOM_BOT_ACCOUNT_PREFIX: one\n"
+            "      AC_PLAYERBOTS_RANDOM_BOT_ACCOUNT_PREFIX: two\n",
+            "",
+        ),
+        # a substitution with nothing to fill it
+        ("      AC_AI_PLAYERBOT_RANDOM_BOT_ACCOUNT_PREFIX: ${UNSET_NAME}\n", ""),
+        # an env_file that cannot be resolved
+        ("      OTHER: 1\n", "    env_file: ${UNSET_FILE}\n"),
+    ],
+)
+def test_an_environment_it_cannot_read_for_certain_is_a_refusal(
+    tmp_path: Path, env_lines: str, extra: str
+) -> None:
+    """Not a guess: the delete writes by this prefix."""
+    server_dir = _install(tmp_path)
+    _compose(server_dir, "docker-compose.override.yml", env_lines, extra=extra)
+
+    answer = dbreads.resolve_marker(WOTLK, server_dir)
+
+    assert answer.marker is None and answer.problem, answer
+
+
+def test_a_blank_environment_prefix_is_refused(tmp_path: Path) -> None:
+    server_dir = _install(tmp_path)
+    _compose(
+        server_dir,
+        "docker-compose.override.yml",
+        '      AC_AI_PLAYERBOT_RANDOM_BOT_ACCOUNT_PREFIX: ""\n',
+    )
+
+    answer = dbreads.resolve_marker(WOTLK, server_dir)
+
+    assert answer.marker is None and "blank" in answer.problem

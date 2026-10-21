@@ -3738,7 +3738,11 @@ def test_tortoise_mmaps_capped_to_half_engine_cpus(tmp_path: Path) -> None:
     rec.engine_size = (16, 64 * GiB)
     said, run = _tortoise_mmaps(rec, tmp_path)
     assert run.cpus == 8
-    assert "mmaps: limited to 8 CPUs" in said
+    # The cores are pinned too (the first 8), and the RAM is ceilinged at half the
+    # engine's: `--cpus` alone bounds only CPU time, not what the workers allocate.
+    assert run.cpuset == "0-7"
+    assert run.memory == 32 * GiB
+    assert "mmaps: limited to 8 CPUs (cores 0-7) and 32.0 GiB of memory" in said
 
 
 def test_tortoise_mmaps_cap_bounded_by_memory(tmp_path: Path) -> None:
@@ -3752,7 +3756,9 @@ def test_tortoise_mmaps_cap_bounded_by_memory(tmp_path: Path) -> None:
     rec.engine_size = (16, 8 * GiB)
     said, run = _tortoise_mmaps(rec, tmp_path)
     assert run.cpus == 4
-    assert "mmaps: limited to 4 CPUs" in said
+    assert run.cpuset == "0-3"
+    assert run.memory == 4 * GiB
+    assert "mmaps: limited to 4 CPUs (cores 0-3) and 4.0 GiB of memory" in said
 
 
 def test_tortoise_mmaps_cap_floor_is_one(tmp_path: Path) -> None:
@@ -3761,7 +3767,9 @@ def test_tortoise_mmaps_cap_floor_is_one(tmp_path: Path) -> None:
     rec.engine_size = (1, 1 * GiB)
     said, run = _tortoise_mmaps(rec, tmp_path)
     assert run.cpus == 1
-    assert "mmaps: limited to 1 CPUs" in said
+    assert run.cpuset == "0", "one core is core 0, not an empty range"
+    assert run.memory == GiB // 2
+    assert "mmaps: limited to 1 CPUs (cores 0) and 0.5 GiB of memory" in said
 
 
 def test_tortoise_mmaps_cap_falls_back_to_two_when_engine_unknown(tmp_path: Path) -> None:
@@ -3770,6 +3778,8 @@ def test_tortoise_mmaps_cap_falls_back_to_two_when_engine_unknown(tmp_path: Path
     rec.engine_size = None
     said, run = _tortoise_mmaps(rec, tmp_path)
     assert run.cpus == 2
+    # No pin and no RAM ceiling sized against an engine nobody measured.
+    assert run.cpuset is None and run.memory is None
     assert "mmaps: limited to 2 CPUs" in said
 
 
@@ -3795,6 +3805,8 @@ def test_tbc_vanilla_mmaps_keep_threads_2_and_no_cpus_flag(tmp_path: Path) -> No
     extracted = len(rec.container_runs)
     said = list(eng._mmaps(context(server_dir)))
     assert rec.container_runs[extracted].cpus is None
+    assert rec.container_runs[extracted].cpuset is None
+    assert rec.container_runs[extracted].memory is None
     assert not any("limited to" in line for line in said)
 
 

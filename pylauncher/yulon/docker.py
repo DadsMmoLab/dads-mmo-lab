@@ -8124,6 +8124,22 @@ class ContainerRun:
     rounding rule. `None` is "the tool may use the engine whole" — the decision
     a caller that states nothing has taken — and nothing is emitted for it.
     """
+    cpuset: str | None = None
+    """`--cpuset-cpus`: the cores the container may run on (`"0-3"`), or None for any.
+
+    `cpus` bounds CPU TIME only: a tool that starts one worker per core it can see
+    still starts them all, sharing that time. Pinning the cores places every worker on
+    those N, and a tool that counts the affinity mask sees N. glibc 2.35 and later count
+    `/sys/devices/system/cpu/online` for `get_nprocs()` instead, so such a tool still
+    starts a worker per HOST core; what bounds its memory is `memory`, not this.
+    """
+    memory: int | None = None
+    """`--memory` and `--memory-swap`, in bytes: the container's hard RAM ceiling, or None.
+
+    Both flags carry the same number, so the container gets no swap beyond its RAM:
+    past the ceiling the kernel kills the tool inside the container, rather than the
+    machine running out of memory under it.
+    """
     security_args: tuple[str, ...] = ()
     """The caller's container-level security decision, verbatim, or nothing.
 
@@ -8227,6 +8243,10 @@ class ContainerRun:
             argv += ["--ulimit", limit]
         if self.cpus is not None:
             argv += ["--cpus", str(self.cpus)]
+        if self.cpuset is not None:
+            argv += ["--cpuset-cpus", self.cpuset]
+        if self.memory is not None:
+            argv += ["--memory", str(self.memory), "--memory-swap", str(self.memory)]
         for mount in self.mounts:
             if not mount.host.is_absolute():
                 raise ValueError(f"bind mount source must be absolute, got {mount.host!r}")

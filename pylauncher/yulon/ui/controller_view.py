@@ -7891,13 +7891,15 @@ REBUILD_BOTS_TEXT = (
 DELETE_BOTS_LABEL = "Delete every random bot…"
 DELETE_BOTS_TITLE = "Delete every random bot?"
 DELETE_BOTS_TEXT = (
-    "Every random bot's character and its rndbot account are deleted from the server's "
-    "databases, so the bots lose their level, gear, bags, bank, quests and professions. "
-    "Also lost: companions you hired from the bots, and the bots' auctions.\n\n"
+    "Every random bot is deleted from the server's databases: its account and characters "
+    "with everything they own -- level, gear, bags, bank, mail, quests, professions, pets "
+    "and the items they have up for auction. A guild a random bot leads passes to its "
+    "highest-ranked member left, or is disbanded if nobody is left; arena teams do the "
+    "same, and groups a random bot leads are disbanded.\n\n"
     "What stays: your own accounts and characters, and the AddClass and city bots. The "
-    "bots module makes its accounts again when the server starts.\n\n"
-    "The server must be stopped: the press refuses while it is running, and nothing is "
-    "deleted until it is."
+    "bots module makes its random-bot accounts again when the server starts.\n\n"
+    "It is all or nothing: if any part fails, nothing is deleted. The server must be "
+    "stopped: the press refuses while it is running."
 )
 """T805's one dialog. Its three buttons are `ask_backup_choice()`'s, relabelled."""
 

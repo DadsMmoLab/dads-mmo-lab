@@ -672,9 +672,13 @@ class MmapPlan(_Strict):
     cpu_cap: Literal["half"] | None = Field(
         default=None,
         description=(
-            "Asks the caller to cap the generator's container at half the Docker engine "
-            "(half its reported CPUs, half its reported memory, at least one CPU; an engine "
-            "that would not say is capped at 2). Only value is `half`, and only one entry "
+            "Asks the caller to cap the generator's container at half the Docker engine: "
+            "CPU time (--cpus) and the cores it runs on (--cpuset-cpus, the first N) at half "
+            "the reported CPUs but no more than half the reported GiB, at least one; its RAM "
+            "(--memory) at half the reported memory. The tool's worker count is not bounded "
+            "(it may count the host's cores), so the memory ceiling is what bounds its RAM. "
+            "An engine that would not say gets --cpus 2 only. Only value is `half`, and only "
+            "one entry "
             "wants it: Tortoise's MoveMapGen starts a worker per core and has no --threads "
             "option to ask for fewer, which ran every CPU flat out for an hour and could "
             "hard-reboot a PC (T801). None is the decision 'uncapped', which the CMaNGOS "
