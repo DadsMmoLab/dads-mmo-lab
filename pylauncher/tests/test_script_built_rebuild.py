@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 from typing import Any
@@ -21,7 +22,7 @@ from PySide6.QtWidgets import QMessageBox
 from tests.conftest import wait_for_panel
 from tests.support_native import Recorder, engine
 from tests.test_controller_view import WOTLK, _Ps, _services
-from yulon import docker, platform, runner, wsl
+from yulon import docker, platform, runner, server_build_presses, wsl
 from yulon.catalog import composegen, native, script_built
 from yulon.catalog.installer import InstallerError, InstallOptions, InstallStopped
 from yulon.controller import Controller
@@ -486,7 +487,7 @@ def test_a_stop_during_the_start_is_a_stop(tmp_path: Path) -> None:
     server = folder(tmp_path)
     log = Log()
     log.up_run = docker.AttachedRun(docker.CANCELLED_RETURNCODE)
-    with pytest.raises(InstallStopped, match="press Rebuild again"):
+    with pytest.raises(InstallStopped, match=re.escape(server_build_presses.REBUILD)):
         rebuilt(server, log)
 
 
@@ -560,7 +561,7 @@ def test_rebuild_press_on_a_script_built_wsl_server_asks_the_script_built_questi
     wait_for_panel(view.rebuild_log)
 
     ((title, text),) = asked
-    assert title == "Rebuild the way it was built?"
+    assert title == "Compile it the way the old script did?"
     assert text == script_built.question(tmp_path, "Ubuntu")
     assert "built by the old Dad's MMO Lab script, not by Yu'lon" in text
     assert "will not change, add or remove any file in that folder" in text

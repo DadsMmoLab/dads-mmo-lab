@@ -7769,6 +7769,7 @@ class Seams:
             wait_ready=on(docker.wait_ready_for, wsl_distro=distro),
             world_output=on(_world_output, wsl_distro=distro),
             container_tail=on(_container_tail, wsl_distro=distro),
+            engine_size=on(docker.engine_size, wsl_distro=distro),
             selinux_enforcing=lambda: False,
             # Asked beside `selinux_enforcing` by the compose render whatever the
             # answer; left to default it ran `stat -f` on the HOST (found by the
@@ -13481,7 +13482,8 @@ class StagedInstaller:
         if verdict.refusal is None:
             return (
                 " This folder matches a server built by the old Dad's MMO Lab script: press "
-                "Rebuild again to be asked to rebuild it the way that script did."
+                f"{server_build_presses.under_server_build(server_build_presses.REBUILD)} "
+                "again to be asked to rebuild it the way that script did."
             )
         return f" {verdict.refusal}"
 

@@ -554,6 +554,18 @@ SEAMS: dict[str, tuple[str, str]] = {
         "held",
         "tests.test_backup_shelf.test_another_yulon_holding_the_server_refuses_before_the_lease",
     ),
+    # Fields of the open-tickets batch (T805, T795, T804):
+    "bot_rndbot_delete": (
+        "held",
+        "tests.test_delete_random_bots."
+        "test_a_delete_while_another_yulon_holds_the_server_writes_nothing",
+    ),
+    "rebuild_note": ("reads", "a heads-up sentence, from files only; writes nothing"),
+    "script_built_rebuild": (
+        "outside",
+        "docker build and compose up of the old script's own project; writes nothing in the "
+        "folder or the databases, and refuses unless the world is stopped (script_built R8)",
+    ),
 }
 
 OPEN_SEAMS = {"backup", "restore", "forget_interrupted", "database_alone"}

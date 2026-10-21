@@ -344,14 +344,7 @@ def _read_version(world: MoveWorld, schema: str) -> Evidence | None:
         module_sql = ""
         if "updates" in tables:
             kind = "updates"
-            sql = (
-                f"SELECT `name` FROM {quoted}.`updates` "
-                "WHERE `state` IN ('RELEASED', 'ARCHIVED') ORDER BY `name`;"
-            )
-            module_sql = (
-                f"SELECT `name`, `hash` FROM {quoted}.`updates` "
-                "WHERE `state` NOT IN ('RELEASED', 'ARCHIVED') ORDER BY `name`;"
-            )
+            sql, module_sql = move.update_name_queries(schema)
         elif "migrations" in tables:
             kind = "migrations"
             sql = f"SELECT `Hash` FROM {quoted}.`migrations` WHERE `Module` = '' ORDER BY `Hash`;"
@@ -398,16 +391,10 @@ def _read_update_names(world: MoveWorld, schema: str, evidence: Evidence) -> Upd
     """
     if evidence.kind != "updates":
         return None
-    quoted = f"`{schema}`"
+    core_sql, module_sql = move.update_name_queries(schema)
     try:
-        core = world.mysql.query(
-            f"SELECT `name` FROM {quoted}.`updates` "
-            "WHERE `state` IN ('RELEASED', 'ARCHIVED') ORDER BY `name`;"
-        ).splitlines()
-        modules = world.mysql.query(
-            f"SELECT `name`, `hash` FROM {quoted}.`updates` "
-            "WHERE `state` NOT IN ('RELEASED', 'ARCHIVED') ORDER BY `name`;"
-        ).splitlines()
+        core = world.mysql.query(core_sql).splitlines()
+        modules = world.mysql.query(module_sql).splitlines()
     except Exception as exc:  # noqa: BLE001 - names that cannot be asked keep the plain sentence
         logger.info(f"could not read the update names of {schema}: {exc}")
         return None

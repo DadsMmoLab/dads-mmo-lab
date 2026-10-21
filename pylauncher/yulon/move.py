@@ -985,6 +985,25 @@ def updates_names_in_dump(package: Package, schema: str) -> UpdateNames | None:
     return checked_names(core, modules, evidence)
 
 
+def update_name_queries(schema: str) -> tuple[str, str]:
+    """`(core, module)` SELECTs for the `updates` names of `schema` on a server (T802).
+
+    The statements live here, with the ledger knowledge that reads their answers
+    (`checked_names()`, `updates_names_in_dump()`), and not beside the refusal sentences that
+    use the names: they are SQL for the database, not words for the player.
+    """
+    quoted = f"`{schema}`"
+    core = (
+        f"SELECT `name` FROM {quoted}.`updates` "
+        "WHERE `state` IN ('RELEASED', 'ARCHIVED') ORDER BY `name`;"
+    )
+    modules = (
+        f"SELECT `name`, `hash` FROM {quoted}.`updates` "
+        "WHERE `state` NOT IN ('RELEASED', 'ARCHIVED') ORDER BY `name`;"
+    )
+    return core, modules
+
+
 def checked_names(
     core: Sequence[str], modules: Sequence[str], evidence: Evidence
 ) -> UpdateNames | None:

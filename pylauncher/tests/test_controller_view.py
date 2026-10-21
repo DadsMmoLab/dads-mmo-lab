@@ -8671,6 +8671,7 @@ def test_the_rebuild_question_carries_the_wirings_note_and_still_starts_on_yes(
 
     assert view.rebuild_server() is True
     assert "NOTE-FROM-THE-WIRING" in asked[0]
+    wait_for_panel(view.rebuild_log)  # the rebuild runs on the panel's worker thread
     assert started, "a note must never stop the rebuild"
 
 

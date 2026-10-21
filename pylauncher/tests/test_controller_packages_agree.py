@@ -632,8 +632,27 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
         # T785: set only when the install's database password cannot be known; absent on every
         # tab built over a folder that has one, the reference included.
         undbrefused = {"db_refusal"}
+        # T805's "Delete every random bot…" deletes through the AzerothCore module's tables
+        # (`rndbots.py`: mod-playerbots' `playerbots_random_bots` and `account_type`), which
+        # only an AzerothCore tree has. Tortoise's own pool reset is `bot_pool_rebuild`, and
+        # CMaNGOS and TrinityCore (Centurion) have no such module to delete for. Read off the
+        # install family the wiring is written for, so a family that gains the press fails
+        # this until its tab offers it.
+        unbotdeleted = (
+            set()
+            if native_block is not None and native_block.family == "azerothcore"
+            else {"bot_rndbot_delete"}
+        )
+        # T804's "rebuild it the way the old script built it": decided by the DISTRO, not the
+        # game -- it exists only for a WotLK folder inside a WSL distro, and this test builds
+        # every tab with no distro (`script_built_rebuild_for_app`: None without one). So it
+        # is absent here for every game, the reference included; the one game it is offered
+        # for, and the distro half, are driven in `test_script_built_rebuild.py`.
+        undistroed = {"script_built_rebuild"}
         allowed = (
             undbrefused
+            | unbotdeleted
+            | undistroed
             | unrepaired
             | unpathed
             | unowed
@@ -662,6 +681,7 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
         if game in ("wow-wotlk", "wow-unbound"):  # T554: Unbound is the same package
             reference = (
                 undbrefused
+                | undistroed
                 | unprobed
                 | unpathed
                 | unowed

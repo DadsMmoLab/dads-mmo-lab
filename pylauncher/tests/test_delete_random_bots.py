@@ -16,6 +16,7 @@ import pytest
 from tests.conftest import pump_until
 from yulon.catalog.catalog import load_catalog
 from yulon.controller_wow_wotlk import rndbots
+from yulon.docker import ServerHeldError
 from yulon.manifest import Db
 from yulon.ui import controller_view as controller_view_module
 from yulon.ui.controller_view import UpdateChoice
@@ -299,6 +300,19 @@ def test_the_deletes_run_under_the_servers_hold(tmp_path: Path) -> None:
     seam = _seam(tmp_path, sql, holds=holds)
     _delete(seam)
     assert holds.presses == [rndbots.PRESS_DELETE_BOTS]
+
+
+def test_a_delete_while_another_yulon_holds_the_server_writes_nothing(tmp_path: Path) -> None:
+    """The hold refuses (another Yu'lon owns the server): no count, no DELETE, nothing sent."""
+
+    def refused(press: str) -> contextlib.AbstractContextManager[object]:
+        raise ServerHeldError(f"another Yu'lon is holding this server; {press} did not run")
+
+    sql = _Sql()
+    seam = _seam(tmp_path, sql, holds=refused)  # type: ignore[arg-type]
+    with pytest.raises(ServerHeldError):
+        _delete(seam)
+    assert sql.sqls() == [] and sql.statements == []
 
 
 def test_a_cancel_before_the_first_delete_deletes_nothing(tmp_path: Path) -> None:

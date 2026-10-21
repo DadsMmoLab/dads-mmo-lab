@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from yulon import docker, git, platform
+from yulon import docker, git, platform, server_build_presses
 from yulon.catalog import composegen
 from yulon.catalog.installer import InstallerError, InstallStopped
 from yulon.log import get_logger
@@ -81,17 +81,19 @@ UP_ARGV: tuple[str, ...] = ("compose", "up", "-d", "--pull", "never", "--no-buil
 WORLD_CONTAINER = WORLD
 
 
-QUESTION_TITLE = "Rebuild the way it was built?"
+QUESTION_TITLE = "Compile it the way the old script did?"
 
 
-def question(server_dir: Path, wsl_distro: str) -> str:
+def question(server_dir: Path, distro: str) -> str:
     """The question the Rebuild press asks INSTEAD of the ordinary confirmation (T804)."""
     return (
-        f"{server_dir} in {wsl_distro} was built by the old Dad's MMO Lab script, not by "
+        f"{server_dir} in {distro} was built by the old Dad's MMO Lab script, not by "
         "Yu'lon. Yu'lon can rebuild it the way that script did: compile the server again from "
         "this folder's own files (2-4 hours), then start it on the new build.\n\n"
         "Yu'lon will not change, add or remove any file in that folder, and it will not take "
-        "the server over: Uninstall and Update to latest stay unavailable for it.\n\n"
+        "the server over: Uninstall and "
+        f"{server_build_presses.under_server_build(server_build_presses.UPDATE_TO_LATEST)} "
+        "stay unavailable for it.\n\n"
         "When the server starts, its database applies any SQL the new modules bring, and that "
         "cannot be undone without a backup. If you have none, press No and take one on the "
         "Maintenance tab first.\n\n"
@@ -490,7 +492,9 @@ def rebuild_as_built(
         cancel is not None and cancel.is_set()
     ):
         raise InstallStopped(
-            "The start was stopped. The new build is compiled; press Rebuild again to start it."
+            "The start was stopped. The new build is compiled; press "
+            f"{server_build_presses.under_server_build(server_build_presses.REBUILD)} "
+            "again to start it."
         )
     if started.returncode != 0:
         raise InstallerError(

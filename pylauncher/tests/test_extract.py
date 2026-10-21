@@ -25,6 +25,7 @@ import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
+from typing import Literal
 
 import pytest
 from pydantic import ValidationError
@@ -2695,12 +2696,26 @@ def test_the_wipe_target_is_built_from_the_data_dir_and_a_constant_no_catalog_na
         "user_args",
         "sink",
         "cancel",
+        # T801: a `--cpus` ceiling for the container (whole CPUs, half of what the engine
+        # reports). It is an int that docker.py renders as `--cpus N`, so it cannot spell a
+        # folder: pinned to that type, not just allowed by name.
+        "cpus",
     }
+    assert parameters["cpus"].annotation == "int | None"
     assert "client" not in " ".join(parameters)
     folder = Path(extract.MMAPS_DIR)
     assert folder.parts == (extract.MMAPS_DIR,)
     assert not folder.is_absolute() and folder.anchor == "" and ".." not in folder.parts
-    assert set(MmapPlan.model_fields) == {"argv", "min_files", "required", "success_codes"}
+    # `cpu_cap` (T801) is `Literal["half"] | None`: a request to cap the container at half the
+    # engine's CPUs and memory. One word, never a path, so it cannot name where a wipe goes.
+    assert set(MmapPlan.model_fields) == {
+        "argv",
+        "min_files",
+        "required",
+        "cpu_cap",
+        "success_codes",
+    }
+    assert MmapPlan.model_fields["cpu_cap"].annotation == Literal["half"] | None
     # NOT `all(isinstance(code, int) ...)`, which was here until a review
     # pointed out that `isinstance(True, int)` is True and the assertion pinned
     # nothing about the value. The default itself is what matters, and it is
