@@ -215,6 +215,23 @@ def _size_text(plan: play_client.BuildPlan) -> str:
     )
 
 
+def _write_realmlists(folder: Path, host: str, port: int, entry: CatalogEntry) -> None:
+    """Write a friend server's realm into every realmlist of its ready-to-play client.
+
+    The realmlist writer takes the GAME's auth port (`entry.ports.auth`) and leaves an
+    address that already names a port as typed. The friend's port is the player's own
+    and may differ from the game's, so the address always names it explicitly unless
+    both are the standard 3724 (then the bare host, as every realmlist before this one).
+    """
+    standard = port == STANDARD_AUTH_PORT and entry.ports.auth == STANDARD_AUTH_PORT
+    networking.write_ready_to_play_realmlists(
+        folder,
+        host if standard else f"{host}:{port}",
+        entry.client.realmlist_file,
+        auth_port=entry.ports.auth,
+    )
+
+
 def _create_work(
     original: Path,
     target: Path,
@@ -224,7 +241,7 @@ def _create_work(
     identity: Path,
     full_copy: bool,
     realm: _Realm,
-    realmlist_file: str,
+    entry: CatalogEntry,
     settings_path: Path | None,
 ) -> _Built:
     """Build the folder, write the realm into it, save the entry — off the GUI thread.
@@ -236,9 +253,7 @@ def _create_work(
     play_client.create(original, target, game=game, server_dir=identity, allow_full_copy=full_copy)
     notes: list[str] = []
     try:
-        networking.write_ready_to_play_realmlists(
-            target, realm.host, realmlist_file, auth_port=realm.port
-        )
+        _write_realmlists(target, realm.host, realm.port, entry)
     except OSError as exc:
         notes.append(f"Its realmlist could not be written yet ({exc}); Play writes it again first.")
     saved = ui_settings.remember_friend_server(
@@ -277,9 +292,7 @@ def _play_work(
     the standard port is left off. The game starts detached and outlives Yu'lon.
     """
     try:
-        networking.write_ready_to_play_realmlists(
-            server.play_folder, server.host, entry.client.realmlist_file, auth_port=server.auth_port
-        )
+        _write_realmlists(server.play_folder, server.host, server.auth_port, entry)
     except OSError as exc:
         raise LaunchRefusal(
             f"The realmlist in {server.play_folder} could not be written ({exc}), so nothing "
@@ -612,7 +625,7 @@ class FriendLauncher(QWidget):
                 identity=friend_server_dir(name),
                 full_copy=full_copy,
                 realm=result.realm,
-                realmlist_file=entry.client.realmlist_file,
+                entry=entry,
                 settings_path=self._settings_path,
             ),
             self._made,

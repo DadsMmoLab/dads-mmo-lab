@@ -543,6 +543,34 @@ def test_a_name_that_folds_to_another_entrys_identity_is_refused(tmp_path: Path)
     assert (first.play_folder / play_client.MARKER).is_file(), "the first client is intact"
 
 
+def _realmlist_text(folder: Path) -> str:
+    return networking_realmlist_text(folder)
+
+
+@pytest.mark.parametrize(
+    ("game_port", "friend_port", "expected"),
+    [
+        (3724, 3724, "set realmlist 10.1.2.3"),
+        (3724, 3725, "set realmlist 10.1.2.3:3725"),
+        (3725, 3724, "set realmlist 10.1.2.3:3724"),
+        (3725, 3725, "set realmlist 10.1.2.3:3725"),
+    ],
+)
+def test_the_friend_realmlist_names_the_friends_port_whatever_the_games_is(
+    tmp_path: Path, game_port: int, friend_port: int, expected: str
+) -> None:
+    """The writer is given the GAME's port; the line must still carry the FRIEND's."""
+    entry = CATALOG.get("wow-wotlk")
+    entry = entry.model_copy(update={"ports": entry.ports.model_copy(update={"auth": game_port})})
+    folder = tmp_path / "play"
+    (folder / "Data" / "enUS").mkdir(parents=True)
+
+    friend_launcher._write_realmlists(folder, "10.1.2.3", friend_port, entry)
+
+    lines = [line.strip() for line in _realmlist_text(folder).splitlines()]
+    assert expected in lines, lines
+
+
 # -- persistence -------------------------------------------------------------------
 
 
