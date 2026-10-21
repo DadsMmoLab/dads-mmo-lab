@@ -550,6 +550,11 @@ SEAMS: dict[str, tuple[str, str]] = {
         "an Applier install/remove: the tab's applier, or Centurion's add-on-only one, holds",
     ),
     "db_refusal": ("reads", "a sentence"),
+    "realm_name_current": ("reads", "the realm row's name, else the saved one; writes nothing"),
+    "realm_name_save": (
+        "held",
+        f"{_SEAMS}.test_a_realm_name_save_while_another_yulon_holds_the_server_writes_nothing",
+    ),
     "shelf": (
         "held",
         "tests.test_backup_shelf.test_another_yulon_holding_the_server_refuses_before_the_lease",

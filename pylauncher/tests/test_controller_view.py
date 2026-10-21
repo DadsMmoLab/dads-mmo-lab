@@ -31784,10 +31784,44 @@ def test_a_held_server_says_so_instead_of_changing_the_realm_name(
     assert view.realm_name_button.isEnabled()
 
 
+def test_with_no_known_database_password_save_name_is_grey_and_says_the_real_reason(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T785's refusal, not "applied the next time the server starts": that start asks with the
+    same unknown password. The saved name is still shown, and the refusal is not replaced by
+    the reading's note. Mutation: leave the button out of `_grey_for_the_database()`, or show
+    `result.note` over the refusal."""
+    from yulon.ui.widgets.reasons import reason_of
+
+    saved: list[str] = []
+    services = _name_services(ps, tmp_path, saved)
+    refusal = "This server's .db_password is missing, so Yu'lon cannot know it and tried none."
+    services.db_refusal = refusal
+    services.realm_name_current = lambda: realm_name.NameState(
+        "Kept Realm",
+        False,
+        "The database did not answer, so this is the name saved for this server.",
+    )
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    assert not view.realm_name_button.isEnabled()
+    assert reason_of(view.realm_name_button) == refusal
+    view.refresh_realm_name()
+    assert view.realm_name_edit.text() == "Kept Realm"
+    assert view.realm_name_report.text() == refusal
+
+    view.realm_name_edit.setText("Other Realm")
+    view.save_realm_name()  # a press by another road than the grey button
+    assert saved == []
+    assert view.realm_name_report.text() == refusal
+    assert not view.realm_name_button.isEnabled()
+
+
 def test_every_game_with_a_realm_row_gets_the_realm_name_seams_and_a_start_step(
     tmp_path: Path,
 ) -> None:
-    """Removing the wiring in `_assemble()` leaves the tab without the control on every game."""
+    """Every factory wires both seams (`_assemble()`) and the start step (`_keeping_the_realm_name`
+    on the controller it builds). Mutation: drop the helper from one factory's controller."""
     for entry in _every_game():
         services = ControllerServices.for_entry(entry, tmp_path / entry.id)
         assert services.realm_name_save is not None, entry.id

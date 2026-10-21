@@ -282,3 +282,88 @@ def test_a_repair_while_another_yulon_holds_the_server_says_so_and_changes_nothi
     assert "database" not in state.reason.lower()
     assert resets == [], "the account was touched under another Yu'lon's job"
     assert state.password == "stale"
+
+
+# ------------------------------------------------------------------ the realm name (T808)
+
+
+class _RealmRow:
+    """The realm row behind the `sql` seam: records every statement, answers its name in hex."""
+
+    def __init__(self) -> None:
+        self.name = "Seeded Realm"
+        self.sent: list[str] = []
+
+    def run_statement(self, db: str, statement: str) -> None:
+        self.sent.append(statement)
+        self.name = bytes.fromhex(statement.split("X'")[1].split("'")[0]).decode("utf-8")
+
+    def query(self, db: str, statement: str) -> str:
+        return self.name.encode("utf-8").hex().upper() + "\n"
+
+
+def _realm_name_save(server: Path, row: _RealmRow) -> Any:
+    from tests.test_more_writes_hold import CATALOG_WOTLK, _Nothing
+    from yulon.ui import controller_view
+
+    services = controller_view._assemble(
+        CATALOG_WOTLK,
+        server,
+        client_dir=None,
+        wsl_distro=None,
+        controller=_Nothing(),  # type: ignore[arg-type]
+        sql=row,  # type: ignore[arg-type]
+        send_console=lambda _c: None,  # type: ignore[arg-type,return-value]
+        create_account=lambda name, pw, level: None,  # type: ignore[arg-type,return-value]
+        store=None,
+        applier=None,
+        backup=lambda: None,  # type: ignore[arg-type,return-value]
+        plan_restore=lambda *_a: None,  # type: ignore[arg-type,return-value]
+        restore=lambda _p: None,  # type: ignore[arg-type,return-value]
+    )
+    assert services.realm_name_save is not None
+    return services.realm_name_save
+
+
+def test_a_realm_name_save_while_another_yulon_holds_the_server_writes_nothing(
+    fake_docker: Path, tmp_path: Path
+) -> None:
+    """Neither the realm row nor `.yulon-realm-name.json`: the assembled seam, the real hold.
+
+    Mutation: pass `names.save` through unwrapped in `_assemble()`.
+    """
+    from tests.test_server_reservation import HOLDER_PRESS, _another_yulon_holds
+    from yulon import realm_name
+
+    server = tmp_path / "server"
+    server.mkdir()
+    row = _RealmRow()
+    save = _realm_name_save(server, row)
+    claim = docker.SERVER_CLAIM_PREFIX + str(docker.folder_id(server))
+    theirs = _another_yulon_holds(fake_docker, claim)
+    try:
+        with pytest.raises(docker.ServerReserved) as refused:
+            save("Jerra's Realm")
+        assert HOLDER_PRESS in str(refused.value)
+        assert "Change the realm name" in str(refused.value)
+    finally:
+        theirs.kill()
+    assert row.sent == []
+    assert row.name == "Seeded Realm"
+    assert not [p for p in server.iterdir() if p.name.startswith(realm_name.REALM_NAME_FILE)]
+
+
+def test_a_realm_name_save_with_nobody_holding_the_server_writes_the_row_and_the_record(
+    fake_docker: Path, tmp_path: Path
+) -> None:
+    """The control for the test above: the same assembled seam, the real hold, nobody in it."""
+    from tests.test_more_writes_hold import CATALOG_WOTLK
+    from yulon import realm_name
+
+    server = tmp_path / "server"
+    server.mkdir()
+    row = _RealmRow()
+    result = _realm_name_save(server, row)("Jerra's Realm")
+    assert result.applied and result.remembered, result.text
+    assert row.sent == [realm_name.name_sql(CATALOG_WOTLK, "Jerra's Realm")]
+    assert realm_name.read_saved_name(server) == "Jerra's Realm"

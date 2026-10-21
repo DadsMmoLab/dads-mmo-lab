@@ -3248,6 +3248,7 @@ def _server_hold_for(
 
 
 _R = TypeVar("_R")
+_C = TypeVar("_C", bound=Controller)
 
 
 def _under_the_hold(
@@ -3319,21 +3320,6 @@ def _assemble(
     """
     spec = entry.container_spec()
     names = realm_name.RealmNames(entry, server_dir, sql)
-    # T808: every Start puts a saved realm name back (an import seeds the catalog's own), through
-    # the step the controller already asks before the servers; it never refuses a start.
-    if hasattr(controller, "before_servers"):
-        controller.before_servers = realm_name.keep_at_start(
-            entry,
-            server_dir,
-            sql,
-            lambda: docker.start_database(
-                spec,
-                server_dir,
-                because="the saved realm name could not be applied",
-                wsl_distro=wsl_distro,
-            ),
-            controller.before_servers,
-        )
     if spec.save_first is not None and channel_setup is not None:
         # T496: where the console needs a terminal this host cannot open (Windows), the save
         # a Stop asks for first goes through this install's command channel, on every route.
@@ -3731,6 +3717,39 @@ def _realm_port_keeper(
     return keep
 
 
+def _keeping_the_realm_name(
+    controller: _C,
+    entry: CatalogEntry,
+    server_dir: Path,
+    sql: DockerSql,
+    *,
+    wsl_distro: str | None,
+) -> _C:
+    """`controller`, whose start step now also puts a saved realm name back (T808).
+
+    Called by each game's factory on the controller it has just built, never by
+    `_assemble()`: the shared assembly is handed whatever controller a caller
+    has, and must not change it. An import seeds the catalog's own name, so every
+    Start re-applies the owner's; the step the controller already had (the realm
+    port keeper, T552) goes first and its refusal stands, and the name never
+    refuses a start (`realm_name.keep_at_start()`).
+    """
+    spec = entry.container_spec()
+    controller.before_servers = realm_name.keep_at_start(
+        entry,
+        server_dir,
+        sql,
+        lambda: docker.start_database(
+            spec,
+            server_dir,
+            because="the saved realm name could not be applied",
+            wsl_distro=wsl_distro,
+        ),
+        controller.before_servers,
+    )
+    return controller
+
+
 def _for_wotlk(
     entry: CatalogEntry,
     server_dir: Path,
@@ -3975,26 +3994,35 @@ def _for_wotlk(
         # it lives in a conf file the user can change while the app is open,
         # and a list built on a stale marker is a list of the wrong characters.
         bots=_BotBrowser(entry, server_dir, sql),
-        controller=Controller(
-            spec,
-            server_dir,
-            wsl_distro=wsl_distro,
-            import_probe=probe,
-            reset_unfinished=reset,
-            pre_stop=recorder,
-            before_servers=_realm_port_keeper(entry, spec, server_dir, sql, wsl_distro=wsl_distro),
-            # T678 review round 3: a copy before Repair clears an unfinished first import.
-            safety_copy=lambda: wotlk_maintenance.safety_copy_sentence(
-                wotlk_maintenance.backup(
-                    server_dir,
-                    mysql,
-                    game=wotlk_maintenance.game_of(entry),
-                    label="before-repair",
-                    spec=spec,
-                    core_databases=entry.core_databases(),
-                    wsl_distro=wsl_distro,
-                )
+        # T808: the saved realm name goes back after the realm port, at every Start.
+        controller=_keeping_the_realm_name(
+            Controller(
+                spec,
+                server_dir,
+                wsl_distro=wsl_distro,
+                import_probe=probe,
+                reset_unfinished=reset,
+                pre_stop=recorder,
+                before_servers=_realm_port_keeper(
+                    entry, spec, server_dir, sql, wsl_distro=wsl_distro
+                ),
+                # T678 review round 3: a copy before Repair clears an unfinished first import.
+                safety_copy=lambda: wotlk_maintenance.safety_copy_sentence(
+                    wotlk_maintenance.backup(
+                        server_dir,
+                        mysql,
+                        game=wotlk_maintenance.game_of(entry),
+                        label="before-repair",
+                        spec=spec,
+                        core_databases=entry.core_databases(),
+                        wsl_distro=wsl_distro,
+                    )
+                ),
             ),
+            entry,
+            server_dir,
+            sql,
+            wsl_distro=wsl_distro,
         ),
         sql=sql,
         # Three facts, from three different places, and the command needs all of
@@ -4281,8 +4309,12 @@ def _for_tbc(
         accounts=accounts_admin,
         play=characters_admin,
         bots=_BotBrowser(entry, server_dir, sql),
-        controller=tbc_controller.TbcController(
-            server_dir, wsl_distro=wsl_distro, pre_stop=recorder
+        controller=_keeping_the_realm_name(
+            tbc_controller.TbcController(server_dir, wsl_distro=wsl_distro, pre_stop=recorder),
+            entry,
+            server_dir,
+            sql,
+            wsl_distro=wsl_distro,
         ),
         sql=sql,
         # No `prompt=`: this package binds this console's prompt and the side of
@@ -4476,8 +4508,14 @@ def _for_vanilla(
             ),
         ),
         bots=_BotBrowser(entry, server_dir, sql),
-        controller=vanilla_controller.VanillaController(
-            server_dir, wsl_distro=wsl_distro, pre_stop=recorder
+        controller=_keeping_the_realm_name(
+            vanilla_controller.VanillaController(
+                server_dir, wsl_distro=wsl_distro, pre_stop=recorder
+            ),
+            entry,
+            server_dir,
+            sql,
+            wsl_distro=wsl_distro,
         ),
         sql=sql,
         send_console=lambda cmd: vanilla_console.send_command(
@@ -4659,8 +4697,14 @@ def _for_centurion(
                 avoid_images=purge.removable_images(composegen.built_image_refs(entry, server_dir)),
             ),
         ),
-        controller=centurion_controller.CenturionController(
-            entry, server_dir, wsl_distro=wsl_distro, pre_stop=recorder
+        controller=_keeping_the_realm_name(
+            centurion_controller.CenturionController(
+                entry, server_dir, wsl_distro=wsl_distro, pre_stop=recorder
+            ),
+            entry,
+            server_dir,
+            sql,
+            wsl_distro=wsl_distro,
         ),
         sql=sql,
         send_console=lambda cmd: centurion_console.send_command(entry, cmd, wsl_distro=wsl_distro),
@@ -4865,8 +4909,12 @@ def _for_tortoise(
         channel_for_saved=channel.live_channel,
         hold_server=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
     )
-    lifecycle = tortoise_controller.controller_for(
-        server_dir, wsl_distro=wsl_distro, pre_stop=recorder
+    lifecycle = _keeping_the_realm_name(
+        tortoise_controller.controller_for(server_dir, wsl_distro=wsl_distro, pre_stop=recorder),
+        entry,
+        server_dir,
+        sql,
+        wsl_distro=wsl_distro,
     )
     # 8.7d's guarded applier (see the `applier=` comment below), built before
     # `_assemble()` since T596 because the custom route is bound over it too.
@@ -18500,6 +18548,9 @@ class ControllerView(QWidget):
         self.maintenance_report.setPlainText(refusal)
         self.module_sql_button.setEnabled(False)
         self.module_sql_button.setToolTip(refusal)
+        # T808: the realm name is a row in the login database; the saved name is still shown.
+        set_enabled_why(self.realm_name_button, refusal)
+        self.realm_name_report.setText(refusal)
 
     def _installed_clones(self) -> Mapping[str, frozenset[str]] | None:
         """What is in this install's clone folders per family, or `None` for no reader.
@@ -23244,9 +23295,6 @@ class ControllerView(QWidget):
             return
         if self._waits_for_the_distro("realm name", self.refresh_realm_name):
             return
-        if (refusal := self.services.db_refusal) is not None:
-            # No database password to ask with: only the saved name can be shown.
-            self.realm_name_report.setText(refusal)
         self._run(current, self._realm_name_read, self._realm_name_read_failed)
 
     @Slot(object)
@@ -23255,18 +23303,23 @@ class ControllerView(QWidget):
             return
         if not self._realm_name_typed and result.shown:
             self.realm_name_edit.setText(result.shown)
-        self.realm_name_report.setText(result.note)
+        # With no database password the refusal stays: it is why Save is grey (T785).
+        self.realm_name_report.setText(self.services.db_refusal or result.note)
 
     @Slot(object)
     def _realm_name_read_failed(self, exc: object) -> None:
         logger.info(f"the realm name could not be read: {exc}")
-        self.realm_name_report.setText(REALM_NAME_NOT_READ)
+        self.realm_name_report.setText(self.services.db_refusal or REALM_NAME_NOT_READ)
 
     @Slot()
     def save_realm_name(self) -> None:
         """Check the typed name here (a refusal needs no job), then save and apply it (T808)."""
         save = self.services.realm_name_save
         if save is None:
+            return
+        if (refusal := self.services.db_refusal) is not None:
+            # The grey button is the sight of it; a press by another road is refused here too.
+            self.realm_name_report.setText(refusal)
             return
         typed = self.realm_name_edit.text()
         try:

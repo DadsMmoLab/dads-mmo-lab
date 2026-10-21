@@ -28,12 +28,13 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from yulon.catalog.catalog import CatalogEntry
+from yulon.catalog.catalog import CatalogEntry, DbPasswordUnknown
 from yulon.log import get_logger
 from yulon.manifest import Db
 
@@ -43,10 +44,17 @@ REALM_NAME_FILE = ".yulon-realm-name.json"
 """The record's name in the server folder. One of `catalog.native.OUR_OWN_FILES`."""
 
 NAME_COLUMN = "name"
-"""The realm row's name column. The same word on AzerothCore and on both CMaNGOS trees."""
+"""The realm row's name column: the same word on AzerothCore, both CMaNGOS trees, Tortoise and
+TrinityCore (Centurion), and `UNIQUE KEY idx_name` on every one of them."""
 
 MAX_LENGTH = 32
-"""Characters. `realmlist.name` is `varchar(32)` on every core this app installs."""
+"""Characters. `realmlist.name` is `varchar(32)` on every core this app installs: utf8mb4 on
+AzerothCore and TrinityCore, three-byte utf8 on CMaNGOS and Tortoise (read 2026-10-21 from each
+pinned tree's base auth schema), so a BMP character is one character on every one."""
+
+
+_DUPLICATE = re.compile(r"\bERROR 1062\b")
+"""The mysql and mariadb clients' words for a taken key (`ER_DUP_ENTRY`): here `idx_name`."""
 
 
 class RealmNameError(ValueError):
@@ -250,22 +258,45 @@ class RealmNames:
         return NameState("", False, "The database did not answer and no name is saved yet.")
 
     def save(self, name: str) -> SaveResult:
-        """Check, remember and (if the database is up) apply `name`.
+        """Check, apply (if the database is up) and remember `name`.
 
-        A refused name touches nothing: no file, no statement.
+        A refused name touches nothing: no file, no statement. Neither does a name
+        another realm row already has (`idx_name` is UNIQUE on every core): it would
+        fail the same way at every start, so it is said and not kept. Any other
+        failure to apply still keeps the choice for the next start.
         """
         try:
             cleaned = check(name)
             statement = name_sql(self.entry, cleaned)
         except RealmNameError as exc:
             return SaveResult(str(exc), ok=False)
-        unwritten = record_name(self.server_dir, cleaned)
-        remembered = not unwritten
         try:
             self.sql.run_statement("auth", statement)
+        except DbPasswordUnknown as exc:
+            # Not "the next start": that start asks with the same unknown password (review).
+            logger.info(f"the realm name could not be applied: {exc}")
+            unwritten = record_name(self.server_dir, cleaned)
+            if not unwritten:
+                text = (
+                    f"Saved the realm name '{cleaned}', but it could not be applied: {exc} "
+                    "It is applied at the first start after that is put right."
+                )
+            else:
+                text = (
+                    f"{exc} The name could not be saved either ({unwritten}), so nothing changed."
+                )
+            return SaveResult(text, ok=True, remembered=not unwritten)
         except Exception as exc:  # noqa: BLE001 - any failure means "not applied now"
+            if _DUPLICATE.search(str(exc)):
+                logger.info(f"the realm name is another realm's: {exc}")
+                return SaveResult(
+                    f"Another realm on this server is already called '{cleaned}', and two "
+                    "realms cannot share a name. Nothing was changed.",
+                    ok=False,
+                )
             logger.info(f"the realm name could not be applied now: {exc}")
-            if remembered:
+            unwritten = record_name(self.server_dir, cleaned)
+            if not unwritten:
                 text = (
                     f"Saved the realm name '{cleaned}'. The database could not be reached, so it "
                     "is applied the next time the server starts."
@@ -275,7 +306,9 @@ class RealmNames:
                     f"The database could not be reached and the name could not be saved "
                     f"({unwritten}), so nothing changed."
                 )
-            return SaveResult(text, ok=True, remembered=remembered)
+            return SaveResult(text, ok=True, remembered=not unwritten)
+        unwritten = record_name(self.server_dir, cleaned)
+        remembered = not unwritten
         if self._row_name() != cleaned:
             text = f"The realm row did not take the name '{cleaned}'." + (
                 " It is saved and tried again at the next start." if remembered else ""

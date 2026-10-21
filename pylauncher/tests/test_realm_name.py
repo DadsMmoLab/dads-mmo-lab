@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from yulon import realm_name
-from yulon.catalog.catalog import CatalogEntry, load_catalog
+from yulon.catalog.catalog import CatalogEntry, DbPasswordUnknown, load_catalog
 from yulon.realm_name import RealmNameError, RealmNames
 
 CATALOG = load_catalog()
@@ -206,6 +206,31 @@ def test_save_with_the_database_down_remembers_the_name_for_the_next_start(
     assert "next time the server starts" in result.text
 
 
+class _NoPassword(FakeSql):
+    """The seam a factory builds over a password reader that refuses (T785)."""
+
+    REFUSAL = "This server's .db_password is missing, and Yu'lon cannot know it."
+
+    def run_statement(self, db: str, statement: str) -> None:
+        raise DbPasswordUnknown(self.REFUSAL)
+
+
+def test_save_with_no_known_password_says_so_and_never_promises_the_next_start(
+    tmp_path: Path,
+) -> None:
+    """The next start asks with the same unknown password, so "applied at the next start" is false.
+
+    Mutation: drop the `DbPasswordUnknown` branch in `save()` and the database-down sentence
+    ("the next time the server starts") comes back.
+    """
+    result = RealmNames(WOTLK, tmp_path, _NoPassword()).save("Mine")
+
+    assert _NoPassword.REFUSAL in result.text
+    assert "next time the server starts" not in result.text
+    assert result.ok and result.remembered and not result.applied
+    assert realm_name.read_saved_name(tmp_path) == "Mine"
+
+
 def test_save_of_a_refused_name_sends_nothing_and_writes_nothing(tmp_path: Path) -> None:
     sql = FakeSql()
     for bad in ("", "y" * 40, "a\nb"):
@@ -214,6 +239,24 @@ def test_save_of_a_refused_name_sends_nothing_and_writes_nothing(tmp_path: Path)
         assert result.text
     assert sql.statements == [] and sql.queries == []
     assert not (tmp_path / realm_name.REALM_NAME_FILE).exists()
+
+
+def test_a_name_another_realm_row_has_is_refused_and_not_kept(tmp_path: Path) -> None:
+    """`idx_name` is UNIQUE: the UPDATE fails with ERROR 1062, and would at every start too.
+
+    Mutation: drop the duplicate branch in `save()` and the name is kept for a start that
+    fails the same way, under "the database could not be reached".
+    """
+    assert realm_name.record_name(tmp_path, "Earlier") == ""
+    sql = FakeSql(
+        down="SQL failed: ERROR 1062 (23000) at line 1: Duplicate entry 'Taken' for key 'idx_name'"
+    )
+    result = RealmNames(WOTLK, tmp_path, sql).save("Taken")
+
+    assert not result.ok and not result.applied and not result.remembered
+    assert "already called 'Taken'" in result.text and "Nothing was changed" in result.text
+    assert "could not be reached" not in result.text
+    assert realm_name.read_saved_name(tmp_path) == "Earlier"
 
 
 def test_save_does_not_claim_success_when_the_row_did_not_take_the_name(tmp_path: Path) -> None:
