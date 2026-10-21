@@ -33,6 +33,7 @@ a modal and without the host.
 from __future__ import annotations
 
 import re
+import shutil
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
@@ -129,12 +130,29 @@ def client_without_a_server(entry: CatalogEntry) -> bool:
 
 
 class _Plan:
-    """What one Make job planned, for the GUI slot that asks the consent question."""
+    """What one Make job planned, for the GUI slot that asks the consent question.
 
-    def __init__(self, original: Path, target: Path, plan: play_client.BuildPlan) -> None:
+    It carries the entry the player pressed Make on — name, game and realm — because
+    the fields stay editable while the plan walks the client: the build that follows
+    must write the identity that was planned, not whatever the fields say by then.
+    """
+
+    def __init__(
+        self,
+        original: Path,
+        target: Path,
+        plan: play_client.BuildPlan,
+        *,
+        name: str,
+        entry: CatalogEntry,
+        realm: _Realm,
+    ) -> None:
         self.original = original
         self.target = target
         self.plan = plan
+        self.name = name
+        self.entry = entry
+        self.realm = realm
 
 
 class _Built:
@@ -158,9 +176,28 @@ class _Realm:
         return self.host if self.port == STANDARD_AUTH_PORT else f"{self.host}:{self.port}"
 
 
-def _plan_work(original: Path, target: Path, identity: Path) -> _Plan:
+def _plan_work(
+    original: Path, target: Path, *, name: str, entry: CatalogEntry, realm: _Realm
+) -> _Plan:
     """Walk the client and sort its files, off the GUI thread (the walk is gigabytes)."""
-    return _Plan(original, target, play_client.plan(original, target, server_dir=identity))
+    plan = play_client.plan(original, target, server_dir=friend_server_dir(name))
+    return _Plan(original, target, plan, name=name, entry=entry, realm=realm)
+
+
+class _Removed:
+    """What one Remove job did, for the GUI slot that forgets the entry."""
+
+    def __init__(self, name: str, said: str) -> None:
+        self.name = name
+        self.said = said
+
+
+def _remove_work(server: FriendServer) -> _Removed:
+    """Delete the client Yu'lon made (marker-checked), off the GUI thread: it can be huge."""
+    said = play_client.delete(
+        server.play_folder, game=server.game, server_dir=friend_server_dir(server.name)
+    )
+    return _Removed(server.name, said or "")
 
 
 def _size_text(plan: play_client.BuildPlan) -> str:
@@ -196,9 +233,7 @@ def _create_work(
     that turns out not to share even beside the client is refused by
     `create()` itself, with the same size sentence the Server tab shows.
     """
-    play_client.create(
-        original, target, game=game, server_dir=identity, allow_full_copy=full_copy
-    )
+    play_client.create(original, target, game=game, server_dir=identity, allow_full_copy=full_copy)
     notes: list[str] = []
     try:
         networking.write_ready_to_play_realmlists(
@@ -282,7 +317,7 @@ class FriendLauncher(QWidget):
         pick_dir: DirPicker = _qt_dir_picker,
         ask_yes: Callable[[QWidget, str, str], bool] = ask_yes_no,
         launch: Callable[[play_launch.LaunchSpec], None] = play_launch.launch,
-        which: Callable[[str], str | None] = play_launch.shutil.which,
+        which: Callable[[str], str | None] = shutil.which,
         env: Mapping[str, str] | None = None,
         job_runner: JobRunner | None = None,
         settings_path: Path | None = None,
@@ -421,9 +456,7 @@ class FriendLauncher(QWidget):
             # first entry): the row Play would start is the one selected, or
             # the list is a dead end until the player clicks it.
             self.saved_list.setCurrentRow(0)
-        empty = not self.saved_list.count()
-        self.play_button.setEnabled(not empty)
-        self.remove_button.setEnabled(not empty)
+        self._sync_buttons()
 
     def _selected_name(self) -> str | None:
         item = self.saved_list.currentItem()
@@ -440,6 +473,18 @@ class FriendLauncher(QWidget):
 
     def _say(self, text: str) -> None:
         self.status.setText(text)
+
+    def _set_pending(self, value: tuple[str, str] | None) -> None:
+        """Record the job under way, and lock the buttons that would start another."""
+        self._pending = value
+        self._sync_buttons()
+
+    def _sync_buttons(self) -> None:
+        idle = self._pending is None
+        has_saved = bool(self.saved_list.count())
+        self.make_button.setEnabled(idle)
+        self.play_button.setEnabled(idle and has_saved)
+        self.remove_button.setEnabled(idle and has_saved)
 
     # -- make ---------------------------------------------------------------
 
@@ -476,21 +521,44 @@ class FriendLauncher(QWidget):
                 "Nothing was made."
             )
             return
+        clash = self._name_clash(name)
+        if clash is not None:
+            self._say(
+                f'"{name}" cannot be used next to "{clash}": names are saved as folder names '
+                "with odd characters swapped for underscores, so the two would share one "
+                "ready-to-play client and removing one would delete the other's. "
+                "Give this one a different name. Nothing was made."
+            )
+            return
         original = Path(self.client_field.text().strip())
         if not original.is_dir():
-            original = self._pick_dir(
+            picked = self._pick_dir(
                 self, "Select your own World of Warcraft client folder", self._home
             )
-            if original is None:
+            if picked is None:
                 return
-        self._pending = ("plan", name)
+            original = picked
+        target = self._target_for(entry, name, original)
+        self._set_pending(("plan", name))
         self._say(f"Checking your client {original}…")
         self._jobs(
-            lambda: _plan_work(original, self._target_for(entry, name, original),
-                               friend_server_dir(name)),
+            lambda: _plan_work(original, target, name=name, entry=entry, realm=_Realm(*realm)),
             self._planned,
             self._failed,
         )
+
+    def _name_clash(self, name: str) -> str | None:
+        """The saved entry whose folder identity `name` would share, or None.
+
+        `friend_server_dir` folds a name to folder-name characters, so "Mark's server"
+        and "Mark_s server" are one identity: one marker, one prefix, one delete. The
+        same name again is a rebuild of its own entry, not a clash.
+        """
+        identity = friend_server_dir(name).name.casefold()
+        for one in ui_settings.friend_servers(self._settings_path):
+            if one.name != name and friend_server_dir(one.name).name.casefold() == identity:
+                return one.name
+        return None
 
     def _target_for(self, entry: CatalogEntry, name: str, original: Path) -> Path:
         """Where this entry's ready-to-play client lives, or its default next to the client.
@@ -518,12 +586,9 @@ class FriendLauncher(QWidget):
             self._failed(result)
             return
         plan = result.plan
-        entry = self._entry_of(str(self.game_pick.currentData()))
-        name = self.name_field.text().strip()
-        realm = parse_realm(self.realm_field.text())
-        if entry is None or not name or realm is None:  # pragma: no cover - the press checked
-            self._pending = None
-            return
+        # The plan's own entry, never the fields' now: they stay editable while it runs.
+        entry = result.entry
+        name = result.name
         full_copy = False
         if not plan.same_volume:
             if not self._ask_yes(
@@ -531,13 +596,13 @@ class FriendLauncher(QWidget):
                 "Full copy needed",
                 f"{_size_text(plan)}\n\nMake the full copy at {result.target}?",
             ):
-                self._pending = None
+                self._set_pending(None)
                 self._say("No copy was made: it would be a full copy, and you said no.")
                 return
             full_copy = True
         else:
             self._say(f"{_size_text(plan)} Making it…")
-        self._pending = ("create", name)
+        self._set_pending(("create", name))
         self._jobs(
             lambda: _create_work(
                 result.original,
@@ -546,7 +611,7 @@ class FriendLauncher(QWidget):
                 game=entry.id,
                 identity=friend_server_dir(name),
                 full_copy=full_copy,
-                realm=_Realm(*realm),
+                realm=result.realm,
                 realmlist_file=entry.client.realmlist_file,
                 settings_path=self._settings_path,
             ),
@@ -557,22 +622,20 @@ class FriendLauncher(QWidget):
     @Slot(object)
     def _made(self, result: object) -> None:
         """Built: the record is saved, the list refreshed, the player told where it is."""
-        self._pending = None
+        self._set_pending(None)
         if not isinstance(result, _Built):  # pragma: no cover - defensive
             self._failed(result)
             return
         for note in result.notes:
             show_information(self, "Friend server", note)
         self.refresh_saved()
-        self._say(
-            f"The ready-to-play client is at {result.target}. Press Play to start the game."
-        )
+        self._say(f"The ready-to-play client is at {result.target}. Press Play to start the game.")
 
     @Slot(object)
     def _failed(self, exc: object) -> None:
         """One job's refusal or failure, said as it is — every play_client refusal names
         the folder and what to do, and says what was left as it was."""
-        self._pending = None
+        self._set_pending(None)
         if isinstance(exc, (PlayClientError, LaunchRefusal)):
             said = str(exc)
             if isinstance(exc, PlayClientError) and exc.flags_lost:
@@ -614,7 +677,7 @@ class FriendLauncher(QWidget):
                 "Make it again, or Remove the entry."
             )
             return
-        self._pending = ("play", name)
+        self._set_pending(("play", name))
         self._say("Writing the realm address and starting the game…")
         self._jobs(
             lambda: _play_work(
@@ -633,7 +696,7 @@ class FriendLauncher(QWidget):
 
     @Slot(object)
     def _launched(self, spec: object) -> None:
-        self._pending = None
+        self._set_pending(None)
         if not isinstance(spec, play_launch.LaunchSpec):  # pragma: no cover - defensive
             self._failed(spec)
             return
@@ -653,6 +716,12 @@ class FriendLauncher(QWidget):
         another server's — and the player's own client is never marked at all,
         so it can never be the folder a Remove takes away.
         """
+        if self._pending is not None:
+            self._say(
+                f"{self._pending[1]} is still being worked on; "
+                "press Remove again once that has finished."
+            )
+            return
         name = self._selected_name()
         if name is None:
             return
@@ -667,17 +736,23 @@ class FriendLauncher(QWidget):
             f"{server.play_folder}?\n\nYour own client at {server.client_folder} is not touched.",
         ):
             return
-        try:
-            said = play_client.delete(
-                server.play_folder, game=server.game, server_dir=friend_server_dir(name)
-            )
-        except PlayClientError as exc:
-            show_warning(self, "Friend server", str(exc))
+        self._set_pending(("remove", name))
+        self._say(f"Removing {name}…")
+        self._jobs(lambda: _remove_work(server), self._removed, self._failed)
+
+    @Slot(object)
+    def _removed(self, result: object) -> None:
+        """The client is gone: the entry is forgotten, and the player is told."""
+        self._set_pending(None)
+        if not isinstance(result, _Removed):  # pragma: no cover - defensive
+            self._failed(result)
             return
-        if not ui_settings.forget_friend_server(name, self._settings_path):
-            self._say(f"{name} was deleted, but the list could not be saved; it may reappear.")
+        if not ui_settings.forget_friend_server(result.name, self._settings_path):
+            self._say(
+                f"{result.name} was deleted, but the list could not be saved; it may reappear."
+            )
         else:
-            self._say(said or f"{name} was removed.")
+            self._say(result.said or f"{result.name} was removed.")
         self.refresh_saved()
 
     def closeEvent(self, event: Any) -> None:  # noqa: N802 - Qt's name

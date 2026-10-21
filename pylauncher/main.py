@@ -687,6 +687,8 @@ def build_window() -> object:
         servers_changed = Signal()
         yulon_show_server_tab: Callable[[str, object], None]
         yulon_show_logs: Callable[[], None]
+        yulon_friend_launcher: QWidget | None
+        yulon_show_friend_launcher: Callable[[], None]
         yulon_quit: Callable[[], bool]
         # T690: `close_refusal()` for the tray, which asks it before its Quit question.
         yulon_close_refusal: Callable[..., str | None]
@@ -979,8 +981,21 @@ def build_window() -> object:
 
     def show_server_tab(game: str, server_dir: object) -> None:
         """The launcher's "Server tab…": this window, on that server's tab."""
-        view = controllers.get((game, Path(str(server_dir))))
+        key = (game, Path(str(server_dir)))
+        # A WoW core has a controller tab, a single-entry game (DDON, DFO) a single view
+        # (T807): the Catalog tile's "Open server" reaches this for both kinds.
+        view: QWidget | None = controllers.get(key)
         if view is None:
+            view = single_views.get(key)
+        if view is None:
+            from yulon.ui.message_box import show_information
+
+            show_information(
+                window,
+                "Open server",
+                "Yu'lon has no open tab for that server. Use the tile's Use existing… "
+                "button to add it again.",
+            )
             return
         tabs.setCurrentWidget(view)
         _bring_to_front(window)
@@ -1006,8 +1021,9 @@ def build_window() -> object:
             launcher = FriendLauncher(catalog)
             launcher.closed.connect(lambda: setattr(window, "yulon_friend_launcher", None))
             window.yulon_friend_launcher = launcher
-        launcher.show()
-        _bring_to_front(window)
+        # The launcher is a top-level window of its own (no parent): it is the one
+        # brought forward, un-minimized, on the first press and on every later one.
+        _bring_to_front(launcher)
 
     window.yulon_show_friend_launcher = show_friend_launcher
     top_menu.launcher_button.clicked.connect(lambda _checked=False: show_friend_launcher())

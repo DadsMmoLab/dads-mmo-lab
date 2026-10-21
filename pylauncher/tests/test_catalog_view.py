@@ -2764,24 +2764,38 @@ def test_pressing_open_server_asks_the_window_for_that_servers_tab(
     assert opened == [("wow-wotlk", tmp_path / "wotlk")], opened
 
 
-def test_pressing_an_installed_tile_starts_no_install(qapp: object, tmp_path: Path) -> None:
+@pytest.mark.parametrize("game_id", ["wow-wotlk", "ddon"])
+def test_pressing_an_installed_tile_starts_no_install(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, game_id: str
+) -> None:
     """The grey-button removal must not resurrect the offer it replaced.
 
     A second install of one game cannot run beside the first (container names
     are global per game), so the press of an installed tile may not fall through
-    to `start_install()` even if the signal found no receiver.
+    to an install, and it must be the OPEN-SERVER routing that takes the press:
+    the emit is asserted, so a press that merely did nothing (the routing removed,
+    the install paths quietly refusing) fails here too.
     """
     panel = LogPanel()
+    started: list[str] = []
     view = CatalogView(
         CATALOG,
-        lambda e: _FakeInstaller(e, []),
+        lambda e: started.append(e.id) or _FakeInstaller(e, []),
         panel,
-        pick_dir=lambda *_: None,
-        installed_games={"wow-wotlk": tmp_path / "wotlk"},
+        pick_dir=lambda *_: started.append("picked") or None,
+        single_installer_factory=lambda e: started.append(e.id) or _FakeInstaller(e, []),
+        installed_games={game_id: tmp_path / "server"},
     )
-    view.open_server.connect(lambda *_: None)
-    assert view.button_for("wow-wotlk").click() is None
-    assert view.button_for("wow-wotlk").text() == "Open server"
+    monkeypatch.setattr(view, "start_install", lambda *_: started.append("start_install"))
+    monkeypatch.setattr(view, "start_single_install", lambda *_: started.append("start_single"))
+    opened: list[tuple[str, object]] = []
+    view.open_server.connect(lambda game, server_dir: opened.append((game, server_dir)))
+
+    view.button_for(game_id).click()
+
+    assert opened == [(game_id, tmp_path / "server")], "the press did not ask for the server's tab"
+    assert started == [], f"the press started an install: {started}"
+    assert view.button_for(game_id).text() == "Open server"
 
 
 def test_a_finished_install_makes_its_own_button_open_the_server(

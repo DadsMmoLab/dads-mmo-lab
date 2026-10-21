@@ -7,10 +7,9 @@ recorder, and the only disk touched is `tmp_path`. Nothing here reads the host.
 
 from __future__ import annotations
 
-import subprocess
-from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -70,6 +69,7 @@ def _window(
     launched: _Recorder | None = None,
     catalog: Catalog = CATALOG,
     os_name: str = "windows",
+    job_runner: Any = run_inline,
 ) -> FriendLauncher:
     pick = picked if picked is not None else []
     answer = answers if answers is not None else []
@@ -83,7 +83,7 @@ def _window(
         launch=launched if launched is not None else _Recorder(),
         which=lambda _name: None,
         env={},
-        job_runner=run_inline,
+        job_runner=job_runner,
         settings_path=tmp_path / "ui.json",
     )
 
@@ -200,13 +200,20 @@ def test_a_full_copy_is_only_made_once_the_player_agrees(
     monkeypatch.setattr(
         friend_launcher,
         "_plan_work",
-        lambda original, target, identity: friend_launcher._Plan(
+        lambda original, target, *, name, entry, realm: friend_launcher._Plan(
             original,
             target,
             play_client.BuildPlan(
-                linked=(), copied=(), shared_bytes=17 * 1024**3, own_bytes=2 * 1024**3,
-                same_volume=False, skipped_links=(),
+                linked=(),
+                copied=(),
+                shared_bytes=17 * 1024**3,
+                own_bytes=2 * 1024**3,
+                same_volume=False,
+                skipped_links=(),
             ),
+            name=name,
+            entry=entry,
+            realm=realm,
         ),
     )
     created = _Recorder()
@@ -224,13 +231,20 @@ def test_the_agreed_full_copy_is_built(tmp_path: Path, monkeypatch: pytest.Monke
     monkeypatch.setattr(
         friend_launcher,
         "_plan_work",
-        lambda original, target, identity: friend_launcher._Plan(
+        lambda original, target, *, name, entry, realm: friend_launcher._Plan(
             original,
             target,
             play_client.BuildPlan(
-                linked=(), copied=(), shared_bytes=17 * 1024**3, own_bytes=2 * 1024**3,
-                same_volume=False, skipped_links=(),
+                linked=(),
+                copied=(),
+                shared_bytes=17 * 1024**3,
+                own_bytes=2 * 1024**3,
+                same_volume=False,
+                skipped_links=(),
             ),
+            name=name,
+            entry=entry,
+            realm=realm,
         ),
     )
     created = _Recorder()
@@ -288,7 +302,7 @@ def test_play_starts_the_saved_client_against_the_typed_realm(tmp_path: Path) ->
     window.play_selected()
 
     assert len(launched.calls) == 1
-    ((spec,), _kwargs) = launched.calls[0]
+    (spec,), _kwargs = launched.calls[0]
     assert isinstance(spec, play_launch.LaunchSpec)
     assert spec.argv[0].endswith("Wow.exe"), spec.argv
     assert spec.cwd == server.play_folder
@@ -409,6 +423,124 @@ def test_removal_of_a_folder_of_another_server_is_refused_by_the_marker(
 
     assert server.play_folder.is_dir(), "another server's client was left as it was"
     assert ui_settings.friend_servers(tmp_path / "ui.json"), "the entry is kept"
+
+
+# -- T807 review: the plan's identity, a Remove that waits, names that fold together ---
+
+
+class _Deferred:
+    """A job runner that holds each job until the test lets it run (a worker still going)."""
+
+    def __init__(self) -> None:
+        self.jobs: list[tuple[Any, Any, Any]] = []
+
+    def __call__(self, work: Any, on_done: Any, on_error: Any) -> None:
+        self.jobs.append((work, on_done, on_error))
+
+    def run_next(self) -> None:
+        work, on_done, on_error = self.jobs.pop(0)
+        try:
+            result = work()
+        except Exception as exc:  # the real runner's contract
+            on_error(exc)
+        else:
+            on_done(result)
+
+
+def test_a_field_edit_while_the_plan_runs_cannot_change_the_planned_identity(
+    tmp_path: Path,
+) -> None:
+    jobs = _Deferred()
+    window = _window(tmp_path, job_runner=jobs)
+    _type(window, tmp_path)
+    window.make_client()
+    assert len(jobs.jobs) == 1, "the plan is out on its worker"
+
+    # The fields stay editable while the client is walked.
+    window.name_field.setText("Someone else's server")
+    window.realm_field.setText("10.0.0.9:3725")
+    other = [i for i in range(window.game_pick.count()) if i != window.game_pick.currentIndex()]
+    assert other, "the picker offers more than one game"
+    window.game_pick.setCurrentIndex(other[0])
+    jobs.run_next()  # the plan answers; the create job is queued
+    jobs.run_next()  # the build runs
+
+    (saved,) = ui_settings.friend_servers(tmp_path / "ui.json")
+    assert saved.name == "Mark's server"
+    assert saved.realm == "192.168.50.49"
+    assert saved.game == "wow-wotlk"
+    marker = play_client.read_marker(saved.play_folder)
+    assert marker is not None
+    assert marker.game == "wow-wotlk"
+    assert marker.server_dir == friend_server_dir("Mark's server")
+    realmlist = networking_realmlist_text(saved.play_folder)
+    assert "192.168.50.49" in realmlist and "10.0.0.9" not in realmlist
+
+
+def networking_realmlist_text(folder: Path) -> str:
+    """Every realmlist file the build wrote, as one text."""
+    return "\n".join(
+        path.read_text(encoding="utf-8", errors="replace")
+        for path in folder.rglob("*")
+        if path.is_file() and path.name.lower().startswith("realmlist")
+    )
+
+
+def test_remove_waits_while_a_job_for_that_entry_is_pending(tmp_path: Path) -> None:
+    answers = [True]
+    window = _window(tmp_path, answers=answers)
+    _type(window, tmp_path)
+    window.make_client()
+    server = ui_settings.friend_servers(tmp_path / "ui.json")[0]
+    jobs = _Deferred()
+    window._jobs = jobs
+    window.play_selected()  # a play job for this entry is out
+    assert len(jobs.jobs) == 1
+
+    window.remove_selected()
+
+    assert answers == [True], "the player was not even asked"
+    assert server.play_folder.is_dir(), "the folder a job is using was not deleted"
+    assert not window.remove_button.isEnabled(), "the button is locked while a job runs"
+    assert "Remove" in window.status.text()
+    jobs.run_next()
+    assert window.remove_button.isEnabled(), "and unlocked when the job ends"
+
+
+def test_remove_deletes_on_a_worker_not_in_the_press(tmp_path: Path) -> None:
+    window = _window(tmp_path, answers=[True])
+    _type(window, tmp_path)
+    window.make_client()
+    server = ui_settings.friend_servers(tmp_path / "ui.json")[0]
+    jobs = _Deferred()
+    window._jobs = jobs
+
+    window.remove_selected()
+
+    assert server.play_folder.is_dir(), "the press itself deleted nothing"
+    assert len(jobs.jobs) == 1 and window._pending == ("remove", "Mark's server")
+    assert not window.make_button.isEnabled() and not window.play_button.isEnabled()
+    jobs.run_next()
+    assert not server.play_folder.exists()
+    assert ui_settings.friend_servers(tmp_path / "ui.json") == ()
+    assert window._pending is None and window.make_button.isEnabled()
+
+
+def test_a_name_that_folds_to_another_entrys_identity_is_refused(tmp_path: Path) -> None:
+    assert friend_server_dir("Mark's server") == friend_server_dir("Mark_s server")
+    window = _window(tmp_path)
+    client = _type(window, tmp_path)
+    window.make_client()
+    (first,) = ui_settings.friend_servers(tmp_path / "ui.json")
+
+    window.name_field.setText("Mark_s server")
+    window.client_field.setText(str(client))
+    window.make_client()
+
+    assert ui_settings.friend_servers(tmp_path / "ui.json") == (first,), "no second entry"
+    assert "Mark's server" in window.status.text()
+    assert "different name" in window.status.text()
+    assert (first.play_folder / play_client.MARKER).is_file(), "the first client is intact"
 
 
 # -- persistence -------------------------------------------------------------------
