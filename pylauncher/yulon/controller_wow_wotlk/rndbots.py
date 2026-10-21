@@ -75,6 +75,12 @@ GUILDS_GONE = "yulon_rb_guilds_gone"
 TEAM_HEIRS = "yulon_rb_team_heirs"
 TEAMS_GONE = "yulon_rb_teams_gone"
 GROUPS_GONE = "yulon_rb_groups_gone"
+LEFTOVERS = "yulon_rb_leftovers"
+"""The guard at the end of the transaction: one row keyed 1, and a second insert of key 1
+for any doomed row still standing, which fails as a duplicate key and so rolls the whole
+transaction back. A duplicate key is an error under every `sql_mode`, on MySQL, MariaDB and
+the tests' SQLite alike, which a `SIGNAL` (stored programs only) or a NULL into NOT NULL
+(a warning outside strict mode) is not."""
 
 _REALM_FIRSTS = (
     " AND achievement NOT BETWEEN 456 AND 467 AND achievement NOT BETWEEN 1400 AND 1427"
@@ -216,10 +222,20 @@ class DatabaseAlone:
 
 @dataclass(frozen=True)
 class _Counts:
-    characters: int
-    accounts: int
+    character_ids: tuple[int, ...]
+    account_ids: tuple[int, ...]
+    """The doomed rows, read BEFORE the delete: what is left afterwards is asked by these ids,
+    never through the auth accounts the delete removes (a join over those reads zero)."""
     kept: int
     """Accounts under the prefix that are NOT random bots (AddClass, city, unassigned)."""
+
+    @property
+    def characters(self) -> int:
+        return len(self.character_ids)
+
+    @property
+    def accounts(self) -> int:
+        return len(self.account_ids)
 
 
 def _plural(n: int, word: str) -> str:
@@ -322,14 +338,13 @@ class RndbotDelete:
             self.sql.run_statement("characters", script)
         except Exception as exc:  # noqa: BLE001 - every failure gets the same recount
             raise RndbotDeleteError(self._after_a_failure(marker, before, exc)) from exc
-        after = self._counts(marker)
-        if after.characters or after.accounts:
-            yield (
-                f"{_plural(after.characters, 'random-bot character')} and "
-                f"{_plural(after.accounts, 'bot account')} are still there after the delete "
-                "reported success; the backup is the way back if anything else looks wrong."
+        left_characters, left_accounts = self._left(before)
+        if left_characters or left_accounts:
+            raise RndbotDeleteError(
+                f"The delete reported success, but {left_characters} of {before.characters} "
+                f"random-bot characters and {left_accounts} of {before.accounts} bot accounts "
+                "are still there; the backup is the way back."
             )
-            return
         kept = (
             f" {_plural(before.kept, 'other bot account')} (AddClass, city or unassigned "
             "bots) stayed."
@@ -346,39 +361,39 @@ class RndbotDelete:
         """The failure's sentence, with what a recount says was left."""
         why = f"{type(exc).__name__}: {exc}"
         try:
-            now = self._counts(marker)
+            now = self._left(before)
         except Exception:  # noqa: BLE001 - the first failure is the one to report
             return (
                 f"The delete failed ({why}). It ran as one transaction, which the database "
                 "rolls back whole on a failure, but the bots could not be counted again to "
                 "confirm it; check the Bots tab's counts, and the backup is the way back."
             )
-        if now == before:
+        if now == (before.characters, before.accounts):
             return (
                 f"No bot was deleted: the delete failed ({why}) and the database rolled the "
                 "whole of it back."
             )
         return (
-            f"The delete failed ({why}), and {now.characters} of {before.characters} "
-            f"random-bot characters and {now.accounts} of {before.accounts} bot accounts are "
+            f"The delete failed ({why}), and {now[0]} of {before.characters} "
+            f"random-bot characters and {now[1]} of {before.accounts} bot accounts are "
             "left; the backup is the way back."
         )
 
     def _counts(self, marker: Marker) -> _Counts:
-        """The random-bot characters, the random-bot accounts, and the prefix accounts kept."""
+        """The random-bot characters' and accounts' ids, and how many prefix accounts stay."""
         schemas = self.entry.schema_map()
-        chars = self._one_number(
+        chars = self._ids(
             self.sql.query(
                 "characters",
-                f"SELECT COUNT(*) FROM `{schemas['characters']}`.`{self._characters_table()}` "
+                f"SELECT `guid` FROM `{schemas['characters']}`.`{self._characters_table()}` "
                 f"WHERE `{self._account_column()}` IN ({self._doomed_accounts_select(marker)});",
             ),
             "the bot characters",
         )
-        accounts = self._one_number(
+        accounts = self._ids(
             self.sql.query(
                 "auth",
-                f"SELECT COUNT(*) FROM `{schemas['auth']}`.`account` "
+                f"SELECT `id` FROM `{schemas['auth']}`.`account` "
                 f"WHERE {self._doomed_accounts_where(marker)};",
             ),
             "the bot accounts",
@@ -392,6 +407,38 @@ class RndbotDelete:
             "the other bot accounts",
         )
         return _Counts(chars, accounts, kept)
+
+    def _left(self, before: _Counts) -> tuple[int, int]:
+        """How many of the characters and accounts read before the delete are still there."""
+        schemas = self.entry.schema_map()
+        characters = self._left_of(
+            "characters",
+            f"`{schemas['characters']}`.`{self._characters_table()}`",
+            "guid",
+            before.character_ids,
+        )
+        accounts = self._left_of("auth", f"`{schemas['auth']}`.`account`", "id", before.account_ids)
+        return characters, accounts
+
+    def _left_of(self, db: Db, table: str, column: str, ids: tuple[int, ...]) -> int:
+        if not ids:
+            return 0
+        listed = ", ".join(str(i) for i in ids)
+        return self._one_number(
+            self.sql.query(db, f"SELECT COUNT(*) FROM {table} WHERE `{column}` IN ({listed});"),
+            f"the rows left in {table}",
+        )
+
+    def _ids(self, answer: str, what: str) -> tuple[int, ...]:
+        """One id a line; anything that is not a whole number is a refusal."""
+        rows = [line.strip() for line in answer.splitlines() if line.strip()]
+        for row in rows:
+            if not row.isdigit():
+                raise RndbotDeleteError(
+                    f"the ids of {what} came back as {row!r}, which is not a number; nothing "
+                    "was deleted"
+                )
+        return tuple(int(row) for row in rows)
 
     def _one_number(self, answer: str, what: str) -> int:
         text = answer.strip()
@@ -593,6 +640,19 @@ class RndbotDelete:
                 )
         has(auth, "account")
         out.append(f"DELETE FROM `{auth}`.`account` WHERE `id` IN {ids(ACCOUNTS, 'id')};")
+        # The guard (`LEFTOVERS`): a doomed character or account still standing here makes a
+        # duplicate key, and the transaction fails whole instead of committing half a plan.
+        doomed_accounts = ids(ACCOUNTS, "id")
+        out += [
+            temp(LEFTOVERS, "`k` INT NOT NULL PRIMARY KEY"),
+            f"INSERT INTO `{LEFTOVERS}` (`k`) VALUES (1);",
+            f"INSERT INTO `{LEFTOVERS}` (`k`) SELECT 1 FROM `{self._characters_table()}` "
+            f"WHERE `guid` IN {ids(CHARACTERS)} LIMIT 1;",
+            f"INSERT INTO `{LEFTOVERS}` (`k`) SELECT 1 FROM `{self._characters_table()}` "
+            f"WHERE `{self._account_column()}` IN {doomed_accounts} LIMIT 1;",
+            f"INSERT INTO `{LEFTOVERS}` (`k`) SELECT 1 FROM `{auth}`.`account` "
+            f"WHERE `id` IN {doomed_accounts} LIMIT 1;",
+        ]
         out.append("COMMIT;")
         self._refuse_what_cannot_roll_back(tables, written)
         return "\n".join(out)

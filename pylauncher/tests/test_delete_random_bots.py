@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import contextlib
 import sqlite3
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
@@ -143,6 +144,7 @@ class _Db:
         fail_at: int | None = None,
         engines: dict[str, str] | None = None,
         drop: tuple[str, ...] = (),
+        skip: Callable[[str], bool] | None = None,
     ) -> None:
         self.conn = sqlite3.connect(":memory:", isolation_level=None)
         self.layout = _layout()
@@ -156,6 +158,8 @@ class _Db:
                 )
                 self.conn.execute(f"CREATE TABLE `{schema}`.`{table}` ({cols})")
         self.dropped = set(drop)
+        self.skip = skip
+        """Lines the stand-in leaves out, as a schema the plan does not fit would ignore them."""
         self.fail_at = fail_at
         self.engines = engines or {}
         self.scripts: list[tuple[Db, str]] = []
@@ -180,7 +184,15 @@ class _Db:
                 if self.conn.in_transaction:
                     self.conn.execute("ROLLBACK")
                 raise ApplyError(f"mysql failed at line {index + 1}")
-            self.conn.execute("BEGIN" if line == "START TRANSACTION;" else line)
+            if self.skip is not None and self.skip(line):
+                continue
+            try:
+                self.conn.execute("BEGIN" if line == "START TRANSACTION;" else line)
+            except sqlite3.Error as exc:
+                # mysql exits at the first error and the session's end rolls it back.
+                if self.conn.in_transaction:
+                    self.conn.execute("ROLLBACK")
+                raise ApplyError(f"mysql: {exc} at line {index + 1}") from exc
 
     # -- seeding and reading back -------------------------------------------------
 
@@ -525,6 +537,49 @@ def test_a_failure_at_any_statement_deletes_nothing(tmp_path: Path) -> None:
             _delete(_seam(tmp_path, db))
         assert db.snapshot() == before, f"a failure at line {fail_at + 1} left a partial delete"
         assert "rolled the whole of it back" in str(raised.value)
+
+
+def _the_characters_delete(line: str) -> bool:
+    return line.startswith("DELETE FROM `characters` WHERE")
+
+
+def test_a_characters_delete_that_removes_nothing_rolls_everything_back(tmp_path: Path) -> None:
+    """The accounts go but the characters do not (schema drift): the guard fails the whole.
+
+    Without the in-transaction guard the auth rows would commit and the characters stay
+    orphaned, and a count joined through the deleted accounts would read zero and say
+    "Deleted".
+    """
+    db = _seeded(skip=_the_characters_delete)
+    before = db.snapshot()
+    lines: list[str] = []
+    with pytest.raises(rndbots.RndbotDeleteError, match="No bot was deleted"):
+        for line in _seam(tmp_path, db).delete():
+            lines.append(line)
+    assert db.snapshot() == before, "the accounts' delete committed without the characters'"
+    assert not any(line.startswith("Deleted") for line in lines)
+
+
+def test_the_recount_asks_by_the_ids_read_before_not_through_the_accounts(
+    tmp_path: Path,
+) -> None:
+    """With the guard gone too, the commit lands half a plan: the recount must say so.
+
+    The characters are asked by their own guids, read before the delete; asked through the
+    auth accounts the delete removed, they would count zero and the job would say "Deleted".
+    """
+
+    def skipped(line: str) -> bool:
+        return _the_characters_delete(line) or (
+            rndbots.LEFTOVERS in line and "SELECT 1 FROM" in line
+        )
+
+    db = _seeded(skip=skipped)
+    lines: list[str] = []
+    with pytest.raises(rndbots.RndbotDeleteError, match="3 of 3 random-bot characters"):
+        for line in _seam(tmp_path, db).delete():
+            lines.append(line)
+    assert not any(line.startswith("Deleted") for line in lines)
 
 
 def test_a_table_that_cannot_roll_back_is_a_refusal(tmp_path: Path) -> None:
