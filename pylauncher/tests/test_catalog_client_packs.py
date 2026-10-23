@@ -29,6 +29,7 @@ from yulon.catalog.catalog import (
     ConfigWtf,
     ExePatch,
     ExeWrite,
+    PackSetup,
     load_catalog,
 )
 
@@ -537,7 +538,174 @@ REFUSALS: dict[str, tuple[Mutation, str]] = {
         _set("config_wtf.seed.gx Window", "1"),
         "String should match pattern",
     ),
+    # T809 W1: the new optional pack fields.
+    "platforms not a list": (
+        _set("packs.3.platforms", "windows"),
+        "Input should be a valid tuple",
+    ),
+    "platforms naming no platform": (
+        _set("packs.3.platforms", ["wine"]),
+        "Input should be",
+    ),
+    "setup exe empty": (
+        _set(
+            "packs.3.setup",
+            {
+                "run": "",
+                "writes": ["lampdata.bin"],
+            },
+        ),
+        "at least 1 character",
+    ),
+    "setup naming a script": (
+        _both(
+            _set("packs.3.install.0.member", "Lumenveil/Lumenveil-Setup.cmd"),
+            _set("packs.3.install.0.to", "Lumenveil/Lumenveil-Setup.cmd"),
+            _set(
+                "packs.3.setup",
+                {
+                    "run": "Lumenveil/Lumenveil-Setup.cmd",
+                    "args": [],
+                    "writes": ["lampdata.bin"],
+                },
+            ),
+        ),
+        "run directly",
+    ),
+    "setup run outside the zip": (
+        _set(
+            "packs.3.setup",
+            {
+                "run": "../lamp_extract.exe",
+                "writes": ["lampdata.bin"],
+            },
+        ),
+        "relative POSIX path",
+    ),
+    "setup run naming no member": (
+        _set(
+            "packs.3.setup",
+            {
+                "run": "Lumenveil/who-is-this.exe",
+                "writes": ["lampdata.bin"],
+            },
+        ),
+        "not an installed member",
+    ),
+    "setup with no writes": (
+        _set(
+            "packs.3.setup",
+            {"run": "Lumenveil/lamp_extract.exe", "writes": []},
+        ),
+        "at least 1 item",
+    ),
+    "setup with a negative timeout": (
+        _set(
+            "packs.3.setup",
+            {
+                "run": "Lumenveil/lamp_extract.exe",
+                "writes": ["lampdata.bin"],
+                "timeout_seconds": -1,
+            },
+        ),
+        "greater than 0",
+    ),
+    "setup write climbing out": (
+        _set(
+            "packs.3.setup",
+            {
+                "run": "Lumenveil/lamp_extract.exe",
+                "writes": ["../lampdata.bin"],
+            },
+        ),
+        "relative POSIX path",
+    ),
+    "two packs sharing one setup output": (
+        _set("packs.0.setup", {"run": "patch-Y.MPQ", "writes": ["Data/patch-F.MPQ"]}),
+        "setup writes",
+    ),
+    "a pack removing another pack's setup output": (
+        _set("packs.0.remove_when_off", ["data/PATCH-f.mpq"]),
+        "removes",
+    ),
+    "redirect host with a scheme": (
+        _set("packs.3.redirect_hosts", ["https://objects.githubusercontent.com"]),
+        "bare hostnames",
+    ),
 }
+
+def _lumenveil_like_pack() -> dict[str, Any]:
+    """A pack that uses every new T809 field once, shaped like the planned Lumenveil entry."""
+    return {
+        "id": "lumenveil",
+        "label": "Lumenveil",
+        "source": {
+            "kind": "url",
+            "url": "https://github.com/lumenveil/Lumenveil/releases/download/v0.1.0/Lumenveil-0.1.0.zip",
+        },
+        "sha256": "2" * 64,
+        "install": [
+            {"member": "Lumenveil/lamp_extract.exe", "to": "Lumenveil/lamp_extract.exe"},
+            {"member": "version.dll", "to": "version.dll"},
+        ],
+        "optional": True,
+        "default": False,
+        "platforms": ["windows"],
+        "redirect_hosts": [
+            "release-assets.githubusercontent.com",
+            "objects.githubusercontent.com",
+        ],
+        "setup": {
+            "run": "Lumenveil/lamp_extract.exe",
+            "args": ["--batch"],
+            "writes": ["lampdata.bin", "liquiddata.bin"],
+            "timeout_seconds": 900,
+        },
+        "credit": "Lumenveil, GPL-2.0, github.com/lumenveil/Lumenveil",
+    }
+
+
+def test_a_pack_with_the_new_fields_parses_and_names_its_redirect_hosts() -> None:
+    """The Lumenveil shape loads, keeps its values, and widens `hosts()` by the redirect hosts."""
+    data = _client()
+    data["packs"].append(_lumenveil_like_pack())
+    client = Client.model_validate(data)
+    pack = next(item for item in client.packs if item.id == "lumenveil")
+    assert pack.platforms == ("windows",)
+    assert pack.redirect_hosts == (
+        "release-assets.githubusercontent.com",
+        "objects.githubusercontent.com",
+    )
+    assert pack.setup is not None
+    assert pack.setup.run == "Lumenveil/lamp_extract.exe"
+    assert pack.setup.args == ("--batch",)
+    assert pack.setup.writes == ("lampdata.bin", "liquiddata.bin")
+    assert pack.setup.timeout_seconds == 900
+    assert pack.credit.startswith("Lumenveil")
+    assert "release-assets.githubusercontent.com" in client.hosts()
+    assert "objects.githubusercontent.com" in client.hosts()
+    assert "github.com" in client.hosts()
+
+
+def test_redirect_hosts_compare_case_insensitively() -> None:
+    """Hostnames are DNS names: the catalog stores them lowered, matching `hosts()` of urls."""
+    data = _client()
+    data["packs"].append(_lumenveil_like_pack())
+    data["packs"][-1]["redirect_hosts"] = ["Objects.GitHubUserContent.Com"]
+    pack = next(item for item in Client.model_validate(data).packs if item.id == "lumenveil")
+    assert pack.redirect_hosts == ("objects.githubusercontent.com",)
+
+
+def test_new_fields_default_to_absent_so_every_existing_pack_behaves_as_now() -> None:
+    """Absent = today's behaviour: every platform, no redirect hosts, no setup, no credit."""
+    client = Client.model_validate(_client())
+    pack = client.packs[3]
+    assert pack.platforms == ()
+    assert pack.redirect_hosts == ()
+    assert pack.setup is None
+    assert pack.credit == ""
+
+
 
 
 @pytest.mark.parametrize("name", sorted(REFUSALS))
@@ -586,3 +754,9 @@ def test_write_and_model_types_are_importable_for_the_engine() -> None:
     assert ConfigWtf().always == {} and ConfigWtf().seed == {}
     assert ExePatch.model_fields["options"].default_factory is dict
     assert ClientPack.model_fields["optional"].default is False
+    assert ClientPack.model_fields["platforms"].default == ()
+    assert ClientPack.model_fields["redirect_hosts"].default == ()
+    assert ClientPack.model_fields["setup"].default is None
+    assert ClientPack.model_fields["credit"].default == ""
+    assert PackSetup.model_fields["timeout_seconds"].default == 900
+    assert PackSetup(run="a.exe", writes=["b.bin"]).args == ()

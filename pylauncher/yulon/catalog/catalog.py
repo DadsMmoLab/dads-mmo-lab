@@ -2710,6 +2710,59 @@ class InstallRule(_Strict):
         return self
 
 
+class PackSetup(_Strict):
+    """A pack's post-install setup step: an exe the zip installed, run once in the client copy.
+
+    Lumenveil's `lamp_extract.exe` reads the client's own files and writes
+    `lampdata.bin`/`liquiddata.bin` beside it (1-5 minutes). `run` names the
+    exe as a zip member, because that is what the catalog pins; the engine
+    runs the file that member was installed as, with cwd the ready-to-play
+    copy. `writes` are the files setup creates, relative to the client folder,
+    recorded by hash like every installed file so switching the pack off
+    removes exactly them. Windows only (plan D6: run directly, no cmd.exe).
+    """
+
+    run: str = Field(
+        min_length=1,
+        description="The setup exe, as a zip member (`Lumenveil/lamp_extract.exe`).",
+    )
+    args: tuple[str, ...] = Field(
+        default=(),
+        description="Argv after the exe, taken from the pinned setup script.",
+    )
+    writes: tuple[str, ...] = Field(
+        min_length=1,
+        description="Files setup creates in the client folder, recorded by hash.",
+    )
+    timeout_seconds: int = Field(
+        default=900,
+        gt=0,
+        description="Seconds setup may run; Lumenveil's 1-5 minutes bounded at 15.",
+    )
+
+    @field_validator("run")
+    @classmethod
+    def _run_stays_inside_the_zip(cls, value: str) -> str:
+        return _inside(value, "setup.run", names_a_file=True)
+
+    @field_validator("writes")
+    @classmethod
+    def _writes_stay_inside_the_client(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        for item in value:
+            _inside(item, "setup.writes", names_a_file=True)
+        return value
+
+    @model_validator(mode="after")
+    def _writes_are_distinct(self) -> PackSetup:
+        seen: dict[str, str] = {}
+        for item in self.writes:
+            key = PurePosixPath(item).as_posix().casefold()
+            if key in seen:
+                raise ValueError(f"setup writes {item!r} more than once")
+            seen[key] = item
+        return self
+
+
 class ClientPack(_Strict):
     """One zip of files a server's ready-to-play client needs, or may have (T181 b).
 
@@ -2770,6 +2823,54 @@ class ClientPack(_Strict):
     size_hint: int | None = Field(
         default=None, ge=0, description="Bytes, for the download size the dialog shows."
     )
+    platforms: tuple[PlatformId, ...] = Field(
+        default=(),
+        description=(
+            "Platforms this pack is offered on; empty means every one. A Windows-only "
+            "pack (Lumenveil: its setup exe runs on the player's machine) is never "
+            "shown nor installed elsewhere."
+        ),
+    )
+    redirect_hosts: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "Extra hosts a download for this pack may be redirected to, beyond the "
+            "hosts its own urls name. GitHub serves a release asset from "
+            "release-assets.githubusercontent.com / objects.githubusercontent.com; "
+            "without them the redirect is refused."
+        ),
+    )
+    setup: PackSetup | None = Field(
+        default=None,
+        description=(
+            "A setup exe the pack installs, run once in the ready-to-play copy. "
+            "None: unpacking the zip is the whole job."
+        ),
+    )
+    credit: str = Field(
+        default="",
+        description="Who made this pack's contents, shown beside the option.",
+    )
+    @field_validator("redirect_hosts")
+    @classmethod
+    def _redirect_hosts_are_bare_hostnames(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        lowered: list[str] = []
+        for item in value:
+            if (
+                not item
+                or "://" in item
+                or "/" in item
+                or "@" in item
+                or ":" in item
+                or any(part.isspace() for part in item)
+            ):
+                raise ValueError(
+                    f"redirect_hosts takes bare hostnames, got {item!r}: no scheme, port, "
+                    "login or path, just the host a redirect may go to"
+                )
+            lowered.append(item.casefold())
+        return tuple(lowered)
+
 
     @field_validator("remove_when_off")
     @classmethod
@@ -2850,6 +2951,19 @@ class ClientPack(_Strict):
                 f"pack {self.id!r}: default only means something on an optional pack; "
                 "a required pack is always installed"
             )
+        if self.setup is not None:
+            run = self.setup.run.casefold()
+            if run.endswith(".cmd") or run.endswith(".bat"):
+                raise ValueError(
+                    f"pack {self.id!r}: setup run {self.setup.run!r} is a script: the exe "
+                    "is run directly, with args from the catalog"
+                )
+            names = {rule.member.casefold() for rule in self.install if rule.member != "*"}
+            if run not in names and not any(rule.member == "*" for rule in self.install):
+                raise ValueError(
+                    f"pack {self.id!r}: setup run {self.setup.run!r} is not an installed "
+                    "member, so Yu'lon would have nothing to run"
+                )
         return self
 
 
@@ -3111,6 +3225,17 @@ class Client(_Strict):
                     )
                 owner[target] = pack.id
         for pack in self.packs:
+            if pack.setup is not None:
+                for item in pack.setup.writes:
+                    target = PurePosixPath(item).as_posix().casefold()
+                    if owner.get(target, pack.id) != pack.id:
+                        raise ValueError(
+                            f"pack {pack.id!r} setup writes {item!r}, which pack "
+                            f"{owner[target]!r} installs: switching one off must never delete "
+                            "the other's file"
+                        )
+                    owner[target] = pack.id
+        for pack in self.packs:
             for item in pack.remove_when_off:
                 target = PurePosixPath(item).as_posix().casefold()
                 if owner.get(target, pack.id) != pack.id:
@@ -3124,17 +3249,20 @@ class Client(_Strict):
     def hosts(self) -> frozenset[str]:
         """Every host a download for this client may reach: packs and clean exe sources.
 
-        The allow-list later steps check every fetch against, so a redirect to
-        anywhere else is refused. Not `fallback_page`: that is a page a person
+        Packs add their urls' hosts plus `redirect_hosts`: a redirect target
+        (GitHub's release-asset hosts) the catalog names so the engine does
+        not refuse it. Not `fallback_page`: that is a page a person
         is sent to, never fetched.
         """
         urls: list[str | None] = []
+        extra: list[str] = []
         for pack in self.packs:
             urls += [pack.source.url, pack.source.version_url]
+            extra += list(pack.redirect_hosts)
         if self.exe_patch is not None:
             urls += [source.url for source in self.exe_patch.clean_sources]
         hosts = (urlsplit(url).hostname for url in urls if url is not None)
-        return frozenset(host for host in hosts if host)
+        return frozenset([host for host in hosts if host] + extra)
 
 
 class BotRegistry(_Strict):
