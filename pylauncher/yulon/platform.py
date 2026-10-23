@@ -25,7 +25,7 @@ import tempfile
 import threading
 import time
 import urllib.request
-from collections.abc import Callable, Collection, Iterable, Iterator, Mapping
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from ipaddress import IPv4Address, IPv4Network
@@ -2646,32 +2646,49 @@ def _step_command(step: str) -> str:
     return step.split(":", 1)[0].strip()
 
 
-def docker_setup_remedy(step: str, *, steamos: bool) -> str:
-    """Plain words for why `step` — the FIRST failed step — stopped, and what to run.
+def docker_setup_remedy(steps: str | Sequence[str], *, steamos: bool) -> str:
+    """Plain words for why the failed steps stopped, and what to run.
 
-    `step` is one entry of `ProvisionReport.skipped`, which `_run_steps()`
+    `steps` is one or more entries of `ProvisionReport.skipped`, which `_run_steps()`
     writes as `"<command>: <why>"`. Everything before the first colon is the
     command as it was shown; commands here are argv lists of package managers
     and never contain one.
 
     Only the pacman keyring gets a named cause, because it is the only one this
-    project has a real capture of (T57) and a source for. Every other first
-    failure is reported as itself with its own command to run in a terminal,
-    which is honest and is still an enormous improvement on advice for a step
-    three links further down the chain.
+    project has a real capture of (T57) and a source for. Every other failure
+    is reported as itself with its own command to run in a terminal, which is
+    honest and is still an enormous improvement on advice for a step three
+    links further down the chain. When several steps failed, every one is
+    named in order, so running just the first no longer leaves the chain
+    broken (follow-up to T799: the first command ran clean and the next one
+    failed the same way, which read as the fix not working).
     """
-    command = _step_command(step)
-    if command.startswith("pacman ") and any(w in step.lower() for w in _KEYRING_WORDS):
+    first = steps if isinstance(steps, str) else steps[0]
+    command = _step_command(first)
+    if command.startswith("pacman ") and any(w in first.lower() for w in _KEYRING_WORDS):
         cause = (
             _PACMAN_KEYRING_CAUSE
             + (_STEAMOS_READONLY_CAUSE if steamos else "")
             + _PACMAN_KEYRING_FIX
         )
         return DOCKER_SETUP_FIRST_FAILURE_STEP.format(cause=cause)
+    if isinstance(steps, str):
+        steps = [steps]
+    commands = [_step_command(s) for s in steps]
+    if len(commands) == 1:
+        cause = (
+            f"{commands[0]} did not run, and the steps after it needed what it would have "
+            "installed. Run it in a terminal and it will say what stopped it, "
+            "then press Install again:\n"
+            f"sudo {commands[0]}"
+        )
+        return DOCKER_SETUP_FIRST_FAILURE_STEP.format(cause=cause)
+    run = "\n".join(f"sudo {command}" for command in commands)
     cause = (
-        f"{command} did not run, and the steps after it needed what it would have installed. "
-        "Run it in a terminal and it will say what stopped it, then press Install again:\n"
-        f"sudo {command}"
+        f"{commands[0]} did not run, and the steps after it needed what it would have "
+        "installed. Run these in a terminal, in order — each one says what stopped it — "
+        "then press Install again:\n"
+        f"{run}"
     )
     return DOCKER_SETUP_FIRST_FAILURE_STEP.format(cause=cause)
 
@@ -4430,7 +4447,7 @@ def _ensure_docker_linux(
                 # that step and gives the command, and it is the right advice
                 # there. Adding the generic remedy too would print the same
                 # `usermod` twice in one message.
-                manual.insert(0, docker_setup_remedy(failed[0], steamos=steamos))
+                manual.insert(0, docker_setup_remedy(failed, steamos=steamos))
         if password:
             # Not `failed`, which is now the list of real failures above: this
             # is the other half of the split, and reusing that name would make
