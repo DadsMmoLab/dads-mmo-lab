@@ -947,7 +947,7 @@ def test_the_fields_a_service_record_does_not_carry_are_owned_elsewhere() -> Non
 def test_the_replaced_client_data_downloader_is_asserted_here_because_nobody_else_does(
     tmp_path: Path,
 ) -> None:
-    """`ac-client-data-init`'s `entrypoint` + `command` are a ~45-line bash script that REPLACES
+    """`ac-client-data-init`'s `entrypoint` + `command` are a ~50-line bash script that REPLACES
     upstream's `curl -L <url> > data.zip`, which cannot resume and so never finishes on a flaky
     link (it died at 66 MB of 1140 MB on the Ubuntu box, 2026-08-19). It is the largest
     deliberate divergence in the stack and it is invisible to `Service`, so a silent revert to
@@ -963,6 +963,14 @@ def test_the_replaced_client_data_downloader_is_asserted_here_because_nobody_els
     version-keyed partial that can never be spliced across two releases, a refusal to extract a
     truncated archive — and the fallback to upstream's own function when the version cannot be
     read, which is what keeps this never worse than what it replaced.
+
+    T810 adds one more: a certificate/TLS failure (curl 35, 51, 58, 60, 77 —
+    the reporter's own `(77) error setting certificate file`, from its own
+    image's missing ca-certificates.crt) quits WITHOUT retrying. Curl's
+    `--retry-all-errors` sledgehammer re-adds exactly this error to the retry
+    set (measured with curl 8.5), so the template reads the exit status and
+    ends the container run at once; without that the player waits through 16
+    retries of 10 s each on a layer cache no retry can fix.
     """
     service = yaml.safe_load(render(tmp_path).base)["services"]["ac-client-data-init"]
     assert service["entrypoint"] == ["/bin/bash", "-c"]
@@ -972,6 +980,8 @@ def test_the_replaced_client_data_downloader_is_asserted_here_because_nobody_els
     assert 'zip="$$data/data-$$ver.zip"' in command
     assert command.count("unzip -t") == 2
     assert "inst_download_client_data" in command
+    assert "35|51|58|60|77" in command
+    assert "certificate problem" in command
 
 
 def test_a_stack_without_a_project_name_is_refused(tmp_path: Path) -> None:

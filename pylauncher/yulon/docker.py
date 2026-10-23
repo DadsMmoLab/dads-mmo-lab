@@ -6753,6 +6753,33 @@ step's output arrives as `#<n> <seconds> ...` and is not read at all
 _STEP_OUTPUT = re.compile(r"^\s*#\d+\s")
 """A line BuildKit's plain progress prints for a step: `#25 213.5 ...`, `#9 ERROR: ...`."""
 
+_ONE_SHOT_ERROR = re.compile(
+    r"^(?:"
+    r"curl: \(\d+\)"
+    r"|ERROR \d+ \([0-9A-Z]+\)"
+    r"|error setting certificate file"
+    r")",
+)
+"""The tool's own failure line, at the start of a line: curl's or mysql's (T810).
+
+Compose prefixes every line with `<service>  | ` and a curl progress meter
+fills the tail with `  0  0  ... --:--:--` readings. The reporter's curl 77
+then quoted a meter line instead of `curl: (77) error setting certificate
+file`. An error recognised here wins over the tail's last lines, in the same
+way a compiler diagnostic wins over BuildKit's epilogue.
+"""
+
+_CURL_METER = re.compile(r"^\s*\d+\s+[\d\s]+--[:\-]")
+"""A curl progress-meter reading, recognised so it is never quoted (T810).
+
+Measured on the reporter's own stream: two lines of bare column readings
+between every error line, `  0  0  0 ... 0 --:--:-- --:--:-- ...`. A meter
+line names nothing and explains nothing, the way ninja's `[NNN/MMMM]
+Building CXX object` progress does for a build -- and like that progress it
+arrives wedged between the lines that do. Matched after `unprefixed()`, so
+the service prefix compose puts in front is already gone.
+"""
+
 
 def builder_connection_lost(tail: Sequence[str]) -> bool:
     """Did this build end because its client lost Docker's builder? (T202)
@@ -6871,6 +6898,11 @@ def last_words(tail: tuple[str, ...], *, from_build: bool = False) -> str:
     than anything that went wrong, so the failing step's output is preferred
     and the `ERROR:` line is kept beside it with its command elided — see
     `_buildkit_failure()`.
+
+    For a failed one-shot (a compose service that printed its own error and
+    exited) the same shape holds: compose's own closing lines and a curl
+    progress meter fill the tail's last lines, so the tool's own error line is
+    preferred and leads — see `_ONE_SHOT_ERROR` (T810).
     """
     said = [line.strip() for line in tail if line.strip()]
     if not said:
@@ -6885,6 +6917,34 @@ def last_words(tail: tuple[str, ...], *, from_build: bool = False) -> str:
             # says where to look (review, 2026-09-12).
             text = text[:_LAST_WORDS_CHARS] + "…"
         return f"{text} / {_elided(error_line)}" if error_line else text
+    error_at = [
+        index
+        for index, line in enumerate(said)
+        if _ONE_SHOT_ERROR.search(unprefixed(line))
+        and not _COMPOSE_OWN_LINE.match(line.strip())
+    ]
+    if error_at and not from_build:
+        # A one-shot's own error line beats compose's closing lines and curl's
+        # meter. The reporter's tail ended in two meter readings and an
+        # "Aborting on container exit..." line, and all five quoted lines were
+        # those. Quoted in stream order: the error with the line before it
+        # (the fetch's last reading) and the line after it (curl's own
+        # "Warning: Problem (retrying ...)", read as the run's own words, not
+        # as a promise — the fail-fast below never retries this; the run
+        # already ended). `unprefixed()` matches without compose's own
+        # `<service>  | `; the quoted line keeps it, like every other answer.
+        at = error_at[-1]
+        latest = said[at]
+        # The error's own neighbourhood, not the tail's last lines: those are
+        # meter readings and compose's own "Aborting on container exit...".
+        nearby = said[max(0, at - 1) : at + 2]
+        window = [line for line in nearby if not _CURL_METER.match(unprefixed(line))]
+        lines = list(dict.fromkeys([latest, *window]))
+        following = [line for line in said[at + 1 :] if not _CURL_METER.match(unprefixed(line))]
+        lines.extend(line for line in following if line not in lines)
+        text = " / ".join(lines[:_LAST_WORDS_LINES])
+        return text if len(text) <= _LAST_WORDS_CHARS else "…" + text[-_LAST_WORDS_CHARS:]
+
     kept = _build_log_elsewhere(said) if from_build else ""
     if kept:
         # T50. The step output is not in the buffer to be selected from, so the

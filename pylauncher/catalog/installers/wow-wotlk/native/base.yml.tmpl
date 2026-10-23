@@ -272,11 +272,28 @@ services:
         # Version-keyed name: a partial left by an OLDER version must never be
         # resumed into a newer one — that would splice two archives together.
         zip="$$data/data-$$ver.zip"
-        retry_all=--retry-all-errors
-        curl --help all 2>/dev/null | grep -q -- --retry-all-errors || retry_all=
+        # T810: curl 77 (and the other certificate/TLS errors) is the IMAGE,
+        # not the network: the reporter's ca-certificates.crt was missing,
+        # unreadable or corrupt in its own locally built client-data image, so
+        # a retry reuses the same cached bad layer and can never succeed — 16
+        # retries of 10 s each for nothing. `--retry-all-errors` retries even
+        # this (measured with curl 8.5: `--retry` alone already gives up at
+        # once on 77, the sledgehammer re-adds it); the wrapper below reads
+        # the exit status curl documents for certificate failures (35, 51, 58,
+        # 60, 77) and quits without a retry, in the entrypoint's own words.
+        # The 416 below is a 4xx --fail DOES retry under the sledgehammer (it
+        # only skips 4xx under plain `--retry`), so the wrapper deliberately
+        # lets that one through to the "already finished" probe.
         echo "yulon: downloading client data $$ver (resumable)"
-        if ! curl -L --fail --retry 30 --retry-delay 10 $$retry_all --continue-at - \
-             -o "$$zip" "https://github.com/wowgaming/client-data/releases/download/$$ver/data.zip"; then
+        fetch() { curl -L --fail --retry 30 --retry-delay 10 --retry-all-errors --continue-at - "$$@"; }
+        if fetch -o "$$zip" "https://github.com/wowgaming/client-data/releases/download/$$ver/data.zip"; then
+          :
+        else
+          status=$$?
+          case $$status in
+            35|51|58|60|77)
+              echo "yulon: client-data download FAILED (curl exit $$status: certificate problem — retrying cannot help, see the curl line above)"; exit $$status;;
+          esac
           # A COMPLETE file makes the server answer 416, which --fail reports as
           # an error. "Already finished" must not read as "failed".
           echo "yulon: fetch returned non-zero — testing whether the archive is complete"

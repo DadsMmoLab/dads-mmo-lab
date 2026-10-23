@@ -1690,6 +1690,105 @@ def test_a_cancel_says_what_is_true_of_the_stage_that_was_cancelled(tmp_path: Pa
     assert str(between.value) == "the install was stopped."
 
 
+# -- T810: a certificate failure ends the download at once, naming the image --
+
+_T810_RUN = docker.AttachedRun(
+    77,
+    (
+        "ac-client-data-init  | curl: (77) error setting certificate file: "
+        "/etc/ssl/certs/ca-certificates.crt",
+        "ac-client-data-init  | Warning: Problem (retrying all errors). "
+        "Will retry in 10 seconds. 16 retries left.",
+        "ac-client-data-init  |   0     0    0     0    0     0      0       0 "
+        "--:--:-- --:--:-- --:--:--     0",
+    ),
+)
+
+
+def test_a_certificate_failure_fails_at_once_naming_the_error_and_the_image(
+    tmp_path: Path,
+) -> None:
+    """A 77 is the image's own bad CA layer, which no retry can fix — so none runs.
+
+    The reporter's install retried 16 times at 10 s each (about three minutes)
+    on a cached layer that could never succeed, then quoted a progress-meter
+    reading instead of the `curl: (77)` line. Now the failure sentence quotes
+    the error line, and the remedy names the locally built client-data image
+    as `built_image_refs()` spells it, with the `docker image rm` command that
+    forces the next Install to rebuild it instead of reusing it.
+    """
+    rec = Recorder(one_shot_result=_T810_RUN)
+    with pytest.raises(InstallerError) as failed:
+        install(rec, tmp_path / "wow")
+    said = str(failed.value)
+    assert "curl: (77) error setting certificate file" in said, said
+    assert "--:--:--" not in said, said
+    assert "docker image rm yulon.local/ac-wotlk-client-data:" in said, said
+    assert "press Install again" in said, said
+    assert [call for call in rec.calls if call == "one-shot:ac-client-data-init"] == [
+        "one-shot:ac-client-data-init"
+    ]
+
+
+def test_the_exit_status_alone_triggers_the_fail_fast_without_any_words(
+    tmp_path: Path,
+) -> None:
+    """The status half of `client_data_certificate_failure()` stands on its own.
+
+    A 77 with no `certificate` word anywhere still fails at once: the
+    container's exit status is the signal, and the words half is the backup
+    for a curl that dies before it can spell the error. Removing the status
+    half turns this red; the words half cannot save it because there are no
+    words to match.
+    """
+    run = docker.AttachedRun(77, ("ac-client-data-init  | something terse",))
+    rec = Recorder(one_shot_result=run)
+    with pytest.raises(InstallerError) as failed:
+        install(rec, tmp_path / "wow")
+    assert "docker image rm yulon.local/ac-wotlk-client-data:" in str(failed.value)
+
+@pytest.mark.parametrize("code", [35, 51, 58, 60])
+def test_the_other_tls_failures_fail_at_once_too(tmp_path: Path, code: int) -> None:
+    """35, 51, 58 and 60 are the same defect as 77: the TLS stack, not the link.
+
+    Deleting any one alternative from the template's `case` or from the
+    failure predicate must turn this red; 56 (a reset link) is the control the
+    other way and is pinned by the test below.
+    """
+    run = docker.AttachedRun(code, (f"ac-client-data-init  | curl: ({code}) the TLS words",))
+    rec = Recorder(one_shot_result=run)
+    with pytest.raises(InstallerError) as failed:
+        install(rec, tmp_path / "wow")
+    said = str(failed.value)
+    assert "docker image rm yulon.local/ac-wotlk-client-data:" in said, said
+    assert [call for call in rec.calls if call == "one-shot:ac-client-data-init"] == [
+        "one-shot:ac-client-data-init"
+    ]
+
+
+def test_a_reset_link_still_fails_through_the_old_sentence(tmp_path: Path) -> None:
+    """56 is a flaky link, not a bad layer: the script still retries it, and the engine says so.
+
+    The T810 fail-fast must not catch what it was not built for. A 56 reaches
+    `_check_run()`'s sentence unchanged — no image name, no removal command —
+    and the mutation that widens the status set to 56 turns this red.
+    """
+    run = docker.AttachedRun(
+        1,
+        (
+            "ac-client-data-init  | curl: (56) Recv failure: Connection reset by peer",
+            "Aborting on container exit...",
+        ),
+    )
+    rec = Recorder(one_shot_result=run)
+    with pytest.raises(InstallerError) as failed:
+        install(rec, tmp_path / "wow")
+    said = str(failed.value)
+    assert said.startswith("the server-data download failed (exit 1). Its last words were: "), said
+    assert "docker image rm" not in said, said
+    assert "curl: (56)" in said, said
+
+
 def test_a_state_file_from_another_game_is_refused(tmp_path: Path) -> None:
     server_dir = tmp_path / "wow"
     server_dir.mkdir()
