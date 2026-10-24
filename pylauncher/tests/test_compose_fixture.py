@@ -981,7 +981,7 @@ def test_the_replaced_client_data_downloader_is_asserted_here_because_nobody_els
     assert "--continue-at -" in fetch_line
     assert "--retry" not in fetch_line
     assert 'zip="$$data/data-$$ver.zip"' in command
-    assert command.count("unzip -t") == 2
+    assert command.count("unzip -t") == 3
     assert "inst_download_client_data" in command
     assert "35|51|58|60|77" in command
     assert "certificate problem" in command
@@ -993,8 +993,9 @@ def _client_data_fetch_script(tmp_path: Path) -> Path:
     The render doubles every `$` for compose interpolation; outside compose a
     single `$` is what the shell sees. The script is cut right after the fetch
     loop's `done`, so the archive tail (extract, write `data-version`) never
-    runs — and `unzip` is a stub on PATH that must never run in these tests.
-    Reaching it means the loop did not quit or break where it should.
+    runs — and `unzip` is a stub on PATH that exits with `$UNZIP_RC` and, when
+    that is unset, with 99 and a loud line: reaching it unasked means the loop
+    did not quit or break where it should.
     """
     service = yaml.safe_load(render(tmp_path).base)["services"]["ac-client-data-init"]
     script = "\n".join(service["command"]).replace("$$", "$")
@@ -1008,7 +1009,11 @@ def _client_data_fetch_script(tmp_path: Path) -> Path:
     path = tmp_path / "fetch.sh"
     path.write_text("#!/bin/bash\nset -eu\n" + fetch, encoding="utf-8")
     (tmp_path / "unzip").write_text(
-        "#!/bin/bash\necho UNZIP-MUST-NOT-RUN >&2\nexit 99\n", encoding="utf-8"
+        "#!/bin/bash\n"
+        'if [ -z "${UNZIP_RC:-}" ]; then echo UNZIP-MUST-NOT-RUN >&2; exit 99; fi\n'
+        'echo "unzip: $*" >> "$CALLS_LOG.unzip"\n'
+        'exit "$UNZIP_RC"\n',
+        encoding="utf-8",
     )
     (tmp_path / "unzip").chmod(0o755)
     return path
@@ -1078,9 +1083,8 @@ def test_the_rendered_fetch_retries_a_flaky_link_to_success(tmp_path: Path) -> N
     """T810 shell-level: two 28s then a 0 succeed after exactly 3 curl calls.
 
     The loop replaced curl's `--retry 30`: transient exits must still be
-    retried up to the same 30 attempts. `FETCH_DELAY=0` keeps this fast; the
-    attempt cap (`-ge 30`) reaching the archive probe is pinned by the
-    snapshot, not by a 30-call run here.
+    retried for the same 31 tries `--retry 30` made. `FETCH_DELAY=0` keeps this
+    fast; the cap itself is the test after the 416 one below.
     """
     script = _client_data_fetch_script(tmp_path)
     _stub_curl(tmp_path)
@@ -1101,6 +1105,59 @@ def test_the_rendered_fetch_retries_a_flaky_link_to_success(tmp_path: Path) -> N
         "calls: 28",
         "calls: 0",
     ]
+
+
+def _run_fetch(tmp_path: Path, exits: str, **extra: str) -> subprocess.CompletedProcess[str]:
+    script = _client_data_fetch_script(tmp_path)
+    _stub_curl(tmp_path)
+    (tmp_path / "exits.txt").write_text(exits, encoding="utf-8")
+    env = {
+        **os.environ,
+        "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
+        "CURL_STATE": str(tmp_path / "exits.txt"),
+        "CALLS_LOG": str(tmp_path / "calls.log"),
+        "FETCH_DELAY": "0",
+        **extra,
+    }
+    return subprocess.run(
+        ["bash", str(script)], capture_output=True, text=True, env=env, cwd=tmp_path
+    )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="needs POSIX bash")
+def test_the_rendered_fetch_ends_at_once_on_a_416_when_the_zip_is_whole(tmp_path: Path) -> None:
+    """T810 shell-level: curl exit 22 (HTTP 416) with a whole zip is success after ONE call.
+
+    A complete file makes the server answer 416, which `--fail` reports as 22.
+    Waiting out the delay and every remaining attempt for it was the defect;
+    the loop now probes `unzip -t` on a 22 and breaks. Deleting that probe turns
+    this red (it would call curl again, and the exits file only has one line).
+    """
+    proc = _run_fetch(tmp_path, "22\n", UNZIP_RC="0")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "already complete" in proc.stdout, proc.stdout
+    assert (tmp_path / "calls.log").read_text().splitlines() == ["calls: 22"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="needs POSIX bash")
+def test_the_rendered_fetch_keeps_retrying_a_22_when_the_zip_is_not_whole(tmp_path: Path) -> None:
+    """A 22 on a partial zip is a real HTTP error: it retries, and the zip is probed each time."""
+    proc = _run_fetch(tmp_path, "22\n22\n0\n", UNZIP_RC="1")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert (tmp_path / "calls.log").read_text().splitlines() == [
+        "calls: 22",
+        "calls: 22",
+        "calls: 0",
+    ]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="needs POSIX bash")
+def test_the_rendered_fetch_makes_31_tries_then_fails_on_a_bad_zip(tmp_path: Path) -> None:
+    """The cap equals the old `--retry 30`: the first try plus 30 retries, then the probe."""
+    proc = _run_fetch(tmp_path, "28\n" * 40, UNZIP_RC="1")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "client-data download FAILED" in proc.stdout, proc.stdout
+    assert len((tmp_path / "calls.log").read_text().splitlines()) == 31
 
 
 def test_a_stack_without_a_project_name_is_refused(tmp_path: Path) -> None:

@@ -111,16 +111,21 @@ NOTHING_DONE = "Nothing was built, stopped or changed: your server stays on the 
 
 
 _TLS_CERTIFICATE_EXIT = frozenset({35, 51, 58, 60, 77})
-"""curl's certificate/TLS exit statuses, as `curl --manual` documents them (T810).
+"""curl's certificate/TLS exit numbers, as `curl --manual` documents them (T810).
 
 35 SSL connect error, 51 peer certificate not verified, 58 problem with the
 local certificate, 60 peer certificate not authenticated with a known CA, 77
 problem reading the SSL CA cert. The reporter's 77 — its own image's
 ca-certificates.crt missing, unreadable or corrupt — is the last of these:
-a retry reuses the same cached bad layer and can never succeed.
+a retry reuses the same cached bad layer and can never succeed. These are
+read ONLY from the `curl: (NN)` line curl printed, never from the container's
+exit status: that status can be another program's (unzip's own 51 is a
+truncated zip, not a certificate).
 """
 
-_CURL_CERTIFICATE_FAILURE = re.compile(r"curl: \((35|51|58|60|77)\)")
+_CURL_CERTIFICATE_FAILURE = re.compile(
+    r"curl: \((" + "|".join(str(code) for code in sorted(_TLS_CERTIFICATE_EXIT)) + r")\)"
+)
 """A curl error line carrying a certificate/TLS exit number (T810).
 
 Matched against the run's own lines after `docker.unprefixed()` strips
@@ -134,16 +139,14 @@ def client_data_certificate_failure(run: docker.AttachedRun) -> bool:
     """Is this client-data run a certificate/TLS failure that retrying cannot fix (T810)?
 
     Only for a FAILED run: a download that printed `curl: (35)` then exited 0
-    recovered, and must not be read as a failure. Past that gate the curl
-    exit-code number is the only signal — the container's own status, or the
-    number in its `curl: (N)` line — never the words around it. A family
+    recovered, and must not be read as a failure. Past that gate only the number
+    in the tail's own `curl: (N)` line counts, never the words around it and never
+    the container's exit status (unzip's own 51 is a truncated zip). A family
     helper, not a spine rule: only the AzerothCore client-data fetch downloads
     with curl.
     """
     if run.returncode == 0:
         return False
-    if run.returncode in _TLS_CERTIFICATE_EXIT:
-        return True
     return any(
         _CURL_CERTIFICATE_FAILURE.search(docker.unprefixed(line)) for line in run.tail
     )
@@ -167,8 +170,9 @@ def stale_client_data_remedy(entry: CatalogEntry, server_dir: Path) -> str:
         "the client-data image",
     )
     return (
-        f"Remove the locally built client-data image with `docker image rm {image}` "
-        "and press Install again, so the next press rebuilds it instead of reusing it."
+        f"Remove the locally built client-data image named {image} from Docker's "
+        "Images list (Docker Desktop shows it there), then press Install again, so the "
+        "next press rebuilds it instead of reusing it."
     )
 
 
@@ -1351,18 +1355,25 @@ class AzerothCoreInstaller(StagedInstaller):
             left = self._seams.end_one_shot(service, ctx.server_dir)
             if left is not None:
                 raise OneShotLeftRunning(download_left_sentence(left, earlier=False))
-        if client_data_certificate_failure(run):
-            # T810: the image's own ca-certificates.crt is missing, unreadable
-            # or corrupt — a retry reuses the same cached bad layer (a rebuild
-            # reuses it too; only removing the image remakes it), so the fetch
-            # script already quit without retrying and this press ends at once
-            # instead of going through `_check_run()`'s sentence alone. The
-            # remedy names the image as `built_image_refs()` spells it.
-            raise InstallerError(
-                f"the server-data download failed (exit {run.returncode}): "
-                f"{docker.last_words(run.tail)}. {stale_client_data_remedy(self.entry, ctx.server_dir)}"
-            )
-        self._check_run(run, "the server-data download", ctx.cancel, DOWNLOAD_CANCEL_NOTE)
+        # `_check_run()` first: a Stop is told as a Stop whatever the tail printed.
+        # Only a failure it would raise is then re-read for a certificate number.
+        try:
+            self._check_run(run, "the server-data download", ctx.cancel, DOWNLOAD_CANCEL_NOTE)
+        except InstallStopped:
+            raise
+        except InstallerError:
+            if client_data_certificate_failure(run):
+                # T810: the image's own ca-certificates.crt is missing, unreadable
+                # or corrupt — a retry reuses the same cached bad layer (a rebuild
+                # reuses it too; only removing the image remakes it), so the fetch
+                # script already quit without retrying and this press ends at once.
+                # The remedy names the image as `built_image_refs()` spells it.
+                raise InstallerError(
+                    f"the server-data download failed (exit {run.returncode}): "
+                    f"{docker.last_words(run.tail)}. "
+                    f"{stale_client_data_remedy(self.entry, ctx.server_dir)}"
+                ) from None
+            raise
         yield "Server data is in place."
 
     def _up(self, ctx: StageContext) -> Iterator[str]:

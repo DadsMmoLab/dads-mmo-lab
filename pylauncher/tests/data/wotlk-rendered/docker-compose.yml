@@ -279,9 +279,10 @@ services:
         # not see these: `--retry-all-errors` re-adds even errors `--retry`
         # alone gives up on (measured with curl 8.5 on 77), so `--retry` is
         # gone too and the loop below does the retrying — one curl call per
-        # attempt, 30 attempts, 10 s between them, `FETCH_DELAY` overriding
-        # the delay in tests. A certificate/TLS exit quits at once, in the
-        # entrypoint's own words.
+        # attempt, 31 attempts (the first try plus the old `--retry 30`), 10 s
+        # between them, `FETCH_DELAY` overriding the delay in tests. A
+        # certificate/TLS exit quits at once, in the entrypoint's own words,
+        # and so does a 22 (HTTP 416) when the zip already tests whole.
         # The 416 below is a 4xx --fail reports as an error on a COMPLETE
         # file. "Already finished" must not read as "failed".
         echo "yulon: downloading client data $$ver (resumable)"
@@ -296,7 +297,12 @@ services:
             35|51|58|60|77)
               echo "yulon: client-data download FAILED (curl exit $$status: certificate problem — retrying cannot help, see the curl line above)"; exit $$status;;
           esac
-          if [ $$attempt -ge 30 ]; then
+          if [ $$status -eq 22 ] && unzip -t "$$zip" >/dev/null 2>&1; then
+            # HTTP 416 on a COMPLETE file: nothing left to fetch, so no waiting.
+            echo "yulon: archive is already complete"
+            break
+          fi
+          if [ $$attempt -ge 31 ]; then
             # A COMPLETE file makes the server answer 416, which --fail reports as
             # an error. "Already finished" must not read as "failed".
             echo "yulon: fetch returned non-zero — testing whether the archive is complete"

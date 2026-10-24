@@ -51,12 +51,14 @@ from yulon.catalog import composegen, native, preflight
 from yulon.catalog import families as family_registry
 from yulon.catalog import installer as installer_module
 from yulon.catalog.catalog import load_catalog
+from yulon.catalog.families import azerothcore
 from yulon.catalog.families.azerothcore import AzerothCoreInstaller
 from yulon.catalog.installer import (
     DockerNeedsReLoginError,
     DockerUnavailableError,
     InstallerError,
     InstallOptions,
+    InstallStopped,
     UnsupportedPlatformError,
     cancelled_install_message,
     installer_for,
@@ -1711,9 +1713,9 @@ def test_a_certificate_failure_fails_at_once_naming_the_error_and_the_image(
     The reporter's install retried on a cached layer that could never succeed,
     then quoted a progress-meter reading instead of the `curl: (77)` line. Now
     the failure sentence quotes the error line, and the remedy names the
-    locally built client-data image as `built_image_refs()` spells it, with the
-    `docker image rm` command that forces the next Install to rebuild it
-    instead of reusing it.
+    locally built client-data image as `built_image_refs()` spells it, in plain
+    words (no command: a player line never carries one), so the next Install
+    rebuilds it instead of reusing it.
     """
     rec = Recorder(one_shot_result=_T810_RUN)
     with pytest.raises(InstallerError) as failed:
@@ -1721,7 +1723,8 @@ def test_a_certificate_failure_fails_at_once_naming_the_error_and_the_image(
     said = str(failed.value)
     assert "curl: (77) error setting certificate file" in said, said
     assert "--:--:--" not in said, said
-    assert "docker image rm yulon.local/ac-wotlk-client-data:" in said, said
+    assert "image named yulon.local/ac-wotlk-client-data:" in said, said
+    assert "docker image rm" not in said and "`" not in said, said
     assert "press Install again" in said, said
     assert [call for call in rec.calls if call == "one-shot:ac-client-data-init"] == [
         "one-shot:ac-client-data-init"
@@ -1743,7 +1746,7 @@ def test_a_printed_tls_number_counts_even_when_the_exit_status_does_not(
     rec = Recorder(one_shot_result=run)
     with pytest.raises(InstallerError) as failed:
         install(rec, tmp_path / "wow")
-    assert "docker image rm yulon.local/ac-wotlk-client-data:" in str(failed.value)
+    assert "image named yulon.local/ac-wotlk-client-data:" in str(failed.value)
 
 
 def test_a_successful_run_that_printed_a_tls_number_is_not_a_failure(
@@ -1765,19 +1768,54 @@ def test_a_successful_run_that_printed_a_tls_number_is_not_a_failure(
 def test_the_other_tls_failures_fail_at_once_too(tmp_path: Path, code: int) -> None:
     """35, 51, 58 and 60 are the same defect as 77: the TLS stack, not the link.
 
-    Deleting any one alternative from the predicate's number set must turn
-    this red; 56 (a reset link) is the control the other way and is pinned by
-    the test below.
+    The regex is built from `_TLS_CERTIFICATE_EXIT`, and the exit status is NOT
+    consulted, so dropping any one number from that set turns its case red;
+    56 (a reset link) is the control the other way, pinned by the test below.
     """
     run = docker.AttachedRun(code, (f"ac-client-data-init  | curl: ({code}) the TLS words",))
     rec = Recorder(one_shot_result=run)
     with pytest.raises(InstallerError) as failed:
         install(rec, tmp_path / "wow")
     said = str(failed.value)
-    assert "docker image rm yulon.local/ac-wotlk-client-data:" in said, said
+    assert "image named yulon.local/ac-wotlk-client-data:" in said, said
     assert [call for call in rec.calls if call == "one-shot:ac-client-data-init"] == [
         "one-shot:ac-client-data-init"
     ]
+
+
+def test_an_exit_status_alone_is_not_a_certificate_failure(tmp_path: Path) -> None:
+    """unzip's own exit 51 (a truncated zip) shares a number with curl's, and means no certificate.
+
+    Only the printed `curl: (NN)` line classifies. Putting the returncode clause
+    back turns this red: the sentence would name the image to remove.
+    """
+    run = docker.AttachedRun(
+        51,
+        (
+            "ac-client-data-init  | End-of-central-directory signature not found.",
+            "ac-client-data-init  | unzip:  cannot find zipfile directory in data.zip",
+        ),
+    )
+    assert not azerothcore.client_data_certificate_failure(run)
+    rec = Recorder(one_shot_result=run)
+    with pytest.raises(InstallerError) as failed:
+        install(rec, tmp_path / "wow")
+    said = str(failed.value)
+    assert said.startswith("the server-data download failed (exit 51). Its last words were: "), said
+    assert "image named" not in said, said
+
+
+def test_a_cancelled_run_is_told_as_cancelled_even_with_a_certificate_tail(
+    tmp_path: Path,
+) -> None:
+    """A Stop is a Stop: the certificate remedy does not replace the cancelled sentence."""
+    run = docker.AttachedRun(docker.CANCELLED_RETURNCODE, _T810_RUN.tail)
+    rec = Recorder(one_shot_result=run)
+    with pytest.raises(InstallStopped) as stopped:
+        install(rec, tmp_path / "wow")
+    said = str(stopped.value)
+    assert native.DOWNLOAD_CANCEL_NOTE in said, said
+    assert "image named" not in said, said
 
 
 def test_an_ssl_worded_reset_link_still_fails_through_the_old_sentence(
