@@ -2253,6 +2253,7 @@ def test_a_member_named_like_a_numbered_swap_file_is_refused(rig: _Rig, suffix: 
 def test_removing_a_read_only_file_shared_with_the_players_client_names_it_and_leaves_it(
     rig: _Rig, windows_read_only: list[tuple[str, int]]
 ) -> None:
+    """A share-refusal joins `left`: every recorded name was attempted, and off reports it."""
     common = rig.original / "Data" / "common.MPQ"
     _REAL_CHMOD(common, 0o444)
     entry = {
@@ -2261,12 +2262,11 @@ def test_removing_a_read_only_file_shared_with_the_players_client_names_it_and_l
         "files": {"Data/common.MPQ": _sha(common.read_bytes())},
     }
 
-    with pytest.raises(PackError) as info:
-        rig.remove(entry, None)
+    left = rig.remove(entry, None)
 
-    text = str(info.value)
-    assert "Data/common.MPQ" in text and "shared with your own" in text and "left" in text
-    assert "Close World of Warcraft" not in text
+    assert len(left) == 1, "the refused file is reported, not raised through"
+    assert "Data/common.MPQ" in left[0] and "shared with your own" in left[0]
+    assert "Close World of Warcraft" not in left[0]
     assert (rig.play / "Data" / "common.MPQ").exists()
     _REAL_CHMOD(common, 0o644)
     rig.untouched()
@@ -3717,26 +3717,26 @@ def test_setup_persists_the_pending_note_before_the_first_run(
     assert (rig.play / "lampdata.bin").read_bytes() == b"lamps"
 
 
-def test_setup_without_the_pending_callback_still_runs_but_leaves_no_note(
+def test_setup_without_the_pending_callback_still_runs_the_exe(
     rig: _Rig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Item 1 guard: the callback is the persistence; without it nothing persists.
-
-    Removing the `on_pending=` argument must leave no trace of the note on the
-    entry that survives: this test fails if the persist call is deleted from
-    `run_setup` rather than merely unwired here.
-    """
+    """Without `on_pending` the exe still runs (the runner is reached twice)."""
     monkeypatch.setattr(client_packs.platform, "detect", lambda: "windows")
     pack, entry = _install_lumen(rig)
+    seen: list[list[str]] = []
+    runner = _run_with(
+        rig.play,
+        _Outcome(writes=[{"lampdata.bin": b"lamps"}, {"liquiddata.bin": b"water"}]),
+        seen=seen,
+    )
 
-    def killer(argv: list[str], *, cwd: Path, timeout: float | None = None) -> Any:
-        raise KeyboardInterrupt()
+    done = client_packs.run_setup(
+        rig.play, pack, entry, game=GAME, server_dir=rig.server, runner=runner
+    )
 
-    with pytest.raises(KeyboardInterrupt):
-        client_packs.run_setup(
-            rig.play, pack, entry, game=GAME, server_dir=rig.server, runner=killer
-        )
-
+    assert len(seen) == 2, "both runs launch without the callback"
+    assert done["files"]["lampdata.bin"] == _sha(b"lamps")
+    assert "setup_pending" not in done
     assert "setup_pending" not in entry, "the input entry is never mutated with the note"
 
 
@@ -3841,11 +3841,71 @@ def test_run_child_uses_shared_creationflags_cwd_timeout_env(
     assert calls["timeout"] == 7.5
     assert calls["env"] == {"X": "1"}
     assert calls["capture_output"] is True and calls["text"] is True
+    assert calls["encoding"] == "utf-8" and calls["errors"] == "replace"
     assert calls["argv"] == ["lamp_extract.exe", "--background"]
     assert "CREATE_NO_WINDOW" not in inspect.getsource(
         client_packs._run_child
     ), "the flag is runner.creationflags(), never re-derived here"
 
+
+def test_a_forged_pending_note_only_cleans_the_packs_own_outputs(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A forged `setup_pending` naming `Wow.exe` and another pack's file refuses.
+
+    Only the intersection of the recorded names with this pack's `setup.writes`
+    is cleaned; anything else is reported in the refusal and NEVER deleted.
+    """
+    monkeypatch.setattr(client_packs.platform, "detect", lambda: "windows")
+    pack, entry = _install_lumen(rig)
+    (rig.play / "Wow.exe").write_bytes(b"the player's own exe")
+    other = rig.play / "other-pack-file.bin"
+    other.write_bytes(b"another pack's file")
+    leftover = rig.play / "lampdata.bin"
+    leftover.write_bytes(b"half a run")
+    forged = {
+        **entry,
+        "setup_pending": ["lampdata.bin", "Wow.exe", "other-pack-file.bin"],
+    }
+    seen: list[list[str]] = []
+
+    with pytest.raises(PackError) as caught:
+        client_packs.run_setup(
+            rig.play, pack, forged, game=GAME, server_dir=rig.server,
+            runner=_run_with(rig.play, _Outcome(), seen=seen),
+        )
+
+    message = str(caught.value)
+    assert "Wow.exe" in message and "other-pack-file.bin" in message
+    assert not leftover.exists(), "a real leftover from setup.writes is cleaned"
+    assert (rig.play / "Wow.exe").read_bytes() == b"the player's own exe"
+    assert other.read_bytes() == b"another pack's file"
+    assert seen == [], "a forged note never reaches the exe"
+
+
+def test_a_setup_run_with_undecodable_bytes_still_finishes(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Undecodable exe bytes with exit 0 still set up: the real capture replaces them."""
+    import sys as _sys
+
+    monkeypatch.setattr(client_packs.platform, "detect", lambda: "windows")
+    pack, entry = _install_lumen(rig)
+    script = (
+        "import sys; sys.stdout.buffer.write(b'ok\\x81\\n'); "
+        "open('lampdata.bin', 'wb').write(b'lamps'); "
+        "open('liquiddata.bin', 'wb').write(b'water')"
+    )
+
+    def via_real_child(argv: list[str], *, cwd: Path, timeout: float | None = None) -> Any:
+        return client_packs._run_child([_sys.executable, "-c", script], cwd=cwd, timeout=timeout)
+
+    done = client_packs.run_setup(
+        rig.play, pack, entry, game=GAME, server_dir=rig.server, runner=via_real_child
+    )
+
+    assert done["files"]["lampdata.bin"] == _sha(b"lamps")
+    assert "setup_pending" not in done
 
 def test_a_failed_remove_attempts_every_output_and_names_the_leftover(
     rig: _Rig, monkeypatch: pytest.MonkeyPatch
@@ -3872,6 +3932,61 @@ def test_a_failed_remove_attempts_every_output_and_names_the_leftover(
     assert not (rig.play / "liquiddata.bin").exists(), "the other output still goes"
     assert (rig.play / "lampdata.bin").is_file(), "the refused output stays"
     assert "lampdata.bin" in str(caught.value), "the error names the leftover"
+
+
+def test_a_failed_recorded_removal_attempts_every_recorded_file(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A first recorded-file refusal never spares the second file; both are reported."""
+    pack, entry = _install_lumen(rig)
+    real_delete = client_packs._delete_own
+    order: list[str] = []
+
+    def refuse_version(rel: str, path: Path) -> None:
+        order.append(rel)
+        if rel == "version.dll":
+            raise OSError(errno.EACCES, "Permission denied", os.fspath(path))
+        real_delete(rel, path)
+
+    monkeypatch.setattr(client_packs, "_delete_own", refuse_version)
+
+    left = rig.remove(entry, pack)
+
+    assert set(order) == {"version.dll", "Lumenveil/lamp_extract.exe"}
+    assert len(left) == 1 and left[0].startswith("version.dll")
+    assert not (rig.play / "Lumenveil" / "lamp_extract.exe").exists()
+
+
+def test_a_failed_setup_with_a_refused_output_names_it_and_claims_nothing(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A setup failure with one undeletable output names that file, never success."""
+    monkeypatch.setattr(client_packs.platform, "detect", lambda: "windows")
+    pack, entry = _install_lumen(rig)
+    real_delete = client_packs._delete_own
+
+    def refuse_lamps(rel: str, path: Path) -> None:
+        if rel == "lampdata.bin":
+            raise OSError(errno.EACCES, "Permission denied", os.fspath(path))
+        real_delete(rel, path)
+
+    monkeypatch.setattr(client_packs, "_delete_own", refuse_lamps)
+    runner = _run_with(
+        rig.play,
+        _Outcome(code=3, writes=[{"lampdata.bin": b"lamps"}, {"liquiddata.bin": b"water"}]),
+        seen=[],
+    )
+
+    with pytest.raises(PackError) as caught:
+        client_packs.run_setup(
+            rig.play, pack, entry, game=GAME, server_dir=rig.server, runner=runner
+        )
+
+    message = str(caught.value)
+    assert "lampdata.bin" in message, "the message names the refused file"
+    assert "Nothing of it stayed" not in message, "no claim of a clean rollback"
+    assert (rig.play / "lampdata.bin").is_file(), "the refused output stays"
+    assert not (rig.play / "liquiddata.bin").exists(), "the other output still goes"
 
 
 def test_a_failed_setup_rolls_everything_back_and_never_claims_success(

@@ -2399,6 +2399,8 @@ def _run_child(
         env=_runner.child_env(),
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=timeout,
         creationflags=_runner.creationflags(),
     )
@@ -2556,8 +2558,18 @@ def run_setup(
     source = entry if record is None else record
     pending = source.get("setup_pending") if isinstance(source, Mapping) else None
     if isinstance(pending, list) and pending:
-        _remove_setup_outputs(play_dir, pack, pending)
+        assert pack.setup is not None  # past the None return above
+        own = {clean.as_posix() for rel in pack.setup.writes if (clean := _clean_rel(rel)) is not None}
+        recorded = sorted({rel for rel in pending if isinstance(rel, str) and rel in own})
+        forged = sorted({rel for rel in pending if isinstance(rel, str)} - set(recorded))
+        _remove_setup_outputs(play_dir, pack, recorded)
         entry = {k: v for k, v in entry.items() if k != "setup_pending"}
+        if forged:
+            raise PackError(
+                f"{pack.label}'s record of an unfinished setup named files the setup "
+                f"never writes ({', '.join(forged)}), so nothing was removed for them. "
+                "Make the ready-to-play client again from the server's Client settings."
+            )
     if not setup_needed(play_dir, pack, entry if record is None else record):
         return entry
     exe = _setup_exe_path(play_dir, pack)
@@ -2939,9 +2951,24 @@ def _rollback_setup(
         for rel in pack.setup.writes:
             if rel in failed:
                 continue
+            clean = _clean_rel(rel)
+            if clean is None or clean.name.startswith(_PROTECTED):
+                continue
             try:
-                if (play_dir / rel).is_file():
-                    failures.append(f"setup output {rel}")
+                path = play_dir / Path(*client_names.on_disk(play_dir, clean).parts)
+            except OSError:
+                continue
+            try:
+                here = play_dir
+                parts = client_names.on_disk(play_dir, clean).parts[:-1]
+                for part in parts:
+                    here = here / part
+                    if play_client._is_link(here):
+                        break
+                else:
+                    if not play_client._is_link(path) and path.is_file():
+                        failures.append(f"setup output {rel}")
+                    continue
             except OSError:
                 continue
     if failures:
@@ -3035,7 +3062,8 @@ def _delete_own(rel: str, path: Path) -> None:
             raise
         raise PackError(
             f"{rel} is read-only and shared with your own WoW client (or another "
-            "ready-to-play client), so Yu'lon left it in place and removed nothing more. "
+            "ready-to-play client), so Yu'lon left it in place and kept going with "
+            "the pack's other files. "
             "Delete that file from the ready-to-play client yourself if you no longer want it."
         ) from exc
 
@@ -3050,6 +3078,7 @@ def _remove(
         _removal_path(play_dir, rel) for rel in (pack.remove_when_off if pack and when_off else ())
     ]
     left: list[str] = []
+    refused: list[str] = []
     removed: list[Path] = []
     for rel, path, sha in todo:
         try:
@@ -3059,17 +3088,26 @@ def _remove(
         if stat.S_ISLNK(st.st_mode) or stat.S_ISDIR(st.st_mode) or _file_sha256(path) != sha:
             left.append(rel)
             continue
-        _delete_own(rel, path)
+        try:
+            _delete_own(rel, path)
+        except (OSError, PackError) as exc:
+            refused.append(f"{rel} ({exc.strerror or exc})" if isinstance(exc, OSError) else str(exc))
+            continue
         removed.append(path)
     for rel, path in extra:
         if path.is_dir() and not play_client._is_link(path):
             continue
         if os.path.lexists(path):
-            _delete_own(rel, path)
+            try:
+                _delete_own(rel, path)
+            except (OSError, PackError) as exc:
+                refused.append(f"{rel} ({exc.strerror or exc})" if isinstance(exc, OSError) else str(exc))
+                continue
             removed.append(path)
     for path in removed:
         _remove_empty_parents(play_dir, path)
     _remove_recorded_dirs(play_dir, rec_entry)
+    left.extend(refused)
     if left:
         logger.warning("client-packs: left %s, which was edited since it was installed", left)
     return tuple(sorted(left))
