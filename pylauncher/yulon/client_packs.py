@@ -2845,32 +2845,62 @@ def _take_out_setup_outputs(
     return removed, failures
 
 
-def _remove_one_setup_output(play_dir: Path, pack: ClientPack, rel: str) -> Path | None:
-    """Remove one setup output by name; the removed path, or None when never there.
+def _setup_output_path(play_dir: Path, pack: ClientPack, rel: str) -> tuple[str, Path] | None:
+    """A setup output's record name and path when it is verifiably a file; None when verifiably gone.
 
-    Only below the copy, never through a link. A file that refuses raises
-    (`OSError`, or `PackError` for a read-only file shared with your own
-    client), naming it, so the caller can attempt every other name first.
+    Only below the copy, never through a link. A link in any ancestor or at the
+    name raises `PackError`, and a lookup raising `OSError` propagates: the
+    caller reports either as a leftover, since only an observed missing path
+    proves the output is gone. A name outside the copy, one of Yu'lon's own, or
+    a folder answers None: never this pack's output.
     """
     assert pack.setup is not None  # the pack whose outputs these are
     clean = _clean_rel(rel)
     if clean is None or clean.name.startswith(_PROTECTED):
         return None
-    try:
-        path = play_dir / Path(*client_names.on_disk(play_dir, clean).parts)
-    except OSError:
-        return None
-    try:
-        here = play_dir
-        for part in client_names.on_disk(play_dir, clean).parts[:-1]:
-            here = here / part
-            if play_client._is_link(here):
-                return None
-        if play_client._is_link(path) or not path.is_file():
+    spelled = client_names.on_disk(play_dir, clean)
+    path = play_dir / Path(*spelled.parts)
+    here = play_dir
+    for part in spelled.parts[:-1]:
+        here = here / part
+        if play_client._is_link(here):
+            raise PackError(
+                f"{pack.label}'s setup output {rel} is under {here}, a link to another "
+                "folder, so it was not looked for through it and may still be there."
+            )
+        try:
+            os.lstat(here)
+        except (FileNotFoundError, NotADirectoryError):
             return None
-    except OSError:
+    if play_client._is_link(path):
+        raise PackError(
+            f"{pack.label}'s setup output {rel} is itself a link to another file, so it "
+            "was not removed through it and may still be there."
+        )
+    try:
+        st = os.lstat(path)
+    except (FileNotFoundError, NotADirectoryError):
         return None
-    _delete_own(clean.as_posix(), path)
+    if stat.S_ISDIR(st.st_mode):
+        return None
+    return clean.as_posix(), path
+
+
+def _remove_one_setup_output(play_dir: Path, pack: ClientPack, rel: str) -> Path | None:
+    """Remove one setup output by name; the removed path, or None when never there.
+
+    Only below the copy, never through a link. A file that refuses raises
+    (`OSError`, or `PackError` for a read-only file shared with your own
+    client), naming it, so the caller can attempt every other name first. A
+    name that cannot be inspected raises too, so the caller reports it as a
+    leftover instead of mistaking it for removed.
+    """
+    assert pack.setup is not None  # the pack whose outputs these are
+    found = _setup_output_path(play_dir, pack, rel)
+    if found is None:
+        return None
+    name, path = found
+    _delete_own(name, path)
     return path
 
 
@@ -2930,53 +2960,59 @@ def _rollback_setup(
     `setup.writes`: never the player's own files, never anything the folder
     check refuses. Every removal is attempted even when one fails; when any
     output or installed file remains, a `PackError` names the leftovers, so
-    the caller never claims the pack went. The caller keeps the recoverable
-    record (with `"setup_pending"`) so the next Play retries.
+    the caller never claims the pack went. Only an observed missing path
+    counts as gone: a name that cannot be looked at, or sits under a link,
+    reports a failure. The caller keeps the recoverable record (with
+    `"setup_pending"`) so the next Play retries.
     """
     failures: list[str] = []
     failed: set[str] = set()
     try:
-        left = remove(play_dir, entry, pack, game=game, server_dir=server_dir)
-    except PackError as exc:
-        failures.append(str(exc))
-    else:
-        for rel in left:
+        for rel in remove(play_dir, entry, pack, game=game, server_dir=server_dir):
             failures.append(f"recorded file {rel}")
             failed.add(rel)
+    except PackError as exc:
+        failures.append(str(exc))
     if pack.setup is not None:
         _, output_failures = _take_out_setup_outputs(play_dir, pack, list(pack.setup.writes))
         for failure in output_failures:
             failures.append(failure)
             failed.add(failure.split(" (", 1)[0])
-        for rel in pack.setup.writes:
-            if rel in failed:
-                continue
-            clean = _clean_rel(rel)
-            if clean is None or clean.name.startswith(_PROTECTED):
-                continue
-            try:
-                path = play_dir / Path(*client_names.on_disk(play_dir, clean).parts)
-            except OSError:
-                continue
-            try:
-                here = play_dir
-                parts = client_names.on_disk(play_dir, clean).parts[:-1]
-                for part in parts:
-                    here = here / part
-                    if play_client._is_link(here):
-                        break
-                else:
-                    if not play_client._is_link(path) and path.is_file():
-                        failures.append(f"setup output {rel}")
-                    continue
-            except OSError:
-                continue
+        uncovered = [rel for rel in pack.setup.writes if rel not in failed]
+        failures.extend(_setup_output_leftovers(play_dir, pack, uncovered))
     if failures:
         raise PackError(
             f"{pack.label} is still partly in the ready-to-play client: "
             + "; ".join(failures)
             + ". The next Play tries again."
         )
+
+
+def _setup_output_leftovers(
+    play_dir: Path, pack: ClientPack, rels: list[str]
+) -> list[str]:
+    """A surviving output per name the delete pass did not report: a case twin on disk.
+
+    The record names outputs in the catalog's spelling, while the copy may hold
+    the same name in another case (T227's `on_disk` rule); such a file survives
+    untouched by the delete pass. A name nothing on disk matches is gone. A name
+    that cannot be inspected reports a failure, since only an observed missing
+    path is success.
+    """
+    leftovers: list[str] = []
+    for rel in rels:
+        clean = _clean_rel(rel)
+        if clean is None or clean.name.startswith(_PROTECTED):
+            continue
+        try:
+            found = _setup_output_path(play_dir, pack, rel)
+        except (OSError, PackError) as exc:
+            reason = exc.strerror or exc if isinstance(exc, OSError) else str(exc)
+            leftovers.append(f"setup output {rel} ({reason})")
+        else:
+            if found is not None:
+                leftovers.append(f"setup output {rel}")
+    return leftovers
 
 
 # --- Remove ----------------------------------------------------------------------------------
@@ -3031,8 +3067,12 @@ def remove(
     so. The pack's `remove_when_off` files go whatever their content (that is what
     they are for). Only a name is ever removed: a name that is a hard link to the
     player's own file leaves the player's file as it is. Folders the pack's files
-    leave empty are removed from `_KEEP_DEPTH` levels down. Nothing is removed if
-    the record or the catalog names a path outside the folder, or one through a link.
+    leave empty are removed from `_KEEP_DEPTH` levels down. A file that refuses
+    (a program holds it open, or a read-only file shared with your own client)
+    is attempted like every other name first, then raises ONE `PackError`
+    naming every refusal: the record must stay while the file stays. Nothing
+    is removed if the record or the catalog names a path outside the folder,
+    or one through a link.
     """
     _gate(play_dir, game=game, server_dir=server_dir, what=f"the removal of {pack_label(pack)}")
     try:
@@ -3071,6 +3111,16 @@ def _delete_own(rel: str, path: Path) -> None:
 def _remove(
     play_dir: Path, rec_entry: Mapping[str, Any], pack: ClientPack | None, when_off: bool = True
 ) -> tuple[str, ...]:
+    """Remove every recorded file the hash still names, collecting edited ones in `left`.
+
+    Every recorded file is attempted even when one refuses: a held-open
+    `version.dll` (a WoW program has it open) never spares the pack's other
+    files. A refusal (`OSError`, or `PackError` for a read-only file shared
+    with your own client) is collected with the file's name and reason, and
+    once every name is attempted the collected refusals raise ONE `PackError`
+    in `_write_refusal`'s wording (close WoW, then press Play again): the
+    record must stay while the file stays.
+    """
     recorded = rec_entry.get("files")
     recorded = recorded if isinstance(recorded, dict) else {}
     todo = [(*_removal_path(play_dir, rel), sha) for rel, sha in recorded.items()]
@@ -3078,20 +3128,24 @@ def _remove(
         _removal_path(play_dir, rel) for rel in (pack.remove_when_off if pack and when_off else ())
     ]
     left: list[str] = []
-    refused: list[str] = []
+    refused: list[tuple[str, BaseException]] = []
     removed: list[Path] = []
     for rel, path, sha in todo:
         try:
             st = path.lstat()
+            leave = stat.S_ISLNK(st.st_mode) or stat.S_ISDIR(st.st_mode) or _file_sha256(path) != sha
         except FileNotFoundError:
             continue
-        if stat.S_ISLNK(st.st_mode) or stat.S_ISDIR(st.st_mode) or _file_sha256(path) != sha:
+        except OSError as exc:
+            refused.append((rel, exc))
+            continue
+        if leave:
             left.append(rel)
             continue
         try:
             _delete_own(rel, path)
         except (OSError, PackError) as exc:
-            refused.append(f"{rel} ({exc.strerror or exc})" if isinstance(exc, OSError) else str(exc))
+            refused.append((rel, exc))
             continue
         removed.append(path)
     for rel, path in extra:
@@ -3101,16 +3155,50 @@ def _remove(
             try:
                 _delete_own(rel, path)
             except (OSError, PackError) as exc:
-                refused.append(f"{rel} ({exc.strerror or exc})" if isinstance(exc, OSError) else str(exc))
+                refused.append((rel, exc))
                 continue
             removed.append(path)
     for path in removed:
         _remove_empty_parents(play_dir, path)
     _remove_recorded_dirs(play_dir, rec_entry)
-    left.extend(refused)
     if left:
         logger.warning("client-packs: left %s, which was edited since it was installed", left)
+    if refused:
+        raise _refusal_many(pack_label(pack), refused)
     return tuple(sorted(left))
+
+
+def _refusal_many(what: str, refused: list[tuple[str, BaseException]]) -> PackError:
+    """ONE `_write_refusal`-worded error naming every file that refused to go."""
+    shared = sorted({f"{rel}: {exc}" for rel, exc in refused if isinstance(exc, PackError)})
+    held = sorted(
+        {f"{rel} ({exc.strerror or exc})" for rel, exc in refused
+         if isinstance(exc, OSError) and isinstance(exc, PermissionError)}
+    )
+    other = sorted(
+        {f"{rel} ({exc.strerror or exc})" for rel, exc in refused
+         if isinstance(exc, OSError) and not isinstance(exc, PermissionError)}
+    )
+    parts: list[str] = []
+    if shared:
+        parts.append("; ".join(shared))
+    if held:
+        parts.append(
+            f"{', '.join(rel for rel, exc in refused if isinstance(exc, PermissionError))} "
+            f"refused to go ({'; '.join(held)}), which usually means a program has the "
+            "file open. Close World of Warcraft (and any program using the client's "
+            "files), then press Play again"
+        )
+    if other:
+        parts.append(
+            f"Yu'lon could not write {', '.join(rel for rel, exc in refused if isinstance(exc, OSError) and not isinstance(exc, PermissionError))} "
+            f"({'; '.join(other)}). Free some space and check that Yu'lon may write "
+            "there, then press Play again"
+        )
+    return PackError(
+        f"{what} is still in the ready-to-play client: {'; '.join(parts)}. "
+        "Your own WoW client was not changed."
+    )
 
 
 def _remove_recorded_dirs(play_dir: Path, rec_entry: Mapping[str, Any]) -> None:

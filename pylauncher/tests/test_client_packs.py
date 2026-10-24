@@ -2253,7 +2253,7 @@ def test_a_member_named_like_a_numbered_swap_file_is_refused(rig: _Rig, suffix: 
 def test_removing_a_read_only_file_shared_with_the_players_client_names_it_and_leaves_it(
     rig: _Rig, windows_read_only: list[tuple[str, int]]
 ) -> None:
-    """A share-refusal joins `left`: every recorded name was attempted, and off reports it."""
+    """A share-refusal raises naming the file: the record stays while it stays."""
     common = rig.original / "Data" / "common.MPQ"
     _REAL_CHMOD(common, 0o444)
     entry = {
@@ -2262,11 +2262,12 @@ def test_removing_a_read_only_file_shared_with_the_players_client_names_it_and_l
         "files": {"Data/common.MPQ": _sha(common.read_bytes())},
     }
 
-    left = rig.remove(entry, None)
+    with pytest.raises(PackError) as info:
+        rig.remove(entry, None)
 
-    assert len(left) == 1, "the refused file is reported, not raised through"
-    assert "Data/common.MPQ" in left[0] and "shared with your own" in left[0]
-    assert "Close World of Warcraft" not in left[0]
+    text = str(info.value)
+    assert "Data/common.MPQ" in text and "shared with your own" in text and "left" in text
+    assert "Close World of Warcraft" not in text
     assert (rig.play / "Data" / "common.MPQ").exists()
     _REAL_CHMOD(common, 0o644)
     rig.untouched()
@@ -3937,7 +3938,7 @@ def test_a_failed_remove_attempts_every_output_and_names_the_leftover(
 def test_a_failed_recorded_removal_attempts_every_recorded_file(
     rig: _Rig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A first recorded-file refusal never spares the second file; both are reported."""
+    """A first recorded-file refusal never spares the second file, then raises naming it."""
     pack, entry = _install_lumen(rig)
     real_delete = client_packs._delete_own
     order: list[str] = []
@@ -3950,11 +3951,14 @@ def test_a_failed_recorded_removal_attempts_every_recorded_file(
 
     monkeypatch.setattr(client_packs, "_delete_own", refuse_version)
 
-    left = rig.remove(entry, pack)
+    with pytest.raises(PackError) as caught:
+        rig.remove(entry, pack)
 
     assert set(order) == {"version.dll", "Lumenveil/lamp_extract.exe"}
-    assert len(left) == 1 and left[0].startswith("version.dll")
+    assert "version.dll" in str(caught.value), "the one error names the refusal"
+    assert "Close World of Warcraft" in str(caught.value) and "press Play again" in str(caught.value)
     assert not (rig.play / "Lumenveil" / "lamp_extract.exe").exists()
+    assert (rig.play / "version.dll").exists(), "the refused file stays, so the record must stay"
 
 
 def test_a_failed_setup_with_a_refused_output_names_it_and_claims_nothing(
@@ -3987,6 +3991,92 @@ def test_a_failed_setup_with_a_refused_output_names_it_and_claims_nothing(
     assert "Nothing of it stayed" not in message, "no claim of a clean rollback"
     assert (rig.play / "lampdata.bin").is_file(), "the refused output stays"
     assert not (rig.play / "liquiddata.bin").exists(), "the other output still goes"
+
+
+def test_a_failed_setup_reports_an_output_it_could_not_inspect(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stat refusal is a leftover, not a clean rollback: the message never claims success."""
+    monkeypatch.setattr(client_packs.platform, "detect", lambda: "windows")
+    pack, entry = _install_lumen(rig)
+    real_stat = os.lstat
+
+    def refuse_lamps(path: Any) -> Any:
+        if os.fspath(path).endswith("lampdata.bin"):
+            raise PermissionError(errno.EACCES, "Permission denied", os.fspath(path))
+        return real_stat(path)
+
+    monkeypatch.setattr(client_packs.os, "lstat", refuse_lamps)
+    runner = _run_with(
+        rig.play,
+        _Outcome(code=3, writes=[{"lampdata.bin": b"lamps"}, {"liquiddata.bin": b"water"}]),
+        seen=[],
+    )
+
+    with pytest.raises(PackError) as caught:
+        client_packs.run_setup(
+            rig.play, pack, entry, game=GAME, server_dir=rig.server, runner=runner
+        )
+
+    message = str(caught.value)
+    assert "lampdata.bin" in message, "the message names the uninspectable output"
+    assert "Nothing of it stayed" not in message, "no claim of a clean rollback"
+
+
+def test_a_failed_setup_reports_an_output_under_a_linked_folder(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A linked ancestor hides the output from removal: it is reported, never claimed gone."""
+    monkeypatch.setattr(client_packs.platform, "detect", lambda: "windows")
+    pack, entry = _install_lumen(rig)
+    sub = rig.play / "Sub"
+    sub.mkdir()
+    (sub / "moved.bin").write_bytes(b"player bytes")
+    moved = _lumen_pack(setup={**_lumen_pack().setup.model_dump(), "writes": ["Sub/lampdata.bin"]})
+    real_is_link = play_client._is_link
+
+    def linked_sub(path: Any) -> bool:
+        if Path(path) == sub:
+            return True
+        return real_is_link(path)
+
+    monkeypatch.setattr(client_packs.play_client, "_is_link", linked_sub)
+
+    with pytest.raises(PackError) as caught:
+        client_packs._rollback_setup(rig.play, moved, entry, game=GAME, server_dir=rig.server)
+
+    message = str(caught.value)
+    assert "Sub/lampdata.bin" in message, "the message names the output under the link"
+    assert "Nothing of it stayed" not in message, "no claim of a clean rollback"
+    (sub / "moved.bin").unlink(missing_ok=True)
+    sub.rmdir()
+
+
+def test_a_failed_setup_reports_a_case_twin_the_delete_pass_missed(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A surviving output in another case still fails the rollback: the loop must stay."""
+    pack, entry = _install_lumen(rig)
+    twin = rig.play / "LAMPDATA.BIN"
+    (rig.play / "lampdata.bin").write_bytes(b"lamps from the run")
+    real_remove_one = client_packs._remove_one_setup_output
+
+    def miss_case_twin(play_dir: Path, target: ClientPack, rel: str) -> Any:
+        gone = real_remove_one(play_dir, target, rel)
+        if gone is not None and os.fspath(gone) == os.fspath(rig.play / "lampdata.bin"):
+            twin.write_bytes(b"lamps in another case")
+        return gone
+
+    monkeypatch.setattr(client_packs, "_remove_one_setup_output", miss_case_twin)
+
+    with pytest.raises(PackError) as caught:
+        client_packs._rollback_setup(rig.play, pack, entry, game=GAME, server_dir=rig.server)
+
+    message = str(caught.value)
+    assert "setup output lampdata.bin" in message, "the leftover loop names the case twin"
+    assert "Nothing of it stayed" not in message, "no claim of a clean rollback"
+    assert twin.exists(), "the twin proves the delete pass missed it"
+    twin.unlink(missing_ok=True)
 
 
 def test_a_failed_setup_rolls_everything_back_and_never_claims_success(
