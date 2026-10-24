@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import inspect
 import io
 import json
 import os
@@ -3797,28 +3798,53 @@ def test_a_missing_setup_exe_without_its_rollback_call_leaves_the_pack(
 def test_run_child_uses_shared_creationflags_cwd_timeout_env(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Item 3: `_run_child` goes through `runner.child_env/creationflags`."""
+    """Item 3: `_run_child` goes through `runner.child_env/creationflags`.
+
+    The test patches `runner` itself, not `subprocess`: `getattr(subprocess,
+    "CREATE_NO_WINDOW", ...)` anywhere in `_run_child` fails this test, and
+    `env=None` (inherit) fails it too.
+    """
     import subprocess as _subprocess
 
     calls: dict[str, Any] = {}
+    child_calls: list[Any] = []
+    flag_calls: list[Any] = []
 
     def fake_run(argv: Any, **kwargs: Any) -> Any:
+        calls["argv"] = argv
         calls.update(kwargs)
         return types.SimpleNamespace(returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr(_subprocess, "run", fake_run)
+    def fake_child_env(env: Any = None) -> Any:
+        child_calls.append(env)
+        return {"X": "1"}
+
+    def fake_flags() -> Any:
+        flag_calls.append(1)
+        return 12345
+
     from yulon import runner as _runner
 
-    monkeypatch.setattr(_runner, "child_env", lambda env=None: {"X": "1"})
-    monkeypatch.setattr(_runner, "creationflags", lambda: 12345)
+    monkeypatch.setattr(_runner, "child_env", fake_child_env)
+    monkeypatch.setattr(_runner, "creationflags", fake_flags)
+    monkeypatch.setattr(
+        _subprocess, "CREATE_NO_WINDOW", 999999, raising=False
+    )
+    monkeypatch.setattr(_subprocess, "run", fake_run)
 
     client_packs._run_child(["lamp_extract.exe", "--background"], cwd=tmp_path, timeout=7.5)
 
-    assert calls["creationflags"] == 12345
+    assert child_calls == [None], "the clean env comes from runner.child_env()"
+    assert flag_calls == [1], "the flag comes from runner.creationflags()"
+    assert calls["creationflags"] == 12345, "a re-derived CREATE_NO_WINDOW fails here"
     assert calls["cwd"] == str(tmp_path)
     assert calls["timeout"] == 7.5
     assert calls["env"] == {"X": "1"}
     assert calls["capture_output"] is True and calls["text"] is True
+    assert calls["argv"] == ["lamp_extract.exe", "--background"]
+    assert "CREATE_NO_WINDOW" not in inspect.getsource(
+        client_packs._run_child
+    ), "the flag is runner.creationflags(), never re-derived here"
 
 
 def test_a_failed_remove_attempts_every_output_and_names_the_leftover(
