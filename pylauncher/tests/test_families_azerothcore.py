@@ -1697,8 +1697,6 @@ _T810_RUN = docker.AttachedRun(
     (
         "ac-client-data-init  | curl: (77) error setting certificate file: "
         "/etc/ssl/certs/ca-certificates.crt",
-        "ac-client-data-init  | Warning: Problem (retrying all errors). "
-        "Will retry in 10 seconds. 16 retries left.",
         "ac-client-data-init  |   0     0    0     0    0     0      0       0 "
         "--:--:-- --:--:-- --:--:--     0",
     ),
@@ -1710,12 +1708,12 @@ def test_a_certificate_failure_fails_at_once_naming_the_error_and_the_image(
 ) -> None:
     """A 77 is the image's own bad CA layer, which no retry can fix — so none runs.
 
-    The reporter's install retried 16 times at 10 s each (about three minutes)
-    on a cached layer that could never succeed, then quoted a progress-meter
-    reading instead of the `curl: (77)` line. Now the failure sentence quotes
-    the error line, and the remedy names the locally built client-data image
-    as `built_image_refs()` spells it, with the `docker image rm` command that
-    forces the next Install to rebuild it instead of reusing it.
+    The reporter's install retried on a cached layer that could never succeed,
+    then quoted a progress-meter reading instead of the `curl: (77)` line. Now
+    the failure sentence quotes the error line, and the remedy names the
+    locally built client-data image as `built_image_refs()` spells it, with the
+    `docker image rm` command that forces the next Install to rebuild it
+    instead of reusing it.
     """
     rec = Recorder(one_shot_result=_T810_RUN)
     with pytest.raises(InstallerError) as failed:
@@ -1730,30 +1728,46 @@ def test_a_certificate_failure_fails_at_once_naming_the_error_and_the_image(
     ]
 
 
-def test_the_exit_status_alone_triggers_the_fail_fast_without_any_words(
+def test_a_printed_tls_number_counts_even_when_the_exit_status_does_not(
     tmp_path: Path,
 ) -> None:
-    """The status half of `client_data_certificate_failure()` stands on its own.
+    """The number in the run's own `curl: (77)` line is the backup signal.
 
-    A 77 with no `certificate` word anywhere still fails at once: the
-    container's exit status is the signal, and the words half is the backup
-    for a curl that dies before it can spell the error. Removing the status
-    half turns this red; the words half cannot save it because there are no
-    words to match.
+    The container's status can be a wrapper's (here 1) while curl's own number
+    is in its error line. Deleting the line-number half of the predicate turns
+    this red; the generic sentence below is what it falls back to.
     """
-    run = docker.AttachedRun(77, ("ac-client-data-init  | something terse",))
+    run = docker.AttachedRun(
+        1, ("ac-client-data-init  | curl: (77) error setting certificate file",)
+    )
     rec = Recorder(one_shot_result=run)
     with pytest.raises(InstallerError) as failed:
         install(rec, tmp_path / "wow")
     assert "docker image rm yulon.local/ac-wotlk-client-data:" in str(failed.value)
 
+
+def test_a_successful_run_that_printed_a_tls_number_is_not_a_failure(
+    tmp_path: Path,
+) -> None:
+    """The predicate only applies to a FAILED run: exit 0 after `curl: (35)` recovered.
+
+    A 35 that a later retry inside the container survived must not end the
+    install with the certificate remedy. Deleting the `returncode == 0` gate
+    turns this red — the whole install would fail on a success.
+    """
+    run = docker.AttachedRun(
+        0, ("ac-client-data-init  | curl: (35) SSL connect error", "ran")
+    )
+    assert install(Recorder(one_shot_result=run), tmp_path / "wow")
+
+
 @pytest.mark.parametrize("code", [35, 51, 58, 60])
 def test_the_other_tls_failures_fail_at_once_too(tmp_path: Path, code: int) -> None:
     """35, 51, 58 and 60 are the same defect as 77: the TLS stack, not the link.
 
-    Deleting any one alternative from the template's `case` or from the
-    failure predicate must turn this red; 56 (a reset link) is the control the
-    other way and is pinned by the test below.
+    Deleting any one alternative from the predicate's number set must turn
+    this red; 56 (a reset link) is the control the other way and is pinned by
+    the test below.
     """
     run = docker.AttachedRun(code, (f"ac-client-data-init  | curl: ({code}) the TLS words",))
     rec = Recorder(one_shot_result=run)
@@ -1766,17 +1780,20 @@ def test_the_other_tls_failures_fail_at_once_too(tmp_path: Path, code: int) -> N
     ]
 
 
-def test_a_reset_link_still_fails_through_the_old_sentence(tmp_path: Path) -> None:
-    """56 is a flaky link, not a bad layer: the script still retries it, and the engine says so.
+def test_an_ssl_worded_reset_link_still_fails_through_the_old_sentence(
+    tmp_path: Path,
+) -> None:
+    """`curl: (56) OpenSSL SSL_read` carries `SSL` but is a reset link, not a bad layer.
 
-    The T810 fail-fast must not catch what it was not built for. A 56 reaches
-    `_check_run()`'s sentence unchanged — no image name, no removal command —
-    and the mutation that widens the status set to 56 turns this red.
+    Classification is by the exit-code number only, never by the words beside
+    it: 56 stays with `_check_run()`'s sentence — no image name, no removal
+    command. The mutation that matches on the words "ssl"/"certificate", or
+    that widens the status set to 56, turns this red.
     """
     run = docker.AttachedRun(
         1,
         (
-            "ac-client-data-init  | curl: (56) Recv failure: Connection reset by peer",
+            "ac-client-data-init  | curl: (56) OpenSSL SSL_read: Connection reset by peer",
             "Aborting on container exit...",
         ),
     )

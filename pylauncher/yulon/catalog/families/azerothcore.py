@@ -101,6 +101,12 @@ DATABASE_MAYBE_STARTED = (
 )
 """Said instead of keeping quiet when the database's state before the check is unknown (T630)."""
 
+_DATED = re.compile(r"^\d{4}_\d{2}_\d{2}_\d{2}")
+"""An update named by its date, `YYYY_MM_DD_NN`: the only names whose order means age."""
+
+_SORTING_FOLDERS = frozenset({"updates", "archive", "base", "custom", "pending"})
+"""Folders under `data/sql` that sort updates rather than name a database (T630)."""
+
 NOTHING_DONE = "Nothing was built, stopped or changed: your server stays on the code it runs."
 
 
@@ -114,29 +120,33 @@ ca-certificates.crt missing, unreadable or corrupt — is the last of these:
 a retry reuses the same cached bad layer and can never succeed.
 """
 
-_TLS_CERTIFICATE_WORDS = ("certificate", "ssl", "tls")
-"""Lowercase words marking a client-data failure as the image's TLS stack, not its link (T810).
+_CURL_CERTIFICATE_FAILURE = re.compile(r"curl: \((35|51|58|60|77)\)")
+"""A curl error line carrying a certificate/TLS exit number (T810).
 
-"`curl: (77) error setting certificate file`" carries `certificate`; a proxy
-or server-side TLS refusal prints `SSL`/`TLS`. Checked case-insensitively
-against the run's own words, never against an exit status in prose.
+Matched against the run's own lines after `docker.unprefixed()` strips
+compose's `<service>  | `. The NUMBER is the signal, never the words beside
+it: `curl: (56) OpenSSL SSL_read: Connection reset by peer` carries `SSL`
+but is a reset link, not a bad image, and must stay a generic failure.
 """
 
 
 def client_data_certificate_failure(run: docker.AttachedRun) -> bool:
     """Is this client-data run a certificate/TLS failure that retrying cannot fix (T810)?
 
-    Either half of the signal counts: curl's own exit status for the five
-    certificate failures above, or the words its error line carries. The exit
-    status is the container's (`compose ... --exit-code-from`), and the words
-    are matched on the `unprefixed()` line, so compose's `<service>  | ` does
-    not hide them. A family helper, not a spine rule: only the AzerothCore
-    client-data fetch downloads with curl.
+    Only for a FAILED run: a download that printed `curl: (35)` then exited 0
+    recovered, and must not be read as a failure. Past that gate the curl
+    exit-code number is the only signal — the container's own status, or the
+    number in its `curl: (N)` line — never the words around it. A family
+    helper, not a spine rule: only the AzerothCore client-data fetch downloads
+    with curl.
     """
+    if run.returncode == 0:
+        return False
     if run.returncode in _TLS_CERTIFICATE_EXIT:
         return True
-    lowered = docker.unprefixed(" ".join(run.tail)).lower()
-    return "curl:" in lowered and any(word in lowered for word in _TLS_CERTIFICATE_WORDS)
+    return any(
+        _CURL_CERTIFICATE_FAILURE.search(docker.unprefixed(line)) for line in run.tail
+    )
 
 
 def stale_client_data_remedy(entry: CatalogEntry, server_dir: Path) -> str:
