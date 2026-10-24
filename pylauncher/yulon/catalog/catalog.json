@@ -192,8 +192,9 @@
             ],
             "setup": {
               "run": "Lumenveil/lamp_extract.exe",
-              "args": [
-                "--background"
+              "runs": [
+                ["--data", "{data}", "--out", "{dir}/lampdata.bin", "--locale", "{locale}", "--background"],
+                ["--data", "{data}", "--liquids", "{dir}/liquiddata.bin", "--maps", "0,1,530,571", "--locale", "{locale}", "--background"]
               ],
               "writes": [
                 "lampdata.bin",
@@ -2837,8 +2838,9 @@
             ],
             "setup": {
               "run": "Lumenveil/lamp_extract.exe",
-              "args": [
-                "--background"
+              "runs": [
+                ["--data", "{data}", "--out", "{dir}/lampdata.bin", "--locale", "{locale}", "--background"],
+                ["--data", "{data}", "--liquids", "{dir}/liquiddata.bin", "--maps", "0,1,530,571", "--locale", "{locale}", "--background"]
               ],
               "writes": [
                 "lampdata.bin",

@@ -3167,9 +3167,12 @@ def _lumen_pack(**extra: Any) -> ClientPack:
         "platforms": ["windows"],
         "setup": {
             "run": "Lumenveil/lamp_extract.exe",
-            "args": ["--background"],
+            "runs": [
+                ["--data", "{data}", "--out", "{dir}/lampdata.bin", "--locale", "{locale}", "--background"],
+                ["--data", "{data}", "--liquids", "{dir}/liquiddata.bin", "--maps", "0,1,530,571", "--locale", "{locale}", "--background"],
+            ],
             "writes": ["lampdata.bin", "liquiddata.bin"],
-            "timeout_seconds": 900,
+            "timeout_seconds": 600,
         },
     }
     base.update(extra)
@@ -3181,35 +3184,78 @@ def _lumen_fetched(rig: _Rig, members: Mapping[str, bytes]) -> client_packs.Fetc
 
 
 class _Outcome:
-    """A canned setup run: what the fake runner answers (exit code, or a raise)."""
+    """A canned setup run: what the fake runner answers (exit code, or a raise).
 
-    def __init__(self, code: int = 0, *, writes: Mapping[str, bytes] | None = None) -> None:
+    `writes` as a list answers each of the two runs in order (the lamps run
+    lays `lampdata.bin`, the water run `liquiddata.bin`); a single map splits
+    the same way, so a second identical run still lays both outputs.
+    """
+
+    def __init__(
+        self, code: int = 0, *, writes: Mapping[str, bytes] | list[Mapping[str, bytes]] | None = None
+    ) -> None:
         self.code = code
-        self.writes = dict(writes or {})
+        if writes is None:
+            self.per_run: list[dict[str, bytes]] = [{}, {}]
+        elif isinstance(writes, Mapping):
+            lamps = {k: v for k, v in writes.items() if k != "liquiddata.bin"}
+            water = {k: v for k, v in writes.items() if k != "lampdata.bin"}
+            self.per_run = [lamps, water]
+        else:
+            self.per_run = [dict(each) for each in writes]
+            while len(self.per_run) < 2:
+                self.per_run.append({})
+
+
+def _locale_fixture(play: Path) -> None:
+    """The copy's Data folder with the probed locale: `enUS` holding its archive."""
+    data = play / "Data" / "enUS"
+    data.mkdir(parents=True, exist_ok=True)
+    (data / "locale-enUS.MPQ").write_bytes(b"locale")
 
 
 def _run_with(
     play: Path,
-    outcome: _Outcome | BaseException,
+    outcome: _Outcome | BaseException | list[_Outcome | BaseException],
     *,
     seen: list[list[str]],
     missing_exe: bool = False,
 ) -> Any:
     """A fake `runner` seam: records argv, lays the canned outputs, answers the code."""
+    if isinstance(outcome, list):
+        per_run: list[_Outcome | BaseException] = list(outcome)
+    else:
+        per_run = [outcome, outcome]
 
     def fake(argv: list[str], *, cwd: Path, timeout: float | None = None) -> Any:
+        index = len(seen)
         seen.append(list(argv))
         assert cwd == play, "setup runs with the ready-to-play copy as its cwd"
-        assert timeout == 900, "bounded by the catalog's timeout"
+        assert timeout == 600, "bounded by the catalog's timeout"
         assert argv[0].endswith("lamp_extract.exe"), argv
-        assert argv[1:] == ["--background"], argv
         assert os.fspath(play) in os.fspath(argv[0]), "the installed exe runs, not a stray path"
-        if isinstance(outcome, BaseException):
-            raise outcome
-        for rel, data in outcome.writes.items():
-            if not missing_exe:
-                (cwd / rel).write_bytes(data)
-        return types.SimpleNamespace(returncode=outcome.code, stdout="", stderr="")
+        tail = argv[1:]
+        assert "--background" in tail, argv
+        assert "--locale" in tail and "enUS" in tail, argv
+        assert "--data" in tail and os.fspath(play / "Data") in tail, argv
+        if "--out" in tail:
+            assert tail[tail.index("--out") + 1].endswith("lampdata.bin"), argv
+        else:
+            assert tail[tail.index("--liquids") + 1].endswith("liquiddata.bin"), argv
+            assert tail[tail.index("--maps") + 1] == "0,1,530,571", argv
+        answered = per_run[index] if index < len(per_run) else per_run[-1]
+        if isinstance(answered, BaseException):
+            raise answered
+        if missing_exe:
+            exe = Path(argv[0])
+            assert exe.is_file(), "missing_exe covers the exe gone after install (item 3)"
+            exe.unlink()
+        assert isinstance(answered, _Outcome)
+        invocation = index % 2
+        by_run = answered.per_run[invocation] if invocation < len(answered.per_run) else {}
+        for rel, data in by_run.items():
+            (cwd / rel).write_bytes(data)
+        return types.SimpleNamespace(returncode=answered.code, stdout="", stderr="")
 
     return fake
 
@@ -3219,6 +3265,7 @@ def _install_lumen(rig: _Rig) -> tuple[ClientPack, dict[str, Any]]:
     entry = rig.install(
         pack, _lumen_fetched(rig, {"version.dll": b"v", "Lumenveil/lamp_extract.exe": b"exe"})
     )
+    _locale_fixture(rig.play)
     return pack, entry
 
 
@@ -3342,14 +3389,15 @@ def test_setup_runs_once_then_stays_quiet(rig: _Rig, monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(client_packs.platform, "detect", lambda: "windows")
     pack, entry = _install_lumen(rig)
     seen: list[list[str]] = []
-    outcome = _Outcome(writes={"lampdata.bin": b"lamps", "liquiddata.bin": b"water"})
+    outcome = _Outcome(writes=[{"lampdata.bin": b"lamps"}, {"liquiddata.bin": b"water"}])
     runner = _run_with(rig.play, outcome, seen=seen)
 
     done = client_packs.run_setup(
         rig.play, pack, entry, game=GAME, server_dir=rig.server, runner=runner
     )
 
-    assert len(seen) == 1, "the exe ran once"
+    assert len(seen) == 2, "the exe runs twice: lamps, then water"
+    assert seen[0][1:] != seen[1][1:], "the two runs take different argv"
     assert done["setup"] == {
         "lampdata.bin": _sha(b"lamps"),
         "liquiddata.bin": _sha(b"water"),
@@ -3358,7 +3406,7 @@ def test_setup_runs_once_then_stays_quiet(rig: _Rig, monkeypatch: pytest.MonkeyP
     again = client_packs.run_setup(
         rig.play, pack, done, game=GAME, server_dir=rig.server, runner=runner
     )
-    assert len(seen) == 1, "the same bytes never run again"
+    assert len(seen) == 2, "the same bytes never run again"
     assert again == done
 
 
@@ -3370,7 +3418,7 @@ def test_setup_runs_again_when_an_output_is_missing(
     seen: list[list[str]] = []
     runner = _run_with(
         rig.play,
-        _Outcome(writes={"lampdata.bin": b"lamps", "liquiddata.bin": b"water"}),
+        _Outcome(writes=[{"lampdata.bin": b"lamps"}, {"liquiddata.bin": b"water"}]),
         seen=seen,
     )
     done = client_packs.run_setup(
@@ -3380,7 +3428,7 @@ def test_setup_runs_again_when_an_output_is_missing(
 
     client_packs.run_setup(rig.play, pack, done, game=GAME, server_dir=rig.server, runner=runner)
 
-    assert len(seen) == 2, "a missing output runs again"
+    assert len(seen) == 4, "each missing-output run is two runs again"
 
 
 def test_setup_non_zero_exit_rolls_the_pack_back(
@@ -3407,9 +3455,9 @@ def test_setup_timeout_rolls_the_pack_back(rig: _Rig, monkeypatch: pytest.Monkey
     import subprocess as _subprocess
 
     seen: list[list[str]] = []
-    runner = _run_with(rig.play, _subprocess.TimeoutExpired(cmd="x", timeout=900), seen=seen)
+    runner = _run_with(rig.play, _subprocess.TimeoutExpired(cmd="x", timeout=600), seen=seen)
 
-    with pytest.raises(PackError, match="took longer than 15 minutes"):
+    with pytest.raises(PackError, match="took longer than 10 minutes"):
         client_packs.run_setup(
             rig.play, pack, entry, game=GAME, server_dir=rig.server, runner=runner
         )
@@ -3452,6 +3500,226 @@ def test_setup_missing_output_after_exit_zero_rolls_the_pack_back(
     rig.untouched()
 
 
+def test_setup_writes_an_output_then_fails_leaves_neither_output(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Item 2: the lamps run lays `lampdata.bin`, the water run fails: both go.
+
+    The record never named the first output (failure hashes nothing), so a
+    rollback of recorded files alone would leave it behind.
+    """
+    monkeypatch.setattr(client_packs.platform, "detect", lambda: "windows")
+    pack, entry = _install_lumen(rig)
+    seen: list[list[str]] = []
+    runner = _run_with(
+        rig.play,
+        [_Outcome(writes=[{"lampdata.bin": b"lamps"}, {}]), _Outcome(code=3)],
+        seen=seen,
+    )
+
+    with pytest.raises(PackError, match=r"stopped before it finished \(code 3\)"):
+        client_packs.run_setup(
+            rig.play, pack, entry, game=GAME, server_dir=rig.server, runner=runner
+        )
+
+    assert len(seen) == 2
+    assert not (rig.play / "lampdata.bin").exists()
+    assert not (rig.play / "liquiddata.bin").exists()
+    assert not (rig.play / "version.dll").exists(), "a failed setup takes the pack out again"
+    assert not (rig.play / "Lumenveil" / "lamp_extract.exe").exists()
+    rig.untouched()
+
+
+def test_setup_timeout_after_an_output_leaves_neither_output(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Item 2: the lamps run lays its output, the water run times out: both go."""
+    import subprocess as _subprocess
+
+    monkeypatch.setattr(client_packs.platform, "detect", lambda: "windows")
+    pack, entry = _install_lumen(rig)
+    seen: list[list[str]] = []
+    runner = _run_with(
+        rig.play,
+        [
+            _Outcome(writes=[{"lampdata.bin": b"lamps"}, {}]),
+            _subprocess.TimeoutExpired(cmd="x", timeout=600),
+        ],
+        seen=seen,
+    )
+
+    with pytest.raises(PackError, match="took longer than 10 minutes"):
+        client_packs.run_setup(
+            rig.play, pack, entry, game=GAME, server_dir=rig.server, runner=runner
+        )
+
+    assert len(seen) == 2
+    assert not (rig.play / "lampdata.bin").exists()
+    assert not (rig.play / "version.dll").exists()
+    rig.untouched()
+
+
+def test_a_pending_note_from_a_killed_run_is_cleaned_first(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Item 2 (crash recovery): a killed run's outputs go on the next Play.
+
+    The pending note is left by hand, as a kill between the note and the clear
+    would: the next call removes those outputs first, drops the note, and --
+    the outputs being gone -- runs again.
+    """
+    monkeypatch.setattr(client_packs.platform, "detect", lambda: "windows")
+    pack, entry = _install_lumen(rig)
+    (rig.play / "lampdata.bin").write_bytes(b"half a run")
+    killed = {**entry, "setup_pending": ["lampdata.bin", "liquiddata.bin"]}
+    seen: list[list[str]] = []
+    runner = _run_with(
+        rig.play,
+        _Outcome(writes=[{"lampdata.bin": b"lamps"}, {"liquiddata.bin": b"water"}]),
+        seen=seen,
+    )
+
+    done = client_packs.run_setup(
+        rig.play, pack, killed, game=GAME, server_dir=rig.server, runner=runner
+    )
+
+    assert len(seen) == 2, "the stale outputs are removed, then the runs go ahead"
+    assert done["files"]["lampdata.bin"] == _sha(b"lamps")
+    assert "setup_pending" not in done, "the note clears only after success"
+
+
+def test_an_unrecorded_output_already_there_refuses_and_stays(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Item 2: an output the record does not name is never written over."""
+    monkeypatch.setattr(client_packs.platform, "detect", lambda: "windows")
+    pack, entry = _install_lumen(rig)
+    (rig.play / "lampdata.bin").write_bytes(b"another program's file")
+    before = _snapshot(rig.play)
+    seen: list[list[str]] = []
+
+    with pytest.raises(PackError, match="already there"):
+        client_packs.run_setup(
+            rig.play, pack, entry, game=GAME, server_dir=rig.server,
+            runner=_run_with(rig.play, _Outcome(), seen=seen),
+        )
+
+    assert seen == [], "nothing runs over an unrecorded output"
+    assert _snapshot(rig.play) == before, "nothing is deleted either"
+
+
+def test_no_locale_folder_refuses_with_the_scripts_plain_line(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Item 1: without a `Data/????` locale folder nothing runs and the pack goes."""
+    monkeypatch.setattr(client_packs.platform, "detect", lambda: "windows")
+    pack, entry = _install_lumen(rig)
+    import shutil as _shutil
+
+    _shutil.rmtree(rig.play / "Data" / "enUS")
+    seen: list[list[str]] = []
+
+    with pytest.raises(PackError, match="No language folder with a locale archive"):
+        client_packs.run_setup(
+            rig.play, pack, entry, game=GAME, server_dir=rig.server,
+            runner=_run_with(rig.play, _Outcome(), seen=seen),
+        )
+
+    assert seen == [], "nothing runs without a locale"
+    assert not (rig.play / "version.dll").exists()
+    rig.untouched()
+
+
+def test_a_second_locale_folder_probes_the_first_in_name_order(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Item 1: the probe is the script's rule -- first `????` with its archive."""
+    monkeypatch.setattr(client_packs.platform, "detect", lambda: "windows")
+    pack, entry = _install_lumen(rig)
+    fr = rig.play / "Data" / "frFR"
+    fr.mkdir(parents=True)
+    (fr / "locale-frFR.MPQ").write_bytes(b"locale")
+    seen: list[list[str]] = []
+    runner = _run_with(
+        rig.play,
+        _Outcome(writes=[{"lampdata.bin": b"lamps"}, {"liquiddata.bin": b"water"}]),
+        seen=seen,
+    )
+
+    client_packs.run_setup(rig.play, pack, entry, game=GAME, server_dir=rig.server, runner=runner)
+
+    assert len(seen) == 2
+    assert all("enUS" in run for run in seen), "enUS sorts first and wins"
+    assert all("frFR" not in run for run in seen)
+
+
+def test_a_missing_setup_exe_is_rolled_back_before_it_raises(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Item 3: the `missing_exe` seam is the exe gone after install -- and it rolls back."""
+    monkeypatch.setattr(client_packs.platform, "detect", lambda: "windows")
+    pack, entry = _install_lumen(rig)
+    seen: list[list[str]] = []
+
+    with pytest.raises(PackError, match="could not be started"):
+        client_packs.run_setup(
+            rig.play, pack, entry, game=GAME, server_dir=rig.server,
+            runner=_run_with(rig.play, _Outcome(), seen=seen, missing_exe=True),
+        )
+
+    assert not (rig.play / "version.dll").exists(), "the pack goes though nothing ran"
+    assert not (rig.play / "Lumenveil" / "lamp_extract.exe").exists()
+    rig.untouched()
+
+
+def test_a_changed_setup_exe_refuses_and_rolls_back(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Item 5: the exe is re-hashed before launch; a changed one never runs."""
+    monkeypatch.setattr(client_packs.platform, "detect", lambda: "windows")
+    pack, entry = _install_lumen(rig)
+    (rig.play / "Lumenveil" / "lamp_extract.exe").write_bytes(b"somebody else's exe")
+    seen: list[list[str]] = []
+
+    with pytest.raises(PackError, match="no longer matches the pack"):
+        client_packs.run_setup(
+            rig.play, pack, entry, game=GAME, server_dir=rig.server,
+            runner=_run_with(rig.play, _Outcome(), seen=seen),
+        )
+
+    assert seen == [], "a changed exe never runs"
+    assert not (rig.play / "version.dll").exists()
+    rig.untouched()
+
+
+def test_an_update_keeps_dirs_so_off_removes_the_emptied_folder(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Item 6: a version update keeps `"dirs"` -- off still removes `Lumenveil/`."""
+    monkeypatch.setattr(client_packs.platform, "detect", lambda: "windows")
+    pack, entry = _install_lumen(rig)
+    runner = _run_with(
+        rig.play,
+        _Outcome(writes=[{"lampdata.bin": b"lamps"}, {"liquiddata.bin": b"water"}]),
+        seen=[],
+    )
+    done = client_packs.run_setup(
+        rig.play, pack, entry, game=GAME, server_dir=rig.server, runner=runner
+    )
+    updated = rig.install(
+        pack, _lumen_fetched(rig, {"version.dll": b"v2", "Lumenveil/lamp_extract.exe": b"exe"}),
+        previous=done,
+    )
+
+    assert updated["dirs"] == done["dirs"], "the update keeps the first install's folders"
+
+    left = client_packs.remove(rig.play, updated, pack, game=GAME, server_dir=rig.server)
+
+    assert left == ()
+    assert not (rig.play / "Lumenveil").exists(), "the emptied Lumenveil/ folder goes too"
+
+
+
 def test_setup_exe_escaping_the_copy_refuses_and_installs_nothing(
     rig: _Rig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3463,7 +3731,7 @@ def test_setup_exe_escaping_the_copy_refuses_and_installs_nothing(
     pack = valid.model_copy(
         update={
             "setup": PackSetup.model_construct(
-                run="../outside.exe", args=(), writes=("lampdata.bin",), timeout_seconds=60
+                run="../outside.exe", runs=((),), writes=("lampdata.bin",), timeout_seconds=60
             )
         }
     )

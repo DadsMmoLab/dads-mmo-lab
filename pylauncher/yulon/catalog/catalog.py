@@ -16,7 +16,7 @@ import hashlib
 import json
 import re
 from pathlib import Path, PurePosixPath
-from typing import Annotated, Literal
+from typing import Annotated, ClassVar, Literal
 from urllib.parse import urlsplit
 
 from pydantic import (
@@ -2711,24 +2711,34 @@ class InstallRule(_Strict):
 
 
 class PackSetup(_Strict):
-    """A pack's post-install setup step: an exe the zip installed, run once in the client copy.
+    """A pack's post-install setup step: an exe the zip installed, run in the client copy.
 
     Lumenveil's `lamp_extract.exe` reads the client's own files and writes
     `lampdata.bin`/`liquiddata.bin` beside it (1-5 minutes). `run` names the
     exe as a zip member, because that is what the catalog pins; the engine
     runs the file that member was installed as, with cwd the ready-to-play
-    copy. `writes` are the files setup creates, relative to the client folder,
-    recorded by hash like every installed file so switching the pack off
-    removes exactly them. Windows only (plan D6: run directly, no cmd.exe).
+    copy. `runs` are the argv lists after the exe, taken from the pinned setup
+    script: one run for the lamps (`--out`), one for the water (`--liquids
+    --maps`); both share `--data`/`--locale`/`--background`, whose values the
+    engine fills in per run (`{data}` = the copy's Data folder, `{dir}` = the
+    copy folder, `{locale}` = probed). `writes` are the files setup creates,
+    relative to the client folder, recorded by hash like every installed file
+    so switching the pack off removes exactly them. Windows only (plan D6: run
+    directly, no cmd.exe).
     """
+
+    _PLACEHOLDERS: ClassVar[frozenset[str]] = frozenset({"{data}", "{dir}", "{locale}"})
 
     run: str = Field(
         min_length=1,
         description="The setup exe, as a zip member (`Lumenveil/lamp_extract.exe`).",
     )
-    args: tuple[str, ...] = Field(
-        default=(),
-        description="Argv after the exe, taken from the pinned setup script.",
+    runs: tuple[tuple[str, ...], ...] = Field(
+        min_length=1,
+        description=(
+            "Argv lists after the exe, one per run, taken from the pinned setup script. "
+            "Only {data}, {dir} and {locale} name a value the engine fills in."
+        ),
     )
     writes: tuple[str, ...] = Field(
         min_length=1,
@@ -2737,13 +2747,32 @@ class PackSetup(_Strict):
     timeout_seconds: int = Field(
         default=900,
         gt=0,
-        description="Seconds setup may run; Lumenveil's 1-5 minutes bounded at 15.",
+        description="Seconds one setup run may take; Lumenveil's 1-5 minutes bounded at 10.",
     )
 
     @field_validator("run")
     @classmethod
     def _run_stays_inside_the_zip(cls, value: str) -> str:
         return _inside(value, "setup.run", names_a_file=True)
+
+    @field_validator("runs")
+    @classmethod
+    def _runs_stay_plain_words(cls, value: tuple[tuple[str, ...], ...]) -> tuple[tuple[str, ...], ...]:
+        for index, run in enumerate(value):
+            if not run:
+                raise ValueError(f"setup runs[{index}] names no argv: each run takes at least one")
+            for word in run:
+                if not word:
+                    raise ValueError(
+                        f"setup runs[{index}] names an empty word: argv has no empty words"
+                    )
+                for hole in re.findall(r"\{[^{}]*\}", word):
+                    if hole not in cls._PLACEHOLDERS:
+                        raise ValueError(
+                            f"setup runs[{index}] names {hole!r}: only "
+                            "{data}, {dir} and {locale} name a value the engine fills in"
+                        )
+        return value
 
     @field_validator("writes")
     @classmethod

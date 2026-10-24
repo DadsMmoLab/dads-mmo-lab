@@ -288,7 +288,10 @@ def test_the_lumenveil_pack_is_pinned_identical_and_windows_only() -> None:
         assert pack.remove_when_off == ("CoAVolFog.log",), "spots stay: player data, plan D5"
         assert pack.setup is not None
         assert pack.setup.run == "Lumenveil/lamp_extract.exe"
-        assert pack.setup.args == ("--background",)
+        assert pack.setup.runs == (
+            ("--data", "{data}", "--out", "{dir}/lampdata.bin", "--locale", "{locale}", "--background"),
+            ("--data", "{data}", "--liquids", "{dir}/liquiddata.bin", "--maps", "0,1,530,571", "--locale", "{locale}", "--background"),
+        )
         assert pack.setup.writes == ("lampdata.bin", "liquiddata.bin")
         assert pack.setup.timeout_seconds == 600
         assert pack.credit.startswith("Lumenveil") and "GPL-2.0" in pack.credit
@@ -304,17 +307,25 @@ def test_the_lumenveil_pack_is_identical_in_wotlk_and_unbound_and_absent_on_cent
     assert "lumenveil" not in centurion_ids
 
 
-def test_the_lumenveil_setup_args_cover_what_the_shipped_cmd_runs() -> None:
+def test_the_lumenveil_setup_runs_cover_what_the_shipped_cmd_runs() -> None:
     """The pinned Lumenveil-Setup.cmd (from inside the verified zip) runs lamp_extract.exe
     twice: once with `--out lampdata.bin` (lamps) and once with `--liquids liquiddata.bin
     --maps 0,1,530,571` (water). Both share `--data <client Data> --locale <probed> --background`
-    with cwd the game folder; the locale is probed from Data/???? folders at setup time, so no
-    static argv can repeat the .cmd line for line. The catalog pins the flag both runs share
-    (`--background`); the runner (W3) fills in data/out/liquids/maps/locale per run, and this
-    test fails when the pinned argv stops being one the .cmd uses."""
+    with cwd the game folder; the locale is probed from Data/???? folders holding
+    `locale-<same>.MPQ` at setup time, so the `.cmd` line's paths and locale reach the
+    catalog as the `{data}`/`{dir}`/`{locale}` placeholders the engine fills in per run.
+    This test fails when the pinned runs stop being the two runs the .cmd runs."""
     pack = _lumenveil_of("wow-wotlk")
     assert pack.setup is not None
-    assert "--background" in pack.setup.args
+    assert len(pack.setup.runs) == 2
+    lamps, water = pack.setup.runs
+    assert "--out" in lamps and "{dir}/lampdata.bin" in lamps
+    assert "--liquids" in water and "{dir}/liquiddata.bin" in water
+    assert "--maps" in water and "0,1,530,571" in water
+    for run in pack.setup.runs:
+        assert "--data" in run and "{data}" in run
+        assert "--locale" in run and "{locale}" in run
+        assert "--background" in run
 
 
 Mutation = Callable[[dict[str, Any]], None]
@@ -662,6 +673,7 @@ REFUSALS: dict[str, tuple[Mutation, str]] = {
             "packs.3.setup",
             {
                 "run": "",
+                "runs": [["--background"]],
                 "writes": ["lampdata.bin"],
             },
         ),
@@ -675,7 +687,7 @@ REFUSALS: dict[str, tuple[Mutation, str]] = {
                 "packs.3.setup",
                 {
                     "run": "Lumenveil/Lumenveil-Setup.cmd",
-                    "args": [],
+                    "runs": [["--background"]],
                     "writes": ["lampdata.bin"],
                 },
             ),
@@ -687,6 +699,7 @@ REFUSALS: dict[str, tuple[Mutation, str]] = {
             "packs.3.setup",
             {
                 "run": "../lamp_extract.exe",
+                "runs": [["--background"]],
                 "writes": ["lampdata.bin"],
             },
         ),
@@ -697,15 +710,52 @@ REFUSALS: dict[str, tuple[Mutation, str]] = {
             "packs.3.setup",
             {
                 "run": "Lumenveil/who-is-this.exe",
+                "runs": [["--background"]],
                 "writes": ["lampdata.bin"],
             },
         ),
         "not an installed member",
     ),
+    "setup with no runs": (
+        _set(
+            "packs.3.setup",
+            {"run": "Lumenveil/lamp_extract.exe", "runs": [], "writes": ["lampdata.bin"]},
+        ),
+        "at least 1 item",
+    ),
+    "setup with an empty run": (
+        _set(
+            "packs.3.setup",
+            {"run": "Lumenveil/lamp_extract.exe", "runs": [[]], "writes": ["lampdata.bin"]},
+        ),
+        "names no argv",
+    ),
+    "setup with an empty run word": (
+        _set(
+            "packs.3.setup",
+            {"run": "Lumenveil/lamp_extract.exe", "runs": [[""]], "writes": ["lampdata.bin"]},
+        ),
+        "no empty words",
+    ),
+    "setup naming an unknown placeholder": (
+        _set(
+            "packs.3.setup",
+            {
+                "run": "Lumenveil/lamp_extract.exe",
+                "runs": [["--out", "{bogus}"]],
+                "writes": ["lampdata.bin"],
+            },
+        ),
+        "{bogus}",
+    ),
     "setup with no writes": (
         _set(
             "packs.3.setup",
-            {"run": "Lumenveil/lamp_extract.exe", "writes": []},
+            {
+                "run": "Lumenveil/lamp_extract.exe",
+                "runs": [["--background"]],
+                "writes": [],
+            },
         ),
         "at least 1 item",
     ),
@@ -714,6 +764,7 @@ REFUSALS: dict[str, tuple[Mutation, str]] = {
             "packs.3.setup",
             {
                 "run": "Lumenveil/lamp_extract.exe",
+                "runs": [["--background"]],
                 "writes": ["lampdata.bin"],
                 "timeout_seconds": -1,
             },
@@ -725,13 +776,21 @@ REFUSALS: dict[str, tuple[Mutation, str]] = {
             "packs.3.setup",
             {
                 "run": "Lumenveil/lamp_extract.exe",
+                "runs": [["--background"]],
                 "writes": ["../lampdata.bin"],
             },
         ),
         "relative POSIX path",
     ),
     "two packs sharing one setup output": (
-        _set("packs.0.setup", {"run": "patch-Y.MPQ", "writes": ["Data/patch-F.MPQ"]}),
+        _set(
+            "packs.0.setup",
+            {
+                "run": "patch-Y.MPQ",
+                "runs": [["--background"]],
+                "writes": ["Data/patch-F.MPQ"],
+            },
+        ),
         "setup writes",
     ),
     "a pack removing another pack's setup output": (
@@ -767,7 +826,7 @@ def _lumenveil_like_pack() -> dict[str, Any]:
         ],
         "setup": {
             "run": "Lumenveil/lamp_extract.exe",
-            "args": ["--batch"],
+            "runs": [["--batch"]],
             "writes": ["lampdata.bin", "liquiddata.bin"],
             "timeout_seconds": 900,
         },
@@ -788,7 +847,7 @@ def test_a_pack_with_the_new_fields_parses_and_names_its_redirect_hosts() -> Non
     )
     assert pack.setup is not None
     assert pack.setup.run == "Lumenveil/lamp_extract.exe"
-    assert pack.setup.args == ("--batch",)
+    assert pack.setup.runs == (("--batch",),)
     assert pack.setup.writes == ("lampdata.bin", "liquiddata.bin")
     assert pack.setup.timeout_seconds == 900
     assert pack.credit.startswith("Lumenveil")
@@ -869,4 +928,4 @@ def test_write_and_model_types_are_importable_for_the_engine() -> None:
     assert ClientPack.model_fields["setup"].default is None
     assert ClientPack.model_fields["credit"].default == ""
     assert PackSetup.model_fields["timeout_seconds"].default == 900
-    assert PackSetup(run="a.exe", writes=["b.bin"]).args == ()
+    assert PackSetup(run="a.exe", runs=[["--background"]], writes=["b.bin"]).runs == (("--background",),)
