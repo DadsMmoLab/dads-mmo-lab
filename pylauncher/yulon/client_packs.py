@@ -2384,28 +2384,23 @@ def _run_child(
 ) -> subprocess.CompletedProcess[str]:
     """Run `argv` in `cwd`, bounded by `timeout`, with the child's own clean env.
 
-    No shell, no cmd.exe: the pinned exe runs directly (plan D6). `env` is the
-    repo's `runner.child_env` where it exists (the suite's own child guard), or
-    `None` (inherit) elsewhere. The child's output is discarded (`capture_output`
-    swallowed by `DEVNULL`): the run's own logs stay out of Yu'lon's. On Windows
-    no console window shows (`CREATE_NO_WINDOW` where the platform names it).
+    No shell, no cmd.exe: the pinned exe runs directly (plan D6). `env` and
+    `creationflags` are the repo's `runner` rules (`child_env`, so a frozen
+    build's library paths never reach the child, and `creationflags`, so no
+    console window shows on Windows), not re-derived here. The child's output
+    is captured, so a failed run's refusal can quote its last lines; it never
+    reaches Yu'lon's own logs.
     """
     from yulon import runner as _runner
 
-    make_env = getattr(_runner, "child_env", None)
-    kwargs: dict[str, Any] = {}
-    no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    if no_window:
-        kwargs["creationflags"] = no_window
     return subprocess.run(
         argv,
         cwd=str(cwd),
-        env=make_env(None) if callable(make_env) else None,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        env=_runner.child_env(),
+        capture_output=True,
         text=True,
         timeout=timeout,
-        **kwargs,
+        creationflags=_runner.creationflags(),
     )
 
 
@@ -2513,6 +2508,7 @@ def run_setup(
     server_dir: Path,
     runner: Runner | None = None,
     record: Mapping[str, Any] | None = None,
+    on_pending: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Run the pack's setup exe in the ready-to-play copy; the record entry with its outputs.
 
@@ -2529,15 +2525,17 @@ def run_setup(
     folder (each spelled per the platform's separator), `{locale}` the
     probed locale (`Data/????` holding `locale-<same>.MPQ`, the script's
     rule); none found stops with the script's plain line, and the pack is
-    taken out again.
+    rolled back first.
 
     Before the first run, an output that already exists and the record does
     not name for this pack refuses with a plain line: the run would write
     over bytes Yu'lon never proved, and nothing runs and nothing is deleted.
-    Otherwise the outputs are noted in the record (`"setup_pending"`) before
-    the first run and cleared only after the last output hashes: a run killed
-    between the two still finds the note on the next Play and removes those
-    outputs first (crash recovery). The caller writes the returned entry.
+    Otherwise `on_pending` is called with the entry carrying the outputs in
+    `"setup_pending"` BEFORE the first run, so the caller can write the
+    record atomically (a run killed between the two still finds the note on
+    the next Play and removes those outputs first: crash recovery); the note
+    clears only after the last output hashes. The caller writes the returned
+    entry.
 
     The outputs (`setup.writes`) are then hashed into the record (`"setup"`:
     `{rel: sha256}`), and join `"files"` so `remove` deletes them by hash like
@@ -2545,8 +2543,9 @@ def run_setup(
     command, no `.cmd` name), and each rolling the pack back first (D4: `remove`
     deletes all its recorded files, and `_remove_setup_outputs` every output
     the run may have created whether or not it is recorded): non-zero exit
-    (code N), timeout ("took longer than N minutes", from the catalog's
-    `timeout_seconds`), cannot start (reason), output missing after exit 0.
+    (code N, with the exe's last output lines quoted), timeout ("took longer
+    than N minutes", from the catalog's `timeout_seconds`), cannot start
+    (reason), output missing after exit 0.
     Nothing runs and nothing is written when the platform is not Windows.
     """
     _gate(play_dir, game=game, server_dir=server_dir, what=f"the setup of {pack.label}")
@@ -2577,12 +2576,12 @@ def run_setup(
             _rollback_setup(play_dir, pack, entry, game=game, server_dir=server_dir)
         except PackError as rollback_exc:
             raise PackError(
-                f"{pack.label}'s setup could not be started ({exe.name} is not there), so "
-                f"{pack.label} could not be taken out again: {rollback_exc}."
+                f"{pack.label}'s setup could not be started ({exe.name} is not there). "
+                f"{rollback_exc}"
             ) from rollback_exc
         raise PackError(
-            f"{pack.label}'s setup could not be started ({exe.name} is not there), so "
-            f"{pack.label} was taken out again."
+            f"{pack.label}'s setup could not be started ({exe.name} is not there). "
+            "Nothing of it stayed in the ready-to-play client; the next Play tries again."
         )
     try:
         want = _expected_exe_sha256(pack, entry if record is None else record)
@@ -2591,12 +2590,12 @@ def run_setup(
                 _rollback_setup(play_dir, pack, entry, game=game, server_dir=server_dir)
             except PackError as rollback_exc:
                 raise PackError(
-                    f"{pack.label}'s setup exe no longer matches the pack, so it was not run, "
-                    f"and {pack.label} could not be taken out again: {rollback_exc}."
+                    f"{pack.label}'s setup exe no longer matches the pack, so it was not run. "
+                    f"{rollback_exc}"
                 ) from rollback_exc
             raise PackError(
-                f"{pack.label}'s setup exe no longer matches the pack, so it was not run, "
-                f"and {pack.label} was taken out again. Press Play to try again."
+                f"{pack.label}'s setup exe no longer matches the pack, so it was not run. "
+                "Nothing of it stayed in the ready-to-play client; the next Play tries again."
             )
     except OSError as exc:
         raise _write_refusal(pack.label, exc) from exc
@@ -2607,15 +2606,18 @@ def run_setup(
         except PackError as rollback_exc:
             raise PackError(
                 "No language folder with a locale archive was found in the client's Data "
-                f"folder, so {pack.label} could not be taken out again: {rollback_exc}."
+                f"folder. {rollback_exc}"
             ) from rollback_exc
         raise PackError(
             "No language folder with a locale archive was found in the client's Data "
-            f"folder, so {pack.label} was taken out again. Press Play to try again, "
-            "or play without it."
+            "folder. Nothing of it stayed in the ready-to-play client; the next Play "
+            "tries again, or play without it."
         )
     _refuse_unrecorded_outputs(play_dir, pack, entry if record is None else record)
-    entry = {**entry, "setup_pending": [rel for rel in pack.setup.writes]}
+    pending_entry = {**entry, "setup_pending": [rel for rel in pack.setup.writes]}
+    if on_pending is not None:
+        on_pending(pending_entry)
+    entry = pending_entry
     data_dir = os.fspath(play_dir / Path(*client_names.on_disk(play_dir, PurePosixPath("Data")).parts))
     filled = [
         [
@@ -2630,22 +2632,22 @@ def run_setup(
     minutes = max(1, round(pack.setup.timeout_seconds / 60))
     minute_word = "minute" if minutes == 1 else "minutes"
     timeout_line = (
-        f"{pack.label}'s setup took longer than {minutes} {minute_word}, so {pack.label} "
-        "was taken out again. Press Play to try again, or play without it."
+        f"{pack.label}'s setup took longer than {minutes} {minute_word} "
+        f"({pack.setup.timeout_seconds:.0f} seconds)."
     )
+    done: object = None
     for argv_tail in filled:
         argv = [os.fspath(exe), *argv_tail]
         try:
             done = run(argv, cwd=play_dir, timeout=float(pack.setup.timeout_seconds))
-        except subprocess.TimeoutExpired as exc:
+        except subprocess.TimeoutExpired:
             _fail_setup(play_dir, pack, entry, timeout_line, game=game, server_dir=server_dir)
         except OSError as exc:
             _fail_setup(
                 play_dir,
                 pack,
                 entry,
-                f"{pack.label}'s setup could not be started ({exc.strerror or exc}), so "
-                f"{pack.label} was taken out again.",
+                f"{pack.label}'s setup could not be started ({exc.strerror or exc}).",
                 game=game,
                 server_dir=server_dir,
             )
@@ -2656,8 +2658,7 @@ def run_setup(
                 play_dir,
                 pack,
                 entry,
-                f"{pack.label}'s setup could not be started ({exc}), so {pack.label} was "
-                "taken out again.",
+                f"{pack.label}'s setup could not be started ({exc}).",
                 game=game,
                 server_dir=server_dir,
             )
@@ -2665,24 +2666,53 @@ def run_setup(
         if code is None:
             code = 0
         if int(code) != 0:
+            tail = _setup_output_tail(done)
+            detail = f" Its last lines were:\n{tail}" if tail else ""
             _fail_setup(
                 play_dir,
                 pack,
                 entry,
-                f"{pack.label}'s setup stopped before it finished (code {int(code)}), so "
-                f"{pack.label} was taken out again. Press Play to try again, or play without it.",
+                f"{pack.label}'s setup stopped before it finished (code {int(code)}).{detail}",
                 game=game,
                 server_dir=server_dir,
             )
     try:
         hashed = _hash_setup_outputs(play_dir, pack)
-    except PackError:
-        _rollback_setup(play_dir, pack, entry, game=game, server_dir=server_dir)
-        raise
+    except PackError as exc:
+        # The hash names the missing output; the rollback names any leftovers.
+        try:
+            _rollback_setup(play_dir, pack, entry, game=game, server_dir=server_dir)
+        except PackError as rollback_exc:
+            raise PackError(f"{exc} {rollback_exc}") from rollback_exc
+        raise PackError(
+            f"{exc} Nothing of it stayed in the ready-to-play client; "
+            "the next Play tries again."
+        ) from exc
     setup_map = {rel: sha for rel, sha in hashed.items()}
     files = dict(entry.get("files") if isinstance(entry.get("files"), dict) else {})
     files.update(setup_map)
     return {k: v for k, v in {**entry, "files": files, "setup": setup_map}.items() if k != "setup_pending"}
+
+
+def _setup_output_tail(done: object) -> str:
+    """The last ~10 lines the setup exe wrote, for the refusal; empty when none."""
+    text = ""
+    for field in ("stdout", "stderr"):
+        try:
+            chunk = getattr(done, field, "")
+        except Exception:
+            chunk = ""
+        if isinstance(chunk, bytes):
+            try:
+                chunk = chunk.decode("utf-8", "replace")
+            except Exception:
+                continue
+        if isinstance(chunk, str) and chunk:
+            text += ("" if text.endswith("\n") or not text else "\n") + chunk
+    lines = [line for line in text.splitlines() if line.strip()]
+    if not lines:
+        return ""
+    return "\n".join(lines[-10:])
 
 
 def _hash_setup_outputs(play_dir: Path, pack: ClientPack) -> dict[str, str]:
@@ -2700,15 +2730,13 @@ def _hash_setup_outputs(play_dir: Path, pack: ClientPack) -> dict[str, str]:
         if clean is None:
             raise PackError(
                 f"{pack.label}'s setup names {rel!r}, which is outside the ready-to-play "
-                f"client, so {pack.label} was taken out again."
+                "client, so nothing was written."
             )
         path = play_dir / Path(*clean.parts)
         try:
             if play_client._is_link(path) or not path.is_file():
                 raise PackError(
-                    f"{pack.label}'s setup finished but its {clean.as_posix()} is not there, "
-                    f"so {pack.label} was taken out again. Press Play to try again, or play "
-                    "without it."
+                    f"{pack.label}'s setup finished but its {clean.as_posix()} is not there."
                 )
             found[clean.as_posix()] = _file_sha256(path)
         except OSError as exc:
@@ -2776,6 +2804,64 @@ def _refuse_unrecorded_outputs(
             continue
 
 
+def _take_out_setup_outputs(
+    play_dir: Path, pack: ClientPack, rels: object
+) -> tuple[list[Path], list[str]]:
+    """Attempt every named setup output; `(removed paths, failure texts)`.
+
+    One failure never stops the next name: the caller reports every leftover
+    at once. A failure text names the file and why it stayed.
+    """
+    assert pack.setup is not None  # the pack whose outputs these are
+    removed: list[Path] = []
+    failures: list[str] = []
+    if not isinstance(rels, (list, tuple)):
+        return removed, failures
+    for rel in rels:
+        if not isinstance(rel, str):
+            continue
+        try:
+            gone = _remove_one_setup_output(play_dir, pack, rel)
+        except (OSError, PackError) as exc:
+            reason = exc.strerror or exc if isinstance(exc, OSError) else str(exc)
+            failures.append(f"{rel} ({reason})")
+            continue
+        if gone is not None:
+            removed.append(gone)
+    for path in removed:
+        _remove_empty_parents(play_dir, path)
+    return removed, failures
+
+
+def _remove_one_setup_output(play_dir: Path, pack: ClientPack, rel: str) -> Path | None:
+    """Remove one setup output by name; the removed path, or None when never there.
+
+    Only below the copy, never through a link. A file that refuses raises
+    (`OSError`, or `PackError` for a read-only file shared with your own
+    client), naming it, so the caller can attempt every other name first.
+    """
+    assert pack.setup is not None  # the pack whose outputs these are
+    clean = _clean_rel(rel)
+    if clean is None or clean.name.startswith(_PROTECTED):
+        return None
+    try:
+        path = play_dir / Path(*client_names.on_disk(play_dir, clean).parts)
+    except OSError:
+        return None
+    try:
+        here = play_dir
+        for part in client_names.on_disk(play_dir, clean).parts[:-1]:
+            here = here / part
+            if play_client._is_link(here):
+                return None
+        if play_client._is_link(path) or not path.is_file():
+            return None
+    except OSError:
+        return None
+    _delete_own(clean.as_posix(), path)
+    return path
+
+
 def _remove_setup_outputs(play_dir: Path, pack: ClientPack, rels: object) -> None:
     """Remove setup outputs by name, whether or not any record lists them.
 
@@ -2783,40 +2869,17 @@ def _remove_setup_outputs(play_dir: Path, pack: ClientPack, rels: object) -> Non
     or the run may have been killed outright: the record then names nothing,
     and `remove` would leave the bytes behind. Only names the caller passes
     (the pack's `setup.writes`, or a `"setup_pending"` note naming those);
-    only below the copy, never through a link; a name that refuses stays, and
-    the caller says so. A read of the folder's own bytes aside, this is the
-    write the ledger names beside the record's own.
+    only below the copy, never through a link. Every name is attempted even
+    when one fails, and leftovers raise `PackError` naming them: the caller
+    then says what stayed instead of claiming the pack went. A read of the
+    folder's own bytes aside, this is the write the ledger names beside the
+    record's own.
     """
-    assert pack.setup is not None  # the pack whose outputs these are
-    if not isinstance(rels, (list, tuple)):
-        return
-    removed: list[Path] = []
-    for rel in rels:
-        if not isinstance(rel, str):
-            continue
-        clean = _clean_rel(rel)
-        if clean is None or clean.name.startswith(_PROTECTED):
-            continue
-        try:
-            path = play_dir / Path(*client_names.on_disk(play_dir, clean).parts)
-        except OSError:
-            continue
-        here = play_dir
-        try:
-            for part in client_names.on_disk(play_dir, clean).parts[:-1]:
-                here = here / part
-                if play_client._is_link(here):
-                    break
-            else:
-                if play_client._is_link(path) or not path.is_file():
-                    continue
-                _delete_own(clean.as_posix(), path)
-                removed.append(path)
-                continue
-        except OSError:
-            continue
-    for path in removed:
-        _remove_empty_parents(play_dir, path)
+    _, failures = _take_out_setup_outputs(play_dir, pack, rels)
+    if failures:
+        raise PackError(
+            "could not take out every setup output: " + ", ".join(sorted(failures)) + "."
+        )
 
 
 def _fail_setup(
@@ -2830,16 +2893,18 @@ def _fail_setup(
 ) -> None:
     """Roll the pack back after its setup failed, then raise `message`.
 
-    The message is the failure's own plain line; when the rollback itself
-    fails, the raise says what could NOT be taken out instead of claiming
-    the pack went (the record still names what stayed, so a later off
-    still finds it).
+    The message is the failure's own plain line; the rollback's leftovers (a
+    `PackError` naming them) are appended, never replaced by a claim the pack
+    went. The record still names what stayed, so the next Play tries again.
     """
     try:
         _rollback_setup(play_dir, pack, entry, game=game, server_dir=server_dir)
     except PackError as rollback_exc:
-        raise PackError(f"{message} It could not be taken out again: {rollback_exc}.") from rollback_exc
-    raise PackError(message)
+        raise PackError(f"{message} {rollback_exc}") from rollback_exc
+    raise PackError(
+        f"{message} Nothing of it stayed in the ready-to-play client; "
+        "the next Play tries again, or play without it."
+    )
 
 
 def _rollback_setup(
@@ -2851,12 +2916,40 @@ def _rollback_setup(
     or not the record lists it: the exe may have written an output after the
     record was read, or died half-way through one. Only names the pack's own
     `setup.writes`: never the player's own files, never anything the folder
-    check refuses. A rollback that itself fails raises `PackError`, so the
-    caller can say what stayed instead of claiming the pack went.
+    check refuses. Every removal is attempted even when one fails; when any
+    output or installed file remains, a `PackError` names the leftovers, so
+    the caller never claims the pack went. The caller keeps the recoverable
+    record (with `"setup_pending"`) so the next Play retries.
     """
-    remove(play_dir, entry, pack, game=game, server_dir=server_dir)
+    failures: list[str] = []
+    failed: set[str] = set()
+    try:
+        left = remove(play_dir, entry, pack, game=game, server_dir=server_dir)
+    except PackError as exc:
+        failures.append(str(exc))
+    else:
+        for rel in left:
+            failures.append(f"recorded file {rel}")
+            failed.add(rel)
     if pack.setup is not None:
-        _remove_setup_outputs(play_dir, pack, list(pack.setup.writes))
+        _, output_failures = _take_out_setup_outputs(play_dir, pack, list(pack.setup.writes))
+        for failure in output_failures:
+            failures.append(failure)
+            failed.add(failure.split(" (", 1)[0])
+        for rel in pack.setup.writes:
+            if rel in failed:
+                continue
+            try:
+                if (play_dir / rel).is_file():
+                    failures.append(f"setup output {rel}")
+            except OSError:
+                continue
+    if failures:
+        raise PackError(
+            f"{pack.label} is still partly in the ready-to-play client: "
+            + "; ".join(failures)
+            + ". The next Play tries again."
+        )
 
 
 # --- Remove ----------------------------------------------------------------------------------

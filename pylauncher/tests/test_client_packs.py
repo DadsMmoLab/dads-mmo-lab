@@ -3672,6 +3672,237 @@ def test_a_missing_setup_exe_is_rolled_back_before_it_raises(
     rig.untouched()
 
 
+def test_setup_persists_the_pending_note_before_the_first_run(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Item 1: the caller writes the pending note before the first exe launch.
+
+    The runner lays `lampdata.bin` then dies with `KeyboardInterrupt` (a kill);
+    the `on_pending` callback must already hold the note naming both outputs,
+    and the next Play with that recorded note cleans the leftover and succeeds.
+    """
+    monkeypatch.setattr(client_packs.platform, "detect", lambda: "windows")
+    pack, entry = _install_lumen(rig)
+    pending_calls: list[dict[str, Any]] = []
+    kill = KeyboardInterrupt()
+
+    def killer(argv: list[str], *, cwd: Path, timeout: float | None = None) -> Any:
+        (cwd / "lampdata.bin").write_bytes(b"half a run")
+        raise kill
+
+    with pytest.raises(KeyboardInterrupt):
+        client_packs.run_setup(
+            rig.play, pack, entry, game=GAME, server_dir=rig.server,
+            runner=killer, on_pending=pending_calls.append,
+        )
+
+    assert len(pending_calls) == 1, "the note is persisted before the first launch"
+    assert pending_calls[0].get("setup_pending") == ["lampdata.bin", "liquiddata.bin"]
+    assert (rig.play / "lampdata.bin").is_file(), "the kill left its output behind"
+
+    seen: list[list[str]] = []
+    done = client_packs.run_setup(
+        rig.play, pack, pending_calls[0], game=GAME, server_dir=rig.server,
+        runner=_run_with(
+            rig.play,
+            _Outcome(writes=[{"lampdata.bin": b"lamps"}, {"liquiddata.bin": b"water"}]),
+            seen=seen,
+        ),
+    )
+
+    assert len(seen) == 2, "the stale output is removed, then the runs go ahead"
+    assert done["files"]["lampdata.bin"] == _sha(b"lamps")
+    assert "setup_pending" not in done
+    assert (rig.play / "lampdata.bin").read_bytes() == b"lamps"
+
+
+def test_setup_without_the_pending_callback_still_runs_but_leaves_no_note(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Item 1 guard: the callback is the persistence; without it nothing persists.
+
+    Removing the `on_pending=` argument must leave no trace of the note on the
+    entry that survives: this test fails if the persist call is deleted from
+    `run_setup` rather than merely unwired here.
+    """
+    monkeypatch.setattr(client_packs.platform, "detect", lambda: "windows")
+    pack, entry = _install_lumen(rig)
+
+    def killer(argv: list[str], *, cwd: Path, timeout: float | None = None) -> Any:
+        raise KeyboardInterrupt()
+
+    with pytest.raises(KeyboardInterrupt):
+        client_packs.run_setup(
+            rig.play, pack, entry, game=GAME, server_dir=rig.server, runner=killer
+        )
+
+    assert "setup_pending" not in entry, "the input entry is never mutated with the note"
+
+
+def test_a_missing_setup_exe_never_reaches_the_runner(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Item 2: the exe is deleted BEFORE `run_setup`; the runner never launches.
+
+    `seen == []` proves nothing launched, and the raise goes through
+    `_rollback_setup` (the companion trap test below fails if that call is
+    ever deleted).
+    """
+    monkeypatch.setattr(client_packs.platform, "detect", lambda: "windows")
+    pack, entry = _install_lumen(rig)
+    (rig.play / "Lumenveil" / "lamp_extract.exe").unlink()
+    seen: list[list[str]] = []
+
+    with pytest.raises(PackError, match="is not there"):
+        client_packs.run_setup(
+            rig.play, pack, entry, game=GAME, server_dir=rig.server,
+            runner=_run_with(rig.play, _Outcome(), seen=seen),
+        )
+
+    assert seen == [], "the missing exe never launches"
+    assert not (rig.play / "version.dll").exists(), "the pack goes though nothing ran"
+    rig.untouched()
+
+
+def test_a_missing_setup_exe_without_its_rollback_call_leaves_the_pack(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Item 2 trap: the exe-missing check must go through `_rollback_setup`.
+
+    `_rollback_setup` patched to raise proves the call is on the path: without
+    that call nothing raises here and the pack is left behind in silence.
+    """
+    monkeypatch.setattr(client_packs.platform, "detect", lambda: "windows")
+    pack, entry = _install_lumen(rig)
+    (rig.play / "Lumenveil" / "lamp_extract.exe").unlink()
+    seen: list[list[str]] = []
+
+    calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    def spy(*args: Any, **kwargs: Any) -> None:
+        calls.append((args, kwargs))
+
+    monkeypatch.setattr(client_packs, "_rollback_setup", spy)
+
+    with pytest.raises(PackError, match="is not there"):
+        client_packs.run_setup(
+            rig.play, pack, entry, game=GAME, server_dir=rig.server,
+            runner=_run_with(rig.play, _Outcome(), seen=seen),
+        )
+
+    assert seen == [], "nothing launches when the exe is gone"
+    assert len(calls) == 1, "the missing-exe check rolls back before it raises"
+
+
+def test_run_child_uses_shared_creationflags_cwd_timeout_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Item 3: `_run_child` goes through `runner.child_env/creationflags`."""
+    import subprocess as _subprocess
+
+    calls: dict[str, Any] = {}
+
+    def fake_run(argv: Any, **kwargs: Any) -> Any:
+        calls.update(kwargs)
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(_subprocess, "run", fake_run)
+    from yulon import runner as _runner
+
+    monkeypatch.setattr(_runner, "child_env", lambda env=None: {"X": "1"})
+    monkeypatch.setattr(_runner, "creationflags", lambda: 12345)
+
+    client_packs._run_child(["lamp_extract.exe", "--background"], cwd=tmp_path, timeout=7.5)
+
+    assert calls["creationflags"] == 12345
+    assert calls["cwd"] == str(tmp_path)
+    assert calls["timeout"] == 7.5
+    assert calls["env"] == {"X": "1"}
+    assert calls["capture_output"] is True and calls["text"] is True
+
+
+def test_a_failed_remove_attempts_every_output_and_names_the_leftover(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Item 4: one undeletable output does not spare the other; the error names it."""
+    monkeypatch.setattr(client_packs.platform, "detect", lambda: "windows")
+    pack, entry = _install_lumen(rig)
+    (rig.play / "lampdata.bin").write_bytes(b"lamps")
+    (rig.play / "liquiddata.bin").write_bytes(b"water")
+    real_delete = client_packs._delete_own
+
+    def refuse_lamps(rel: str, path: Path) -> None:
+        if rel == "lampdata.bin":
+            raise OSError(errno.EACCES, "Permission denied", os.fspath(path))
+        real_delete(rel, path)
+
+    monkeypatch.setattr(client_packs, "_delete_own", refuse_lamps)
+
+    with pytest.raises(PackError) as caught:
+        client_packs._remove_setup_outputs(
+            rig.play, pack, ["lampdata.bin", "liquiddata.bin"]
+        )
+
+    assert not (rig.play / "liquiddata.bin").exists(), "the other output still goes"
+    assert (rig.play / "lampdata.bin").is_file(), "the refused output stays"
+    assert "lampdata.bin" in str(caught.value), "the error names the leftover"
+
+
+def test_a_failed_setup_rolls_everything_back_and_never_claims_success(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Item 4: `_fail_setup` says what is left and that the next Play retries."""
+    monkeypatch.setattr(client_packs.platform, "detect", lambda: "windows")
+    pack, entry = _install_lumen(rig)
+    seen: list[list[str]] = []
+    runner = _run_with(
+        rig.play,
+        _Outcome(code=3, writes=[{"lampdata.bin": b"lamps"}, {"liquiddata.bin": b"water"}]),
+        seen=seen,
+    )
+
+    with pytest.raises(PackError) as caught:
+        client_packs.run_setup(
+            rig.play, pack, entry, game=GAME, server_dir=rig.server, runner=runner
+        )
+
+    message = str(caught.value)
+    assert "was taken out again" not in message, "no claim the pack went"
+    assert "Nothing of it stayed" in message, "the rollback left nothing unreported"
+    assert "next Play" in message
+    assert not (rig.play / "lampdata.bin").exists()
+    assert not (rig.play / "liquiddata.bin").exists()
+    assert not (rig.play / "version.dll").exists()
+
+
+def test_a_non_zero_exit_quotes_the_last_output_lines(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Item 5: the non-zero-exit refusal quotes the exe's last ~10 output lines."""
+    monkeypatch.setattr(client_packs.platform, "detect", lambda: "windows")
+    pack, entry = _install_lumen(rig)
+    lines = [f"lamp line {n}" for n in range(1, 16)]
+    seen: list[list[str]] = []
+
+    def noisy(argv: list[str], *, cwd: Path, timeout: float | None = None) -> Any:
+        seen.append(list(argv))
+        return types.SimpleNamespace(
+            returncode=3, stdout="\n".join(lines), stderr="darker\nstill darker"
+        )
+
+    with pytest.raises(PackError) as caught:
+        client_packs.run_setup(
+            rig.play, pack, entry, game=GAME, server_dir=rig.server, runner=noisy
+        )
+
+    message = str(caught.value)
+    assert "code 3" in message
+    assert "lamp line 8" in message and "lamp line 15" in message
+    assert "lamp line 7" not in message, "only the last ~10 lines are quoted"
+    assert "still darker" in message
+    rig.untouched()
+
+
 def test_a_changed_setup_exe_refuses_and_rolls_back(
     rig: _Rig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
