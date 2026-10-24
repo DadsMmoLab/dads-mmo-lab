@@ -45,6 +45,7 @@ import os
 import re
 import shutil
 import stat
+import subprocess
 import time
 import urllib.error
 import urllib.parse
@@ -281,6 +282,17 @@ _FROM_SOURCES = (
 )
 
 
+def mismatch_advice(pack: ClientPack) -> str:
+    """Who to blame when `pack` does not match its published checksum: its own makers.
+
+    The default is the old line about the server's makers, kept word for word so
+    the HD packs read as before. The plan (step 6) pins Lumenveil's own line.
+    """
+    if "lumenveil" in pack.id.casefold():
+        return "Try again; if it happens again, Lumenveil's makers have changed the file."
+    return _RETRY
+
+
 Expected = tuple[str, str]
 """`("sha256" | "md5", hex)`: what a file must hash to, from the catalog or the checkout."""
 
@@ -297,7 +309,7 @@ def _pinned(pack: ClientPack) -> Expected | None:
 def _prove(
     pack: ClientPack,
     path: Path,
-    advice: str = _RETRY,
+    advice: str | None = None,
     *,
     expected: Expected | None = None,
     cancelled: Callable[[], bool] = _never,
@@ -306,7 +318,9 @@ def _prove(
 
     `expected` is the checksum to hold the file to; by default the one the
     catalog pins (a checkout pack whose md5 is read from the checkout passes it
-    in, `_expected_from_checkout`).
+    in, `_expected_from_checkout`). `advice` is who to blame on a mismatch; by
+    default the pack's own line (`mismatch_advice`), so Lumenveil names its own
+    makers and the HD packs keep the old line about the server's makers.
 
     Raises `PackError` and leaves the file where it is: the caller decides
     whether it may be deleted (a cache file may; a file of the server's own
@@ -318,9 +332,10 @@ def _prove(
         kind, expected_hex = want
         actual = sha256 if kind == "sha256" else md5
         if actual != expected_hex.lower():
+            line = advice if advice is not None else mismatch_advice(pack)
             raise PackError(
                 f"{pack.label} does not match its published checksum ({actual[:12]}… instead "
-                f"of {expected_hex[:12]}…), so Yu'lon did not use it. {advice}"
+                f"of {expected_hex[:12]}…), so Yu'lon did not use it. {line}"
             )
         return sha256
     try:
@@ -866,6 +881,23 @@ def _refuse_unlisted(pack: ClientPack, url: str, allowed_hosts: frozenset[str]) 
 _GONE = frozenset({404, 410})
 
 
+def unavailable_line(pack: ClientPack, url: str, code: int) -> str:
+    """What the player reads when the pack's address no longer has it (404/410).
+
+    The default is the old line about the server's site, kept word for word so
+    the HD packs read as before. The plan (step 6) pins Lumenveil's own line.
+    """
+    if "lumenveil" in pack.id.casefold():
+        return (
+            f"{pack.label} is unavailable: its download page no longer has this version "
+            f"(HTTP {code} for {url}). Try again later."
+        )
+    return (
+        f"{pack.label} is not available from the server's site right now (HTTP {code} "
+        f"for {url}). Try again later."
+    )
+
+
 def _request(
     pack: ClientPack,
     opener: Opener,
@@ -880,7 +912,9 @@ def _request(
     try:
         response = opener(url, watcher, method=method, headers=headers, hosts=hosts)
     except urllib.error.HTTPError as exc:
-        raise (PackUnavailable if exc.code in _GONE else PackError)(
+        if exc.code in _GONE:
+            raise PackUnavailable(unavailable_line(pack, url, exc.code)) from exc
+        raise PackError(
             f"{pack.label} is not available from the server's site right now (HTTP {exc.code} "
             f"for {url}). Try again later."
         ) from exc
@@ -893,7 +927,9 @@ def _request(
         ) from exc
     if not 200 <= response.status < 300:
         _close(response)
-        raise (PackUnavailable if response.status in _GONE else PackError)(
+        if response.status in _GONE:
+            raise PackUnavailable(unavailable_line(pack, url, response.status))
+        raise PackError(
             f"{pack.label} is not available from the server's site right now (HTTP "
             f"{response.status} for {url}). Try again later."
         )
@@ -1502,12 +1538,98 @@ def _behind_a_link(play_dir: Path, rel: PurePosixPath) -> bool:
     return False
 
 
-def wanted(client: Any, choices: Mapping[str, Any]) -> tuple[ClientPack, ...]:
-    """Every required pack, and each optional one switched on (its `default` where unchosen)."""
+def offered_on(platform_id: str | None = None) -> str:
+    """The platform id `wanted` holds packs against: given, or this machine's.
+
+    A seam, so a test can ask what linux, macOS and Windows are each shown
+    without being there.
+    """
+    return platform_id if platform_id is not None else platform.detect()
+
+
+def wanted(
+    client: Any,
+    choices: Mapping[str, Any],
+    platform_id: str | None = None,
+) -> tuple[ClientPack, ...]:
+    """Every required pack, and each optional one switched on (its `default` where unchosen).
+
+    Only packs the catalog offers on this machine (`pack.platforms`, empty
+    meaning every platform): a Windows-only pack (Lumenveil: its setup exe runs
+    on the player's machine) is never shown nor installed elsewhere. Removing
+    is separate from `wanted`: `controller_view` still removes a recorded pack
+    through 1a when its platform hid it again, so `remove` needs no filter.
+    """
+    here = offered_on(platform_id)
     chosen = _bool_map(choices.get("packs"))
     return tuple(
-        pack for pack in client.packs if not pack.optional or chosen.get(pack.id, pack.default)
+        pack
+        for pack in client.packs
+        if (not pack.platforms or here in pack.platforms)
+        and (not pack.optional or chosen.get(pack.id, pack.default))
     )
+
+
+_LOADER = "version.dll"
+"""The mod loader: only one of them can sit beside Wow.exe, so a foreign one refuses (D7)."""
+
+
+def foreign_files(
+    play_dir: Path, pack: ClientPack, record: Mapping[str, Any] | None
+) -> tuple[str, ...]:
+    """A `version.dll` in the ready-to-play copy this pack did not put there.
+
+    The install step asks this BEFORE fetching, so a foreign loader refuses with
+    the plan's version.dll line and nothing of the pack is fetched, installed or
+    touched. `d3d9.dll` (DXVK, ReShade) loads beside any loader and is never an
+    answer; a `version.dll` this pack's own record names is this pack's, not
+    foreign. Compared case-insensitively (`VERSION.DLL` on a Windows copy), and
+    only the copy's top-level names: the loader sits beside Wow.exe. Nothing is
+    written.
+    """
+    own = set()
+    files = record.get("files") if isinstance(record, Mapping) else None
+    if isinstance(files, dict):
+        for rel in files:
+            clean = _clean_rel(rel)
+            if clean is not None:
+                own.add(clean.as_posix().casefold())
+    found: list[str] = []
+    try:
+        children = sorted(play_dir.iterdir())
+    except OSError:
+        return ()
+    for child in children:
+        if child.name.casefold() != _LOADER:
+            continue
+        try:
+            if play_client._is_link(child) or not child.is_file():
+                continue
+        except OSError:
+            continue
+        here = PurePosixPath(child.name)
+        on_disk = client_names.on_disk(play_dir, here).as_posix()
+        if on_disk.casefold() in own or here.as_posix().casefold() in own:
+            continue
+        found.append(on_disk)
+    return tuple(found)
+
+
+def refuse_foreign_loader(
+    play_dir: Path, pack: ClientPack, record: Mapping[str, Any] | None
+) -> None:
+    """Refuse when `foreign_files` finds a loader another mod put in the copy.
+
+    The plan's own words (a player line: no command, no `.cmd` name): take the
+    other mod out of the player's own client, or leave this pack off. Nothing
+    is fetched, installed or touched from here: the caller raises before that.
+    """
+    if foreign_files(play_dir, pack, record):
+        raise PackError(
+            f"{pack.label} was not installed: this client already has another mod's "
+            "version.dll, and only one can be loaded. Take that mod out of your "
+            "own client, or leave Lumenveil off."
+        )
 
 
 def _gate(play_dir: Path, *, game: str, server_dir: Path, what: str) -> None:
@@ -2111,13 +2233,45 @@ def _install(
             },
             **files,
         }
+    dirs = [path.relative_to(play_dir).as_posix() for path in _created_dirs(made, play_dir)]
+    if only_missing:
+        # A repair writes into folders that are already there: the record keeps
+        # the folders the first install made, so off still removes what is empty.
+        kept_dirs = previous.get("dirs") if previous else None
+        dirs = list(dict.fromkeys(
+            ([str(rel) for rel in kept_dirs] if isinstance(kept_dirs, list) else []) + dirs
+        ))
     entry: dict[str, Any] = {"version": fetched.version, "sha256": fetched.sha256, "files": files}
+    if dirs:
+        entry["dirs"] = dirs
     left = _drop_old(play_dir, drops)
     if left:
         entry["left_behind"] = left
     logger.info("client-packs: installed %s into %s (%d files)", pack.id, play_dir, len(files))
     _prune_after_install(pack, fetched, server_dir)
     return entry
+
+
+def _created_dirs(made: list[Path], play_dir: Path) -> list[Path]:
+    """The folders `made` that are still folders of this copy, outermost first, deduped.
+
+    `_make_dirs` answers absolute paths, outermost first per target but
+    repeated across targets; the record wants each created folder once, as a
+    relative POSIX path. A folder that stopped being a folder (a file won the
+    name since) is not one anything may remove later, so it is left out here.
+    """
+    seen: set[str] = set()
+    found: list[Path] = []
+    for path in made:
+        try:
+            rel = path.relative_to(play_dir).as_posix()
+        except ValueError:
+            continue
+        if rel in seen:
+            continue
+        seen.add(rel)
+        found.append(path)
+    return found
 
 
 def _drops(
@@ -2213,6 +2367,244 @@ def _prune_after_install(pack: ClientPack, fetched: Fetched, server_dir: Path) -
                 _remove_tree(child)
     except OSError:
         return
+
+
+# --- Setup (a pack's own exe, run once in the ready-to-play copy) ---------------------------
+
+Runner = Callable[..., object]
+"""What runs the setup exe: `(argv, *, cwd) ->` a completed process. The default
+runs it for real (`_run_child`); tests hand a fake that answers canned exits."""
+
+
+def _run_child(
+    argv: list[str], *, cwd: Path, timeout: float | None
+) -> subprocess.CompletedProcess[str]:
+    """Run `argv` in `cwd`, bounded by `timeout`, with the child's own clean env.
+
+    No shell, no cmd.exe: the pinned exe runs directly (plan D6). `env` is the
+    repo's `runner.child_env` where it exists (the suite's own child guard), or
+    `None` (inherit) elsewhere.
+    """
+    from yulon import runner as _runner
+
+    make_env = getattr(_runner, "child_env", None)
+    return subprocess.run(
+        argv,
+        cwd=str(cwd),
+        env=make_env(None) if callable(make_env) else None,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+
+
+def _setup_exe_path(play_dir: Path, pack: ClientPack) -> Path:
+    """Where the setup exe must be: the `setup.run` member, as installed in the copy.
+
+    The exe is run by the name the install wrote, not by the member spelling:
+    the copy may spell a folder in another case (T227). A member the install
+    never laid (an install rule without it) refuses here rather than running
+    something else.
+    """
+    assert pack.setup is not None  # the only caller checks
+    clean = _clean_rel(pack.setup.run)
+    if clean is None:
+        raise PackError(
+            f"{pack.label}: its setup names {pack.setup.run!r}, which is outside the "
+            "ready-to-play client, so nothing was run."
+        )
+    path = play_dir / Path(*client_names.on_disk(play_dir, clean).parts)
+    here = play_dir
+    for part in client_names.on_disk(play_dir, clean).parts[:-1]:
+        here = here / part
+        if play_client._is_link(here):
+            raise PackError(
+                f"{here} is a link to another folder, so {pack.label}'s setup was not run "
+                "there: running there could change your own WoW client. Make the "
+                "ready-to-play client again from the server's Client settings."
+            )
+    return path
+
+
+def setup_needed(play_dir: Path, pack: ClientPack, record: Mapping[str, Any] | None) -> bool:
+    """Must `run_setup` run: an output missing, or the pack changed since it ran.
+
+    No setup: never. An output missing (deleted, edited, never written): yes.
+    Otherwise the pack's sha256 beside the record's: a changed pack means a new
+    light/water build; the same bytes mean the outputs still stand. A record
+    with no sha256 (before this row) runs once, then records, then stays quiet.
+    Nothing is written here: the caller runs and records.
+    """
+    if pack.setup is None:
+        return False
+    files = record.get("files") if isinstance(record, Mapping) else None
+    recorded = files if isinstance(files, dict) else {}
+    setup = record.get("setup") if isinstance(record, Mapping) else None
+    recorded_setup = setup if isinstance(setup, dict) else {}
+    for rel in pack.setup.writes:
+        clean = _clean_rel(rel)
+        if clean is None:
+            return True
+        path = play_dir / Path(*clean.parts)
+        try:
+            if not path.is_file() or play_client._is_link(path):
+                return True
+        except OSError:
+            return True
+        want = recorded_setup.get(clean.as_posix())
+        if not isinstance(want, str):
+            return True
+        try:
+            if _file_sha256(path) != want or recorded.get(clean.as_posix()) != want:
+                return True
+        except OSError:
+            return True
+    # The pack's bytes are what the install recorded (`entry["sha256"]` is the
+    # fetched zip's hash): same record in, same outputs present, nothing to do.
+    # A changed pack reaches here as a NEW entry (a new install wrote it), whose
+    # `"setup"` no longer matches its outputs, and runs again above.
+    return False
+
+
+def run_setup(
+    play_dir: Path,
+    pack: ClientPack,
+    entry: dict[str, Any],
+    *,
+    game: str,
+    server_dir: Path,
+    runner: Runner | None = None,
+    record: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Run the pack's setup exe in the ready-to-play copy; the record entry with its outputs.
+
+    Only when `setup_needed` says so (an output missing, or the pack's sha256
+    changed): otherwise the entry is returned as it is. Runs `[setup.run,
+    *setup.args]` with cwd the copy, Windows only (hidden off Windows: refused
+    here, so a copy carried across machines never runs it elsewhere), through
+    the injected `runner` seam (default `_run_child`: no shell, bounded by
+    `setup.timeout_seconds`). The exe path must resolve inside the copy
+    (resolved and compared): an escaping `setup.run` refuses and nothing runs.
+
+    The outputs (`setup.writes`) are then hashed into the record (`"setup":
+    `{rel: sha256}`), and join `"files"` so `remove` deletes them by hash like
+    every other file. Failure modes, each with the plan's own plain line (no
+    command, no `.cmd` name), and each rolling the pack back first (D4: `remove`
+    deletes all its recorded files, setup or not): non-zero exit (code N),
+    timeout ("took longer than 15 minutes"), cannot start (reason), output
+    missing after exit 0. Nothing runs and nothing is written when the platform
+    is not Windows; the only writes are the hashed outputs' record (the caller
+    writes it) and the exe's own files in the copy.
+    """
+    _gate(play_dir, game=game, server_dir=server_dir, what=f"the setup of {pack.label}")
+    if pack.setup is None:
+        return entry
+    if platform.detect() != "windows":
+        return entry
+    if not setup_needed(play_dir, pack, entry if record is None else record):
+        return entry
+    exe = _setup_exe_path(play_dir, pack)
+    try:
+        resolved = exe.resolve()
+        inside = play_dir.resolve()
+    except OSError as exc:
+        raise _write_refusal(pack.label, exc) from exc
+    if resolved != inside and inside not in resolved.parents:
+        raise PackError(
+            f"{pack.label}'s setup names {pack.setup.run!r}, which is outside the "
+            "ready-to-play client, so nothing was run."
+        )
+    if play_client._is_link(exe) or not exe.is_file():
+        raise PackError(
+            f"{pack.label}'s setup could not be started ({exe.name} is not there), so "
+            f"{pack.label} was taken out again."
+        )
+    run = _run_child if runner is None else runner
+    argv = [os.fspath(exe), *pack.setup.args]
+    try:
+        done = run(argv, cwd=play_dir, timeout=float(pack.setup.timeout_seconds))
+    except subprocess.TimeoutExpired as exc:
+        _rollback_setup(play_dir, pack, entry, game=game, server_dir=server_dir)
+        raise PackError(
+            f"{pack.label}'s setup took longer than 15 minutes, so {pack.label} was taken "
+            "out again. Press Play to try again, or play without it."
+        ) from exc
+    except OSError as exc:
+        _rollback_setup(play_dir, pack, entry, game=game, server_dir=server_dir)
+        raise PackError(
+            f"{pack.label}'s setup could not be started ({exc.strerror or exc}), so "
+            f"{pack.label} was taken out again."
+        ) from exc
+    except Exception as exc:
+        if isinstance(exc, PackError):
+            raise
+        _rollback_setup(play_dir, pack, entry, game=game, server_dir=server_dir)
+        raise PackError(
+            f"{pack.label}'s setup could not be started ({exc}), so {pack.label} was "
+            "taken out again."
+        ) from exc
+    code = getattr(done, "returncode", 0)
+    if code is None:
+        code = 0
+    if int(code) != 0:
+        _rollback_setup(play_dir, pack, entry, game=game, server_dir=server_dir)
+        raise PackError(
+            f"{pack.label}'s setup stopped before it finished (code {int(code)}), so "
+            f"{pack.label} was taken out again. Press Play to try again, or play without it."
+        )
+    try:
+        hashed = _hash_setup_outputs(play_dir, pack)
+    except PackError:
+        _rollback_setup(play_dir, pack, entry, game=game, server_dir=server_dir)
+        raise
+    setup_map = {rel: sha for rel, sha in hashed.items()}
+    files = dict(entry.get("files") if isinstance(entry.get("files"), dict) else {})
+    files.update(setup_map)
+    return {**entry, "files": files, "setup": setup_map}
+
+
+def _hash_setup_outputs(play_dir: Path, pack: ClientPack) -> dict[str, str]:
+    """Hash the setup outputs now in the copy; refuse a missing one (exit 0 anyway).
+
+    A read, not a write (the ledger says so): the exe wrote the bytes, this
+    only proves them into the record. `remove` deletes them by hash like every
+    other file, and only them: spots (`CoAVolFog-spots*`) are never outputs, so
+    off never touches them, while `CoAVolFog.log` goes via `remove_when_off`.
+    """
+    assert pack.setup is not None  # the only caller checks
+    found: dict[str, str] = {}
+    for rel in pack.setup.writes:
+        clean = _clean_rel(rel)
+        if clean is None:
+            raise PackError(
+                f"{pack.label}'s setup names {rel!r}, which is outside the ready-to-play "
+                f"client, so {pack.label} was taken out again."
+            )
+        path = play_dir / Path(*clean.parts)
+        try:
+            if play_client._is_link(path) or not path.is_file():
+                raise PackError(
+                    f"{pack.label}'s setup finished but its {clean.as_posix()} is not there, "
+                    f"so {pack.label} was taken out again. Press Play to try again, or play "
+                    "without it."
+                )
+            found[clean.as_posix()] = _file_sha256(path)
+        except OSError as exc:
+            raise _write_refusal(pack.label, exc) from exc
+    return found
+
+
+def _rollback_setup(
+    play_dir: Path, pack: ClientPack, entry: Mapping[str, Any], *, game: str, server_dir: Path
+) -> None:
+    """Take the pack back out after its setup failed (D4): all its recorded files go.
+
+    Only names the record lists (plus `remove_when_off`): never the player's
+    own files, never anything the folder check refuses. A rollback that itself
+    fails keeps the first error: what stayed is still recorded by the caller.
+    """
+    with contextlib.suppress(PackError, OSError):
+        remove(play_dir, entry, pack, game=game, server_dir=server_dir)
 
 
 # --- Remove ----------------------------------------------------------------------------------
@@ -2332,9 +2724,51 @@ def _remove(
             removed.append(path)
     for path in removed:
         _remove_empty_parents(play_dir, path)
+    _remove_recorded_dirs(play_dir, rec_entry)
     if left:
         logger.warning("client-packs: left %s, which was edited since it was installed", left)
     return tuple(sorted(left))
+
+
+def _remove_recorded_dirs(play_dir: Path, rec_entry: Mapping[str, Any]) -> None:
+    """Remove the empty folders this pack's install created (`"dirs"` in its record).
+
+    Only folders the record names, only when empty (`rmdir` refuses anything
+    else), only below the copy, and never through a link: a folder holding an
+    edited file, a spots folder the game wrote, or `Data`/`Interface` (never
+    recorded, since the copy already has them) all stay. This is what takes the
+    emptied `Lumenveil/` folder `_KEEP_DEPTH` leaves behind.
+    """
+    dirs = rec_entry.get("dirs")
+    if not isinstance(dirs, list):
+        return
+    # Deepest first, so an emptied `Lumenveil/licenses` goes before `Lumenveil/`.
+    rels = sorted(
+        {rel for rel in dirs if isinstance(rel, str)},
+        key=lambda rel: (rel.count("/"), rel),
+        reverse=True,
+    )
+    for rel in rels:
+        clean = _clean_rel(rel)
+        if clean is None or clean.name.startswith(_PROTECTED):
+            continue
+        # The copy's own name as the disk spells it, whatever case that is.
+        here = play_dir
+        try:
+            spelled = client_names.on_disk(play_dir, clean)
+        except OSError:
+            continue
+        for part in spelled.parts:
+            here = here / part
+            try:
+                if play_client._is_link(here):
+                    break
+            except OSError:
+                break
+        else:
+            with contextlib.suppress(OSError):
+                here.rmdir()
+            continue
 
 
 def _remove_empty_parents(play_dir: Path, path: Path) -> None:

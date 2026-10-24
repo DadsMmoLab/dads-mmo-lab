@@ -2813,6 +2813,12 @@ def test_a_folder_pack_installs_byte_for_byte_and_keeps_the_players_own_addons(
         "version": None,
         "sha256": fetched.sha256,
         "files": {f"Interface/AddOns/{name}": _sha(data) for name, data in FOLDER_FILES.items()},
+        "dirs": [
+            "Interface/AddOns/UnboundSpellbook",
+            "Interface/AddOns/multiclass-resources",
+            "Interface/AddOns/multiclass-talents-ui",
+            "Interface/AddOns/multiclass-talents-ui/Art",
+        ],
     }
     assert own.read_bytes() == b"## Title: Questie\n", "the player's own addon was touched"
     assert (addons / "Blizzard_Own" / "x.toc").exists()
@@ -3143,3 +3149,441 @@ def test_a_recorded_file_missing_from_the_client_is_reported(rig: _Rig) -> None:
     assert client_packs.recorded_files_missing(rig.play, entry) == ()
     junk = {**entry, "files": {"../outside": "0" * 64}}
     assert client_packs.recorded_files_missing(rig.play, junk) == (), "a bad name is not a file"
+# -- T809 W3 (Lumenveil engine) ------------------------------------------------------------
+
+
+def _lumen_pack(**extra: Any) -> ClientPack:
+    """A Windows-only Lumenveil-shaped pack: the setup exe installed, two outputs."""
+    base: dict[str, Any] = {
+        "id": "lumenveil",
+        "label": "Lumenveil",
+        "source": {"kind": "url", "url": ZIP_URL},
+        "sha256": "1" * 64,
+        "install": [
+            {"member": "version.dll", "to": "version.dll"},
+            {"member": "Lumenveil/lamp_extract.exe", "to": "Lumenveil/lamp_extract.exe"},
+        ],
+        "optional": True,
+        "platforms": ["windows"],
+        "setup": {
+            "run": "Lumenveil/lamp_extract.exe",
+            "args": ["--background"],
+            "writes": ["lampdata.bin", "liquiddata.bin"],
+            "timeout_seconds": 900,
+        },
+    }
+    base.update(extra)
+    return ClientPack.model_validate(base)
+
+
+def _lumen_fetched(rig: _Rig, members: Mapping[str, bytes]) -> client_packs.Fetched:
+    return rig.fetched(members, name="lumen.zip")
+
+
+class _Outcome:
+    """A canned setup run: what the fake runner answers (exit code, or a raise)."""
+
+    def __init__(self, code: int = 0, *, writes: Mapping[str, bytes] | None = None) -> None:
+        self.code = code
+        self.writes = dict(writes or {})
+
+
+def _run_with(
+    play: Path,
+    outcome: _Outcome | BaseException,
+    *,
+    seen: list[list[str]],
+    missing_exe: bool = False,
+) -> Any:
+    """A fake `runner` seam: records argv, lays the canned outputs, answers the code."""
+
+    def fake(argv: list[str], *, cwd: Path, timeout: float | None = None) -> Any:
+        seen.append(list(argv))
+        assert cwd == play, "setup runs with the ready-to-play copy as its cwd"
+        assert timeout == 900, "bounded by the catalog's timeout"
+        assert argv[0].endswith("lamp_extract.exe"), argv
+        assert argv[1:] == ["--background"], argv
+        assert os.fspath(play) in os.fspath(argv[0]), "the installed exe runs, not a stray path"
+        if isinstance(outcome, BaseException):
+            raise outcome
+        for rel, data in outcome.writes.items():
+            if not missing_exe:
+                (cwd / rel).write_bytes(data)
+        return types.SimpleNamespace(returncode=outcome.code, stdout="", stderr="")
+
+    return fake
+
+
+def _install_lumen(rig: _Rig) -> tuple[ClientPack, dict[str, Any]]:
+    pack = _lumen_pack()
+    entry = rig.install(
+        pack, _lumen_fetched(rig, {"version.dll": b"v", "Lumenveil/lamp_extract.exe": b"exe"})
+    )
+    return pack, entry
+
+
+def test_wanted_hides_a_windows_only_pack_on_linux_and_macos(rig: _Rig) -> None:
+    pack = _lumen_pack()
+    client = _client_with(WORLD, pack)
+
+    assert [p.id for p in client_packs.wanted(client, {"packs": {"lumenveil": True}})] == ["p"]
+    assert [p.id for p in client_packs.wanted(client, {}, platform_id="linux")] == ["p"]
+    assert [p.id for p in client_packs.wanted(client, {}, platform_id="macos")] == ["p"]
+    assert [
+        p.id
+        for p in client_packs.wanted(
+            client, {"packs": {"lumenveil": True}}, platform_id="windows"
+        )
+    ] == ["p", "lumenveil"]
+
+
+def test_wanted_still_hides_an_unwanted_pack_on_windows(rig: _Rig) -> None:
+    pack = _lumen_pack()
+    client = _client_with(WORLD, pack)
+
+    assert [
+        p.id
+        for p in client_packs.wanted(
+            client, {"packs": {"lumenveil": True}}, platform_id="windows"
+        )
+    ] == ["p", "lumenveil"]
+    assert [
+        p.id
+        for p in client_packs.wanted(
+            client, {"packs": {"lumenveil": False}}, platform_id="windows"
+        )
+    ] == ["p"]
+
+
+def test_a_recorded_pack_on_a_now_hidden_platform_is_still_removable(rig: _Rig) -> None:
+    pack, entry = _install_lumen(rig)
+
+    left = client_packs.remove(rig.play, entry, pack, game=GAME, server_dir=rig.server)
+
+    assert left == ()
+    assert not (rig.play / "version.dll").exists()
+    rig.untouched()
+
+
+def test_a_foreign_version_dll_refuses_before_anything_is_fetched(rig: _Rig) -> None:
+    pack = _lumen_pack()
+    (rig.play / "version.dll").write_bytes(b"another mod's loader")
+    before = _snapshot(rig.play)
+
+    with pytest.raises(PackError, match="another mod's version.dll"):
+        client_packs.refuse_foreign_loader(rig.play, pack, None)
+
+    assert _snapshot(rig.play) == before
+    assert client_packs.foreign_files(rig.play, pack, None) == ("version.dll",)
+
+
+def test_a_version_dll_this_pack_installed_is_not_foreign(rig: _Rig) -> None:
+    pack, entry = _install_lumen(rig)
+
+    assert client_packs.foreign_files(rig.play, pack, entry) == ()
+    client_packs.refuse_foreign_loader(rig.play, pack, entry)
+
+
+def test_a_foreign_version_dll_in_another_case_still_refuses(rig: _Rig) -> None:
+    pack = _lumen_pack()
+    (rig.play / "VERSION.DLL").write_bytes(b"another mod's loader")
+
+    assert client_packs.foreign_files(rig.play, pack, None) == ("VERSION.DLL",)
+    with pytest.raises(PackError, match="another mod's version.dll"):
+        client_packs.refuse_foreign_loader(rig.play, pack, None)
+
+
+def test_a_d3d9_dll_is_never_refused_or_touched(rig: _Rig) -> None:
+    pack = _lumen_pack()
+    (rig.play / "d3d9.dll").write_bytes(b"reshade")
+    before = _snapshot(rig.play)
+
+    assert client_packs.foreign_files(rig.play, pack, None) == ()
+    client_packs.refuse_foreign_loader(rig.play, pack, None)
+
+    assert _snapshot(rig.play) == before
+
+
+def test_a_checksum_mismatch_names_lumenveils_own_makers(rig: _Rig) -> None:
+    with pytest.raises(PackError, match="Lumenveil's makers have changed the file"):
+        fetch_url(
+            _lumen_pack(sha256="0" * 64),
+            entry_id="centurion",
+            allowed_hosts=HOSTS,
+            opener=_site(_zip()),
+        )
+
+
+def test_a_checksum_mismatch_on_an_hd_pack_names_the_servers_makers() -> None:
+    with pytest.raises(PackError, match="the server's makers have changed the file"):
+        fetch_url(
+            _url_pack(sha256="0" * 64),
+            entry_id="centurion",
+            allowed_hosts=HOSTS,
+            opener=_site(_zip()),
+        )
+
+
+def test_a_404_names_lumenveils_download_page() -> None:
+    site = _Site({VERSION_URL: b"1.0"})
+    with pytest.raises(PackError, match="its download page no longer has this version"):
+        fetch_url(_lumen_pack(), entry_id="centurion", allowed_hosts=HOSTS, opener=site)
+
+
+def test_a_404_on_an_hd_pack_names_the_servers_site() -> None:
+    site = _Site({VERSION_URL: b"1.0"})
+    with pytest.raises(
+        PackError, match=r"not available from the server's site right now \(HTTP 404"
+    ):
+        fetch_url(_url_pack(), entry_id="centurion", allowed_hosts=HOSTS, opener=site)
+
+
+def test_setup_runs_once_then_stays_quiet(rig: _Rig, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(client_packs.platform, "detect", lambda: "windows")
+    pack, entry = _install_lumen(rig)
+    seen: list[list[str]] = []
+    outcome = _Outcome(writes={"lampdata.bin": b"lamps", "liquiddata.bin": b"water"})
+    runner = _run_with(rig.play, outcome, seen=seen)
+
+    done = client_packs.run_setup(
+        rig.play, pack, entry, game=GAME, server_dir=rig.server, runner=runner
+    )
+
+    assert len(seen) == 1, "the exe ran once"
+    assert done["setup"] == {
+        "lampdata.bin": _sha(b"lamps"),
+        "liquiddata.bin": _sha(b"water"),
+    }
+    assert done["files"]["lampdata.bin"] == _sha(b"lamps")
+    again = client_packs.run_setup(
+        rig.play, pack, done, game=GAME, server_dir=rig.server, runner=runner
+    )
+    assert len(seen) == 1, "the same bytes never run again"
+    assert again == done
+
+
+def test_setup_runs_again_when_an_output_is_missing(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(client_packs.platform, "detect", lambda: "windows")
+    pack, entry = _install_lumen(rig)
+    seen: list[list[str]] = []
+    runner = _run_with(
+        rig.play,
+        _Outcome(writes={"lampdata.bin": b"lamps", "liquiddata.bin": b"water"}),
+        seen=seen,
+    )
+    done = client_packs.run_setup(
+        rig.play, pack, entry, game=GAME, server_dir=rig.server, runner=runner
+    )
+    (rig.play / "liquiddata.bin").unlink()
+
+    client_packs.run_setup(rig.play, pack, done, game=GAME, server_dir=rig.server, runner=runner)
+
+    assert len(seen) == 2, "a missing output runs again"
+
+
+def test_setup_non_zero_exit_rolls_the_pack_back(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(client_packs.platform, "detect", lambda: "windows")
+    pack, entry = _install_lumen(rig)
+    seen: list[list[str]] = []
+    runner = _run_with(rig.play, _Outcome(code=3), seen=seen)
+
+    with pytest.raises(PackError, match=r"stopped before it finished \(code 3\)"):
+        client_packs.run_setup(
+            rig.play, pack, entry, game=GAME, server_dir=rig.server, runner=runner
+        )
+
+    assert not (rig.play / "version.dll").exists(), "a failed setup takes the pack out again"
+    assert not (rig.play / "Lumenveil" / "lamp_extract.exe").exists()
+    rig.untouched()
+
+
+def test_setup_timeout_rolls_the_pack_back(rig: _Rig, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(client_packs.platform, "detect", lambda: "windows")
+    pack, entry = _install_lumen(rig)
+    import subprocess as _subprocess
+
+    seen: list[list[str]] = []
+    runner = _run_with(rig.play, _subprocess.TimeoutExpired(cmd="x", timeout=900), seen=seen)
+
+    with pytest.raises(PackError, match="took longer than 15 minutes"):
+        client_packs.run_setup(
+            rig.play, pack, entry, game=GAME, server_dir=rig.server, runner=runner
+        )
+
+    assert not (rig.play / "version.dll").exists()
+    rig.untouched()
+
+
+def test_setup_that_cannot_start_rolls_the_pack_back(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(client_packs.platform, "detect", lambda: "windows")
+    pack, entry = _install_lumen(rig)
+    seen: list[list[str]] = []
+    runner = _run_with(rig.play, OSError(2, "No such file or directory"), seen=seen)
+
+    with pytest.raises(PackError, match="could not be started"):
+        client_packs.run_setup(
+            rig.play, pack, entry, game=GAME, server_dir=rig.server, runner=runner
+        )
+
+    assert not (rig.play / "version.dll").exists()
+    rig.untouched()
+
+
+def test_setup_missing_output_after_exit_zero_rolls_the_pack_back(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(client_packs.platform, "detect", lambda: "windows")
+    pack, entry = _install_lumen(rig)
+    seen: list[list[str]] = []
+    runner = _run_with(rig.play, _Outcome(), seen=seen)
+
+    with pytest.raises(PackError, match="is not there"):
+        client_packs.run_setup(
+            rig.play, pack, entry, game=GAME, server_dir=rig.server, runner=runner
+        )
+
+    assert not (rig.play / "version.dll").exists()
+    rig.untouched()
+
+
+def test_setup_exe_escaping_the_copy_refuses_and_installs_nothing(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The catalog refuses an escaping `setup.run`; the engine refuses one anyway."""
+    from yulon.catalog.catalog import PackSetup
+
+    monkeypatch.setattr(client_packs.platform, "detect", lambda: "windows")
+    valid = _lumen_pack()
+    pack = valid.model_copy(
+        update={
+            "setup": PackSetup.model_construct(
+                run="../outside.exe", args=(), writes=("lampdata.bin",), timeout_seconds=60
+            )
+        }
+    )
+    before = _snapshot(rig.play)
+
+    with pytest.raises(PackError, match="outside the ready-to-play client"):
+        client_packs.run_setup(
+            rig.play, pack, {"version": "v", "sha256": "0" * 64, "files": {}},
+            game=GAME, server_dir=rig.server,
+        )
+
+    assert _snapshot(rig.play) == before
+
+
+def test_setup_through_a_linked_folder_refuses_and_runs_nothing(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A `Lumenveil/` turned into a link after install: running through it could run
+    somebody else's exe, so the setup refuses instead (the install's own link rule)."""
+    import shutil as _shutil
+
+    monkeypatch.setattr(client_packs.platform, "detect", lambda: "windows")
+    pack, entry = _install_lumen(rig)
+    outside = rig.root / "evil"
+    outside.mkdir()
+    (outside / "lamp_extract.exe").write_bytes(b"somebody else's exe")
+    _shutil.rmtree(rig.play / "Lumenveil")
+    (rig.play / "Lumenveil").symlink_to(outside, target_is_directory=True)
+    seen: list[list[str]] = []
+
+    with pytest.raises(PackError, match="link to another folder"):
+        client_packs.run_setup(
+            rig.play, pack, entry, game=GAME, server_dir=rig.server,
+            runner=_run_with(rig.play, _Outcome(), seen=seen),
+        )
+
+    assert seen == [], "nothing runs through a link"
+    assert (outside / "lamp_extract.exe").read_bytes() == b"somebody else's exe"
+
+
+def test_setup_is_hidden_off_windows(rig: _Rig, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(client_packs.platform, "detect", lambda: "linux")
+    pack, entry = _install_lumen(rig)
+    seen: list[list[str]] = []
+
+    done = client_packs.run_setup(
+        rig.play, pack, entry, game=GAME, server_dir=rig.server,
+        runner=_run_with(rig.play, _Outcome(), seen=seen),
+    )
+
+    assert seen == [], "nothing runs off Windows"
+    assert done == entry
+
+
+def test_off_removes_setup_outputs_and_the_folders_the_pack_made(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(client_packs.platform, "detect", lambda: "windows")
+    pack, entry = _install_lumen(rig)
+    seen: list[list[str]] = []
+    runner = _run_with(
+        rig.play,
+        _Outcome(writes={"lampdata.bin": b"lamps", "liquiddata.bin": b"water"}),
+        seen=seen,
+    )
+    done = client_packs.run_setup(
+        rig.play, pack, entry, game=GAME, server_dir=rig.server, runner=runner
+    )
+    assert "dirs" in entry and "Lumenveil" in entry["dirs"], entry
+
+    left = client_packs.remove(rig.play, done, pack, game=GAME, server_dir=rig.server)
+
+    assert left == ()
+    assert not (rig.play / "lampdata.bin").exists()
+    assert not (rig.play / "liquiddata.bin").exists()
+    assert not (rig.play / "Lumenveil").exists(), "the emptied Lumenveil/ folder goes too"
+    assert (rig.play / "Data").is_dir() and (rig.play / "Interface").is_dir()
+    rig.untouched()
+
+
+def test_off_removes_coavolfog_log_but_keeps_spots(rig: _Rig) -> None:
+    pack = _lumen_pack(remove_when_off=["CoAVolFog.log"])
+    entry = rig.install(
+        pack, _lumen_fetched(rig, {"version.dll": b"v", "Lumenveil/lamp_extract.exe": b"exe"})
+    )
+    (rig.play / "CoAVolFog.log").write_bytes(b"log")
+    (rig.play / "CoAVolFog-spots.txt").write_bytes(b"player data")
+    (rig.play / "CoAVolFog-spots").mkdir()
+    (rig.play / "CoAVolFog-spots" / "shot.txt").write_bytes(b"player data")
+
+    left = client_packs.remove(rig.play, entry, pack, game=GAME, server_dir=rig.server)
+
+    assert left == ()
+    assert not (rig.play / "CoAVolFog.log").exists()
+    assert (rig.play / "CoAVolFog-spots.txt").read_bytes() == b"player data"
+    assert (rig.play / "CoAVolFog-spots" / "shot.txt").read_bytes() == b"player data"
+
+
+def test_off_keeps_an_edited_ini_and_names_it(rig: _Rig) -> None:
+    pack = _lumen_pack(install=[
+        {"member": "CoAVolFog.ini", "to": "CoAVolFog.ini"},
+        {"member": "Lumenveil/lamp_extract.exe", "to": "Lumenveil/lamp_extract.exe"},
+    ])
+    entry = rig.install(
+        pack,
+        _lumen_fetched(
+            rig,
+            {"CoAVolFog.ini": b"stock=1\n", "Lumenveil/lamp_extract.exe": b"exe"},
+        ),
+    )
+    (rig.play / "CoAVolFog.ini").write_bytes(b"stock=1\nplayer=2\n")
+
+    left = client_packs.remove(rig.play, entry, pack, game=GAME, server_dir=rig.server)
+
+    assert left == ("CoAVolFog.ini",)
+    assert (rig.play / "CoAVolFog.ini").read_bytes() == b"stock=1\nplayer=2\n"
+
+
+def test_off_records_every_file_it_installed(rig: _Rig) -> None:
+    _pack, entry = _install_lumen(rig)
+
+    assert set(entry["files"]) == {"version.dll", "Lumenveil/lamp_extract.exe"}
+    assert entry["files"]["version.dll"] == _sha(b"v")
