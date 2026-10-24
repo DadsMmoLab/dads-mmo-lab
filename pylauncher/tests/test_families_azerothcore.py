@@ -1714,8 +1714,9 @@ def test_a_certificate_failure_fails_at_once_naming_the_error_and_the_image(
     then quoted a progress-meter reading instead of the `curl: (77)` line. Now
     the failure sentence quotes the error line, and the remedy names the
     locally built client-data image as `built_image_refs()` spells it, in plain
-    words (no command: a player line never carries one), so the next Install
-    rebuilds it instead of reusing it.
+    words (no command: a player line never carries one), without promising that
+    removing it cures anything: Docker's build cache can remake it from the
+    same layers, so the build-cache clause is said too.
     """
     rec = Recorder(one_shot_result=_T810_RUN)
     with pytest.raises(InstallerError) as failed:
@@ -1725,6 +1726,9 @@ def test_a_certificate_failure_fails_at_once_naming_the_error_and_the_image(
     assert "--:--:--" not in said, said
     assert "image named yulon.local/ac-wotlk-client-data:" in said, said
     assert "docker image rm" not in said and "`" not in said, said
+    assert "may hold a bad certificate file" in said, said
+    assert "build cache" in said, said
+    assert "rebuilds" not in said and "instead of reusing" not in said, said
     assert "press Install again" in said, said
     assert [call for call in rec.calls if call == "one-shot:ac-client-data-init"] == [
         "one-shot:ac-client-data-init"
@@ -1764,15 +1768,17 @@ def test_a_successful_run_that_printed_a_tls_number_is_not_a_failure(
     assert install(Recorder(one_shot_result=run), tmp_path / "wow")
 
 
-@pytest.mark.parametrize("code", [35, 51, 58, 60])
-def test_the_other_tls_failures_fail_at_once_too(tmp_path: Path, code: int) -> None:
-    """35, 51, 58 and 60 are the same defect as 77: the TLS stack, not the link.
+@pytest.mark.parametrize("code", [58])
+def test_the_other_local_certificate_failure_fails_at_once_too(
+    tmp_path: Path, code: int
+) -> None:
+    """58 (a problem with the local certificate) is the same defect as 77.
 
     The regex is built from `_TLS_CERTIFICATE_EXIT`, and the exit status is NOT
-    consulted, so dropping any one number from that set turns its case red;
-    56 (a reset link) is the control the other way, pinned by the test below.
+    consulted, so dropping 58 from that set turns this red; 35, 51, 60 and 56
+    are the controls the other way, pinned by the tests below.
     """
-    run = docker.AttachedRun(code, (f"ac-client-data-init  | curl: ({code}) the TLS words",))
+    run = docker.AttachedRun(code, (f"ac-client-data-init  | curl: ({code}) the cert words",))
     rec = Recorder(one_shot_result=run)
     with pytest.raises(InstallerError) as failed:
         install(rec, tmp_path / "wow")
@@ -1781,6 +1787,25 @@ def test_the_other_tls_failures_fail_at_once_too(tmp_path: Path, code: int) -> N
     assert [call for call in rec.calls if call == "one-shot:ac-client-data-init"] == [
         "one-shot:ac-client-data-init"
     ]
+
+
+@pytest.mark.parametrize("code", [35, 51, 60])
+def test_a_remote_or_routing_tls_failure_is_generic_with_no_image_advice(
+    tmp_path: Path, code: int
+) -> None:
+    """35, 51 and 60 can come from a remote certificate, a proxy or flaky routing.
+
+    They are retried like any other error and never tell the player to remove
+    the image. Putting a number back into `_TLS_CERTIFICATE_EXIT` turns its case red.
+    """
+    run = docker.AttachedRun(code, (f"ac-client-data-init  | curl: ({code}) the TLS words",))
+    assert not azerothcore.client_data_certificate_failure(run)
+    rec = Recorder(one_shot_result=run)
+    with pytest.raises(InstallerError) as failed:
+        install(rec, tmp_path / "wow")
+    said = str(failed.value)
+    assert said.startswith(f"the server-data download failed (exit {code}). Its last words were: "), said
+    assert "image named" not in said, said
 
 
 def test_an_exit_status_alone_is_not_a_certificate_failure(tmp_path: Path) -> None:

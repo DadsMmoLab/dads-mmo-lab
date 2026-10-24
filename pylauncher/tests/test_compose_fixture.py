@@ -965,7 +965,7 @@ def test_the_replaced_client_data_downloader_is_asserted_here_because_nobody_els
     truncated archive — and the fallback to upstream's own function when the version cannot be
     read, which is what keeps this never worse than what it replaced.
 
-    T810 adds one more: a certificate/TLS failure (curl 35, 51, 58, 60, 77 —
+    T810 adds one more: a certificate/TLS failure (curl 58, 77 —
     the reporter's own `(77) error setting certificate file`, from its own
     image's missing ca-certificates.crt) quits WITHOUT retrying. Curl must not
     do the retrying itself: `--retry-all-errors` re-adds even errors plain
@@ -983,7 +983,7 @@ def test_the_replaced_client_data_downloader_is_asserted_here_because_nobody_els
     assert 'zip="$$data/data-$$ver.zip"' in command
     assert command.count("unzip -t") == 3
     assert "inst_download_client_data" in command
-    assert "35|51|58|60|77" in command
+    assert "58|77)" in command
     assert "certificate problem" in command
 
 
@@ -1045,10 +1045,11 @@ def _stub_curl(tmp_path: Path) -> Path:
 
 
 @pytest.mark.skipif(os.name == "nt", reason="needs POSIX bash")
+@pytest.mark.parametrize("code", [58, 77])
 def test_the_rendered_fetch_quits_a_certificate_failure_without_a_retry(
-    tmp_path: Path,
+    tmp_path: Path, code: int
 ) -> None:
-    """T810 shell-level: a 77 costs exactly one curl call, and the error line is printed.
+    """T810 shell-level: a 58 or 77 costs exactly one curl call, and the error line is printed.
 
     The reporter's install burned 16 attempts of 10 s each because `--retry`
     lived inside the curl call. The loop must fail fast now: one call, a
@@ -1060,7 +1061,7 @@ def test_the_rendered_fetch_quits_a_certificate_failure_without_a_retry(
     """
     script = _client_data_fetch_script(tmp_path)
     _stub_curl(tmp_path)
-    (tmp_path / "exits.txt").write_text("77\n", encoding="utf-8")
+    (tmp_path / "exits.txt").write_text(f"{code}\n", encoding="utf-8")
     env = {
         **os.environ,
         "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
@@ -1072,10 +1073,41 @@ def test_the_rendered_fetch_quits_a_certificate_failure_without_a_retry(
         ["bash", str(script)], capture_output=True, text=True, env=env, cwd=tmp_path
     )
     assert proc.returncode != 0, proc.stdout + proc.stderr
-    assert proc.returncode == 77, proc.stdout + proc.stderr
-    assert "curl: (77)" in proc.stderr, proc.stdout + proc.stderr
+    assert proc.returncode == code, proc.stdout + proc.stderr
+    assert f"curl: ({code})" in proc.stderr, proc.stdout + proc.stderr
     assert "certificate problem" in proc.stdout + proc.stderr
-    assert (tmp_path / "calls.log").read_text().splitlines() == ["calls: 77"]
+    assert (tmp_path / "calls.log").read_text().splitlines() == [f"calls: {code}"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="needs POSIX bash")
+@pytest.mark.parametrize("code", [35, 51, 60])
+def test_the_rendered_fetch_retries_a_remote_tls_error_to_success(
+    tmp_path: Path, code: int
+) -> None:
+    """T810 shell-level: a 35, 51 or 60 can be a proxy or routing, so it is retried.
+
+    Two of them then a 0 succeed after exactly 3 curl calls. Putting the number
+    back into the fast-fail `case` turns this red (one call, non-zero exit).
+    """
+    script = _client_data_fetch_script(tmp_path)
+    _stub_curl(tmp_path)
+    (tmp_path / "exits.txt").write_text(f"{code}\n{code}\n0\n", encoding="utf-8")
+    env = {
+        **os.environ,
+        "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
+        "CURL_STATE": str(tmp_path / "exits.txt"),
+        "CALLS_LOG": str(tmp_path / "calls.log"),
+        "FETCH_DELAY": "0",
+    }
+    proc = subprocess.run(
+        ["bash", str(script)], capture_output=True, text=True, env=env, cwd=tmp_path
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert (tmp_path / "calls.log").read_text().splitlines() == [
+        f"calls: {code}",
+        f"calls: {code}",
+        "calls: 0",
+    ]
 
 
 @pytest.mark.skipif(os.name == "nt", reason="needs POSIX bash")

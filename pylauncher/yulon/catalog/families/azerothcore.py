@@ -110,17 +110,19 @@ _SORTING_FOLDERS = frozenset({"updates", "archive", "base", "custom", "pending"}
 NOTHING_DONE = "Nothing was built, stopped or changed: your server stays on the code it runs."
 
 
-_TLS_CERTIFICATE_EXIT = frozenset({35, 51, 58, 60, 77})
-"""curl's certificate/TLS exit numbers, as `curl --manual` documents them (T810).
+_TLS_CERTIFICATE_EXIT = frozenset({58, 77})
+"""curl's LOCAL-certificate exit numbers, as `curl --manual` documents them (T810).
 
-35 SSL connect error, 51 peer certificate not verified, 58 problem with the
-local certificate, 60 peer certificate not authenticated with a known CA, 77
-problem reading the SSL CA cert. The reporter's 77 — its own image's
-ca-certificates.crt missing, unreadable or corrupt — is the last of these:
-a retry reuses the same cached bad layer and can never succeed. These are
-read ONLY from the `curl: (NN)` line curl printed, never from the container's
-exit status: that status can be another program's (unzip's own 51 is a
-truncated zip, not a certificate).
+58 problem with the local certificate, 77 problem reading the SSL CA cert
+file. The reporter's 77 — its own image's ca-certificates.crt missing,
+unreadable or corrupt — is the case: material inside the image, which a retry
+on the same image can never fix. 35 (SSL connect error), 51 and 60 (peer
+certificate not verified / not known) are NOT here: they can come from a
+remote certificate, a proxy or flaky routing, so they are retried like any
+other error and carry no advice to remove the image. The numbers are read ONLY
+from the `curl: (NN)` line curl printed, never from the container's exit
+status: that status can be another program's (unzip's own 51 is a truncated
+zip, not a certificate).
 """
 
 _CURL_CERTIFICATE_FAILURE = re.compile(
@@ -153,14 +155,16 @@ def client_data_certificate_failure(run: docker.AttachedRun) -> bool:
 
 
 def stale_client_data_remedy(entry: CatalogEntry, server_dir: Path) -> str:
-    """How to remove this install's bad client-data image so the next Install rebuilds it (T810).
+    """What to tell the player about a possibly bad client-data image (T810).
 
-    A 77 survives every retry because the bad layer is CACHED: the image
+    A 77 survives every retry because the image
     `{{IMAGE_PREFIX}}client-data:{{IMAGE_TAG}}` was built on this machine from
-    the checkout's Dockerfile, and Docker reuses the layer with the missing or
-    corrupt ca-certificates.crt on every attempt. Removing the image (not the
-    volume — the map data was never written) forces the next build to remake
-    it. The references are the same strings `built_image_refs()` is made of,
+    the checkout's Dockerfile and may hold a missing or corrupt
+    ca-certificates.crt. Removing the image (not the volume — the map data was
+    never written) is the step; it is NOT promised to cure it, because Docker's
+    build cache can remake the image from the same cached layers (a known
+    limit: no cache-bypassing build path exists here), hence the build-cache
+    clause. The references are the same strings `built_image_refs()` is made of,
     so the name cannot drift from what the build produces; only the
     `client-data` one is named, never the world the player keeps.
     """
@@ -170,9 +174,9 @@ def stale_client_data_remedy(entry: CatalogEntry, server_dir: Path) -> str:
         "the client-data image",
     )
     return (
-        f"Remove the locally built client-data image named {image} from Docker's "
-        "Images list (Docker Desktop shows it there), then press Install again, so the "
-        "next press rebuilds it instead of reusing it."
+        f"The locally built client-data image named {image} may hold a bad certificate "
+        "file. Remove it from Docker's Images list (Docker Desktop shows it there), and if "
+        "Docker offers to clear its build cache, do so, then press Install again."
     )
 
 
