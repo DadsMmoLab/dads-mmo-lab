@@ -41,7 +41,7 @@ from yulon import (
     party,
     server_build_presses,
 )
-from yulon.catalog import snapshot
+from yulon.catalog import composegen, snapshot
 from yulon.catalog.catalog import AzerothCoreData, CatalogEntry, EmulatorSource
 from yulon.catalog.families import carried, scriptdeploy
 from yulon.catalog.families.direction import moves_forward
@@ -108,6 +108,76 @@ _SORTING_FOLDERS = frozenset({"updates", "archive", "base", "custom", "pending"}
 """Folders under `data/sql` that sort updates rather than name a database (T630)."""
 
 NOTHING_DONE = "Nothing was built, stopped or changed: your server stays on the code it runs."
+
+
+_TLS_CERTIFICATE_EXIT = frozenset({58, 77})
+"""curl's LOCAL-certificate exit numbers, as `curl --manual` documents them (T810).
+
+58 problem with the local certificate, 77 problem reading the SSL CA cert
+file. The reporter's 77 — its own image's ca-certificates.crt missing,
+unreadable or corrupt — is the case: material inside the image, which a retry
+on the same image can never fix. 35 (SSL connect error), 51 and 60 (peer
+certificate not verified / not known) are NOT here: they can come from a
+remote certificate, a proxy or flaky routing, so they are retried like any
+other error and carry no advice to remove the image. The numbers are read ONLY
+from the `curl: (NN)` line curl printed, never from the container's exit
+status: that status can be another program's (unzip's own 51 is a truncated
+zip, not a certificate).
+"""
+
+_CURL_CERTIFICATE_FAILURE = re.compile(
+    r"curl: \((" + "|".join(str(code) for code in sorted(_TLS_CERTIFICATE_EXIT)) + r")\)"
+)
+"""A curl error line carrying a certificate/TLS exit number (T810).
+
+Matched against the run's own lines after `docker.unprefixed()` strips
+compose's `<service>  | `. The NUMBER is the signal, never the words beside
+it: `curl: (56) OpenSSL SSL_read: Connection reset by peer` carries `SSL`
+but is a reset link, not a bad image, and must stay a generic failure.
+"""
+
+
+def client_data_certificate_failure(run: docker.AttachedRun) -> bool:
+    """Is this client-data run a certificate/TLS failure that retrying cannot fix (T810)?
+
+    Only for a FAILED run: a download that printed `curl: (35)` then exited 0
+    recovered, and must not be read as a failure. Past that gate only the number
+    in the tail's own `curl: (N)` line counts, never the words around it and never
+    the container's exit status (unzip's own 51 is a truncated zip). A family
+    helper, not a spine rule: only the AzerothCore client-data fetch downloads
+    with curl.
+    """
+    if run.returncode == 0:
+        return False
+    return any(
+        _CURL_CERTIFICATE_FAILURE.search(docker.unprefixed(line)) for line in run.tail
+    )
+
+
+def stale_client_data_remedy(entry: CatalogEntry, server_dir: Path) -> str:
+    """What to tell the player about a possibly bad client-data image (T810).
+
+    A 77 survives every retry because the image
+    `{{IMAGE_PREFIX}}client-data:{{IMAGE_TAG}}` was built on this machine from
+    the checkout's Dockerfile and may hold a missing or corrupt
+    ca-certificates.crt. Removing the image (not the volume — the map data was
+    never written) is the step; it is NOT promised to cure it, because Docker's
+    build cache can remake the image from the same cached layers (a known
+    limit: no cache-bypassing build path exists here), hence the build-cache
+    clause. The references are the same strings `built_image_refs()` is made of,
+    so the name cannot drift from what the build produces; only the
+    `client-data` one is named, never the world the player keeps.
+    """
+    refs = composegen.built_image_refs(entry, server_dir)
+    image = next(
+        (ref for ref in refs if ref.split(":")[0].endswith("client-data")),
+        "the client-data image",
+    )
+    return (
+        f"The locally built client-data image named {image} may hold a bad certificate "
+        "file. Remove it from Docker's Images list (Docker Desktop shows it there), and if "
+        "Docker offers to clear its build cache, do so, then press Install again."
+    )
 
 
 def newer_updates_refusal(
@@ -1289,7 +1359,25 @@ class AzerothCoreInstaller(StagedInstaller):
             left = self._seams.end_one_shot(service, ctx.server_dir)
             if left is not None:
                 raise OneShotLeftRunning(download_left_sentence(left, earlier=False))
-        self._check_run(run, "the server-data download", ctx.cancel, DOWNLOAD_CANCEL_NOTE)
+        # `_check_run()` first: a Stop is told as a Stop whatever the tail printed.
+        # Only a failure it would raise is then re-read for a certificate number.
+        try:
+            self._check_run(run, "the server-data download", ctx.cancel, DOWNLOAD_CANCEL_NOTE)
+        except InstallStopped:
+            raise
+        except InstallerError:
+            if client_data_certificate_failure(run):
+                # T810: the image's own ca-certificates.crt is missing, unreadable
+                # or corrupt — a retry reuses the same cached bad layer (a rebuild
+                # reuses it too; only removing the image remakes it), so the fetch
+                # script already quit without retrying and this press ends at once.
+                # The remedy names the image as `built_image_refs()` spells it.
+                raise InstallerError(
+                    f"the server-data download failed (exit {run.returncode}): "
+                    f"{docker.last_words(run.tail)}. "
+                    f"{stale_client_data_remedy(self.entry, ctx.server_dir)}"
+                ) from None
+            raise
         yield "Server data is in place."
 
     def _up(self, ctx: StageContext) -> Iterator[str]:

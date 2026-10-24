@@ -338,6 +338,9 @@ class UpstreamNews:
 
     checked_unix: int
     sources: tuple[SourceNews, ...]
+    adopted: bool = False
+    """True for a server Yu'lon did not build (no install record): "Update the server to
+    latest…" refuses there, so the line sends the player to the launcher that built it (T802)."""
 
     def answered(self) -> bool:
         """Did any source answer at all? False is "no network", which says nothing."""
@@ -378,6 +381,11 @@ def line(news: UpstreamNews | None) -> str:
     said = [_said(source) for source in news.sources if source.behind]
     if not said:
         return ""
+    if news.adopted:
+        return (
+            f"Upstream has new code since this server was built: {', '.join(said)}. "
+            "Update it with the launcher that built it."
+        )
     return (
         f"Upstream has new code since this server was built: {', '.join(said)}. "
         # The menu named as well as the entry (T89): the press is not on the

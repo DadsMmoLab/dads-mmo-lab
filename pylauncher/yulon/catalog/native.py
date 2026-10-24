@@ -103,6 +103,7 @@ from yulon.catalog import (
     build_context,
     composegen,
     preflight,
+    script_built,
     snapshot,
     time_zone,
     upstream,
@@ -1925,6 +1926,29 @@ def core_off_its_moved_pin_note(moved: Sequence[CatalogPin], named: Sequence[str
         f"the tested commits with your modules. If Yu'lon put {mods} back above, update "
         f"{'it' if one else 'them'} on the Modules tab again first, without pressing "
         f"“{server_build_presses.REBUILD}” in between."
+    )
+
+
+def module_before_rebuild_note(moved: Sequence[CatalogPin], named: Sequence[str]) -> str:
+    """Said in the Rebuild question when a new module meets a core off its moved pin (T795).
+
+    The Discord player's case again, but before the compile instead of after it:
+    mod-ale installed fresh on a core that sits behind the commits this version
+    of Yu'lon was tested with, and a seven-minute build that was bound to stop in
+    the module. This is a guess from two facts the app already keeps (the core's
+    commits and which modules went in since the last build), not a reading of the
+    module's code, so it only names the order and never stops the build.
+    """
+    mods = _listed(named)
+    one = len(named) == 1
+    return (
+        f"This server is not on the commits this version of Yu'lon was tested with "
+        f"({_on_and_tested(moved)}), and {mods} {'was' if one else 'were'} installed or updated "
+        f"since your last build. {'It' if one else 'They'} may have been written for the tested "
+        f"commits and fail to build on yours. If you would rather build the tested commits with "
+        f"your modules, say no and press "
+        f"{server_build_presses.under_server_build(server_build_presses.RETURN_TO_PIN)} "
+        f"instead. This is only a guess, and a yes here still builds what is on your server now."
     )
 
 
@@ -7529,6 +7553,13 @@ class Seams:
     exec_stdin: Callable[..., subprocess.CompletedProcess[str]] = docker.exec_stdin
     sql_query: Callable[[str, str, str, str | None, str], str] = docker.sql_query
     volume_exists: Callable[[str], bool] = docker.volume_exists
+    engine_size: Callable[..., tuple[int, int] | None] = docker.engine_size
+    """The daemon's CPU count and memory (T636), or None when it would not say.
+
+    A seam for T801: the Tortoise mmaps cap is computed from what the ENGINE
+    reports, not from the host, and a test that could not fake the answer could
+    not pin the cap at all — it would assert whatever box the test ran on.
+    """
     read_database: Callable[[CatalogEntry, Path], database_presence.Reading] = (
         database_presence.take_reading
     )
@@ -7738,6 +7769,7 @@ class Seams:
             wait_ready=on(docker.wait_ready_for, wsl_distro=distro),
             world_output=on(_world_output, wsl_distro=distro),
             container_tail=on(_container_tail, wsl_distro=distro),
+            engine_size=on(docker.engine_size, wsl_distro=distro),
             selinux_enforcing=lambda: False,
             # Asked beside `selinux_enforcing` by the compose render whatever the
             # answer; left to default it ran `stat -f` on the HOST (found by the
@@ -13429,6 +13461,32 @@ class StagedInstaller:
                 "before."
             )
 
+    def _script_built_clause(self, server_dir: Path) -> str:
+        """T804: for a server inside a WSL distro, why it is not one the old script built.
+
+        The Rebuild press asks the script-built question first where the folder matches
+        (`install_wiring.script_built_rebuild_for_app()`); a press that got here anyway
+        names the rule that did not match, so the refusal says what to look at. Empty
+        outside a distro, and when the check itself could not run.
+        """
+        distro = self._seams.distro
+        if not distro:
+            return ""
+        try:
+            verdict = script_built.check(
+                server_dir, distro, seams=script_built.ScriptBuiltSeams.in_wsl(distro)
+            )
+        except Exception as exc:  # noqa: BLE001 - a clause must never hide the refusal itself
+            logger.warning(f"could not check {server_dir} against the old script's layout: {exc}")
+            return ""
+        if verdict.refusal is None:
+            return (
+                " This folder matches a server built by the old Dad's MMO Lab script: press "
+                f"{server_build_presses.under_server_build(server_build_presses.REBUILD)} "
+                "again to be asked to rebuild it the way that script did."
+            )
+        return f" {verdict.refusal}"
+
     def _refuse_unless_rebuildable(self, server_dir: Path) -> InstallState:
         """The two folders this button cannot help, refused by name before anything runs.
 
@@ -13463,7 +13521,7 @@ class StagedInstaller:
                 f"server there and cannot rebuild one. Nothing was started. A server this "
                 f'app installed carries that file; one adopted through "Use existing…", or '
                 f"built by another launcher, does not — rebuild that one the way it was "
-                f"built."
+                f"built.{self._script_built_clause(server_dir)}"
             )
         ours = generated_compose_files(server_dir)
         missing = [name for name in composegen.COMPOSE_FILES if name not in ours]

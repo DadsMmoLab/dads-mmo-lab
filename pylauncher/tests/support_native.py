@@ -278,6 +278,16 @@ class Recorder:
     container_runs: list[docker.ContainerRun] = field(default_factory=list)
     """Every `docker run` the engine asked for, as the typed spec — asserted by field."""
 
+    engine_size: tuple[int, int] | None = None
+    """What `docker.engine_size()` answers for the mmaps CPU cap (T801), pinned by the test.
+
+    Bound like T64's six, not left to the default: the default shells out to
+    `docker info`, and a test that fell through to it would assert whatever box
+    the suite ran on — exactly what "tests must not read the host machine" is
+    about. `None` by default is a Docker that would not say, which the cap
+    treats as "two".
+    """
+
     copied: list[tuple[str, str, Path]] = field(default_factory=list)
     sql_calls: list[str] = field(default_factory=list)
     """The first line of every stream fed to `exec_stdin`, plus every `sql_query` statement.
@@ -1069,6 +1079,7 @@ class Recorder:
             fs_type=lambda path: "ext4",
             keep_awake=lambda: nullcontext(),
             run_container=self.run_container,
+            engine_size=lambda: self.engine_size,
             # T543: no claim container; a test about the claim binds `docker.folder_claim`.
             folder_claim=lambda folder, image, cancel=None: nullcontext(True),
             copy_from_image=self.copy_from_image,

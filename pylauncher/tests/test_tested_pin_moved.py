@@ -304,6 +304,64 @@ def test_a_server_move_failing_in_a_module_says_to_update_it_first(
     assert label in note, "the note does not send the player back to the press that failed"
 
 
+# -- T795: the same order, said before the compile ----------------------------------------
+
+
+def _owe(server_dir: Path, *, never_built: bool = True) -> None:
+    """Record a C++ module (mod-x) as installed or updated since the last build."""
+    from tests.test_apply_put_back import _manifest
+    from yulon import module_answers
+
+    assert (
+        module_answers.record_rebuild_owed(server_dir, _manifest(), None, never_built=never_built)
+        == ""
+    )
+
+
+def test_the_rebuild_question_names_the_return_for_a_new_module_on_an_off_pin_core(
+    tmp_path: Path,
+) -> None:
+    from yulon.catalog.installer import rebuild_confirmation
+
+    _checkout(tmp_path, {CORE: OLD_CORE, BOTS: OLD_BOTS})
+    _owe(tmp_path)
+
+    note = install_wiring.rebuild_note_for_app(ENTRY, tmp_path)()
+
+    assert "mod-x" in note and BACK in note
+    assert OLD_CORE[:7] in note and _catalog_pins()[CORE][:7] in note
+    question = rebuild_confirmation(ENTRY, tmp_path, kept_build=False, note=note)
+    assert note in question
+    assert "Say no and nothing happens" in question, "the note replaced the question's own text"
+    assert note not in rebuild_confirmation(ENTRY, tmp_path, kept_build=False)
+
+
+def test_an_updated_module_counts_like_an_installed_one(tmp_path: Path) -> None:
+    """An Update of a module no build has compiled yet records the same owed rebuild."""
+    _checkout(tmp_path, {CORE: OLD_CORE, BOTS: OLD_BOTS})
+    _owe(tmp_path, never_built=False)
+    assert "mod-x" in install_wiring.rebuild_note_for_app(ENTRY, tmp_path)()
+
+
+def test_the_rebuild_question_adds_nothing_on_the_tested_pin(tmp_path: Path) -> None:
+    _checkout(tmp_path, _catalog_pins())
+    _owe(tmp_path)
+    assert install_wiring.rebuild_note_for_app(ENTRY, tmp_path)() == ""
+
+
+def test_the_rebuild_question_adds_nothing_when_no_module_went_in(tmp_path: Path) -> None:
+    _checkout(tmp_path, {CORE: OLD_CORE, BOTS: OLD_BOTS})
+    assert install_wiring.rebuild_note_for_app(ENTRY, tmp_path)() == ""
+
+
+def test_the_rebuild_note_reads_as_meant_for_the_player(tmp_path: Path) -> None:
+    from tests.support_player_text import text_faults
+
+    moved = (_pin(CORE, NEW_CORE, OLD_CORE), _pin(BOTS, NEW_BOTS, None))
+    for names in (("mod-ale",), ("mod-ale", "mod-x")):
+        assert text_faults(native.module_before_rebuild_note(moved, names)) == []
+
+
 # -- T586: the Modules tab's report after an update, before any build ----------------------
 
 

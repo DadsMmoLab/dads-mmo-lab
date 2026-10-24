@@ -752,6 +752,37 @@ def test_both_restart_keys_the_owner_named_are_written_off() -> None:
     assert keys["AutoRestart.MaxServerUptime"] == "0", "the dist ships three days"
 
 
+def test_a_gm_account_logs_in_as_a_player_and_starts_where_its_race_does() -> None:
+    """Two more `GM.*` keys the core's own defaults force against `GM.LoginState = 0`.
+
+    On the pinned core a ranked account still logged in invisible in GM mode, and
+    every new character the account made started on GM Island, with Yu'lon writing
+    only `GM.LoginState = 0` and `GM.StartLevel = 1`. Two of the core's own
+    `mangosd.conf.dist.in` defaults were the cause, read at the pinned core:
+
+    * `GM.Visible` ships at `0` and is read at login (`src/game/Player.cpp`,
+      `SetGameMode(true)` when the key is 0), which forces the GM mode on even
+      though `GM.LoginState` asked for it off.
+    * `GM.StartOnGMIsland` ships at `1` and is read on every new character of a
+      ranked account (`Player::Create`), which is why they started on GM Island.
+
+    `characters.extra_flags = 55` was that forced mode's doing, not something
+    Yu'lon wrote: no DB write here, conf keys only.
+    """
+    keys = _native().cmangos.conf.files["mangosd.conf"].keys  # type: ignore[union-attr]
+    assert (
+        keys["GM.LoginState"] == "0"
+    ), "the core reads this one; a ranked account must not ask for GM at login"
+    assert keys["GM.Visible"] == "1", (
+        "the core ships 0 and 0 forces SetGameMode(true) at login even with GM.LoginState = 0, "
+        "which is the invisible-in-GM-mode report"
+    )
+    assert keys["GM.StartOnGMIsland"] == "0", (
+        "the core ships 1 and 1 sends a ranked account's new characters to GM Island instead "
+        "of their race's starting area"
+    )
+
+
 def test_the_world_does_not_print_every_sql_statement_it_runs() -> None:
     """The pinned core's `mangosd.conf.dist.in` ships `LogFilter_SQLText = 0`, which PRINTS them.
 

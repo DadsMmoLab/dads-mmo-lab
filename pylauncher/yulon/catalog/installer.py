@@ -551,7 +551,9 @@ about ten minutes" would be read as the likely case rather than the lucky one.
 """
 
 
-def rebuild_confirmation(entry: CatalogEntry, server_dir: Path, *, kept_build: bool = True) -> str:
+def rebuild_confirmation(
+    entry: CatalogEntry, server_dir: Path, *, kept_build: bool = True, note: str = ""
+) -> str:
     """The question asked before a rebuild starts. Nothing here is invented.
 
     A rebuild is the most expensive thing this app can be asked to do to an
@@ -632,6 +634,9 @@ def rebuild_confirmation(entry: CatalogEntry, server_dir: Path, *, kept_build: b
     from yulon.catalog import native
 
     native_block = entry.install.native
+    # T795: a heuristic note from the wiring ("" for none) that names an order and never
+    # changes what the press does; it sits right under the first paragraph.
+    heads_up = f"{note}\n\n" if note else ""
     recipe = (
         "Before it compiles, the build recipe in that folder — the Dockerfile and the "
         ".dockerignore this app wrote when it installed the server — is written again from "
@@ -713,6 +718,7 @@ def rebuild_confirmation(entry: CatalogEntry, server_dir: Path, *, kept_build: b
             f"This compiles the server again from the source and modules in that folder. It is "
             f"the same compile an install does, and it has taken "
             f"{MEASURED_BUILD_TIMES}.\n\n"
+            f"{heads_up}"
             f"{kept}"
             f"{recipe}"
             f"{overlay}"
@@ -725,6 +731,7 @@ def rebuild_confirmation(entry: CatalogEntry, server_dir: Path, *, kept_build: b
         f"the same compile an install does, and it has taken "
         f"{MEASURED_BUILD_TIMES}. Yours depends on your machine, and nothing here can "
         f"predict it better than that range does.\n\n"
+        f"{heads_up}"
         f"{kept}"
         f"{recipe}"
         f"{overlay}"

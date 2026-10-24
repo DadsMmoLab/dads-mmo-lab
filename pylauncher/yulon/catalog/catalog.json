@@ -1239,7 +1239,8 @@
               ],
               "min_files": 500,
               "required": false,
-              "success_codes": [1]
+              "success_codes": [1],
+              "cpu_cap": "half"
             },
             "conf": {
               "source_dir": "/opt/tortoise/etc",
@@ -1294,6 +1295,8 @@
                     "GameType": "0",
                     "GM.LoginState": "0",
                     "GM.StartLevel": "1",
+                    "GM.Visible": "1",
+                    "GM.StartOnGMIsland": "0",
                     "AutoHonorRestart": "0",
                     "AutoRestart.MaxServerUptime": "0",
                     "Console.Enable": "1",

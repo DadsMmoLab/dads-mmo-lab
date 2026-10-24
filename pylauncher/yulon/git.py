@@ -905,8 +905,23 @@ def parse_status(raw: str) -> tuple[str, ...]:
     return tuple(paths)
 
 
-_STATUS_ARGS = ["status", "--porcelain", "--untracked-files=no", "--ignore-submodules=all"]
+_STATUS_ARGS = [
+    "-c",
+    "core.fileMode=false",
+    "status",
+    "--porcelain",
+    "--untracked-files=no",
+    "--ignore-submodules=all",
+]
 """What both `local_edits()` bodies ask, spelled once so they cannot drift.
+
+`core.fileMode=false` is the file-mode half of T797. A Windows bind mount does
+not carry Unix permissions, so a checkout made there can show every script as
+`644 -> 755` with the content untouched; `status` lists each one as modified,
+and a user with no edits of their own was refused "Return to the tested pin"
+over a 9 MB SQL file whose only change was its mode. A mode flip is not work
+`reset --hard` would lose in any way the user could mind, so it is not counted.
+A content change in the same file is still reported.
 
 `--untracked-files=no` is the load-bearing flag and it is not a tidy. The
 question this feeds is "would `reset --hard` destroy anything of yours?", and
@@ -1484,6 +1499,10 @@ def _no_prompt_env() -> dict[str, str]:
     env["GIT_ASKPASS"] = ""
     env["SSH_ASKPASS"] = ""
     env["GCM_INTERACTIVE"] = "never"
+    # git translates its `fatal:` / `error:` prefixes on a non-English system, and
+    # the refusal reasons are read by those prefixes: pin the C locale so they are English.
+    env["LC_ALL"] = "C"
+    env["LANGUAGE"] = "C"
     return env
 
 

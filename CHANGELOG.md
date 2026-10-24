@@ -14,10 +14,23 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ## Unreleased
 
 ### New
+- A WotLK or Unbound server's Bots tab has **Delete every random bot…**: all or nothing, optional backup first; AddClass bots stay.
+- Filter the Characters and Bots lists by name as you type; the X clears the filter.
 
 ### Fixed
+- A failed build in a module you just installed now says the module is new and your server still runs its old build.
+- **Rebuild the server…** now warns when a new module may not build on a server that is off the tested commits.
+- On Bazzite and other image-based Fedora systems without Docker, the install now says how to get Docker.
+- A refused import now says which server is behind and what to do, instead of pointing at a button that refuses.
+- LAN mode now advertises the wired network's address instead of a VPN adapter's, so other computers can connect.
+- Installing WoW Tortoise no longer runs every CPU core flat out while making movement maps, which could restart some PCs.
+- On WoW Tortoise, an account with a GM level no longer logs in invisible in GM mode with new characters on GM Island.
 - When Docker cannot fetch the git image, the Modules tab now shows Docker's reason instead of an unhelpful line.
 - Docker setup now asks for your password on Ubuntu 25.10+ and Kubuntu (sudo-rs) instead of failing every step.
+- **Return to the tested pin** no longer refuses because Windows changed a server file's permissions and nothing else.
+- **Rebuild** works for a WotLK server the old Dad's MMO Lab script built inside WSL, once you agree to it.
+- When Docker setup genuinely fails, the advice now lists every failed step to run, in order, instead of only the first.
+- When the server-data download fails on the image's own certificate store, Install stops at once and names the image to remove.
 
 ### Changed
 

@@ -8654,6 +8654,48 @@ def test_declining_the_rebuild_confirmation_starts_nothing(
     assert view.rebuild_log.running is False
 
 
+def test_the_rebuild_question_carries_the_wirings_note_and_still_starts_on_yes(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T795: the heads-up is in the question, and a Yes still rebuilds (it never blocks)."""
+    asked: list[str] = []
+
+    def question(parent: object, title: str, text: str, *a: object, **k: object) -> object:
+        asked.append(text)
+        return controller_view_module.QMessageBox.StandardButton.Yes
+
+    monkeypatch.setattr(controller_view_module.QMessageBox, "question", question)
+    services, started = _rebuild_services(ps, tmp_path)
+    services.rebuild_note = lambda: "NOTE-FROM-THE-WIRING"
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    assert view.rebuild_server() is True
+    assert "NOTE-FROM-THE-WIRING" in asked[0]
+    wait_for_panel(view.rebuild_log)  # the rebuild runs on the panel's worker thread
+    assert started, "a note must never stop the rebuild"
+
+
+def test_a_rebuild_note_that_raises_is_left_out_and_the_question_is_still_asked(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asked: list[str] = []
+
+    def question(parent: object, title: str, text: str, *a: object, **k: object) -> object:
+        asked.append(text)
+        return controller_view_module.QMessageBox.StandardButton.No
+
+    def broken() -> str:
+        raise OSError("unreadable")
+
+    monkeypatch.setattr(controller_view_module.QMessageBox, "question", question)
+    services, _started = _rebuild_services(ps, tmp_path)
+    services.rebuild_note = broken
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    assert view.rebuild_server() is False
+    assert asked and "unreadable" not in asked[0]
+
+
 def test_a_rebuild_the_sources_refuse_is_refused_before_the_question(
     qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -15443,7 +15485,10 @@ def test_the_upstream_count_runs_on_a_worker_thread_with_the_real_runner(
     view = ControllerView(WOTLK, services, status_poll_ms=0)
     pump_until(lambda: not view.upstream_label.isHidden(), "the upstream line")
     assert threads and all(t is not threading.main_thread() for t in threads)
-    view._jobs.wait()  # type: ignore[attr-defined]
+    # Every job the view started at build, not only the upstream count: the Tuning tab's
+    # undo lookup (`_look_up_undo`) is one, and joining the threads (`_jobs.wait()`) left its
+    # answer queued, a T771 leak whenever it had not landed while the line was awaited.
+    pump_until_every_job_has_answered("the jobs the view started when it was built")
 
 
 def test_the_upstream_line_is_asked_again_when_a_job_finishes(

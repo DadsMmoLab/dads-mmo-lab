@@ -61,7 +61,11 @@ from yulon.move import (
     Manifest,
     MovePackageError,
     Role,
+    UpdateNames,
+    checked_names,
     counts_phrase,
+    digest_of,
+    updates_names_in_dump,
 )
 from yulon.ownership import Ownership
 
@@ -243,11 +247,6 @@ def engine_for(
 # --------------------------------------------------------------- small shared pieces
 
 
-def digest_of(names: Sequence[str]) -> str:
-    """SHA-256 of a version's items, order-free: how two servers' versions are compared."""
-    return hashlib.sha256("\n".join(sorted(names)).encode("utf-8")).hexdigest()
-
-
 def _literal(value: str) -> str:
     """A SQL string literal's content: quotes doubled, backslashes doubled (both SQL modes)."""
     return value.replace("\\", "\\\\").replace("'", "''")
@@ -345,14 +344,7 @@ def _read_version(world: MoveWorld, schema: str) -> Evidence | None:
         module_sql = ""
         if "updates" in tables:
             kind = "updates"
-            sql = (
-                f"SELECT `name` FROM {quoted}.`updates` "
-                "WHERE `state` IN ('RELEASED', 'ARCHIVED') ORDER BY `name`;"
-            )
-            module_sql = (
-                f"SELECT `name`, `hash` FROM {quoted}.`updates` "
-                "WHERE `state` NOT IN ('RELEASED', 'ARCHIVED') ORDER BY `name`;"
-            )
+            sql, module_sql = move.update_name_queries(schema)
         elif "migrations" in tables:
             kind = "migrations"
             sql = f"SELECT `Hash` FROM {quoted}.`migrations` WHERE `Module` = '' ORDER BY `Hash`;"
@@ -391,11 +383,34 @@ def _read_versions(world: MoveWorld, roles: Mapping[Role, str]) -> dict[str, Evi
     return {roles[r]: _read_version(world, roles[r]) for r in wanted if r in roles}
 
 
+def _read_update_names(world: MoveWorld, schema: str, evidence: Evidence) -> UpdateNames | None:
+    """This server's `updates` names for `schema`, or None when unsure (T802).
+
+    Asked again only once a refusal needs to say which side is behind. The answer must add up
+    to the `evidence` already read (count, digest, module rows), else it is not used.
+    """
+    if evidence.kind != "updates":
+        return None
+    core_sql, module_sql = move.update_name_queries(schema)
+    try:
+        core = world.mysql.query(core_sql).splitlines()
+        modules = world.mysql.query(module_sql).splitlines()
+    except Exception as exc:  # noqa: BLE001 - names that cannot be asked keep the plain sentence
+        logger.info(f"could not read the update names of {schema}: {exc}")
+        return None
+    return checked_names(
+        [line.strip() for line in core if line.strip()],
+        [line.strip().replace("\t", "|") for line in modules if line.strip()],
+        evidence,
+    )
+
+
 def _version_problem(
     world: MoveWorld,
     manifest: Manifest,
     roles: Mapping[Role, str],
     here: Mapping[str, Evidence | None],
+    file: move.Package | None = None,
 ) -> str | None:
     """The sentence for a package that is not at this server's version or modules, else None.
 
@@ -413,7 +428,21 @@ def _version_problem(
             optional.add(schema)
         else:
             package.pop(schema, None)
-    return move.version_difference(package, here, frozenset(optional))
+    if file is None:
+        return move.version_difference(package, here, frozenset(optional))
+
+    def server_names(schema: str) -> UpdateNames | None:
+        ours = here.get(schema)
+        return None if ours is None else _read_update_names(world, schema, ours)
+
+    return move.version_difference(
+        package,
+        here,
+        frozenset(optional),
+        file_names=lambda schema: updates_names_in_dump(file, schema),
+        server_names=server_names,
+        built_here=world.ownership() is Ownership.OWNED,
+    )
 
 
 def _bot_and_app_clauses(world: MoveWorld) -> tuple[str, str]:
@@ -960,7 +989,7 @@ def plan_import(world: MoveWorld, path: Path) -> ImportPlan:
             refusals=(f"Yu'lon could not look at this server: {exc}",),
             schemas=schemas,
         )
-    said = _version_problem(world, manifest, roles, here)
+    said = _version_problem(world, manifest, roles, here, package)
     if said:
         refusals.append(said)
     if counts is None:
@@ -1187,7 +1216,7 @@ def _import_locked(
     manifest = package.manifest
     roles = _present_roles(world)
     here = _read_versions(world, roles)
-    said = _version_problem(world, manifest, roles, here)
+    said = _version_problem(world, manifest, roles, here, package)
     if said:
         raise MoveError(f"{said} {_NOT_IN}")
     counts = _survey_counts(world, roles)

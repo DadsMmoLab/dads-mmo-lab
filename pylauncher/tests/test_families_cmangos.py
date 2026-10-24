@@ -155,6 +155,7 @@ def context(
     *,
     completed: Iterable[str] = (),
     cancel: threading.Event | None = None,
+    entry: CatalogEntry = ENTRY,
 ) -> native.StageContext:
     """A `StageContext` for calling one stage body directly.
 
@@ -166,7 +167,7 @@ def context(
         server_dir=server_dir,
         client_dir=client_dir,
         state=native.InstallState(
-            game_id=ENTRY.id,
+            game_id=entry.id,
             install_id=composegen.install_id(server_dir, platform_id=lambda: "linux"),
             family="cmangos",
             completed=tuple(completed),
@@ -3689,6 +3690,134 @@ def test_mmaps_refuses_before_any_extraction(tmp_path: Path) -> None:
     with pytest.raises(InstallerError, match="no extraction evidence"):
         list(engine(rec)._mmaps(context(server_dir)))
     assert rec.container_runs == []
+
+
+# --- T801: Tortoise's MoveMapGen has no --threads option and starts a worker per
+# --- core, so its container is capped with Docker's --cpus instead. The cap comes
+# --- through the `engine_size` seam: a test that fell through to the real
+# --- `docker info` would assert whatever box the suite ran on.
+
+
+TORTOISE = installable(load_catalog().get("wow-tortoise"))
+VANILLA = installable(load_catalog().get("wow-vanilla"))
+assert TORTOISE.install.native is not None
+assert TORTOISE.install.native.cmangos is not None
+TORTOISE_MMAPS_ARGV = TORTOISE.install.native.cmangos.mmaps.argv
+GiB = 1024 * 1024 * 1024
+
+
+def tortoise_client(tmp_path: Path) -> Path:
+    """A client passing Tortoise's ClientSpec: `Data/dbc.MPQ`, the Vanilla expansion's file."""
+    client = tmp_path / "client"
+    (client / "Data").mkdir(parents=True)
+    (client / "Data" / "dbc.MPQ").write_bytes(b"MPQ\x1a")
+    return client
+
+
+def _tortoise_mmaps(rec: Recorder, tmp_path: Path, **overrides: object) -> tuple[list[str], object]:
+    """Drive Tortoise's extract then mmaps once; return (stage lines, the generator's run)."""
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    eng = engine(rec, entry=TORTOISE, **overrides)
+    rec.success_returncodes = (0, 1)
+    list(eng._extract(context(server_dir, tortoise_client(tmp_path), entry=TORTOISE)))
+    extracted = len(rec.container_runs)
+    # The Tortoise fork's generator ends `return silent ? 1 : finish(..., 1)`:
+    # a COMPLETE build exits 1 (MmapPlan.success_codes), and the double must
+    # both return that status and accept it as "the tool wrote its output".
+    rec.run_result = docker.AttachedRun(1, ("ran",))
+    said = list(eng._mmaps(context(server_dir, entry=TORTOISE)))
+    run = rec.container_runs[extracted]
+    assert run.argv == TORTOISE_MMAPS_ARGV, run.argv
+    return said, run
+
+
+def test_tortoise_mmaps_capped_to_half_engine_cpus(tmp_path: Path) -> None:
+    """16 CPUs / 64 GiB: half the cores is 8, half the memory is 32 — cores bind."""
+    rec = Recorder()
+    rec.engine_size = (16, 64 * GiB)
+    said, run = _tortoise_mmaps(rec, tmp_path)
+    assert run.cpus == 8
+    # The cores are pinned too (the first 8), and the RAM is ceilinged at half the
+    # engine's: `--cpus` alone bounds only CPU time, not what the workers allocate.
+    assert run.cpuset == "0-7"
+    assert run.memory == 32 * GiB
+    assert "mmaps: limited to 8 CPUs (cores 0-7) and 32.0 GiB of memory" in said
+
+
+def test_tortoise_mmaps_cap_bounded_by_memory(tmp_path: Path) -> None:
+    """16 CPUs / 8 GiB: half the cores is 8, half the memory is 4 — the memory binds.
+
+    A movement-map worker is ~2 GB, so a many-core box with little RAM must be
+    bounded by the memory: an uncapped 16 workers on an 8 GiB engine is the
+    hard-reboot shape T801 reports.
+    """
+    rec = Recorder()
+    rec.engine_size = (16, 8 * GiB)
+    said, run = _tortoise_mmaps(rec, tmp_path)
+    assert run.cpus == 4
+    assert run.cpuset == "0-3"
+    assert run.memory == 4 * GiB
+    assert "mmaps: limited to 4 CPUs (cores 0-3) and 4.0 GiB of memory" in said
+
+
+def test_tortoise_mmaps_cap_floor_is_one(tmp_path: Path) -> None:
+    """1 CPU / 1 GiB: both halves floor at zero, and a cap of zero is not a cap."""
+    rec = Recorder()
+    rec.engine_size = (1, 1 * GiB)
+    said, run = _tortoise_mmaps(rec, tmp_path)
+    assert run.cpus == 1
+    assert run.cpuset == "0", "one core is core 0, not an empty range"
+    assert run.memory == GiB // 2
+    assert "mmaps: limited to 1 CPUs (cores 0) and 0.5 GiB of memory" in said
+
+
+def test_tortoise_mmaps_cap_falls_back_to_two_when_engine_unknown(tmp_path: Path) -> None:
+    """An engine that would not say gets the number the CMaNGOS generators spell themselves."""
+    rec = Recorder()
+    rec.engine_size = None
+    said, run = _tortoise_mmaps(rec, tmp_path)
+    assert run.cpus == 2
+    # No pin and no RAM ceiling sized against an engine nobody measured.
+    assert run.cpuset is None and run.memory is None
+    assert "mmaps: limited to 2 CPUs" in said
+
+
+def test_tbc_vanilla_mmaps_keep_threads_2_and_no_cpus_flag(tmp_path: Path) -> None:
+    """The CMaNGOS entries cap THEMSELVES with `--threads 2` and take no `--cpus` from us.
+
+    `cpu_cap` stays None on both: capping their containers too would be a second
+    cap on top of the one the generator already makes for itself.
+    """
+    for entry in (ENTRY, VANILLA):
+        native_cmangos = entry.install.native.cmangos
+        assert native_cmangos is not None
+        assert native_cmangos.mmaps.cpu_cap is None
+        argv = native_cmangos.mmaps.argv
+        i = argv.index("--threads")
+        assert argv[i + 1] == "2", argv
+        assert argv.count("--threads") == 1
+    rec = Recorder()
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    eng = engine(rec)
+    list(eng._extract(context(server_dir, client_folder(tmp_path))))
+    extracted = len(rec.container_runs)
+    said = list(eng._mmaps(context(server_dir)))
+    assert rec.container_runs[extracted].cpus is None
+    assert rec.container_runs[extracted].cpuset is None
+    assert rec.container_runs[extracted].memory is None
+    assert not any("limited to" in line for line in said)
+
+
+def test_tortoise_mmaps_argv_has_no_threads_flag() -> None:
+    """Tortoise's fork rejects `--threads` as a map id, so the argv must never grow one.
+
+    The cap is the container's `--cpus` instead; this pins the argv shape the
+    four cap tests above assume.
+    """
+    assert "--threads" not in TORTOISE_MMAPS_ARGV
+    assert TORTOISE.install.native.cmangos.mmaps.cpu_cap == "half"
 
 
 def test_no_mmaps_container_is_handed_anything_that_names_the_users_client(

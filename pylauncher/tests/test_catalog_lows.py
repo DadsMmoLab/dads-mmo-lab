@@ -36,6 +36,27 @@ def test_a_failed_build_in_a_module_with_no_update_to_put_back_names_remove(
     assert "was not updated since your last build that worked" not in said
 
 
+def test_a_failed_build_in_a_module_installed_since_the_last_build_says_it_is_new(
+    tmp_path: Path,
+) -> None:
+    """T795: a fresh install (mod-ale on an old core) is in no build, so nothing is put back."""
+    from yulon import module_answers
+
+    manifest = _manifest()
+    assert module_answers.record_rebuild_owed(tmp_path, manifest, None, never_built=True) == ""
+
+    said = Applier(tmp_path).after_failed_build(("mod-x",), lambda _id: manifest)
+
+    assert "new since your last build" in said
+    assert "still running that build" in said
+    assert "press Remove on its row" in said
+    assert "was not updated since your last build that worked" not in said
+    # With no record of the install, the sentence for a module with no update is unchanged.
+    plain = Applier(tmp_path / "other").after_failed_build(("mod-x",), lambda _id: manifest)
+    assert "new since your last build" not in plain
+    assert "has no update of mod-x to put back" in plain
+
+
 # -------------------------------------------------- a typed answer in a conf
 
 

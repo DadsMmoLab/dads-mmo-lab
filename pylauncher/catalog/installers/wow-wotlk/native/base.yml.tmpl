@@ -272,16 +272,48 @@ services:
         # Version-keyed name: a partial left by an OLDER version must never be
         # resumed into a newer one — that would splice two archives together.
         zip="$$data/data-$$ver.zip"
-        retry_all=--retry-all-errors
-        curl --help all 2>/dev/null | grep -q -- --retry-all-errors || retry_all=
+        # T810: curl 58 and 77 implicate LOCAL certificate material: the
+        # reporter's ca-certificates.crt was missing, unreadable or corrupt in
+        # its own locally built client-data image, so a retry on the same
+        # image can never succeed. 35, 51 and 60 can come from a remote
+        # certificate, a proxy or flaky routing, so they are retried like any
+        # other error. curl's own `--retry` must
+        # not see these: `--retry-all-errors` re-adds even errors `--retry`
+        # alone gives up on (measured with curl 8.5 on 77), so `--retry` is
+        # gone too and the loop below does the retrying — one curl call per
+        # attempt, 31 attempts (the first try plus the old `--retry 30`), 10 s
+        # between them, `FETCH_DELAY` overriding the delay in tests. A
+        # certificate/TLS exit quits at once, in the entrypoint's own words,
+        # and so does a 22 (HTTP 416) when the zip already tests whole.
+        # The 416 below is a 4xx --fail reports as an error on a COMPLETE
+        # file. "Already finished" must not read as "failed".
         echo "yulon: downloading client data $$ver (resumable)"
-        if ! curl -L --fail --retry 30 --retry-delay 10 $$retry_all --continue-at - \
-             -o "$$zip" "https://github.com/wowgaming/client-data/releases/download/$$ver/data.zip"; then
-          # A COMPLETE file makes the server answer 416, which --fail reports as
-          # an error. "Already finished" must not read as "failed".
-          echo "yulon: fetch returned non-zero — testing whether the archive is complete"
-          unzip -t "$$zip" >/dev/null 2>&1 || { echo "yulon: client-data download FAILED"; exit 1; }
-        fi
+        fetch() { curl -L --fail --continue-at - "$$@"; }
+        attempt=1
+        while :; do
+          if fetch -o "$$zip" "https://github.com/wowgaming/client-data/releases/download/$$ver/data.zip"; then status=0; else status=$$?; fi
+          if [ $$status -eq 0 ]; then
+            break
+          fi
+          case $$status in
+            58|77)
+              echo "yulon: client-data download FAILED (curl exit $$status: certificate problem — retrying cannot help, see the curl line above)"; exit $$status;;
+          esac
+          if [ $$status -eq 22 ] && unzip -t "$$zip" >/dev/null 2>&1; then
+            # HTTP 416 on a COMPLETE file: nothing left to fetch, so no waiting.
+            echo "yulon: archive is already complete"
+            break
+          fi
+          if [ $$attempt -ge 31 ]; then
+            # A COMPLETE file makes the server answer 416, which --fail reports as
+            # an error. "Already finished" must not read as "failed".
+            echo "yulon: fetch returned non-zero — testing whether the archive is complete"
+            unzip -t "$$zip" >/dev/null 2>&1 || { echo "yulon: client-data download FAILED"; exit 1; }
+            break
+          fi
+          attempt=$$((attempt + 1))
+          sleep "$${FETCH_DELAY:-10}"
+        done
         # Refuse to extract a truncated archive: a half-unzipped data dir boots
         # a silently wrong server, which every check we have would call healthy.
         unzip -t "$$zip" >/dev/null

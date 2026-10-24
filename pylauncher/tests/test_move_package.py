@@ -28,6 +28,7 @@ from yulon.move import (
     read_package,
     write_package,
 )
+from yulon.server_build_presses import UPDATE_TO_LATEST, under_server_build
 
 AT = datetime(2026, 10, 9, 15, 30)
 DIGEST_A = "a" * 64
@@ -601,3 +602,148 @@ def test_a_dump_unpacked_from_a_package_is_owner_only(tmp_path: Path) -> None:
     finally:
         os.umask(old)
     assert _mode(written) == 0o600, oct(_mode(written))
+
+
+# ------------------------------------------------------------------ update names (T802)
+
+
+def _updates_dump(names: tuple[str, ...], *, modules: tuple[tuple[str, str], ...] = ()) -> bytes:
+    """A dump whose `updates` table holds `names` (RELEASED) and `modules` (MODULE rows)."""
+    rows = [
+        f"('{n}','{hashlib.sha1(n.encode()).hexdigest().upper()}','RELEASED',"
+        "'2026-10-01 00:00:00',0)"
+        for n in names
+    ]
+    rows += [f"('{n}','{h * 40}','MODULE','2026-10-01 00:00:00',0)" for n, h in modules]
+    return (
+        b"-- yulon-backup: game=wow-wotlk\n-- MySQL dump 10.13\nUSE `acore_auth`;\n"
+        b"INSERT INTO `t` VALUES (1);\n"
+        + f"INSERT INTO `updates` VALUES {','.join(rows)};\n".encode()
+    )
+
+
+def _updates_package(
+    tmp_path: Path,
+    body: bytes,
+    evidence: Evidence,
+) -> move.Package:
+    dest = tmp_path / "ledger.zip"
+    write_package(
+        dest,
+        header(schema_evidence={"acore_auth": evidence}),
+        [dump(tmp_path, "acore_auth", body=body)],
+    )
+    return read_package(dest)
+
+
+NAMES = tuple(f"2026_10_{n:02d}_00.sql" for n in range(1, 6))
+
+
+def _evidence_of(names: tuple[str, ...], modules: tuple[tuple[str, str], ...] = ()) -> Evidence:
+    return Evidence(
+        kind="updates",
+        count=len(names),
+        digest=move.digest_of(names),
+        modules=tuple(sorted(f"{n}|{h * 40}" for n, h in modules)),
+    )
+
+
+def test_dump_update_names_match_the_manifest_digest(tmp_path: Path) -> None:
+    modules = (("mod_a.sql", "a"),)
+    package = _updates_package(
+        tmp_path, _updates_dump(NAMES, modules=modules), _evidence_of(NAMES, modules)
+    )
+    core, module_rows = move.updates_names_in_dump(package, "acore_auth") or ((), ())
+    assert core == tuple(sorted(NAMES))
+    assert module_rows == ("mod_a.sql|" + "a" * 40,)
+
+
+def test_dump_update_names_that_disagree_with_the_digest_refuse(tmp_path: Path) -> None:
+    body = _updates_dump(NAMES)
+    wrong_digest = Evidence(kind="updates", count=5, digest=DIGEST_A)
+    wrong_count = Evidence(kind="updates", count=6, digest=move.digest_of(NAMES))
+    extra_modules = _evidence_of(NAMES, (("mod_x.sql", "b"),))
+    for evidence in (wrong_digest, wrong_count, extra_modules):
+        package = _updates_package(tmp_path, body, evidence)
+        assert move.updates_names_in_dump(package, "acore_auth") is None
+        (tmp_path / "ledger.zip").unlink()
+        (tmp_path / "src" / "acore_auth.sql").unlink()
+    # The same dump with evidence that does add up is read, so the refusals above are the
+    # cross-check's doing and not the dump's.
+    package = _updates_package(tmp_path, body, _evidence_of(NAMES))
+    assert move.updates_names_in_dump(package, "acore_auth") is not None
+
+
+@pytest.mark.parametrize(
+    "tuple_text",
+    [
+        "('2026_10_01_00.sql','ABC','RELEASED','2026-10-01 00:00:00',0)",  # hash is not 40 hex
+        f"('2026_10_01_00.sql','{'A' * 40}','RELEASED','2026-10-01 00:00:00')",  # a column short
+        f"('2026_10_01_00.sql','{'A' * 40}','RELEASED','2026-10-01 00:00:00',0,1)",  # one too many
+        "('2026_10_01_00.sql',NULL,'RELEASED','2026-10-01 00:00:00',0)",
+        f"('it\\'s.sql','{'A' * 40}','RELEASED','2026-10-01 00:00:00',0)",  # an escaped quote
+    ],
+)
+def test_a_malformed_updates_tuple_refuses(tmp_path: Path, tuple_text: str) -> None:
+    good = f"('2026_10_02_00.sql','{'B' * 40}','RELEASED','2026-10-01 00:00:00',0)"
+    names = ("2026_10_01_00.sql", "2026_10_02_00.sql")
+    body = (
+        b"-- yulon-backup: game=wow-wotlk\nUSE `acore_auth`;\n"
+        + f"INSERT INTO `updates` VALUES {tuple_text},{good};\n".encode()
+    )
+    package = _updates_package(tmp_path, body, _evidence_of(names))
+    assert move.updates_names_in_dump(package, "acore_auth") is None
+
+
+def test_a_dump_with_no_updates_insert_has_no_names(tmp_path: Path) -> None:
+    package = _updates_package(tmp_path, b"-- yulon-backup: game=wow-wotlk\n", _evidence_of(NAMES))
+    assert move.updates_names_in_dump(package, "acore_auth") is None
+
+
+def _sides(file: tuple[str, ...], here: tuple[str, ...], *, built_here: bool = True) -> str | None:
+    def names_of(names: tuple[str, ...]) -> move.NamesOf:
+        return lambda schema: (tuple(sorted(names)), ())
+
+    return move.version_difference(
+        {"acore_auth": _evidence_of(file)},
+        {"acore_auth": _evidence_of(here)},
+        file_names=names_of(file),
+        server_names=names_of(here),
+        built_here=built_here,
+    )
+
+
+def test_a_file_whose_updates_are_inside_this_servers_is_called_behind() -> None:
+    said = _sides(NAMES[:4], NAMES)
+    assert said is not None
+    assert said.startswith(
+        "The file is behind this server (acore_auth: 4 updates in the file, 5 here). "
+        "Bring the OLD server up to date and pack again"
+    )
+
+
+def test_this_server_is_called_behind_only_with_a_press_it_can_use() -> None:
+    owned = _sides(NAMES, NAMES[:4], built_here=True)
+    adopted = _sides(NAMES, NAMES[:4], built_here=False)
+    assert owned is not None and adopted is not None
+    assert owned.startswith("This server is behind the file (acore_auth: 5 updates in the file")
+    assert under_server_build(UPDATE_TO_LATEST) in owned
+    assert "launcher that built it" in adopted
+    assert UPDATE_TO_LATEST not in adopted
+
+
+def test_updates_that_are_neither_inside_the_other_are_called_different() -> None:
+    said = _sides((*NAMES[:3], "only_file.sql"), (*NAMES[:3], "only_here.sql"))
+    assert said is not None
+    assert said.startswith("The two servers ran different updates")
+    assert "whole server" in said
+
+
+def test_unknown_names_keep_the_plain_sentence() -> None:
+    said = move.version_difference(
+        {"acore_auth": _evidence_of(NAMES)},
+        {"acore_auth": _evidence_of(NAMES[:4])},
+        file_names=lambda schema: None,
+        server_names=lambda schema: (NAMES[:4], ()),
+    )
+    assert said is not None and said.startswith("The databases in this file are not at the same")

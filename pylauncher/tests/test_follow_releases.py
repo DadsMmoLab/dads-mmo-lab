@@ -8,6 +8,7 @@ is declared per source (`follow: releases`) and never guessed at run time.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from pathlib import Path
 from typing import Any
@@ -976,3 +977,16 @@ def test_a_release_row_the_clone_cannot_place_is_still_offered_its_release(tmp_p
     assert apply_module._behind_from_json(apply_module._behind_to_json(Behind.UNPLACED)) is (
         Behind.UNPLACED
     )
+
+
+def test_the_upstream_line_for_a_server_yulon_did_not_build_never_points_at_the_press(
+    tmp_path: Path,
+) -> None:
+    rec, server_dir = _counted(tmp_path)
+    news = _engine(rec).upstream_news(InstallOptions(server_dir=server_dir), now=T0)
+    ours = upstream.line(news)
+    adopted = upstream.line(dataclasses.replace(news, adopted=True))
+    assert "Update the server to latest" in ours
+    assert adopted.endswith("Update it with the launcher that built it.")
+    assert "Update the server to latest" not in adopted
+    assert adopted.startswith("Upstream has new code since this server was built: server 300")

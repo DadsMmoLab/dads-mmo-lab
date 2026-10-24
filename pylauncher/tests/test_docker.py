@@ -5477,6 +5477,51 @@ def test_a_run_that_never_started_is_told_apart_from_one_that_exited_127() -> No
     assert not docker.cli_missing_run(docker.AttachedRun(0, (help_text,)))
 
 
+def test_container_run_cpus_emits_flag_before_image() -> None:
+    """T801: a `cpus` ceiling reaches docker as `--cpus <n>`, among the options.
+
+    Docker stops reading its own options at the image name, so the flag must sit
+    beside the other limits and BEFORE the image and mounts; `None` spells
+    nothing, because "uncapped" is a decision a caller takes and the argv should
+    not carry an option nobody asked for. Both argv forms carry it: the mmaps
+    generation this exists for is the detached one.
+    """
+    spec = docker.ContainerRun(
+        image="busybox:1.36",
+        argv=("true",),
+        ulimits=("stack=unlimited",),
+        mounts=(docker.Mount(Path("/srv/data"), "/out"),),
+        cpus=8,
+    )
+    argv = spec.to_argv()
+    assert argv[argv.index("--cpus") + 1] == "8"
+    assert argv.index("--cpus") > argv.index("--ulimit")  # beside the limits
+    assert argv.index("--cpus") < argv.index("-v")  # before the mounts
+    assert argv.index("--cpus") < argv.index("busybox:1.36")  # an option, not a tool arg
+    assert "--cpus" in spec.to_detached_argv(name="yulon-extract-0123456789ab")
+    uncapped = docker.ContainerRun(image="busybox:1.36", argv=("true",))
+    assert "--cpus" not in uncapped.to_argv()
+
+
+def test_container_run_cpuset_and_memory_emit_their_flags_before_image() -> None:
+    """T801 review: the cores are pinned and the RAM ceilinged, not only the CPU time.
+
+    `--memory-swap` carries the same number as `--memory`, so the ceiling is not
+    stretched by swap; None spells neither.
+    """
+    spec = docker.ContainerRun(
+        image="busybox:1.36", argv=("true",), cpus=4, cpuset="0-3", memory=8 * 1024**3
+    )
+    argv = spec.to_argv()
+    image = argv.index("busybox:1.36")
+    assert argv[argv.index("--cpuset-cpus") + 1] == "0-3" and argv.index("--cpuset-cpus") < image
+    assert argv[argv.index("--memory") + 1] == str(8 * 1024**3) and argv.index("--memory") < image
+    assert argv[argv.index("--memory-swap") + 1] == str(8 * 1024**3)
+    assert "--cpuset-cpus" in spec.to_detached_argv(name="yulon-extract-0123456789ab")
+    plain = docker.ContainerRun(image="busybox:1.36", argv=("true",)).to_argv()
+    assert "--cpuset-cpus" not in plain and "--memory" not in plain
+
+
 def test_a_relative_mount_source_is_refused_before_docker_sees_it() -> None:
     """Docker rejects a relative bind source daemon-side; the message should name our caller."""
     spec = docker.ContainerRun(
@@ -7553,7 +7598,9 @@ def test_two_rules_that_are_not_a_step_block_are_left_alone() -> None:
     """A tool drawing its own `------` rules must not be read as a failed build.
 
     The header under the opening fence is what tells the two apart, so a pair
-    of rules with ordinary text under the first falls back to the plain tail.
+    of rules with ordinary text under the first is not parsed as one. T810
+    adds the refinement: the importer's mysql error line leads with its
+    nearest neighbour, not with the tool's own `------` rules three lines up.
     """
     # TWO lines between the rules, deliberately. With only one, the slice that
     # skips the header comes out empty whether the guard is there or not, and a
@@ -7567,23 +7614,95 @@ def test_two_rules_that_are_not_a_step_block_are_left_alone() -> None:
     )
     said = docker.last_words(tail)
     assert "ERROR 1064" in said, said
-    assert "42 files applied" in said, said
+    assert "------" in said, said
 
 
-def test_output_with_no_buildkit_block_still_reports_its_last_lines(tmp_path: Path) -> None:
-    """The other shape, unchanged: a plain tool that failed without Docker's fences.
+def test_output_with_no_buildkit_block_still_reports_its_error_line_first(tmp_path: Path) -> None:
+    """The other shape, unchanged in spirit: a plain tool failed without Docker's fences.
 
     The T38 fix must not make a non-build failure worse by hunting for a block
     that was never printed -- an import, a git clone and a map extractor all
-    come through `last_words()` too.
+    come through `last_words()` too. T810 adds the one refinement: when the
+    tail carries a recognised error line, that line leads and its neighbours
+    fill the window, instead of the tail's last lines winning by position.
     """
     plain = ("Reading table", "applying update 3", "ERROR 1064 (42000): syntax error near 'x'")
     said = docker.last_words(plain)
-    assert "ERROR 1064" in said, said
-    assert "Reading table" in said, said
+    assert said.startswith("ERROR 1064"), said
+    assert "applying update 3" in said, said
 
     assert docker.last_words(()) == "it printed nothing at all"
     assert docker.last_words(("", "   ", "")) == "it printed nothing at all"
+
+
+# -- T810: the failed download's own error line, not a curl progress meter ----
+
+_T810_TAIL = (
+    # The reporter's own stream, shape kept: compose's `<service>  | ` prefix,
+    # its error line, curl's own "will retry in 10 seconds" line, two bare
+    # meter readings, then compose's closing line.
+    "ac-client-data-init  | curl: (77) error setting certificate file: /etc/ssl/certs/ca-certificates.crt",
+    "ac-client-data-init  | Warning: Problem (retrying all errors). Will retry in 10 seconds. 16 retries left.",
+    "ac-client-data-init  |   0     0    0     0    0     0      0       0 --:--:-- --:--:-- --:--:--     0",
+    "ac-client-data-init  |   0     0    0     0    0     0      0       0 --:--:-- --:--:-- --:--:--     0",
+    "Aborting on container exit...",
+)
+
+
+def test_a_curl_error_line_beats_the_progress_meter_and_compose_closing_line() -> None:
+    """T810: "Its last words were" quoted a progress bar, not the `curl: (77)` line.
+
+    The reporter's tail ended in two meter readings and compose's closing
+    line, and all five quoted lines were those. The one-shot's own error line
+    leads now, in stream order with its neighbours — the same shape as the
+    compiler diagnostic beating BuildKit's epilogue.
+    """
+    said = docker.last_words(_T810_TAIL)
+    assert said.startswith(
+        "ac-client-data-init  | curl: (77) error setting certificate file: "
+    ), said
+    assert "--:--:--" not in said, said
+
+
+def test_a_meter_reading_with_no_error_line_is_still_quoted_as_is() -> None:
+    """The new branch fires on a recognised error line, not on meter-shaped lines.
+
+    Deleting `_ONE_SHOT_ERROR`'s `curl: (N)` alternative must turn the first
+    test red; widening it to meter-shaped lines would hide this one's own
+    words instead. A tail with no error line reaches the plain fallback, meter
+    lines and all.
+    """
+    tail = (
+        "  0  0  0  0 --:--:-- --:--:-- --:--:--  0",
+        "the fetch wrote nothing else before it died",
+    )
+    said = docker.last_words(tail)
+    assert "the fetch wrote nothing else" in said, said
+
+
+def test_an_importers_mysql_error_keeps_its_old_sentence() -> None:
+    """The new branch also matches the importer's mysql line, and still leads with it.
+
+    The old plain-tail sentence already fit whole, so this pins the one thing
+    the branch changes: the error's nearest neighbours fill the window, not
+    the tail's far end. Deleting the `ERROR \\d+` alternative turns this red.
+    """
+    said = docker.last_words(
+        ("Reading table", "applying update 3", "ERROR 1064 (42000): syntax error near 'x'")
+    )
+    assert said.startswith("ERROR 1064"), said
+    assert "applying update 3" in said, said
+
+
+def test_the_one_shot_branch_never_fires_for_a_build() -> None:
+    """`from_build=True` keeps the build's own parsing, however curl-shaped its lines.
+
+    A narrowing of the branch condition must not send a build's tail down the
+    epilogue path: the mutation that drops `not from_build` turns this red.
+    """
+    said = docker.last_words(_T810_TAIL, from_build=True)
+    assert "rtificate file" in said, said
+    assert said != docker.last_words(_T810_TAIL), (said, docker.last_words(_T810_TAIL))
 
 
 def test_a_tool_printing_its_own_angle_bracket_line_is_not_read_as_a_build() -> None:

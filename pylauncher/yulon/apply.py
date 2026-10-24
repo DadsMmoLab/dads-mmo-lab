@@ -4761,6 +4761,7 @@ class Applier:
         other: list[str] = []
         moved: set[str] = set()
         handled: set[str] = set()  # modules `other` already says something about
+        owed = rebuilds_owed_now(self.server_dir)  # `<type>/<id>` -> in no build yet
         for item_id in named:
             manifest = load(item_id)
             last = self.last_update(manifest) if manifest is not None else None
@@ -4772,6 +4773,16 @@ class Applier:
                     f"{item_id}, so it did not change it. Your server is still running the "
                     f"build it had. To build without it, move the folder modules/{item_id} out "
                     f"of your server folder, then press {_REBUILD}."
+                )
+                continue
+            if last is None and owed.get(f"{manifest.type}/{item_id}") is True:
+                # T795: installed after the last build and never built. Nothing was put back
+                # because there was nothing to put back; the server never had this module.
+                other.append(
+                    f"The build stopped on an error in {item_id}, which is new since your last "
+                    f"build. Nothing was put back, because the build you have never had "
+                    f"{item_id}: your server is still running that build. To build without "
+                    f"{item_id}, press Remove on its row, then press {_REBUILD}."
                 )
                 continue
             if last is None:

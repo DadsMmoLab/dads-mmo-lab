@@ -1134,6 +1134,29 @@ def compose_project_name(server_dir: Path, *, wsl_distro: str | None = None) -> 
     return name if isinstance(name, str) and name else None
 
 
+def compose_config(server_dir: Path, *, wsl_distro: str | None = None) -> dict[str, Any] | None:
+    """`docker compose config --format json` of this folder, parsed; None if it cannot say (T804).
+
+    The whole document, for the one reader that checks several facts of it at once
+    (`catalog.script_built.check()`); the narrower readers above each ask for one.
+    """
+    proc = _docker(
+        ["compose", "config", "--format", "json"],
+        cwd=server_dir,
+        timeout=_COMPOSE_CONFIG_TIMEOUT_SECONDS,
+        wsl_distro=wsl_distro,
+    )
+    if proc.returncode != 0:
+        logger.debug(f"compose config failed in {server_dir}: {proc.stderr.strip()}")
+        return None
+    try:
+        parsed = json.loads(proc.stdout)
+    except ValueError:
+        logger.debug("compose config did not return JSON")
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
 def compose_service_images(
     server_dir: Path, services: Sequence[str], *, wsl_distro: str | None = None
 ) -> dict[str, str] | None:
@@ -6730,6 +6753,33 @@ step's output arrives as `#<n> <seconds> ...` and is not read at all
 _STEP_OUTPUT = re.compile(r"^\s*#\d+\s")
 """A line BuildKit's plain progress prints for a step: `#25 213.5 ...`, `#9 ERROR: ...`."""
 
+_ONE_SHOT_ERROR = re.compile(
+    r"^(?:"
+    r"curl: \(\d+\)"
+    r"|ERROR \d+ \([0-9A-Z]+\)"
+    r"|error setting certificate file"
+    r")",
+)
+"""The tool's own failure line, at the start of a line: curl's or mysql's (T810).
+
+Compose prefixes every line with `<service>  | ` and a curl progress meter
+fills the tail with `  0  0  ... --:--:--` readings. The reporter's curl 77
+then quoted a meter line instead of `curl: (77) error setting certificate
+file`. An error recognised here wins over the tail's last lines, in the same
+way a compiler diagnostic wins over BuildKit's epilogue.
+"""
+
+_CURL_METER = re.compile(r"^\s*\d+\s+[\d\s]+--[:\-]")
+"""A curl progress-meter reading, recognised so it is never quoted (T810).
+
+Measured on the reporter's own stream: two lines of bare column readings
+between every error line, `  0  0  0 ... 0 --:--:-- --:--:-- ...`. A meter
+line names nothing and explains nothing, the way ninja's `[NNN/MMMM]
+Building CXX object` progress does for a build -- and like that progress it
+arrives wedged between the lines that do. Matched after `unprefixed()`, so
+the service prefix compose puts in front is already gone.
+"""
+
 
 def builder_connection_lost(tail: Sequence[str]) -> bool:
     """Did this build end because its client lost Docker's builder? (T202)
@@ -6848,6 +6898,11 @@ def last_words(tail: tuple[str, ...], *, from_build: bool = False) -> str:
     than anything that went wrong, so the failing step's output is preferred
     and the `ERROR:` line is kept beside it with its command elided — see
     `_buildkit_failure()`.
+
+    For a failed one-shot (a compose service that printed its own error and
+    exited) the same shape holds: compose's own closing lines and a curl
+    progress meter fill the tail's last lines, so the tool's own error line is
+    preferred and leads — see `_ONE_SHOT_ERROR` (T810).
     """
     said = [line.strip() for line in tail if line.strip()]
     if not said:
@@ -6862,6 +6917,34 @@ def last_words(tail: tuple[str, ...], *, from_build: bool = False) -> str:
             # says where to look (review, 2026-09-12).
             text = text[:_LAST_WORDS_CHARS] + "…"
         return f"{text} / {_elided(error_line)}" if error_line else text
+    error_at = [
+        index
+        for index, line in enumerate(said)
+        if _ONE_SHOT_ERROR.search(unprefixed(line))
+        and not _COMPOSE_OWN_LINE.match(line.strip())
+    ]
+    if error_at and not from_build:
+        # A one-shot's own error line beats compose's closing lines and curl's
+        # meter. The reporter's tail ended in two meter readings and an
+        # "Aborting on container exit..." line, and all five quoted lines were
+        # those. Quoted in stream order: the error with the line before it
+        # (the fetch's last reading) and the line after it (curl's own
+        # "Warning: Problem (retrying ...)", read as the run's own words, not
+        # as a promise — the fail-fast below never retries this; the run
+        # already ended). `unprefixed()` matches without compose's own
+        # `<service>  | `; the quoted line keeps it, like every other answer.
+        at = error_at[-1]
+        latest = said[at]
+        # The error's own neighbourhood, not the tail's last lines: those are
+        # meter readings and compose's own "Aborting on container exit...".
+        nearby = said[max(0, at - 1) : at + 2]
+        window = [line for line in nearby if not _CURL_METER.match(unprefixed(line))]
+        lines = list(dict.fromkeys([latest, *window]))
+        following = [line for line in said[at + 1 :] if not _CURL_METER.match(unprefixed(line))]
+        lines.extend(line for line in following if line not in lines)
+        text = " / ".join(lines[:_LAST_WORDS_LINES])
+        return text if len(text) <= _LAST_WORDS_CHARS else "…" + text[-_LAST_WORDS_CHARS:]
+
     kept = _build_log_elsewhere(said) if from_build else ""
     if kept:
         # T50. The step output is not in the buffer to be selected from, so the
@@ -8092,6 +8175,31 @@ class ContainerRun:
     env: Mapping[str, str] = field(default_factory=dict)
     user_args: tuple[str, ...] = ()
     ulimits: tuple[str, ...] = ()
+    cpus: int | None = None
+    """A `--cpus` ceiling on the container, in whole CPUs, or None for no ceiling.
+
+    A whole CPU, not a fraction: Docker accepts `1.5`, but the only caller today
+    caps a movement-map generator by halving what the engine reports, and a
+    half-core more of that tool buys nothing worth a second spelling of the
+    rounding rule. `None` is "the tool may use the engine whole" — the decision
+    a caller that states nothing has taken — and nothing is emitted for it.
+    """
+    cpuset: str | None = None
+    """`--cpuset-cpus`: the cores the container may run on (`"0-3"`), or None for any.
+
+    `cpus` bounds CPU TIME only: a tool that starts one worker per core it can see
+    still starts them all, sharing that time. Pinning the cores places every worker on
+    those N, and a tool that counts the affinity mask sees N. glibc 2.35 and later count
+    `/sys/devices/system/cpu/online` for `get_nprocs()` instead, so such a tool still
+    starts a worker per HOST core; what bounds its memory is `memory`, not this.
+    """
+    memory: int | None = None
+    """`--memory` and `--memory-swap`, in bytes: the container's hard RAM ceiling, or None.
+
+    Both flags carry the same number, so the container gets no swap beyond its RAM:
+    past the ceiling the kernel kills the tool inside the container, rather than the
+    machine running out of memory under it.
+    """
     security_args: tuple[str, ...] = ()
     """The caller's container-level security decision, verbatim, or nothing.
 
@@ -8193,6 +8301,12 @@ class ContainerRun:
         argv = [*self.user_args, *self.security_args]
         for limit in self.ulimits:
             argv += ["--ulimit", limit]
+        if self.cpus is not None:
+            argv += ["--cpus", str(self.cpus)]
+        if self.cpuset is not None:
+            argv += ["--cpuset-cpus", self.cpuset]
+        if self.memory is not None:
+            argv += ["--memory", str(self.memory), "--memory-swap", str(self.memory)]
         for mount in self.mounts:
             if not mount.host.is_absolute():
                 raise ValueError(f"bind mount source must be absolute, got {mount.host!r}")

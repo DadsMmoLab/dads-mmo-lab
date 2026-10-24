@@ -336,9 +336,10 @@ def test_an_error_in_a_module_that_was_not_updated_changes_nothing(
         _press(monkeypatch, two, [ERROR_X], InstallerError(FAILED))
 
     assert two.head("mod-x") == two.a["mod-x"] and two.head("mod-y") == tips["mod-y"]
+    # mod-x was installed here and no build has finished since (T795): it is new, not "not updated".
     assert (
-        "The build stopped on an error in mod-x. Yu'lon has no update of mod-x to put back, so "
-        "it did not change it."
+        "The build stopped on an error in mod-x, which is new since your last build. Nothing was "
+        "put back"
     ) in str(failed.value)
 
 

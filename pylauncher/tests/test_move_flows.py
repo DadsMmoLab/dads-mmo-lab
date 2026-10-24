@@ -8,6 +8,7 @@ order, and the guards are the flow's own.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import stat
@@ -29,6 +30,7 @@ from yulon.controller_wow_wotlk.maintenance import MaintenanceError
 from yulon.move import Counts, DumpFile, Evidence, Header
 from yulon.move_flows import MoveWorld
 from yulon.ownership import Ownership
+from yulon.server_build_presses import UPDATE_TO_LATEST, under_server_build
 
 CATALOG = load_catalog()
 AT = datetime(2026, 10, 9, 15, 30, 0)
@@ -1683,3 +1685,144 @@ def test_clear_pack_folder_takes_a_dead_packs_folder_and_follows_no_link(tmp_pat
     assert not os.path.lexists(work)
     assert (elsewhere / "mine.sql").read_bytes() == b"the player's"
     move_flows.clear_pack_folder(server)  # nothing there: nothing to do
+
+
+# ------------------------------------------------ which server is behind (T802)
+
+
+def _sql_names(prefix: str, count: int) -> tuple[str, ...]:
+    return tuple(f"2026_10_{n:02d}_00_{prefix}.sql" for n in range(count))
+
+
+def ledger_package(tmp_path: Path, names: dict[str, tuple[str, ...]]) -> Path:
+    """A package whose dumps hold a real `updates` insert for each schema in `names`."""
+    src = tmp_path / "ledger"
+    src.mkdir(exist_ok=True)
+    dumps = []
+    for schema, held in names.items():
+        rows = ",".join(
+            f"('{n}','{hashlib.sha1(n.encode()).hexdigest().upper()}','RELEASED',"
+            "'2026-10-01 00:00:00',0)"
+            for n in held
+        )
+        insert = f"INSERT INTO `updates` VALUES {rows};\n".encode()
+        path = src / f"{schema}.sql"
+        body = dump_text(schema).replace(b"-- Dump completed", insert + b"-- Dump completed")
+        path.write_bytes(body)
+        role = (
+            "auth"
+            if schema.endswith("auth")
+            else "playerbots" if schema.endswith("playerbots") else "characters"
+        )
+        dumps.append(DumpFile(schema, role, path, ("t",)))  # type: ignore[arg-type]
+    header = Header(
+        game_id="wow-wotlk",
+        game_name="WoW WotLK",
+        realm_name="Old Realm",
+        channel_account="YULON_BBBB2222",
+        bot_prefix="RNDBOT",
+        counts=Counts(accounts=1, characters=1, bot_accounts=0, bot_characters=0),
+        schema_evidence={
+            s: Evidence(kind="updates", count=len(n), digest=_digest(n)) for s, n in names.items()
+        },
+        excluded=(),
+        made=AT,
+    )
+    dest = tmp_path / "ledger.zip"
+    move.write_package(dest, header, dumps)
+    return dest
+
+
+def _ledger_refusal(
+    tmp_path: Path,
+    in_file: dict[str, tuple[str, ...]],
+    here: dict[str, tuple[str, ...]],
+    *,
+    ownership: Ownership = Ownership.OWNED,
+) -> str:
+    package = ledger_package(tmp_path, in_file)
+    db = Db(
+        [],
+        present=("acore_world", *here),
+        updates_by_schema=here,
+    )
+    box = target(tmp_path, db=db)
+    box.ownership = ownership
+    plan = move_flows.plan_import(box.world, package)
+    assert not plan.allowed
+    return plan.refusals[0]
+
+
+AUTH_23 = _sql_names("auth", 23)
+BOTS_36 = _sql_names("bots", 36)
+
+
+def test_a_package_behind_names_the_file_as_behind(tmp_path: Path) -> None:
+    said = _ledger_refusal(
+        tmp_path,
+        {
+            "acore_auth": AUTH_23[:22],
+            "acore_characters": _sql_names("chars", 5),
+            "acore_playerbots": BOTS_36[:31],
+        },
+        {
+            "acore_auth": AUTH_23,
+            "acore_characters": _sql_names("chars", 5),
+            "acore_playerbots": BOTS_36,
+        },
+    )
+    assert said.startswith(
+        "The file is behind this server (acore_auth: 22 updates in the file, 23 here; "
+        "acore_playerbots: 31 updates in the file, 36 here). Bring the OLD server up to date "
+        "and pack again"
+    )
+
+
+def test_a_package_ahead_names_this_server_as_behind(tmp_path: Path) -> None:
+    said = _ledger_refusal(
+        tmp_path,
+        {"acore_auth": AUTH_23, "acore_characters": _sql_names("chars", 5)},
+        {"acore_auth": AUTH_23[:22], "acore_characters": _sql_names("chars", 5)},
+    )
+    assert said.startswith(
+        "This server is behind the file (acore_auth: 23 updates in the file, 22 here)."
+    )
+    assert under_server_build(UPDATE_TO_LATEST) in said
+
+
+def test_updates_sets_that_differ_both_ways_still_refuse(tmp_path: Path) -> None:
+    said = _ledger_refusal(
+        tmp_path,
+        {
+            "acore_auth": (*AUTH_23[:20], "x_file_only.sql"),
+            "acore_characters": _sql_names("chars", 5),
+        },
+        {
+            "acore_auth": (*AUTH_23[:20], "x_here_only.sql"),
+            "acore_characters": _sql_names("chars", 5),
+        },
+    )
+    assert said.startswith("The two servers ran different updates")
+    assert "whole server" in said
+    assert "Update the server to latest" not in said
+
+
+def test_refusal_never_advises_update_to_latest_for_a_server_without_an_install_record(
+    tmp_path: Path,
+) -> None:
+    said = _ledger_refusal(
+        tmp_path,
+        {"acore_auth": AUTH_23, "acore_characters": _sql_names("chars", 5)},
+        {"acore_auth": AUTH_23[:22], "acore_characters": _sql_names("chars", 5)},
+        ownership=Ownership.UNCLAIMED,
+    )
+    assert "This server is behind the file" in said
+    assert UPDATE_TO_LATEST not in said
+    assert "launcher that built it" in said
+
+
+def test_a_package_with_no_readable_names_keeps_the_plain_refusal(tmp_path: Path) -> None:
+    package = packed(tmp_path)  # its dumps hold no updates insert
+    box = target(tmp_path, db=Db([], updates=("2024_01_a", "2024_01_b", "2024_02_new")))
+    said = move_flows.plan_import(box.world, package).refusals[0]
+    assert said.startswith("The databases in this file are not at the same version")

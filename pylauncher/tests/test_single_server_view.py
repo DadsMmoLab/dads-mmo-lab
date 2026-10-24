@@ -199,6 +199,39 @@ def test_the_address_clients_are_told_is_shown_and_selected(qapp: object, tmp_pa
     view.shutdown()
 
 
+def test_the_lan_lookup_never_runs_on_the_gui_thread(qapp: object, tmp_path: Path) -> None:
+    """`detect_lan_ip()` runs powershell.exe with an 8 s timeout: it is a job, not a build step.
+
+    Jobs are held instead of run, so anything asked while the view is built is asked on the
+    GUI thread. The LAN choice arrives with the job, before the address is matched to it.
+    """
+    held: list[tuple[Work, OnDone, OnError]] = []
+    asked: list[str] = []
+
+    def reaches() -> tuple[Reach, ...]:
+        asked.append(threading.current_thread().name)
+        return REACHES
+
+    view = SingleServerView(
+        DDON,
+        FakeController(tmp_path, address="192.168.0.60"),  # type: ignore[arg-type]
+        client_dir=None,
+        run_job=lambda work, done, error: held.append((work, done, error)),
+        poll_ms=60_000,
+        reaches=reaches,
+        os_name=lambda: "windows",
+    )
+    assert asked == [], "the LAN was looked up while the view was being built"
+    assert view.reach_box.findData("192.168.0.60") == -1
+    view.read_address()
+    work, done, _error = held[-1]
+    done(work())
+    assert len(asked) == 1
+    assert view.reach_box.findData("192.168.0.60") != -1
+    assert view.chosen_address() == "192.168.0.60", "matched to the LAN choice, not 'another'"
+    view.shutdown()
+
+
 def test_an_address_not_offered_is_shown_as_another_address(qapp: object, tmp_path: Path) -> None:
     view = _view(FakeController(tmp_path, address="100.64.0.7"))
     assert view.reach_box.currentText() == ANOTHER_ADDRESS
