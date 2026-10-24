@@ -24630,9 +24630,10 @@ def test_the_button_offers_to_make_one_and_then_reads_play(
     assert with_one.play_menu_button is not None and not with_one.play_menu_button.isHidden()
     entries = [action.text() for action in with_one.play_menu.actions()]
     assert entries == [
+        controller_view_module.CLIENT_OPTIONS_LABEL,
         controller_view_module.REFRESH_PLAY_CLIENT_LABEL,
         controller_view_module.DELETE_PLAY_CLIENT_LABEL,
-    ]
+    ], "shipped wow-wotlk now has one optional pack (T809 W2: Lumenveil)"
 
 
 def test_no_write_seam_means_no_button(qapp: object, ps: _Ps, tmp_path: Path) -> None:
@@ -27167,7 +27168,9 @@ def test_an_entry_without_client_data_shows_no_options_in_the_make_dialog(
 ) -> None:
     original = _game_client(tmp_path / "clients" / "WoW")
     asker = _Asked(cancel=True)
-    view, _ = _play_view(ps, tmp_path, original=original, asker=asker)
+    bare = WOTLK.client.model_copy(update={"packs": (), "exe_patch": None, "config_wtf": None})
+    entry = WOTLK.model_copy(update={"client": bare})
+    view, _ = _play_view(ps, tmp_path, original=original, asker=asker, entry=entry)
 
     view.make_play_client()
 
@@ -27176,6 +27179,24 @@ def test_an_entry_without_client_data_shows_no_options_in_the_make_dialog(
     assert dialog.client_options is None
     chosen = dialog.choice()
     assert chosen is not None and chosen.client_choices is None
+
+
+def test_the_shipped_wotlk_entry_offers_lumenveil_in_the_make_dialog(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T809 W2: wow-wotlk's real client section is one optional pack, so the Make dialog
+    shows it (a choice the player can leave off)."""
+    original = _game_client(tmp_path / "clients" / "WoW")
+    asker = _Asked(cancel=True)
+    view, _ = _play_view(ps, tmp_path, original=original, asker=asker)
+
+    view.make_play_client()
+
+    assert asker.offers[0].client is not None
+    assert [pack.id for pack in asker.offers[0].client.packs] == ["lumenveil"]
+    dialog = controller_view_module.PlayClientDialog(asker.offers[0], jobs=run_inline)
+    assert dialog.client_options is not None
+    assert list(dialog.client_options.pack_boxes) == ["lumenveil"]
 
 
 def test_make_saves_the_choices_into_the_record(
@@ -27209,7 +27230,10 @@ def test_client_options_is_in_the_menu_only_for_an_entry_that_has_options(
         controller_view_module.REFRESH_PLAY_CLIENT_LABEL,
         controller_view_module.DELETE_PLAY_CLIENT_LABEL,
     ]
-    plain, _ = _play_view(ps, tmp_path, original=original, play=play)
+    plain_entry = WOTLK.model_copy(
+        update={"client": WOTLK.client.model_copy(update={"packs": ()})}
+    )
+    plain, _ = _play_view(ps, tmp_path, original=original, play=play, entry=plain_entry)
     assert controller_view_module.CLIENT_OPTIONS_LABEL not in [
         action.text() for action in plain.play_menu.actions()
     ]
@@ -28316,7 +28340,8 @@ def test_a_pack_the_catalog_dropped_is_removed_at_the_next_play(
     first.play()
     assert (play / "Data" / "patch-W.MPQ").is_file()
 
-    plain, _ = _play_view(ps, tmp_path, original=original, play=play)  # no client section
+    bare = WOTLK.model_copy(update={"client": WOTLK.client.model_copy(update={"packs": ()})})
+    plain, _ = _play_view(ps, tmp_path, original=original, play=play, entry=bare)  # no packs
     plain.play()
 
     assert not (play / "Data" / "patch-W.MPQ").exists()

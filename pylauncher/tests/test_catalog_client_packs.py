@@ -174,37 +174,147 @@ def test_a_client_without_the_new_fields_names_no_host() -> None:
     assert client.hosts() == frozenset()
 
 
-def test_the_shipped_catalog_uses_the_new_fields_on_centurion_and_unbound_alone() -> None:
-    """Groundwork for T179: Centurion is the first entry with a ready-to-play client section,
-    WoW Unbound (T555) the second; every other entry behaves exactly as before (its own tests:
-    test_catalog_centurion, test_unbound_entry)."""
+def test_the_shipped_catalog_uses_the_new_fields_on_wotlk_centurion_and_unbound() -> None:
+    """T809 W2: wow-wotlk and wow-unbound carry the Lumenveil ClientPack; Centurion does not.
+    WoW Unbound (T555) keeps its required addons pack beside it; every other entry behaves
+    exactly as before (its own tests: test_catalog_centurion, test_unbound_entry)."""
     raw = json.loads(CATALOG_FILE.read_text(encoding="utf-8"))
     for entry in raw["games"]:
-        if entry["id"] not in ("wow-centurion", "wow-unbound"):
-            assert set(entry["client"]) <= {
-                "version",
-                "build",
-                "required_build",
-                "also_builds",
-                "foreign_data_dies_after",
-                "addon_interface",
-                "realmlist_file",
-                "notes",
-            }
+        if entry["id"] in ("wow-wotlk", "wow-centurion", "wow-unbound"):
+            assert "packs" in entry["client"], entry["id"]
+            continue
+        assert set(entry["client"]) <= {
+            "version",
+            "build",
+            "required_build",
+            "also_builds",
+            "foreign_data_dies_after",
+            "addon_interface",
+            "realmlist_file",
+            "notes",
+        }
     for game in load_catalog().games:
+        if game.id == "wow-wotlk":
+            assert [pack.id for pack in game.client.packs] == ["lumenveil"]
+            assert game.client.exe_patch is None
+            assert game.client.config_wtf is None
+            assert game.client.hosts() == frozenset(
+                {
+                    "github.com",
+                    "release-assets.githubusercontent.com",
+                    "objects.githubusercontent.com",
+                }
+            )
+            continue
         if game.id == "wow-centurion":
             assert game.client.packs and game.client.exe_patch and game.client.config_wtf
             assert game.client.hosts() == frozenset({"centurionpvp.com", "wow.baerthe.com"})
             continue
         if game.id == "wow-unbound":
-            assert game.client.packs and game.client.config_wtf
+            assert [pack.id for pack in game.client.packs] == ["unbound-addons", "lumenveil"]
+            assert game.client.config_wtf
             assert game.client.exe_patch is None
-            assert game.client.hosts() == frozenset()
+            assert game.client.hosts() == frozenset(
+                {
+                    "github.com",
+                    "release-assets.githubusercontent.com",
+                    "objects.githubusercontent.com",
+                }
+            )
             continue
         assert game.client.packs == ()
         assert game.client.exe_patch is None
         assert game.client.config_wtf is None
         assert game.client.hosts() == frozenset()
+
+
+LUMENVEIL_URL = "https://github.com/lumenveil/Lumenveil/releases/download/v0.1.0/Lumenveil-0.1.0.zip"
+LUMENVEIL_SHA256 = "78d1e1ca7450858a67d6ec2298343c3f67cda9aa920aa800e28982d8d3fee83b"
+LUMENVEIL_SIZE = 1_233_402
+"""T809 W2 pin (2026-10-24): release page https://github.com/lumenveil/Lumenveil/releases,
+tag v0.1.0. Zip hash recomputed locally from the downloaded asset and compared with the
+release's SHA256SUMS.txt line for Lumenveil-0.1.0.zip: match; all 16 zip members rechecked
+against their SHA256SUMS.txt lines: all OK. Size is the asset's byte count."""
+
+LUMENVEIL_MEMBERS = (
+    "version.dll",
+    "CoAVolFog.dll",
+    "CoAVolFog.ini",
+    "CoAVolFog-regions.ini",
+    "Lumenveil-Setup.cmd",
+    "Lumenveil-Uninstall.cmd",
+    "Lumenveil/lamp_extract.exe",
+    "Lumenveil/LEGAL.txt",
+    "Lumenveil/LICENSE.txt",
+    "Lumenveil/README.txt",
+    "Lumenveil/THIRD-PARTY-NOTICES.txt",
+    "Lumenveil/licenses/bzip2.txt",
+    "Lumenveil/licenses/DearImGui-MIT.txt",
+    "Lumenveil/licenses/Everwood-MIT.txt",
+    "Lumenveil/licenses/GPL-2.0.txt",
+    "Lumenveil/licenses/zlib.txt",
+)
+"""The zip's 16 members as the catalog installs them: root members verbatim, and the
+`Lumenveil\\...` members with forward slashes, because the catalog's `_inside` refuses
+backslashes. Spelled per member (no `"*"`) so an unexpected member is never laid in."""
+
+
+def _lumenveil_of(game_id: str) -> ClientPack:
+    """The shipped Lumenveil pack on one entry, failing loudly when it is missing."""
+    packs = {pack.id: pack for pack in load_catalog().get(game_id).client.packs}
+    assert "lumenveil" in packs, f"{game_id} lost its Lumenveil pack"
+    return packs["lumenveil"]
+
+
+def test_the_lumenveil_pack_is_pinned_identical_and_windows_only() -> None:
+    """The pin both entries share: URL, hash, size, members, platform, hosts, setup, credit."""
+    for game_id in ("wow-wotlk", "wow-unbound"):
+        pack = _lumenveil_of(game_id)
+        assert pack.label == "Lumenveil"
+        assert (pack.source.kind, pack.source.url) == ("url", LUMENVEIL_URL)
+        assert pack.source.version_url is None, "no latest to chase: an update is a catalog change"
+        assert pack.sha256 == LUMENVEIL_SHA256
+        assert (pack.md5, pack.md5_file, pack.sha256_file) == (None, None, None)
+        assert pack.optional is True and pack.default is False, "opt-in extra, off until chosen"
+        assert pack.size_hint == LUMENVEIL_SIZE
+        assert pack.platforms == ("windows",), "the setup exe runs on the player's machine"
+        assert pack.redirect_hosts == (
+            "release-assets.githubusercontent.com",
+            "objects.githubusercontent.com",
+        )
+        assert [(rule.member, rule.to) for rule in pack.install] == [
+            (member, member) for member in LUMENVEIL_MEMBERS
+        ]
+        assert pack.remove_when_off == ("CoAVolFog.log",), "spots stay: player data, plan D5"
+        assert pack.setup is not None
+        assert pack.setup.run == "Lumenveil/lamp_extract.exe"
+        assert pack.setup.args == ("--background",)
+        assert pack.setup.writes == ("lampdata.bin", "liquiddata.bin")
+        assert pack.setup.timeout_seconds == 600
+        assert pack.credit.startswith("Lumenveil") and "GPL-2.0" in pack.credit
+        assert "CoAVolFog" in pack.credit
+
+
+def test_the_lumenveil_pack_is_identical_in_wotlk_and_unbound_and_absent_on_centurion() -> None:
+    """Same pack JSON in both entries (build 12340); Centurion's 12342 exe stays without it."""
+    wotlk = _lumenveil_of("wow-wotlk")
+    unbound = _lumenveil_of("wow-unbound")
+    assert wotlk.model_dump() == unbound.model_dump()
+    centurion_ids = [pack.id for pack in load_catalog().get("wow-centurion").client.packs]
+    assert "lumenveil" not in centurion_ids
+
+
+def test_the_lumenveil_setup_args_cover_what_the_shipped_cmd_runs() -> None:
+    """The pinned Lumenveil-Setup.cmd (from inside the verified zip) runs lamp_extract.exe
+    twice: once with `--out lampdata.bin` (lamps) and once with `--liquids liquiddata.bin
+    --maps 0,1,530,571` (water). Both share `--data <client Data> --locale <probed> --background`
+    with cwd the game folder; the locale is probed from Data/???? folders at setup time, so no
+    static argv can repeat the .cmd line for line. The catalog pins the flag both runs share
+    (`--background`); the runner (W3) fills in data/out/liquids/maps/locale per run, and this
+    test fails when the pinned argv stops being one the .cmd uses."""
+    pack = _lumenveil_of("wow-wotlk")
+    assert pack.setup is not None
+    assert "--background" in pack.setup.args
 
 
 Mutation = Callable[[dict[str, Any]], None]

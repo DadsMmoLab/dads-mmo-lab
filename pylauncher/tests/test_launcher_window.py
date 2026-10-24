@@ -843,9 +843,18 @@ def test_extras_are_the_client_options_packs_with_their_sizes(
 
 
 def test_a_server_with_no_extras_says_so(qapp: object, ps: _Ps, tmp_path: Path) -> None:
-    window, _view, _ = _launcher(ps, tmp_path)
+    window, _view, _ = _launcher(ps, tmp_path, entry=_client_entry(tmp_path, with_packs=False))
     assert window.pack_boxes == {}
     assert "no extras" in window.extras_note.text()
+
+
+def test_the_shipped_wotlk_entry_offers_lumenveil_as_its_only_extra(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T809 W2: wow-wotlk's real entry now carries the optional Lumenveil pack (Windows-only)."""
+    window, _view, _ = _launcher(ps, tmp_path)
+    assert list(window.pack_boxes) == ["lumenveil"]
+    assert window.pack_boxes["lumenveil"].text() == "Lumenveil"
 
 
 def test_the_addons_in_the_client_are_listed_and_their_folder_opens(
