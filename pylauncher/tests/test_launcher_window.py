@@ -853,7 +853,7 @@ def test_the_shipped_wotlk_entry_offers_lumenveil_as_its_only_extra(
 ) -> None:
     """T809 W2: wow-wotlk's real entry now carries the optional Lumenveil pack (Windows-only)."""
     window, _view, _ = _launcher(ps, tmp_path)
-    assert list(window.pack_boxes) == ["lumenveil"]
+    assert list(window.pack_boxes) == ["lumenveil"]  # W4: flips when the platform filter reaches the UI
     assert window.pack_boxes["lumenveil"].text() == "Lumenveil"
 
 

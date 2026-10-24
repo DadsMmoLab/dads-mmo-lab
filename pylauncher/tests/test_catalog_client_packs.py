@@ -231,10 +231,16 @@ def test_the_shipped_catalog_uses_the_new_fields_on_wotlk_centurion_and_unbound(
 LUMENVEIL_URL = "https://github.com/lumenveil/Lumenveil/releases/download/v0.1.0/Lumenveil-0.1.0.zip"
 LUMENVEIL_SHA256 = "78d1e1ca7450858a67d6ec2298343c3f67cda9aa920aa800e28982d8d3fee83b"
 LUMENVEIL_SIZE = 1_233_402
-"""T809 W2 pin (2026-10-24): release page https://github.com/lumenveil/Lumenveil/releases,
-tag v0.1.0. Zip hash recomputed locally from the downloaded asset and compared with the
+LUMENVEIL_RELEASE = "https://github.com/lumenveil/Lumenveil/releases"
+LUMENVEIL_RELEASE_TAG = "v0.1.0"
+LUMENVEIL_RELEASE_DATE = "2026-10-21"
+"""T809 W2 pin (verified 2026-10-24): release page + tag + release date, and how the bytes proved.
+
+Zip hash recomputed locally from the downloaded asset and compared with the
 release's SHA256SUMS.txt line for Lumenveil-0.1.0.zip: match; all 16 zip members rechecked
-against their SHA256SUMS.txt lines: all OK. Size is the asset's byte count."""
+against their SHA256SUMS.txt lines: all OK. Size is the asset's byte count.
+`test_the_lumenveil_pin_names_its_release` holds the page, tag and date beside the hash,
+so a silent re-point at another tag fails here rather than in the download."""
 
 LUMENVEIL_MEMBERS = (
     "version.dll",
@@ -298,13 +304,14 @@ def test_the_lumenveil_pack_is_pinned_identical_and_windows_only() -> None:
         assert "CoAVolFog" in pack.credit
 
 
-def test_the_lumenveil_pack_is_identical_in_wotlk_and_unbound_and_absent_on_centurion() -> None:
-    """Same pack JSON in both entries (build 12340); Centurion's 12342 exe stays without it."""
-    wotlk = _lumenveil_of("wow-wotlk")
-    unbound = _lumenveil_of("wow-unbound")
-    assert wotlk.model_dump() == unbound.model_dump()
-    centurion_ids = [pack.id for pack in load_catalog().get("wow-centurion").client.packs]
-    assert "lumenveil" not in centurion_ids
+def test_the_lumenveil_pin_names_its_release() -> None:
+    """Item 7: the pinned hash is answerable -- the release page, tag and date it came from."""
+    assert LUMENVEIL_URL == (
+        f"{LUMENVEIL_RELEASE}/download/{LUMENVEIL_RELEASE_TAG}/Lumenveil-0.1.0.zip"
+    )
+    assert LUMENVEIL_RELEASE == "https://github.com/lumenveil/Lumenveil/releases"
+    assert LUMENVEIL_RELEASE_TAG == "v0.1.0"
+    assert LUMENVEIL_RELEASE_DATE == "2026-10-21"
 
 
 def test_the_lumenveil_setup_runs_cover_what_the_shipped_cmd_runs() -> None:

@@ -2985,7 +2985,7 @@ class ClientPack(_Strict):
             if run.endswith(".cmd") or run.endswith(".bat"):
                 raise ValueError(
                     f"pack {self.id!r}: setup run {self.setup.run!r} is a script: the exe "
-                    "is run directly, with args from the catalog"
+                    "is run directly, with runs from the catalog"
                 )
             names = {rule.member.casefold() for rule in self.install if rule.member != "*"}
             if run not in names and not any(rule.member == "*" for rule in self.install):

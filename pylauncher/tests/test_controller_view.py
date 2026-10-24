@@ -24633,7 +24633,7 @@ def test_the_button_offers_to_make_one_and_then_reads_play(
         controller_view_module.CLIENT_OPTIONS_LABEL,
         controller_view_module.REFRESH_PLAY_CLIENT_LABEL,
         controller_view_module.DELETE_PLAY_CLIENT_LABEL,
-    ], "shipped wow-wotlk now has one optional pack (T809 W2: Lumenveil)"
+    ], "shipped wow-wotlk now has one optional pack (T809 W2: Lumenveil)"  # W4: flips when the platform filter reaches the UI
 
 
 def test_no_write_seam_means_no_button(qapp: object, ps: _Ps, tmp_path: Path) -> None:
@@ -27193,7 +27193,7 @@ def test_the_shipped_wotlk_entry_offers_lumenveil_in_the_make_dialog(
     view.make_play_client()
 
     assert asker.offers[0].client is not None
-    assert [pack.id for pack in asker.offers[0].client.packs] == ["lumenveil"]
+    assert [pack.id for pack in asker.offers[0].client.packs] == ["lumenveil"]  # W4: flips when the platform filter reaches the UI
     dialog = controller_view_module.PlayClientDialog(asker.offers[0], jobs=run_inline)
     assert dialog.client_options is not None
     assert list(dialog.client_options.pack_boxes) == ["lumenveil"]
