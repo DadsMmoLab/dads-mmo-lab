@@ -32099,3 +32099,39 @@ def test_a_game_with_no_route_has_no_outside_add_ons_and_no_note(
     object.__setattr__(view.services, "client_addons", None)
     assert view._outside_addons_work(lambda _line: None) == ()
     assert view._has_outside_addons() is False
+
+
+def test_play_never_reports_a_regenerated_output_as_left_alone(
+    qapp: object, ps: _Ps, tmp_path: Path, site: _Site, steps: list[str],
+    asks: _Asks, monkeypatch: pytest.MonkeyPatch, launched: list[object],
+) -> None:
+    """Item 3: an edited setup output is regenerated, never reported as "left alone"."""
+    entry, original, play, seen, _ = _lumen_play(tmp_path, monkeypatch, site)
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+
+    view.play()
+
+    assert len(seen) == 2 and steps[-1] == "launch"
+    (play / "lampdata.bin").write_bytes(b"the player's edit")
+    site.members["lumenveil"] = {
+        **_lumen_members(), "version.dll": b"lumen loader v2",
+        "Lumenveil/lamp_extract.exe": b"exe v2",
+    }
+    site.version = "2"
+    again, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+    seen.clear()
+    steps.clear()
+    launched.clear()
+
+    again.play()
+
+    assert steps == ["install lumenveil", "launch"], (
+        "the reinstall and the regenerated setup still lead to launch"
+    )
+    assert (play / "lampdata.bin").read_bytes() == b"lamps"
+    said = again.play_label.text()
+    assert "lampdata.bin" not in said, (
+        "a setup output setup regenerated is not 'left alone because you changed it'"
+    )

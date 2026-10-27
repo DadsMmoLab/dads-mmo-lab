@@ -13641,17 +13641,30 @@ class ControllerView(QWidget):
                         done,
                         game=game,
                         server_dir=server_dir,
+                        record=have,
                         on_pending=keep_pending,
                     )
                     save()
                 except client_packs.PackError as exc:
                     raise _PackStopped(pack, str(exc)) from exc
             if left_behind:
-                notes.append(
-                    f"{pack.label}: left alone because you changed them: "
-                    + ", ".join(left_behind)
-                    + "."
-                )
+                # Setup outputs are never told as "left alone": the install
+                # regenerates them (the note rides `setup_pending` instead),
+                # so that wording would contradict what Play then does.
+                left = [
+                    rel for rel in left_behind
+                    if not (
+                        pack.setup is not None
+                        and isinstance(rel, str)
+                        and rel in done.get("setup_pending", [])
+                    )
+                ]
+                if left:
+                    notes.append(
+                        f"{pack.label}: left alone because you changed them: "
+                        + ", ".join(sorted(left))
+                        + "."
+                    )
         # 2. Wow.exe.
         if client.exe_patch is not None:
             check_cancel()

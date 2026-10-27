@@ -2208,6 +2208,36 @@ def _holds(path: Path, sha256: str) -> bool:
         return False
 
 
+def _setup_output_names(pack: ClientPack) -> list[str]:
+    """This pack's setup `writes`, as record names; empty when it has no setup."""
+    if pack.setup is None:
+        return []
+    return [
+        clean.as_posix() for rel in pack.setup.writes
+        if (clean := _clean_rel(rel)) is not None
+    ]
+
+
+def _recorded_output_verified(play_dir: Path, rel: str, want: str) -> bool:
+    """Whether the file now in the copy still hashes to the recorded digest.
+
+    A link, a folder, or an unreadable name is not verification: nothing is
+    claimed about it. The install's carried `files` hash then never asserts a
+    false ownership, and the note instead lets `run_setup` remove that known
+    path and regenerate it.
+    """
+    clean = _clean_rel(rel)
+    if clean is None:
+        return False
+    try:
+        path = play_dir / Path(*client_names.on_disk(play_dir, clean).parts)
+        if play_client._is_link(path) or not path.is_file():
+            return False
+        return _file_sha256(path) == want
+    except OSError:
+        return False
+
+
 def _install(
     play_dir: Path,
     pack: ClientPack,
@@ -2243,6 +2273,14 @@ def _install(
         if plain:
             _refuse_without_room(pack, play_dir, plain)
         drops = [] if only_missing else _drops(play_dir, previous, new)
+        if drops:
+            # Setup outputs are setup's to regenerate, never drops: an edited
+            # one is not "left behind", it is re-run (the note rides
+            # `setup_pending` below); an intact one stays for the re-hash.
+            owned = _setup_output_names(pack)
+            if owned:
+                folded = {rel.casefold() for rel in owned}
+                drops = [drop for drop in drops if drop[0].casefold() not in folded]
         staged: list[tuple[Path, Path, str]] = []
         made: list[Path] = []
         try:
@@ -2283,38 +2321,64 @@ def _install(
         dirs = list(dict.fromkeys(
             ([str(rel) for rel in kept_dirs] if isinstance(kept_dirs, list) else []) + dirs
         ))
+
+    owned = _setup_output_names(pack)
+    stale: list[str] = []
+    verified: dict[str, str] = {}
     if isinstance(previous, Mapping):
         # Setup outputs are never zip members, so the merge above never keeps
         # them; the previous entry's hashes for them ride along into the new
-        # files instead. That proves the bytes on disk are this pack's own
-        # (no unrecorded-output refusal), and off can still delete them by
-        # hash. A repair (only_missing) is the same version laid again: the
-        # whole `"setup"` map rides along too, so `run_setup` finds the
-        # recorded outputs and stays quiet, and a pending note rides in the
-        # returned entry itself (never via `record=`), so its crash recovery
-        # still applies on the next run. An update carries no `"setup"`: the
-        # new version reruns setup and re-hashes its outputs.
+        # files instead -- but ONLY while the bytes now in the copy still hash
+        # to the recorded digest. That proves the bytes on disk are this
+        # pack's own (no unrecorded-output refusal), and off can still delete
+        # them by hash. A file edited or stale since is left OUT of `files`
+        # (no false hash is ever persisted) and named in `setup_pending`
+        # instead, so `run_setup` first removes that known path, then
+        # regenerates it, instead of refusing it as unrecorded. Final output
+        # hashes are only persisted after setup succeeds. A repair
+        # (only_missing) is the same version laid again: the verified `"setup"`
+        # map rides along too, so `run_setup` finds the recorded outputs and
+        # stays quiet while they stand. A pending note rides in the returned
+        # entry itself on every path (never via `record=`), so its crash
+        # recovery still applies on the next run -- including an update over a
+        # killed run's leftovers. An update carries no `"setup"`: the new
+        # version reruns setup and re-hashes its outputs.
         held_setup = previous.get("setup")
         kept_files = previous.get("files")
-        if isinstance(held_setup, dict) and isinstance(kept_files, dict):
+        recorded = kept_files if isinstance(kept_files, dict) else {}
+        if isinstance(held_setup, dict) and isinstance(recorded, dict):
             for rel in held_setup:
                 if (
                     isinstance(rel, str)
                     and rel not in files
-                    and isinstance(kept_files.get(rel), str)
+                    and isinstance(recorded.get(rel), str)
                 ):
-                    files[rel] = kept_files[rel]
+                    want = recorded[rel]
+                    assert isinstance(want, str), "narrowed by the isinstance check above"
+                    if _recorded_output_verified(play_dir, rel, want):
+                        files[rel] = want
+                        verified[rel] = want
+        stale = sorted(
+            rel for rel in owned
+            if rel not in files and isinstance(recorded.get(rel), str)
+        )
     entry: dict[str, Any] = {"version": fetched.version, "sha256": fetched.sha256, "files": files}
-    if only_missing and isinstance(previous, Mapping):
-        for carried in ("setup", "setup_pending"):
-            held = previous.get(carried)
+    if isinstance(previous, Mapping):
+        if only_missing:
+            held = previous.get("setup")
             if isinstance(held, dict):
-                entry[carried] = {
+                entry["setup"] = {
                     rel: sha for rel, sha in held.items()
                     if isinstance(rel, str) and isinstance(sha, str)
+                    and verified.get(rel) == sha
                 }
-            elif isinstance(held, list):
-                entry[carried] = [rel for rel in held if isinstance(rel, str)]
+        held_note = previous.get("setup_pending")
+        pending = [rel for rel in held_note if isinstance(rel, str)] if isinstance(held_note, list) else []
+        for rel in stale:
+            if rel not in pending:
+                pending.append(rel)
+        if pending:
+            entry["setup_pending"] = pending
     if dirs:
         entry["dirs"] = dirs
     left = _drop_old(play_dir, drops)
