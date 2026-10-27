@@ -3802,6 +3802,23 @@ class Applier:
             )
         return release
 
+    def newest_release_and_head(self, manifest: Manifest) -> tuple[upstream.Release, str | None]:
+        """The newest release of `manifest` and the commit its clone is on now (T814).
+
+        A read: GitHub is asked which release is newest, and the clone is asked
+        where HEAD is. Raises `ApplyRefusal` when GitHub cannot say, and
+        `ApplyError` for a manifest that follows no releases. Off the GUI
+        thread: both answers may run git or reach the network.
+        """
+        source = manifest.source
+        if source is None or source.follow != "releases":
+            raise ApplyError(f"{manifest.id} follows no releases, so it has no newest release.")
+        release = self._release_for(manifest)
+        assert release is not None
+        head: str | None = self._reader("head_sha", HeadReader)(self.clone_dir(manifest))
+        return release, head
+
+
     def install(
         self,
         manifest: Manifest,

@@ -14,8 +14,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ## Unreleased
 
 ### New
-- A WotLK or Unbound server's Bots tab has **Delete every random bot…**: all or nothing, optional backup first; AddClass bots stay.
-- Filter the Characters and Bots lists by name as you type; the X clears the filter.
+- **Update the server to latest…** on a Tortoise server also updates TortoiseBots Manager in your game client.
 
 ### Fixed
 - A failed build in a module you just installed now says the module is new and your server still runs its old build.

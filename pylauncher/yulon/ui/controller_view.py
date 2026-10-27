@@ -5093,20 +5093,35 @@ def _for_tortoise(
         # T607: the whole rebuild is held under this server's cross-process reservation.
         hold_server=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
     )
+    followed = tortoise_botpool.wrap_route(
+        tortoise_botdash.wrap_route(services.update_to_latest, dashboard_switch),
+        entry,
+        server_dir,
+        channels=adoption_channels,
+        restart=lambda: tortoise_botpool.restart_world(lifecycle),
+        wsl_distro=wsl_distro,
+        moved=module_moved,
+    )
+    if module_applier is not None and services.store is not None:
+        store = services.store
+        followed = tortoise_modules.follow_with_addon(
+            followed,
+            lambda: default_addons.follow_server_update(
+                server_dir,
+                module_applier,
+                lambda: store.load_all("mod"),
+                tortoise_modules.ADDON_ID,
+                place=lambda: default_addons.client_place(
+                    client_dir, module_applier.client_dir
+                ),
+            ),
+        )
     return replace(
         services,
         custom_module_tips=(TORTOISE_LINK_TIP, TORTOISE_FOLDER_TIP),
         bot_dashboard=dashboard_switch,
         bot_pool_rebuild=pool_rebuild,
-        update_to_latest=tortoise_botpool.wrap_route(
-            tortoise_botdash.wrap_route(services.update_to_latest, dashboard_switch),
-            entry,
-            server_dir,
-            channels=adoption_channels,
-            restart=lambda: tortoise_botpool.restart_world(lifecycle),
-            wsl_distro=wsl_distro,
-            moved=module_moved,
-        ),
+        update_to_latest=followed,
     )
 
 
@@ -21329,6 +21344,11 @@ class ControllerView(QWidget):
             # counts are still the counts -- unless its new build was KEPT, which
             # keeps its sources too (`sources_kept`, T179 Task 6 fix round 3).
             self._forget_what_the_server_update_moved()
+            # T814: the addon the update's own press moved is not one the
+            # server moved, so its count and version go here rather than there.
+            if tortoise_modules.ADDON_ID in self.services.default_addons:
+                self._behind.pop(("mod", tortoise_modules.ADDON_ID), None)
+                self._versions.forget(tortoise_modules.ADDON_ID)
         # THREE questions, not one, and every one of them has bitten this clause.
         #
         # `ok` alone is not "the server was compiled": `LogPanel` reports a
