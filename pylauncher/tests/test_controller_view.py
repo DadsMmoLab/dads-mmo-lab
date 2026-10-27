@@ -2474,8 +2474,9 @@ def test_only_the_game_that_names_an_importer_is_wired_a_module_sql_route(
     assert ControllerServices.for_entry(WOTLK, tmp_path).module_sql is not None
     for entry in _every_game():
         game = entry.id
-        if game == "wow-unbound":  # T554: it runs the WotLK importer, on its own containers
-            assert entry.container_spec().import_service == "ub-db-import"
+        if game in ("wow-unbound", "wow-coa"):
+            # T554/T812: each runs the WotLK importer, on its own containers.
+            assert entry.container_spec().import_service == {"wow-unbound": "ub-db-import", "wow-coa": "coa-db-import"}[game]
             assert ControllerServices.for_entry(entry, tmp_path).module_sql is not None
             continue
         if game == "wow-wotlk":
@@ -5032,6 +5033,7 @@ def test_each_game_waits_for_the_ready_line_its_own_server_prints(
     prints = {
         "wow-wotlk": "ready...",
         "wow-unbound": "ready...",
+        "wow-coa": "ready...",
         "wow-tbc": "Avg Diff: 15ms",
         "wow-vanilla": "Avg Diff: 15ms",
         "wow-tortoise": "World initialized in 12 seconds",
@@ -7125,6 +7127,8 @@ BOT_SQL_BY_GAME = {
     "wow-centurion": ("centurion_auth", "centurion_characters", "centurion-db"),
     # T554: the same schema names as WotLK, in the database container of its own.
     "wow-unbound": ("acore_auth", "acore_characters", "ub-database"),
+    # T812: the same schema names as WotLK, in the database container of its own.
+    "wow-coa": ("acore_auth", "acore_characters", "coa-database"),
 }
 """Written out per game rather than read back out of the entry.
 
@@ -21462,13 +21466,13 @@ def test_a_game_with_the_route_keeps_its_two_buttons_and_the_card_sentence(
 def test_every_game_either_has_the_outside_module_route_or_says_it_has_not(
     qapp: object, tmp_path: Path
 ) -> None:
-    """T596: the shipped games split cleanly; WotLK, Unbound (its sibling) and Tortoise take some.
+    """T596: the shipped games split cleanly; WotLK, Unbound and CoA (its siblings) and Tortoise take some.
 
-    Unbound is built by WotLK's factory and Tortoise has its own route since T596
+    Unbound and CoA are built by WotLK's factory and Tortoise has its own route since T596
     step 2, so their boxes keep both presses and the card's own sentence; every
     other game must show the "can't take" sentence.
     """
-    takes = {"wow-wotlk", "wow-unbound", "wow-tortoise"}
+    takes = {"wow-wotlk", "wow-unbound", "wow-coa", "wow-tortoise"}
     for entry in load_catalog().games:
         services = ControllerServices.for_entry(entry, tmp_path / entry.id, None)
         view = ControllerView(entry, services, status_poll_ms=0)
@@ -31501,7 +31505,7 @@ def test_a_tab_opened_at_start_up_asks_for_the_addons_a_moment_later(
 
 @pytest.mark.parametrize(
     "game_id",
-    ["wow-wotlk", "wow-unbound", "wow-tbc", "wow-vanilla", "wow-tortoise", "wow-centurion"],
+    ["wow-wotlk", "wow-unbound", "wow-coa", "wow-tbc", "wow-vanilla", "wow-tortoise", "wow-centurion"],
 )
 def test_every_game_gets_the_move_group_from_its_real_factory(game_id: str, tmp_path: Path) -> None:
     from yulon.catalog.catalog import load_catalog

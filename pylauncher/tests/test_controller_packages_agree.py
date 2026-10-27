@@ -184,6 +184,7 @@ def test_every_seam_builder_in_every_package_binds_the_declared_client(tmp_path:
         "wow-tortoise": (tortoise_accounts, tortoise_maintenance),
         "wow-wotlk": (wotlk_accounts, wotlk_maintenance),
         "wow-unbound": (wotlk_accounts, wotlk_maintenance),  # T554: WotLK's package, its own entry
+        "wow-coa": (wotlk_accounts, wotlk_maintenance),  # T812: WotLK's package, its own entry
         "wow-centurion": (centurion_accounts, centurion_maintenance),
     }
     catalog = load_catalog()
@@ -222,8 +223,8 @@ def test_every_seam_builder_in_every_package_binds_the_declared_client(tmp_path:
                     + repr(expected)
                 )
                 checked += 1
-    assert checked == 16, (  # T554: wow-unbound runs the WotLK package's two builders
-        str(checked) + " builders were exercised, not 16. An exact count, not a floor: the "
+    assert checked == 18, (  # T554/T812: unbound and coa run the WotLK package's two builders
+        str(checked) + " builders were exercised, not 18. An exact count, not a floor: the "
         "floor this replaced had slack of one, so a deleted builder still passed it."
     )
 
@@ -659,7 +660,7 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
             | uncorrectable
             | unlocked
         )
-        if game in ("wow-wotlk", "wow-unbound"):  # T554: Unbound is the same package
+        if game in ("wow-wotlk", "wow-unbound", "wow-coa"):  # T554/T812: same package as WotLK
             reference = (
                 undbrefused
                 | unprobed
@@ -676,6 +677,10 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
                 | uncorrectable
                 | unlocked
             )
+            if game == "wow-coa":
+                # T812: CoA pins its fork and carries a patch; no update control
+                # until a gate proves one (catalog `update_to_latest: false`).
+                reference = reference | unlatest
             assert (
                 set(absent) == reference
             ), f"wow-wotlk is the reference and is missing {sorted(set(absent) - reference)}"

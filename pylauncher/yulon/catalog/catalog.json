@@ -2733,6 +2733,393 @@
         }
       ],
       "manifests_from": "wow-wotlk"
+    },
+    {
+        "id": "wow-coa",
+        "name": "WoW Conquest of Azeroth",
+        "status": "beta",
+        "description": "Conquest of Azeroth (3.3.5a) on the Ascension CoA fork, with bots that quest, group and fight alongside you. You bring your own Ascension 3.3.5a client; Yu'lon never downloads it.",
+        "notes": [
+            "T812: the Conquest of Azeroth server. Core Zyth45/azerothcore-wotlk-coa @ coa-bots-2.8 98570f248b6095a23ef14bbbfac6731ac4c20d66; mod-playerbots Zyth45 v2.8 2b7a4f6547b2e4b35a4ec3a89374e41e5c6e5272 (on branch coa). The 30 CoA modules are in-tree. client_build.read_version reads Ascension.exe as 3.3.5 (12340), checked 2026-10-27 on the live client.",
+            "Health markers read off the pin: src/server/coa/AscensionCompat.cpp:9472 (Ascension compatibility) and src/server/coa/CoADungeonBossKit.cpp:154 (CoA dungeon boss kit rows)."
+        ],
+        "emulator": {
+            "name": "AzerothCore (Ascension CoA fork) + SquidBots playerbots",
+            "sources": [
+                {
+                    "repo": "Zyth45/azerothcore-wotlk-coa",
+                    "branch": "coa-bots-2.8",
+                    "depth": null,
+                    "dest": ".",
+                    "rev": "98570f248b6095a23ef14bbbfac6731ac4c20d66"
+                },
+                {
+                    "repo": "Zyth45/mod-playerbots",
+                    "branch": "coa",
+                    "dest": "modules/mod-playerbots",
+                    "rev": "2b7a4f6547b2e4b35a4ec3a89374e41e5c6e5272"
+                }
+            ]
+        },
+        "install": {
+            "platforms": [
+                "linux"
+            ],
+            "default_server_dir": "yulon-coa",
+            "requires_client_dir": true,
+            "password": {
+                "mode": "generated",
+                "file": ".db_password",
+                "prefix": "coa-",
+                "legacy": "password"
+            },
+            "native": {
+                "family": "azerothcore",
+                "update_to_latest": false,
+                "templates": "wow-coa/native",
+                "images": [
+                    "worldserver",
+                    "authserver",
+                    "db-import",
+                    "tools"
+                ],
+                "image_prefix": "yulon.local/ac-coa-",
+                "db": {
+                    "image": "mysql:8.4",
+                    "client": "mysql",
+                    "user": "root"
+                },
+                "ready": {
+                    "world": "ready...",
+                    "auth": "{{REALM_HOST}}:{{WORLD_PORT}}"
+                },
+                "soap_port": 7880,
+                "min_ram_gb": 8,
+                "warn_ram_gb": 12,
+                "min_server_dir_gb": 25,
+                "warn_server_dir_gb": 40,
+                "azerothcore": {
+                    "patches": [
+                        {
+                            "file": "wow-coa/patches/01-vmap4-extractor-name-lists.patch",
+                            "source": ".",
+                            "reason": "Lets the map tools read the Conquest of Azeroth client's map files without reading past the end of a list."
+                        }
+                    ],
+                    "world_env": {
+                        "AC_CO_A_ALLOW_REMOTE_CLIENTS": "1",
+                        "AC_UPDATES_ENABLE_DATABASES": "0",
+                        "AC_PLAYERBOTS_UPDATES_ENABLE_DATABASES": "1",
+                        "AC_CO_A_BOSS_PROBE_ENABLE": "0",
+                        "AC_CO_AGAMEPLAY_TEST_ENABLE": "0",
+                        "AC_UPDATE_UPTIME_INTERVAL": "1",
+                        "AC_AI_PLAYERBOT_MIN_RANDOM_BOTS": "150",
+                        "AC_AI_PLAYERBOT_MAX_RANDOM_BOTS": "150",
+                        "AC_AI_PLAYERBOT_RANDOM_BOT_AUTOLOGIN": "1",
+                        "AC_AI_PLAYERBOT_RANDOM_BOT_JOIN_BG": "0",
+                        "AC_AI_PLAYERBOT_RANDOM_BOT_AUTO_JOIN_BG": "0",
+                        "AC_AI_PLAYERBOT_SYNC_LEVEL_WITH_PLAYERS": "1",
+                        "AC_AI_PLAYERBOT_RANDOM_BOT_CONCENTRATE_IN_PLAYER_ZONE": "0"
+                    },
+                    "confs_from_dist": [
+                        "env/dist/etc/modules/coa.conf",
+                        "env/dist/etc/modules/coa_bugreport.conf",
+                        "env/dist/etc/modules/wildcard.conf",
+                        "env/dist/etc/modules/playerbots.conf",
+                        "env/dist/etc/modules/craftsmans_codex.conf",
+                        "env/dist/etc/modules/destiny_weaver.conf",
+                        "env/dist/etc/modules/dynamicxp.conf",
+                        "env/dist/etc/modules/ethereal_bazaar.conf",
+                        "env/dist/etc/modules/hero_call_board.conf",
+                        "env/dist/etc/modules/item_recovery.conf",
+                        "env/dist/etc/modules/manastorm-endless.conf",
+                        "env/dist/etc/modules/mod-coa-challenges.conf",
+                        "env/dist/etc/modules/mod-coa-legendary-items.conf",
+                        "env/dist/etc/modules/mod-coa-lottery.conf",
+                        "env/dist/etc/modules/mod-coa-prestige.conf",
+                        "env/dist/etc/modules/mod_ahbot.conf",
+                        "env/dist/etc/modules/mod_coa_change_potions.conf",
+                        "env/dist/etc/modules/mod_coa_mythic_plus.conf",
+                        "env/dist/etc/modules/mod_teleport_actionbar.conf",
+                        "env/dist/etc/modules/path_to_ascension.conf",
+                        "env/dist/etc/modules/portablemail.conf",
+                        "env/dist/etc/modules/spellbook.conf",
+                        "env/dist/etc/modules/treasure_keeper.conf",
+                        "env/dist/etc/modules/war_games.conf",
+                        "env/dist/etc/modules/worldforged_upgrades.conf"
+                    ],
+                    "sql_checks": [
+                        {
+                            "db": "world",
+                            "table": "instance_template",
+                            "where": "map >= 936 AND map <= 937",
+                            "at_least": 2,
+                            "reason": "The Conquest of Azeroth world is missing: its two custom dungeons are not in the world database."
+                        }
+                    ],
+                    "health": {
+                        "name": "Conquest of Azeroth",
+                        "log_markers": [
+                            "Ascension compatibility enabled; consuming extension opcodes",
+                            "CoA dungeon boss kit rows for"
+                        ]
+                    },
+                    "world_bootstrap_service": "coa-world-bootstrap",
+                    "realm_types": [
+                        {
+                            "id": "coa",
+                            "label": "CoA classes",
+                            "description": "The Conquest of Azeroth classes, as the Ascension client teaches them.",
+                            "realm_name": "Conquest of Azeroth",
+                            "world_env": {
+                                "AC_CO_A_CLASS_MODEL": "coa",
+                                "AC_CO_A_MAP_CLASS_10_TO_WARRIOR": "1"
+                            }
+                        },
+                        {
+                            "id": "hero",
+                            "label": "Free Pick",
+                            "description": "Free-pick advancement: any spell on any character.",
+                            "realm_name": "CoA Free Pick",
+                            "world_env": {
+                                "AC_CO_A_CLASS_MODEL": "hero",
+                                "AC_CO_A_MAP_CLASS_10_TO_WARRIOR": "0"
+                            }
+                        },
+                        {
+                            "id": "wcr",
+                            "label": "Warcraft Reborn",
+                            "description": "Warcraft Reborn rules on the Conquest of Azeroth world.",
+                            "realm_name": "CoA Warcraft Reborn",
+                            "world_env": {
+                                "AC_CO_A_CLASS_MODEL": "wcr",
+                                "AC_CO_A_MAP_CLASS_10_TO_WARRIOR": "1"
+                            }
+                        },
+                        {
+                            "id": "wc",
+                            "label": "Wildcard",
+                            "description": "Wildcard seasonal rules: free pick with the Wildcard draft.",
+                            "realm_name": "CoA Wildcard",
+                            "world_env": {
+                                "AC_CO_A_CLASS_MODEL": "hero",
+                                "AC_CO_A_MAP_CLASS_10_TO_WARRIOR": "0",
+                                "AC_CO_ACHALLENGES_GAME_MODES_REALM": "WildCard",
+                                "AC_CO_A_GAME_MODE_MASK": "64",
+                                "AC_CO_A_CLIENT_BOOLEAN_CONFIGS": "CONFIG_LEGACY_CHARACTER_ADVANCEMENT_ENABLED=0",
+                                "AC_CO_A_REALM_TYPE": "live seasonal",
+                                "AC_PLAYER_START_CUSTOM_SPELLS": "1",
+                                "AC_ALWAYS_MAX_SKILL_FOR_LEVEL": "1"
+                            }
+                        }
+                    ],
+                    "default_realm_type": "coa",
+                    "auth_after_world_ready": true,
+                    "client_extract": {
+                        "client": {
+                            "required_file": "Data/patch-WB2.MPQ",
+                            "min_mpq": 40,
+                            "mpq_depth": "recursive",
+                            "locale_mpq_required": true,
+                            "locales": [
+                                "enUS"
+                            ],
+                            "near_client_warn_gb": 8
+                        },
+                        "extract": {
+                            "image": "tools",
+                            "tools": [
+                                {
+                                    "name": "maps, dbc and cameras",
+                                    "argv": [
+                                        "/azerothcore/env/dist/bin/map_extractor",
+                                        "-i",
+                                        "/client",
+                                        "-o",
+                                        "/out"
+                                    ],
+                                    "produces": {
+                                        "maps": 9000,
+                                        "dbc": 360,
+                                        "Cameras": 1
+                                    }
+                                },
+                                {
+                                    "name": "vmap extract",
+                                    "argv": [
+                                        "/azerothcore/env/dist/bin/vmap4_extractor",
+                                        "-d",
+                                        "/client/Data"
+                                    ],
+                                    "produces": {
+                                        "Buildings": 1000
+                                    }
+                                },
+                                {
+                                    "name": "vmap assemble",
+                                    "argv": [
+                                        "/azerothcore/env/dist/bin/vmap4_assembler",
+                                        "Buildings",
+                                        "vmaps"
+                                    ],
+                                    "produces": {
+                                        "vmaps": 18000
+                                    }
+                                }
+                            ]
+                        },
+                        "mmaps": {
+                            "argv": [
+                                "/azerothcore/env/dist/bin/mmaps_generator",
+                                "--silent",
+                                "--threads",
+                                "2"
+                            ],
+                            "min_files": 500,
+                            "required": true
+                        },
+                        "mmaps_config": "src/tools/mmaps_generator/mmaps-config.yaml",
+                        "required_maps": [
+                            0,
+                            1,
+                            530,
+                            571,
+                            936,
+                            937
+                        ],
+                        "surgical_maps": [
+                            {
+                                "map_id": 936,
+                                "archive": "Data/patch-WB1.MPQ.DISABLED",
+                                "link_as": "Data/patch-WB1.MPQ",
+                                "extra_vmaps": [
+                                    "Ns_Inquisitorial_Dungeon.wmo.vmo"
+                                ],
+                                "min_maps": 9
+                            }
+                        ]
+                    }
+                }
+            }
+        },
+        "containers": {
+            "db": "coa-database",
+            "auth": "coa-authserver",
+            "world": "coa-worldserver",
+            "db_import": "coa-db-import"
+        },
+        "ports": {
+            "auth": 3726,
+            "world": 8087,
+            "db": 3308
+        },
+        "databases": {
+            "auth": "acore_auth",
+            "characters": "acore_characters",
+            "world": "acore_world",
+            "extra": [
+                "acore_playerbots"
+            ],
+            "playerbots": "acore_playerbots"
+        },
+        "client": {
+            "addon_interface": 30300,
+            "version": "3.3.5a",
+            "build": 12340,
+            "required_build": 12340,
+            "exe_names": [
+                "ascension.exe"
+            ],
+            "wine_dll_overrides": "divxtac=d",
+            "notes": [
+                "set realmlist 127.0.0.1:3726 (or the host's LAN/public IP and :3726 for other players); this server's login port is not WoW WotLK's",
+                "Bring your own Ascension 3.3.5a client (Ascension.exe + Data); Yu'lon never downloads it."
+            ]
+        },
+        "play": {
+            "equipped": {
+                "template_column": "itemEntry",
+                "instance_table": "item_instance",
+                "inventory_column": "item"
+            },
+            "teleport_command": "teleport name",
+            "mail_item_cap": 12,
+            "rename_command": "character rename",
+            "set_level_command": "character level"
+        },
+        "accounts": {
+            "level": {
+                "table": "account_access",
+                "account_column": "id",
+                "level_column": "gmlevel",
+                "max_level": 3
+            }
+        },
+        "operations": {
+            "channel": "soap",
+            "namespace": "urn:AC",
+            "port": 7880,
+            "gm_level": 3,
+            "enable_env": {
+                "AC_SOAP_ENABLED": "1",
+                "AC_SOAP_IP": "0.0.0.0",
+                "AC_AI_PLAYERBOT_COMMAND_SERVER_PORT": "0",
+                "AC_RA_ENABLE": "0"
+            },
+            "must_not_listen": [
+                8888,
+                3443
+            ]
+        },
+        "observability": {
+            "characters": {
+                "table": "characters",
+                "account": "account",
+                "online": "online"
+            },
+            "bots": {
+                "account_prefix": "rndbot",
+                "prefix_conf_file": "env/dist/etc/modules/playerbots.conf",
+                "prefix_conf_key": "AiPlayerbot.RandomBotAccountPrefix",
+                "registry": {
+                    "database": "playerbots",
+                    "table": "playerbots_account_type",
+                    "account_column": "account_id",
+                    "type_column": "account_type",
+                    "types": [
+                        1,
+                        2,
+                        3
+                    ]
+                }
+            }
+        },
+        "has_manifests": true,
+        "help_places": [
+            {
+                "label": "Zyth45/azerothcore-wotlk-coa",
+                "url": "https://github.com/Zyth45/azerothcore-wotlk-coa/issues",
+                "purpose": "Bugs in the Conquest of Azeroth server."
+            },
+            {
+                "label": "Zyth45/mod-playerbots",
+                "url": "https://github.com/Zyth45/mod-playerbots/issues",
+                "purpose": "Bugs in the bots."
+            },
+            {
+                "label": "Yu'lon",
+                "url": "https://github.com/DadsMmoLab/dads-mmo-lab/issues",
+                "purpose": "Problems with Yu'lon itself: installing, starting, and this app."
+            }
+        ],
+        "manifests_from": "wow-wotlk",
+        "realmlist": {
+            "table": "realmlist",
+            "address_column": "address",
+            "local_address_column": "localAddress",
+            "realm_id": 1,
+            "offline_flag_column": "flag"
+        }
     }
   ],
   "single": [

@@ -455,7 +455,7 @@ def test_the_smoke_run_builds_every_servers_tab_and_asks_docker_nothing(tmp_path
         fake = bin_ / name
         fake.write_text(f'#!/bin/sh\necho "{name} $*" >> "{calls}"\nexit 1\n', encoding="utf-8")
         fake.chmod(0o755)
-    games = ["wow-wotlk", "wow-tbc", "wow-vanilla", "wow-tortoise", "wow-unbound", "wow-centurion"]
+    games = ["wow-wotlk", "wow-tbc", "wow-vanilla", "wow-tortoise", "wow-unbound", "wow-coa", "wow-centurion"]
     installs = []
     for game in games:
         server_dir = tmp_path / "servers" / game

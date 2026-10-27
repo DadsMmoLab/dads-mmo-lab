@@ -175,10 +175,23 @@ def test_a_client_without_the_new_fields_names_no_host() -> None:
 
 def test_the_shipped_catalog_uses_the_new_fields_on_centurion_and_unbound_alone() -> None:
     """Groundwork for T179: Centurion is the first entry with a ready-to-play client section,
-    WoW Unbound (T555) the second; every other entry behaves exactly as before (its own tests:
-    test_catalog_centurion, test_unbound_entry)."""
+    WoW Unbound (T555) the second, WoW Conquest of Azeroth (T812) the third; every other
+    entry behaves exactly as before (its own tests: test_catalog_centurion, test_unbound_entry,
+    test_coa_entry)."""
     raw = json.loads(CATALOG_FILE.read_text(encoding="utf-8"))
     for entry in raw["games"]:
+        if entry["id"] == "wow-coa":
+            assert set(entry["client"]) <= {
+                "version",
+                "build",
+                "required_build",
+                "addon_interface",
+                "realmlist_file",
+                "exe_names",
+                "wine_dll_overrides",
+                "notes",
+            }, sorted(set(entry["client"]))
+            continue
         if entry["id"] not in ("wow-centurion", "wow-unbound"):
             assert set(entry["client"]) <= {
                 "version",
@@ -198,6 +211,14 @@ def test_the_shipped_catalog_uses_the_new_fields_on_centurion_and_unbound_alone(
         if game.id == "wow-unbound":
             assert game.client.packs and game.client.config_wtf
             assert game.client.exe_patch is None
+            assert game.client.hosts() == frozenset()
+            continue
+        if game.id == "wow-coa":
+            assert game.client.exe_names == ("ascension.exe",)
+            assert game.client.wine_dll_overrides == "divxtac=d"
+            assert game.client.packs == ()
+            assert game.client.exe_patch is None
+            assert game.client.config_wtf is None
             assert game.client.hosts() == frozenset()
             continue
         assert game.client.packs == ()

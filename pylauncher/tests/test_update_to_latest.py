@@ -172,8 +172,8 @@ def test_every_shipped_source_is_classified_and_only_the_db_repos_stay() -> None
     # "nine sources, seven shallow" when the catalog held ten and nine. A number
     # in prose that nothing recomputes is a number that was true once.
     every = [source for entry in load_catalog().games for source in entry.emulator.sources]
-    assert len(every) == 15, [s.repo for s in every]
-    assert sum(1 for s in every if s.depth is not None) == 13
+    assert len(every) == 17, [s.repo for s in every]
+    assert sum(1 for s in every if s.depth is not None) == 14
     moving = {
         entry.id: tuple(s.repo for s in entry.emulator.sources if not native.held_at_its_pin(s))
         for entry in load_catalog().games
@@ -190,6 +190,7 @@ def test_every_shipped_source_is_classified_and_only_the_db_repos_stay() -> None
         "wow-vanilla": ("cmangos/mangos-classic", "cmangos/playerbots"),
         "wow-tortoise": ("tortoise-wow/tortoise-wow", "Sagiroth/TortoiseBots"),
         "wow-centurion": ("thomasjteachey/TrinityCore112",),
+        "wow-coa": ("Zyth45/azerothcore-wotlk-coa", "Zyth45/mod-playerbots"),
     }, moving
 
 
@@ -245,6 +246,8 @@ def test_only_wotlk_has_a_server_source_inside_a_folder_the_modules_tab_lists() 
         ("wow-unbound", "modules/mod-playerbots"),
         ("wow-unbound", "modules/mod-ale"),
         ("wow-unbound", "modules/mod-unbound"),
+        # T812: CoA's bots land in the same listed folder; the fork core is the server dir.
+        ("wow-coa", "modules/mod-playerbots"),
     }, listed
 
 
@@ -267,6 +270,8 @@ def test_the_route_is_offered_for_every_shipped_entry_and_by_the_flag_not_the_id
         "wow-vanilla": True,
         "wow-tortoise": True,
         "wow-centurion": True,
+        # T812: CoA pins its fork and carries a patch; no update control until a gate proves one.
+        "wow-coa": False,
     }
     assert update_to_latest_for_app(ENTRY, Path("/srv/x")) is not None
     unflagged = ENTRY.install.native.model_copy(update={"update_to_latest": False})

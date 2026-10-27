@@ -488,10 +488,28 @@ PROVENANCE: dict[str, Provenance] = {
             "same press: the row's level is the `gmlevel` column the server's own query agreed with"
         ),
     ),
+    # -- wow-coa (T812 C2): every play/accounts value copied from wow-unbound --
+    # Same AzerothCore lineage; not asked on the CoA core yet. The live proof
+    # (plan §4) upgrades each of these to measured-on.
+    "wow-coa:play.equipped.template_column": Provenance("inherited", "wow-unbound"),
+    "wow-coa:play.equipped.instance_table": Provenance("inherited", "wow-unbound"),
+    "wow-coa:play.equipped.inventory_column": Provenance("inherited", "wow-unbound"),
+    "wow-coa:play.teleport_command": Provenance("inherited", "wow-unbound"),
+    "wow-coa:play.mail_item_cap": Provenance("inherited", "wow-unbound"),
+    "wow-coa:play.rename_command": Provenance("inherited", "wow-unbound"),
+    "wow-coa:play.set_level_command": Provenance("inherited", "wow-unbound"),
+    "wow-coa:accounts.level.table": Provenance("inherited", "wow-unbound"),
+    "wow-coa:accounts.level.account_column": Provenance("inherited", "wow-unbound"),
+    "wow-coa:accounts.level.level_column": Provenance("inherited", "wow-unbound"),
 }
 
 
 OWED: dict[str, str] = {
+    "wow-coa:accounts.level.max_level": (
+        "Copied from wow-unbound, whose own max_level is itself owed: no tree has been asked "
+        "for a level it would refuse. Settled by 8.3d's probe (accept 3, refuse 4) run on the "
+        "CoA server during the T812 live proof."
+    ),
     "wow-unbound:accounts.level.max_level": (
         "The live run on m910q set account levels 2 and 3 and read them back; the refusal of 4 "
         "came from Yu'lon's own check (`commands.py`), whose highest level is this very catalog "

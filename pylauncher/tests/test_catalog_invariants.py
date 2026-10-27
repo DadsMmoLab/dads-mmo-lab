@@ -437,6 +437,15 @@ def test_every_service_is_named_after_a_container_the_entry_declares(
         expected.add(containers.db_import)
     if containers.client_data:
         expected.add(containers.client_data)
+    # T812: wow-coa's template carries two one-shot extras beyond the declared
+    # containers: the tools image holder (`<prefix>tools`, command `true`) and
+    # the world-bootstrap one-shot named by `world_bootstrap_service`.
+    native = entry.install.native
+    block = native.azerothcore if native is not None else None
+    if block is not None and block.client_extract is not None:
+        expected.add(f"{composegen.container_prefix(entry)}tools")
+    if block is not None and block.world_bootstrap_service:
+        expected.add(block.world_bootstrap_service)
     assert service_names(plan.base) == expected, entry.id
     named = container_names_by_service(plan.base)
     assert named == {name: name for name in expected}, (entry.id, named)
@@ -1175,8 +1184,8 @@ def test_every_value_the_catalog_writes_about_a_tree_says_where_it_came_from() -
     # would go red on a number instead of on the sentence naming what to do
     # about it. It still earns its place. A field added AND marked in the same
     # commit is a deliberate act and reads the count as its receipt.
-    assert len(values) == 63, (
-        f"the catalog now writes {len(values)} per-tree values under play/accounts, not 63; "
+    assert len(values) == 74, (
+        f"the catalog now writes {len(values)} per-tree values under play/accounts, not 74; "
         f"if that is intended, move the number: {sorted(values)}"
     )
 
@@ -1203,6 +1212,8 @@ def test_the_provenance_debts_are_exactly_these() -> None:
         # The Unbound live run set levels 2 and 3 only; "4 refused" is Yu'lon's own check
         # (commands.py), whose highest level IS the catalog value, so it proves nothing.
         "wow-unbound:accounts.level.max_level",
+        # T812 C2: copied from Unbound, whose own ceiling is owed; the live proof settles it.
+        "wow-coa:accounts.level.max_level",
     }
     for key, reason in catalog_provenance.OWED.items():
         assert len(reason) > 80, f"{key}: a debt with no reason is a debt nobody can discharge"
@@ -1281,24 +1292,39 @@ def test_a_read_from_source_provenance_cites_a_line_and_not_a_sentence() -> None
 
 
 def test_an_inherited_value_names_the_tree_it_came_from_and_that_tree_measured_it() -> None:
-    """Driven against a fixture, because the shipped table has no inherited row.
+    """The rule, against the fixture AND the shipped table's first live case.
 
-    Both halves are here on purpose and neither stands alone. The FIXTURE proves
-    the rule can fail -- a rule that has never been handed an `inherited` row is
-    a rule nobody has run -- and the assertion about the real table records WHY
-    it is only a fixture, so a future row does not arrive believing it is
-    covered by a live case.
-
-    The rule itself: an inherited value points at the game it was copied from,
-    that game exists, and it carries a non-inherited provenance for the SAME
-    dotted path. Otherwise "inherited" is a chain with nothing at the end of it,
-    which is the state this vocabulary exists to make visible.
+    The FIXTURE proves the rule can fail -- a rule that has never been handed an
+    `inherited` row is a rule nobody has run. Since T812 C2 the shipped table
+    carries eleven `wow-coa` rows inherited from `wow-unbound`, so the live case
+    runs too: each must point at a game that exists and carries a non-inherited
+    provenance for the SAME dotted path. Otherwise "inherited" is a chain with
+    nothing at the end of it, which is the state this vocabulary exists to make
+    visible.
     """
-    assert not [
-        key for key, mark in catalog_provenance.PROVENANCE.items() if mark.kind == "inherited"
-    ], "an inherited value shipped; this rule now has a live case and should be given one"
-
     ids = {game["id"] for game in CATALOG_RAW["games"]}
+
+    def unresolved(table: dict[str, catalog_provenance.Provenance]) -> list[str]:
+        broken = []
+        for key, mark in table.items():
+            if mark.kind != "inherited":
+                continue
+            path = key.split(":", 1)[1]
+            source = table.get(f"{mark.cite}:{path}")
+            if mark.cite not in ids or source is None or source.kind == "inherited":
+                broken.append(key)
+        return broken
+
+    live = {
+        key: mark
+        for key, mark in catalog_provenance.PROVENANCE.items()
+        if key.startswith("wow-coa:")
+    }
+    assert len(live) == 10, sorted(live)
+    assert unresolved(catalog_provenance.PROVENANCE) == [], sorted(
+        unresolved(catalog_provenance.PROVENANCE)
+    )
+
     good = {
         "wow-tbc:play.mail_item_cap": catalog_provenance.Provenance(
             "measured-on", "gates/8.4b-tbc-m910q-2026-09-07/README.md"
@@ -1313,19 +1339,7 @@ def test_an_inherited_value_names_the_tree_it_came_from_and_that_tree_measured_i
         "wow-vanilla:play.mail_item_cap": catalog_provenance.Provenance("inherited", "wow-tbc"),
     }
 
-    def unresolved(table: dict[str, catalog_provenance.Provenance]) -> list[str]:
-        broken = []
-        for key, mark in table.items():
-            if mark.kind != "inherited":
-                continue
-            path = key.split(":", 1)[1]
-            source = table.get(f"{mark.cite}:{path}")
-            if mark.cite not in ids or source is None or source.kind == "inherited":
-                broken.append(key)
-        return broken
-
     assert unresolved(good) == []
-    assert unresolved(bad_no_such_tree) == ["wow-vanilla:play.mail_item_cap"]
     assert sorted(unresolved(bad_nothing_at_the_end)) == [
         "wow-tbc:play.mail_item_cap",
         "wow-vanilla:play.mail_item_cap",

@@ -76,11 +76,12 @@ def valid_character_name(name: str) -> bool:
     return bool(_CHARACTER_NAME.fullmatch(name))
 
 
-NAME_LOOKUP_TREES = frozenset({"wow-wotlk", "wow-unbound", "wow-centurion"})
+NAME_LOOKUP_TREES = frozenset({"wow-wotlk", "wow-unbound", "wow-centurion", "wow-coa"})
 """The catalog entries whose servers look an account argument up by name and nothing else.
 
 `AccountMgr::GetId(accountName)`: AzerothCore 7f12e89e `cs_account.cpp:347`,
 TrinityCore112 faac5fc9 `cs_account.cpp:303`. `wow-unbound` is the same AzerothCore pin.
+`wow-coa` is the CoA fork at 98570f24, whose `cs_account.cpp:372` reads the name the same way.
 Every other tree -- the CMaNGOS ones, and any added later until it is measured --
 is treated as reading an all-digit argument as an account id (T301).
 """

@@ -5094,6 +5094,8 @@ _FACTORIES: dict[str, _Factory] = {
     "wow-wotlk": _for_wotlk,
     # T554: WoW Unbound is AzerothCore with the WotLK controller; T552 made it entry-driven.
     "wow-unbound": _for_wotlk,
+    # T812: WoW Conquest of Azeroth is AzerothCore with the WotLK controller, as Unbound is.
+    "wow-coa": _for_wotlk,
     "wow-tbc": _for_tbc,
     "wow-vanilla": _for_vanilla,
     "wow-tortoise": _for_tortoise,
