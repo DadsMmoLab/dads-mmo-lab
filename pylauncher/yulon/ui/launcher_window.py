@@ -347,6 +347,7 @@ class ViewReads:
                     play,
                     source,
                     keep=module_kept_files(self.server_dir, play, self.client_dir),
+                    exe_names=self.entry.client.exe_names,
                 )
             except Exception as exc:  # noqa: BLE001 - "could not compare" is an answer
                 logger.info(f"could not compare {play} with {source}: {exc}")

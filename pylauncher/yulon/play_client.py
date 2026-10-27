@@ -11,8 +11,11 @@ read-only) makes a second folder cost 50-300 MB. Everything else is a real
 copy, because WoW writes to it (`WTF/`, `Interface/`, every `realmlist.wtf`),
 and a write through a hard link would land in the original too. So the rule is
 by suffix and nothing else: a file is linked only when its suffix is `.mpq` or
-`.dll`. Where the filesystem can clone (btrfs, XFS: `FICLONE`), a clone is used
-instead of a link - same space saving, no shared inode at all.
+`.dll`, or `.mpq` shows up anywhere in its suffix chain (`patch-WB1.MPQ.DISABLED`,
+T812: the Conquest of Azeroth client keeps its disabled archives under such names,
+gigabytes WoW only reads like any other archive). Where the filesystem can clone
+(btrfs, XFS: `FICLONE`), a clone is used instead of a link - same space saving,
+no shared inode at all.
 
 Links cannot cross volumes. A target on another drive therefore means a full
 copy, which only happens once the player agreed to its size
@@ -78,6 +81,16 @@ PARTIAL_SUFFIX = ".yulon-partial"
 _PACK_SWAP_NAME = re.compile(r"(.+)\.yulon-pack-(?:tmp|old)(?:\.\d+)?", re.IGNORECASE)
 """A name `client_packs`' swap gives a file beside its target `<name>` (its `_STAGING` and
 `_ASIDE`, numbered when the plain one is taken), matched whole; group 1 is `<name>`."""
+def _is_linked(name: str) -> bool:
+    """Whether a ready-to-play client shares this file name instead of copying it.
+
+    By suffix and nothing else (`plan()`'s rule): `.mpq` or `.dll` as the final
+    suffix, or `.mpq` anywhere in the suffix chain (`patch-WB1.MPQ.DISABLED`,
+    `patch-B.MPQ.ORIGINAL`, T812). The chain half is link-only for `.mpq`: a
+    `.dll.ORIGINAL` is not a library WoW loads.
+    """
+    suffixes = [suffix.lower() for suffix in Path(name).suffixes]
+    return ".mpq" in suffixes or (bool(suffixes) and suffixes[-1] in LINKED_SUFFIXES)
 
 
 @dataclass(frozen=True)
@@ -411,7 +424,7 @@ def plan(original: Path, target: Path, *, server_dir: Path | None = None) -> Bui
             rel = rel_dir / name
             if rel == Path(MARKER):
                 continue  # a ready-to-play client used as the source: its marker is not ours
-            if path.suffix.lower() in LINKED_SUFFIXES:
+            if _is_linked(name):
                 linked.append(rel)
                 shared += st.st_size
             else:
@@ -1223,7 +1236,7 @@ def _linked_files(play_dir: Path) -> Iterator[Path]:
             if not _is_link(here / name) and not _players_own(rel_dir / name)
         ]
         for name in filenames:
-            if Path(name).suffix.lower() in LINKED_SUFFIXES and not _is_link(here / name):
+            if _is_linked(name) and not _is_link(here / name):
                 yield rel_dir / name
 
 
@@ -1271,12 +1284,19 @@ def _same_bytes(a: Path, b: Path) -> bool:
                 return True
 
 
-def stale(play_dir: Path, original: Path, *, keep: Collection[Path] = ()) -> tuple[Path, ...]:
+def stale(
+    play_dir: Path,
+    original: Path,
+    *,
+    keep: Collection[Path] = (),
+    exe_names: Sequence[str] = ("wow.exe",),
+) -> tuple[Path, ...]:
     """What in `play_dir` no longer matches the original client, relative and sorted.
 
     An `*.MPQ`/`*.dll` whose original is no longer the same file and differs in
     size or time (a patcher writes a new file, which breaks the hard link); and
-    `Wow.exe` when its bytes differ, since it is always a copy. Nothing
+    the game exe (`Wow.exe`, or the entry's `exe_names`, T812) when its bytes
+    differ, since it is always a copy. Nothing
     under WTF/ or Interface/, which `refresh()` would not touch either: listing
     what it will not fix would offer Refresh at every Play.
 
@@ -1309,7 +1329,9 @@ def stale(play_dir: Path, original: Path, *, keep: Collection[Path] = ()) -> tup
             logger.warning(
                 "ready-to-play client: could not compare %s", play_dir / rel, exc_info=True
             )
-    mine, theirs = client_executable(play_dir), client_executable(original)
+    mine, theirs = client_executable(play_dir, names=exe_names), client_executable(
+        original, names=exe_names
+    )
     rec_exe = _exe_record(play_dir)
     try:
         if is_kept(Path(mine.name)):
@@ -1319,7 +1341,7 @@ def stale(play_dir: Path, original: Path, *, keep: Collection[Path] = ()) -> tup
             # no longer what Yu'lon made, and that is `refresh()`'s to re-patch, never to copy over.
             from yulon import client_exe
 
-            if client_exe.exe_stale(play_dir, original, rec_exe):
+            if client_exe.exe_stale(play_dir, original, rec_exe, exe_names=exe_names):
                 found.append(Path(mine.name))
         elif mine.is_file() and theirs.is_file() and not _same_bytes(mine, theirs):
             found.append(Path(mine.name))
@@ -1385,6 +1407,7 @@ def refresh(
     keep: Collection[Path] = (),
     exe_patch: ExePatch | None,
     catalog_always: Mapping[str, str],
+    exe_names: Sequence[str] = ("wow.exe",),
     opener: Any = None,
     flags_lost: list[LostFlag] | None = None,
 ) -> tuple[Path, ...]:
@@ -1442,14 +1465,20 @@ def refresh(
     lost = flags_lost if flags_lost is not None else []
     if exe_patch is None and _exe_record(play_dir) is not None:
         # The catalog dropped the exe patch: the patched exe goes, the original's comes back.
-        if restore_original_exe(play_dir, original, game=game, server_dir=server_dir):
-            done.append(Path(client_executable(play_dir).name))
-    todo = [rel for rel in stale(play_dir, original) if not _players_own(rel) and not is_kept(rel)]
-    exe = client_executable(original)
+        if restore_original_exe(
+            play_dir, original, game=game, server_dir=server_dir, exe_names=exe_names
+        ):
+            done.append(Path(client_executable(play_dir, names=exe_names).name))
+    todo = [
+        rel
+        for rel in stale(play_dir, original, exe_names=exe_names)
+        if not _players_own(rel) and not is_kept(rel)
+    ]
+    exe = client_executable(original, names=exe_names)
     rec_exe = _exe_record(play_dir)
     try:
         for rel in todo:
-            archive = rel.suffix.lower() in LINKED_SUFFIXES
+            archive = _is_linked(rel.name)
             if not archive and rec_exe is not None:
                 # A patched exe is made again from stock bytes, never copied from the original.
                 if exe_patch is None:
@@ -1463,6 +1492,7 @@ def refresh(
                     game=game,
                     server_dir=server_dir,
                     catalog_always=catalog_always,
+                    exe_names=exe_names,
                     flags_lost=lost,
                 )
                 done.append(rel)
@@ -1526,8 +1556,15 @@ def refresh(
     return tuple(done)
 
 
-def restore_original_exe(play_dir: Path, original: Path, *, game: str, server_dir: Path) -> bool:
-    """Put the original's Wow.exe back over a patched one, and forget the patch. True if done.
+def restore_original_exe(
+    play_dir: Path,
+    original: Path,
+    *,
+    game: str,
+    server_dir: Path,
+    exe_names: Sequence[str] = ("wow.exe",),
+) -> bool:
+    """Put the original's game exe back over a patched one, and forget the patch. True if done.
 
     For a catalog entry that no longer has an `exe_patch`. A real copy through a
     temporary name renamed into place (never a link, never a write through the
@@ -1537,13 +1574,17 @@ def restore_original_exe(play_dir: Path, original: Path, *, game: str, server_di
     """
     from yulon import client_packs
 
-    src, dst = client_executable(original), client_executable(play_dir)
+    src, dst = client_executable(original, names=exe_names), client_executable(
+        play_dir, names=exe_names
+    )
     try:
         readable = _original_file(src) is not None
     except OSError:
         readable = False  # permission denied, device not ready: the same as missing
     if not readable:
-        logger.info("ready-to-play client: %s has no readable Wow.exe, patched exe kept", original)
+        logger.info(
+            "ready-to-play client: %s has no readable game exe, patched exe kept", original
+        )
         return False
     tmp = dst.with_name(dst.name + REFRESH_SUFFIX)
     never: list[LostFlag] = []  # its temporary is always a copy (`copy2`), never a link
@@ -1585,6 +1626,7 @@ def _reapply_exe(
     game: str,
     server_dir: Path,
     catalog_always: Mapping[str, str],
+    exe_names: Sequence[str] = ("wow.exe",),
     flags_lost: Collection[LostFlag] = (),
 ) -> None:
     """Make the patched Wow.exe again from stock bytes, with the options it was made with.
@@ -1602,7 +1644,7 @@ def _reapply_exe(
     )
     options = client_exe.options_for(patch, chosen)
     try:
-        kwargs = {} if opener is None else {"opener": opener}
+        kwargs: dict[str, Any] = {"exe_names": exe_names} if opener is None else {"opener": opener, "exe_names": exe_names}
         made = client_exe.apply(play_dir, original, patch, options, **kwargs)
         client_packs.write_record(
             play_dir,
@@ -1779,7 +1821,7 @@ def left_out_archives(
         for name in filenames:
             rel = rel_dir / name
             if (
-                Path(name).suffix.lower() in LINKED_SUFFIXES
+                _is_linked(name)
                 and not _is_link(here / name)
                 and not os.path.lexists(play_dir / rel)
                 and not is_ignored(rel)

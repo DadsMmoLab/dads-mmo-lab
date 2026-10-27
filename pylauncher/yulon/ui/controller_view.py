@@ -3189,6 +3189,8 @@ def _steam_seam(
         game=entry.name,
         server_dir=server_dir,
         client_dir=client_dir,
+        exe_names=entry.client.exe_names,
+        wine_dll_overrides=entry.client.wine_dll_overrides,
         # Steam Deck Gaming Mode: the Server tile starts the server through `yulon --server`
         # and stops it when the game closes, and a third tile stops it (`gaming_mode`).
         gaming=partial(_wow_gaming_scripts, entry, server_dir),
@@ -12453,7 +12455,7 @@ class ControllerView(QWidget):
         """
         client = self.entry.client
         return client_build.refusal(
-            steam_module.client_executable(client_dir),
+            steam_module.client_executable(client_dir, names=client.exe_names),
             version=client.version,
             build=client.required_build,
             also=client.also_builds,
@@ -13318,7 +13320,10 @@ class ControllerView(QWidget):
         self._run(
             lambda: _Compared(
                 play_client.stale(
-                    play, source, keep=module_kept_files(server_dir, play, client_dir)
+                    play,
+                    source,
+                    keep=module_kept_files(server_dir, play, client_dir),
+                    exe_names=self.entry.client.exe_names,
                 ),
                 archives_left_out(server_dir, play, source, client_dir),
             ),
@@ -13598,7 +13603,9 @@ class ControllerView(QWidget):
             )
             choices = {**record.choices, "exe_options": picked_exe}
             options = client_exe.options_for(client.exe_patch, picked_exe)
-            exe = client_exe.apply(play, source, client.exe_patch, options)
+            exe = client_exe.apply(
+                play, source, client.exe_patch, options, exe_names=client.exe_names
+            )
             try:
                 save()
             except client_packs.PackError as exc:
@@ -13610,7 +13617,9 @@ class ControllerView(QWidget):
         elif exe is not None:
             # The catalog dropped the patch: the original's Wow.exe comes back.
             say("Putting your own Wow.exe back…")
-            if play_client.restore_original_exe(play, source, game=game, server_dir=server_dir):
+            if play_client.restore_original_exe(
+                play, source, game=game, server_dir=server_dir, exe_names=client.exe_names
+            ):
                 exe = None
         # 3. Config.wtf (else step (a)'s realmlist.wtf, written by `_launch`).
         cfg = client.config_wtf
@@ -13954,6 +13963,8 @@ class ControllerView(QWidget):
             os_name=platform.detect(),
             home=Path.home(),
             config_dir=platform.config_dir(),
+            exe_names=self.entry.client.exe_names,
+            wine_dll_overrides=self.entry.client.wine_dll_overrides,
         )
         try:
             play_launch.launch(spec)
@@ -14186,6 +14197,7 @@ class ControllerView(QWidget):
                 keep=module_kept_files(server_dir, play, client_dir),
                 exe_patch=self.entry.client.exe_patch,
                 catalog_always=_catalog_always(self.entry.client.config_wtf),
+                exe_names=self.entry.client.exe_names,
                 flags_lost=lost,
             )
             left_out = archives_left_out(server_dir, play, source, client_dir)

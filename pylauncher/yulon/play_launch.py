@@ -78,6 +78,12 @@ NO_WOW_EXE = (
     "nothing to start and nothing was started. Use Refresh from your original "
     "client to copy it back from your own client folder, then press Play again."
 )
+NO_WOW_EXE_FOR = (
+    "There is no {exe} in the ready-to-play client at {folder}, so there is "
+    "nothing to start and nothing was started. Use Refresh from your original "
+    "client to copy it back from your own client folder, then press Play again."
+)
+"""`NO_WOW_EXE` for any game's client: `exe` is the entry's expected file name (T812)."""
 
 NO_RUNNER_LINUX = (
     "Nothing on this machine can run Wow.exe, so nothing was started. WoW is a "
@@ -106,6 +112,8 @@ def launch_spec(
     os_name: str,
     home: Path,
     config_dir: Path,
+    exe_names: Sequence[str] = ("wow.exe",),
+    wine_dll_overrides: str | None = None,
     which: Callable[[str], str | None] = shutil.which,
 ) -> LaunchSpec:
     """How to start the ready-to-play client in `play_dir` on `os_name`, or a refusal.
@@ -115,11 +123,15 @@ def launch_spec(
 
     The binary is checked first, on every OS: a runner handed a path that is not
     there starts, fails, and says so in a log nobody reads, while the player
-    watches nothing happen.
+    watches nothing happen. `exe_names` is the entry's `client.exe_names`, so a
+    Conquest of Azeroth client starts `Ascension.exe` and not `Wow.exe`.
     """
-    exe = steam.client_executable(play_dir)
+    exe = steam.client_executable(play_dir, names=exe_names)
     if not exe.is_file():
-        raise LaunchRefusal(NO_WOW_EXE.format(folder=play_dir))
+        if tuple(exe_names) == ("wow.exe",):
+            raise LaunchRefusal(NO_WOW_EXE.format(folder=play_dir))
+        raise LaunchRefusal(NO_WOW_EXE_FOR.format(exe=exe.name, folder=play_dir))
+    extra_env = {"WINEDLLOVERRIDES": wine_dll_overrides} if wine_dll_overrides else {}
     return program_launch_spec(
         exe,
         game=game,
@@ -129,6 +141,7 @@ def launch_spec(
         config_dir=config_dir,
         which=which,
         cwd=play_dir,
+        extra_env=extra_env,
         no_runner_linux=NO_RUNNER_LINUX,
         no_runner_macos=NO_RUNNER_MACOS,
     )
@@ -161,6 +174,7 @@ def program_launch_spec(
     config_dir: Path,
     which: Callable[[str], str | None] = shutil.which,
     cwd: Path | None = None,
+    extra_env: Mapping[str, str] = {},
     no_runner_linux: str,
     no_runner_macos: str,
 ) -> LaunchSpec:
@@ -170,6 +184,8 @@ def program_launch_spec(
     first Steam's Proton, in this server's own prefix, else Wine; else the refusal the
     caller words. The working folder is `cwd`, else the program's own, where a client
     looks for its data. The caller has already checked that `exe` is there.
+    `extra_env` (the entry's `WINEDLLOVERRIDES`, T812) rides on the Proton and Wine
+    specs, never on the Windows one: there the client runs itself and takes no overrides.
     """
     folder = cwd if cwd is not None else exe.parent
     if os_name == "windows":
@@ -184,12 +200,13 @@ def program_launch_spec(
                 env={
                     "STEAM_COMPAT_DATA_PATH": str(prefix),
                     "STEAM_COMPAT_CLIENT_INSTALL_PATH": str(steam_root),
+                    **extra_env,
                 },
                 cwd=folder,
             )
     wine = which("wine")
     if wine:
-        return LaunchSpec(argv=(wine, str(exe), *args), env={}, cwd=folder)
+        return LaunchSpec(argv=(wine, str(exe), *args), env=dict(extra_env), cwd=folder)
     raise LaunchRefusal(no_runner_macos if os_name == "macos" else no_runner_linux)
 
 

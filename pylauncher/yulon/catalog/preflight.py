@@ -485,7 +485,7 @@ def gather(
             # before anything is compiled or extracted. A wrong one refuses like any other.
             from yulon.catalog.families import clientdir
 
-            wrong_build = clientdir.build_check(client_dir, entry.client)
+            wrong_build = clientdir.build_check(client_dir, entry.client, entry.client.exe_names)
             if wrong_build is not None:
                 client_checks = (*client_checks, wrong_build)
                 refused = wrong_build.verdict == "refuse"

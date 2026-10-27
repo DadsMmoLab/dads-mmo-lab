@@ -150,23 +150,27 @@ def validate(
     return tuple(checks)
 
 
-def build_check(client_dir: Path, client: Client) -> Check | None:
+def build_check(
+    client_dir: Path, client: Client, exe_names: tuple[str, ...] = ("wow.exe",)
+) -> Check | None:
     """The verdict on the build of the client's game program (T594): a refusal, or a pass row.
 
     Asked of the entry's `client.required_build` and `also_builds`, never of a game id, so a
-    new game is checked by filling its catalog entry. None: the entry names no build, the
-    folder has no exe to read yet (the folder rules say that), or the exe carries no readable
-    version -- an unknown client is never blocked, only a build that was read. A build that
-    was read and is right is a `pass` row, so the install log shows it was looked at.
+    new game is checked by filling its catalog entry. `exe_names` is the entry's
+    `client.exe_names`, so a Conquest of Azeroth client reads `Ascension.exe` (T812).
+    None: the entry names no build, the folder has no exe to read yet (the folder rules
+    say that), or the exe carries no readable version -- an unknown client is never
+    blocked, only a build that was read. A build that was read and is right is a `pass`
+    row, so the install log shows it was looked at.
     """
     said = client_build.refusal(
-        steam.client_executable(client_dir),
+        steam.client_executable(client_dir, names=exe_names),
         version=client.version,
         build=client.required_build,
         also=client.also_builds,
     )
     if said is None:
-        found = client_build.read_version(steam.client_executable(client_dir))
+        found = client_build.read_version(steam.client_executable(client_dir, names=exe_names))
         if found is None or client.required_build is None:
             return None
         return Check(BUILD_CHECK, "pass", f"the game program is {found}")

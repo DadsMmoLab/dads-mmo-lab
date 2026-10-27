@@ -360,7 +360,12 @@ def _no_stock(patch: ExePatch, problems: list[str]) -> ExeError:
 
 
 def stock_bytes(
-    play_dir: Path, original: Path, patch: ExePatch, *, opener: Opener = _open
+    play_dir: Path,
+    original: Path,
+    patch: ExePatch,
+    *,
+    exe_names: Sequence[str] = ("wow.exe",),
+    opener: Opener = _open,
 ) -> bytes:
     """The stock Wow.exe, from the first place that has one matching `patch.expect_sha256`.
 
@@ -369,8 +374,8 @@ def stock_bytes(
     fallback page when none has it.
     """
     for path in (
-        client_executable(play_dir),
-        client_executable(original),
+        client_executable(play_dir, names=exe_names),
+        client_executable(original, names=exe_names),
         exe_cache_dir() / f"{patch.expect_sha256}.exe",
     ):
         found = _stock_in(path, patch)
@@ -430,6 +435,7 @@ def apply(
     patch: ExePatch,
     options: dict[str, bool],
     *,
+    exe_names: Sequence[str] = ("wow.exe",),
     opener: Opener = _open,
 ) -> dict[str, Any]:
     """Patch the ready-to-play client's Wow.exe from stock bytes; return what to record.
@@ -439,11 +445,11 @@ def apply(
     into place, never into a hard link to the player's exe.
     """
     try:
-        stock = stock_bytes(play_dir, original, patch, opener=opener)
+        stock = stock_bytes(play_dir, original, patch, exe_names=exe_names, opener=opener)
         result = patched(stock, patch, options)
-        target = client_executable(play_dir)
+        target = client_executable(play_dir, names=exe_names)
         if not target.exists() and not os.path.lexists(target):
-            target = play_dir / client_executable(original).name
+            target = play_dir / client_executable(original, names=exe_names).name
         current: bytes | None = None
         mode = 0o755
         try:
@@ -473,7 +479,13 @@ def options_for(patch: ExePatch, chosen: Mapping[str, bool]) -> dict[str, bool]:
     return {name: chosen.get(name, option.default) for name, option in patch.options.items()}
 
 
-def exe_stale(play_dir: Path, original: Path, rec_exe: dict[str, Any] | None) -> bool:
+def exe_stale(
+    play_dir: Path,
+    original: Path,
+    rec_exe: dict[str, Any] | None,
+    *,
+    exe_names: Sequence[str] = ("wow.exe",),
+) -> bool:
     """Whether the ready-to-play Wow.exe is no longer what the record says Yu'lon made.
 
     Stale when it is missing or its SHA-256 is not the recorded patched one
@@ -489,7 +501,7 @@ def exe_stale(play_dir: Path, original: Path, rec_exe: dict[str, Any] | None) ->
     if not isinstance(want, str):
         return True
     try:
-        data = client_executable(play_dir).read_bytes()
+        data = client_executable(play_dir, names=exe_names).read_bytes()
     except OSError:
         return True
     return _sha256(data) != want

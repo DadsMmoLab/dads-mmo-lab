@@ -1295,7 +1295,7 @@ def test_refresh_leaves_wtf_and_interface_alone_even_when_listed(
     replace_file(orig / "WTF" / "odd.MPQ", b"new!")
     replace_file(orig / "Interface" / "helper.dll", b"new!")
     listed = (Path("Interface/helper.dll"), Path("WTF/odd.MPQ"))
-    monkeypatch.setattr(play_client, "stale", lambda play_dir, original: listed)
+    monkeypatch.setattr(play_client, "stale", lambda play_dir, original, **_k: listed)
     assert refresh(play, orig, tmp_path) == ()
     assert (play / "WTF" / "odd.MPQ").read_bytes() == b"old"
     assert (play / "Interface" / "helper.dll").read_bytes() == b"old"
@@ -1493,7 +1493,7 @@ def test_refresh_keeps_an_archive_the_original_lacks_even_when_listed(
     play = tmp_path / "t"
     build(orig, play, tmp_path)
     (orig / "DivxDecoder.dll").unlink()
-    monkeypatch.setattr(play_client, "stale", lambda play_dir, original: (Path("DivxDecoder.dll"),))
+    monkeypatch.setattr(play_client, "stale", lambda play_dir, original, **_k: (Path("DivxDecoder.dll"),))
     assert refresh(play, orig, tmp_path) == ()
     assert (play / "DivxDecoder.dll").read_bytes() == b"dll"
 
@@ -1531,7 +1531,7 @@ def test_refresh_never_touches_a_kept_module_file_even_when_listed(
     play = tmp_path / "t"
     rel = module_patch_over(play, orig)
     ours = (play / rel).read_bytes()
-    monkeypatch.setattr(play_client, "stale", lambda play_dir, original: (rel,))
+    monkeypatch.setattr(play_client, "stale", lambda play_dir, original, **_k: (rel,))
 
     assert refresh(play, orig, tmp_path, keep=(rel,)) == ()
     assert (play / rel).read_bytes() == ours
