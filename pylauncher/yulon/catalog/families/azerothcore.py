@@ -27,7 +27,7 @@ import posixpath
 import re
 import stat
 import tempfile
-from collections.abc import Generator, Iterator, Mapping, Sequence
+from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import ClassVar
@@ -50,6 +50,7 @@ from yulon.catalog.installer import (
     InstallerError,
     InstallStopped,
     OneShotLeftRunning,
+    ReadyWaitStopped,
 )
 from yulon.catalog.native import (
     DOWNLOAD_CANCEL_NOTE,
@@ -841,8 +842,7 @@ class AzerothCoreInstaller(StagedInstaller):
         elif was_up is None:
             yield DATABASE_MAYBE_STARTED
         yield (
-            "None of them was applied, so the tested commit's server can start on your "
-            "databases."
+            "None of them was applied, so the tested commit's server can start on your databases."
         )
         return None
 
@@ -1018,7 +1018,7 @@ class AzerothCoreInstaller(StagedInstaller):
             raise InstallerError(
                 updates_unread(
                     "your databases already have",
-                    f"Yu'lon could not start the database to " f"ask it: {exc}",
+                    f"Yu'lon could not start the database to ask it: {exc}",
                 )
             ) from exc
         password = self.resolve_secrets(server_dir).db_password
@@ -1291,6 +1291,151 @@ class AzerothCoreInstaller(StagedInstaller):
                 raise OneShotLeftRunning(download_left_sentence(left, earlier=False))
         self._check_run(run, "the server-data download", ctx.cancel, DOWNLOAD_CANCEL_NOTE)
         yield "Server data is in place."
+
+    def _start_servers(self, ctx: StageContext) -> None:
+        """The ordered start for an entry that asks for it, else the spine's (T812).
+
+        For these entries `stage_ready` below only re-confirms: the waits
+        already happened here, with `ctx.cancel` ending them.
+        """
+        from yulon.catalog import ordered_start
+
+        if not ordered_start.ordered(self.entry):
+            super()._start_servers(ctx)
+            return
+        spec = self.entry.container_spec()
+        ordered_start.start(
+            spec,
+            ctx.server_dir,
+            entry=self.entry,
+            start_services=self._start_ordered_services,
+            wait_world=self._wait_ordered_world,
+            wait_auth=self._wait_ordered_world,
+            open_realm=lambda: self._open_ordered_realm(ctx),
+            cancel=ctx.cancel,
+            say=logger.info,
+        )
+
+    def _start_ordered_services(
+        self,
+        spec: docker.ContainerSpec,
+        server_dir: Path,
+        *,
+        services: Sequence[str] | None = None,
+        wsl_distro: str | None = None,
+        force_recreate: bool = False,
+    ) -> bool:
+        """`docker.start_staged` through the seams, naming the ordered subset."""
+        return self._seams.start(spec, server_dir, services=services)
+
+    def _wait_ordered_world(
+        self,
+        spec: docker.ContainerSpec,
+        ready: docker.ReadySpec,
+        *,
+        wsl_distro: str | None = None,
+    ) -> bool:
+        """One ordered wait through the seams.
+
+        A single `timeout_s` window, not the spine's quiet budget: a
+        slow-but-printing first boot past that total fails here where
+        `wait_for_ready()` would have kept waiting. CoA boot times are
+        unmeasured; if the live proof shows one past 30 min, this wait must
+        spend the quiet budget too (cold review D6).
+        """
+        return self._seams.wait_ready(spec, ready)
+
+    def _open_ordered_realm(self, ctx: StageContext) -> str | None:
+        """Open the realm row through the seams, read back; a sentence or None."""
+        from yulon import realm_flag
+
+        return realm_flag.open_realm(
+            self.entry,
+            self.entry.container_spec(),
+            ctx.server_dir,
+            wsl_distro=self._seams.distro,
+        )
+
+    def _recreate_servers(
+        self,
+        spec: docker.ContainerSpec,
+        server_dir: Path,
+        *,
+        control: docker.StopControl,
+        before_signal: Callable[[], None] | None = None,
+    ) -> bool:
+        """The ordered recreate for an entry that asks for it, else the spine's (T812)."""
+        from yulon.catalog import ordered_start
+
+        if not ordered_start.ordered(self.entry):
+            return super()._recreate_servers(
+                spec, server_dir, control=control, before_signal=before_signal
+            )
+        return self._recreate_ordered(
+            spec, server_dir, control=control, before_signal=before_signal
+        )
+
+    def _recreate_ordered(
+        self,
+        spec: docker.ContainerSpec,
+        server_dir: Path,
+        *,
+        control: docker.StopControl,
+        before_signal: Callable[[], None] | None = None,
+    ) -> bool:
+        """Replace db+world, wait the world, replace auth, open the realm."""
+        from yulon import realm_flag
+        from yulon.catalog import ordered_start
+
+        if before_signal is not None:
+            before_signal()
+        services = spec.compose_services()
+        by_container = dict(zip((spec.db, spec.auth, spec.world), services, strict=False))
+        auth_service = by_container.get(spec.auth, spec.auth)
+        others = [service for service in services if service != auth_service]
+        self._seams.recreate(spec, server_dir, control=control, services=others)
+        world_ready, auth_ready = ordered_start.ready_specs(self.entry)
+        self._wait_ordered_ready(
+            world_ready, control, spec, server_dir, ordered_start.WORLD_WAIT_STOPPED
+        )
+        self._seams.recreate(spec, server_dir, control=control, services=[auth_service])
+        self._wait_ordered_ready(
+            auth_ready, control, spec, server_dir, ordered_start.AUTH_WAIT_STOPPED
+        )
+        refused = realm_flag.open_realm(self.entry, spec, server_dir, wsl_distro=self._seams.distro)
+        if refused is not None:
+            logger.info(refused)
+        return True
+
+    def _wait_ordered_ready(
+        self,
+        ready: docker.ReadySpec,
+        control: docker.StopControl,
+        spec: docker.ContainerSpec,
+        server_dir: Path,
+        stopped: str,
+    ) -> None:
+        """One ordered recreate wait: Stop lets the load finish, then still stops (T158).
+
+        A rebuild never kills a loading world (the lead's ruling of
+        2026-10-05): a Stop during the wait is said and the wait goes on
+        without the cancel until the server is ready, crashes or runs out.
+        Then it still raises, because the player asked to stop.
+        """
+        from yulon.catalog import ordered_start
+
+        if self._seams.wait_ready(spec, replace(ready, cancel=control.abandon)):
+            return
+        if not control.abandon.is_set():
+            raise docker.DockerRefusal(
+                ordered_start.WORLD_NEVER_READY
+                if ready.auth is None
+                else ordered_start.AUTH_NEVER_READY,
+                detail=docker.logs_command(spec.service_for(spec.world), server_dir),
+            )
+        logger.info(docker.STOP_WAITS_FOR_THE_LOAD)
+        self._seams.wait_ready(spec, ready)
+        raise ReadyWaitStopped(stopped)
 
     def _up(self, ctx: StageContext) -> Iterator[str]:
         """Write the catalog's module confs from their `.dist`, then the spine's `up` (T137).

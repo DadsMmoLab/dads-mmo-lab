@@ -68,6 +68,74 @@ def offline_statement(entry: CatalogEntry) -> str | None:
     )
 
 
+def open_statement(entry: CatalogEntry) -> str | None:
+    """The UPDATE that clears this entry's realm row offline bit; None when it names none."""
+    return online_statement(entry)
+
+
+def open_realm(
+    entry: CatalogEntry,
+    spec: docker.ContainerSpec,
+    server_dir: Path,
+    *,
+    wsl_distro: str | None = None,
+) -> str | None:
+    """Clear this entry's realm row offline bit, read back; None when open, else the sentence.
+
+    Run after the ordered start's auth wait, with the database started by the
+    up and the world up: `start_database=False, only_with_world_up=True`, the
+    Keeper and the uptime tick being the backstop a failure leaves behind.
+    Best effort otherwise: a database that cannot be reached or a row that
+    still reads the bit is a sentence for the line, never a failed start.
+
+    Only bit 2 (`REALM_FLAG_OFFLINE`) is cleared, like `online_statement()`
+    and the Keeper: any other flag bit is the core's, not this start's to wipe.
+    """
+    statement = open_statement(entry)
+    if statement is None:
+        return None
+    password = entry.install.db_password(server_dir)
+    if password is None:
+        return (
+            f"{entry.id}: the realm could not be listed Online (the database password "
+            "could not be read); it opens once the world ticks it."
+        )
+    native = entry.install.native
+    client = native.db.client if native is not None else "mysql"
+    try:
+        up = set(docker.status(wsl_distro=wsl_distro))
+        if spec.db not in up or spec.world not in up:
+            return (
+                f"{entry.id}: the realm could not be listed Online (the world is not "
+                "running); it opens once the world ticks it."
+            )
+        docker.sql_query(spec.db, client, password, None, statement, wsl_distro=wsl_distro)
+        read = flags_statement(entry)
+        answer = (
+            docker.sql_query(spec.db, client, password, None, read, wsl_distro=wsl_distro)
+            if read is not None
+            else ""
+        )
+    except docker.DockerCommandError as exc:
+        logger.warning(f"{entry.id}: the realm row was not opened: {exc}")
+        return (
+            f"{entry.id}: the realm could not be listed Online ({exc}); it opens once "
+            "the world ticks it."
+        )
+    try:
+        flags = int(answer.split()[0])
+    except (IndexError, ValueError):
+        flags = REALM_FLAG_OFFLINE
+    if flags & REALM_FLAG_OFFLINE:
+        logger.warning(f"{entry.id}: the realm row reads {' '.join(answer.split()) or 'nothing'}")
+        return (
+            f"{entry.id}: the realm could not be listed Online (its row reads "
+            f"{' '.join(answer.split()) or 'nothing'}); it opens once the world ticks it."
+        )
+    logger.info(f"{entry.id}: realm row opened in {entry.databases.auth}: {statement}")
+    return None
+
+
 def mark_offline(
     entry: CatalogEntry,
     spec: docker.ContainerSpec,

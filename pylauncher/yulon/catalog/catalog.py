@@ -3949,6 +3949,8 @@ class CatalogEntry(_Strict):
 
     def container_spec(self) -> ContainerSpec:
         """The `ContainerSpec` a controller for this game would be built from."""
+        native = self.install.native
+        block = native.azerothcore if native is not None else None
         return ContainerSpec(
             db=self.containers.db,
             auth=self.containers.auth,
@@ -3960,6 +3962,7 @@ class CatalogEntry(_Strict):
                 self.install.native is not None and self.install.native.stop_waits_for_world_load
             ),
             save_first=self._save_first(),
+            auth_after_world=block is not None and block.auth_after_world_ready,
         )
 
     def _save_first(self) -> SaveFirst | None:

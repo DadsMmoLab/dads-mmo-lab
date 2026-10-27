@@ -569,12 +569,59 @@ class Controller:
             # entry, so the lambda that used to be built here was dead code reading
             # like a health wait that no longer happens. Compose does the waiting
             # now, through the project's own `service_healthy` conditions.
-            docker.start_staged(self.spec, self.server_dir, wsl_distro=self.wsl_distro)
+            self._start_servers()
             if self.wsl_distro is not None:
                 # AFTER the start, so a start that failed pins nothing. The distro
                 # would otherwise stop 15-25 s after this app's last call into it,
                 # killing the server it just started (T132, `wsl.hold()`).
                 self._hold = wsl.hold(self.wsl_distro, self.spec.world)
+
+    def _start_servers(self) -> None:
+        """Bring this install's servers up; the ordered start for a CoA server (T812).
+
+        The default is today's single `start_staged` over all three services.
+        When `self.spec.auth_after_world` (set from the entry's
+        `azerothcore.auth_after_world_ready`), instead up db+world, wait the
+        world ready, up auth, wait the auth ready, then open the realm row —
+        with the job's Stop ending the waits (`stop_control.abandon`). A
+        failed open is said, not raised: the Keeper and the uptime tick are
+        the backstop.
+        """
+        from yulon import realm_flag
+        from yulon.catalog import native as native_mod
+        from yulon.catalog import ordered_start
+
+        if not self.spec.auth_after_world:
+            docker.start_staged(self.spec, self.server_dir, wsl_distro=self.wsl_distro)
+            return
+        entry = self.entry or _entry_for(self.spec)
+        if entry is None:  # pragma: no cover - the spec flag came from an entry
+            docker.start_staged(self.spec, self.server_dir, wsl_distro=self.wsl_distro)
+            return
+        # D5: a running auth lists the realm Online for the whole world load
+        # unless it is marked first (the install's `up` does this; T577).
+        # `unless_world_up`: a healthy Start over a running world marks nothing.
+        realm_flag.mark_offline(
+            entry, self.spec, self.server_dir, wsl_distro=self.wsl_distro, unless_world_up=True
+        )
+        cancel = None if self.stop_control is None else self.stop_control.abandon
+        ordered_start.start(
+            self.spec,
+            self.server_dir,
+            entry=entry,
+            start_services=docker.start_staged,
+            wait_world=lambda spec, ready, **kw: native_mod.wait_ready_quietly(
+                spec, ready, wsl_distro=self.wsl_distro, cancel=cancel
+            ),
+            wait_auth=lambda spec, ready, **kw: native_mod.wait_ready_quietly(
+                spec, ready, wsl_distro=self.wsl_distro, cancel=cancel
+            ),
+            open_realm=lambda: realm_flag.open_realm(
+                entry, self.spec, self.server_dir, wsl_distro=self.wsl_distro
+            ),
+            wsl_distro=self.wsl_distro,
+            cancel=cancel,
+        )
 
     def _rename_bot_settings(self) -> str | None:
         """T657: the bot settings under the prefix this server's mod-playerbots reads.

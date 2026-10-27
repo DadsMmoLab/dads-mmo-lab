@@ -7335,7 +7335,7 @@ class Seams:
     # return this seam's own fakes do not have to produce.
     start_db: Callable[..., object] = docker.start_database
     """Called with `because=`, which ends `start_database()`'s timeout sentence (T248)."""
-    start: Callable[[docker.ContainerSpec, Path], bool] = docker.start_staged
+    start: Callable[..., bool] = docker.start_staged
     recreate: Callable[..., bool] = docker.recreate_staged
     """`start` with `--force-recreate`, and the rebuild's only reason to exist as a seam.
 
@@ -7349,6 +7349,9 @@ class Seams:
     `Callable[...]` since T158: `stage_recreate()` passes `control=` (the load
     wait's `docker.StopControl`, carrying the rebuild's Cancel) and
     `before_signal=` (the moment past which something may have been touched).
+    T812 adds `services=`: the ordered start/recreate names the subset to
+    bring (db+world first, auth once the world said ready); None is all of
+    `compose_services()`, as today.
     """
     mark_realm_offline: Callable[..., object] = realm_flag.mark_offline
     """Set the realm row's offline bit before the world starts or is replaced (T577).
@@ -9891,7 +9894,7 @@ class StagedInstaller:
             self._seams.mark_realm_offline(self.entry, spec, ctx.server_dir)
 
             def replace_them(say: docker.OutputSink) -> bool:
-                return self._seams.recreate(
+                return self._recreate_servers(
                     spec,
                     ctx.server_dir,
                     control=replace(control, say=say),
@@ -9932,6 +9935,28 @@ class StagedInstaller:
                     f"old build is still what is running: {exc}"
                 ) from exc
         yield "The containers were replaced."
+
+    def _recreate_servers(
+        self,
+        spec: docker.ContainerSpec,
+        server_dir: Path,
+        *,
+        control: docker.StopControl,
+        before_signal: Callable[[], None] | None = None,
+    ) -> bool:
+        """Replace this install's containers; the ordered start overrides it (T812).
+
+        The default is the `native.py:9894` call: `docker.recreate_staged`
+        over all three services. An entry with
+        `azerothcore.auth_after_world_ready` instead replaces db+world, waits
+        the world ready, replaces auth and opens the realm.
+        """
+        return self._seams.recreate(
+            spec,
+            server_dir,
+            control=control,
+            before_signal=before_signal,
+        )
 
     def _remove_the_old_servers(
         self, spec: docker.ContainerSpec, server_dir: Path
@@ -16184,9 +16209,19 @@ class StagedInstaller:
             self.entry, self.entry.container_spec(), ctx.server_dir, unless_world_up=True
         )
         try:
-            self._seams.start(self.entry.container_spec(), ctx.server_dir)
+            self._start_servers(ctx)
         except docker.DockerCommandError as exc:
             raise carry_detail(exc, InstallerError(f"The server would not start: {exc}")) from exc
+
+    def _start_servers(self, ctx: StageContext) -> None:
+        """Bring this install's servers up; the ordered start overrides it (T812).
+
+        The default is today's single `up`: `docker.start_staged` over all
+        three services. An entry with `azerothcore.auth_after_world_ready`
+        instead ups db+world, waits the world ready, ups auth and opens the
+        realm (`ordered_start.start`), with `ctx.cancel` ending the waits.
+        """
+        self._seams.start(self.entry.container_spec(), ctx.server_dir)
 
     def stage_ready(self, ctx: StageContext, *, stop_lets_it_load: bool = False) -> Iterator[str]:
         """Wait until the database is healthy and both servers have said they are up.

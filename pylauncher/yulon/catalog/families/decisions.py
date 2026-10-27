@@ -272,6 +272,28 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         hits=(".azerothcore",),
     ),
     Site(
+        "yulon.catalog.catalog",
+        "CatalogEntry.container_spec",
+        "the ordered start flag rides the spec from the AzerothCore block (T812)",
+        {
+            "azerothcore": supported(),
+            "cmangos": not_applicable("only an AzerothCore block orders auth after the world"),
+            "trinitycore": not_applicable("only an AzerothCore block orders auth after the world"),
+        },
+        hits=(".azerothcore",),
+    ),
+    Site(
+        "yulon.catalog.ordered_start",
+        "ordered",
+        "starting auth after the world needs the AzerothCore block's flag (T812)",
+        {
+            "azerothcore": supported(),
+            "cmangos": not_applicable("only an AzerothCore block orders auth after the world"),
+            "trinitycore": not_applicable("only an AzerothCore block orders auth after the world"),
+        },
+        hits=(".azerothcore", ".azerothcore"),
+    ),
+    Site(
         "yulon.unbound_settings",
         "shown_for",
         "the Tuning tab's Unbound card is for an entry whose AzerothCore install makes "
