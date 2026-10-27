@@ -24621,6 +24621,7 @@ def test_the_button_offers_to_make_one_and_then_reads_play(
     without, _ = _play_view(ps, tmp_path, original=original)
     assert without.play_button is not None
     assert without.play_button.text() == controller_view_module.MAKE_PLAY_CLIENT_LABEL
+    assert not without.play_button.isHidden()
     assert without.play_menu_button is not None and without.play_menu_button.isHidden()
 
     play = _built(original, tmp_path)
@@ -27387,6 +27388,206 @@ def test_a_killed_setup_leaves_a_pending_record_the_next_play_cleans(
     done = client_packs.read_record(play).packs["lumenveil"]
     assert "setup_pending" not in done
     assert steps[-1] == "launch"
+
+
+def test_a_failed_setup_stops_play_leaves_no_pack_files_and_asks_again(
+    qapp: object, ps: _Ps, tmp_path: Path, site: _Site, steps: list[str],
+    asks: _Asks, monkeypatch: pytest.MonkeyPatch, launched: list[object],
+) -> None:
+    """Item 5: the water run's non-zero exit rolls the pack back and Play asks to retry."""
+    entry, original, play, seen, _ = _lumen_play(tmp_path, monkeypatch, site)
+
+    def first_lamps_then_fail(argv: list[str], *, cwd: Path, timeout: float | None = None) -> Any:
+        import types as _types
+
+        seen.append(list(argv))
+        if "--out" in argv[1:]:
+            (cwd / "lampdata.bin").write_bytes(b"lamps")
+            return _types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        return _types.SimpleNamespace(returncode=3, stdout="lamp 3 failed", stderr="")
+
+    monkeypatch.setattr(client_packs, "_run_child", first_lamps_then_fail)
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+    asks.answers = [None]
+
+    view.play()
+
+    title, text, yes, save = asks.calls[0]
+    assert "stopped before it finished (code 3)" in text and "lamp 3 failed" in text
+    assert yes == "Retry" and save is not None, "an optional pack offers a skip"
+    assert "launch" not in steps, "a failed setup never launches"
+    assert launched == []
+    assert not (play / "version.dll").exists(), "the rollback took the install with it"
+    assert not (play / "lampdata.bin").exists() and not (play / "liquiddata.bin").exists()
+    held = client_packs.read_record(play).packs.get("lumenveil")
+    assert held is not None, "the installed entry stays: the next Play repairs and tries again"
+    assert "setup" not in held, "no completed outputs are recorded"
+    assert "lampdata.bin" not in held["files"], "no output hash is recorded"
+    assert held.get("setup_pending") == ["lampdata.bin", "liquiddata.bin"], (
+        "the pending note stays: the next Play cleans the leftovers and tries again"
+    )
+
+
+def test_switching_lumenveil_off_after_setup_removes_its_files_and_outputs(
+    qapp: object, ps: _Ps, tmp_path: Path, site: _Site, steps: list[str],
+    asks: _Asks, monkeypatch: pytest.MonkeyPatch, launched: list[object],
+) -> None:
+    """Item 5: pack off after a full Play removes the install, the outputs, and the record."""
+    entry, original, play, _seen, _ = _lumen_play(tmp_path, monkeypatch, site)
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+
+    view.play()
+
+    assert steps[-1] == "launch" and (play / "lampdata.bin").is_file()
+    held = client_packs.read_record(play)
+    client_packs.write_record(
+        play,
+        client_packs.PackRecord(
+            held.packs, held.exe,
+            {"packs": {"lumenveil": False}, "exe_options": {}},
+            held.config_seeded, held.launcher,
+        ),
+        game=WOTLK.id,
+        server_dir=tmp_path,
+    )
+    steps.clear()
+    launched.clear()
+    again, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+
+    again.play()
+
+    assert steps[-1] == "launch"
+    assert not (play / "version.dll").exists()
+    assert not (play / "lampdata.bin").exists() and not (play / "liquiddata.bin").exists()
+    assert not (play / "Lumenveil").exists(), "the emptied folder goes too"
+    assert "lumenveil" not in client_packs.read_record(play).packs
+
+def test_play_with_an_updated_lumenveil_reruns_setup_and_records_new_outputs(
+    qapp: object, ps: _Ps, tmp_path: Path, site: _Site, steps: list[str],
+    asks: _Asks, monkeypatch: pytest.MonkeyPatch, launched: list[object],
+) -> None:
+    """Item 5: v2's new exe and stale outputs rerun setup through the whole Play."""
+    entry, original, play, seen, _ = _lumen_play(tmp_path, monkeypatch, site)
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+
+    view.play()
+
+    assert len(seen) == 2 and steps[-1] == "launch"
+    site.members["lumenveil"] = {
+        **_lumen_members(), "version.dll": b"lumen loader v2",
+        "Lumenveil/lamp_extract.exe": b"exe v2",
+    }
+    site.version = "2"
+    seen.clear()
+    steps.clear()
+    launched.clear()
+    again, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+
+    again.play()
+
+    assert len(seen) == 2, "the new exe runs on the next Play"
+    assert steps[-1] == "launch"
+    done = client_packs.read_record(play).packs["lumenveil"]
+    assert "setup_pending" not in done
+    assert set(done["setup"]) == {"lampdata.bin", "liquiddata.bin"}
+
+
+def test_play_repairs_a_deleted_pack_file_without_rerunning_setup(
+    qapp: object, ps: _Ps, tmp_path: Path, site: _Site, steps: list[str],
+    asks: _Asks, monkeypatch: pytest.MonkeyPatch, launched: list[object],
+) -> None:
+    """Item 5: repair keeps `"setup"` and output hashes, so the next Play stays quiet."""
+    entry, original, play, seen, _ = _lumen_play(tmp_path, monkeypatch, site)
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+
+    view.play()
+
+    assert len(seen) == 2 and steps[-1] == "launch"
+    (play / "version.dll").unlink()
+    seen.clear()
+    steps.clear()
+    launched.clear()
+    again, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+
+    again.play()
+
+    assert (play / "version.dll").read_bytes() == b"lumen loader", "the missing file comes back"
+    assert seen == [], "recorded outputs stand: setup never reruns"
+    assert steps[-1] == "launch"
+    done = client_packs.read_record(play).packs["lumenveil"]
+    assert done["files"]["lampdata.bin"] == hashlib.sha256(b"lamps").hexdigest()
+    assert done["files"]["liquiddata.bin"] == hashlib.sha256(b"water").hexdigest()
+    once_more, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+    seen.clear()
+    steps.clear()
+
+    once_more.play()
+
+    assert seen == [], "the next Play does not refuse the owned outputs"
+    assert steps[-1] == "launch"
+
+
+def test_play_with_a_foreign_loader_refuses_lumenveil_but_not_an_addons_pack(
+    qapp: object, ps: _Ps, tmp_path: Path, site: _Site, steps: list[str],
+    asks: _Asks, monkeypatch: pytest.MonkeyPatch, launched: list[object],
+) -> None:
+    """Items 1+5: another mod's loader refuses Lumenveil before its fetch, never an addons pack."""
+    from yulon.catalog.catalog import ClientPack as _Pack
+
+
+    addons = _Pack.model_validate(
+        {
+            "id": "addons",
+            "label": "Addons",
+            "source": {
+                "kind": "url", "url": "https://packs.example.org/addons.zip",
+                "version_url": "https://packs.example.org/addons.version",
+            },
+            "install": [{"member": "*", "to_dir": "Interface/AddOns"}],
+        }
+    )
+    lumen = {pack.id: pack for pack in WOTLK.client.packs}["lumenveil"]
+    entry = WOTLK.model_copy(
+        update={"client": WOTLK.client.model_copy(update={"packs": (lumen, addons)})}
+    )
+    monkeypatch.setattr(controller_view_module.platform, "detect", lambda: "windows")
+    monkeypatch.setattr(client_packs.platform, "detect", lambda: "windows")
+    original = _game_client(tmp_path / "clients" / "WoW")
+    play = _built(original, tmp_path)
+    (play / "Data" / "enUS").mkdir(parents=True, exist_ok=True)
+    (play / "version.dll").write_bytes(b"someone else's loader")
+    site.members["lumenveil"] = _lumen_members()
+    site.members["addons"] = {"Foo/Foo.toc": b"## Interface: 30300"}
+    client_packs.write_record(
+        play,
+        client_packs.PackRecord(
+            {}, None, {"packs": {"lumenveil": True, "addons": True}, "exe_options": {}}
+        ),
+        game=WOTLK.id,
+        server_dir=tmp_path,
+    )
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+    asks.answers = ["save"]
+    view.play()
+
+    title, text, yes, save = asks.calls[0]
+    assert "another mod's version.dll" in text
+    assert yes == "Retry" and save == "Play without Lumenveil"
+    assert "lumenveil" not in site.calls, "Lumenveil refuses before its fetch: never fetched"
+    assert site.calls == ["addons"], "the addons pack fetches and installs despite the loader"
+    assert steps[-1] == "launch", "skipping Lumenveil launches with the addons pack"
+    assert len(launched) == 1
+    assert (play / "version.dll").read_bytes() == b"someone else's loader", "untouched"
+    assert (play / "Interface" / "AddOns" / "Foo" / "Foo.toc").is_file()
 
 def test_make_saves_the_choices_into_the_record(
     qapp: object, ps: _Ps, tmp_path: Path, site: _Site

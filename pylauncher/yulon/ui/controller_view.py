@@ -13521,12 +13521,14 @@ class ControllerView(QWidget):
             if pack.id not in wanted or pack.id in skip:
                 continue
             check_cancel()
-            # A loader another mod put in the copy refuses BEFORE its fetch (D7):
+            # A loader another mod put in the copy refuses BEFORE its fetch (D7),
+            # but only for a pack that installs a top-level version.dll itself:
             # one version.dll loads, and nothing of the pack is touched.
-            try:
-                client_packs.refuse_foreign_loader(play, pack, packs.get(pack.id))
-            except client_packs.PackError as exc:
-                raise _PackStopped(pack, str(exc)) from exc
+            if client_packs.pack_installs_loader(pack):
+                try:
+                    client_packs.refuse_foreign_loader(play, pack, packs.get(pack.id))
+                except client_packs.PackError as exc:
+                    raise _PackStopped(pack, str(exc)) from exc
             say(f"Getting {pack.label}…")
             try:
                 # Each kind by name, and nothing falls through to the downloader: a
@@ -13639,7 +13641,6 @@ class ControllerView(QWidget):
                         done,
                         game=game,
                         server_dir=server_dir,
-                        record=have,
                         on_pending=keep_pending,
                     )
                     save()

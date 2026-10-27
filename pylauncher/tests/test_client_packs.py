@@ -4345,3 +4345,140 @@ def test_an_unreadable_recorded_file_refuses_and_stays(
     assert (rig.play / "version.dll").is_file(), "the refused file stays"
     assert not (rig.play / "Lumenveil" / "lamp_extract.exe").exists(), "the other file still goes"
     rig.untouched()
+
+
+def test_a_foreign_loader_does_not_block_a_pack_without_a_loader(rig: _Rig) -> None:
+    (rig.play / "version.dll").write_bytes(b"someone else's loader")
+
+    client_packs.refuse_foreign_loader(rig.play, ADDONS, None)
+
+    assert client_packs.foreign_files(rig.play, ADDONS, None) == ("version.dll",)
+
+
+def test_a_foreign_loader_refuses_a_pack_before_its_fetch(rig: _Rig) -> None:
+    pack = _lumen_pack()
+    (rig.play / "version.dll").write_bytes(b"someone else's loader")
+    before = _snapshot(rig.play)
+
+    with pytest.raises(PackError, match="another mod's version.dll"):
+        client_packs.refuse_foreign_loader(rig.play, pack, None)
+
+    assert _snapshot(rig.play) == before
+    members = {"version.dll": b"v", "Lumenveil/lamp_extract.exe": b"exe"}
+    rig.install(pack, _lumen_fetched(rig, members))
+    assert (rig.play / "version.dll").read_bytes() == b"v"
+
+
+def test_an_overwritten_loader_is_foreign_for_the_next_play(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ownership is by bytes: the record's hash names this pack's loader only while it stands."""
+    monkeypatch.setattr(client_packs.platform, "detect", lambda: "windows")
+    pack, entry = _install_lumen(rig)
+    assert client_packs.foreign_files(rig.play, pack, entry) == ()
+    (rig.play / "version.dll").write_bytes(b"another mod's loader")
+
+    with pytest.raises(PackError, match="another mod's version.dll"):
+        client_packs.refuse_foreign_loader(rig.play, pack, entry)
+
+
+def test_an_unreadable_loader_is_foreign(rig: _Rig, monkeypatch: pytest.MonkeyPatch) -> None:
+    pack, entry = _install_lumen(rig)
+    real_sha = client_packs._file_sha256
+
+    def refuse_version(path: Path) -> str:
+        if Path(path).name == "version.dll":
+            raise PermissionError(errno.EACCES, "Permission denied", os.fspath(path))
+        return real_sha(path)
+
+    monkeypatch.setattr(client_packs, "_file_sha256", refuse_version)
+
+    with pytest.raises(PackError, match="another mod's version.dll"):
+        client_packs.refuse_foreign_loader(rig.play, pack, entry)
+
+
+def test_a_star_rule_at_the_top_level_still_refuses(rig: _Rig) -> None:
+    pack = _pack_of([{"member": "*", "to_dir": "."}], id="root")
+    (rig.play / "version.dll").write_bytes(b"someone else's loader")
+
+    with pytest.raises(PackError, match="another mod's version.dll"):
+        client_packs.refuse_foreign_loader(rig.play, pack, None)
+
+
+def test_an_update_to_a_changed_exe_installs_and_sets_up_cleanly(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v2's new exe and stale outputs rerun setup; the record hashes the new outputs."""
+    monkeypatch.setattr(client_packs.platform, "detect", lambda: "windows")
+    pack = _lumen_pack()
+    f1 = _lumen_fetched(rig, {"version.dll": b"v", "Lumenveil/lamp_extract.exe": b"exe"})
+    _locale_fixture(rig.play)
+    have = client_packs.run_setup(
+        rig.play, pack, rig.install(pack, f1), game=GAME, server_dir=rig.server,
+        runner=_run_with(
+            rig.play, [_Outcome(writes={"lampdata.bin": b"lamps"}),
+                        _Outcome(writes={"liquiddata.bin": b"water"})],
+            seen=(seen := []),
+        ),
+    )
+    assert len(seen) == 2
+    # Stale outputs the update must not drop: edited bytes stay behind, and the
+    # new setup still reruns and re-hashes them.
+    (rig.play / "lampdata.bin").write_bytes(b"stale bytes another build left")
+    v2 = {"version.dll": b"v2", "Lumenveil/lamp_extract.exe": b"exe2"}
+    done = rig.install(pack, rig.fetched(v2, name="lumen2.zip"), previous=have)
+    assert done.get("left_behind") == ["lampdata.bin"]
+    assert (rig.play / "lampdata.bin").read_bytes() == b"stale bytes another build left"
+    seen.clear()
+
+    after = client_packs.run_setup(
+        rig.play, pack, done, game=GAME, server_dir=rig.server,
+        runner=_run_with(
+            rig.play, [_Outcome(writes={"lampdata.bin": b"new lamps"}),
+                        _Outcome(writes={"liquiddata.bin": b"new water"})],
+            seen=seen,
+        ),
+    )
+
+    assert len(seen) == 2, "the new exe runs: setup is evaluated against the new install"
+    assert after["files"]["lampdata.bin"] == _sha(b"new lamps")
+    assert after["files"]["liquiddata.bin"] == _sha(b"new water")
+    assert set(after["setup"]) == {"lampdata.bin", "liquiddata.bin"}
+    assert "setup_pending" not in after
+
+
+def test_repair_of_a_non_output_file_keeps_setup_outputs_and_stays_quiet(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A deleted pack file comes back with `"setup"` and output hashes intact; no rerun."""
+    monkeypatch.setattr(client_packs.platform, "detect", lambda: "windows")
+    pack = _lumen_pack()
+    members = {"version.dll": b"v", "Lumenveil/lamp_extract.exe": b"exe"}
+    _locale_fixture(rig.play)
+    done = client_packs.run_setup(
+        rig.play, pack, rig.install(pack, _lumen_fetched(rig, members)), game=GAME,
+        server_dir=rig.server,
+        runner=_run_with(
+            rig.play, _Outcome(writes={"lampdata.bin": b"lamps", "liquiddata.bin": b"water"}),
+            seen=(seen := []),
+        ),
+    )
+    assert "lampdata.bin" in done["files"]
+    (rig.play / "version.dll").unlink()
+    assert client_packs.recorded_files_missing(rig.play, done)
+    repaired = rig.install(
+        pack, _lumen_fetched(rig, members), previous=done, only_missing=True
+    )
+    assert repaired["files"]["lampdata.bin"] == _sha(b"lamps")
+    assert repaired["setup"] == done["setup"]
+    seen.clear()
+
+    after = client_packs.run_setup(
+        rig.play, pack, repaired, game=GAME, server_dir=rig.server,
+        runner=_run_with(rig.play, _Outcome(), seen=seen),
+    )
+
+    assert seen == [], "recorded outputs present: setup stays quiet"
+    assert after["files"]["lampdata.bin"] == _sha(b"lamps")
+    assert after["files"]["liquiddata.bin"] == _sha(b"water")
+    assert after == repaired

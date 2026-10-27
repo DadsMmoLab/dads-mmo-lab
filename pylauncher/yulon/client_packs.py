@@ -1574,6 +1574,28 @@ _LOADER = "version.dll"
 """The mod loader: only one of them can sit beside Wow.exe, so a foreign one refuses (D7)."""
 
 
+def pack_installs_loader(pack: ClientPack) -> bool:
+    """Whether the pack's install rules put a `version.dll` beside Wow.exe.
+
+    Only such a pack is ever refused by another mod's loader: a foreign
+    `version.dll` never blocks a pack (an addons pack, a patch pack) that
+    installs no loader itself. A `"*"` rule unpacking the whole zip at the top
+    level (`to_dir` `"."`) counts: its members are unknown before the fetch, so
+    one of them may be the loader.
+    """
+    for rule in pack.install:
+        if rule.member == "*":
+            assert rule.to_dir is not None  # catalog validation
+            if PurePosixPath(rule.to_dir).parts == ():
+                return True
+            continue
+        assert rule.to is not None  # catalog validation
+        target = PurePosixPath(rule.to)
+        if len(target.parts) == 1 and target.parts[0].casefold() == _LOADER:
+            return True
+    return False
+
+
 def foreign_files(
     play_dir: Path, pack: ClientPack, record: Mapping[str, Any] | None
 ) -> tuple[str, ...]:
@@ -1582,18 +1604,24 @@ def foreign_files(
     The install step asks this BEFORE fetching, so a foreign loader refuses with
     the plan's version.dll line and nothing of the pack is fetched, installed or
     touched. `d3d9.dll` (DXVK, ReShade) loads beside any loader and is never an
-    answer; a `version.dll` this pack's own record names is this pack's, not
-    foreign. Compared case-insensitively (`VERSION.DLL` on a Windows copy), and
-    only the copy's top-level names: the loader sits beside Wow.exe. Nothing is
-    written.
+    answer; only the copy's top-level names: the loader sits beside Wow.exe.
+    Nothing is written.
+
+    A `version.dll` the record names is this pack's own ONLY while its bytes
+    still match the recorded hash: a loader overwritten since (another mod's,
+    by hand) is foreign, and refuses. Compared case-insensitively
+    (`VERSION.DLL` on a Windows copy). An unreadable one is foreign too:
+    ownership that cannot be proved is not claimed.
     """
-    own = set()
+    own: dict[str, str] = {}
     files = record.get("files") if isinstance(record, Mapping) else None
     if isinstance(files, dict):
-        for rel in files:
+        for rel, sha in files.items():
             clean = _clean_rel(rel)
-            if clean is not None:
-                own.add(clean.as_posix().casefold())
+            if clean is None or len(clean.parts) != 1:
+                continue
+            if clean.as_posix().casefold() == _LOADER and isinstance(sha, str):
+                own[clean.as_posix().casefold()] = sha
     found: list[str] = []
     try:
         children = sorted(play_dir.iterdir())
@@ -1609,21 +1637,32 @@ def foreign_files(
             continue
         here = PurePosixPath(child.name)
         on_disk = client_names.on_disk(play_dir, here).as_posix()
-        if on_disk.casefold() in own or here.as_posix().casefold() in own:
+        want = own.get(on_disk.casefold(), own.get(here.as_posix().casefold()))
+        if want is None:
+            found.append(on_disk)
             continue
-        found.append(on_disk)
+        try:
+            if _file_sha256(child) != want:
+                found.append(on_disk)
+        except OSError:
+            found.append(on_disk)
     return tuple(found)
 
 
 def refuse_foreign_loader(
     play_dir: Path, pack: ClientPack, record: Mapping[str, Any] | None
 ) -> None:
-    """Refuse when `foreign_files` finds a loader another mod put in the copy.
+    """Refuse when a loader another mod put in the copy would block this pack.
 
-    The plan's own words (a player line: no command, no `.cmd` name): take the
-    other mod out of the player's own client, or leave this pack off. Nothing
-    is fetched, installed or touched from here: the caller raises before that.
+    Only for a pack that installs a top-level `version.dll` itself
+    (`pack_installs_loader`): any other pack returns silently, so another
+    mod's loader never blocks it. Otherwise the plan's own words (a player
+    line: no command, no `.cmd` name): take the other mod out of the player's
+    own client, or leave this pack off. Nothing is fetched, installed or
+    touched from here: the caller raises before that.
     """
+    if not pack_installs_loader(pack):
+        return
     if foreign_files(play_dir, pack, record):
         raise PackError(
             f"{pack.label} was not installed: this client already has another mod's "
@@ -2244,7 +2283,38 @@ def _install(
         dirs = list(dict.fromkeys(
             ([str(rel) for rel in kept_dirs] if isinstance(kept_dirs, list) else []) + dirs
         ))
+    if isinstance(previous, Mapping):
+        # Setup outputs are never zip members, so the merge above never keeps
+        # them; the previous entry's hashes for them ride along into the new
+        # files instead. That proves the bytes on disk are this pack's own
+        # (no unrecorded-output refusal), and off can still delete them by
+        # hash. A repair (only_missing) is the same version laid again: the
+        # whole `"setup"` map rides along too, so `run_setup` finds the
+        # recorded outputs and stays quiet, and a pending note rides in the
+        # returned entry itself (never via `record=`), so its crash recovery
+        # still applies on the next run. An update carries no `"setup"`: the
+        # new version reruns setup and re-hashes its outputs.
+        held_setup = previous.get("setup")
+        kept_files = previous.get("files")
+        if isinstance(held_setup, dict) and isinstance(kept_files, dict):
+            for rel in held_setup:
+                if (
+                    isinstance(rel, str)
+                    and rel not in files
+                    and isinstance(kept_files.get(rel), str)
+                ):
+                    files[rel] = kept_files[rel]
     entry: dict[str, Any] = {"version": fetched.version, "sha256": fetched.sha256, "files": files}
+    if only_missing and isinstance(previous, Mapping):
+        for carried in ("setup", "setup_pending"):
+            held = previous.get(carried)
+            if isinstance(held, dict):
+                entry[carried] = {
+                    rel: sha for rel, sha in held.items()
+                    if isinstance(rel, str) and isinstance(sha, str)
+                }
+            elif isinstance(held, list):
+                entry[carried] = [rel for rel in held if isinstance(rel, str)]
     if dirs:
         entry["dirs"] = dirs
     left = _drop_old(play_dir, drops)
@@ -2464,10 +2534,12 @@ def _probe_locale(play_dir: Path) -> str | None:
 def setup_needed(play_dir: Path, pack: ClientPack, record: Mapping[str, Any] | None) -> bool:
     """Must `run_setup` run: an output missing, or the pack changed since it ran.
 
-    No setup: never. An output missing (deleted, edited, never written): yes.
-    Otherwise the pack's sha256 beside the record's: a changed pack means a new
-    light/water build; the same bytes mean the outputs still stand. A record
-    with no sha256 (before this row) runs once, then records, then stays quiet.
+    No setup: never. An output missing (deleted, never written), edited, or
+    not recorded for this entry: yes. A changed pack reaches here as a NEW
+    entry (a new install wrote it): an update carries no `"setup"`, so the
+    outputs are unrecorded-as-setup and it runs again; a repair carries the
+    old `"setup"` and stays quiet while its outputs stand. A record with no
+    sha256 (before this row) runs once, then records, then stays quiet.
     Nothing is written here: the caller runs and records.
     """
     if pack.setup is None:
@@ -2494,10 +2566,9 @@ def setup_needed(play_dir: Path, pack: ClientPack, record: Mapping[str, Any] | N
                 return True
         except OSError:
             return True
-    # The pack's bytes are what the install recorded (`entry["sha256"]` is the
-    # fetched zip's hash): same record in, same outputs present, nothing to do.
-    # A changed pack reaches here as a NEW entry (a new install wrote it), whose
-    # `"setup"` no longer matches its outputs, and runs again above.
+    # Same entry in, same outputs present, nothing to do. An update carries
+    # no `"setup"` (only the outputs' `"files"` hashes, so off still deletes
+    # them and no refusal fires), and runs again above.
     return False
 
 
@@ -2514,20 +2585,24 @@ def run_setup(
 ) -> dict[str, Any]:
     """Run the pack's setup exe in the ready-to-play copy; the record entry with its outputs.
 
-    Only when `setup_needed` says so (an output missing, or the pack's sha256
-    changed) and no `"setup_pending"` note says a run died half-way: that note
-    is cleaned first, so a killed run's outputs never stand. Runs each of
-    `setup.runs` in order as `[setup.run, *run]` with cwd the copy, Windows
-    only (hidden off Windows: refused here, so a copy carried across machines
-    never runs it elsewhere), through the injected `runner` seam (default
-    `_run_child`: no shell, bounded per run by `setup.timeout_seconds`). The
-    exe path must resolve inside the copy (resolved and compared): an escaping
-    `setup.run` refuses and nothing runs. The placeholders come from the
-    pinned setup script: `{dir}` is the copy folder, `{data}` its Data
-    folder (each spelled per the platform's separator), `{locale}` the
-    probed locale (`Data/????` holding `locale-<same>.MPQ`, the script's
-    rule); none found stops with the script's plain line, and the pack is
-    rolled back first.
+    Evaluated against the newly installed `entry`: `setup_needed`, the setup
+    exe's recorded hash and the unrecorded-outputs refusal all read what the
+    install just wrote, so an update runs its new exe and a repair finds its
+    old outputs already recorded. `record` is only ownership (the prior entry
+    for collision checks) and a fallback for a `"setup_pending"` note an older
+    record still holds apart from the entry; the note otherwise rides in the
+    entry itself. The note is cleaned first when a run died half-way, so a
+    killed run's outputs never stand. Runs each of `setup.runs` in order as
+    `[setup.run, *run]` with cwd the copy, Windows only (hidden off Windows:
+    refused here, so a copy carried across machines never runs it elsewhere),
+    through the injected `runner` seam (default `_run_child`: no shell,
+    bounded per run by `setup.timeout_seconds`). The exe path must resolve
+    inside the copy (resolved and compared): an escaping `setup.run` refuses
+    and nothing runs. The placeholders come from the pinned setup script:
+    `{dir}` is the copy folder, `{data}` its Data folder (each spelled per
+    the platform's separator), `{locale}` the probed locale (`Data/????`
+    holding `locale-<same>.MPQ`, the script's rule); none found stops with
+    the script's plain line, and the pack is rolled back first.
 
     Before the first run, an output that already exists and the record does
     not name for this pack refuses with a plain line: the run would write
@@ -2555,8 +2630,11 @@ def run_setup(
         return entry
     if platform.detect() != "windows":
         return entry
-    source = entry if record is None else record
-    pending = source.get("setup_pending") if isinstance(source, Mapping) else None
+    # The note rides in the entry `install` returned (item 4's repair carries it),
+    # falling back to `record` for an older record that still holds it apart.
+    pending = entry.get("setup_pending")
+    if not pending and isinstance(record, Mapping):
+        pending = record.get("setup_pending")
     if isinstance(pending, list) and pending:
         assert pack.setup is not None  # past the None return above
         own = {clean.as_posix() for rel in pack.setup.writes if (clean := _clean_rel(rel)) is not None}
@@ -2570,7 +2648,7 @@ def run_setup(
                 f"never writes ({', '.join(forged)}), so nothing was removed for them. "
                 "Make the ready-to-play client again from the server's Client settings."
             )
-    if not setup_needed(play_dir, pack, entry if record is None else record):
+    if not setup_needed(play_dir, pack, entry):
         return entry
     exe = _setup_exe_path(play_dir, pack)
     try:
@@ -2596,7 +2674,7 @@ def run_setup(
             "Nothing of it stayed in the ready-to-play client; the next Play tries again."
         )
     try:
-        want = _expected_exe_sha256(pack, entry if record is None else record)
+        want = _expected_exe_sha256(pack, entry)
         if want is not None and _file_sha256(exe) != want:
             try:
                 _rollback_setup(play_dir, pack, entry, game=game, server_dir=server_dir)
@@ -2625,7 +2703,7 @@ def run_setup(
             "folder. Nothing of it stayed in the ready-to-play client; the next Play "
             "tries again, or play without it."
         )
-    _refuse_unrecorded_outputs(play_dir, pack, entry if record is None else record)
+    _refuse_unrecorded_outputs(play_dir, pack, entry)
     pending_entry = {**entry, "setup_pending": [rel for rel in pack.setup.writes]}
     if on_pending is not None:
         on_pending(pending_entry)
