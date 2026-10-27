@@ -241,6 +241,15 @@ class ContainerSpec:
     Centurion and Tortoise, whose own close loses saves. See
     `save_then_stop_the_world()`.
     """
+    auth_after_world: bool = False
+    """Start the auth server only after the world said ready, then open the realm (T812).
+
+    Set by `CatalogEntry.container_spec()` from the entry's
+    `azerothcore.auth_after_world_ready`: Conquest of Azeroth's authserver lists a
+    realm as online the moment its row's flag says so, so auth goes up only once
+    the world is listening, and the row's offline bit is then cleared. False: the one
+    `compose up` names all three services, as before.
+    """
 
     def compose_services(self) -> tuple[str, ...]:
         """The long-running compose services, in dependency order (db first).
@@ -1684,7 +1693,9 @@ def database_volume(
     return None
 
 
-def staged_up_argv(spec: ContainerSpec, *, force_recreate: bool = False) -> list[str]:
+def staged_up_argv(
+    spec: ContainerSpec, *, force_recreate: bool = False, services: Sequence[str] | None = None
+) -> list[str]:
     """The argv of the one `compose up` this app runs, with and without the rebuild's force.
 
     One builder for both spellings, so the service selection and `--no-deps`
@@ -1708,19 +1719,24 @@ def staged_up_argv(spec: ContainerSpec, *, force_recreate: bool = False) -> list
     compose that did not would be an hour of correct compiler output followed by
     the old binary still running, which is the exact report this control exists
     to answer.
+
+    `services` names the services to bring (T812): the ordered start ups
+    db+world first and auth once the world said ready. None is all of
+    `compose_services()`, as today; naming a subset still carries `--no-deps`,
+    so the one-shot import is never selected either way.
     """
     argv = ["compose", "up", "-d"]
     if force_recreate:
         argv.append("--force-recreate")
-    return [*argv, "--no-deps", *spec.compose_services()]
+    return [*argv, "--no-deps", *(spec.compose_services() if services is None else services)]
 
 
-def recreate_argv(spec: ContainerSpec) -> list[str]:
+def recreate_argv(spec: ContainerSpec, *, services: Sequence[str] | None = None) -> list[str]:
     """`staged_up_argv()` as the rebuild spells it — the name a test can assert on."""
-    return staged_up_argv(spec, force_recreate=True)
+    return staged_up_argv(spec, force_recreate=True, services=services)
 
 
-def recreate_stop_argv(spec: ContainerSpec) -> list[str]:
+def recreate_stop_argv(spec: ContainerSpec, *, services: Sequence[str] | None = None) -> list[str]:
     """What the rebuild stops before its recreate: the servers, not the database (T98).
 
     `compose up --force-recreate` replaces the database FIRST (dependency
@@ -1733,9 +1749,16 @@ def recreate_stop_argv(spec: ContainerSpec) -> list[str]:
     under the world anyway, 270.2 s. Stopping the servers first, with the
     grace every other stop here uses, lets the world drain onto a live
     database, and then the database has nobody to wait for.
+
+    `services` (T812) narrows the stop to those services' servers: the
+    ordered recreate's auth-only replace must not stop the world it just
+    readied. None stops all servers, as today.
     """
     database = spec.service_for(spec.db)
     servers = [service for service in spec.compose_services() if service != database]
+    if services is not None:
+        wanted = set(services)
+        servers = [service for service in servers if service in wanted]
     return ["compose", "stop", "-t", str(STOP_GRACE_SECONDS), *reversed(servers)]
 
 
@@ -1747,6 +1770,7 @@ def stop_servers_staged(
     wsl_distro: str | None = None,
     control: StopControl | None = None,
     before_signal: Callable[[], None] | None = None,
+    services: Sequence[str] | None = None,
 ) -> None:
     """Stop this install's servers and leave its database up: `recreate_stop_argv()`, waited for.
 
@@ -1761,15 +1785,23 @@ def stop_servers_staged(
     before the world's own signal (`save_then_stop_the_world()`), so a caller
     can tell "nothing was signalled" from "something may have been". Compose's stop of services that
     are not running is a no-op, and so is the wait of a world that is down.
+
+    `services` (T812) narrows the stop: the ordered recreate's auth-only
+    replace stops auth alone, never the world it just readied. None stops all
+    servers, as today. The load wait and the save still cover the world when
+    it is among them; narrowing past it skips both for it.
     """
-    heard = wait_for_the_world_to_load(spec, control, wsl_distro=wsl_distro)
-    # T384: the world saves before the grace below can reach it. `before_signal` is
-    # called inside, right before the world's own signal (after any save it is asked
-    # for first, which a give-up can still end with nothing sent).
-    save_then_stop_the_world(
-        spec, control, wsl_distro=wsl_distro, before_signal=before_signal, heard=heard
-    )
-    _run(recreate_stop_argv(spec), cwd=server_dir, wsl_distro=wsl_distro)
+    if services is None or spec.service_for(spec.world) in set(services):
+        heard = wait_for_the_world_to_load(spec, control, wsl_distro=wsl_distro)
+        # T384: the world saves before the grace below can reach it. `before_signal` is
+        # called inside, right before the world's own signal (after any save it is asked
+        # for first, which a give-up can still end with nothing sent).
+        save_then_stop_the_world(
+            spec, control, wsl_distro=wsl_distro, before_signal=before_signal, heard=heard
+        )
+    elif before_signal is not None:
+        before_signal()
+    _run(recreate_stop_argv(spec, services=services), cwd=server_dir, wsl_distro=wsl_distro)
 
 
 @_a_lifecycle_command
@@ -1780,6 +1812,7 @@ def recreate_staged(
     wsl_distro: str | None = None,
     control: StopControl | None = None,
     before_signal: Callable[[], None] | None = None,
+    services: Sequence[str] | None = None,
 ) -> bool:
     """Replace this install's long-running containers from the images on disk now.
 
@@ -1797,11 +1830,23 @@ def recreate_staged(
     `recreate_stop_argv()`), for the reason given there -- and with its wait
     for a loading world, so the rebuild's replace is the check right before
     the signal, cancellable through `control` (T158). `before_signal` is its.
+
+    `services` names the services to replace (T812): the ordered recreate
+    replaces db+world first and auth once the world said ready. None is all
+    of `compose_services()`, as today. The stop narrows with the replace, so
+    an auth-only replace stops auth alone, never the world beside it.
     """
     stop_servers_staged(
-        spec, server_dir, wsl_distro=wsl_distro, control=control, before_signal=before_signal
+        spec,
+        server_dir,
+        wsl_distro=wsl_distro,
+        control=control,
+        before_signal=before_signal,
+        services=services,
     )
-    return start_staged(spec, server_dir, wsl_distro=wsl_distro, force_recreate=True)
+    return start_staged(
+        spec, server_dir, wsl_distro=wsl_distro, force_recreate=True, services=services
+    )
 
 
 @_a_lifecycle_command
@@ -1811,6 +1856,7 @@ def start_staged(
     *,
     wsl_distro: str | None = None,
     force_recreate: bool = False,
+    services: Sequence[str] | None = None,
 ) -> bool:
     """Start this install's long-running services, and only those.
 
@@ -1873,7 +1919,8 @@ def start_staged(
         DockerCommandError: compose failed, or a named service is not running
             once it returned.
     """
-    argv = staged_up_argv(spec, force_recreate=force_recreate)
+    named = spec.compose_services() if services is None else tuple(services)
+    argv = staged_up_argv(spec, force_recreate=force_recreate, services=named)
     logger.info(f"start_staged(): `{' '.join(argv)}` in {server_dir}")
     _run(argv, cwd=server_dir, wsl_distro=wsl_distro)
     listed = _status_safe(wsl_distro=wsl_distro)
@@ -1881,7 +1928,12 @@ def start_staged(
         logger.warning("start_staged(): could not confirm what is running; taking compose's word")
         return True
     running = {line.strip() for line in listed}
-    missing = [name for name in (spec.db, spec.auth, spec.world) if name not in running]
+    by_service = dict(zip(spec.compose_services(), (spec.db, spec.auth, spec.world), strict=False))
+    missing = [
+        by_service.get(service, service)
+        for service in named
+        if by_service.get(service, service) not in running
+    ]
     if missing:
         raise DockerRefusal(
             f"Docker reported the start as done, but {', '.join(missing)} "
@@ -8930,7 +8982,7 @@ def _take_claim(
         "-c",
         "cat >/dev/null",
     ]
-    logger.info(f"claiming the folder: `docker {' '.join(argv[len(prefix):])}`")
+    logger.info(f"claiming the folder: `docker {' '.join(argv[len(prefix) :])}`")
     try:
         proc = subprocess.Popen(
             argv,
@@ -9054,7 +9106,9 @@ def _claim_coming_up(
             kind = (
                 ClaimImageGone
                 if _IMAGE_GONE.search(said)
-                else ClaimDockerDown if _DAEMON_DOWN.search(said) else ClaimUnavailable
+                else ClaimDockerDown
+                if _DAEMON_DOWN.search(said)
+                else ClaimUnavailable
             )
             raise kind(refused)
         if time.monotonic() > deadline:
