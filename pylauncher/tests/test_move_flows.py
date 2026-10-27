@@ -73,6 +73,8 @@ class Db:
         fail_dump_of: str | None = None,
         module_rows: dict[str, tuple[tuple[str, str], ...]] | None = None,
         updates_by_schema: dict[str, tuple[str, ...]] | None = None,
+        tail_rows: dict[str, tuple[tuple[str, str, str], ...]] | None = None,
+        include_rows: dict[str, tuple[str, ...]] | None = None,
         no_ledger: tuple[str, ...] = (),
     ) -> None:
         self.events = events
@@ -85,6 +87,8 @@ class Db:
         self.fail_dump_of = fail_dump_of
         self.module_rows = module_rows or {}  # schema -> ((name, hash), ...) of non-core rows
         self.updates_by_schema = updates_by_schema or {}
+        self.tail_rows = tail_rows or {}
+        self.include_rows = include_rows or {}
         self.no_ledger = no_ledger
         self.session_columns = "session_key\tYES\n"
         self.extra_tables = extra_tables or {}  # schema -> {table: rows} the target alone has
@@ -110,6 +114,19 @@ class Db:
         if self.fail_load_of == name:
             raise MaintenanceError("The database did not load the backup.")
         self.events.append(f"load:{name}")
+        # T802: a load replaces the ledger with the dump's, so scripted answers
+        # follow it. The dump holds the file's names; the updater restores the
+        # target's afterwards (the `apply-updates` fake) or not (the silent one).
+        found = re.findall(rb"INSERT INTO `updates` VALUES (.*?);", body, re.DOTALL)
+        if found:
+            names = re.findall(rb"\('([^']*)','[0-9A-Fa-f]{40}','", found[0])
+            self.updates_by_schema[name] = tuple(n.decode() for n in names)
+            self.tail_rows[name] = tuple(
+                (n.decode(), h.decode(), s.decode())
+                for n, h, s in re.findall(
+                    rb"\('([^']*)','([0-9A-Fa-f]{40})','([A-Za-z_]+)',", found[0]
+                )
+            )
 
     def execute(self, sql: str) -> None:
         self.events.append("exec")
@@ -140,8 +157,15 @@ class Db:
             return "\t".join(str(n) for n in self.counts) + "\n"
         if "realmlist" in sql:
             return f"{self.realm}\n"
+        if "`updates_include`" in sql:
+            schema = re.search(r"`([^`]+)`\.`updates_include`", sql).group(1)  # type: ignore[union-attr]
+            return "".join(
+                f"{row}\n".replace("|", "\t") for row in self.include_rows.get(schema, ())
+            )
         if "`updates`" in sql:
             schema = re.search(r"`([^`]+)`\.`updates`", sql).group(1)  # type: ignore[union-attr]
+            if "`name`, `hash`, `state`" in sql:
+                return "".join(f"{n}\t{h}\t{s}\n" for n, h, s in self.tail_rows.get(schema, ()))
             if "NOT IN ('RELEASED'" in sql:
                 return "".join(f"{n}\t{h}\n" for n, h in self.module_rows.get(schema, ()))
             names = self.updates_by_schema.get(schema, self.updates)
@@ -1712,7 +1736,9 @@ def ledger_package(tmp_path: Path, names: dict[str, tuple[str, ...]]) -> Path:
         role = (
             "auth"
             if schema.endswith("auth")
-            else "playerbots" if schema.endswith("playerbots") else "characters"
+            else "playerbots"
+            if schema.endswith("playerbots")
+            else "characters"
         )
         dumps.append(DumpFile(schema, role, path, ("t",)))  # type: ignore[arg-type]
     header = Header(
@@ -1826,3 +1852,176 @@ def test_a_package_with_no_readable_names_keeps_the_plain_refusal(tmp_path: Path
     box = target(tmp_path, db=Db([], updates=("2024_01_a", "2024_01_b", "2024_02_new")))
     said = move_flows.plan_import(box.world, package).refusals[0]
     assert said.startswith("The databases in this file are not at the same version")
+
+
+# ------------------------------------------------------------ appliable tails (T802)
+
+
+def _tail_names(prefix: str, count: int) -> tuple[str, ...]:
+    return tuple(f"2026_10_{n:02d}_00_{prefix}.sql" for n in range(count))
+
+
+def _tail_box(
+    tmp_path: Path, file_names: dict[str, tuple[str, ...]], here_names: dict[str, tuple[str, ...]]
+) -> tuple[Box, Path]:
+    """A target whose ledger holds `here_names` and a package holding `file_names`.
+
+    Both sides' `updates` rows are scripted `(name, hash, state)` answers; the
+    checkout files the tail proof hashes are laid under the target's server dir.
+    """
+    package = ledger_package(tmp_path, file_names)
+    hashes = {
+        name: hashlib.sha1(name.encode()).hexdigest().upper()
+        for names in here_names.values()
+        for name in names
+    }
+    rows = {
+        schema: tuple((n, hashes[n], "RELEASED") for n in names)
+        for schema, names in here_names.items()
+    }
+    present = ("acore_auth", "acore_characters", "acore_world", "acore_playerbots")
+    db = Db([], present=present, tail_rows=rows, updates_by_schema=dict(here_names))
+    box = target(tmp_path, db=db)
+    for schema, names in here_names.items():
+        for name in names:
+            path = move.tail_update_path(box.server_dir, schema, name)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(name.encode())
+    runs: list[docker.AttachedRun] = []
+
+    def apply_updates(sink: object) -> docker.AttachedRun:
+        box.events.append("apply-updates")
+        both = set(file_names) | set(here_names)
+        for schema in both:
+            db.updates_by_schema[schema] = here_names.get(schema, ())
+        run = docker.AttachedRun(returncode=0, tail=())
+        runs.append(run)
+        return run
+
+    from dataclasses import replace
+
+    box.world = replace(box.world, apply_updates=apply_updates)
+    return box, package
+
+
+def test_a_tail_behind_is_allowed_and_runs_the_one_shot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(docker, "importer_sees_modules", lambda *a, **k: True)
+    auth = _tail_names("auth", 23)
+    chars = ("2024_01_a", "2024_01_b")
+    box, package = _tail_box(
+        tmp_path,
+        {"acore_auth": auth[:22], "acore_characters": chars},
+        {"acore_auth": auth, "acore_characters": chars},
+    )
+    plan = move_flows.plan_import(box.world, package)
+    assert plan.allowed, plan.refusals
+    assert plan.updates_to_apply == {"acore_auth": (auth[22],)}
+    result = move_flows.run_import(
+        box.world, plan, confirm=None, use_old_realm_name=False, stop_allowed=False
+    )
+    assert "apply-updates" in box.events
+    assert box.events.index("apply-updates") > box.events.index("load:acore_characters")
+    assert "applied after the load" in result.text()
+
+
+def test_a_tail_without_the_seam_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(docker, "importer_sees_modules", lambda *a, **k: True)
+    auth = _tail_names("auth", 23)
+    chars = ("2024_01_a", "2024_01_b")
+    box, package = _tail_box(
+        tmp_path,
+        {"acore_auth": auth[:22], "acore_characters": chars},
+        {"acore_auth": auth, "acore_characters": chars},
+    )
+    from dataclasses import replace
+
+    box.world = replace(box.world, apply_updates=None)
+    plan = move_flows.plan_import(box.world, package)
+    assert not plan.allowed
+    assert "not at the same version" in " ".join(plan.refusals)
+
+
+def test_a_tail_with_a_failing_one_shot_names_the_copies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(docker, "importer_sees_modules", lambda *a, **k: True)
+    auth = _tail_names("auth", 23)
+    chars = ("2024_01_a", "2024_01_b")
+    box, package = _tail_box(
+        tmp_path,
+        {"acore_auth": auth[:22], "acore_characters": chars},
+        {"acore_auth": auth, "acore_characters": chars},
+    )
+    from dataclasses import replace
+
+    def failing(sink: object) -> docker.AttachedRun:
+        return docker.AttachedRun(returncode=1, tail=("Applying of file 'x.sql' failed",))
+
+    box.world = replace(box.world, apply_updates=failing)
+    plan = move_flows.plan_import(box.world, package)
+    assert plan.allowed, plan.refusals
+    with pytest.raises(MaintenanceError, match="before-move"):
+        move_flows.run_import(
+            box.world, plan, confirm=None, use_old_realm_name=False, stop_allowed=False
+        )
+
+
+def test_a_one_shot_that_applies_nothing_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mutation: drop the post-run re-read and a silent updater passes."""
+    monkeypatch.setattr(docker, "importer_sees_modules", lambda *a, **k: True)
+    auth = _tail_names("auth", 23)
+    chars = ("2024_01_a", "2024_01_b")
+    box, package = _tail_box(
+        tmp_path,
+        {"acore_auth": auth[:22], "acore_characters": chars},
+        {"acore_auth": auth, "acore_characters": chars},
+    )
+    from dataclasses import replace
+
+    box.world = replace(box.world, apply_updates=lambda sink: docker.AttachedRun(0, ()))
+    plan = move_flows.plan_import(box.world, package)
+    assert plan.allowed, plan.refusals
+    with pytest.raises(MaintenanceError, match="did not land as expected"):
+        move_flows.run_import(
+            box.world, plan, confirm=None, use_old_realm_name=False, stop_allowed=False
+        )
+
+
+def test_a_playerbots_only_tail_needs_no_one_shot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(docker, "importer_sees_modules", lambda *a, **k: True)
+    bots = _tail_names("bots", 36)
+    here = {
+        "acore_auth": _tail_names("auth", 5),
+        "acore_characters": ("2024_01_a", "2024_01_b"),
+        "acore_playerbots": bots,
+    }
+    box, package = _tail_box(
+        tmp_path,
+        {
+            "acore_auth": _tail_names("auth", 5),
+            "acore_characters": ("2024_01_a", "2024_01_b"),
+            "acore_playerbots": bots[:31],
+        },
+        here,
+    )
+    from dataclasses import replace
+
+    seen: list[str] = []
+    box.world = replace(
+        box.world, apply_updates=lambda sink: seen.append("ran") or docker.AttachedRun(0, ())
+    )
+    plan = move_flows.plan_import(box.world, package)
+    assert plan.allowed, plan.refusals
+    result = move_flows.run_import(
+        box.world, plan, confirm=None, use_old_realm_name=False, stop_allowed=False
+    )
+    assert seen == []
+    assert "next Start" in result.text()

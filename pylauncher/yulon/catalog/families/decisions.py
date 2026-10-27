@@ -1179,6 +1179,47 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         hits=("isinstance TrinityCoreInstaller",),
     ),
     Site(
+        "yulon.move_flows",
+        "tail_updates",
+        "a pack import applies the missing bundled updates when the file is behind (T802)",
+        {
+            "azerothcore": supported(
+                "a strict hash-equal tail on a Yu'lon-owned server is applied by the one-shot"
+            ),
+            "cmangos": not_applicable(
+                "Tortoise migrations are non-idempotent; a tail is always refused"
+            ),
+            "trinitycore": not_applicable(
+                "TrinityCore has a different reimport path; a tail is always refused"
+            ),
+        },
+        hits=("'azerothcore'",),
+    ),
+    Site(
+        "yulon.move_flows",
+        "_tail_rows_of_server",
+        "the tail proof reads the server's update rows only on the updater's own ledger (T802)",
+        {
+            "azerothcore": supported("its `updates` table holds the rows the classifier compares"),
+            "cmangos": not_applicable(
+                "it keeps `migrations`, not `updates`; the tail is refused above"
+            ),
+            "trinitycore": not_applicable("out of scope: it has a different reimport path"),
+        },
+        hits=("'azerothcore'",),
+    ),
+    Site(
+        "yulon.ui.controller_view",
+        "_move_services",
+        "a pack import's one-shot seam is bound only where the updater can run it (T802)",
+        {
+            "azerothcore": supported("the Modules tab's `apply_module_sql` route, bound here"),
+            "cmangos": not_applicable("no importer one-shot; the tail is refused at plan time"),
+            "trinitycore": not_applicable("no importer one-shot; the tail is refused at plan time"),
+        },
+        hits=("'azerothcore'",),
+    ),
+    Site(
         "yulon.purge",
         "Uninstaller._real_stop_background_jobs",
         "Uninstall removes a background job before the containers (found by its record)",
