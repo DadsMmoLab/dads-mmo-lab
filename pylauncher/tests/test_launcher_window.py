@@ -849,12 +849,25 @@ def test_a_server_with_no_extras_says_so(qapp: object, ps: _Ps, tmp_path: Path) 
 
 
 def test_the_shipped_wotlk_entry_offers_lumenveil_as_its_only_extra(
-    qapp: object, ps: _Ps, tmp_path: Path
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """T809 W2: wow-wotlk's real entry now carries the optional Lumenveil pack (Windows-only)."""
+    """T809 W4: on Windows the launcher shows the shipped Lumenveil extra and its credit."""
+    monkeypatch.setattr(client_packs.platform, "detect", lambda: "windows")
     window, _view, _ = _launcher(ps, tmp_path)
-    assert list(window.pack_boxes) == ["lumenveil"]  # W4: flips when the platform filter reaches the UI
+    assert list(window.pack_boxes) == ["lumenveil"]
     assert window.pack_boxes["lumenveil"].text() == "Lumenveil"
+    assert "Lumenveil" in window.extras_note.text() and "GPL-2.0" in window.extras_note.text()
+
+
+def test_the_shipped_wotlk_entry_hides_lumenveil_off_windows(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T809 W4: Wine/Linux/mac hide the Windows-only pack instead of offering it."""
+    for here in ("linux", "macos"):
+        monkeypatch.setattr(client_packs.platform, "detect", lambda here=here: here)
+        window, _view, _ = _launcher(ps, tmp_path / here)
+        assert window.pack_boxes == {}, here
+        assert "no extras" in window.extras_note.text(), here
 
 
 def test_the_addons_in_the_client_are_listed_and_their_folder_opens(

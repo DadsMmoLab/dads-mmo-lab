@@ -24614,13 +24614,13 @@ def _realmlist(client: Path) -> str:
 
 
 def test_the_button_offers_to_make_one_and_then_reads_play(
-    qapp: object, ps: _Ps, tmp_path: Path
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(controller_view_module.platform, "detect", lambda: "windows")
     original = _game_client(tmp_path / "clients" / "WoW")
     without, _ = _play_view(ps, tmp_path, original=original)
     assert without.play_button is not None
     assert without.play_button.text() == controller_view_module.MAKE_PLAY_CLIENT_LABEL
-    assert not without.play_button.isHidden()
     assert without.play_menu_button is not None and without.play_menu_button.isHidden()
 
     play = _built(original, tmp_path)
@@ -24633,7 +24633,7 @@ def test_the_button_offers_to_make_one_and_then_reads_play(
         controller_view_module.CLIENT_OPTIONS_LABEL,
         controller_view_module.REFRESH_PLAY_CLIENT_LABEL,
         controller_view_module.DELETE_PLAY_CLIENT_LABEL,
-    ], "shipped wow-wotlk now has one optional pack (T809 W2: Lumenveil)"  # W4: flips when the platform filter reaches the UI
+    ], "wow-wotlk on Windows offers Lumenveil under Client options… (T809 W4)"
 
 
 def test_no_write_seam_means_no_button(qapp: object, ps: _Ps, tmp_path: Path) -> None:
@@ -27182,22 +27182,211 @@ def test_an_entry_without_client_data_shows_no_options_in_the_make_dialog(
 
 
 def test_the_shipped_wotlk_entry_offers_lumenveil_in_the_make_dialog(
-    qapp: object, ps: _Ps, tmp_path: Path
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """T809 W2: wow-wotlk's real client section is one optional pack, so the Make dialog
-    shows it (a choice the player can leave off)."""
+    """T809 W4: wow-wotlk's one optional pack reaches the Make dialog on Windows."""
+    monkeypatch.setattr(controller_view_module.platform, "detect", lambda: "windows")
     original = _game_client(tmp_path / "clients" / "WoW")
     asker = _Asked(cancel=True)
     view, _ = _play_view(ps, tmp_path, original=original, asker=asker)
-
     view.make_play_client()
 
     assert asker.offers[0].client is not None
-    assert [pack.id for pack in asker.offers[0].client.packs] == ["lumenveil"]  # W4: flips when the platform filter reaches the UI
+    assert [pack.id for pack in asker.offers[0].client.packs] == ["lumenveil"]
     dialog = controller_view_module.PlayClientDialog(asker.offers[0], jobs=run_inline)
     assert dialog.client_options is not None
     assert list(dialog.client_options.pack_boxes) == ["lumenveil"]
+    assert (
+        dialog.client_options.pack_boxes["lumenveil"].toolTip() != ""
+    ), "the credit line rides on the box"
 
+
+def test_the_make_dialog_hides_lumenveil_off_windows(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T809 W4: Linux/macOS offer no box for the Windows-only pack."""
+    ClientOptionsBox = controller_view_module.ClientOptionsBox
+    client = WOTLK.client
+    for here in ("linux", "macos"):
+        monkeypatch.setattr(
+            controller_view_module.client_packs.platform, "detect", lambda here=here: here
+        )
+        box = ClientOptionsBox(client, choices=None, parent=None)
+        assert list(box.pack_boxes) == [], here
+
+
+
+def _lumen_entry(tmp_path: Path) -> CatalogEntry:
+    """WotLK's shipped entry: one optional pack, Windows-only, with setup from the catalog.
+
+    The catalog's own pack (real Lumenveil bytes) never downloads in the suite:
+    the `site` fake answers it by id with a small local zip of the same members.
+    """
+    from yulon.catalog.catalog import ClientPack, load_catalog
+
+    for game_id in ("wow-wotlk", "wow-unbound"):
+        assert "lumenveil" in [p.id for p in load_catalog().get(game_id).client.packs]
+    lumen = {p.id: p for p in WOTLK.client.packs}["lumenveil"]
+    assert isinstance(lumen, ClientPack)
+    return WOTLK.model_copy(
+        update={"client": WOTLK.client.model_copy(update={"packs": (lumen,)})}
+    )
+
+
+def _lumen_members() -> dict[str, bytes]:
+    return {
+        "version.dll": b"lumen loader",
+        "CoAVolFog.dll": b"fog",
+        "CoAVolFog.ini": b"stock=1\n",
+        "CoAVolFog-regions.ini": b"regions\n",
+        "Lumenveil-Setup.cmd": b"setup\n",
+        "Lumenveil-Uninstall.cmd": b"uninstall\n",
+        "Lumenveil/lamp_extract.exe": b"exe",
+        "Lumenveil/LEGAL.txt": b"legal\n",
+        "Lumenveil/LICENSE.txt": b"license\n",
+        "Lumenveil/README.txt": b"readme\n",
+        "Lumenveil/THIRD-PARTY-NOTICES.txt": b"notices\n",
+        "Lumenveil/licenses/bzip2.txt": b"bzip2\n",
+        "Lumenveil/licenses/DearImGui-MIT.txt": b"imgui\n",
+        "Lumenveil/licenses/Everwood-MIT.txt": b"everwood\n",
+        "Lumenveil/licenses/GPL-2.0.txt": b"gpl\n",
+        "Lumenveil/licenses/zlib.txt": b"zlib\n",
+    }
+
+
+def _lumen_play(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, site: _Site
+) -> tuple[CatalogEntry, Path, Path, list[list[str]], Any]:
+    """A Lumenveil Play: windows, the pack ticked, the locale fixture, the fake runner.
+
+    Shares one `_Outcome`-shaped fake with `test_client_packs`' `_run_with`: two
+    runs (lamps, then water), each laying its own output.
+    """
+    monkeypatch.setattr(controller_view_module.platform, "detect", lambda: "windows")
+    monkeypatch.setattr(client_packs.platform, "detect", lambda: "windows")
+    entry = _lumen_entry(tmp_path)
+    original = _game_client(tmp_path / "clients" / "WoW")
+    play = _built(original, tmp_path)
+    (play / "Data" / "enUS").mkdir(parents=True, exist_ok=True)
+    (play / "Data" / "enUS" / "locale-enUS.MPQ").write_bytes(b"locale")
+    site.members["lumenveil"] = _lumen_members()
+    seen: list[list[str]] = []
+
+    def fake(argv: list[str], *, cwd: Path, timeout: float | None = None) -> Any:
+        import types as _types
+
+        index = len(seen)
+        seen.append(list(argv))
+        assert cwd == play, "setup runs with the ready-to-play copy as its cwd"
+        assert argv[0].endswith("lamp_extract.exe"), argv
+        if "--out" in argv[1:]:
+            (cwd / "lampdata.bin").write_bytes(b"lamps")
+        else:
+            (cwd / "liquiddata.bin").write_bytes(b"water")
+        assert index < 2, "the exe runs twice: lamps, then water"
+        return _types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(client_packs, "_run_child", fake)
+    client_packs.write_record(
+        play,
+        client_packs.PackRecord(
+            {}, None, {"packs": {"lumenveil": True}, "exe_options": {}}
+        ),
+        game=WOTLK.id,
+        server_dir=tmp_path,
+    )
+    return entry, original, play, seen, site
+
+
+def test_play_with_lumenveil_ticked_installs_runs_setup_and_records_outputs(
+    qapp: object, ps: _Ps, tmp_path: Path, site: _Site, steps: list[str],
+    asks: _Asks, monkeypatch: pytest.MonkeyPatch, launched: list[object],
+) -> None:
+    """T809 W4 end-to-end: checkbox on -> fetch -> install -> two setup runs -> record.
+
+    The record holds both setup outputs with their hashes and no pending note;
+    the copy holds the installed files beside them; the next Play runs nothing.
+    """
+    entry, original, play, seen, _ = _lumen_play(tmp_path, monkeypatch, site)
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+
+    view.play()
+
+    assert site.calls == ["lumenveil"], "the ticked pack is fetched, nothing else"
+    assert len(seen) == 2, "the setup exe runs twice: lamps, then water"
+    assert (play / "version.dll").read_bytes() == b"lumen loader"
+    assert (play / "lampdata.bin").read_bytes() == b"lamps"
+    assert (play / "liquiddata.bin").read_bytes() == b"water"
+    record = client_packs.read_record(play)
+    installed = record.packs["lumenveil"]
+    assert installed["files"]["lampdata.bin"] == hashlib.sha256(b"lamps").hexdigest()
+    assert installed["files"]["liquiddata.bin"] == hashlib.sha256(b"water").hexdigest()
+    assert set(installed["setup"]) == {"lampdata.bin", "liquiddata.bin"}
+    assert "setup_pending" not in installed
+    assert steps[-1] == "launch" and asks.calls == [], "an optional pack never asks"
+    steps.clear()
+    seen.clear()
+    site.calls.clear()
+
+    view.play()
+
+    assert site.calls == ["lumenveil"], "the version is cheaply checked again, then nothing re-runs"
+    assert seen == [], "setup that already ran never runs again"
+    assert steps[-1] == "launch"
+
+
+def test_a_killed_setup_leaves_a_pending_record_the_next_play_cleans(
+    qapp: object, ps: _Ps, tmp_path: Path, site: _Site, steps: list[str],
+    asks: _Asks, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T809 W4: a kill between the pending write and the exe leaves outputs the next Play cleans.
+
+    The first Play's runner lays `lampdata.bin` then dies; the record it already
+    wrote carries `setup_pending`. The next Play removes that leftover first,
+    runs both runs again, and records clean outputs with no note.
+    """
+    entry, original, play, _seen, _ = _lumen_play(tmp_path, monkeypatch, site)
+
+    class Killed(BaseException):
+        pass
+
+    def killer(argv: list[str], *, cwd: Path, timeout: float | None = None) -> Any:
+        (cwd / "lampdata.bin").write_bytes(b"half a run")
+        raise Killed()
+
+    monkeypatch.setattr(client_packs, "_run_child", killer)
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+
+    with pytest.raises(Killed):
+        view._prepare_client(play, original, frozenset())
+
+    held = client_packs.read_record(play).packs["lumenveil"]
+    assert held.get("setup_pending") == ["lampdata.bin", "liquiddata.bin"]
+    assert (play / "lampdata.bin").read_bytes() == b"half a run"
+
+    def retry(argv: list[str], *, cwd: Path, timeout: float | None = None) -> Any:
+        import types as _types
+
+        if "--out" in argv[1:]:
+            (cwd / "lampdata.bin").write_bytes(b"lamps")
+        else:
+            (cwd / "liquiddata.bin").write_bytes(b"water")
+        return _types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(client_packs, "_run_child", retry)
+    again, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+    steps.clear()
+
+    again.play()
+
+    assert (play / "lampdata.bin").read_bytes() == b"lamps"
+    assert (play / "liquiddata.bin").read_bytes() == b"water"
+    done = client_packs.read_record(play).packs["lumenveil"]
+    assert "setup_pending" not in done
+    assert steps[-1] == "launch"
 
 def test_make_saves_the_choices_into_the_record(
     qapp: object, ps: _Ps, tmp_path: Path, site: _Site

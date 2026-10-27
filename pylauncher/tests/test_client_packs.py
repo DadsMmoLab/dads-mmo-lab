@@ -4317,3 +4317,31 @@ def test_off_records_every_file_it_installed(rig: _Rig) -> None:
 
     assert set(entry["files"]) == {"version.dll", "Lumenveil/lamp_extract.exe"}
     assert entry["files"]["version.dll"] == _sha(b"v")
+
+
+def test_an_unreadable_recorded_file_refuses_and_stays(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T809 W4: `_file_sha256` raising PermissionError is a refusal, not a skip.
+
+    The `except OSError` arm beside the hash check (~3134-3141) collects the
+    refusal and keeps going; the single collected refusal then raises ONE
+    PackError naming the file, and the file stays.
+    """
+    pack, entry = _install_lumen(rig)
+    real_sha = client_packs._file_sha256
+
+    def refuse_version(path: Path) -> str:
+        if Path(path).name == "version.dll":
+            raise PermissionError(errno.EACCES, "Permission denied", os.fspath(path))
+        return real_sha(path)
+
+    monkeypatch.setattr(client_packs, "_file_sha256", refuse_version)
+
+    with pytest.raises(PackError) as caught:
+        rig.remove(entry, pack)
+
+    assert "version.dll" in str(caught.value)
+    assert (rig.play / "version.dll").is_file(), "the refused file stays"
+    assert not (rig.play / "Lumenveil" / "lamp_extract.exe").exists(), "the other file still goes"
+    rig.untouched()

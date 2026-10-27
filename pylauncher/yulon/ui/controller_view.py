@@ -1166,12 +1166,31 @@ def has_client_data(client: Client) -> bool:
     return bool(client.packs or client.exe_patch is not None or client.config_wtf is not None)
 
 
-def has_client_choices(client: Client) -> bool:
-    """Whether a player can choose anything: an optional pack or a Wow.exe option."""
-    return any(pack.optional for pack in client.packs) or bool(
-        client.exe_patch is not None and client.exe_patch.options
+def shown_packs(client: Client, platform_id: str | None = None) -> tuple[ClientPack, ...]:
+    """The optional packs this machine is offered: `wanted`'s platform filter, choice-blind.
+
+    The Make dialog and "Client options…" show the same boxes the launcher shows
+    and Play installs: a Windows-only pack (Lumenveil) never appears on Wine, Linux
+    or macOS. `wanted` also reads the player's ticks, which a dialog lists rather
+    than applies, so this asks it nothing and filters only by platform.
+    """
+    here = client_packs.offered_on(platform_id)
+    return tuple(
+        pack
+        for pack in client.packs
+        if pack.optional and (not pack.platforms or here in pack.platforms)
     )
 
+
+def has_client_choices(client: Client) -> bool:
+    """Whether a player can choose anything: an offered optional pack or a Wow.exe option."""
+    here = client_packs.offered_on()
+    return any(
+        pack.optional and (not pack.platforms or here in pack.platforms)
+        for pack in client.packs
+    ) or bool(
+        client.exe_patch is not None and client.exe_patch.options
+    )
 
 class ClientOptionsBox(QWidget):
     """The packs and Wow.exe options of a server's client, as checkboxes (T181 b/c).
@@ -1218,11 +1237,11 @@ class ClientOptionsBox(QWidget):
         box.addWidget(self.extra_label)
         self.pack_boxes: dict[str, QCheckBox] = {}
         self._sizes: dict[str, int] = {}
-        for pack in client.packs:
-            if not pack.optional:
-                continue
+        for pack in shown_packs(client):
             gone = pack.id in unavailable
             check = QCheckBox(self._pack_text(pack, gone), self)
+            if pack.credit:
+                check.setToolTip(pack.credit)
             check.setChecked(bool(chosen_packs.get(pack.id, pack.default)))
             if gone and pack.id not in installed:
                 check.setChecked(False)
@@ -13502,6 +13521,12 @@ class ControllerView(QWidget):
             if pack.id not in wanted or pack.id in skip:
                 continue
             check_cancel()
+            # A loader another mod put in the copy refuses BEFORE its fetch (D7):
+            # one version.dll loads, and nothing of the pack is touched.
+            try:
+                client_packs.refuse_foreign_loader(play, pack, packs.get(pack.id))
+            except client_packs.PackError as exc:
+                raise _PackStopped(pack, str(exc)) from exc
             say(f"Getting {pack.label}…")
             try:
                 # Each kind by name, and nothing falls through to the downloader: a
@@ -13554,29 +13579,72 @@ class ControllerView(QWidget):
             if same:
                 assert have is not None
                 if not client_packs.recorded_files_missing(play, have):
-                    continue
-                say(f"Putting back the missing files of {pack.label}…")
+                    done = have
+                else:
+                    say(f"Putting back the missing files of {pack.label}…")
+                    try:
+                        done = client_packs.install(
+                            play,
+                            pack,
+                            fetched,
+                            game=game,
+                            server_dir=server_dir,
+                            previous=have,
+                            only_missing=True,
+                        )
+                    except client_packs.PartialInstall as exc:
+                        packs[pack.id] = exc.entry
+                        save()
+                        raise _PackStopped(pack, str(exc)) from exc
+                    except client_packs.PackError as exc:
+                        raise _PackStopped(pack, str(exc)) from exc
+                    packs[pack.id] = done
+                    save()
             else:
                 say(f"Installing {pack.label}…")
-            try:
-                done = client_packs.install(
-                    play,
-                    pack,
-                    fetched,
-                    game=game,
-                    server_dir=server_dir,
-                    previous=have,
-                    only_missing=same,
-                )
-            except client_packs.PartialInstall as exc:
-                packs[pack.id] = exc.entry
+                try:
+                    done = client_packs.install(
+                        play,
+                        pack,
+                        fetched,
+                        game=game,
+                        server_dir=server_dir,
+                        previous=have,
+                        only_missing=False,
+                    )
+                except client_packs.PartialInstall as exc:
+                    packs[pack.id] = exc.entry
+                    save()
+                    raise _PackStopped(pack, str(exc)) from exc
+                except client_packs.PackError as exc:
+                    raise _PackStopped(pack, str(exc)) from exc
+                packs[pack.id] = done
                 save()
-                raise _PackStopped(pack, str(exc)) from exc
-            except client_packs.PackError as exc:
-                raise _PackStopped(pack, str(exc)) from exc
-            packs[pack.id] = done
-            save()
             left_behind = done.get("left_behind")
+            if pack.setup is not None:
+                check_cancel()
+                say(f"Preparing {pack.label}'s light and water data (1-5 minutes)…")
+                pack_id = pack.id
+                try:
+                    # The pending note rides in the record BEFORE the exe runs, so a
+                    # kill between the two still cleans on the next Play; the final
+                    # save drops it. The engine rolls back on any setup failure.
+                    def keep_pending(pending_entry: Mapping[str, Any]) -> None:
+                        packs[pack_id] = dict(pending_entry)
+                        save()
+
+                    packs[pack.id] = client_packs.run_setup(
+                        play,
+                        pack,
+                        done,
+                        game=game,
+                        server_dir=server_dir,
+                        record=have,
+                        on_pending=keep_pending,
+                    )
+                    save()
+                except client_packs.PackError as exc:
+                    raise _PackStopped(pack, str(exc)) from exc
             if left_behind:
                 notes.append(
                     f"{pack.label}: left alone because you changed them: "

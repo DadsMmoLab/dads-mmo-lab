@@ -938,13 +938,17 @@ class LauncherWindow(QWidget):
                         widget.deleteLater()
         self.pack_boxes = {}
         self.pack_sizes = {}
-        for pack in entry.client.packs:
-            if not pack.optional:
-                continue
+        here = client_packs.offered_on()
+        shown = [
+            pack
+            for pack in entry.client.packs
+            if pack.optional and (not pack.platforms or here in pack.platforms)
+        ]
+        for pack in shown:
             row = QHBoxLayout()
             check = QCheckBox(pack.label, self.extras_box)
-            if pack.description:
-                check.setToolTip(pack.description)
+            if pack.credit or pack.description:
+                check.setToolTip(pack.credit or pack.description)
             check.clicked.connect(lambda on, pack_id=pack.id: self._pack_toggled(pack_id, on))
             row.addWidget(check)
             row.addStretch(1)
@@ -955,12 +959,19 @@ class LauncherWindow(QWidget):
             self._extras_rows.addLayout(row)
             self.pack_boxes[pack.id] = check
             self.pack_sizes[pack.id] = size
-        self.extras_note.setText(
-            "Downloaded from the server makers' site at your next Play. Your own client is "
-            "never changed."
-            if self.pack_boxes
-            else NO_EXTRAS
-        )
+        credits = [pack.credit for pack in shown if pack.credit]
+        if self.pack_boxes and credits:
+            self.extras_note.setText(
+                "Downloaded from the server makers' site at your next Play. Your own client is "
+                "never changed. " + " ".join(credits)
+            )
+        else:
+            self.extras_note.setText(
+                "Downloaded from the server makers' site at your next Play. Your own client is "
+                "never changed."
+                if self.pack_boxes
+                else NO_EXTRAS
+            )
 
     # -- reading -----------------------------------------------------------
 
