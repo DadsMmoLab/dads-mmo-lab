@@ -1001,9 +1001,7 @@ def _client_data_fetch_script(tmp_path: Path) -> Path:
     script = "\n".join(service["command"]).replace("$$", "$")
     loop, _, _ = script.partition("\n        # Refuse to extract a truncated archive")
     lines = loop.splitlines()
-    start = next(
-        index for index, line in enumerate(lines) if "downloading client data" in line
-    )
+    start = next(index for index, line in enumerate(lines) if "downloading client data" in line)
     end = next(index for index, line in enumerate(lines) if line.strip() == "done")
     fetch = "\n".join(["ver=vTEST", "zip=$PWD/data.zip", *lines[start : end + 1]]) + "\n"
     path = tmp_path / "fetch.sh"

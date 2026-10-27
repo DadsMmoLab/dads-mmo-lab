@@ -6754,11 +6754,7 @@ _STEP_OUTPUT = re.compile(r"^\s*#\d+\s")
 """A line BuildKit's plain progress prints for a step: `#25 213.5 ...`, `#9 ERROR: ...`."""
 
 _ONE_SHOT_ERROR = re.compile(
-    r"^(?:"
-    r"curl: \(\d+\)"
-    r"|ERROR \d+ \([0-9A-Z]+\)"
-    r"|error setting certificate file"
-    r")",
+    r"^(?:" r"curl: \(\d+\)" r"|ERROR \d+ \([0-9A-Z]+\)" r"|error setting certificate file" r")",
 )
 """The tool's own failure line, at the start of a line: curl's or mysql's (T810).
 
@@ -6920,8 +6916,7 @@ def last_words(tail: tuple[str, ...], *, from_build: bool = False) -> str:
     error_at = [
         index
         for index, line in enumerate(said)
-        if _ONE_SHOT_ERROR.search(unprefixed(line))
-        and not _COMPOSE_OWN_LINE.match(line.strip())
+        if _ONE_SHOT_ERROR.search(unprefixed(line)) and not _COMPOSE_OWN_LINE.match(line.strip())
     ]
     if error_at and not from_build:
         # A one-shot's own error line beats compose's closing lines and curl's

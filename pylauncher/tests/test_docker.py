@@ -7641,10 +7641,14 @@ _T810_TAIL = (
     # The reporter's own stream, shape kept: compose's `<service>  | ` prefix,
     # its error line, curl's own "will retry in 10 seconds" line, two bare
     # meter readings, then compose's closing line.
-    "ac-client-data-init  | curl: (77) error setting certificate file: /etc/ssl/certs/ca-certificates.crt",
-    "ac-client-data-init  | Warning: Problem (retrying all errors). Will retry in 10 seconds. 16 retries left.",
-    "ac-client-data-init  |   0     0    0     0    0     0      0       0 --:--:-- --:--:-- --:--:--     0",
-    "ac-client-data-init  |   0     0    0     0    0     0      0       0 --:--:-- --:--:-- --:--:--     0",
+    "ac-client-data-init  | "
+    "curl: (77) error setting certificate file: /etc/ssl/certs/ca-certificates.crt",
+    "ac-client-data-init  | "
+    "Warning: Problem (retrying all errors). Will retry in 10 seconds. 16 retries left.",
+    "ac-client-data-init  | "
+    "  0     0    0     0    0     0      0       0 --:--:-- --:--:-- --:--:--     0",
+    "ac-client-data-init  | "
+    "  0     0    0     0    0     0      0       0 --:--:-- --:--:-- --:--:--     0",
     "Aborting on container exit...",
 )
 

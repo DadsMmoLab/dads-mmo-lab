@@ -149,9 +149,7 @@ def client_data_certificate_failure(run: docker.AttachedRun) -> bool:
     """
     if run.returncode == 0:
         return False
-    return any(
-        _CURL_CERTIFICATE_FAILURE.search(docker.unprefixed(line)) for line in run.tail
-    )
+    return any(_CURL_CERTIFICATE_FAILURE.search(docker.unprefixed(line)) for line in run.tail)
 
 
 def stale_client_data_remedy(entry: CatalogEntry, server_dir: Path) -> str:

@@ -31,7 +31,6 @@ from tests.test_changed_migrations import (
     _core_changed,
     _forward,
     _ready,
-    _refused_clean,
 )
 from tests.test_families_cmangos import engine_for
 from tests.test_return_newer_migrations import (
@@ -50,7 +49,9 @@ from yulon.catalog import native
 from yulon.catalog.catalog import CATALOG_FILE, CmangosData, RerunnableModule, parse_catalog
 from yulon.catalog.installer import InstallOptions
 
-REASON = "Its author guarantees every migration is idempotent; checked on the three rewritten files."
+REASON = (
+    "Its author guarantees every migration is idempotent; checked on the three rewritten files."
+)
 
 PRESSES = pytest.mark.parametrize("to_pin", [False, True], ids=["update-to-latest", "return"])
 
@@ -90,7 +91,8 @@ def _listed(entry: object, *rows: RerunnableModule) -> object:
         update={"rerunnable_modules": rows}
     )
     native_block = entry.install.native.model_copy(update={"cmangos": data})  # type: ignore[union-attr]
-    return entry.model_copy(update={"install": entry.install.model_copy(update={"native": native_block})})  # type: ignore[union-attr]
+    install = entry.install.model_copy(update={"native": native_block})  # type: ignore[union-attr]
+    return entry.model_copy(update={"install": install})
 
 
 def _return(
@@ -113,9 +115,7 @@ def _module() -> RerunnableModule:
 
 
 @PRESSES
-def test_a_rewritten_module_file_with_any_new_bytes_goes_on(
-    tmp_path: Path, to_pin: bool
-) -> None:
+def test_a_rewritten_module_file_with_any_new_bytes_goes_on(tmp_path: Path, to_pin: bool) -> None:
     """The rule is per module, not per bytes: any new bytes in TortoiseBots go on."""
     rec, server_dir, _made = _ready(tmp_path)
     other = EDITED + b"-- upstream edited it again\n"
@@ -147,6 +147,8 @@ def test_a_changed_core_file_still_refuses(tmp_path: Path, to_pin: bool) -> None
 
     assert raised is not None, "a changed core file went on"
     assert f"tw_world: {OLDER_NAME}" in str(raised), raised
+
+
 @PRESSES
 def test_a_listed_module_file_plus_a_core_file_names_only_the_core_one(
     tmp_path: Path, to_pin: bool

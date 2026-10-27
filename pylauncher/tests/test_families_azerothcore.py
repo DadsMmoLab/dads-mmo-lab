@@ -1762,16 +1762,12 @@ def test_a_successful_run_that_printed_a_tls_number_is_not_a_failure(
     install with the certificate remedy. Deleting the `returncode == 0` gate
     turns this red — the whole install would fail on a success.
     """
-    run = docker.AttachedRun(
-        0, ("ac-client-data-init  | curl: (35) SSL connect error", "ran")
-    )
+    run = docker.AttachedRun(0, ("ac-client-data-init  | curl: (35) SSL connect error", "ran"))
     assert install(Recorder(one_shot_result=run), tmp_path / "wow")
 
 
 @pytest.mark.parametrize("code", [58])
-def test_the_other_local_certificate_failure_fails_at_once_too(
-    tmp_path: Path, code: int
-) -> None:
+def test_the_other_local_certificate_failure_fails_at_once_too(tmp_path: Path, code: int) -> None:
     """58 (a problem with the local certificate) is the same defect as 77.
 
     The regex is built from `_TLS_CERTIFICATE_EXIT`, and the exit status is NOT
@@ -1804,7 +1800,9 @@ def test_a_remote_or_routing_tls_failure_is_generic_with_no_image_advice(
     with pytest.raises(InstallerError) as failed:
         install(rec, tmp_path / "wow")
     said = str(failed.value)
-    assert said.startswith(f"the server-data download failed (exit {code}). Its last words were: "), said
+    assert said.startswith(
+        f"the server-data download failed (exit {code}). Its last words were: "
+    ), said
     assert "image named" not in said, said
 
 

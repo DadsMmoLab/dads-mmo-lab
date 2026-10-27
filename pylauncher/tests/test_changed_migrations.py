@@ -91,8 +91,8 @@ def _made_without_allowlist(rec: Recorder) -> native.StagedInstaller:
     refusal itself drives an entry without the listing; the T813 file pins what
     the listing does.
     """
-    from tests.test_families_cmangos import engine as tbc_engine
     from tests.support_native import FakeSnapshot
+    from tests.test_families_cmangos import engine as tbc_engine
 
     assert TORTOISE.install.native is not None and TORTOISE.install.native.cmangos is not None
     data = TORTOISE.install.native.cmangos.model_copy(update={"rerunnable_modules": ()})

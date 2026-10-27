@@ -1184,10 +1184,7 @@ class RerunnableModule(_Strict):
         ):
             raise ValueError(f"reason names no command, got {value!r}")
         if "\n" in value or not value.endswith("."):
-            raise ValueError(
-                "reason must be one sentence ending in a full stop, "
-                f"got {value!r}"
-            )
+            raise ValueError("reason must be one sentence ending in a full stop, " f"got {value!r}")
         return value
 
 
