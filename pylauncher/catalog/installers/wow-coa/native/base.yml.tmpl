@@ -321,21 +321,33 @@ services:
       {{CONTAINER_PREFIX}}database:
         condition: service_healthy
     entrypoint: ["/bin/bash", "-c"]
+    # T812 C5: the world bootstrap. The base data of `acore_world` is not an
+    # import of SQL updates but a versioned baseline laid by
+    # `apps/coa-world/world_data.py` out of the core checkout (`./apps/coa-world`
+    # is that checkout's `apps/coa-world`, `./data/coa-world` its versioned
+    # `data/coa-world`), so it runs here, in the image's own mysql:8.4, before
+    # the db-import one-shot. The checkout's `ROOT` is `parents[2]` of that
+    # script, i.e. `/src` here. The database's charset and collation are the
+    # core's own default (`DBUpdater::Create()` on the pin, `DBUpdater.cpp`:
+    # `DEFAULT CHARACTER SET UTF8MB4 COLLATE utf8mb4_general_ci`). The
+    # password rides the compose `.env` variable into the mysql option file
+    # only: never in argv, never in a printed command. Every `$` is doubled
+    # for compose (`$$` renders one `$` for the shell that runs this).
     command:
       - |
         set -eu; umask 077
         printf '[client]\nuser root\nhost {{DB_HOST}}\npassword %s\n' "$$DB_ROOT_PASSWORD" > /tmp/w.cnf
         chmod 600 /tmp/w.cnf
         q() { mysql --defaults-file=/tmp/w.cnf -N -B -e "$$1"; }
-        q "CREATE DATABASE IF NOT EXISTS acore_world"
-        if [ "$$(q "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA='acore_world' AND TABLE_NAME='version')" = 1 ]; then
+        q "CREATE DATABASE IF NOT EXISTS acore_world DEFAULT CHARACTER SET UTF8MB4 COLLATE utf8mb4_general_ci"
+        if [ "$$(q "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA='acore_world' AND TABLE_NAME='version'")" = 1 ]; then
           echo "yulon: the CoA world is already loaded"
           exit 0
         fi
         if [ "$$(q "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA='acore_world'")" != 0 ]; then
           echo "yulon: an interrupted CoA world load was found; loading it again"
           q "DROP DATABASE acore_world"
-          q "CREATE DATABASE IF NOT EXISTS acore_world"
+          q "CREATE DATABASE IF NOT EXISTS acore_world DEFAULT CHARACTER SET UTF8MB4 COLLATE utf8mb4_general_ci"
         fi
         microdnf install -y python3.11 && microdnf clean all
         python3.11 /src/apps/coa-world/world_data.py bootstrap --defaults-file /tmp/w.cnf --database acore_world

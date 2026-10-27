@@ -436,12 +436,38 @@ class AzerothCoreInstaller(StagedInstaller):
     `lua-and-sql` is never recorded, because it runs on every press like `up`.
     """
 
+    WORLD_BOOTSTRAP_STAGE: ClassVar[str] = "world-bootstrap"
+    """T812 C5: the CoA world's base data, loaded after `start-db`, before `import`.
+
+    The base data of `acore_world` is not an import of SQL updates but a
+    versioned baseline (`apps/coa-world/world_data.py` in the core checkout),
+    run by the compose one-shot the entry's `world_bootstrap_service` names.
+    Not in `STAGE_NAMES`: an entry without that service runs the historical
+    tuple, word for word, exactly as a patch-less entry skips `patch-sources`.
+    Not recorded: a resume must always run it again (cheap when the world is
+    already loaded: the service exits 0 at its done-marker) — the same reason
+    `client-data` re-asks its volume.
+    """
+
+
     def stages(self) -> tuple[Stage, ...]:
         block = self._block()
         patch_stage = (Stage(self.PATCH_STAGE, self._patch_sources),) if block.patches else ()
         lua_stage = (
             (Stage(self.LUA_STAGE, self._lua_and_sql, recorded=False),)
             if block.lua_scripts or block.sql_checks
+            else ()
+        )
+        bootstrap_stage = (
+            (
+                Stage(
+                    self.WORLD_BOOTSTRAP_STAGE,
+                    self._world_bootstrap,
+                    recorded=False,
+                    cancel_note=IMPORT_STAGE_CANCEL_NOTE,
+                ),
+            )
+            if block.world_bootstrap_service
             else ()
         )
         return (
@@ -456,6 +482,7 @@ class AzerothCoreInstaller(StagedInstaller):
             Stage("build", self.stage_build, cancel_note=build_cancel_note()),
             Stage("client-data", self._client_data, cancel_note=DOWNLOAD_CANCEL_NOTE),
             Stage("start-db", self._start_db, recorded=False),
+            *bootstrap_stage,
             Stage("import", self._import, cancel_note=IMPORT_STAGE_CANCEL_NOTE),
             *lua_stage,
             Stage("up", self._up, recorded=False),
@@ -1291,6 +1318,51 @@ class AzerothCoreInstaller(StagedInstaller):
                 raise OneShotLeftRunning(download_left_sentence(left, earlier=False))
         self._check_run(run, "the server-data download", ctx.cancel, DOWNLOAD_CANCEL_NOTE)
         yield "Server data is in place."
+
+    def _world_bootstrap(self, ctx: StageContext) -> Iterator[str]:
+        """Load the CoA world's base data, before the import applies updates over it.
+
+        `import` runs the db-import one-shot, whose updater applies only what its
+        `updates` tables do not hold: with no bootstrap first it would apply the
+        core's `updates/db_world` over a missing schema. The bootstrap is its own
+        `_client_data`-pattern one-shot rather than part of `import` because an
+        interrupted world bootstrap is dropped and loaded again, while an
+        interrupted import is refused or cleared by its own gate — one service,
+        one verdict. Done-marker: `world_data.py` loads `updates`,
+        `updates_include` and `version` LAST (`world_data.py: bootstrap()`), so a
+        world with tables but no `version` is an interrupted load and is
+        dropped, while one WITH `version` exits 0 in seconds and the stage ends.
+        `version` — not `updates`: a bare import also writes `updates` rows, so
+        only the table nothing else writes says the bootstrap ran.
+
+        `start-db` ran first and the import's probe answers afterwards, so the
+        import stage that follows still decides; this stage asks nothing of the
+        databases itself. Rebuild and update never run it: the world exists.
+        """
+        service = self._block().world_bootstrap_service
+        if not service:
+            yield "This server has no separate world bootstrap step."
+            return
+        # T539, as in `_client_data()`: a bootstrap a Stop or a closed Yu'lon
+        # left running is ended before another starts into the same database.
+        left = self._seams.end_one_shot(service, ctx.server_dir)
+        if left is not None:
+            raise OneShotLeftRunning(download_left_sentence(left, earlier=True))
+        yield f"Loading the CoA world's base data ({service})."
+        run = yield from self._pump(
+            lambda sink: self._seams.one_shot(
+                service, ctx.server_dir, sink=sink, cancel=ctx.cancel
+            ),
+            cancel=ctx.cancel,
+            stage="import",
+        )
+        if ctx.cancel is not None and ctx.cancel.is_set():
+            # Not read as a clean Stop until nothing of the bootstrap is still running.
+            left = self._seams.end_one_shot(service, ctx.server_dir)
+            if left is not None:
+                raise OneShotLeftRunning(download_left_sentence(left, earlier=False))
+        self._check_run(run, "the world bootstrap", ctx.cancel, IMPORT_STAGE_CANCEL_NOTE)
+        yield "The CoA world's base data is in place."
 
     def _up(self, ctx: StageContext) -> Iterator[str]:
         """Write the catalog's module confs from their `.dist`, then the spine's `up` (T137).
