@@ -521,7 +521,7 @@ def _default_bind_probe(server_dir: Path) -> bool | None:
 
 
 def client_spec_for(entry: CatalogEntry) -> ClientSpec | None:
-    """The entry's client rules, if its family block has any; AzerothCore's has none.
+    """The entry's client rules, if its family block has any.
 
     The one place that decides whether this install reads a client at all, so
     `gather()` and `evaluate()` cannot come to different conclusions about it.
@@ -535,7 +535,24 @@ def client_spec_for(entry: CatalogEntry) -> ClientSpec | None:
     """
     native = entry.install.native
     built = None if native is None else composegen.built_here(native)
-    return None if built is None else built.client
+    if built is not None:
+        return built.client
+    return client_spec_of(native)
+
+
+def client_spec_of(native: NativeInstall | None) -> ClientSpec | None:
+    """The client rules of an AzerothCore `client_extract` block, or None (T812 C4a).
+
+    `client_spec_for()`'s answer for the family `built_here()` does not
+    cover: an AzerothCore entry with `client_extract` extracts from the
+    player's client under its own block's rules. A CMaNGOS or TrinityCore
+    entry never reaches here with a block (its `built.client` answered
+    above), and neither does an AzerothCore entry without `client_extract`.
+    """
+    block = native.azerothcore if native is not None else None
+    if block is not None and block.client_extract is not None:
+        return block.client_extract.client
+    return None
 
 
 def _default_client_validate(free: Callable[[Path], int | None]) -> ClientValidate:
