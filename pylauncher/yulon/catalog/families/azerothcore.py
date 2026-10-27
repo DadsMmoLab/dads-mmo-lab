@@ -45,9 +45,8 @@ from yulon import (
     server_build_presses,
 )
 from yulon.catalog import composegen, snapshot
-from yulon.catalog.catalog import AzerothCoreData, CatalogEntry, EmulatorSource
-from yulon.catalog.families import carried, extract, scriptdeploy
-from yulon.catalog.families.direction import moves_forward
+from yulon.catalog.catalog import AcClientExtract, AzerothCoreData, CatalogEntry, EmulatorSource
+from yulon.catalog.families import carried, extract, scriptdeploy, surgical
 from yulon.catalog.installer import (
     ImportWindowStopped,
     InstallerError,
@@ -1524,7 +1523,8 @@ class AzerothCoreInstaller(StagedInstaller):
         `CmangosInstaller._extract`'s shape: the image ref is the `tools` entry
         of `composegen.built_image_refs`, the client is `ctx.client_dir`, the
         output the server's own `data/`, the plan the entry's
-        `client_extract.extract`. After the run, `extract.missing_map_data()`
+        `client_extract.extract` plus one appended tool per surgical map (C4b:
+        `surgical.effective_plan()`). After the run, `extract.missing_map_data()`
         of `required_maps` is the gate: a press that cannot start its world
         must not record an extract that cannot run it.
         """
@@ -1532,6 +1532,8 @@ class AzerothCoreInstaller(StagedInstaller):
         if plan_block is None:
             yield "This server has no separate client-extract step."
             return
+        tools_bin = self._tools_bin(plan_block)
+        plan = surgical.effective_plan(self._block(), tools_bin)
         client_dir = ctx.client_dir
         if client_dir is None:
             raise InstallerError(
@@ -1548,7 +1550,7 @@ class AzerothCoreInstaller(StagedInstaller):
             read_from = yield from self._case_view(client_dir, view)
             yield from self._stream(
                 lambda sink: extract.run_plan(
-                    plan_block.extract,
+                    plan,
                     image_ref=image_ref,
                     client_dir=read_from,
                     data_dir=data_dir,
@@ -1581,20 +1583,25 @@ class AzerothCoreInstaller(StagedInstaller):
         yield "Extraction finished."
 
     def _mmaps(self, ctx: StageContext) -> Iterator[str]:
-        """Generate movement maps from the extracted maps, before the import (T812 C4a).
+        """Generate movement maps from the extracted maps, before the import (T812 C4a/C4b).
 
         Never recorded, like `up`: a resume must always end with the movement
         maps made, and `extract.run_mmaps()` skips itself when its record and
-        counts already vouch for the run.
+        counts already vouch for the run. C4b lays `data/mmaps-config.yaml`
+        beside it first — `mmaps_generator` opens that name in its cwd
+        (`PathGenerator.cpp:169`), and the workdir here is `/out` = `data/`.
+        Copied from the checkout the install was built from (the core source),
+        refused by name when it is not there.
         """
         plan_block = self._block().client_extract
         if plan_block is None:  # unreachable: the stage is only in the tuple with one
             yield "This server has no separate movement-map step."
             return
         data_dir = self._data_dir(ctx)
+        self._lay_mmaps_config(ctx, plan_block, data_dir)
         image_ref = self._image_ref(ctx, plan_block.extract.image)
         user_args = self._user_args()
-        yield "Generating movement maps (this can take an hour or more)."
+        yield "Making movement maps for the bots"
         yield from self._stream(
             lambda sink: extract.run_mmaps(
                 plan_block.mmaps,
@@ -1604,12 +1611,39 @@ class AzerothCoreInstaller(StagedInstaller):
                 user_args=user_args,
                 sink=sink,
                 cancel=ctx.cancel,
+                progress_every=60.0,
             ),
             cancel=ctx.cancel,
             stage="mmaps",
         )
         self._check_cancel(ctx.cancel)
         yield "Map generation finished."
+
+    MMAPS_CONFIG_NAME = "mmaps-config.yaml"
+    """The name `mmaps_generator` opens in its cwd: beside the mmaps it writes."""
+
+    def _tools_bin(self, plan_block: AcClientExtract) -> str:
+        """The container-absolute folder of the extract tools (C4b surgical script).
+
+        Read off the first tool's argv, not written here: if the install prefix
+        ever moves, the catalog moves this with it and the script follows.
+        """
+        first = plan_block.extract.tools[0].argv[0]
+        return first.rpartition("/")[0] or "/"
+
+    def _lay_mmaps_config(self, ctx: StageContext, plan_block: AcClientExtract, data_dir: Path) -> None:
+        source = ctx.server_dir / plan_block.mmaps_config
+        try:
+            text = source.read_bytes()
+        except OSError:
+            raise InstallerError(
+                f"{source} holds no {self.MMAPS_CONFIG_NAME}: the checkout this install was "
+                "built from has no mmaps config where the entry says it is "
+                f"({plan_block.mmaps_config}). Nothing was run."
+            )
+        target = data_dir / self.MMAPS_CONFIG_NAME
+        target.write_bytes(text)
+
 
     def start_refusal(self, server_dir: Path, *, rebuilding: bool = False) -> str | None:
         """The spine's refusal, then the extract gate for a `client_extract` entry (T812 C4a).

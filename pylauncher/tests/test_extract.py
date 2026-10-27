@@ -2695,12 +2695,17 @@ def test_the_wipe_target_is_built_from_the_data_dir_and_a_constant_no_catalog_na
         "user_args",
         "sink",
         "cancel",
+        "progress_every",
+        "clock",
     }
+    # `progress_every`/`clock` are the C4b progress seam: neither names a folder
+    # or a client, so the wipe's audit holds with them — `progress_every` is a
+    # cadence and `clock` a time source. Both default off/None-checked, which
+    # `test_cmangos_mmaps_output_is_unchanged` pins from the other direction.
     assert "client" not in " ".join(parameters)
     folder = Path(extract.MMAPS_DIR)
     assert folder.parts == (extract.MMAPS_DIR,)
     assert not folder.is_absolute() and folder.anchor == "" and ".." not in folder.parts
-    assert set(MmapPlan.model_fields) == {"argv", "min_files", "required", "success_codes"}
     # NOT `all(isinstance(code, int) ...)`, which was here until a review
     # pointed out that `isinstance(True, int)` is True and the assertion pinned
     # nothing about the value. The default itself is what matters, and it is

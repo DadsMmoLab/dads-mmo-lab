@@ -16,8 +16,8 @@ import pytest
 
 from tests.support_native import Recorder
 from yulon.catalog import composegen, native, preflight
-from yulon.catalog.catalog import CatalogEntry, load_catalog
-from yulon.catalog.families import extract
+from yulon.catalog.catalog import AzerothCoreData, CatalogEntry, load_catalog
+from yulon.catalog.families import extract, surgical
 from yulon.catalog.families.azerothcore import AzerothCoreInstaller
 from yulon.catalog.installer import InstallerError
 from yulon.resources import installers_dir
@@ -155,11 +155,12 @@ def test_a_resume_with_evidence_skips_the_extract(tmp_path: Path) -> None:
     eng = engine(rec)
     list(eng._extract_maps(context(server_dir, client)))
     first = len(rec.container_runs)
-    plan = block().extract  # type: ignore[union-attr]
-    assert first == len(plan.tools), "a skip is only observable once something ran"
+    block_data = block()
+    assert block_data is not None
+    effective = surgical.effective_plan(AzerothCoreData(client_extract=block_data), "/azerothcore/env/dist/bin")
+    assert first == len(effective.tools), "a skip is only observable once something ran"
     list(eng._extract_maps(context(server_dir, client)))
     assert len(rec.container_runs) == first, "every tool had a record and its counts; none re-ran"
-
 
 def test_the_extract_stage_refuses_when_936_is_missing_after_the_run(tmp_path: Path) -> None:
     """The stage-end gate (not the counts): full counts but no 936 grid files still refuses."""
@@ -204,7 +205,9 @@ def test_the_extract_stage_names_the_tools_image(tmp_path: Path) -> None:
     rec = coa_produce(Recorder())
     lay_evidence_maps(server_dir / "data", (0, 1, 530, 571, 936, 937))
     list(engine(rec)._extract_maps(context(server_dir, client)))
-    plan = block().extract  # type: ignore[union-attr]
+    block_data = block()
+    assert block_data is not None
+    plan = surgical.effective_plan(AzerothCoreData(client_extract=block_data), "/azerothcore/env/dist/bin")
     assert [run.argv for run in rec.container_runs] == [tool.argv for tool in plan.tools]
     for run in rec.container_runs:
         mounts = {m.guest: m for m in run.mounts}
@@ -212,7 +215,7 @@ def test_the_extract_stage_names_the_tools_image(tmp_path: Path) -> None:
         assert mounts["/client"].read_only is True
         assert mounts["/out"].host == server_dir / "data"
         assert run.workdir == "/out"
-    expected = engine(rec)._image_ref(context(server_dir, client), plan.image)
+    expected = engine(rec)._image_ref(context(server_dir, client), block_data.extract.image)
     assert all(run.image == expected for run in rec.container_runs)
     assert expected.startswith("yulon.local/ac-coa-tools:")
 

@@ -1996,6 +1996,72 @@ about neither: after a wipe the machine is a folder poorer than the sentence
 implies, and the user needs to know that the next attempt is not optional.
 """
 
+PROGRESS_EVERY_DEFAULT: float | None = None
+"""`run_mmaps()`'s progress line cadence when the caller names none: off.
+
+`None` is the CMaNGOS runs' byte-identical default: the stage yields exactly
+the lines it always has. The CoA `_mmaps` stage passes 60. `0` or negative is
+also off, so a catalog or caller can never ask for a line per byte.
+"""
+
+
+def _progress_due(
+    progress_every: float | None, started: float, now: float, last: float | None
+) -> bool:
+    """Whether a progress line is owed: cadence set, past the first interval, new interval."""
+    if progress_every is None or progress_every <= 0:
+        return False
+    if now - started < progress_every:
+        return False
+    return last is None or now - last >= progress_every
+
+
+def _progress_line(started: float, now: float, data_dir: Path) -> str:
+    """One progress line: mmaps files so far and elapsed, over the folder being written."""
+    have = file_count(data_dir / MMAPS_DIR)
+    elapsed = int(now - started)
+    return (
+        f"Movement maps: {have} files so far ({elapsed}s elapsed). "
+        "This takes hours on a first install; the server starts when it is done."
+    )
+
+
+def _progress_watcher(
+    progress_every: float | None,
+    clock: Callable[[], float],
+    data_dir: Path,
+    sink: docker.OutputSink,
+) -> tuple[docker.OutputSink, Callable[[], None]]:
+    """The container-run sink plus its flush: a progress line at most every `progress_every`.
+
+    `None`/non-positive disables: the sink IS `sink` and the flush is a no-op,
+    which is what keeps every CMaNGOS caller byte-identical. Otherwise each
+    container line first asks whether a progress line is owed (`_progress_due`
+    on the watcher clock: test-seamed, never `time.monotonic` direct) and, when
+    one is, sinks it BEFORE the container's own line — and the flush after the
+    run sinks one last line when the cadence is on but no interval ever elapsed,
+    so a short run still says one thing rather than nothing.
+    """
+    started = clock()
+    last: list[float | None] = [None]
+
+    def watch(line: str) -> None:
+        now = clock()
+        if _progress_due(progress_every, started, now, last[0]):
+            sink(_progress_line(started, now, data_dir))
+            last[0] = now
+        sink(line)
+
+    def flush() -> None:
+        if progress_every is None or progress_every <= 0:
+            return
+        if last[0] is not None:
+            return
+        sink(_progress_line(started, clock(), data_dir))
+
+    return watch, flush
+
+
 
 def run_mmaps(
     plan: MmapPlan,
@@ -2006,6 +2072,8 @@ def run_mmaps(
     user_args: Sequence[str],
     sink: docker.OutputSink,
     cancel: threading.Event | None,
+    progress_every: float | None = None,
+    clock: Callable[[], float] | None = None,
 ) -> Iterator[str]:
     """Generate `data/mmaps` from the extracted maps and vmaps, unless the evidence vouches for it.
 
@@ -2099,18 +2167,27 @@ def run_mmaps(
         # (review, 2026-09-02).
         raise InstallerError(f"{exc}{cleared}") from exc
     yield f"mmaps: running {' '.join(plan.argv)}"
-    run = _quiet(run_container)(
-        docker.ContainerRun(
-            image=image_ref,
-            argv=tuple(plan.argv),
-            mounts=(docker.Mount(data_dir, OUT_MOUNT),),
-            workdir=OUT_MOUNT,
-            user_args=tuple(user_args),
-            security_args=EXTRACT_HARDENING,
-        ),
-        sink=sink,
-        cancel=cancel,
+    progress_sink, progress_flush = _progress_watcher(
+        progress_every if progress_every is not None else PROGRESS_EVERY_DEFAULT,
+        clock if clock is not None else time.monotonic,
+        data_dir,
+        sink,
     )
+    try:
+        run = _quiet(run_container)(
+            docker.ContainerRun(
+                image=image_ref,
+                argv=tuple(plan.argv),
+                mounts=(docker.Mount(data_dir, OUT_MOUNT),),
+                workdir=OUT_MOUNT,
+                user_args=tuple(user_args),
+                security_args=EXTRACT_HARDENING,
+            ),
+            sink=progress_sink,
+            cancel=cancel,
+        )
+    finally:
+        progress_flush()
     if run.returncode == docker.CANCELLED_RETURNCODE or (cancel is not None and cancel.is_set()):
         _left_running("map generation", run, data_dir)
         raise InstallStopped(f"map generation was stopped.{cleared} {MMAPS_CANCEL_NOTE}")
