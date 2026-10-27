@@ -30,7 +30,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - **Return to the tested pin** no longer refuses because Windows changed a server file's permissions and nothing else.
 - **Rebuild** works for a WotLK server the old Dad's MMO Lab script built inside WSL, once you agree to it.
 - When Docker setup genuinely fails, the advice now lists every failed step to run, in order, instead of only the first.
-- When the server-data download fails on the image's own certificate store, Install stops at once and names the image to remove.
+- Tortoise updates no longer stop on upstream's three rewritten database migrations.
 
 ### Changed
 

@@ -1422,6 +1422,12 @@
                 "obsolete_when_absent": "std::getline(std::cin",
                 "reason": "tortoise-wow's DB auto-updater ends a failed migration with std::getline(std::cin) (src/shared/Database/AutoUpdater.cpp:236-239 at 187af788, the same bytes at 6131a26f and at 10393426); the world container keeps stdin open for the Console tab, so the read never returns and a failed update hangs the world with no signal handler, no SOAP and no error line. The patch drops the read so the world reports the failure and exits, as Shyalya's fork did in b405b10adb"
               }
+            ],
+            "rerunnable_modules": [
+              {
+                "module": "TortoiseBots",
+                "reason": "Its author guarantees every migration is idempotent; verified 2026-10-27 on the three rewritten files in commit 765ea993 on MariaDB 10.6 and MySQL 8.4, each run twice."
+              }
             ]
           }
         }

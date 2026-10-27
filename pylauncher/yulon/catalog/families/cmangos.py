@@ -883,6 +883,16 @@ class CmangosInstaller(StagedInstaller):
                     )
         return changed
 
+    def _rerunnable_modules(self) -> set[str]:
+        """The modules whose migrations may run again (T813).
+
+        The module's author guarantees every migration it ships is idempotent,
+        so a changed SHA-1 there never blocks an update. Matched on the owner
+        module, never on bytes: any new bytes in a listed module go on, and a
+        later edit refuses only in an unlisted module or the core.
+        """
+        return {entry.module for entry in self._data().rerunnable_modules}
+
     def _refuse_changed_migrations(
         self, changed: _Changed, held: Mapping[Db, set[str]], *, to_pin: bool
     ) -> None:
@@ -892,11 +902,15 @@ class CmangosInstaller(StagedInstaller):
         has already refused a changed file whose old bytes the database holds, so in
         practice this is a forward Return or "Update the server to latest…" (T767 made the
         forward Return skip that file). A file refuses when the ledger holds an old key
-        and no new one. No SQL is run to test whether the new bytes could run twice. Every
-        source with such a file is named in the `UpdateRefused`, so the Server tab offers
-        none of their commits again.
+        and no new one. A file owned by a listed module
+        (`CmangosData.rerunnable_modules`, T813) does not refuse: that module's
+        author guarantees every migration it ships is idempotent. Core files and
+        other modules refuse exactly as before. No SQL is run to test whether the
+        new bytes could run twice. Every source with such a file is named in the
+        `UpdateRefused`, so the Server tab offers none of their commits again.
         """
         schemas = self.entry.schema_map()
+        rerunnable = self._rerunnable_modules()
         again: dict[str, list[str]] = {}
         refused: dict[str, str] = {}
         for role, labelled in changed.items():
@@ -904,6 +918,8 @@ class CmangosInstaller(StagedInstaller):
                 if any(k.upper() in held[role] for k in ran) and not any(
                     k.upper() in held[role] for k in new
                 ):
+                    if owner.module and owner.module in rerunnable:
+                        continue
                     again.setdefault(schemas[role], []).append(label)
                     refused.setdefault(owner.source.repo, owner.new)
         if refused:

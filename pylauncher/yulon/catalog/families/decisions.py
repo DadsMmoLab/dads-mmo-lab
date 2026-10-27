@@ -221,6 +221,17 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
     ),
     Site(
         "yulon.catalog.catalog",
+        "CatalogEntry._every_rerunnable_module_is_a_module_this_entry_clones",
+        "a re-runnable module (T813) names a module the entry clones",
+        {
+            "azerothcore": not_applicable("only a CMaNGOS block carries re-runnable modules"),
+            "cmangos": supported(),
+            "trinitycore": not_applicable("only a CMaNGOS block carries re-runnable modules"),
+        },
+        hits=(".cmangos",),
+    ),
+    Site(
+        "yulon.catalog.catalog",
         "CatalogEntry._the_trinitycore_block_agrees_with_the_entry",
         "the TrinityCore checkout is a cloned dest; renames land on the entry's schemas",
         {

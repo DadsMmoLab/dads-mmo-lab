@@ -14,6 +14,7 @@ import builtins
 import fnmatch
 import hashlib
 import json
+import posixpath
 import re
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Literal
@@ -1142,6 +1143,54 @@ class SourcePatch(_Strict):
         return value
 
 
+class RerunnableModule(_Strict):
+    """One module whose migrations the worldserver may run again (T813).
+
+    The module's author guarantees every migration it ships is idempotent, so a
+    changed SHA-1 in that module never blocks an update: the world re-runs the
+    file and its own guards make it a no-op where it already applied. Data,
+    because which module gave that guarantee is a fact about one upstream tree
+    and not about the family: the entry carries it beside the pin it was
+    checked against, and the CMaNGOS engine reads it where the refusal is decided.
+    """
+
+    module: str = Field(
+        min_length=1,
+        description="The module as the ledger keys it (the source's folder name).",
+    )
+    reason: str = Field(
+        min_length=1,
+        description="One sentence saying who guarantees idempotency and what was checked.",
+    )
+
+    @field_validator("reason")
+    @classmethod
+    def _a_plain_sentence(cls, value: str) -> str:
+        if re.search(r"\bT\d{1,3}\b", value):
+            raise ValueError(f"reason names no ticket, got {value!r}")
+        if "`" in value:
+            raise ValueError(f"reason names no command and takes no backticks, got {value!r}")
+        if re.search(
+            r"\bdocker\s+(?:compose|ps|logs|exec|run|start|stop|restart|rm|volume|image|"
+            r"info|version|system|attach|inspect|cp|pull|build|create|kill|network)\b"
+            r"|\bsystemctl\b|\bjournalctl\b|\bwsl(?:\.exe)?\s+-{1,2}[a-z]"
+            r"|\bsudo\s+(?:apt|apt-get|pacman|dnf|zypper|systemctl|service|usermod|chcon|passwd)\b"
+            r"|\b(?:apt|apt-get|pacman|dnf|zypper|brew)\s+(?:-S\b|install\b|update\b)"
+            r"|\bgit\s+(?:fetch|reset|clone|log|status|stash|pull|-C)\b|\bgit checkout -"
+            r"|\b(?:gunzip|chcon|xcode-select|usermod|passwd|pacman-key|steamos-readonly)\b"
+            r"|\b(?:firewall-cmd|firewall-offline-cmd)\b|\bufw\s+(?:allow|enable)\b"
+            r"|\bcompose\s+(?:logs|up|down|ps|run|build|ls|exec)\b|--rm\b",
+            value,
+        ):
+            raise ValueError(f"reason names no command, got {value!r}")
+        if "\n" in value or not value.endswith("."):
+            raise ValueError(
+                "reason must be one sentence ending in a full stop, "
+                f"got {value!r}"
+            )
+        return value
+
+
 class CmangosData(_Strict):
     """Everything the CMaNGOS family needs that differs per game (roadmap 7.3)."""
 
@@ -1159,6 +1208,22 @@ class CmangosData(_Strict):
             "trees carry no known defect this project works around (2026-09-05: Tortoise)."
         ),
     )
+    rerunnable_modules: tuple[RerunnableModule, ...] = Field(
+        default=(),
+        description=(
+            "Modules whose migrations the worldserver may run again (T813). A changed file "
+            "whose owner module is listed here never refuses; core files and other "
+            "modules refuse exactly as before."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _no_rerunnable_twice(self) -> CmangosData:
+        """Each reviewed module is listed once."""
+        seen = [entry.module for entry in self.rerunnable_modules]
+        if len(set(seen)) != len(seen):
+            raise ValueError(f"rerunnable_modules lists {sorted(seen)} with a repeat")
+        return self
 
 
 def _below(value: str, field: str, root: str) -> str:
@@ -3529,6 +3594,42 @@ class CatalogEntry(_Strict):
                 raise ValueError(
                     f"sql check on {check.table!r} reads the {check.db!r} database, which this "
                     f"entry does not name (it has {sorted(roles)})"
+                )
+        return self
+
+    @model_validator(mode="after")
+    def _every_rerunnable_module_is_a_module_this_entry_clones(self) -> CatalogEntry:
+        """A `RerunnableModule.module` is a module this entry clones (T813).
+
+        The engine skips a changed file whose owner module is listed, where the
+        module is a non-core source's folder name. A name no module source
+        provides -- including the core's own folder name, whose files the
+        ledger keys with an empty module -- is an entry that can never match,
+        so it is refused here.
+        """
+        native = self.install.native
+        block = native.cmangos if native is not None else None
+        if block is None:
+            return self
+        cores = {
+            source.dest
+            for source in self.emulator.sources
+            if not any(
+                source.dest.startswith(f"{other.dest.rstrip('/')}/modules/")
+                for other in self.emulator.sources
+                if other is not source
+            )
+        }
+        modules = {
+            posixpath.basename(source.dest.rstrip("/"))
+            for source in self.emulator.sources
+            if source.dest not in cores
+        }
+        for entry in block.rerunnable_modules:
+            if entry.module not in modules:
+                raise ValueError(
+                    f"rerunnable module {entry.module!r} is not a module of any of this "
+                    f"entry's sources {sorted(modules)}"
                 )
         return self
 
