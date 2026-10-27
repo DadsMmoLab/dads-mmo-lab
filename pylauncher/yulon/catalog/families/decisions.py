@@ -332,6 +332,17 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         hits=(".azerothcore", ".azerothcore"),
     ),
     Site(
+        "yulon.catalog.preflight",
+        "client_spec_of",
+        "the client rules of an AzerothCore entry with client_extract (T812 C4a)",
+        {
+            "azerothcore": supported("`client_extract.client`, when the entry has one"),
+            "cmangos": not_applicable("its `built.client` answered in `client_spec_for`"),
+            "trinitycore": not_applicable("its `built.client` answered in `client_spec_for`"),
+        },
+        hits=(".azerothcore",),
+    ),
+    Site(
         "yulon.catalog.families.cmangos",
         "CmangosInstaller._data",
         "the CMaNGOS engine reads its own block",

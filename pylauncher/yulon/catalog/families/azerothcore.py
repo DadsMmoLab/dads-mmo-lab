@@ -24,13 +24,15 @@ from __future__ import annotations
 
 import os
 import posixpath
+import queue
 import re
 import stat
 import tempfile
-from collections.abc import Generator, Iterator, Mapping, Sequence
+import threading
+from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import ClassVar
+from typing import ClassVar, cast
 
 from yulon import (
     ale_playerbots,
@@ -39,11 +41,12 @@ from yulon import (
     git,
     networking,
     party,
+    platform,
     server_build_presses,
 )
-from yulon.catalog import snapshot
+from yulon.catalog import composegen, snapshot
 from yulon.catalog.catalog import AzerothCoreData, CatalogEntry, EmulatorSource
-from yulon.catalog.families import carried, scriptdeploy
+from yulon.catalog.families import carried, extract, scriptdeploy
 from yulon.catalog.families.direction import moves_forward
 from yulon.catalog.installer import (
     ImportWindowStopped,
@@ -65,8 +68,10 @@ from yulon.catalog.native import (
     StagedInstaller,
     _listed,
     _listing,
+    _put_all,
     build_cancel_note,
     download_left_sentence,
+    stop_abandoned_worker,
 )
 from yulon.log import get_logger
 from yulon.manifest import Db
@@ -450,6 +455,14 @@ class AzerothCoreInstaller(StagedInstaller):
     """
 
 
+    EXTRACT_STAGE: ClassVar[str] = "extract-maps"
+    MMAPS_STAGE: ClassVar[str] = "mmaps"
+    """T812 C4a's two stages, in the tuple only for an entry with `client_extract`.
+
+    Not in `STAGE_NAMES` for the same reason as the T553 stages: an entry
+    without one (WotLK, Unbound) runs the historical tuple word for word.
+    """
+
     def stages(self) -> tuple[Stage, ...]:
         block = self._block()
         patch_stage = (Stage(self.PATCH_STAGE, self._patch_sources),) if block.patches else ()
@@ -470,6 +483,14 @@ class AzerothCoreInstaller(StagedInstaller):
             if block.world_bootstrap_service
             else ()
         )
+        extract_stage = (
+            (
+                Stage(self.EXTRACT_STAGE, self._extract_maps),
+                Stage(self.MMAPS_STAGE, self._mmaps, recorded=False),
+            )
+            if block.client_extract is not None
+            else ()
+        )
         return (
             Stage("clone-core", self._clone_core),
             Stage("clone-modules", self._clone_modules),
@@ -481,6 +502,7 @@ class AzerothCoreInstaller(StagedInstaller):
             Stage("generate-compose", self.stage_generate_compose),
             Stage("build", self.stage_build, cancel_note=build_cancel_note()),
             Stage("client-data", self._client_data, cancel_note=DOWNLOAD_CANCEL_NOTE),
+            *extract_stage,
             Stage("start-db", self._start_db, recorded=False),
             *bootstrap_stage,
             Stage("import", self._import, cancel_note=IMPORT_STAGE_CANCEL_NOTE),
@@ -868,8 +890,7 @@ class AzerothCoreInstaller(StagedInstaller):
         elif was_up is None:
             yield DATABASE_MAYBE_STARTED
         yield (
-            "None of them was applied, so the tested commit's server can start on your "
-            "databases."
+            "None of them was applied, so the tested commit's server can start on your databases."
         )
         return None
 
@@ -1045,7 +1066,7 @@ class AzerothCoreInstaller(StagedInstaller):
             raise InstallerError(
                 updates_unread(
                     "your databases already have",
-                    f"Yu'lon could not start the database to " f"ask it: {exc}",
+                    f"Yu'lon could not start the database to ask it: {exc}",
                 )
             ) from exc
         password = self.resolve_secrets(server_dir).db_password
@@ -1363,6 +1384,254 @@ class AzerothCoreInstaller(StagedInstaller):
                 raise OneShotLeftRunning(download_left_sentence(left, earlier=False))
         self._check_run(run, "the world bootstrap", ctx.cancel, IMPORT_STAGE_CANCEL_NOTE)
         yield "The CoA world's base data is in place."
+    DATA_DIR = "data"
+    """`data/` under the server directory: what the extract stage fills and mmaps reads."""
+
+    def _data_dir(self, ctx: StageContext) -> Path:
+        """`data/` under the server directory -- refused if it resolves anywhere else.
+
+        `CmangosInstaller._data_dir`'s rule: `run_mmaps()` deletes `data/mmaps`
+        outright, so a `data/` that is a symlink into a client would carry that
+        delete there. One `resolve()` per stage; a link refused by name.
+        """
+        server_dir = ctx.server_dir
+        data_dir = server_dir / self.DATA_DIR
+        landing = data_dir.resolve()
+        if not landing.is_relative_to(server_dir.resolve()):
+            raise InstallerError(
+                f"{data_dir} leads to {landing}, which is outside this install's folder "
+                f"({server_dir}). This install writes extracted game data into that folder and "
+                "deletes a folder inside it when it regenerates movement maps, so a link pointing "
+                "elsewhere would let it overwrite and delete files that are not its own. "
+                "This stage ran nothing and removed nothing. Remove the link so "
+                f"{self.DATA_DIR} can be this install's own folder, or install this server "
+                "in the folder you want its data to live in."
+            )
+        data_dir.mkdir(parents=True, exist_ok=True)
+        return data_dir
+
+    def _image_ref(self, ctx: StageContext, service: str) -> str:
+        """The fully qualified image reference for `service` in `native.images`.
+
+        `CmangosInstaller._image_ref`'s body through `composegen.built_image_refs`.
+        """
+        prefix = self._native().image_prefix
+        refs = composegen.built_image_refs(
+            self.entry,
+            ctx.server_dir,
+            platform_id=self._seams.platform_id,
+            install_id=self._install_id(ctx.server_dir),
+        )
+        for ref in refs:
+            if ref.startswith(f"{prefix}{service}:"):
+                return ref
+        raise InstallerError(
+            f"{service} is not one of the images this install builds "
+            f"({', '.join(self._native().images)}). That is a bug in the app, not something "
+            "to fix on this machine."
+        )
+
+    def _user_args(self) -> tuple[str, ...]:
+        """`--user uid:gid` on Linux, nothing on Docker Desktop: `platform.py`'s one policy."""
+        ask = cast("Callable[[], platform.PlatformId]", self._seams.platform_id)
+        return tuple(platform.container_user_args(platform_id=ask))
+
+    def _stream(
+        self,
+        call: Callable[[docker.OutputSink], Iterator[str]],
+        *,
+        cancel: threading.Event | None,
+        stage: str,
+    ) -> Iterator[str]:
+        """A stage-kind generator that ALSO takes a sink: yield both streams live.
+
+        `CmangosInstaller._stream`'s bridge: one queue, one worker thread, the
+        sink's lines and the generator's own progress lines on it together.
+        """
+        queued: queue.Queue[str | None] = queue.Queue()
+        failure: list[BaseException] = []
+
+        def work() -> None:
+            try:
+                for line in call(lambda pushed: _put_all(queued, pushed, stage)):
+                    queued.put(line)
+            except BaseException as exc:  # noqa: BLE001 - re-raised on the caller's thread
+                failure.append(exc)
+            finally:
+                queued.put(None)
+
+        worker = threading.Thread(target=work, daemon=True, name="yulon-azerothcore-output")
+        worker.start()
+        try:
+            while True:
+                item = queued.get()
+                if item is None:
+                    break
+                yield item
+        except BaseException:
+            stop_abandoned_worker(worker, cancel, what="the AzerothCore stage output")
+            raise
+        worker.join()
+        if failure:
+            exc = failure[0]
+            if isinstance(exc, InstallerError):
+                raise exc
+            raise InstallerError(f"the step could not be run: {exc}") from exc
+
+    def _case_view(self, client_dir: Path, view: Path) -> Generator[str, None, Path]:
+        """The folder the tools read the client from: itself, or a view of it in `view`.
+
+        `CmangosInstaller._case_view`'s rule: the tools open archives by fixed
+        names, and a client named in another case on a case-sensitive disk gives
+        them nothing to read. The view is links under the names they open.
+        """
+        if not client_dir.is_dir():
+            return client_dir
+        try:
+            extract.remove_case_view(view)
+            if not extract.lay_case_view(client_dir, view):
+                return client_dir
+        except OSError as exc:
+            try:
+                extract.remove_case_view(view)
+            except OSError as left:
+                logger.warning(f"the links in {view} could not be removed: {left}")
+            try:
+                renames = extract.renamed_in_view(client_dir)
+            except OSError:
+                renames = []
+            named = ", ".join(f"{theirs} to {ours}" for theirs, ours in renames[:3])
+            more = f" and {len(renames) - 3} more" if len(renames) > 3 else ""
+            raise InstallerError(
+                f"Some of your client's files are named in another case than {self.entry.name}'s "
+                "map tools open, and Yu'lon could not make the links that let the tools read "
+                f"them in {view} ({exc}). Nothing was extracted. Free that folder, or rename the "
+                f"client's files ({named}{more}), then press Install again."
+            ) from exc
+        renames = extract.renamed_in_view(client_dir)
+        named = ", ".join(f"{theirs} as {ours}" for theirs, ours in renames[:3])
+        more = f" and {len(renames) - 3} more" if len(renames) > 3 else ""
+        yield (
+            "Some of your client's files are named in another case than the map tools open; "
+            f"they read them through links in {view} ({named}{more}). Your client is not changed."
+        )
+        return view
+
+    def _extract_maps(self, ctx: StageContext) -> Iterator[str]:
+        """Pull dbc/maps/vmaps out of the player's client, mounted read-only (T812 C4a).
+
+        `CmangosInstaller._extract`'s shape: the image ref is the `tools` entry
+        of `composegen.built_image_refs`, the client is `ctx.client_dir`, the
+        output the server's own `data/`, the plan the entry's
+        `client_extract.extract`. After the run, `extract.missing_map_data()`
+        of `required_maps` is the gate: a press that cannot start its world
+        must not record an extract that cannot run it.
+        """
+        plan_block = self._block().client_extract
+        if plan_block is None:
+            yield "This server has no separate client-extract step."
+            return
+        client_dir = ctx.client_dir
+        if client_dir is None:
+            raise InstallerError(
+                f"{self.entry.name} needs the game client folder to extract its maps from, and "
+                "none was given. Pick the client folder and try again."
+            )
+        data_dir = self._data_dir(ctx)
+        image_ref = self._image_ref(ctx, plan_block.extract.image)
+        user_args = self._user_args()
+        yield f"Extracting server data from {client_dir} into {data_dir} (the client is read-only)."
+        view = ctx.server_dir / extract.CASE_VIEW_DIR
+        read_from = client_dir
+        try:
+            read_from = yield from self._case_view(client_dir, view)
+            yield from self._stream(
+                lambda sink: extract.run_plan(
+                    plan_block.extract,
+                    image_ref=image_ref,
+                    client_dir=read_from,
+                    data_dir=data_dir,
+                    run_container=self._seams.run_container,
+                    user_args=user_args,
+                    sink=sink,
+                    cancel=ctx.cancel,
+                    required_file=plan_block.client.required_file,
+                    client_build=self.entry.client.build,
+                    selinux_enforcing=self._seams.ask_selinux,
+                    evidence_client_dir=client_dir,
+                    client_files=None if read_from == client_dir else client_dir,
+                ),
+                cancel=ctx.cancel,
+                stage="extract",
+            )
+        finally:
+            try:
+                extract.remove_case_view(view)
+            except OSError as exc:
+                logger.warning(f"the links in {view} could not be removed: {exc}")
+        self._check_cancel(ctx.cancel)
+        missing = extract.missing_map_data(data_dir, plan_block.required_maps)
+        if missing:
+            raise InstallerError(
+                "The map data the world server needs at start is not all there "
+                f"({'; '.join(missing)}). The extract stage made it from {client_dir}: check "
+                "that it is a complete Ascension 3.3.5a client. Nothing was started."
+            )
+        yield "Extraction finished."
+
+    def _mmaps(self, ctx: StageContext) -> Iterator[str]:
+        """Generate movement maps from the extracted maps, before the import (T812 C4a).
+
+        Never recorded, like `up`: a resume must always end with the movement
+        maps made, and `extract.run_mmaps()` skips itself when its record and
+        counts already vouch for the run.
+        """
+        plan_block = self._block().client_extract
+        if plan_block is None:  # unreachable: the stage is only in the tuple with one
+            yield "This server has no separate movement-map step."
+            return
+        data_dir = self._data_dir(ctx)
+        image_ref = self._image_ref(ctx, plan_block.extract.image)
+        user_args = self._user_args()
+        yield "Generating movement maps (this can take an hour or more)."
+        yield from self._stream(
+            lambda sink: extract.run_mmaps(
+                plan_block.mmaps,
+                image_ref=image_ref,
+                data_dir=data_dir,
+                run_container=self._seams.run_container,
+                user_args=user_args,
+                sink=sink,
+                cancel=ctx.cancel,
+            ),
+            cancel=ctx.cancel,
+            stage="mmaps",
+        )
+        self._check_cancel(ctx.cancel)
+        yield "Map generation finished."
+
+    def start_refusal(self, server_dir: Path, *, rebuilding: bool = False) -> str | None:
+        """The spine's refusal, then the extract gate for a `client_extract` entry (T812 C4a).
+
+        The server must not start without the map data its start check would
+        refuse on: `extract.missing_map_data()` of the entry's `required_maps`
+        over the server's own `data/`. Asked in the start path so a `data/`
+        emptied after a finished extract still refuses with the map sentence.
+        """
+        refused = super().start_refusal(server_dir, rebuilding=rebuilding)
+        if refused is not None:
+            return refused
+        plan_block = self._block().client_extract
+        if plan_block is None:
+            return None
+        missing = extract.missing_map_data(server_dir / self.DATA_DIR, plan_block.required_maps)
+        if not missing:
+            return None
+        return (
+            "The map data the world server needs at start is not all there "
+            f"({'; '.join(missing)}). Press Install to extract it from your client first. "
+            "Nothing was started."
+        )
 
     def _up(self, ctx: StageContext) -> Iterator[str]:
         """Write the catalog's module confs from their `.dist`, then the spine's `up` (T137).
