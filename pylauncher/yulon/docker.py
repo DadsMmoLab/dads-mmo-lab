@@ -6938,7 +6938,9 @@ def last_words(tail: tuple[str, ...], *, from_build: bool = False) -> str:
         following = [line for line in said[at + 1 :] if not _CURL_METER.match(unprefixed(line))]
         lines.extend(line for line in following if line not in lines)
         text = " / ".join(lines[:_LAST_WORDS_LINES])
-        return text if len(text) <= _LAST_WORDS_CHARS else "…" + text[-_LAST_WORDS_CHARS:]
+        # From the HEAD: the error line leads, and a long neighbour must not push
+        # its own words ("ERROR 1146 ...") off the front (CI shard 2, 2026-10-28).
+        return text if len(text) <= _LAST_WORDS_CHARS else text[:_LAST_WORDS_CHARS] + "…"
 
     kept = _build_log_elsewhere(said) if from_build else ""
     if kept:
