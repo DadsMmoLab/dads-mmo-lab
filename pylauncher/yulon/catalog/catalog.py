@@ -396,6 +396,121 @@ class ModuleHealth(_Strict):
         return self
 
 
+class AcRealmType(_Strict):
+    """One realm type an AzerothCore entry may switch between (T812 C1).
+
+    The ACTIVE type lives under the plain `acore_auth`/`acore_characters`/
+    `acore_playerbots` names, so every module reading `entry.databases.*` stays
+    right; inactive types are parked in `<name>_<id>` schemas and a switch is
+    one atomic `RENAME TABLE` with the servers stopped. `world_env` carries the
+    conf keys this type sets, merged over the block's own `world_env`.
+    """
+
+    id: Annotated[str, Field(pattern=r"^[a-z][a-z0-9]{1,9}$")] = Field(
+        description="The DB suffix the parked schemas carry: `<name>_<id>`.",
+    )
+    label: str = Field(min_length=1)
+    description: str = Field(min_length=1)
+    realm_name: Annotated[str, Field(min_length=1, max_length=32)] = Field(
+        description="The realm row's name for this type.",
+    )
+    world_env: dict[Annotated[str, Field(pattern=r"^AC_[A-Z0-9_]+$")], str] = Field(
+        default_factory=dict,
+        description="Conf keys this realm type sets, merged over the block's `world_env`.",
+    )
+
+    @field_validator("realm_name")
+    @classmethod
+    def _realm_name_is_plain_text(cls, value: str) -> str:
+        if any(mark in value for mark in ("'", '"', "\\")):
+            raise ValueError(
+                f"realm_name carries a quote or backslash ({value!r}): it is written into "
+                "an UPDATE statement, not through a parameter"
+            )
+        return value
+
+
+class AcSurgicalMap(_Strict):
+    """One map carved out of a disabled client archive at extract time (T812 C1).
+
+    The archive stays OUT of the main run: the extract appends a tool that links
+    it under `link_as` in a scratch view of the client, extracts there, and
+    copies only this map's files into the shared `data/`.
+    """
+
+    map_id: int = Field(ge=0, description="The map extracted on the side, e.g. 936.")
+    archive: str = Field(
+        min_length=1,
+        description="Client-relative path of the disabled archive holding the map.",
+    )
+    link_as: str = Field(
+        min_length=1,
+        description="Client-relative path the archive is linked as in the scratch view.",
+    )
+    extra_vmaps: tuple[Annotated[str, Field(min_length=1)], ...] = Field(
+        default=(),
+        description="Bare vmap file names copied beside the map's own tiles.",
+    )
+    min_maps: int = Field(
+        ge=1,
+        description="How many `maps/<map>*.map` files the side run must leave behind.",
+    )
+
+    @field_validator("archive")
+    @classmethod
+    def _archive_inside_data(cls, value: str) -> str:
+        return _below(value, "archive", "the client's Data/ folder")
+
+    @field_validator("link_as")
+    @classmethod
+    def _link_is_an_archive_inside_data(cls, value: str) -> str:
+        _below(value, "link_as", "the client's Data/ folder")
+        if not value.casefold().endswith(".mpq"):
+            raise ValueError(f"link_as names the archive the tools open (.MPQ), got {value!r}")
+        return value
+
+    @field_validator("extra_vmaps")
+    @classmethod
+    def _extras_are_bare_names(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        for name in value:
+            if "/" in name or "\\" in name:
+                raise ValueError(
+                    f"extra_vmaps holds bare file names copied out of the run, got {name!r}"
+                )
+        return value
+
+
+class AcClientExtract(_Strict):
+    """How an AzerothCore entry extracts its client data and movement maps (T812 C1).
+
+    The same shape as `CmangosData`'s client/extract/mmaps triple, with the
+    coverage this family needs: which maps must exist before the server may
+    start, which the checkout-relative mmaps config is, and which maps are
+    carved out of disabled archives on the side.
+    """
+
+    client: ClientSpec
+    extract: ExtractPlan
+    mmaps: MmapPlan
+    mmaps_config: str = Field(
+        min_length=1,
+        description="Checkout-relative path of the `mmaps-config.yaml` the generator needs.",
+    )
+    required_maps: tuple[Annotated[int, Field(ge=0)], ...] = Field(
+        min_length=1,
+        description="Map ids whose maps and vmaps must exist before the server starts.",
+    )
+    surgical_maps: tuple[AcSurgicalMap, ...] = Field(
+        default=(),
+        description="Maps carved out of disabled archives after the main run (e.g. 936).",
+    )
+
+    @field_validator("mmaps_config")
+    @classmethod
+    def _config_inside_the_checkout(cls, value: str) -> str:
+        return _below(value, "mmaps_config", "the checkout")
+
+
 class AzerothCoreData(_Strict):
     """The AzerothCore family's own install data: the worldserver env block (A2), and the
     module confs the install writes from their `.dist` (T137)."""
@@ -476,6 +591,82 @@ class AzerothCoreData(_Strict):
             "RSS reading by the first gate."
         ),
     )
+
+    client_extract: AcClientExtract | None = Field(
+        default=None,
+        description=(
+            "How this entry extracts its client data and movement maps from the player's "
+            "client (T812): the client's shape, the extractor tools and their evidence, "
+            "the mmaps run and its config, and the maps that must exist before the "
+            "server starts. None: the entry has no extract stage and behaves as before."
+        ),
+    )
+    world_bootstrap_service: str | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Compose service that loads the world's base data after start-db, before import "
+            "(T812). None: the entry has no bootstrap stage."
+        ),
+    )
+    realm_types: tuple[AcRealmType, ...] = Field(
+        default=(),
+        description=(
+            "The realm types this entry may switch between (T812). Empty: one realm, as "
+            "before."
+        ),
+    )
+    default_realm_type: str | None = Field(
+        default=None,
+        min_length=1,
+        description="The active type of a fresh install; required exactly when realm types are.",
+    )
+    auth_after_world_ready: bool = Field(
+        default=False,
+        description=(
+            "Start the auth server only after the world is ready, then set its offline flag "
+            "row from the world (T812). False: both servers start as before."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _realm_type_ids_are_unique(self) -> AzerothCoreData:
+        seen = [realm.id for realm in self.realm_types]
+        doubled = sorted({realm_id for realm_id in seen if seen.count(realm_id) > 1})
+        if doubled:
+            raise ValueError(f"realm type ids must be unique, got {doubled} more than once")
+        return self
+
+    @model_validator(mode="after")
+    def _a_default_realm_type_is_a_listed_one(self) -> AzerothCoreData:
+        if self.realm_types and self.default_realm_type is None:
+            raise ValueError(
+                "an entry with realm types names its default realm type "
+                "(default_realm_type)"
+            )
+        if self.default_realm_type is not None:
+            if not self.realm_types:
+                raise ValueError(
+                    f"default_realm_type {self.default_realm_type!r} names no realm type: "
+                    "the entry lists none"
+                )
+            if self.default_realm_type not in {realm.id for realm in self.realm_types}:
+                raise ValueError(
+                    f"default_realm_type {self.default_realm_type!r} is not one of this "
+                    f"entry's realm types {sorted(realm.id for realm in self.realm_types)}"
+                )
+        return self
+
+    @model_validator(mode="after")
+    def _a_world_env_key_has_one_owner(self) -> AzerothCoreData:
+        for realm in self.realm_types:
+            repeated = sorted(set(self.world_env) & set(realm.world_env))
+            if repeated:
+                raise ValueError(
+                    f"realm type {realm.id!r} repeats world_env keys {repeated}: one key "
+                    "has one owner, the block's or the type's, never both"
+                )
+        return self
 
 
 MpqDepth = int | Literal["recursive"]
@@ -1957,7 +2148,13 @@ class NativeInstall(_Strict):
                 f"family is {self.family!r} but the blocks present are {present}; "
                 f"exactly the `{self.family}` block must be present"
             )
+        azerothcore_image = (
+            self.azerothcore.client_extract.extract.image
+            if self.azerothcore is not None and self.azerothcore.client_extract is not None
+            else None
+        )
         extract_images = {
+            "azerothcore": azerothcore_image,
             "cmangos": self.cmangos.extract.image if self.cmangos is not None else None,
             "trinitycore": self.trinitycore.extract.image if self.trinitycore is not None else None,
         }
@@ -3069,10 +3266,44 @@ class Client(_Strict):
         ),
     )
     realmlist_file: str = "realmlist.wtf"
+    exe_names: tuple[Annotated[str, Field(pattern=r"^[^\\/:*?\"<>|]+\.exe$")], ...] = Field(
+        default=("wow.exe",),
+        min_length=1,
+        description=(
+            "The client executables Play may start, lower case (T812). Each ends `.exe`; "
+            "the default is the stock name every shipped entry has used until now."
+        ),
+    )
+    wine_dll_overrides: str | None = Field(
+        default=None,
+        pattern=r"^[A-Za-z0-9_.,;=-]+$",
+        description=(
+            "The `WINEDLLOVERRIDES` value Play runs the client with (T812). "
+            "None: no overrides."
+        ),
+    )
     notes: tuple[str, ...] = ()
     packs: tuple[ClientPack, ...] = ()
     exe_patch: ExePatch | None = None
     config_wtf: ConfigWtf | None = None
+
+    @field_validator("exe_names")
+    @classmethod
+    def _exe_names_are_lower_case_and_distinct(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        """Lower case, because the client folder is usually on Windows and `Ascension.exe`
+
+        must not slip past a rule that only knows `ascension.exe`; distinct casefolded,
+        for the same reason two packs may not install one file twice.
+        """
+        lowered = [name.casefold() for name in value]
+        if any(name != name.casefold() for name in value):
+            raise ValueError(
+                f"exe_names are lower case, got {[n for n in value if n != n.casefold()]}"
+            )
+        doubled = sorted({name for name in lowered if lowered.count(name) > 1})
+        if doubled:
+            raise ValueError(f"exe_names must be distinct, got {doubled} more than once")
+        return value
 
     @model_validator(mode="after")
     def _also_builds_extend_a_required_build(self) -> Client:
@@ -3606,7 +3837,13 @@ class CatalogEntry(_Strict):
             "db_import": c.db_import,
             "client_data": c.client_data,
         }
+        if native.azerothcore is not None and native.azerothcore.client_extract is not None:
+            # A client-extract entry lays its data from the player's client (T812): the
+            # old download service is gone, so its template name is gone with it.
+            del given["client_data"]
         for field, suffix in AZEROTHCORE_CONTAINER_SUFFIXES.items():
+            if field not in given:
+                continue
             want = prefix + suffix
             if given[field] != want:
                 raise ValueError(
@@ -3620,6 +3857,56 @@ class CatalogEntry(_Strict):
                 f"{self.id}: operations.port {ops.port} is not install.native.soap_port "
                 f"{native.soap_port}; the base file publishes the second and the command "
                 "channel dials the first, so they must be one number"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _a_client_extract_needs_no_client_data_service(self) -> CatalogEntry:
+        """`client_extract` replaces the `client-data` fetch: both would lay maps and DBCs.
+
+        The old service pulls the data from a download; the new stage extracts it
+        from the player's own client. An entry naming both has two writers of
+        `data/` and no rule for which one wins, and `requires_client_dir` is how
+        the engine knows the player's folder must be there to read.
+        """
+        native = self.install.native
+        block = native.azerothcore if native is not None else None
+        if block is None or block.client_extract is None:
+            return self
+        if self.containers.client_data is not None:
+            raise ValueError(
+                f"{self.id}: client_extract extracts maps from the player's client, so "
+                "containers.client_data must be absent (it is the download that "
+                "client_extract replaces)"
+            )
+        if not self.install.requires_client_dir:
+            raise ValueError(
+                f"{self.id}: client_extract reads the player's client, so "
+                "install.requires_client_dir must be true"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _auth_after_world_needs_its_marker(self) -> CatalogEntry:
+        """`auth_after_world_ready` waits on the auth log and the auth container.
+
+        The flag row is re-asserted through `containers.auth`, and the start
+        order waits for `ready.auth` before it; without either the entry names
+        an order nobody keeps and a row nobody writes.
+        """
+        native = self.install.native
+        block = native.azerothcore if native is not None else None
+        if block is None or not block.auth_after_world_ready:
+            return self
+        if native is not None and native.ready.auth is None:
+            raise ValueError(
+                f"{self.id}: auth_after_world_ready waits on the auth server's ready line, "
+                "so install.native.ready.auth must be set"
+            )
+        if self.containers.auth is None:
+            raise ValueError(
+                f"{self.id}: auth_after_world_ready re-asserts the realm flag through the "
+                "auth container, so containers.auth must be set"
             )
         return self
 

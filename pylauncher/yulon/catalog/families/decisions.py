@@ -184,10 +184,14 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         _all(supported()),
         hits=(
             "'azerothcore'",
+            "'azerothcore'",
             "'cmangos'",
             "'cmangos'",
             "'trinitycore'",
             "'trinitycore'",
+            ".azerothcore",
+            ".azerothcore",
+            ".azerothcore",
             ".azerothcore",
             ".cmangos",
             ".cmangos",
@@ -243,7 +247,29 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
                 "shared/trinitycore names three services; the rendered file is checked instead"
             ),
         },
-        hits=("'azerothcore'",),
+        hits=("'azerothcore'", ".azerothcore", ".azerothcore"),
+    ),
+    Site(
+        "yulon.catalog.catalog",
+        "CatalogEntry._a_client_extract_needs_no_client_data_service",
+        "a client-extract entry lays maps from the player's client, not the download (T812)",
+        {
+            "azerothcore": supported(),
+            "cmangos": not_applicable("only an AzerothCore block carries a client extract"),
+            "trinitycore": not_applicable("only an AzerothCore block carries a client extract"),
+        },
+        hits=(".azerothcore",),
+    ),
+    Site(
+        "yulon.catalog.catalog",
+        "CatalogEntry._auth_after_world_needs_its_marker",
+        "starting auth after the world needs the auth ready marker and container (T812)",
+        {
+            "azerothcore": supported(),
+            "cmangos": not_applicable("only an AzerothCore block orders auth after the world"),
+            "trinitycore": not_applicable("only an AzerothCore block orders auth after the world"),
+        },
+        hits=(".azerothcore",),
     ),
     Site(
         "yulon.unbound_settings",
