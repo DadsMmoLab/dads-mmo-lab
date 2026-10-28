@@ -417,8 +417,8 @@ def _ignore_answer(_answer: object) -> None:
 DOCKERIGNORE = ".dockerignore"
 DOCKERIGNORE_DATA_BLOCK: tuple[str, ...] = (
     "# Yu'lon: `data/` holds the client data this install extracts (maps, vmaps,",
-    "# mmaps, dbc, Cameras, Buildings). It is several gigabytes after install and",
-    "# no build stage reads it, so it is left out of the build context; `data/sql`",
+    "# mmaps and the DBC files). It is several gigabytes after install and no",
+    "# build stage reads it, so it is left out of the build context; `data/sql`",
     "# is the one folder the db-import image copies.",
     "data/*",
     "!data/sql",
