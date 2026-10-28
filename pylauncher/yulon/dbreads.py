@@ -49,7 +49,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-from yulon import playerbots_keys
+from yulon import playerbots_keys, table_repair
 from yulon.catalog import compose_env, composegen
 from yulon.catalog.catalog import BotMarker, CatalogEntry
 from yulon.log import get_logger
@@ -145,6 +145,10 @@ class Population:
     characters: int | None = None
     problem: str = ""
     warning: str = ""
+    crashed: tuple[table_repair.CrashedTable, ...] = ()
+    """The damaged tables a read failure named (T822); empty on every other failure."""
+    crash_unnamed: bool = False
+    """A storage-engine crash error that named no table this app may repair (T822)."""
 
 
 def resolve_marker(entry: CatalogEntry, server_dir: Path) -> MarkerAnswer:
@@ -520,6 +524,18 @@ def population(
                         "Save logs for support… and ask for help."
                     )
                 return Population(problem=f"could not read the server's characters: {exc}")
+        crashed = table_repair.crashed_tables(
+            text, (entry.databases.characters, entry.databases.auth)
+        )
+        if crashed.tables or crashed.unnamed:
+            # T822: a crash left a table damaged. The program's own words are the log's;
+            # the card says what happened in plain words and offers the repair.
+            logger.warning(f"a database table is damaged: {text}")
+            return Population(
+                problem=table_repair.damaged_sentence(crashed),
+                crashed=crashed.tables,
+                crash_unnamed=crashed.unnamed,
+            )
         say = logger.info if early else logger.warning
         say(f"could not count this server's population: {exc}")
         return Population(problem=f"could not read the server's characters: {exc}")

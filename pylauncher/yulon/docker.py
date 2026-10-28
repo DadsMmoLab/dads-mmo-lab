@@ -10427,6 +10427,37 @@ def copy_from_image(image: str, src: str, dest: Path) -> None:
                 )
 
 
+def copy_from_container(
+    container: str,
+    src: str,
+    dest: Path | str,
+    *,
+    wsl_distro: str | None = None,
+) -> None:
+    """`docker cp <container>:<src> <dest>` from a container that is already running.
+
+    `copy_from_image()`'s sibling for a file on a live container's own filesystem, which
+    is how T822 keeps a copy of a crashed table's files before repairing it. The copy is
+    a read of the container and a write to the host: `dest`'s folder must exist, and
+    `docker cp`'s own rules decide whether a file or a folder lands in it.
+
+    `wsl_distro` is REQUIRED for a server that lives inside a distro (T125). The CLI
+    then runs in that distro, so a Windows spelling of `dest` would be resolved on the
+    wrong side of the boundary; the caller translates it (`platform.wsl_linux_path`)
+    and this function runs the argv it was given.
+
+    Raises:
+        DockerCliMissingError: there was no docker CLI to run.
+        DockerCommandError: docker refused the copy, or did not answer in time.
+    """
+    proc = _docker(["cp", f"{container}:{src}", str(dest)], wsl_distro=wsl_distro)
+    if proc.returncode == 0:
+        return
+    if _cli_missing(proc):
+        raise DockerCliMissingError(platform.DOCKER_CLI_MISSING_HELP)
+    raise DockerCommandError(f"docker cp {container}:{src} exited {proc.returncode}: {proc.stderr}")
+
+
 _STDIN_CHUNK_BYTES = 1 << 20
 """How much of `source` is read per write. A dump is measured in gigabytes."""
 

@@ -30,7 +30,7 @@ measurement (review, 2026-09-03).
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 
@@ -127,6 +127,7 @@ def backup(
     *,
     only: Sequence[str] | None = None,
     label: str | None = None,
+    ignore_tables: Mapping[str, Sequence[str]] | None = None,
     running: RunningNames | None = None,
     wsl_distro: str | None = None,
     now: datetime | None = None,
@@ -138,6 +139,7 @@ def backup(
         game=GAME,
         only=only,
         label=label,
+        ignore_tables=ignore_tables,
         spec=docker_ctl.SPEC,
         core_databases=CORE_DATABASES,
         running=running,
