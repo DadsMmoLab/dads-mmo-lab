@@ -1102,6 +1102,19 @@ def test_a_marker_that_will_not_write_refuses_the_start(tmp_path: Path) -> None:
     assert coa_realm.refusal(coa(), tmp_path, sql) == coa_realm.MARK_START_REFUSAL
 
 
+def test_a_marker_that_does_not_read_back_refuses_the_start(tmp_path: Path) -> None:
+    class Deaf(FakeSql):
+        def execute(self, statement: str) -> None:
+            if statement.startswith("INSERT IGNORE"):
+                self.executed.append(statement)  # answered OK, wrote nothing
+                return
+            super().execute(statement)
+
+    sql = Deaf()
+    coa_schemas(sql, marker=None)
+    assert coa_realm.refusal(coa(), tmp_path, sql) == coa_realm.MARK_START_REFUSAL
+
+
 def test_a_crash_note_refuses_the_start_before_any_read(tmp_path: Path) -> None:
     """A first switch killed mid-import leaves plain schemas with no marker to refuse on."""
     sql = FakeSql()
@@ -1259,6 +1272,9 @@ def test_the_engine_asks_the_realm_gate_once_per_start(
         return real(entry, server_dir, sql)  # type: ignore[arg-type]
 
     monkeypatch.setattr(coa_realm, "refusal", counting)
+    _engine().start_refusal(tmp_path)  # the gate lets it by: the rest is asked after it
+    assert asked == [tmp_path]
+    asked.clear()
     write_crash(tmp_path, "hero", imported=True)
     assert _engine().start_refusal(tmp_path) == coa_realm.CRASH_START_REFUSAL
     assert asked == [tmp_path]
