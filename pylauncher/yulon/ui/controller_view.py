@@ -1828,6 +1828,14 @@ class _PackStopped(Exception):
         self.reason = reason
 
 
+_UpdatePending = tuple[
+    ClientPack,
+    Callable[[ClientPack, str], None] | None,
+    Callable[[ClientPack, str], None] | None,
+]
+"""A pack update in flight: the pack and the `done`/`failed` its slots hand to (T809 W6)."""
+
+
 @dataclass(frozen=True)
 class _Prepared:
     """What the Play pipeline did, read on the GUI thread: lines to show, and 404 packs."""
@@ -8670,6 +8678,11 @@ class ControllerView(QWidget):
         # A Make…, Refresh or Delete writing the ready-to-play client: it holds
         # the close (`busy_reason()`) the way the import does.
         self._play_client_running = False
+        # T809 W6: the pack update in flight (`update_client_pack`): the bound
+        # slots can carry only the worker's answer, so the caller's pack and its
+        # `done`/`failed` wait here for them to pick up. One at a time under the
+        # play-client lock (`_play_client_refusal()` refuses the second).
+        self._update_pending: _UpdatePending | None = None
         # Play's two waits: a Start it asked for, and a Refresh it asked for.
         self._play_after_start = False
         self._play_after_refresh = False
@@ -14472,6 +14485,11 @@ class ControllerView(QWidget):
         leaves the record as it was, so the old pack keeps working. Refused while a
         server hold, a module job, or a Play (or another pack write) runs; off Windows
         the pack's own checkbox is never shown, so no button is either.
+
+        The work runs under `_update_pending` the way `_backup_before_update` carries a
+        backup chained in front of a server update: the callbacks are bound slots
+        and can carry only the worker's answer, so the caller's `done`/`failed`
+        waits here for them to pick up.
         """
         play = self.services.play_client_dir
         pack = next((p for p in self.entry.client.packs if p.id == pack_id), None)
@@ -14496,22 +14514,22 @@ class ControllerView(QWidget):
             return
         self._play_client_running = True
         self._hold_busy()
+        self._update_pending = (pack, done, failed)
         self._say_play(f"Updating {pack.label}…")
         self._run(
             lambda: self._lumen_update_work(pack_id),
-            lambda result: self._update_done(pack, result, done),
-            lambda exc: self._update_failed(pack, exc, done, failed),
+            self._update_done,
+            self._update_failed,
         )
 
     @Slot(object)
-    def _update_done(
-        self,
-        pack: ClientPack,
-        result: object,
-        done: Callable[[ClientPack, str], None] | None,
-    ) -> None:
+    def _update_done(self, result: object) -> None:
         """An update's worker answered: give back the lock and hand on its sentence."""
+        pending, self._update_pending = self._update_pending, None
         self._release_play_client()
+        if pending is None:
+            return
+        pack, done, _failed = pending
         sentence = result[1] if isinstance(result, tuple) else f"{pack.label} is updated."
         if done is not None:
             done(pack, sentence)
@@ -14519,15 +14537,13 @@ class ControllerView(QWidget):
             self._say_play(sentence)
 
     @Slot(object)
-    def _update_failed(
-        self,
-        pack: ClientPack,
-        exc: object,
-        done: Callable[[ClientPack, str], None] | None,
-        failed: Callable[[ClientPack, str], None] | None,
-    ) -> None:
+    def _update_failed(self, exc: object) -> None:
         """An update failed: the record is as it was, so the old pack keeps working."""
+        pending, self._update_pending = self._update_pending, None
         self._release_play_client()
+        if pending is None:
+            return
+        pack, _done, failed = pending
         if isinstance(exc, client_packs.Cancelled):
             sentence = "Update cancelled. Nothing was changed."
         elif isinstance(exc, client_packs.PackError):

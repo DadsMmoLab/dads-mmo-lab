@@ -3113,6 +3113,32 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "the player's own client is never chmodded and is left). Only in a folder whose step "
         "(a) marker was checked, never into a link, and never the player's own client"
     ),
+    ("client_packs.py", "foreign_files"): (
+        "T809 W5. Lists the ready-to-play client's top level for a loader name "
+        "(`version.dll`, whatever the case) this pack did not put there, so the "
+        "install step can refuse BEFORE fetching (`refuse_foreign_loader`). The "
+        "listing decides that refusal, but only inside a folder whose step (a) "
+        "marker was checked (`_gate`), never into a link, and the names it hands "
+        "back decide no write: the refusal is before any fetch, install or touch. "
+        "A folder that cannot be listed answers no names"
+    ),
+    ("client_packs.py", "reap_stale_loader"): (
+        "T809 W6B. Lists the marker's own client (the player's client the copy "
+        "was made from) for its top-level names, to tell a loader the copy still "
+        "holds but neither that client nor a pack record owns. The listing "
+        "decides a delete of that one loader name only, in a folder whose step "
+        "(a) marker was read first and only when the marker's own client no "
+        "longer has it. The copy's own names come from `foreign_files()` above; "
+        "a folder that cannot be listed ends the reap"
+    ),
+    ("client_packs.py", "_probe_locale"): (
+        "T809. Lists the copy's `Data/` for its four-character locale folders so "
+        "the pinned setup script can run over the one holding its "
+        "`locale-<same>.MPQ`, the way the script reads the client's own folders. "
+        "Read-only: the names decide only which locale the run is told, and a "
+        "missing folder refuses before anything runs. A folder that cannot be "
+        "listed answers no locale, which refuses the same way"
+    ),
     ("launcher_reads.py", "_scandir"): (
         "T187. Lists a ready-to-play client, its `Interface` and its `AddOns` -- one folder "
         "each, never a walk -- for the NAMES the launcher window shows under Addons in this "
