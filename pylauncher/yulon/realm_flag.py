@@ -111,8 +111,13 @@ def open_realm(
             )
         docker.sql_query(spec.db, client, password, None, statement, wsl_distro=wsl_distro)
         read = flags_statement(entry)
+        # T812 C8: the read names the auth schema to connect to; `flags_statement()` is
+        # unqualified (the Keeper asks it on the auth schema), and with no schema MySQL
+        # answered "ERROR 1046 No database selected" on every ordered start.
         answer = (
-            docker.sql_query(spec.db, client, password, None, read, wsl_distro=wsl_distro)
+            docker.sql_query(
+                spec.db, client, password, entry.databases.auth, read, wsl_distro=wsl_distro
+            )
             if read is not None
             else ""
         )

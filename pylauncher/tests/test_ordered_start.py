@@ -353,3 +353,32 @@ def test_opening_the_realm_keeps_other_flag_bits(monkeypatch, tmp_path) -> None:
     )
     (tmp_path / ".db_password").write_text("pw", encoding="utf-8")
     assert realm_flag.open_realm(COA, _spec(COA), tmp_path) is None
+
+
+def test_opening_the_realm_reads_its_row_in_the_auth_schema(monkeypatch, tmp_path) -> None:
+    """The live run (T812 C8): the row read ran with no schema: ERROR 1046 No database selected.
+
+    The fake answers as MySQL does: a table named without a schema, on a connection
+    that selected none, is refused. Mutation: pass None as the read's schema again.
+    """
+    from yulon import realm_flag
+
+    monkeypatch.setattr(
+        docker, "status", lambda **kw: ["coa-database", "coa-worldserver", "coa-authserver"]
+    )
+    asked: list[tuple[str | None, str]] = []
+
+    def sql_query(container, client, password, schema, statement, **kw):  # type: ignore[no-untyped-def]
+        asked.append((schema, statement))
+        table = COA.realmlist.table
+        qualified = f"{COA.databases.auth}.{table}" in statement
+        if schema is None and not qualified:
+            raise docker.DockerCommandError(
+                "mysql in coa-database exited 1: ERROR 1046 (3D000) at line 1: No database selected"
+            )
+        return "0" if statement.lstrip().upper().startswith("SELECT") else ""
+
+    monkeypatch.setattr(docker, "sql_query", sql_query)
+    (tmp_path / ".db_password").write_text("pw", encoding="utf-8")
+    assert realm_flag.open_realm(COA, _spec(COA), tmp_path) is None
+    assert any(statement.lstrip().upper().startswith("SELECT") for _s, statement in asked)
