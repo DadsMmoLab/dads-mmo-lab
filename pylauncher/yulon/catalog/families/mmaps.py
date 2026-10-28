@@ -126,7 +126,7 @@ WORK_MOUNT = "/out"
 LOG_TAIL_LINES = 200
 """How much of the generator's log a status reads: bounded, the progress is in its last line."""
 
-TILE_SUFFIX = ".mmtile"
+TILE_SUFFIX = extract.MMTILE_SUFFIX
 """`mmaps/MMMYYXX.mmtile`, one finished navmesh tile (MapBuilder.cpp:963 at faac5fc9); the
 per-map `MMM.mmap` is rewritten whenever a map starts (:649-651) and is never checked."""
 

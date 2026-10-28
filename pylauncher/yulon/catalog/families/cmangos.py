@@ -70,7 +70,7 @@ import posixpath
 import queue
 import re
 import threading
-from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
+from collections.abc import Callable, Generator, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import ClassVar, cast
@@ -600,6 +600,28 @@ class CmangosInstaller(StagedInstaller):
 
     # -- the world updates a `*-db` pin brings to an existing server (T531) ----
 
+    def before_rebuild(
+        self, server_dir: Path, route: str, press: str = server_build_presses.REBUILD
+    ) -> Iterator[str]:
+        """Put back a movement-map backup an unfinished press left, before anything changes.
+
+        T811's crash door for EVERY press, not only the update route's own check:
+        a Rebuild pressed after an update crashed would otherwise start a world on
+        `mmaps` missing the map that press had set aside. Restoring puts the tiles
+        and the off-mesh hash they were built from back together; nothing else of
+        the press is undone.
+        """
+        yield from self._restore_maps_a_press_left(server_dir)
+
+    def _restore_maps_a_press_left(self, server_dir: Path) -> Iterator[str]:
+        """Put back the tiles a press that did not finish set aside (T811); says so when it did."""
+        restored = extract.put_maps_back(server_dir / DATA_DIR)
+        if restored:
+            yield (
+                "An earlier press did not finish, so the movement maps it rebuilt were put "
+                f"back first ({_maps_named(restored)})."
+            )
+
     def check_moved_sources(
         self,
         server_dir: Path,
@@ -614,8 +636,15 @@ class CmangosInstaller(StagedInstaller):
         `*-db` checkout, or the ledger's first reading of it could not be what the install
         applied. Then each `report` phase whose files live in a source that just moved --
         the bots' world SQL -- is asked of git, and what changed is named, never applied.
-        What is returned is what `servers_down_work()` acts on.
+        What is returned is what `servers_down_work()` acts on. A movement-map
+        backup an earlier press did not finish with is put back FIRST (T811), so
+        the comparison below reads the hash the tiles on disk were built from.
         """
+        # T811: BEFORE anything reads the off-mesh record. A backup folder is a press
+        # that did not finish: its maps are put back with the hash they were built
+        # from, so the comparison below still sees the change instead of finding it
+        # already recorded, and the rebuild starts over from the old tiles.
+        yield from self._restore_maps_a_press_left(server_dir)
         catch_up = self._world_catch_up_plan()
         if catch_up.applying():
             # The `*-db` checkouts the catch-up will move get the route's own three
@@ -1418,8 +1447,16 @@ class CmangosInstaller(StagedInstaller):
             for work in reversed(works):
                 yield from work.back(ctx)
 
+        def done() -> Iterator[str]:
+            for work in works:
+                yield from work.done()
+
         return ServersDownWork(
-            prepare=lambda: iter(()), forward=forward, back=back, finishes_start_refusal=False
+            prepare=lambda: iter(()),
+            forward=forward,
+            back=back,
+            done=done,
+            finishes_start_refusal=False,
         )
 
     def _offmesh_rebuild_work(
@@ -1427,12 +1464,18 @@ class CmangosInstaller(StagedInstaller):
     ) -> ServersDownWork | None:
         """Rebuild only the maps whose off-mesh lines changed, once the new build runs (T811).
 
-        `forward()` -- servers down, the new image tagged, before it starts -- runs the
-        generator once per changed map over the install's own `data/mmaps`, keeping every
-        other map's tiles, then records the new hash. Nothing is wiped and no count gate
-        judges it. A failure records nothing, so the next press retries. `back()` puts the
-        old record back; the tiles a failed press left stay, and the next press rebuilds
-        them again from the recorded hash.
+        `forward()` -- servers down, the new image tagged, before it starts -- puts
+        back any backup a press that did not finish left, runs the generator once per
+        changed map over the install's own `data/mmaps`, keeping every other map's
+        tiles, then records the new hash. Each map's own files are moved aside before
+        its generator runs and put back at once if it fails, so one map is never left
+        half old and half new. Nothing is wiped and no count gate judges it.
+
+        `back()` -- the new build started nothing -- puts the set-aside tiles and the
+        hash they were built from back together, so the old build runs on the tiles
+        its own core was built with rather than on the rejected build's. What is set
+        aside is deleted by `done()`, once the new build is up: until then a rollback
+        still has something to put back.
         """
         if offmesh is None or not offmesh.map_ids:
             return None
@@ -1446,6 +1489,13 @@ class CmangosInstaller(StagedInstaller):
                     "the movement maps cannot be rebuilt: the install's data folder is gone. "
                     f"{NOTHING_DONE}"
                 )
+            yield from self._restore_maps_a_press_left(server_dir)
+            # Read after the put-back, never before: the hash has to be the one the
+            # tiles now on disk were built from, which is what a rollback restores.
+            current = extract.read_evidence(data_dir)
+            previous = None if current is None else current.offmesh_sha
+            if current is not None:
+                recorded.append(previous or "")
             image_ref = self._image_ref(ctx, data.extract.image)
             user_args = self._user_args()
             cap = _MmapCap()
@@ -1462,6 +1512,7 @@ class CmangosInstaller(StagedInstaller):
                     user_args=user_args,
                     sink=sink,
                     cancel=ctx.cancel,
+                    previous_sha=previous,
                     cpus=cap.cpus,
                     cpuset=cap.cpuset,
                     memory=cap.memory,
@@ -1470,9 +1521,7 @@ class CmangosInstaller(StagedInstaller):
                 stage="mmaps",
             )
             self._check_cancel(ctx.cancel)
-            current = extract.read_evidence(data_dir)
             if current is not None:
-                recorded.append(current.offmesh_sha or "")
                 extract.write_evidence(data_dir, replace(current, offmesh_sha=offmesh.sha))
             maps = ", ".join(f"map {each}" for each in offmesh.map_ids)
             yield (
@@ -1481,20 +1530,35 @@ class CmangosInstaller(StagedInstaller):
             )
 
         def back(ctx: StageContext) -> Iterator[str]:
-            if not recorded:
-                return
             data_dir = server_dir / DATA_DIR
-            current = extract.read_evidence(data_dir)
-            if current is not None:
-                before = recorded[0] or None
-                extract.write_evidence(data_dir, replace(current, offmesh_sha=before))
+            # The tiles go back BEFORE the record, and only the tiles can say which
+            # record that is: the backup wrote the hash they were built from.
+            restored = extract.put_maps_back(data_dir)
+            if recorded and not restored:
+                # Nothing to put back (a map with no finished tiles yet), but the new
+                # hash was recorded: put the old one back or the next press would call
+                # tiles that were never built current.
+                current = extract.read_evidence(data_dir)
+                if current is not None:
+                    before = recorded[0] or None
+                    extract.write_evidence(data_dir, replace(current, offmesh_sha=before))
+            if not restored and not recorded:
+                return
             yield (
                 "the new build did not start, so the movement maps go back to "
                 "the off-mesh file they were built from."
             )
 
+        def done() -> Iterator[str]:
+            if extract.drop_maps_backup(server_dir / DATA_DIR):
+                yield "The rebuilt movement maps stand; the tiles they replaced are gone."
+
         return ServersDownWork(
-            prepare=lambda: iter(()), forward=forward, back=back, finishes_start_refusal=False
+            prepare=lambda: iter(()),
+            forward=forward,
+            back=back,
+            done=done,
+            finishes_start_refusal=False,
         )
 
     def _world_catch_up_work(self, catch_up: _WorldCatchUp) -> ServersDownWork | None:
@@ -2858,6 +2922,10 @@ class CmangosInstaller(StagedInstaller):
         )
         self._check_cancel(ctx.cancel)
         self._note_offmesh(data_dir, ctx.server_dir)
+        # T811: a full generation replaces every map's tiles, so a backup a crashed
+        # per-map press left is no longer a state to go back to -- and its hash would
+        # be older than the one just recorded.
+        extract.drop_maps_backup(data_dir)
         yield "Map generation finished."
 
     def _conf(self, ctx: StageContext) -> Iterator[str]:
@@ -4885,6 +4953,11 @@ def _glob_names(glob: str, path: str) -> bool:
     folder, pattern = posixpath.split(glob)
     where, name = posixpath.split(path)
     return where == folder and fnmatch.fnmatchcase(name, pattern)
+
+
+def _maps_named(prefixes: Iterable[str]) -> str:
+    """`map 800, map 5` from the backup folders' zero-padded names (T811)."""
+    return ", ".join(f"map {int(each) if each.isdigit() else each}" for each in prefixes)
 
 
 @dataclass(frozen=True)
