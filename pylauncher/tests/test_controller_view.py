@@ -13458,22 +13458,30 @@ def test_the_file_picker_lists_the_deployed_confs_and_opens_the_first(
     assert not view.tuning_panel.editor.isReadOnly()
 
 
-def test_the_servers_own_conf_is_listed_read_only_and_says_why(
+def test_wotlks_own_conf_opens_editable_and_names_its_locked_keys(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
-    """T43's own follow-up: who owns core configuration is a bigger question."""
-    _deploy(tmp_path, "env/dist/etc/worldserver.conf", "[worldserver]\nMotd = hi\n")
+    """T819: the AzerothCore family's own confs open editable, with locked keys.
+
+    Mutation: leave the family in `read_only_confs` and the editor is read-only again.
+    """
+    _deploy(
+        tmp_path,
+        "env/dist/etc/worldserver.conf",
+        "[worldserver]\nWorldServerPort = 8085\nMotd = hi\n",
+    )
     view = _tuned_view(ps, tmp_path)
     core = next(
         b
         for b in view.tuning_panel.file_buttons()
         if b.toolTip() == "env/dist/etc/worldserver.conf"
     )
-    assert core.text().endswith(tuning_panel.READ_ONLY_SUFFIX)
+    assert not core.text().endswith(tuning_panel.READ_ONLY_SUFFIX)
     core.click()
-    assert view.tuning_panel.editor.isReadOnly()
-    assert view.tuning_panel.file_note.text() == controller_view_module.TUNING_CORE_FILE
-    assert not view.tuning_panel.file_save_button.isEnabled()
+    assert not view.tuning_panel.editor.isReadOnly()
+    assert view.tuning_panel.file_note.text() == controller_view_module.TUNING_CORE_EDITABLE
+    assert view.tuning_panel.file_save_button.isEnabled()
+    assert "WorldServerPort" in view.tuning_panel.locked_list.text()
 
 
 def test_a_raw_save_that_still_looks_like_a_conf_asks_nothing(
@@ -14398,11 +14406,12 @@ def test_the_size_cap_counts_bytes_not_characters(
     assert "too big" in view.tuning_panel.file_note.text()
 
 
-def test_the_picker_marks_the_core_files_read_only(qapp: object, ps: _Ps, tmp_path: Path) -> None:
-    """Item 13's other half: WHICH files are read-only is the view's list, not the panel's.
+def test_the_picker_marks_no_wotlk_core_file_read_only(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T819: the AzerothCore family's own confs sit in the row like files this tab writes.
 
-    Mutation: pass no `read_only` and `worldserver.conf` sits in the row
-    looking exactly like a file this tab will write.
+    Mutation: pass the old read-only list and `worldserver.conf` carries the suffix again.
     """
     core = tmp_path / "env" / "dist" / "etc" / "worldserver.conf"
     core.parent.mkdir(parents=True, exist_ok=True)
@@ -14410,7 +14419,8 @@ def test_the_picker_marks_the_core_files_read_only(qapp: object, ps: _Ps, tmp_pa
     view = _tuning_view(ps, tmp_path)
 
     labels = [b.text() for b in view.tuning_panel.file_buttons()]
-    assert "worldserver.conf · read-only" in labels
+    assert "worldserver.conf" in labels
+    assert "worldserver.conf · read-only" not in labels
 
 
 def test_restart_and_recreate_both_ask_first_and_do_nothing_on_no(
@@ -14620,21 +14630,21 @@ def test_the_tuning_tab_warns_about_the_keys_this_installs_compose_really_beats(
     assert "BeastMaster.Enable" not in said, "only the shadowed key is named"
 
 
-def test_the_file_this_install_shadows_most_is_the_one_it_will_not_write(
+def test_the_file_this_install_shadows_most_is_the_one_with_locked_keys(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
     """A fact worth pinning: `playerbots.conf` is where the shadowed keys really live.
 
     Every `AC_*` row this app writes is an `AiPlayerbot.*` or `Playerbots.*`
     key, and those live in `env/dist/etc/modules/playerbots.conf` -- which is
-    in `TUNING_CORE_FILES` and so is shown READ-ONLY (T43's own follow-up). So
-    on a shipped install the warning is mostly a statement about a file nobody
-    can edit here anyway, and the honest place to change those values is the
-    override itself.
+    in `TUNING_CORE_FILES` and since T819 is editable with the env-shadowed keys
+    locked (`core_conf.locked`). So on a shipped install the warning is mostly a
+    statement about lines nobody can edit here anyway, and the honest place to
+    change those values is the override itself.
 
-    Recorded rather than assumed: if that file ever becomes writable on this
-    tab, the warning is what stands between a user and an edit the world
-    ignores, and this test is where somebody will find that out.
+    Recorded rather than assumed: the locked list is what stands between a user
+    and an edit the world ignores, and this test is where somebody will find
+    that out.
 
     Mutation: drop `playerbots.conf` from `TUNING_CORE_FILES` and this fails,
     which is the review this change would owe.
@@ -22607,11 +22617,13 @@ def test_down_from_tunings_conf_list_stops_at_the_conf_buttons_under_it(
 ) -> None:
     """The live check's first press: 960x640, the control above the conf list, Down (T175).
 
-    It lands on the first conf button straight under it, and not on the
+    It lands on a conf button straight under it, and not on the
     full-width strip at the bottom of the tab. Since T190 the conf list and the
     cards share 960x640 through a "Settings | Edit file" switch, so the press
     starts on the switch with the file side shown -- the row a player is on
-    when the conf buttons are what they came for.
+    when the conf buttons are what they came for. Since T819 the core confs
+    carry no read-only suffix, so the narrower buttons share one row, and Down
+    lands on the one nearest straight under the switch rather than the first.
     """
     from PySide6.QtCore import Qt
     from PySide6.QtTest import QTest
@@ -22643,7 +22655,18 @@ def test_down_from_tunings_conf_list_stops_at_the_conf_buttons_under_it(
         nav.navigate(Direction.DOWN)
         landed = QApplication.focusWidget()
         assert landed is not view.tuning_report_strip, "Down went past the conf buttons"
-        assert landed is confs[0], f"Down from the switch went to {_pad_describe(landed, window)}"
+        top = _edges_in(confs[0], window)[1]
+        first_row = [b for b in confs if _edges_in(b, window)[1] == top]
+        assert landed in first_row, f"Down from the switch went to {_pad_describe(landed, window)}"
+        middle = (_edges_in(switch, window)[0] + _edges_in(switch, window)[2]) // 2
+
+        def middle_of(button: object) -> int:
+            left, _top, right, _bottom = _edges_in(button, window)
+            return abs((left + right) // 2 - middle)
+
+        assert landed is min(
+            first_row, key=middle_of
+        ), f"Down from the switch went to {_pad_describe(landed, window)}"
     finally:
         keyboard.stop()
         gamepad.stop()
@@ -31733,3 +31756,94 @@ def test_a_game_with_no_route_has_no_outside_add_ons_and_no_note(
     object.__setattr__(view.services, "client_addons", None)
     assert view._outside_addons_work(lambda _line: None) == ()
     assert view._has_outside_addons() is False
+
+
+def _open_core(view: ControllerView) -> None:
+    """Pick the core conf's button: `open_tuning_file` alone leaves the old file current."""
+    next(
+        b
+        for b in view.tuning_panel.file_buttons()
+        if b.toolTip() == "env/dist/etc/worldserver.conf"
+    ).click()
+
+
+def test_a_core_save_that_changes_a_locked_key_writes_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T819: a Save that touches a locked key is refused before a byte moves (M3)."""
+    path = _deploy(
+        tmp_path,
+        "env/dist/etc/worldserver.conf",
+        "[worldserver]\nWorldServerPort = 8085\nMotd = hi\n",
+    )
+    view = _tuned_view(ps, tmp_path)
+    _open_core(view)
+    before = path.read_bytes()
+
+    view.save_tuning_file("[worldserver]\nWorldServerPort = 9\nMotd = hi\n")
+
+    assert path.read_bytes() == before
+    assert tuning.backups_of(path) == ()
+    assert "WorldServerPort" in view.tuning_report.toPlainText()
+
+
+def test_a_core_save_asks_with_the_diff_then_backs_up_and_writes(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T819: one confirm lists the changes, then a backup and the write (M4, M8)."""
+    path = _deploy(
+        tmp_path,
+        "env/dist/etc/worldserver.conf",
+        "[worldserver]\n"
+        'LoginDatabaseInfo = "127.0.0.1;3306;acore;s3cret;acore_auth"\n'
+        "Rate.XP.Kill = 1\n",
+    )
+    dist = path.with_name("worldserver.conf.dist")
+    dist.write_text(
+        "[worldserver]\n"
+        'LoginDatabaseInfo = "127.0.0.1;3306;acore;acore;acore_auth"\n'
+        "Rate.XP.Kill = 1\n",
+        encoding="utf-8",
+    )
+    view = _tuned_view(ps, tmp_path)
+    _open_core(view)
+    asked: list[str] = []
+
+    def question(_parent: object, _title: str, said: str, *_a: object, **_k: object) -> int:
+        asked.append(said)
+        return int(controller_view_module.QMessageBox.StandardButton.Yes)
+
+    monkeypatch.setattr(controller_view_module.QMessageBox, "question", question)
+    view.save_tuning_file(
+        "[worldserver]\n"
+        'LoginDatabaseInfo = "127.0.0.1;3306;acore;***;acore_auth"\n'
+        "Rate.XP.Kill = 2\n"
+    )
+
+    assert len(asked) == 1
+    assert "Rate.XP.Kill: 1 -> 2" in asked[0]
+    assert "s3cret" not in asked[0]
+    backups = tuning.backups_of(path)
+    assert len(backups) == 1
+    assert "s3cret" in path.read_text(encoding="utf-8")
+    assert "Rate.XP.Kill = 2" in path.read_text(encoding="utf-8")
+
+
+def test_a_core_save_answered_no_writes_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T819: No on the diff confirm leaves the file alone."""
+    path = _deploy(tmp_path, "env/dist/etc/worldserver.conf", "[worldserver]\nMotd = hi\n")
+    view = _tuned_view(ps, tmp_path)
+    _open_core(view)
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "question",
+        lambda *a, **k: int(controller_view_module.QMessageBox.StandardButton.No),
+    )
+    before = path.read_bytes()
+
+    view.save_tuning_file("[worldserver]\nMotd = yo\n")
+
+    assert path.read_bytes() == before
+    assert tuning.backups_of(path) == ()

@@ -1398,3 +1398,38 @@ def test_a_reload_that_cannot_read_the_file_blanks_only_a_clean_editor(qapp: obj
     panel.set_file_text("", read_only=True, note="a/mod.conf: gone")
     assert panel.editor.toPlainText() == "" and panel.editor.isReadOnly()
     assert tp.EDITOR_UNREAD not in panel.file_note.text()
+
+
+def test_default_for_this_line_puts_the_dist_line_in_the_editor_only(qapp: object) -> None:
+    """The press types the shipped line; only Save writes it anywhere (T819)."""
+    panel = tp.TuningPanel()
+    panel.set_file_text(
+        "[worldserver]\nRate.XP.Kill = 9\n",
+        read_only=False,
+        note=None,
+        defaults={"Rate.XP.Kill": "Rate.XP.Kill = 1"},
+    )
+    cursor = panel.editor.textCursor()
+    cursor.setPosition(panel.editor.toPlainText().index("Rate.XP.Kill = 9"))
+    panel.editor.setTextCursor(cursor)
+    panel.default_button.click()
+    assert "Rate.XP.Kill = 1" in panel.editor.toPlainText()
+    assert "Rate.XP.Kill = 9" not in panel.editor.toPlainText()
+
+
+def test_default_for_this_line_on_a_locked_line_says_why(qapp: object) -> None:
+    """A locked line is not replaced: the press names the lock instead (T819)."""
+    panel = tp.TuningPanel()
+    panel.set_file_text(
+        "[worldserver]\nWorldServerPort = 9\n",
+        read_only=False,
+        note=None,
+        locked={"WorldServerPort": "Yu'lon publishes this server's port onto it"},
+        defaults={"WorldServerPort": "WorldServerPort = 8085"},
+    )
+    cursor = panel.editor.textCursor()
+    cursor.setPosition(panel.editor.toPlainText().index("WorldServerPort = 9"))
+    panel.editor.setTextCursor(cursor)
+    panel.default_button.click()
+    assert "WorldServerPort = 9" in panel.editor.toPlainText()
+    assert "Yu'lon publishes" in panel.locked_note.text()
