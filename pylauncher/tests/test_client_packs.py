@@ -4814,6 +4814,54 @@ def test_defender_blocking_the_zip_says_so_in_one_plain_sentence() -> None:
     assert "`" not in str(refused)
 
 
+def test_defender_hidden_einval_on_a_full_download_says_blocked(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """T809 eino: EINVAL opening a full-size .part on Windows is the virus sentence."""
+    monkeypatch.setattr(client_packs.platform, "detect", lambda: "windows")
+    pack = _lumen_pack(size_hint=1_233_402)
+    part = tmp_path / "Lumenveil-0.1.0.zip.part"
+    part.write_bytes(b"x" * 1_233_402)
+    blocked = OSError(errno.EINVAL, "Invalid argument", os.fspath(part))
+    assert getattr(blocked, "winerror", None) is None
+    refused = client_packs._os_refusal(pack, blocked)
+    assert "virus protection blocked" in str(refused)
+    assert "Nothing was changed" in str(refused)
+    assert "Free some space" not in str(refused)
+    assert "exclusion" not in str(refused).casefold()
+    assert "`" not in str(refused)
+
+
+def test_defender_hidden_einval_on_a_short_file_keeps_the_disk_sentence(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """T809 eino mutation: EINVAL on a short .part keeps today's wording."""
+    monkeypatch.setattr(client_packs.platform, "detect", lambda: "windows")
+    pack = _lumen_pack(size_hint=1_233_402)
+    part = tmp_path / "Lumenveil-0.1.0.zip.part"
+    part.write_bytes(b"x" * 100)
+    refused = client_packs._os_refusal(
+        pack, OSError(errno.EINVAL, "Invalid argument", os.fspath(part))
+    )
+    assert "Free some space" in str(refused)
+    assert "virus" not in str(refused).casefold()
+
+
+def test_defender_hidden_einval_off_windows_keeps_the_disk_sentence(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """T809 eino mutation: EINVAL on a full .part off Windows keeps today's wording."""
+    pack = _lumen_pack(size_hint=1_233_402)
+    part = tmp_path / "Lumenveil-0.1.0.zip.part"
+    part.write_bytes(b"x" * 1_233_402)
+    blocked = OSError(errno.EINVAL, "Invalid argument", os.fspath(part))
+    for system in ("linux", "macos"):
+        monkeypatch.setattr(client_packs.platform, "detect", lambda sid=system: sid)
+        refused = client_packs._os_refusal(pack, blocked)
+        assert "Free some space" in str(refused)
+        assert "virus" not in str(refused).casefold()
+
+
 def test_virus_text_without_a_winerror_says_so_too() -> None:
     """T809 W6A mutation: the 'contains a virus' text alone takes the same sentence."""
     pack = _lumen_pack()
