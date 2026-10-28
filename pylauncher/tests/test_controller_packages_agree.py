@@ -24,7 +24,7 @@ from pathlib import Path
 import pytest
 
 from yulon import apply as apply_module
-from yulon import install_wiring, party, serverlock
+from yulon import coa_realm, install_wiring, party, serverlock
 from yulon.catalog import bot_dashboard, native
 from yulon.catalog.catalog import CatalogEntry
 from yulon.catalog.families import azerothcore, mmaps
@@ -633,6 +633,12 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
         # T785: set only when the install's database password cannot be known; absent on every
         # tab built over a folder that has one, the reference included.
         undbrefused = {"db_refusal"}
+        # T812 C3b: the realm-type switch is CoA-only (realm types): only an
+        # entry that names `realm_types` gets one, read through the function
+        # the wiring reads, so a tree that gains the block fails this until
+        # its wiring lands. Centurion is the current prover: its fixture
+        # entry names none, so it must be absent there.
+        unswitched = set() if coa_realm.has_realm_types(entry) else {"realm_switch"}
         allowed = (
             undbrefused
             | unrepaired
@@ -659,6 +665,7 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
             | untipped
             | uncorrectable
             | unlocked
+            | unswitched
         )
         if game in ("wow-wotlk", "wow-unbound", "wow-coa"):  # T554/T812: same package as WotLK
             reference = (
@@ -676,6 +683,7 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
                 | untipped
                 | uncorrectable
                 | unlocked
+                | unswitched
             )
             if game == "wow-coa":
                 # T812: CoA pins its fork and carries a patch; no update control

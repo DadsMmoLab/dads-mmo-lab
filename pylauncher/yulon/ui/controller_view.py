@@ -1973,18 +1973,24 @@ def _stop_for_realm_switch(
     entry: CatalogEntry, server_dir: Path, *, wsl_distro: str | None
 ) -> bool:
     """Stop for a realm-type switch: the existing Stop, saving every character (T812 C3b)."""
-    from yulon.controller import Controller as _Controller
+    from yulon import controller as _controller_module
 
-    return _Controller(entry.container_spec(), server_dir, wsl_distro=wsl_distro).stop()
+    controller = _controller_module.Controller(
+        entry.container_spec(), server_dir, wsl_distro=wsl_distro
+    )
+    return controller.stop()
 
 
 def _start_for_realm_switch(
     entry: CatalogEntry, server_dir: Path, *, wsl_distro: str | None
 ) -> None:
     """Start for a realm-type switch: the existing Start, ordered for CoA (T812 C3b)."""
-    from yulon.controller import Controller as _Controller
+    from yulon import controller as _controller_module
 
-    _Controller(entry.container_spec(), server_dir, wsl_distro=wsl_distro).start()
+    controller = _controller_module.Controller(
+        entry.container_spec(), server_dir, wsl_distro=wsl_distro
+    )
+    controller.start()
 
 
 def _run_realm_import(
