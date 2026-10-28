@@ -427,7 +427,8 @@ def test_the_client_carries_the_modules_addon_folder_as_one_required_pack() -> N
 
 
 def test_the_client_offers_lumenveil_as_an_optional_windows_extra() -> None:
-    """T809 W2: the same Lumenveil pack as wow-wotlk (held equal there); required addons stay first."""
+    """T809 W2: the same Lumenveil pack as wow-wotlk (held equal there); required addons
+    stay first."""
     from tests.test_catalog_client_packs import LUMENVEIL_SHA256, LUMENVEIL_URL
 
     client = unbound().client

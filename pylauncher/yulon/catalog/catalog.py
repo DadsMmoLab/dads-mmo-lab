@@ -2843,7 +2843,9 @@ class PackSetup(_Strict):
 
     @field_validator("runs")
     @classmethod
-    def _runs_stay_plain_words(cls, value: tuple[tuple[str, ...], ...]) -> tuple[tuple[str, ...], ...]:
+    def _runs_stay_plain_words(
+        cls, value: tuple[tuple[str, ...], ...]
+    ) -> tuple[tuple[str, ...], ...]:
         for index, run in enumerate(value):
             if not run:
                 raise ValueError(f"setup runs[{index}] names no argv: each run takes at least one")
@@ -2975,6 +2977,7 @@ class ClientPack(_Strict):
         default="",
         description="Who made this pack's contents, shown beside the option.",
     )
+
     @field_validator("redirect_hosts")
     @classmethod
     def _redirect_hosts_are_bare_hostnames(cls, value: tuple[str, ...]) -> tuple[str, ...]:
@@ -2994,7 +2997,6 @@ class ClientPack(_Strict):
                 )
             lowered.append(item.casefold())
         return tuple(lowered)
-
 
     @field_validator("remove_when_off")
     @classmethod

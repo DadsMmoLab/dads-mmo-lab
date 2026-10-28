@@ -228,7 +228,9 @@ def test_the_shipped_catalog_uses_the_new_fields_on_wotlk_centurion_and_unbound(
         assert game.client.hosts() == frozenset()
 
 
-LUMENVEIL_URL = "https://github.com/lumenveil/Lumenveil/releases/download/v0.1.0/Lumenveil-0.1.0.zip"
+LUMENVEIL_URL = (
+    "https://github.com/lumenveil/Lumenveil/releases/download/v0.1.0/Lumenveil-0.1.0.zip"
+)
 LUMENVEIL_SHA256 = "78d1e1ca7450858a67d6ec2298343c3f67cda9aa920aa800e28982d8d3fee83b"
 LUMENVEIL_SIZE = 1_233_402
 LUMENVEIL_RELEASE = "https://github.com/lumenveil/Lumenveil/releases"
@@ -295,8 +297,26 @@ def test_the_lumenveil_pack_is_pinned_identical_and_windows_only() -> None:
         assert pack.setup is not None
         assert pack.setup.run == "Lumenveil/lamp_extract.exe"
         assert pack.setup.runs == (
-            ("--data", "{data}", "--out", "{dir}/lampdata.bin", "--locale", "{locale}", "--background"),
-            ("--data", "{data}", "--liquids", "{dir}/liquiddata.bin", "--maps", "0,1,530,571", "--locale", "{locale}", "--background"),
+            (
+                "--data",
+                "{data}",
+                "--out",
+                "{dir}/lampdata.bin",
+                "--locale",
+                "{locale}",
+                "--background",
+            ),
+            (
+                "--data",
+                "{data}",
+                "--liquids",
+                "{dir}/liquiddata.bin",
+                "--maps",
+                "0,1,530,571",
+                "--locale",
+                "{locale}",
+                "--background",
+            ),
         )
         assert pack.setup.writes == ("lampdata.bin", "liquiddata.bin")
         assert pack.setup.timeout_seconds == 600
@@ -810,6 +830,7 @@ REFUSALS: dict[str, tuple[Mutation, str]] = {
     ),
 }
 
+
 def _lumenveil_like_pack() -> dict[str, Any]:
     """A pack that uses every new T809 field once, shaped like the planned Lumenveil entry."""
     return {
@@ -882,8 +903,6 @@ def test_new_fields_default_to_absent_so_every_existing_pack_behaves_as_now() ->
     assert pack.credit == ""
 
 
-
-
 @pytest.mark.parametrize("name", sorted(REFUSALS))
 def test_each_rule_refuses_its_one_bad_input(name: str) -> None:
     mutate, fragment = REFUSALS[name]
@@ -935,4 +954,6 @@ def test_write_and_model_types_are_importable_for_the_engine() -> None:
     assert ClientPack.model_fields["setup"].default is None
     assert ClientPack.model_fields["credit"].default == ""
     assert PackSetup.model_fields["timeout_seconds"].default == 900
-    assert PackSetup(run="a.exe", runs=[["--background"]], writes=["b.bin"]).runs == (("--background",),)
+    assert PackSetup(run="a.exe", runs=[["--background"]], writes=["b.bin"]).runs == (
+        ("--background",),
+    )

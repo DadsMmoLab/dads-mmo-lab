@@ -1579,12 +1579,13 @@ def wanted(
 
 
 def update_state(pack: ClientPack, record: Mapping[str, Any] | None) -> str:
-    """Whether an installed pack is behind the catalog: `"not installed"`, `"current"` or `"update available"`.
+    """Whether an installed pack is behind the catalog.
 
-    Qt-free: what the Client options dialog and the launcher extras row read. `"update
-    available"` when the catalog's pinned sha256 differs from the record's installed
-    sha256. A record without a sha256 (an older pin wrote none) counts as behind too:
-    its bytes were proved against something else, so the next Play proves them again.
+    One of `"not installed"`, `"current"` or `"update available"`. Qt-free: what the
+    Client options dialog and the launcher extras row read. `"update available"` when
+    the catalog's pinned sha256 differs from the record's installed sha256. A record
+    without a sha256 (an older pin wrote none) counts as behind too: its bytes were
+    proved against something else, so the next Play proves them again.
     """
     if not isinstance(record, Mapping):
         return "not installed"
@@ -1698,9 +1699,7 @@ def refuse_foreign_loader(
         )
 
 
-def reap_stale_loader(
-    play_dir: Path, pack: ClientPack, record: Mapping[str, Any] | None
-) -> bool:
+def reap_stale_loader(play_dir: Path, pack: ClientPack, record: Mapping[str, Any] | None) -> bool:
     """Remove a loader the copy holds that neither the original nor a record owns (T809 W6B).
 
     After a foreign `version.dll` refused Play, the player takes that mod out of their
@@ -2295,10 +2294,7 @@ def _setup_output_names(pack: ClientPack) -> list[str]:
     """This pack's setup `writes`, as record names; empty when it has no setup."""
     if pack.setup is None:
         return []
-    return [
-        clean.as_posix() for rel in pack.setup.writes
-        if (clean := _clean_rel(rel)) is not None
-    ]
+    return [clean.as_posix() for rel in pack.setup.writes if (clean := _clean_rel(rel)) is not None]
 
 
 def _recorded_output_verified(play_dir: Path, rel: str, want: str) -> bool:
@@ -2401,9 +2397,11 @@ def _install(
         # removes what is empty. Without this an update dropped `"dirs"`, and
         # the emptied `Lumenveil/` folder stayed behind when the pack went off.
         kept_dirs = previous.get("dirs") if isinstance(previous, Mapping) else None
-        dirs = list(dict.fromkeys(
-            ([str(rel) for rel in kept_dirs] if isinstance(kept_dirs, list) else []) + dirs
-        ))
+        dirs = list(
+            dict.fromkeys(
+                ([str(rel) for rel in kept_dirs] if isinstance(kept_dirs, list) else []) + dirs
+            )
+        )
 
     owned = _setup_output_names(pack)
     stale: list[str] = []
@@ -2431,19 +2429,14 @@ def _install(
         recorded = kept_files if isinstance(kept_files, dict) else {}
         if isinstance(held_setup, dict) and isinstance(recorded, dict):
             for rel in held_setup:
-                if (
-                    isinstance(rel, str)
-                    and rel not in files
-                    and isinstance(recorded.get(rel), str)
-                ):
+                if isinstance(rel, str) and rel not in files and isinstance(recorded.get(rel), str):
                     want = recorded[rel]
                     assert isinstance(want, str), "narrowed by the isinstance check above"
                     if _recorded_output_verified(play_dir, rel, want):
                         files[rel] = want
                         verified[rel] = want
         stale = sorted(
-            rel for rel in owned
-            if rel not in files and isinstance(recorded.get(rel), str)
+            rel for rel in owned if rel not in files and isinstance(recorded.get(rel), str)
         )
     entry: dict[str, Any] = {"version": fetched.version, "sha256": fetched.sha256, "files": files}
     if isinstance(previous, Mapping):
@@ -2451,12 +2444,16 @@ def _install(
             held = previous.get("setup")
             if isinstance(held, dict):
                 entry["setup"] = {
-                    rel: sha for rel, sha in held.items()
-                    if isinstance(rel, str) and isinstance(sha, str)
-                    and verified.get(rel) == sha
+                    rel: sha
+                    for rel, sha in held.items()
+                    if isinstance(rel, str) and isinstance(sha, str) and verified.get(rel) == sha
                 }
         held_note = previous.get("setup_pending")
-        pending = [rel for rel in held_note if isinstance(rel, str)] if isinstance(held_note, list) else []
+        pending = (
+            [rel for rel in held_note if isinstance(rel, str)]
+            if isinstance(held_note, list)
+            else []
+        )
         for rel in stale:
             if rel not in pending:
                 pending.append(rel)
@@ -2670,7 +2667,9 @@ def _probe_locale(play_dir: Path) -> str | None:
             folder = play_dir / Path(*client_names.on_disk(play_dir, data_rel / name).parts)
             if not folder.is_dir() or play_client._is_link(folder):
                 continue
-            probe = play_dir / Path(*client_names.on_disk(play_dir, data_rel / name / f"locale-{name}.MPQ").parts)
+            probe = play_dir / Path(
+                *client_names.on_disk(play_dir, data_rel / name / f"locale-{name}.MPQ").parts
+            )
             if probe.is_file() and not play_client._is_link(probe):
                 return name
         except OSError:
@@ -2784,7 +2783,9 @@ def run_setup(
         pending = record.get("setup_pending")
     if isinstance(pending, list) and pending:
         assert pack.setup is not None  # past the None return above
-        own = {clean.as_posix() for rel in pack.setup.writes if (clean := _clean_rel(rel)) is not None}
+        own = {
+            clean.as_posix() for rel in pack.setup.writes if (clean := _clean_rel(rel)) is not None
+        }
         recorded = sorted({rel for rel in pending if isinstance(rel, str) and rel in own})
         forged = sorted({rel for rel in pending if isinstance(rel, str)} - set(recorded))
         _remove_setup_outputs(play_dir, pack, recorded)
@@ -2855,7 +2856,9 @@ def run_setup(
     if on_pending is not None:
         on_pending(pending_entry)
     entry = pending_entry
-    data_dir = os.fspath(play_dir / Path(*client_names.on_disk(play_dir, PurePosixPath("Data")).parts))
+    data_dir = os.fspath(
+        play_dir / Path(*client_names.on_disk(play_dir, PurePosixPath("Data")).parts)
+    )
     filled = [
         [
             word.replace("{data}", data_dir)
@@ -2922,21 +2925,25 @@ def run_setup(
         except PackError as rollback_exc:
             raise PackError(f"{exc} {rollback_exc}") from rollback_exc
         raise PackError(
-            f"{exc} Nothing of it stayed in the ready-to-play client; "
-            "the next Play tries again."
+            f"{exc} Nothing of it stayed in the ready-to-play client; " "the next Play tries again."
         ) from exc
     setup_map = {rel: sha for rel, sha in hashed.items()}
-    files = dict(entry.get("files") if isinstance(entry.get("files"), dict) else {})
+    old_files = entry.get("files")
+    files = dict(old_files if isinstance(old_files, dict) else {})
     files.update(setup_map)
-    return {k: v for k, v in {**entry, "files": files, "setup": setup_map}.items() if k != "setup_pending"}
+    return {
+        k: v
+        for k, v in {**entry, "files": files, "setup": setup_map}.items()
+        if k != "setup_pending"
+    }
 
 
 def _setup_output_tail(done: object) -> str:
     """The last ~10 lines the setup exe wrote, for the refusal; empty when none."""
     text = ""
-    for field in ("stdout", "stderr"):
+    for stream in ("stdout", "stderr"):
         try:
-            chunk = getattr(done, field, "")
+            chunk = getattr(done, stream, "")
         except Exception:
             chunk = ""
         if isinstance(chunk, bytes):
@@ -3003,7 +3010,11 @@ def _expected_exe_sha256(pack: ClientPack, source: Mapping[str, Any] | None) -> 
     want = files.get(exe_rel)
     if not isinstance(want, str):
         for rel, sha in files.items():
-            if isinstance(rel, str) and rel.casefold() == exe_rel.casefold() and isinstance(sha, str):
+            if (
+                isinstance(rel, str)
+                and rel.casefold() == exe_rel.casefold()
+                and isinstance(sha, str)
+            ):
                 return sha
         return None
     return want
@@ -3071,13 +3082,13 @@ def _take_out_setup_outputs(
 
 
 def _setup_output_path(play_dir: Path, pack: ClientPack, rel: str) -> tuple[str, Path] | None:
-    """A setup output's record name and path when it is verifiably a file; None when verifiably gone.
+    """A setup output's record name and path when it is verifiably a file.
 
-    Only below the copy, never through a link. A link in any ancestor or at the
-    name raises `PackError`, and a lookup raising `OSError` propagates: the
-    caller reports either as a leftover, since only an observed missing path
-    proves the output is gone. A name outside the copy, one of Yu'lon's own, or
-    a folder answers None: never this pack's output.
+    None when verifiably gone. Only below the copy, never through a link. A link in
+    any ancestor or at the name raises `PackError`, and a lookup raising `OSError`
+    propagates: the caller reports either as a leftover, since only an observed
+    missing path proves the output is gone. A name outside the copy, one of Yu'lon's
+    own, or a folder answers None: never this pack's output.
     """
     assert pack.setup is not None  # the pack whose outputs these are
     clean = _clean_rel(rel)
@@ -3213,9 +3224,7 @@ def _rollback_setup(
         )
 
 
-def _setup_output_leftovers(
-    play_dir: Path, pack: ClientPack, rels: list[str]
-) -> list[str]:
+def _setup_output_leftovers(play_dir: Path, pack: ClientPack, rels: list[str]) -> list[str]:
     """A surviving output per name the delete pass did not report: a case twin on disk.
 
     The record names outputs in the catalog's spelling, while the copy may hold
@@ -3358,7 +3367,9 @@ def _remove(
     for rel, path, sha in todo:
         try:
             st = path.lstat()
-            leave = stat.S_ISLNK(st.st_mode) or stat.S_ISDIR(st.st_mode) or _file_sha256(path) != sha
+            leave = (
+                stat.S_ISLNK(st.st_mode) or stat.S_ISDIR(st.st_mode) or _file_sha256(path) != sha
+            )
         except FileNotFoundError:
             continue
         except OSError as exc:
@@ -3397,12 +3408,18 @@ def _refusal_many(what: str, refused: list[tuple[str, BaseException]]) -> PackEr
     """ONE `_write_refusal`-worded error naming every file that refused to go."""
     shared = sorted({f"{rel}: {exc}" for rel, exc in refused if isinstance(exc, PackError)})
     held = sorted(
-        {f"{rel} ({exc.strerror or exc})" for rel, exc in refused
-         if isinstance(exc, OSError) and isinstance(exc, PermissionError)}
+        {
+            f"{rel} ({exc.strerror or exc})"
+            for rel, exc in refused
+            if isinstance(exc, OSError) and isinstance(exc, PermissionError)
+        }
     )
     other = sorted(
-        {f"{rel} ({exc.strerror or exc})" for rel, exc in refused
-         if isinstance(exc, OSError) and not isinstance(exc, PermissionError)}
+        {
+            f"{rel} ({exc.strerror or exc})"
+            for rel, exc in refused
+            if isinstance(exc, OSError) and not isinstance(exc, PermissionError)
+        }
     )
     parts: list[str] = []
     if shared:
@@ -3415,8 +3432,13 @@ def _refusal_many(what: str, refused: list[tuple[str, BaseException]]) -> PackEr
             "files), then press Play again"
         )
     if other:
+        unwritable = ", ".join(
+            rel
+            for rel, exc in refused
+            if isinstance(exc, OSError) and not isinstance(exc, PermissionError)
+        )
         parts.append(
-            f"Yu'lon could not write {', '.join(rel for rel, exc in refused if isinstance(exc, OSError) and not isinstance(exc, PermissionError))} "
+            f"Yu'lon could not write {unwritable} "
             f"({'; '.join(other)}). Free some space and check that Yu'lon may write "
             "there, then press Play again"
         )

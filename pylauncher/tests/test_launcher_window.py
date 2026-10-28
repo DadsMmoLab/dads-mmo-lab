@@ -859,18 +859,23 @@ def test_the_shipped_wotlk_entry_offers_lumenveil_as_its_only_extra(
     assert "Lumenveil" in window.extras_note.text() and "GPL-2.0" in window.extras_note.text()
     assert window.update_buttons == {}, "a fresh copy is current: no Update button"
 
+
 def test_an_updated_lumenveil_shows_an_update_row_on_the_launcher(
-    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    qapp: object,
+    ps: _Ps,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     launched: list[object],
 ) -> None:
     """T809 W6: after a pin bump the extras row shows the versioned label, note and button."""
-    from tests.test_controller_view import _lumen_play, _play_view, _Site
     from tests.test_controller_view import WORLD_UP as _WORLD_UP
+    from tests.test_controller_view import _lumen_play, _play_view, _Site
 
     monkeypatch.setattr(client_packs.platform, "detect", lambda: "windows")
     site = _Site(tmp_path / "downloads")
     monkeypatch.setattr(client_packs, "fetch_url", site)
     from yulon import platform as yulon_platform
+
     monkeypatch.setattr(yulon_platform, "config_dir", lambda: tmp_path / "config")
     entry, original, play, _seen, _ = _lumen_play(tmp_path, monkeypatch, site)
     view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
@@ -878,7 +883,7 @@ def test_an_updated_lumenveil_shows_an_update_row_on_the_launcher(
 
     view.play()
 
-    record = client_packs.read_record(play)
+    client_packs.read_record(play)
     bumped = entry.client.packs[0].model_copy(update={"sha256": "0" * 64})
     bumped_entry = entry.model_copy(
         update={"client": entry.client.model_copy(update={"packs": (bumped,)})}

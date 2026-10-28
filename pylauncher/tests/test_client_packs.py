@@ -3151,6 +3151,8 @@ def test_a_recorded_file_missing_from_the_client_is_reported(rig: _Rig) -> None:
     assert client_packs.recorded_files_missing(rig.play, entry) == ()
     junk = {**entry, "files": {"../outside": "0" * 64}}
     assert client_packs.recorded_files_missing(rig.play, junk) == (), "a bad name is not a file"
+
+
 # -- T809 W3 (Lumenveil engine) ------------------------------------------------------------
 
 
@@ -3170,8 +3172,26 @@ def _lumen_pack(**extra: Any) -> ClientPack:
         "setup": {
             "run": "Lumenveil/lamp_extract.exe",
             "runs": [
-                ["--data", "{data}", "--out", "{dir}/lampdata.bin", "--locale", "{locale}", "--background"],
-                ["--data", "{data}", "--liquids", "{dir}/liquiddata.bin", "--maps", "0,1,530,571", "--locale", "{locale}", "--background"],
+                [
+                    "--data",
+                    "{data}",
+                    "--out",
+                    "{dir}/lampdata.bin",
+                    "--locale",
+                    "{locale}",
+                    "--background",
+                ],
+                [
+                    "--data",
+                    "{data}",
+                    "--liquids",
+                    "{dir}/liquiddata.bin",
+                    "--maps",
+                    "0,1,530,571",
+                    "--locale",
+                    "{locale}",
+                    "--background",
+                ],
             ],
             "writes": ["lampdata.bin", "liquiddata.bin"],
             "timeout_seconds": 600,
@@ -3194,7 +3214,10 @@ class _Outcome:
     """
 
     def __init__(
-        self, code: int = 0, *, writes: Mapping[str, bytes] | list[Mapping[str, bytes]] | None = None
+        self,
+        code: int = 0,
+        *,
+        writes: Mapping[str, bytes] | list[Mapping[str, bytes]] | None = None,
     ) -> None:
         self.code = code
         if writes is None:
@@ -3280,9 +3303,7 @@ def test_wanted_hides_a_windows_only_pack_on_linux_and_macos(rig: _Rig) -> None:
     assert [p.id for p in client_packs.wanted(client, {}, platform_id="macos")] == ["p"]
     assert [
         p.id
-        for p in client_packs.wanted(
-            client, {"packs": {"lumenveil": True}}, platform_id="windows"
-        )
+        for p in client_packs.wanted(client, {"packs": {"lumenveil": True}}, platform_id="windows")
     ] == ["p", "lumenveil"]
 
 
@@ -3292,15 +3313,11 @@ def test_wanted_still_hides_an_unwanted_pack_on_windows(rig: _Rig) -> None:
 
     assert [
         p.id
-        for p in client_packs.wanted(
-            client, {"packs": {"lumenveil": True}}, platform_id="windows"
-        )
+        for p in client_packs.wanted(client, {"packs": {"lumenveil": True}}, platform_id="windows")
     ] == ["p", "lumenveil"]
     assert [
         p.id
-        for p in client_packs.wanted(
-            client, {"packs": {"lumenveil": False}}, platform_id="windows"
-        )
+        for p in client_packs.wanted(client, {"packs": {"lumenveil": False}}, platform_id="windows")
     ] == ["p"]
 
 
@@ -3602,7 +3619,11 @@ def test_an_unrecorded_output_already_there_refuses_and_stays(
 
     with pytest.raises(PackError, match="already there"):
         client_packs.run_setup(
-            rig.play, pack, entry, game=GAME, server_dir=rig.server,
+            rig.play,
+            pack,
+            entry,
+            game=GAME,
+            server_dir=rig.server,
             runner=_run_with(rig.play, _Outcome(), seen=seen),
         )
 
@@ -3623,7 +3644,11 @@ def test_no_locale_folder_refuses_with_the_scripts_plain_line(
 
     with pytest.raises(PackError, match="No language folder with a locale archive"):
         client_packs.run_setup(
-            rig.play, pack, entry, game=GAME, server_dir=rig.server,
+            rig.play,
+            pack,
+            entry,
+            game=GAME,
+            server_dir=rig.server,
             runner=_run_with(rig.play, _Outcome(), seen=seen),
         )
 
@@ -3665,7 +3690,11 @@ def test_a_missing_setup_exe_is_rolled_back_before_it_raises(
 
     with pytest.raises(PackError, match="could not be started"):
         client_packs.run_setup(
-            rig.play, pack, entry, game=GAME, server_dir=rig.server,
+            rig.play,
+            pack,
+            entry,
+            game=GAME,
+            server_dir=rig.server,
             runner=_run_with(rig.play, _Outcome(), seen=seen, missing_exe=True),
         )
 
@@ -3694,8 +3723,13 @@ def test_setup_persists_the_pending_note_before_the_first_run(
 
     with pytest.raises(KeyboardInterrupt):
         client_packs.run_setup(
-            rig.play, pack, entry, game=GAME, server_dir=rig.server,
-            runner=killer, on_pending=pending_calls.append,
+            rig.play,
+            pack,
+            entry,
+            game=GAME,
+            server_dir=rig.server,
+            runner=killer,
+            on_pending=pending_calls.append,
         )
 
     assert len(pending_calls) == 1, "the note is persisted before the first launch"
@@ -3704,7 +3738,11 @@ def test_setup_persists_the_pending_note_before_the_first_run(
 
     seen: list[list[str]] = []
     done = client_packs.run_setup(
-        rig.play, pack, pending_calls[0], game=GAME, server_dir=rig.server,
+        rig.play,
+        pack,
+        pending_calls[0],
+        game=GAME,
+        server_dir=rig.server,
         runner=_run_with(
             rig.play,
             _Outcome(writes=[{"lampdata.bin": b"lamps"}, {"liquiddata.bin": b"water"}]),
@@ -3757,7 +3795,11 @@ def test_a_missing_setup_exe_never_reaches_the_runner(
 
     with pytest.raises(PackError, match="is not there"):
         client_packs.run_setup(
-            rig.play, pack, entry, game=GAME, server_dir=rig.server,
+            rig.play,
+            pack,
+            entry,
+            game=GAME,
+            server_dir=rig.server,
             runner=_run_with(rig.play, _Outcome(), seen=seen),
         )
 
@@ -3788,7 +3830,11 @@ def test_a_missing_setup_exe_without_its_rollback_call_leaves_the_pack(
 
     with pytest.raises(PackError, match="is not there"):
         client_packs.run_setup(
-            rig.play, pack, entry, game=GAME, server_dir=rig.server,
+            rig.play,
+            pack,
+            entry,
+            game=GAME,
+            server_dir=rig.server,
             runner=_run_with(rig.play, _Outcome(), seen=seen),
         )
 
@@ -3828,9 +3874,7 @@ def test_run_child_uses_shared_creationflags_cwd_timeout_env(
 
     monkeypatch.setattr(_runner, "child_env", fake_child_env)
     monkeypatch.setattr(_runner, "creationflags", fake_flags)
-    monkeypatch.setattr(
-        _subprocess, "CREATE_NO_WINDOW", 999999, raising=False
-    )
+    monkeypatch.setattr(_subprocess, "CREATE_NO_WINDOW", 999999, raising=False)
     monkeypatch.setattr(_subprocess, "run", fake_run)
 
     client_packs._run_child(["lamp_extract.exe", "--background"], cwd=tmp_path, timeout=7.5)
@@ -3872,7 +3916,11 @@ def test_a_forged_pending_note_only_cleans_the_packs_own_outputs(
 
     with pytest.raises(PackError) as caught:
         client_packs.run_setup(
-            rig.play, pack, forged, game=GAME, server_dir=rig.server,
+            rig.play,
+            pack,
+            forged,
+            game=GAME,
+            server_dir=rig.server,
             runner=_run_with(rig.play, _Outcome(), seen=seen),
         )
 
@@ -3908,6 +3956,7 @@ def test_a_setup_run_with_undecodable_bytes_still_finishes(
     assert done["files"]["lampdata.bin"] == _sha(b"lamps")
     assert "setup_pending" not in done
 
+
 def test_a_failed_remove_attempts_every_output_and_names_the_leftover(
     rig: _Rig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3926,9 +3975,7 @@ def test_a_failed_remove_attempts_every_output_and_names_the_leftover(
     monkeypatch.setattr(client_packs, "_delete_own", refuse_lamps)
 
     with pytest.raises(PackError) as caught:
-        client_packs._remove_setup_outputs(
-            rig.play, pack, ["lampdata.bin", "liquiddata.bin"]
-        )
+        client_packs._remove_setup_outputs(rig.play, pack, ["lampdata.bin", "liquiddata.bin"])
 
     assert not (rig.play / "liquiddata.bin").exists(), "the other output still goes"
     assert (rig.play / "lampdata.bin").is_file(), "the refused output stays"
@@ -3956,7 +4003,9 @@ def test_a_failed_recorded_removal_attempts_every_recorded_file(
 
     assert set(order) == {"version.dll", "Lumenveil/lamp_extract.exe"}
     assert "version.dll" in str(caught.value), "the one error names the refusal"
-    assert "Close World of Warcraft" in str(caught.value) and "press Play again" in str(caught.value)
+    assert "Close World of Warcraft" in str(caught.value) and "press Play again" in str(
+        caught.value
+    )
     assert not (rig.play / "Lumenveil" / "lamp_extract.exe").exists()
     assert (rig.play / "version.dll").exists(), "the refused file stays, so the record must stay"
 
@@ -4145,7 +4194,11 @@ def test_a_changed_setup_exe_refuses_and_rolls_back(
 
     with pytest.raises(PackError, match="no longer matches the pack"):
         client_packs.run_setup(
-            rig.play, pack, entry, game=GAME, server_dir=rig.server,
+            rig.play,
+            pack,
+            entry,
+            game=GAME,
+            server_dir=rig.server,
             runner=_run_with(rig.play, _Outcome(), seen=seen),
         )
 
@@ -4169,7 +4222,8 @@ def test_an_update_keeps_dirs_so_off_removes_the_emptied_folder(
         rig.play, pack, entry, game=GAME, server_dir=rig.server, runner=runner
     )
     updated = rig.install(
-        pack, _lumen_fetched(rig, {"version.dll": b"v2", "Lumenveil/lamp_extract.exe": b"exe"}),
+        pack,
+        _lumen_fetched(rig, {"version.dll": b"v2", "Lumenveil/lamp_extract.exe": b"exe"}),
         previous=done,
     )
 
@@ -4179,7 +4233,6 @@ def test_an_update_keeps_dirs_so_off_removes_the_emptied_folder(
 
     assert left == ()
     assert not (rig.play / "Lumenveil").exists(), "the emptied Lumenveil/ folder goes too"
-
 
 
 def test_setup_exe_escaping_the_copy_refuses_and_installs_nothing(
@@ -4201,8 +4254,11 @@ def test_setup_exe_escaping_the_copy_refuses_and_installs_nothing(
 
     with pytest.raises(PackError, match="outside the ready-to-play client"):
         client_packs.run_setup(
-            rig.play, pack, {"version": "v", "sha256": "0" * 64, "files": {}},
-            game=GAME, server_dir=rig.server,
+            rig.play,
+            pack,
+            {"version": "v", "sha256": "0" * 64, "files": {}},
+            game=GAME,
+            server_dir=rig.server,
         )
 
     assert _snapshot(rig.play) == before
@@ -4226,7 +4282,11 @@ def test_setup_through_a_linked_folder_refuses_and_runs_nothing(
 
     with pytest.raises(PackError, match="link to another folder"):
         client_packs.run_setup(
-            rig.play, pack, entry, game=GAME, server_dir=rig.server,
+            rig.play,
+            pack,
+            entry,
+            game=GAME,
+            server_dir=rig.server,
             runner=_run_with(rig.play, _Outcome(), seen=seen),
         )
 
@@ -4240,7 +4300,11 @@ def test_setup_is_hidden_off_windows(rig: _Rig, monkeypatch: pytest.MonkeyPatch)
     seen: list[list[str]] = []
 
     done = client_packs.run_setup(
-        rig.play, pack, entry, game=GAME, server_dir=rig.server,
+        rig.play,
+        pack,
+        entry,
+        game=GAME,
+        server_dir=rig.server,
         runner=_run_with(rig.play, _Outcome(), seen=seen),
     )
 
@@ -4293,10 +4357,12 @@ def test_off_removes_coavolfog_log_but_keeps_spots(rig: _Rig) -> None:
 
 
 def test_off_keeps_an_edited_ini_and_names_it(rig: _Rig) -> None:
-    pack = _lumen_pack(install=[
-        {"member": "CoAVolFog.ini", "to": "CoAVolFog.ini"},
-        {"member": "Lumenveil/lamp_extract.exe", "to": "Lumenveil/lamp_extract.exe"},
-    ])
+    pack = _lumen_pack(
+        install=[
+            {"member": "CoAVolFog.ini", "to": "CoAVolFog.ini"},
+            {"member": "Lumenveil/lamp_extract.exe", "to": "Lumenveil/lamp_extract.exe"},
+        ]
+    )
     entry = rig.install(
         pack,
         _lumen_fetched(
@@ -4414,10 +4480,17 @@ def test_an_update_to_a_changed_exe_installs_and_sets_up_cleanly(
     f1 = _lumen_fetched(rig, {"version.dll": b"v", "Lumenveil/lamp_extract.exe": b"exe"})
     _locale_fixture(rig.play)
     have = client_packs.run_setup(
-        rig.play, pack, rig.install(pack, f1), game=GAME, server_dir=rig.server,
+        rig.play,
+        pack,
+        rig.install(pack, f1),
+        game=GAME,
+        server_dir=rig.server,
         runner=_run_with(
-            rig.play, [_Outcome(writes={"lampdata.bin": b"lamps"}),
-                        _Outcome(writes={"liquiddata.bin": b"water"})],
+            rig.play,
+            [
+                _Outcome(writes={"lampdata.bin": b"lamps"}),
+                _Outcome(writes={"liquiddata.bin": b"water"}),
+            ],
             seen=(seen := []),
         ),
     )
@@ -4427,17 +4500,24 @@ def test_an_update_to_a_changed_exe_installs_and_sets_up_cleanly(
     (rig.play / "lampdata.bin").write_bytes(b"stale bytes another build left")
     v2 = {"version.dll": b"v2", "Lumenveil/lamp_extract.exe": b"exe2"}
     done = rig.install(pack, rig.fetched(v2, name="lumen2.zip"), previous=have)
-    assert done.get("left_behind") is None, (
-        "a setup output is never 'left behind': it is re-run, not kept as edited"
-    )
+    assert (
+        done.get("left_behind") is None
+    ), "a setup output is never 'left behind': it is re-run, not kept as edited"
     assert (rig.play / "lampdata.bin").read_bytes() == b"stale bytes another build left"
     seen.clear()
 
     after = client_packs.run_setup(
-        rig.play, pack, done, game=GAME, server_dir=rig.server,
+        rig.play,
+        pack,
+        done,
+        game=GAME,
+        server_dir=rig.server,
         runner=_run_with(
-            rig.play, [_Outcome(writes={"lampdata.bin": b"new lamps"}),
-                        _Outcome(writes={"liquiddata.bin": b"new water"})],
+            rig.play,
+            [
+                _Outcome(writes={"lampdata.bin": b"new lamps"}),
+                _Outcome(writes={"liquiddata.bin": b"new water"}),
+            ],
             seen=seen,
         ),
     )
@@ -4458,25 +4538,31 @@ def test_repair_of_a_non_output_file_keeps_setup_outputs_and_stays_quiet(
     members = {"version.dll": b"v", "Lumenveil/lamp_extract.exe": b"exe"}
     _locale_fixture(rig.play)
     done = client_packs.run_setup(
-        rig.play, pack, rig.install(pack, _lumen_fetched(rig, members)), game=GAME,
+        rig.play,
+        pack,
+        rig.install(pack, _lumen_fetched(rig, members)),
+        game=GAME,
         server_dir=rig.server,
         runner=_run_with(
-            rig.play, _Outcome(writes={"lampdata.bin": b"lamps", "liquiddata.bin": b"water"}),
+            rig.play,
+            _Outcome(writes={"lampdata.bin": b"lamps", "liquiddata.bin": b"water"}),
             seen=(seen := []),
         ),
     )
     assert "lampdata.bin" in done["files"]
     (rig.play / "version.dll").unlink()
     assert client_packs.recorded_files_missing(rig.play, done)
-    repaired = rig.install(
-        pack, _lumen_fetched(rig, members), previous=done, only_missing=True
-    )
+    repaired = rig.install(pack, _lumen_fetched(rig, members), previous=done, only_missing=True)
     assert repaired["files"]["lampdata.bin"] == _sha(b"lamps")
     assert repaired["setup"] == done["setup"]
     seen.clear()
 
     after = client_packs.run_setup(
-        rig.play, pack, repaired, game=GAME, server_dir=rig.server,
+        rig.play,
+        pack,
+        repaired,
+        game=GAME,
+        server_dir=rig.server,
         runner=_run_with(rig.play, _Outcome(), seen=seen),
     )
 
@@ -4501,32 +4587,44 @@ def test_an_update_over_a_killed_setup_carries_the_pending_note(
     (rig.play / "lampdata.bin").write_bytes(b"half a run")
     killed = {**entry, "setup_pending": ["lampdata.bin", "liquiddata.bin"]}
     held = rig.install(
-        pack, _lumen_fetched(rig, {"version.dll": b"v2", "Lumenveil/lamp_extract.exe": b"exe2"}),
+        pack,
+        _lumen_fetched(rig, {"version.dll": b"v2", "Lumenveil/lamp_extract.exe": b"exe2"}),
         previous=killed,
     )
 
-    assert held.get("setup_pending") == ["lampdata.bin", "liquiddata.bin"], (
-        "the update path carries the note like a repair does"
-    )
+    assert held.get("setup_pending") == [
+        "lampdata.bin",
+        "liquiddata.bin",
+    ], "the update path carries the note like a repair does"
 
     import json as _json
+
     record = client_packs.PackRecord(
-        packs={"lumenveil": dict(held)}, exe=None,
+        packs={"lumenveil": dict(held)},
+        exe=None,
         choices={"packs": {}, "exe_options": {}},
     )
     client_packs.write_record(rig.play, record, game=GAME, server_dir=rig.server)
     held = client_packs.read_record(rig.play).packs["lumenveil"]
-    assert held.get("setup_pending") == ["lampdata.bin", "liquiddata.bin"], (
-        "the post-install save persists the note: the copy holds it, not only memory"
-    )
+    assert held.get("setup_pending") == [
+        "lampdata.bin",
+        "liquiddata.bin",
+    ], "the post-install save persists the note: the copy holds it, not only memory"
     assert all(
-        _json.loads((rig.play / client_packs.RECORD).read_text())["packs"]["lumenveil"]["files"].get(rel) is None
+        _json.loads((rig.play / client_packs.RECORD).read_text())["packs"]["lumenveil"][
+            "files"
+        ].get(rel)
+        is None
         for rel in ("lampdata.bin", "liquiddata.bin")
     ), "no output hash is persisted before setup succeeds (a crash here leaves no false claim)"
 
     seen: list[list[str]] = []
     done = client_packs.run_setup(
-        rig.play, pack, held, game=GAME, server_dir=rig.server,
+        rig.play,
+        pack,
+        held,
+        game=GAME,
+        server_dir=rig.server,
         runner=_run_with(
             rig.play,
             _Outcome(writes=[{"lampdata.bin": b"lamps"}, {"liquiddata.bin": b"water"}]),
@@ -4547,11 +4645,16 @@ def test_an_update_drops_an_inherited_output_hash_unless_disk_matches(
     pack = _lumen_pack()
     _locale_fixture(rig.play)
     have = client_packs.run_setup(
-        rig.play, pack,
-        rig.install(pack, _lumen_fetched(rig, {"version.dll": b"v", "Lumenveil/lamp_extract.exe": b"exe"})),
-        game=GAME, server_dir=rig.server,
+        rig.play,
+        pack,
+        rig.install(
+            pack, _lumen_fetched(rig, {"version.dll": b"v", "Lumenveil/lamp_extract.exe": b"exe"})
+        ),
+        game=GAME,
+        server_dir=rig.server,
         runner=_run_with(
-            rig.play, _Outcome(writes={"lampdata.bin": b"lamps", "liquiddata.bin": b"water"}),
+            rig.play,
+            _Outcome(writes={"lampdata.bin": b"lamps", "liquiddata.bin": b"water"}),
             seen=(seen := []),
         ),
     )
@@ -4561,34 +4664,44 @@ def test_an_update_drops_an_inherited_output_hash_unless_disk_matches(
     done = rig.install(pack, rig.fetched(v2, name="lumen2.zip"), previous=have)
 
     import json as _json
+
     client_packs.write_record(
         rig.play,
         client_packs.PackRecord(
-            packs={"lumenveil": dict(done)}, exe=None,
+            packs={"lumenveil": dict(done)},
+            exe=None,
             choices={"packs": {}, "exe_options": {}},
         ),
-        game=GAME, server_dir=rig.server,
+        game=GAME,
+        server_dir=rig.server,
     )
     saved = _json.loads((rig.play / client_packs.RECORD).read_text())["packs"]["lumenveil"]
-    assert saved["files"].get("lampdata.bin") is None, (
-        "every persisted hash matches disk right after the post-install save"
-    )
-    assert saved["files"]["liquiddata.bin"] == _sha(b"water"), (
-        "the intact output's proven hash does persist"
-    )
+    assert (
+        saved["files"].get("lampdata.bin") is None
+    ), "every persisted hash matches disk right after the post-install save"
+    assert saved["files"]["liquiddata.bin"] == _sha(
+        b"water"
+    ), "the intact output's proven hash does persist"
 
-    assert "lampdata.bin" not in done["files"], (
-        "the hash on disk no longer matches: persisting it would assert a false ownership"
-    )
-    assert "lampdata.bin" in done.get("setup_pending", []), (
-        "the note lets run_setup remove that known path and regenerate it"
-    )
+    assert (
+        "lampdata.bin" not in done["files"]
+    ), "the hash on disk no longer matches: persisting it would assert a false ownership"
+    assert "lampdata.bin" in done.get(
+        "setup_pending", []
+    ), "the note lets run_setup remove that known path and regenerate it"
 
     after = client_packs.run_setup(
-        rig.play, pack, done, game=GAME, server_dir=rig.server,
+        rig.play,
+        pack,
+        done,
+        game=GAME,
+        server_dir=rig.server,
         runner=_run_with(
-            rig.play, [_Outcome(writes={"lampdata.bin": b"new lamps"}),
-                        _Outcome(writes={"liquiddata.bin": b"new water"})],
+            rig.play,
+            [
+                _Outcome(writes={"lampdata.bin": b"new lamps"}),
+                _Outcome(writes={"liquiddata.bin": b"new water"}),
+            ],
             seen=(retry := []),
         ),
     )
@@ -4607,42 +4720,52 @@ def test_a_repair_marks_an_edited_output_for_regeneration(
     members = {"version.dll": b"v", "Lumenveil/lamp_extract.exe": b"exe"}
     _locale_fixture(rig.play)
     done = client_packs.run_setup(
-        rig.play, pack, rig.install(pack, _lumen_fetched(rig, members)), game=GAME,
+        rig.play,
+        pack,
+        rig.install(pack, _lumen_fetched(rig, members)),
+        game=GAME,
         server_dir=rig.server,
         runner=_run_with(
-            rig.play, _Outcome(writes={"lampdata.bin": b"lamps", "liquiddata.bin": b"water"}),
+            rig.play,
+            _Outcome(writes={"lampdata.bin": b"lamps", "liquiddata.bin": b"water"}),
             seen=[],
         ),
     )
     (rig.play / "lampdata.bin").write_bytes(b"the player's edit")
     (rig.play / "version.dll").unlink()
     assert client_packs.recorded_files_missing(rig.play, done)
-    repaired = rig.install(
-        pack, _lumen_fetched(rig, members), previous=done, only_missing=True
-    )
+    repaired = rig.install(pack, _lumen_fetched(rig, members), previous=done, only_missing=True)
 
     import json as _json
+
     client_packs.write_record(
         rig.play,
         client_packs.PackRecord(
-            packs={"lumenveil": dict(repaired)}, exe=None,
+            packs={"lumenveil": dict(repaired)},
+            exe=None,
             choices={"packs": {}, "exe_options": {}},
         ),
-        game=GAME, server_dir=rig.server,
+        game=GAME,
+        server_dir=rig.server,
     )
     saved = _json.loads((rig.play / client_packs.RECORD).read_text())["packs"]["lumenveil"]
-    assert saved["files"].get("lampdata.bin") is None, (
-        "every persisted hash matches disk right after the post-install save"
-    )
-    assert "lampdata.bin" not in repaired["files"], (
-        "the hash on disk no longer matches: persisting it would assert a false ownership"
-    )
+    assert (
+        saved["files"].get("lampdata.bin") is None
+    ), "every persisted hash matches disk right after the post-install save"
+    assert (
+        "lampdata.bin" not in repaired["files"]
+    ), "the hash on disk no longer matches: persisting it would assert a false ownership"
     assert "lampdata.bin" in repaired.get("setup_pending", [])
 
     after = client_packs.run_setup(
-        rig.play, pack, repaired, game=GAME, server_dir=rig.server,
+        rig.play,
+        pack,
+        repaired,
+        game=GAME,
+        server_dir=rig.server,
         runner=_run_with(
-            rig.play, _Outcome(writes={"lampdata.bin": b"lamps", "liquiddata.bin": b"water"}),
+            rig.play,
+            _Outcome(writes={"lampdata.bin": b"lamps", "liquiddata.bin": b"water"}),
             seen=(retry := []),
         ),
     )
@@ -4653,7 +4776,8 @@ def test_a_repair_marks_an_edited_output_for_regeneration(
 
 
 def test_update_state_is_current_when_the_record_matches_the_pin(
-    rig: _Rig, monkeypatch: pytest.MonkeyPatch,
+    rig: _Rig,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """T809 W6: an installed record at the pinned sha256 is current, not an update."""
     monkeypatch.setattr(client_packs.platform, "detect", lambda: "windows")
@@ -4680,7 +4804,7 @@ def test_defender_blocking_the_zip_says_so_in_one_plain_sentence() -> None:
     pack = _lumen_pack()
     blocked = OSError(22, "Invalid argument")
     blocked.winerror = 225  # type: ignore[attr-defined]
-    blocked.filename = str("Lumenveil-0.1.0.zip.part")
+    blocked.filename = "Lumenveil-0.1.0.zip.part"
     refused = client_packs._os_refusal(pack, blocked)
     assert "virus protection blocked" in str(refused)
     assert "Nothing was changed" in str(refused)
@@ -4720,6 +4844,7 @@ def test_a_stale_copy_loader_goes_when_the_original_lost_it(rig: _Rig) -> None:
     assert not (rig.play / "version.dll").exists()
     client_packs.refuse_foreign_loader(rig.play, pack, None)
 
+
 def test_a_loader_the_original_keeps_still_refuses(rig: _Rig) -> None:
     """T809 W6B mutation: the original still holding it means the refusal stands."""
     pack = _lumen_pack()
@@ -4732,7 +4857,8 @@ def test_a_loader_the_original_keeps_still_refuses(rig: _Rig) -> None:
 
 
 def test_a_recorded_lumenveil_loader_is_never_reaped(
-    rig: _Rig, monkeypatch: pytest.MonkeyPatch,
+    rig: _Rig,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """T809 W6B: Lumenveil's own recorded loader stays even when the original lacks it."""
     monkeypatch.setattr(client_packs.platform, "detect", lambda: "windows")

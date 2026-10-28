@@ -1196,11 +1196,9 @@ def has_client_choices(client: Client) -> bool:
     """Whether a player can choose anything: an offered optional pack or a Wow.exe option."""
     here = client_packs.offered_on()
     return any(
-        pack.optional and (not pack.platforms or here in pack.platforms)
-        for pack in client.packs
-    ) or bool(
-        client.exe_patch is not None and client.exe_patch.options
-    )
+        pack.optional and (not pack.platforms or here in pack.platforms) for pack in client.packs
+    ) or bool(client.exe_patch is not None and client.exe_patch.options)
+
 
 class ClientOptionsBox(QWidget):
     """The packs and Wow.exe options of a server's client, as checkboxes (T181 b/c).
@@ -1344,7 +1342,9 @@ class ClientOptionsDialog(QDialog):
     """ "Client options…": the checkboxes, Save and Cancel. Save applies at the next Play."""
 
     def __init__(
-        self, offer: ClientOptionsOffer, parent: QWidget | None = None,
+        self,
+        offer: ClientOptionsOffer,
+        parent: QWidget | None = None,
         view: ControllerView | None = None,
     ) -> None:
         super().__init__(parent)
@@ -1415,7 +1415,9 @@ class ClientOptionsDialog(QDialog):
 
 
 def ask_client_options(
-    parent: QWidget, offer: ClientOptionsOffer, view: ControllerView | None = None,
+    parent: QWidget,
+    offer: ClientOptionsOffer,
+    view: ControllerView | None = None,
 ) -> dict[str, Any] | None:
     """The real `ClientOptionsAsker`: the dialog, modal; None for Cancel."""
     dialog = ClientOptionsDialog(offer, parent, view=view)
@@ -13869,7 +13871,9 @@ class ControllerView(QWidget):
                     # The pending note rides in the record BEFORE the exe runs, so a
                     # kill between the two still cleans on the next Play; the final
                     # save drops it. The engine rolls back on any setup failure.
-                    def keep_pending(pending_entry: Mapping[str, Any]) -> None:
+                    def keep_pending(
+                        pending_entry: Mapping[str, Any], pack_id: str = pack_id
+                    ) -> None:
                         packs[pack_id] = dict(pending_entry)
                         save()
 
@@ -13889,18 +13893,19 @@ class ControllerView(QWidget):
                 # Setup outputs are never told as "left alone": the install
                 # regenerates them (the note rides `setup_pending` instead),
                 # so that wording would contradict what Play then does.
-                left = [
-                    rel for rel in left_behind
+                alone = [
+                    rel
+                    for rel in left_behind
                     if not (
                         pack.setup is not None
                         and isinstance(rel, str)
                         and rel in done.get("setup_pending", [])
                     )
                 ]
-                if left:
+                if alone:
                     notes.append(
                         f"{pack.label}: left alone because you changed them: "
-                        + ", ".join(sorted(left))
+                        + ", ".join(sorted(alone))
                         + "."
                     )
         # 2. Wow.exe.
@@ -14160,7 +14165,10 @@ class ControllerView(QWidget):
             client_packs.write_record(
                 play,
                 client_packs.PackRecord(
-                    dict(packs), record.exe, record.choices, record.config_seeded,
+                    dict(packs),
+                    record.exe,
+                    record.choices,
+                    record.config_seeded,
                     record.launcher,
                 ),
                 game=game,
@@ -14192,9 +14200,7 @@ class ControllerView(QWidget):
             raise client_packs.PackError(str(exc)) from exc
         except client_packs.PackError as exc:
             raise client_packs.PackError(
-                _checkout_refusal(
-                    pack, server_dir, wsl_distro=self.services.controller.wsl_distro
-                )
+                _checkout_refusal(pack, server_dir, wsl_distro=self.services.controller.wsl_distro)
                 or str(exc)
             ) from exc
         if client_packs.pack_installs_loader(pack):
@@ -14206,7 +14212,12 @@ class ControllerView(QWidget):
                 client_packs.refuse_foreign_loader(play, pack, have)
         try:
             done = client_packs.install(
-                play, pack, fetched, game=game, server_dir=server_dir, previous=have,
+                play,
+                pack,
+                fetched,
+                game=game,
+                server_dir=server_dir,
+                previous=have,
             )
         except client_packs.PartialInstall as exc:
             packs[pack.id] = exc.entry
@@ -14226,8 +14237,13 @@ class ControllerView(QWidget):
 
             try:
                 packs[pack.id] = client_packs.run_setup(
-                    play, pack, done, game=game, server_dir=server_dir,
-                    record=have, on_pending=keep_pending,
+                    play,
+                    pack,
+                    done,
+                    game=game,
+                    server_dir=server_dir,
+                    record=have,
+                    on_pending=keep_pending,
                 )
             except client_packs.PackError as exc:
                 raise client_packs.PackError(str(exc)) from exc
@@ -14481,7 +14497,10 @@ class ControllerView(QWidget):
         pack = next((p for p in self.entry.client.packs if p.id == pack_id), None)
         if self.services.set_play_client_dir is None or play is None or pack is None:
             return
-        if client_packs.update_state(pack, client_packs.read_record(play).packs.get(pack_id)) != "update available":
+        if (
+            client_packs.update_state(pack, client_packs.read_record(play).packs.get(pack_id))
+            != "update available"
+        ):
             return
         refusal = self._play_client_refusal()
         if refusal is None and self._play_pending:
@@ -14506,7 +14525,9 @@ class ControllerView(QWidget):
 
     @Slot(object)
     def _update_done(
-        self, pack: ClientPack, result: object,
+        self,
+        pack: ClientPack,
+        result: object,
         done: Callable[[ClientPack, str], None] | None,
     ) -> None:
         """An update's worker answered: give back the lock and hand on its sentence."""
@@ -14519,7 +14540,9 @@ class ControllerView(QWidget):
 
     @Slot(object)
     def _update_failed(
-        self, pack: ClientPack, exc: object,
+        self,
+        pack: ClientPack,
+        exc: object,
         done: Callable[[ClientPack, str], None] | None,
         failed: Callable[[ClientPack, str], None] | None,
     ) -> None:
