@@ -49,6 +49,7 @@ PINS_MEASURED = (
     "f19a18799",
     "2a2211cd8",
     "8a4e76eac",
+    "3f2969ddb",
 )
 USED_AT_BOTH_PINS = (
     (50000, 50008),
@@ -77,8 +78,13 @@ no base SQL changed since f19a1879, and its 66 db_world updates touch gossip men
 (2026-10-17) read 8a4e76ea from the GitHub compare: no base SQL changed since 2a2211cd, and
 none of its 73 db_world updates has an event-62 smart_scripts row with a parameter in the range,
 a gossip_menu or gossip_menu_option row, a type 14 or 15 condition, or a gossip_menu_id in it
-(519 smart_scripts rows read, 4 gossip statements, 33 condition statements). Unbound's Mentor (900001)
-carries `gossip_menu_id` 0 and talks through Lua. 58000..60999 and 62000..89999 are unused.
+(519 smart_scripts rows read, 4 gossip statements, 33 condition statements). T824
+(2026-10-28) read 3f2969dd from the GitHub compare: no base SQL changed since 8a4e76ea, and its
+19 db_world updates hold no event-62 smart_scripts row, no gossip_menu or gossip_menu_option row
+and no type 14 or 15 condition with an id in 49990..70000 (the only menus they touch are
+10599..10706, and 2026_10_16_00's `gossip_menu_id` values are 10599, 10692 and 10704). Unbound's
+Mentor (900001) carries `gossip_menu_id` 0 and talks through Lua. 58000..60999 and
+62000..89999 are unused.
 """
 
 _ONY = 80

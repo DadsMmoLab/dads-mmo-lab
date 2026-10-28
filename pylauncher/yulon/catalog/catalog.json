@@ -7,7 +7,8 @@
       "status": "stable",
       "description": "Wrath of the Lich King (3.3.5a) on AzerothCore, with bots that quest, group and fight alongside you. The most complete server here: add modules, scripts and mods from its Modules tab.",
       "notes": [
-        "The tile said, until T194: \"The flagship install; module/ALE/mod/keg management is manifest-driven.\""
+        "The tile said, until T194: \"The flagship install; module/ALE/mod/keg management is manifest-driven.\"",
+        "T824 (2026-10-28): core 8a4e76ea -> 3f2969dd and mod-playerbots d750b4b3 -> e88cc409, the newest at 2026-10-28, not live-tested."
       ],
       "emulator": {
         "name": "AzerothCore (mod-playerbots fork) + mod-playerbots",
@@ -17,13 +18,13 @@
             "branch": "Playerbot",
             "depth": null,
             "dest": ".",
-            "rev": "8a4e76eac8c4ccebf547113afe7b51d6c3e91641"
+            "rev": "3f2969ddb0da42b48b4fca050c02b19163ba1e20"
           },
           {
             "repo": "mod-playerbots/mod-playerbots",
             "branch": "master",
             "dest": "modules/mod-playerbots",
-            "rev": "d750b4b3a50effdf22bedc8032f0e8e5f7cb8091"
+            "rev": "e88cc4099e69f35126b28942a412ca702d20453b"
           }
         ]
       },
@@ -282,23 +283,26 @@
       "name": "WoW TBC",
       "status": "beta",
       "description": "TBC (2.4.3) on CMaNGOS with the CMaNGOS playerbots fork.",
+      "notes": [
+        "T824 (2026-10-28): mangos-tbc 15b6ddb4 -> 37767e95, playerbots da4419af -> 6823423e and tbc-db ebe51a83 -> 1c54acd2, the newest at 2026-10-28, not live-tested."
+      ],
       "emulator": {
         "name": "CMaNGOS mangos-tbc + cmangos/playerbots + tbc-db",
         "sources": [
           {
             "repo": "cmangos/mangos-tbc",
             "dest": "src/mangos-tbc",
-            "rev": "15b6ddb4ec9e443d49f4e438af73782ce5c16491"
+            "rev": "37767e954241e346453260b8bc8c1fb2e2afdf7d"
           },
           {
             "repo": "cmangos/playerbots",
             "dest": "src/mangos-tbc/src/modules/Bots",
-            "rev": "da4419afc44f97bb950ca2ebccc3f29a902a3fab"
+            "rev": "6823423e07789c875f55a0fee9beeae0d3b69561"
           },
           {
             "repo": "cmangos/tbc-db",
             "dest": "src/tbc-db",
-            "rev": "ebe51a83b0fde5397f0ecd82a36cb6c40f667d36"
+            "rev": "1c54acd200540076c3078d22a66fd417d0f6dd60"
           }
         ]
       },
@@ -747,23 +751,26 @@
       "name": "WoW Vanilla",
       "status": "beta",
       "description": "Vanilla (1.12.1) on CMaNGOS with the CMaNGOS playerbots fork.",
+      "notes": [
+        "T824 (2026-10-28): mangos-classic 8ec338a1 -> 57312491, playerbots da4419af -> 6823423e and classic-db ec4f5961 -> 603ece10, the newest at 2026-10-28, not live-tested."
+      ],
       "emulator": {
         "name": "CMaNGOS mangos-classic + cmangos/playerbots + classic-db",
         "sources": [
           {
             "repo": "cmangos/mangos-classic",
             "dest": "src/mangos-classic",
-            "rev": "8ec338a1704e7dcb1c0213eb7ed58f9231ade40f"
+            "rev": "5731249195520323cb5fb9aa29761d4f033272ce"
           },
           {
             "repo": "cmangos/playerbots",
             "dest": "src/mangos-classic/src/modules/Bots",
-            "rev": "da4419afc44f97bb950ca2ebccc3f29a902a3fab"
+            "rev": "6823423e07789c875f55a0fee9beeae0d3b69561"
           },
           {
             "repo": "cmangos/classic-db",
             "dest": "src/classic-db",
-            "rev": "ec4f596146be6467ea93c57397858e329e2db852"
+            "rev": "603ece109099ce44a5447a1b1cffd65c7272d71c"
           }
         ]
       },
@@ -1213,7 +1220,8 @@
         "The core moved from its 1181dev branch to main with v0.9.18: 1181dev was main plus the SOAP interface (PR #491, 2026-09-17), main now holds all of it (src/mangosd/MaNGOSsoap.cpp) and four commits more, and the TortoiseBots README names the core's main branch as its base. main carries the headless bot sessions (PR #438, bot-helpers is fully merged into it) the bots module requires, and the bots themselves are Sagiroth/TortoiseBots, cloned into modules/TortoiseBots.",
         "It replaces the retired Shyalya fork that vendored the cmangos playerbots; a server already installed from that fork goes on opening, starting and being played, and is not migrated.",
         "Commands reach this world over SOAP again: the core builds gsoap from source behind ENABLE_SOAP, which the image template switches on (T86, 2026-09-17).",
-        "Installed, started and pressed headless through the app's own seams on the test box; no client rendered there (T30, T86)."
+        "Installed, started and pressed headless through the app's own seams on the test box; no client rendered there (T30, T86).",
+        "T824 (2026-10-28): core 10393426 -> 33d0131a and TortoiseBots ff668fee -> 573c7919 (release v1.14.0), the newest at 2026-10-28, not live-tested."
       ],
       "emulator": {
         "name": "tortoise-wow/tortoise-wow @ main (the Penqle core) + Sagiroth/TortoiseBots",
@@ -1222,13 +1230,13 @@
             "repo": "tortoise-wow/tortoise-wow",
             "branch": "main",
             "dest": "src/tortoise-wow",
-            "rev": "10393426efe4bbe1de3a31fd071ca36fae358bb6"
+            "rev": "33d0131a5f0f536dffaced04de859561bfc13d5a"
           },
           {
             "repo": "Sagiroth/TortoiseBots",
             "branch": "main",
             "dest": "src/tortoise-wow/modules/TortoiseBots",
-            "rev": "ff668fee0604035943e2ff0028ea2fd16c029d64",
+            "rev": "573c791928341c79f1086ce6cf7dab795b54978d",
             "follow": "releases"
           }
         ]
@@ -1526,7 +1534,7 @@
                 "file": "wow-tortoise/patches/updater-no-wait-for-enter.patch",
                 "source": "src/tortoise-wow",
                 "obsolete_when_absent": "std::getline(std::cin",
-                "reason": "tortoise-wow's DB auto-updater ends a failed migration with std::getline(std::cin) (src/shared/Database/AutoUpdater.cpp:236-239 at 187af788, the same bytes at 6131a26f and at 10393426); the world container keeps stdin open for the Console tab, so the read never returns and a failed update hangs the world with no signal handler, no SOAP and no error line. The patch drops the read so the world reports the failure and exits, as Shyalya's fork did in b405b10adb"
+                "reason": "tortoise-wow's DB auto-updater ends a failed migration with std::getline(std::cin) (src/shared/Database/AutoUpdater.cpp:236-239 at 187af788, the same bytes at 6131a26f, at 10393426 and at 33d0131a, the pin since T824); the world container keeps stdin open for the Console tab, so the read never returns and a failed update hangs the world with no signal handler, no SOAP and no error line. The patch drops the read so the world reports the failure and exits, as Shyalya's fork did in b405b10adb"
               }
             ],
             "rerunnable_modules": [
@@ -1657,6 +1665,9 @@
       "name": "Centurion",
       "status": "beta",
       "description": "Centurion is level-60 player-versus-player WoW on the 3.3.5a client, with hardcore world characters, tournament battlegrounds and arenas, and 150 bots that quest, roam and fill the battlegrounds. Yu'lon builds the server from Centurion's own source and makes your English 3.3.5a client ready to play it, with Centurion's patches and addons.",
+      "notes": [
+        "T824 (2026-10-28): TrinityCore112 CENTURION 25d3e6ef -> 351950fb, the newest at 2026-10-28, not live-tested."
+      ],
       "emulator": {
         "name": "Centurion (TrinityCore 3.3.5 fork with its own playerbots)",
         "sources": [
@@ -1664,7 +1675,7 @@
             "repo": "thomasjteachey/TrinityCore112",
             "branch": "CENTURION",
             "dest": "src/centurion",
-            "rev": "25d3e6efbee97c3cb38830003e2460d98e235f46"
+            "rev": "351950fb9a5579edfb96a301eb846f13e65aeda6"
           }
         ]
       },
@@ -2547,7 +2558,8 @@
       "status": "beta",
       "description": "Wrath of the Lich King with Wrath Unbound: unlock more classes at the Mentor and mix their spells and talents. Its own server, beside your WotLK one. Death Knight can be your first class, not an added one.",
       "notes": [
-        "T554: the multi-class server. Own folder, containers, images, volumes, databases and ports, so it runs beside WoW WotLK."
+        "T554: the multi-class server. Own folder, containers, images, volumes, databases and ports, so it runs beside WoW WotLK.",
+        "T824 (2026-10-28): core 8a4e76ea -> 3f2969dd and mod-playerbots d750b4b3 -> e88cc409, the newest at 2026-10-28, not live-tested."
       ],
       "emulator": {
         "name": "AzerothCore (mod-playerbots fork) + mod-playerbots + mod-ale + Wrath Unbound",
@@ -2557,13 +2569,13 @@
             "branch": "Playerbot",
             "depth": null,
             "dest": ".",
-            "rev": "8a4e76eac8c4ccebf547113afe7b51d6c3e91641"
+            "rev": "3f2969ddb0da42b48b4fca050c02b19163ba1e20"
           },
           {
             "repo": "mod-playerbots/mod-playerbots",
             "branch": "master",
             "dest": "modules/mod-playerbots",
-            "rev": "d750b4b3a50effdf22bedc8032f0e8e5f7cb8091"
+            "rev": "e88cc4099e69f35126b28942a412ca702d20453b"
           },
           {
             "repo": "azerothcore/mod-ale",

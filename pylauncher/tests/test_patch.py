@@ -2,8 +2,8 @@
 
 The fixture under `tests/fixtures/cmangos-vmap-8ec338a1/` is the four files of
 `contrib/vmap_extractor/vmapextract/` as they are in `cmangos/mangos-classic`
-at `8ec338a1` — the commit `wow-vanilla` pins — copied byte for byte on
-2026-09-05 from the checkout on `m910q`; `patched/` beside it holds the same
+at `8ec338a1` — the commit `wow-vanilla` was pinned to when it was copied — copied byte
+for byte on 2026-09-05 from the checkout on `m910q`; `patched/` beside it holds the same
 four files after `git apply` of the shipped patch on that box. So the strongest
 assertion here is not "the fix is in the file" but "this module produced the
 bytes git produced", and every other test is a way the apply must refuse or

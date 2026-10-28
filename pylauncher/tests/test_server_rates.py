@@ -227,7 +227,8 @@ def test_a_rate_the_file_spells_oddly_is_shown_as_written_and_can_still_be_edite
 # kept and set to 0.25.
 
 WOTLK_RATES = (
-    # mod-playerbots/azerothcore-wotlk @7f12e89e (the file is unchanged at f19a1879 and 2a2211cd),
+    # mod-playerbots/azerothcore-wotlk @7f12e89e (the file is unchanged at f19a1879, 2a2211cd,
+    # 8a4e76ea and 3f2969dd),
     # worldserver.conf.dist:2439,2499-2503,2573,2850-2858
     "Rate.Reputation.Gain = 11\n"
     "Rate.XP.Kill      = 2\n"
@@ -245,8 +246,8 @@ WOTLK_RATES = (
     "Rate.Drop.Money                 = 5\n"
 )
 TBC_RATES = (
-    # cmangos/mangos-tbc @15b6ddb4, mangosd.conf.dist.in:1560-1594 (an excerpt; the conf and
-    # World.cpp are byte-identical to 75f9ae68)
+    # cmangos/mangos-tbc @37767e95, mangosd.conf.dist.in:1566-1600 (an excerpt; values
+    # unchanged from 15b6ddb4)
     "Rate.Drop.Item.Poor = 6\n"
     "Rate.Drop.Item.Normal = 7\n"
     "Rate.Drop.Item.Uncommon = 8\n"
@@ -271,7 +272,7 @@ TBC_RATES = (
     "Rate.Reputation.LowLevel.Kill    = 0.25\n"
 )
 VANILLA_RATES = (
-    # cmangos/mangos-classic @8ec338a1, mangosd.conf.dist.in:1499-1526 (an excerpt)
+    # cmangos/mangos-classic @57312491, mangosd.conf.dist.in:1505-1531 (an excerpt)
     "Rate.Drop.Item.Poor = 6\n"
     "Rate.Drop.Item.Normal = 7\n"
     "Rate.Drop.Item.Uncommon = 8\n"
@@ -307,7 +308,7 @@ TORTOISE_RATES = (
     "Rate.Reputation.Gain = 11\n"
 )
 CENTURION_RATES = (
-    # thomasjteachey/TrinityCore112 @56fe34fa, worldserver.conf.dist:2525-2553,2618,2639
+    # thomasjteachey/TrinityCore112 @351950fb, worldserver.conf.dist:2537-2545,2563-2565,2630,2651
     "Rate.Drop.Item.Poor             = 6\n"
     "Rate.Drop.Item.Normal           = 7\n"
     "Rate.Drop.Item.Uncommon         = 8\n"

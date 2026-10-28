@@ -968,11 +968,11 @@ def test_the_walk_does_not_enter_a_folder_no_exception_can_reach(tmp_path: Path)
 
 # --- T230: a recipe recognised by its bytes is walked only where its stages read -------------
 
-WOTLK_DATA = Path(__file__).resolve().parent / "data" / "azerothcore-wotlk-8a4e76ea"
+WOTLK_DATA = Path(__file__).resolve().parent / "data" / "azerothcore-wotlk-3f2969dd"
 """mod-playerbots/azerothcore-wotlk at the catalog pin, byte for byte: `apps/docker/Dockerfile`,
 `src/cmake/genrev.cmake` and the root `.dockerignore` (read 2026-10-05, T230 plan §1; the three
 files were the same bytes at f19a1879 when the pin moved there, 2026-10-08, at 2a2211cd
-(2026-10-10) and at 8a4e76ea, 2026-10-17)."""
+(2026-10-10), at 8a4e76ea (2026-10-17) and at 3f2969dd, T824, 2026-10-28)."""
 WOTLK_RECIPE_SHA = "e87bc1bd18f94bbf1705b81438b0caf7a1c8c8c8a0330cdaf08511f0f3ae7964"
 GENREV_SHA = "a27f319585605516ed82601d87a7785a135ae3b3d0b725d1bf4f24615b6d342b"
 WOTLK_READS = (".git", "CMakeLists.txt", "apps", "conf", "data", "deps", "modules", "src")

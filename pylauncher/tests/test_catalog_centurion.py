@@ -41,6 +41,14 @@ Leap) measured inside the spline initializer and drawn at 0.4 yd (MotionMaster.c
 game test). No SQL, conf, CMake, dbc, World.cpp, cs_misc.cpp or MapBuilder.cpp change, so every
 reading above and the revive fix still hold.
 
+T824 (2026-10-28) moved the pin to 351950fb, the newest CENTURION tip that day, without a live
+run: the versioned SQL files are unchanged (`auth_data.sql`'s realm row still at :73,
+`auth_schema.sql`'s `localAddress` now :400), the ready line is still Main.cpp:446 and the
+signal handler :304-308, `World initialized` moved to World.cpp:2544 and the fatal line to
+:1876, `TCSoap.cpp`'s `SEC_ADMINISTRATOR` check is :103-105, `worldserver.conf.dist`'s
+`MaxCoreStuckTime = 60` is :464 and `playerbots.conf.dist:27` still defaults every bot feature
+off, and `cs_misc.cpp:798` still holds the revive fix (added to `REVIVE_FIXED_PINS`).
+
 The entry's family blocks were tested before this entry existed against the fixture in
 `tests/support_trinitycore.py`; the last test here holds the two together, so a template
 proved on the fixture is proved on what ships.
@@ -66,7 +74,7 @@ ENTRY: CatalogEntry = load_catalog().get("wow-centurion")
 NATIVE = ENTRY.install.native
 assert NATIVE is not None and NATIVE.trinitycore is not None
 TC = NATIVE.trinitycore
-REV = "25d3e6efbee97c3cb38830003e2460d98e235f46"
+REV = "351950fb9a5579edfb96a301eb846f13e65aeda6"
 CHECKOUT = "src/centurion"
 PATCHES = f"{CHECKOUT}/centurion/patches"
 CORE = "/opt/trinitycore"
@@ -105,18 +113,18 @@ def test_ports_databases_and_the_realm_row() -> None:
     assert ENTRY.operations is not None
     assert ENTRY.operations.port == 7878
     assert ENTRY.operations.namespace == "urn:TC"
-    assert ENTRY.operations.gm_level == 3  # SEC_ADMINISTRATOR, TCSoap.cpp:83-103
+    assert ENTRY.operations.gm_level == 3  # SEC_ADMINISTRATOR, TCSoap.cpp:103-105
     assert ENTRY.databases.auth == "centurion_auth"
     assert ENTRY.databases.world == "centurion_world"
     assert ENTRY.databases.characters == "centurion_characters"
-    assert ENTRY.realmlist.local_address_column == "localAddress"  # auth_schema.sql:399
+    assert ENTRY.realmlist.local_address_column == "localAddress"  # auth_schema.sql:400
 
 
 def test_the_world_is_ready_when_it_says_so_after_its_network_is_up() -> None:
     """`(worldserver-daemon) ready...` (worldserver/Main.cpp:446) is printed after the SOAP
     thread, the world socket and the realm's online flag (:383-425); `World initialized`
-    (World.cpp:2492 at 6c6472c3, read 2026-10-07) comes before all three. The fatal line is
-    World.cpp:1833, whole."""
+    (World.cpp:2544 at 351950fb; :2492 at 6c6472c3 when it was read on 2026-10-07) comes before
+    all three. The fatal line is World.cpp:1876, whole."""
     assert NATIVE.ready.world == "(worldserver-daemon) ready..."
     assert NATIVE.ready.regex is False
     assert NATIVE.ready.fatal == "Unable to load critical files - server shutting down !!!"
@@ -133,7 +141,7 @@ def test_the_client_folder_must_be_an_english_wotlk_client() -> None:
 
 
 def test_the_map_data_takes_maps_cameras_and_vmaps_and_the_trees_own_dbcs() -> None:
-    """`-e 5` = maps + cameras (map_extractor System.cpp:66-68): the DBCs are the checkout's
+    """`-e 5` = maps + cameras (map_extractor System.cpp:65-68): the DBCs are the checkout's
     (`centurion/dbc`, README.md:174-180), and `Cameras/` goes into DataDir beside maps."""
     maps, extract_v, assemble = TC.extract.tools
     assert maps.argv == (f"{CORE}/bin/mapextractor", "-i", "/client", "-o", "/out", "-e", "5")

@@ -348,7 +348,7 @@ def test_every_tortoise_source_is_pinned_to_a_commit_not_a_moving_branch() -> No
     # rest are held to the SHAPE of a full commit id, because an abbreviation
     # is a prefix and a prefix can stop being unique.
     core = next(s for s in sources if s.repo.endswith("tortoise-wow"))
-    assert core.rev == "10393426efe4bbe1de3a31fd071ca36fae358bb6", (
+    assert core.rev == "33d0131a5f0f536dffaced04de859561bfc13d5a", (
         f"the core is pinned to {core.rev!r}. It was 7c0fb278, then 3a8472e on the retired "
         "Shyalya fork, 9980181c on `tortoise-wow/tortoise-wow` branch `bot-helpers` since T30 "
         "(every measurement in this file taken against it on `yulon-arch` 2026-09-11, "
@@ -368,11 +368,14 @@ def test_every_tortoise_source_is_pinned_to_a_commit_not_a_moving_branch() -> No
         "1181dev's tip 6131a26f is its ancestor and `main` is four commits ahead, touching "
         "src/game/Objects/Unit.h and src/scripts/spells/spell_druid.cpp only (GitHub compare), "
         "so every measurement above holds; the TortoiseBots README names the core's `main` "
-        "branch as its base, and `main` has the SOAP interface (src/mangosd/MaNGOSsoap.cpp). "
-        "Moving it again means taking them again"
+        "branch as its base, and `main` has the SOAP interface (src/mangosd/MaNGOSsoap.cpp); "
+        "and T824 moved it to 33d0131a, `main` on 2026-10-28, the newest at 2026-10-28 and "
+        "not live-tested: AutoUpdater.cpp's failed-migration read is still at :236-239 "
+        "(re-read on GitHub, the updater patch still applies), and nothing else in this "
+        "file's measurements was re-taken. Moving it again means taking them again"
     )
     module = next(s for s in sources if s.repo == "Sagiroth/TortoiseBots")
-    assert module.rev == "ff668fee0604035943e2ff0028ea2fd16c029d64", (
+    assert module.rev == "573c791928341c79f1086ce6cf7dab795b54978d", (
         f"the bots module is pinned to {module.rev!r}. Its own pin is as load-bearing as the "
         "core's: the module is what decides the folder names its SQL is installed under, "
         "which conf keys exist, and what the world prints when it loads. It was fd7ec9ec "
@@ -438,7 +441,9 @@ def test_every_tortoise_source_is_pinned_to_a_commit_not_a_moving_branch() -> No
         "`data/sql/world` and `data/sql/character` folders, TortoiseBots.cmake gaining the "
         "new sources and a zlib link (zlib1g-dev is in the image already; the core finds ZLIB at "
         "its top level), and the dashboard protocol 8 -> 9 (rebuilt from "
-        "the same checkout, T162)"
+        "the same checkout, T162); and T824 moved it to 573c7919, the commit release v1.14.0 "
+        "names (2026-10-28, main's tip, chosen without a live run: the newest at 2026-10-28, "
+        "not live-tested)"
     )
     for source in sources:
         assert re.fullmatch(

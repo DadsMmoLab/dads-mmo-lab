@@ -47,6 +47,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Spin boxes keep their number clear of the buttons with any font.
 
 ### Changed
+- The newest WotLK, Unbound, TBC, Vanilla, Tortoise and Centurion servers are pinned (not tested live yet).
 - The Danger zone now has one **Remove this server…** press offering off the list, uninstall, or containers.
 - Server updates live in a **Server version** section on the Backups & updates tab instead of a Modules menu.
 - The Maintenance tab is now **Backups & updates**, saying what you find on it.
