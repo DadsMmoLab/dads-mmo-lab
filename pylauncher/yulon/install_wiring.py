@@ -164,7 +164,8 @@ def import_gate_for(
     import graph on itself the first time anything in that package moves.
     """
     spec = entry.container_spec()
-    if not spec.import_service:
+    import_service = spec.import_service
+    if not import_service:
         return None, None
 
     from yulon.apply import DockerSql
@@ -199,14 +200,49 @@ def import_gate_for(
         spec.db, password, schemas=entry.schema_map(), wsl_distro=wsl_distro, client=client
     )
     mysql = wotlk_maintenance.DockerMysql(spec.db, password, wsl_distro=wsl_distro, client=client)
+    bootstrap = None if native is None or native.azerothcore is None else native.azerothcore
+    names = entry.databases
 
     def probe() -> docker.ImportState:
         try:
-            return wotlk_repair.import_state(
+            state = wotlk_repair.import_state(
                 sql, mysql, lambda: docker.health(spec.db, wsl_distro=wsl_distro)
             )
         except _PasswordUnknown as exc:
             return docker.ImportState("unreadable", str(exc))
+        if bootstrap is None or not bootstrap.world_bootstrap_service:
+            return state
+        if state.state != "partial" or server_dir is None:
+            return state
+        # T812 live-proof D3: the CoA world bootstrap fills `acore_world` from
+        # the baseline BEFORE the import has created `acore_auth` and
+        # `acore_characters`, which the generic probe reads as `partial` — and
+        # `reset_unfinished()` then finds nothing to drop, so the import was
+        # never run. Ask the two facts that make it the bootstrap's own work:
+        # no import in this folder was ever started and not seen to finish
+        # (its record is what a world an import touched would leave), and the
+        # schemas hold exactly the loaded world (`version` is the table that
+        # script loads last). Everything else keeps the probe's answer,
+        # including every game with no bootstrap and every world with the
+        # import's own tables in it.
+        try:
+            if docker.one_shot_ended_marker(server_dir, import_service).is_file():
+                return state
+            loaded = wotlk_repair.only_the_world_was_loaded(
+                sql,
+                mysql,
+                done_marker=azerothcore.AzerothCoreInstaller.WORLD_BOOTSTRAP_DONE_TABLE,
+            )
+        except Exception as exc:  # noqa: BLE001 - an unproven answer keeps the probe's
+            logger.warning(f"could not tell whether only the world was loaded: {exc}")
+            return state
+        if not loaded:
+            return state
+        return docker.ImportState(
+            "absent",
+            f"{names.world} holds the base data this install loaded and "
+            f"{names.auth}, {names.characters} hold no tables, so the import never ran",
+        )
 
     def reset(*, everything: bool = False, seeded: bool = False) -> tuple[str, ...]:
         try:

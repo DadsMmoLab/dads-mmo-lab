@@ -283,6 +283,38 @@ def import_state(
     return docker.ImportState("partial", _unfinished_detail(unfinished, tables))
 
 
+def only_the_world_was_loaded(sql: SqlQuery, mysql: MysqlDocker, *, done_marker: str) -> bool:
+    """Whether `acore_world` alone holds tables and it holds `done_marker`.
+
+    The state an install's own world bootstrap leaves, and nothing else can:
+    the CoA bootstrap (`apps/coa-world/world_data.py`) fills `acore_world` and
+    exits with its done-marker (`version`, loaded last) before the import's
+    one-shot has created `acore_auth`/`acore_characters` at all. The import
+    itself cannot leave this state — it populates and then updates
+    Login, Character and World in that order
+    (`DatabaseLoader::AddDatabase` calls), so any world update it applied means
+    auth and characters were written first. Requiring both of them to hold no
+    tables is therefore what keeps a world an import touched out of this answer.
+
+    Asked only by a caller that knows ITS entry has a world bootstrap (see
+    `install_wiring.import_gate_for`); the schemas are still `acore_*`, so this
+    module can answer it. `done_marker` is the table that script loads last, and
+    the caller passes it rather than this module knowing a second game's
+    bootstrap. Raises `MaintenanceError`/`ApplyError` like `import_state()` does;
+    the caller turns that into "not proven" and keeps the probe's answer.
+    """
+    existing = _databases(mysql)
+    present = [name for name in CORE_DATABASES if name in existing]
+    if not present:
+        return False
+    tables = _tables_in(sql, _DB_KEYS[present[0]])
+    return (
+        not tables[DB_NAMES["auth"]]
+        and not tables[DB_NAMES["characters"]]
+        and done_marker in tables[DB_NAMES["world"]]
+    )
+
+
 def _tables_in(sql: SqlQuery, through: Db) -> dict[str, set[str]]:
     """Every table name in each core schema, in one query.
 

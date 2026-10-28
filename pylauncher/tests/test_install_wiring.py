@@ -30,6 +30,7 @@ from yulon import docker, install_wiring, platform
 from yulon import log as log_module
 from yulon.apply import DockerSql
 from yulon.catalog.catalog import CatalogEntry, PasswordPlan, load_catalog
+from yulon.catalog.families import azerothcore
 from yulon.catalog.installer import InstallEngine, InstallerError, InstallOptions
 from yulon.controller_wow_wotlk import repair as wotlk_repair
 from yulon.controller_wow_wotlk.maintenance import DockerMysql
@@ -1653,3 +1654,87 @@ def test_a_repair_reset_the_database_refuses_carries_the_refusal(
     with pytest.raises(MaintenanceError) as caught:
         reset()
     assert "ERROR 1045" in str(caught.value)
+
+
+COA = load_catalog().get("wow-coa")
+
+
+def _coa_folder(tmp_path: Path) -> Path:
+    folder = tmp_path / "coa"
+    folder.mkdir()
+    plan = COA.install.password
+    assert plan.file is not None
+    (folder / plan.file).write_text("coa-0123456789abcdef\n", encoding="utf-8")
+    return folder
+
+
+def test_a_coa_probe_reads_the_bootstrap_s_own_world_as_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T812 live-proof D3: the bootstrap filled acore_world, the import has not run.
+
+    The generic probe reads that as `partial`, and `reset_unfinished()` then finds
+    nothing to drop, so the install died "the databases read as unfinished, but
+    nothing was found to clear". The CoA gate asks the bootstrap's own evidence.
+    """
+    folder = _coa_folder(tmp_path)
+    asked: list[str] = []
+
+    def fake_import_state(sql: object, mysql: object, health: object = None) -> docker.ImportState:
+        return docker.ImportState(
+            "partial", "acore_auth has 0 tables, acore_characters has 0 tables"
+        )
+
+    def fake_loaded(sql: object, mysql: object, *, done_marker: str) -> bool:
+        asked.append(done_marker)
+        return True
+
+    monkeypatch.setattr(wotlk_repair, "import_state", fake_import_state)
+    monkeypatch.setattr(wotlk_repair, "only_the_world_was_loaded", fake_loaded)
+    probe, _reset = install_wiring.import_gate_for(COA, server_dir=folder)
+    assert probe is not None
+    state = probe()
+    assert state.state == "absent", state.detail
+    assert asked == [azerothcore.AzerothCoreInstaller.WORLD_BOOTSTRAP_DONE_TABLE]
+
+
+def test_an_import_that_was_started_and_ended_keeps_the_partial_answer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A world an import touched is not the bootstrap's work, record or no tables."""
+    folder = _coa_folder(tmp_path)
+    docker.one_shot_ended_marker(folder, COA.containers.db_import or "").write_text(
+        "coa-db-import was ended before it finished\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        wotlk_repair,
+        "import_state",
+        lambda sql, mysql, health=None: docker.ImportState("partial", "half-written"),
+    )
+    monkeypatch.setattr(
+        wotlk_repair,
+        "only_the_world_was_loaded",
+        lambda *a, **k: pytest.fail("asked the bootstrap question over an ended import"),
+    )
+    probe, _reset = install_wiring.import_gate_for(COA, server_dir=folder)
+    assert probe is not None
+    assert probe().state == "partial"
+
+
+def test_a_game_with_no_world_bootstrap_keeps_the_generic_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every other game: the probe's `partial` is never re-read as the bootstrap's work."""
+    monkeypatch.setattr(
+        wotlk_repair,
+        "import_state",
+        lambda sql, mysql, health=None: docker.ImportState("partial", "acore_world has 3 tables"),
+    )
+    monkeypatch.setattr(
+        wotlk_repair,
+        "only_the_world_was_loaded",
+        lambda *a, **k: pytest.fail("asked the bootstrap question for a game with no bootstrap"),
+    )
+    probe, _reset = install_wiring.import_gate_for(WOTLK)
+    assert probe is not None
+    assert probe().state == "partial"

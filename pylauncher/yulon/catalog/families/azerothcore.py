@@ -414,6 +414,53 @@ def _ignore_answer(_answer: object) -> None:
     """`FnSql.run` is for statements whose answer nobody reads."""
 
 
+DOCKERIGNORE = ".dockerignore"
+DOCKERIGNORE_DATA_BLOCK: tuple[str, ...] = (
+    "# Yu'lon: `data/` holds the client data this install extracts (maps, vmaps,",
+    "# mmaps and the DBC files). It is several gigabytes after install and no",
+    "# build stage reads it, so it is left out of the build context; `data/sql`",
+    "# is the one folder the db-import image copies.",
+    "data/*",
+    "!data/sql",
+)
+"""The generated build context leaves the extracted game data out (T812 D9).
+
+The core checkout IS the build context and ships a `.dockerignore` with no
+`data/` line. After extraction that folder holds 6.6 GB (live proof,
+yulon-ubuntu2 2026-10-28), so every Rebuild uploaded it: BuildKit logged
+`transferring context: 2.02GB` and the build-context fingerprint gave no answer
+(over its 4 GiB cap), while the install's disk filled. `data/*` excludes the
+extracted folders and `!data/sql` keeps the base SQL and update files the
+db-import image's own `COPY data data` needs; nothing else in `data/` is read by
+a built stage (`apps/docker/Dockerfile` copies `apps`, `conf`, `deps`, `modules`,
+`src` and `data`).
+"""
+
+DOCKERIGNORE_DATA_MARKER = "`data/` holds the client data this install extracts"
+"""Its presence in `.dockerignore` means the block is already there (idempotent)."""
+
+
+def exclude_extracted_data(server_dir: Path) -> bool:
+    """Append `DOCKERIGNORE_DATA_BLOCK` to the checkout's `.dockerignore`; True if written.
+
+    Appended, never replaced: the file is the core's own and its lines decide
+    what else a build sends. Idempotent by the marker line, because a repair and
+    every update's put-back run `stage_generate_compose()` again. Raises
+    `OSError`/`UnicodeDecodeError` to the stage, which words it.
+    """
+    path = server_dir / DOCKERIGNORE
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        text = ""
+    if DOCKERIGNORE_DATA_MARKER in text:
+        return False
+    separator = "" if not text or text.endswith("\n") else "\n"
+    block = "\n".join((*DOCKERIGNORE_DATA_BLOCK, ""))
+    path.write_text(f"{text}{separator}{block}", encoding="utf-8")
+    return True
+
+
 class AzerothCoreInstaller(StagedInstaller):
     """Install one AzerothCore entry: clone, generate compose, build, fetch data, import, start."""
 
@@ -457,6 +504,15 @@ class AzerothCoreInstaller(StagedInstaller):
     Not recorded: a resume must always run it again (cheap when the world is
     already loaded: the service exits 0 at its done-marker) — the same reason
     `client-data` re-asks its volume.
+    """
+
+    WORLD_BOOTSTRAP_DONE_TABLE: ClassVar[str] = "version"
+    """The table that script loads LAST, so its presence means the load finished.
+
+    `world_data.py` loads `updates`, `updates_include` and `version` last, and the
+    service's own skip rule reads `version` (`base.yml.tmpl`); the import gate
+    asks the same table when a partial database is only that loaded world
+    (`install_wiring.import_gate_for`).
     """
 
     EXTRACT_STAGE: ClassVar[str] = "extract-maps"
@@ -521,6 +577,29 @@ class AzerothCoreInstaller(StagedInstaller):
         if native is None or native.azerothcore is None:
             return AzerothCoreData()
         return native.azerothcore
+
+    def stage_generate_compose(self, ctx: StageContext) -> Iterator[str]:
+        """The spine's three compose files, plus leaving extracted data out of the build context.
+
+        Only an entry that extracts client data into `data/` has anything to
+        leave out (CoA's `client_extract`, T812 C4a); every other entry runs
+        the spine's body and returns. Runs here rather than in a stage of its
+        own because a Repair and an update's put-back already rewrite the
+        generated files through this method, and the ignore belongs with them.
+        """
+        yield from super().stage_generate_compose(ctx)
+        if self._block().client_extract is None:
+            return
+        try:
+            written = exclude_extracted_data(ctx.server_dir)
+        except (OSError, UnicodeDecodeError) as exc:
+            raise InstallerError(
+                f"The build context's {DOCKERIGNORE} could not be written in {ctx.server_dir} "
+                f"({exc}), so a Rebuild would upload the extracted game data. Nothing else was "
+                "changed."
+            ) from exc
+        if written:
+            yield "The extracted game data is left out of the build context."
 
     def stage_build(self, ctx: StageContext) -> Iterator[str]:
         """The spine's compile, with mod-ale's Playerbots names bridged for it alone (T645).
@@ -641,6 +720,13 @@ class AzerothCoreInstaller(StagedInstaller):
         not ship adds nothing here and refuses where it is loaded.
         """
         found: dict[str, tuple[str, ...]] = dict(super().app_written_paths(server_dir))
+        if self._block().client_extract is not None and "." in found:
+            # `stage_generate_compose()` appends the build-context block to the
+            # checkout's own tracked .dockerignore (T812 D9), so a fetch's reset
+            # restores upstream's copy and the same stage writes it again. The
+            # update route's dirty-tree guard must read the modified file as
+            # this app's, or every CoA install refuses to update.
+            found["."] = (*found["."], DOCKERIGNORE)
         specs = self._block().patches
         if not specs:
             return found

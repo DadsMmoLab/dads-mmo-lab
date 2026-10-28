@@ -27,7 +27,7 @@ import yaml
 from tests.support_bash import bash_available
 from tests.support_native import ENTRY, Recorder
 from yulon import docker, resources
-from yulon.catalog import composegen
+from yulon.catalog import build_context, composegen, native
 from yulon.catalog.catalog import CatalogEntry
 from yulon.catalog.families.azerothcore import AzerothCoreInstaller
 from yulon.catalog.installer import InstallOptions
@@ -123,6 +123,28 @@ def _run_script(tmp_path: Path, state: str) -> tuple[str, str, int]:
         version, tables = "0", "0"
     (binds / "mysql").write_text(
         "#!/usr/bin/env bash\n" "for last; do :; done\n"
+        # The option file is parsed the way the real client parses it: a line
+        # that is not `name=value` is an unknown option, which is exactly how
+        # the shipped bootstrap died on `host coa-database` (live proof,
+        # 2026-10-28). The file is the one the rendered `--defaults-file=`
+        # names.
+        'cnf=""\n'
+        'for arg; do case "$arg" in --defaults-file=*) cnf="${arg#--defaults-file=}";; esac; done\n'
+        'if [ -n "$cnf" ]; then\n'
+        "  seen_client=0\n"
+        "  while IFS= read -r line; do\n"
+        '    case "$line" in\n'
+        '      "") continue;;\n'
+        '      "[client]") seen_client=1; continue;;\n'
+        '      "["*) echo "mysql: [ERROR] unknown group $line" >&2; exit 2;;\n'
+        "    esac\n"
+        '    case "$line" in\n'
+        "      *=*) ;;\n"
+        "      *) echo \"mysql: [ERROR] unknown option '--$line'\" >&2; exit 2;;\n"
+        "    esac\n"
+        '  done < "$cnf"\n'
+        '  [ "$seen_client" = 1 ] || { echo "mysql: [ERROR] no [client] group" >&2; exit 2; }\n'
+        "fi\n"
         # The version probe's query CONTAINS the table-count query's substring,
         # so it is matched first — as the rendered shell asks it first.
         "if [[ \"$last\" == *\"TABLE_SCHEMA='acore_world' AND TABLE_NAME='version'\"* ]]; then\n"
@@ -211,6 +233,48 @@ def test_the_password_is_never_in_argv_or_echoed() -> None:
     assert "MYSQL_PWD" not in script
 
 
+def test_the_mysql_option_file_is_name_equals_value() -> None:
+    """The option file the bootstrap hands `mysql --defaults-file` is parsed as MySQL parses it.
+
+    Written `user root` / `host coa-database` it is not an option file at all:
+    the one-shot dies `mysql: [ERROR] unknown option '--host coa-database'`
+    before a single table is loaded (live proof, yulon-ubuntu2 2026-10-28).
+    """
+    script = _script(_rendered_bootstrap())
+    line = next(line for line in script.splitlines() if "printf '[client]" in line)
+    proc = subprocess.run(
+        ["bash", "-c", line.split(">")[0]],
+        env={"PATH": "/usr/bin:/bin", "DB_ROOT_PASSWORD": "coa-test-password"},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert proc.returncode == 0, proc.stderr
+    lines = proc.stdout.splitlines()
+    assert lines[0] == "[client]", lines
+    assert lines[1] == "user=root", lines
+    assert lines[2].startswith("host=") and lines[2] != "host=", lines
+    assert lines[3] == "password=coa-test-password", lines
+    assert all("=" in entry or entry.startswith("[") for entry in lines), lines
+
+
+def test_the_option_file_is_what_the_one_shot_runs_with(tmp_path: Path) -> None:
+    """The rendered shell leaves 0 with the strict client, not exit 2 at its first query."""
+    out, _called, code = _run_script(tmp_path, "empty")
+    assert code == 0, out
+
+
+def test_the_bootstrap_mounts_the_migrations_the_baseline_hashes() -> None:
+    """`coveredMigrations` names files under `/src/data/sql` and `/src/modules/mod-ascension`.
+
+    Without the two mounts `world_data.py` stops before the first table with
+    `[Errno 2] No such file or directory` (live proof, yulon-ubuntu2 2026-10-28).
+    """
+    volumes = _rendered_bootstrap()["volumes"]
+    assert "./data/sql:/src/data/sql:ro" in volumes, volumes
+    assert "./modules/mod-ascension:/src/modules/mod-ascension:ro" in volumes, volumes
+
+
 def test_the_service_reads_the_core_checkout_at_src() -> None:
     service = _rendered_bootstrap()
     assert service["image"] == "mysql:8.4"
@@ -293,3 +357,72 @@ def test_the_done_marker_is_version_not_updates() -> None:
     chunk = _script(_rendered_bootstrap())
     assert "TABLE_NAME='version'" in chunk
     assert "TABLE_NAME='updates'" not in chunk
+
+
+def coa_linux() -> CatalogEntry:
+    entry = coa()
+    return entry.model_copy(
+        update={"install": entry.install.model_copy(update={"platforms": ("linux",)})}
+    )
+
+
+def _stage_context(server_dir: Path) -> native.StageContext:
+    entry = coa_linux()
+    return native.StageContext(
+        server_dir=server_dir,
+        client_dir=None,
+        state=native.InstallState(
+            game_id=entry.id,
+            install_id=composegen.install_id(server_dir, platform_id=lambda: "linux"),
+        ),
+        cancel=None,
+        secrets=native.Secrets(db_password="pw"),
+    )
+
+
+def test_the_extracted_data_is_left_out_of_the_build_context(tmp_path: Path) -> None:
+    """D9: after install `data/` is 6.6 GB, and a Rebuild uploaded all of it.
+
+    BuildKit logged "transferring context: 2.02GB" and the fingerprint gave no
+    answer ("the build context holds more than 4294967296 bytes") while the
+    install's disk filled (yulon-ubuntu2, 2026-10-28). The generated ignore
+    leaves the extracted folders out and keeps `data/sql`, the only part the
+    db-import image copies.
+    """
+    server = tmp_path / "server"
+    server.mkdir()
+    ignore = server / ".dockerignore"
+    ignore.write_text("/cmake-build-debug/*\n", encoding="utf-8")
+    made = make(coa_linux(), Recorder())
+    list(made.stage_generate_compose(_stage_context(server)))
+    text = ignore.read_text(encoding="utf-8")
+    assert text.startswith("/cmake-build-debug/*"), text
+    assert "data/*" in text.splitlines(), text
+    assert "!data/sql" in text.splitlines(), text
+    # Docker's own rules, as this project reads them for the build fingerprint:
+    # the extracted folders are not sent, the SQL the importer needs still is.
+    rules = build_context.parse_dockerignore(text)
+    assert rules is not None
+    assert rules.excludes("data/maps/0004331.map")
+    assert rules.excludes("data/vmaps/1.vmo")
+    assert not rules.excludes("data/sql/base/db_world/instance_template.sql")
+    # A repair or an update's put-back runs this stage again: no second block.
+    list(made.stage_generate_compose(_stage_context(server)))
+    assert ignore.read_text(encoding="utf-8") == text
+
+
+def test_a_game_that_extracts_nothing_gets_no_ignore_block(tmp_path: Path) -> None:
+    server = tmp_path / "server"
+    server.mkdir()
+    made = make(ENTRY, Recorder())
+    list(made.stage_generate_compose(_stage_context(server)))
+    assert not (server / ".dockerignore").exists()
+
+
+def test_the_coa_install_owns_the_ignore_block_an_update_restores(tmp_path: Path) -> None:
+    """An update's reset restores upstream's .dockerignore; the guard must read it as ours."""
+    owned = make(coa_linux(), Recorder()).app_written_paths(tmp_path / "server")
+    assert ".dockerignore" in owned["."]
+    assert (
+        ".dockerignore" not in make(ENTRY, Recorder()).app_written_paths(tmp_path / "server")["."]
+    )

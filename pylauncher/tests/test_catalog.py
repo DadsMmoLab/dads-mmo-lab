@@ -678,15 +678,17 @@ def test_a_game_with_a_one_shot_import_service_asks_its_database_with_the_folder
     THAT folder's password, or a new install's probe answers "unreadable" for a healthy
     database.
     """
-    from yulon import install_wiring
+    from yulon import docker, install_wiring
     from yulon.controller_wow_wotlk import repair as wotlk_repair
 
     seen: list[str] = []
 
-    def fake_import_state(sql: object, _mysql: object, _health: object) -> object:
+    def fake_import_state(sql: object, _mysql: object, _health: object = None) -> object:
         password = sql.root_password  # type: ignore[attr-defined]
         seen.append(password() if callable(password) else password)
-        return object()
+        # A finished import: the CoA entry's probe reads `state` for its own
+        # bootstrap question, and this test is about the password it asks with.
+        return docker.ImportState("imported", "every acore_* schema has tables", complete=True)
 
     monkeypatch.setattr(wotlk_repair, "import_state", fake_import_state)
     with_import = [entry for entry in load_catalog().games if entry.containers.db_import]

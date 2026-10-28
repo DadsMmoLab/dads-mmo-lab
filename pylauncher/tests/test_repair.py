@@ -479,3 +479,53 @@ def test_any_other_listing_failure_is_not_waited_for(monkeypatch: pytest.MonkeyP
     mysql = _Mysql(fails="Access denied")
     assert repair.import_state(_Sql(), mysql).state == "unreadable"
     assert mysql.asked == 1
+
+
+def _bootstrapped_world() -> dict[str, list[str]]:
+    """`acore_world` as the CoA baseline bootstrap leaves it, and nothing else."""
+    return {WORLD: _done("version", "instance_template")}
+
+
+def test_a_loaded_world_alone_reads_as_partial_to_the_generic_probe() -> None:
+    """The live-proof shape: the bootstrap filled the world, the import has not run.
+
+    The generic probe is right to call this `partial` — it has no way to know a
+    world bootstrap wrote the tables — and the CoA gate asks the extra question.
+    """
+    sql = _Sql(tables=_bootstrapped_world())
+    state = repair.import_state(sql, _Mysql(WORLD))
+    assert state.state == "partial", state.detail
+
+
+def test_the_world_bootstrap_s_own_output_is_recognised() -> None:
+    sql = _Sql(tables=_bootstrapped_world())
+    assert repair.only_the_world_was_loaded(sql, _Mysql(WORLD), done_marker="version")
+
+
+def test_the_done_marker_is_required() -> None:
+    """A world with tables but no `version` was not loaded to the end (D3's guard)."""
+    sql = _Sql(tables={WORLD: _done("instance_template")})
+    assert not repair.only_the_world_was_loaded(sql, _Mysql(WORLD), done_marker="version")
+
+
+def test_a_world_an_import_touched_is_never_the_bootstrap_s_own_output() -> None:
+    """The import populates auth and characters before it updates the world.
+
+    So any world it has written updates into comes with both schemas holding
+    tables, and this answer must stay False: the real unfinished-import
+    detection is not weakened for that world.
+    """
+    sql = _Sql(
+        tables={
+            AUTH: _done("account"),
+            CHARACTERS: ["characters"],
+            WORLD: [*_full_world(), "version"],
+        }
+    )
+    assert not repair.only_the_world_was_loaded(
+        sql, _Mysql(AUTH, CHARACTERS, WORLD), done_marker="version"
+    )
+
+
+def test_the_bootstrap_question_is_false_with_no_schemas_at_all() -> None:
+    assert not repair.only_the_world_was_loaded(_Sql(), _Mysql(), done_marker="version")
