@@ -33,7 +33,7 @@ from pydantic import ValidationError
 from yulon import docker, platform
 from yulon.catalog.catalog import ExtractPlan, ExtractTool, MmapPlan, RetrySpec, load_catalog
 from yulon.catalog.families import extract
-from yulon.catalog.installer import InstallerError
+from yulon.catalog.installer import InstallerError, InstallStopped
 
 AD = ExtractTool(
     name="dbc and maps",
@@ -2715,14 +2715,18 @@ def test_the_wipe_target_is_built_from_the_data_dir_and_a_constant_no_catalog_na
     assert not folder.is_absolute() and folder.anchor == "" and ".." not in folder.parts
     # `cpu_cap` (T801) is `Literal["half"] | None`: a request to cap the container at half the
     # engine's CPUs and memory. One word, never a path, so it cannot name where a wipe goes.
+    # `offmesh_repo_path` (T811) is the checkout-relative off-mesh file the update route diffs:
+    # a repo path, never read by `run_mmaps`, so it cannot name where a wipe goes either.
     assert set(MmapPlan.model_fields) == {
         "argv",
         "min_files",
         "required",
         "cpu_cap",
         "success_codes",
+        "offmesh_repo_path",
     }
     assert MmapPlan.model_fields["cpu_cap"].annotation == Literal["half"] | None
+    assert MmapPlan.model_fields["offmesh_repo_path"].annotation in ("str | None", str | None)
     # NOT `all(isinstance(code, int) ...)`, which was here until a review
     # pointed out that `isinstance(True, int)` is True and the assertion pinned
     # nothing about the value. The default itself is what matters, and it is
@@ -4054,3 +4058,137 @@ def test_the_movement_map_generator_s_progress_bar_is_kept_out_too(tmp_path: Pat
 
     assert logged == VMAP4_SAID
     assert str(failed.value).endswith("Its last words were: " + " / ".join(VMAP4_SAID))
+
+
+# --- T811: off-mesh changes rebuild only the maps they touch -------------------------------
+
+
+OFFMESH_BEFORE = b"1 -1 2 3 4\n" b"800 1.0 2.0 3.0 4.0 5.0 6.0\n"
+OFFMESH_AFTER = b"1 -1 2 3 4\n" b"800 1.0 2.0 3.0 4.0 5.0 7.0\n"
+
+
+def test_offmesh_changed_ids_collects_added_removed_and_edited_lines() -> None:
+    changed = extract.offmesh_changed_ids(OFFMESH_BEFORE, OFFMESH_AFTER)
+    assert changed == ("800",)
+    assert extract.offmesh_changed_ids(OFFMESH_AFTER, OFFMESH_AFTER) == ()
+    assert extract.offmesh_map_ids(b"") == frozenset()
+
+
+def test_offmesh_sha_is_the_files_sha256() -> None:
+    import hashlib
+
+    assert extract.offmesh_sha(OFFMESH_BEFORE) == hashlib.sha256(OFFMESH_BEFORE).hexdigest()
+
+
+def test_per_map_argv_carries_only_the_mesh_inputs() -> None:
+    plan = MmapPlan(
+        argv=(
+            "/opt/tortoise/bin/MoveMapGen",
+            "--silent",
+            "--doNotFilterDeepWater",
+            "--offMeshInput",
+            "/opt/tortoise/src/tools/mmap/offmesh.txt",
+            "--settingsInput",
+            "/opt/tortoise/src/tools/mmap/mmapSettings.txt",
+        ),
+        success_codes=(1,),
+        min_files=1,
+    )
+    assert extract.per_map_argv(plan, "800") == (
+        "/opt/tortoise/bin/MoveMapGen",
+        "800",
+        "--doNotFilterDeepWater",
+        "--offMeshInput",
+        "/opt/tortoise/src/tools/mmap/offmesh.txt",
+        "--settingsInput",
+        "/opt/tortoise/src/tools/mmap/mmapSettings.txt",
+    )
+
+
+def test_per_map_argv_refuses_a_flag_it_does_not_know() -> None:
+    plan = MmapPlan(argv=("/opt/tortoise/bin/MoveMapGen", "--silent", "--threads", "2"))
+    with pytest.raises(InstallerError, match="no per-map spelling"):
+        extract.per_map_argv(plan, "800")
+
+
+def test_a_per_map_run_leaves_other_maps_tiles_and_writes_no_record(tmp_path: Path) -> None:
+    plan = MmapPlan(
+        argv=("x", "--silent", "--doNotFilterDeepWater"),
+        min_files=3,
+        required=True,
+        success_codes=(0,),
+    )
+    data = tmp_path / "data"
+    (data / "mmaps").mkdir(parents=True)
+    (data / "mmaps" / "0000001.mmtile").write_bytes(b"other map's tile")
+    runner = Runner({"x": {"mmaps": 1}})
+    said = list(
+        extract.run_mmaps_for_maps(
+            plan,
+            ("800",),
+            image_ref="img",
+            data_dir=data,
+            run_container=runner,
+            user_args=(),
+            sink=lambda line: None,
+            cancel=None,
+        )
+    )
+    assert any("map 800" in line for line in said)
+    assert (data / "mmaps" / "0000001.mmtile").read_bytes() == b"other map's tile"
+    assert [run.argv[1] for run in runner.specs] == ["800"]
+
+
+def test_a_stopped_per_map_run_leaves_no_record(tmp_path: Path) -> None:
+    import threading
+
+    plan = MmapPlan(
+        argv=("x", "--silent", "--doNotFilterDeepWater"),
+        min_files=3,
+        required=True,
+        success_codes=(0,),
+    )
+    data = tmp_path / "data"
+    (data / "mmaps").mkdir(parents=True)
+    cancel = threading.Event()
+    cancel.set()
+    with pytest.raises(InstallStopped, match="stopped before map 800"):
+        list(
+            extract.run_mmaps_for_maps(
+                plan,
+                ("800",),
+                image_ref="img",
+                data_dir=data,
+                run_container=Runner({}),
+                user_args=(),
+                sink=lambda line: None,
+                cancel=cancel,
+            )
+        )
+
+
+def test_a_failed_per_map_run_writes_nothing_and_raises(tmp_path: Path) -> None:
+    plan = MmapPlan(
+        argv=("x", "--silent", "--doNotFilterDeepWater"),
+        min_files=3,
+        required=True,
+        success_codes=(0,),
+    )
+    data = tmp_path / "data"
+    (data / "mmaps").mkdir(parents=True)
+    runner = Runner({}, fail={"x": (3, "broken")})
+    with pytest.raises(InstallerError, match="map generation for map 800"):
+        list(
+            extract.run_mmaps_for_maps(
+                plan,
+                ("800", "801"),
+                image_ref="img",
+                data_dir=data,
+                run_container=runner,
+                user_args=(),
+                sink=lambda line: None,
+                cancel=None,
+            )
+        )
+    assert [run.argv[1] for run in runner.specs] == ["800"], "the second map never started"
+    assert not (data / extract.EVIDENCE_FILE).exists(), "no record without a full success"

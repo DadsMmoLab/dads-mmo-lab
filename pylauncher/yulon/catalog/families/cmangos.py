@@ -640,7 +640,71 @@ class CmangosInstaller(StagedInstaller):
         if self._updates_at_start():
             trees = self._migrations_moved(moved, to_pin=to_pin)
             yield from self._refuse_what_the_databases_ran(server_dir, trees, to_pin=to_pin)
-        return _MovedChanges(catch_up=catch_up, confs=self._conf_defaults_moved(moved))
+        offmesh = self._offmesh_moved(server_dir, moved)
+        if offmesh is not None and offmesh.map_ids:
+            yield offmesh.said()
+        elif offmesh is not None:
+            yield offmesh.recorded_line
+        return _MovedChanges(
+            catch_up=catch_up,
+            confs=self._conf_defaults_moved(moved),
+            offmesh=offmesh,
+        )
+
+    def _offmesh_moved(
+        self,
+        server_dir: Path,
+        moved: Sequence[tuple[EmulatorSource, Path, str]],
+    ) -> _OffmeshMove | None:
+        """The new off-mesh bytes and which maps changed, or the old install's record (T811).
+
+        Old bytes come from git at the pre-move commit, never from disk. A move that did
+        not touch the core, or a plan naming no off-mesh file, or a file git cannot read
+        at either end, takes no part. Nothing is written here: the rebuild records.
+        """
+        rel = self._data().mmaps.offmesh_repo_path
+        if rel is None:
+            return None
+        core = self._core_source()
+        if core is None:
+            return None
+        entry = next(
+            ((source, dest, old) for source, dest, old in moved if source.repo == core.repo),
+            None,
+        )
+        if entry is None:
+            return None
+        _source, dest, old = entry
+        new = self._seams.head_sha(dest)
+        if new is None:
+            raise InstallerError(
+                f"Yu'lon could not read which commit {dest} is on, so it could not tell whether "
+                f"the movement maps are current. {NOTHING_DONE}"
+            )
+        if new == old:
+            return None
+        found = self._seams.tree_bytes(dest, old, rel)
+        before = None if found is None else found.get(rel)
+        after = self._seams.tree_bytes(dest, new, rel)
+        current_after = None if after is None else after.get(rel)
+        if before is None or current_after is None:
+            return None
+        changed = extract.offmesh_changed_ids(before, current_after)
+        if not changed:
+            return None
+        current = extract.read_evidence(server_dir / DATA_DIR)
+        if current is None or current.offmesh_sha is None:
+            return _OffmeshMove(
+                sha=extract.offmesh_sha(current_after),
+                map_ids=(),
+                recorded_line=(
+                    "the movement maps now record the core's off-mesh file, so a later change "
+                    "is seen; this press rebuilt nothing."
+                ),
+            )
+        if current.offmesh_sha == extract.offmesh_sha(current_after):
+            return None
+        return _OffmeshMove(sha=extract.offmesh_sha(current_after), map_ids=changed)
 
     # -- a moved module's changed conf defaults, carried into the live conf (T656) ----
 
@@ -1338,17 +1402,95 @@ class CmangosInstaller(StagedInstaller):
             return None
         world = self._world_catch_up_work(changes.catch_up)
         confs = self._conf_defaults_work(server_dir, changes.confs)
-        if world is None or confs is None:
-            return world or confs
-        first, then = world, confs
+        navmesh = self._offmesh_rebuild_work(server_dir, changes.offmesh)
+        works = [work for work in (world, confs, navmesh) if work is not None]
+        if not works:
+            return None
+        if len(works) == 1:
+            return works[0]
 
         def forward(ctx: StageContext) -> Iterator[str]:
-            yield from first.forward(ctx)
-            yield from then.forward(ctx)
+            for work in works:
+                yield from work.forward(ctx)
 
         def back(ctx: StageContext) -> Iterator[str]:
-            yield from then.back(ctx)
-            yield from first.back(ctx)
+            for work in reversed(works):
+                yield from work.back(ctx)
+
+        return ServersDownWork(
+            prepare=lambda: iter(()), forward=forward, back=back, finishes_start_refusal=False
+        )
+
+    def _offmesh_rebuild_work(
+        self, server_dir: Path, offmesh: _OffmeshMove | None
+    ) -> ServersDownWork | None:
+        """Rebuild only the maps whose off-mesh lines changed, once the new build runs (T811).
+
+        `forward()` -- servers down, the new image tagged, before it starts -- runs the
+        generator once per changed map over the install's own `data/mmaps`, keeping every
+        other map's tiles, then records the new hash. Nothing is wiped and no count gate
+        judges it. A failure records nothing, so the next press retries. `back()` puts the
+        old record back; the tiles a failed press left stay, and the next press rebuilds
+        them again from the recorded hash.
+        """
+        if offmesh is None or not offmesh.map_ids:
+            return None
+        data = self._data()
+        recorded: list[str] = []
+
+        def forward(ctx: StageContext) -> Iterator[str]:
+            data_dir = server_dir / DATA_DIR
+            if (server_dir / native_secret.STATE_FILE).is_file() and not data_dir.is_dir():
+                raise InstallerError(
+                    "the movement maps cannot be rebuilt: the install's data folder is gone. "
+                    f"{NOTHING_DONE}"
+                )
+            image_ref = self._image_ref(ctx, data.extract.image)
+            user_args = self._user_args()
+            cap = _MmapCap()
+            if data.mmaps.cpu_cap == "half":
+                cap = _half_engine_cap(self._seams.engine_size())
+                yield cap.said()
+            yield from self._stream(
+                lambda sink: extract.run_mmaps_for_maps(
+                    data.mmaps,
+                    offmesh.map_ids,
+                    image_ref=image_ref,
+                    data_dir=data_dir,
+                    run_container=self._seams.run_container,
+                    user_args=user_args,
+                    sink=sink,
+                    cancel=ctx.cancel,
+                    cpus=cap.cpus,
+                    cpuset=cap.cpuset,
+                    memory=cap.memory,
+                ),
+                cancel=ctx.cancel,
+                stage="mmaps",
+            )
+            self._check_cancel(ctx.cancel)
+            current = extract.read_evidence(data_dir)
+            if current is not None:
+                recorded.append(current.offmesh_sha or "")
+                extract.write_evidence(data_dir, replace(current, offmesh_sha=offmesh.sha))
+            maps = ", ".join(f"map {each}" for each in offmesh.map_ids)
+            yield (
+                f"the off-mesh file changed, so {maps} "
+                f"{'was' if len(offmesh.map_ids) == 1 else 'were'} rebuilt."
+            )
+
+        def back(ctx: StageContext) -> Iterator[str]:
+            if not recorded:
+                return iter(())
+            data_dir = server_dir / DATA_DIR
+            current = extract.read_evidence(data_dir)
+            if current is not None:
+                before = recorded[0] or None
+                extract.write_evidence(data_dir, replace(current, offmesh_sha=before))
+            yield (
+                "the new build did not start, so the movement maps go back to "
+                "the off-mesh file they were built from."
+            )
 
         return ServersDownWork(
             prepare=lambda: iter(()), forward=forward, back=back, finishes_start_refusal=False
@@ -2714,6 +2856,7 @@ class CmangosInstaller(StagedInstaller):
             stage="mmaps",
         )
         self._check_cancel(ctx.cancel)
+        self._note_offmesh(data_dir, ctx.server_dir)
         yield "Map generation finished."
 
     def _conf(self, ctx: StageContext) -> Iterator[str]:
@@ -4095,6 +4238,51 @@ class CmangosInstaller(StagedInstaller):
         db = self.entry.databases
         return {name: name for name in (db.auth, db.characters, db.world, *db.extra)}
 
+    # -- the off-mesh file a moved core brings (T811) ----------------------
+
+    def _offmesh_core_dest(self, server_dir: Path) -> Path | None:
+        """The core checkout holding this plan's off-mesh file, or None without one (T811)."""
+        if self._data().mmaps.offmesh_repo_path is None:
+            return None
+        core = self._core_source()
+        return server_dir / core.dest if core is not None else None
+
+    def _core_source(self) -> EmulatorSource | None:
+        """The source whose checkout holds this plan's off-mesh file (T811)."""
+        rel = self._data().mmaps.offmesh_repo_path
+        if rel is None:
+            return None
+        sources = list(self.entry.emulator.sources)
+        for source in sources:
+            if not any(
+                other is not source and source.dest.startswith(f"{other.dest.rstrip('/')}/")
+                for other in sources
+            ):
+                return source
+        return sources[0] if sources else None
+
+    def _note_offmesh(self, data_dir: Path, server_dir: Path) -> None:
+        """Record the hash the maps now hold, read off the built checkout (T811).
+
+        The checkout is the build's own, so its bytes are what the generator ran on.
+        Old installs record without rebuilding anything; the absence of a file writes
+        nothing, and the hash is only ever replaced, never cleared.
+        """
+        rel = self._data().mmaps.offmesh_repo_path
+        dest = self._offmesh_core_dest(server_dir)
+        if rel is None or dest is None:
+            return
+        try:
+            data = (dest / rel).read_bytes()
+        except OSError:
+            return
+        current = extract.read_evidence(data_dir)
+        if current is None:
+            return
+        if current.offmesh_sha == extract.offmesh_sha(data):
+            return
+        extract.write_evidence(data_dir, replace(current, offmesh_sha=extract.offmesh_sha(data)))
+
     # -- what only the engine knows ---------------------------------------
 
     def _data_dir(self, ctx: StageContext) -> Path:
@@ -4699,11 +4887,29 @@ def _glob_names(glob: str, path: str) -> bool:
 
 
 @dataclass(frozen=True)
+class _OffmeshMove:
+    """What an update's move did to the off-mesh file: the new bytes, and which maps (T811)."""
+
+    sha: str
+    map_ids: tuple[str, ...]
+    recorded_line: str = ""
+    """Said when there was nothing to rebuild: an old install's first record (T811)."""
+
+    def said(self) -> str:
+        maps = ", ".join(f"map {each}" for each in self.map_ids)
+        return (
+            f"the core's off-mesh file changed, so {maps} "
+            f"{'is' if len(self.map_ids) == 1 else 'are'} rebuilt once the new build starts."
+        )
+
+
+@dataclass(frozen=True)
 class _MovedChanges:
-    """What `check_moved_sources()` found, for `servers_down_work()` (T531, T656)."""
+    """What `check_moved_sources()` found, for `servers_down_work()` (T531, T656, T811)."""
 
     catch_up: _WorldCatchUp
     confs: tuple[_ConfDefaults, ...]
+    offmesh: _OffmeshMove | None = None
 
 
 @dataclass

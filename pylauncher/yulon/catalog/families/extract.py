@@ -88,6 +88,8 @@ class Evidence:
     required_file_size: int | None
     required_file_mtime: int | None
     tools: tuple[ToolRecord, ...]
+    offmesh_sha: str | None = None
+    """Sha256 of the off-mesh bytes the movement maps were built from (T811); None names old."""
     client_facts_complete: bool = True
     """Were `client_path` and the required file's facts actually obtained?
 
@@ -238,6 +240,8 @@ def _parse(text: str) -> Evidence:
     tools = raw["tools"]
     if not isinstance(tools, list):
         raise TypeError(f"tools is a {type(tools).__name__}, not a list")
+    if raw.get("offmesh_sha") is not None and _optional_sha(raw["offmesh_sha"]) is None:
+        raise TypeError(f"offmesh_sha is {raw['offmesh_sha']!r}, which is not a sha256 hash")
     return Evidence(
         plan_hash=str(raw["plan_hash"]),
         client_path=str(raw["client_path"]),
@@ -248,12 +252,21 @@ def _parse(text: str) -> Evidence:
             for record in tools
         ),
         client_facts_complete=complete,
+        offmesh_sha=_optional_sha(raw.get("offmesh_sha")),
     )
 
 
 def _optional_int(value: Any) -> int | None:
     """`None` stays `None`; anything else must be a number or the file is not usable."""
     return None if value is None else int(value)
+
+
+def _optional_sha(value: Any) -> str | None:
+    """A recorded off-mesh hash, or None for an install that predates it (T811)."""
+    if value is None:
+        return None
+    text = str(value)
+    return text if len(text) == 64 and all(c in "0123456789abcdef" for c in text) else None
 
 
 def write_evidence(data_dir: Path, evidence: Evidence) -> None:
@@ -2180,6 +2193,136 @@ def run_mmaps(
     record = ToolRecord(MMAPS_TOOL, argv_hash(plan.argv), int(time.time()))
     write_evidence(data_dir, with_record(current, record))
     yield f"mmaps: done ({_counts_text(seen)})"
+
+
+def offmesh_sha(data: bytes) -> str:
+    """The sha256 of an off-mesh file's bytes, as recorded beside the mmaps record (T811)."""
+    return hashlib.sha256(data).hexdigest()
+
+
+def offmesh_map_ids(data: bytes) -> frozenset[str]:
+    """The map ids an off-mesh file names: the first token of each non-blank line (T811).
+
+    Blank lines and `#` comments name no map. A line with no parseable leading number still
+    reaches the diff as its raw token, so a reformatted line is never silently dropped.
+    """
+    ids: set[str] = set()
+    for line in data.decode("utf-8", errors="replace").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        ids.add(stripped.split(None, 1)[0])
+    return frozenset(ids)
+
+
+def offmesh_changed_ids(old: bytes, new: bytes) -> tuple[str, ...]:
+    """The map ids whose off-mesh lines changed between two files (T811).
+
+    Added, removed or edited lines all count: the ids named by either side's lines that are
+    not in both. Sorted numerically where the ids are numbers, so the rebuild order is stable.
+    """
+    before = {line for line in old.decode("utf-8", errors="replace").splitlines() if line.strip()}
+    after = {line for line in new.decode("utf-8", errors="replace").splitlines() if line.strip()}
+    changed = before ^ after
+    ids: set[str] = set()
+    for line in changed:
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            continue
+        ids.add(stripped.split(None, 1)[0])
+    return tuple(sorted(ids, key=lambda each: (0, int(each)) if each.isdigit() else (1, each)))
+
+
+def per_map_argv(plan: MmapPlan, map_id: str) -> tuple[str, ...]:
+    """This generator's argv for one map: `MoveMapGen <id>` with the plan's own flags (T811)."""
+    argv = list(plan.argv)
+    if len(argv) < 3 or argv[1] != "--silent":
+        raise InstallerError(
+            f"this generator's per-map run is not known for {list(plan.argv)}: "
+            "the plan's argv must start with the generator and --silent"
+        )
+    rest = argv[2:] if not argv[2].isdigit() else argv[3:]
+    out: list[str] = [argv[0], map_id]
+    pending = list(rest)
+    while pending:
+        flag = pending.pop(0)
+        if flag in ("--offMeshInput", "--settingsInput"):
+            if not pending:
+                raise InstallerError(
+                    f"this generator's per-map run is not known for {list(plan.argv)}: "
+                    f"{flag} names no file"
+                )
+            out += [flag, pending.pop(0)]
+        elif flag in ("--silent", "--doNotFilterDeepWater"):
+            out.append(flag)
+        else:
+            raise InstallerError(
+                f"this generator's per-map run is not known for {list(plan.argv)}: "
+                f"no per-map spelling for {flag}"
+            )
+    return tuple(out)
+
+
+def run_mmaps_for_maps(
+    plan: MmapPlan,
+    map_ids: Sequence[str],
+    *,
+    image_ref: str,
+    data_dir: Path,
+    run_container: RunContainer,
+    user_args: Sequence[str],
+    sink: docker.OutputSink,
+    cancel: threading.Event | None,
+    cpus: int | None = None,
+    cpuset: str | None = None,
+    memory: int | None = None,
+) -> Iterator[str]:
+    """Regenerate only the named maps, without touching the other maps' tiles (T811)."""
+    if not map_ids:
+        return
+    for map_id in map_ids:
+        if cancel is not None and cancel.is_set():
+            raise InstallStopped(
+                f"map generation was stopped before map {map_id} started, so nothing was "
+                f"removed. {MMAPS_CANCEL_NOTE}"
+            )
+        argv = per_map_argv(plan, map_id)
+        yield f"mmaps: rebuilding map {map_id} ({' '.join(argv)})"
+        run = _quiet(run_container)(
+            docker.ContainerRun(
+                image=image_ref,
+                argv=argv,
+                mounts=(docker.Mount(data_dir, OUT_MOUNT),),
+                workdir=OUT_MOUNT,
+                user_args=tuple(user_args),
+                security_args=EXTRACT_HARDENING,
+                cpus=cpus,
+                cpuset=cpuset,
+                memory=memory,
+            ),
+            sink=sink,
+            cancel=cancel,
+        )
+        if run.returncode == docker.CANCELLED_RETURNCODE or (
+            cancel is not None and cancel.is_set()
+        ):
+            _left_running(f"map generation for map {map_id}", run, data_dir)
+            raise InstallStopped(
+                f"map generation for map {map_id} was stopped. {MMAPS_CANCEL_NOTE}"
+            )
+        if docker.cli_missing_run(run):
+            raise InstallerError(
+                "map generation could not be started, so no movement data was written. "
+                f"{docker.last_words(run.tail)}"
+            )
+        if run.returncode not in plan.success_codes:
+            expected = ", ".join(str(code) for code in plan.success_codes)
+            raise InstallerError(
+                f"map generation for map {map_id} failed (exit {run.returncode}); this server's "
+                f"generator reports {expected} when it finishes. Its last words were: "
+                f"{docker.last_words(run.tail)}"
+            )
+        yield f"mmaps: map {map_id} done"
 
 
 # ------------------------------------- T241: the map data a re-extraction replaces, kept aside

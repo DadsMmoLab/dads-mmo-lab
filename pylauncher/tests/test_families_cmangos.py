@@ -5848,3 +5848,185 @@ def test_a_cancelled_tbc_install_offers_the_users_own_compose_file(tmp_path: Pat
         "the folder `attach_existing()` accepts got no offer to attach it: " + note
     )
     assert f"Delete {server}" not in note and f"delete {server}" not in note, note
+
+
+# --- T811 family tests: the four failing cases ---------------------------------------
+
+OFFMESH_OLD = b"1 -1 2 3 4\n800 1.0 2.0 3.0 4.0 5.0 6.0\n"
+OFFMESH_NEW = b"1 -1 2 3 4\n800 1.0 2.0 3.0 4.0 5.0 7.0\n"
+
+
+def tortoise_entry() -> CatalogEntry:
+    entry = installable(load_catalog().get("wow-tortoise"))
+    assert entry.install.native is not None and entry.install.native.cmangos is not None
+    return entry
+
+
+def tortoise_engine(rec: Recorder):
+    entry = tortoise_entry()
+    eng = engine_for(entry, rec)
+    eng._test_gate = native.CallableGate(rec.probe, rec.reset)  # type: ignore[attr-defined]
+    return entry, eng
+
+
+def extract_and_mmaps(rec: Recorder, server_dir: Path, entry: CatalogEntry, eng) -> None:
+    list(eng._extract(context(server_dir, client_folder(server_dir.parent), entry=entry)))
+    rec.run_result = docker.AttachedRun(1, ("Movemap build is complete!",))
+    rec.success_returncodes = (1,)
+    list(eng._mmaps(context(server_dir, entry=entry)))
+    rec.success_returncodes = (0,)
+
+
+def test_a_changed_offmesh_line_rebuilds_only_map_800(tmp_path: Path) -> None:
+    _OffmeshMove = cmangos._OffmeshMove
+    _MovedChanges = cmangos._MovedChanges
+    _WorldCatchUp = cmangos._WorldCatchUp
+    entry, eng = tortoise_engine(Recorder())
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = Recorder()
+    entry, eng = tortoise_engine(rec)
+    extract_and_mmaps(rec, server_dir, entry, eng)
+    core = server_dir / "src" / "tortoise-wow"
+    old, new = "a" * 40, "b" * 40
+    evidence = extract.read_evidence(server_dir / "data")
+    assert evidence is not None
+    extract.write_evidence(
+        server_dir / "data", replace(evidence, offmesh_sha=extract.offmesh_sha(OFFMESH_OLD))
+    )
+    rec.heads[core] = new
+    rec.byte_trees[(core, old, "tools/mmap")] = {"offmesh.txt": OFFMESH_OLD}
+    rec.byte_trees[(core, new, "tools/mmap")] = {"offmesh.txt": OFFMESH_NEW}
+    moved = [(next(s for s in entry.emulator.sources if s.dest == "src/tortoise-wow"), core, old)]
+    found = eng._offmesh_moved(server_dir, moved)
+    assert found is not None and found.map_ids == ("800",), found
+    work = eng._offmesh_rebuild_work(server_dir, found)
+    assert work is not None
+    ctx = context(server_dir, entry=entry)
+    before = len(rec.container_runs)
+    said = list(work.forward(ctx))
+    assert any("map 800 was rebuilt" in line for line in said), said
+    assert any("limited to" in line for line in said), said
+    capped = [run for run in rec.container_runs[before:]]
+    assert all(run.cpus is not None for run in capped), "the per-map run keeps the T801 cap"
+    assert [run.argv[1] for run in rec.container_runs[before:]] == ["800"]
+    assert extract.read_evidence(server_dir / "data").offmesh_sha == extract.offmesh_sha(
+        OFFMESH_NEW
+    )
+
+
+def test_an_unchanged_offmesh_file_rebuilds_nothing(tmp_path: Path) -> None:
+    _MovedChanges = cmangos._MovedChanges
+    _WorldCatchUp = cmangos._WorldCatchUp
+    entry, eng = tortoise_engine(Recorder())
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = Recorder()
+    entry, eng = tortoise_engine(rec)
+    extract_and_mmaps(rec, server_dir, entry, eng)
+    core = server_dir / "src" / "tortoise-wow"
+    old = "a" * 40
+    rec.heads[core] = old
+    assert eng._offmesh_moved(server_dir, []) is None
+    assert (
+        eng.servers_down_work(
+            server_dir, _MovedChanges(catch_up=_WorldCatchUp(phases=()), confs=()), press="x"
+        )
+        is None
+    )
+
+
+def test_an_offmesh_change_already_recorded_rebuilds_nothing(tmp_path: Path) -> None:
+    entry, eng = tortoise_engine(Recorder())
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = Recorder()
+    entry, eng = tortoise_engine(rec)
+    extract_and_mmaps(rec, server_dir, entry, eng)
+    evidence = extract.read_evidence(server_dir / "data")
+    assert evidence is not None
+    extract.write_evidence(
+        server_dir / "data", replace(evidence, offmesh_sha=extract.offmesh_sha(OFFMESH_NEW))
+    )
+    core = server_dir / "src" / "tortoise-wow"
+    old, new = "a" * 40, "b" * 40
+    rec.heads[core] = new
+    rec.byte_trees[(core, old, "tools/mmap")] = {"offmesh.txt": OFFMESH_OLD}
+    rec.byte_trees[(core, new, "tools/mmap")] = {"offmesh.txt": OFFMESH_NEW}
+    moved = [(next(s for s in entry.emulator.sources if s.dest == "src/tortoise-wow"), core, old)]
+    assert eng._offmesh_moved(server_dir, moved) is None
+
+
+def test_a_rolled_back_update_puts_the_old_record_back(tmp_path: Path) -> None:
+    entry, eng = tortoise_engine(Recorder())
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = Recorder()
+    entry, eng = tortoise_engine(rec)
+    extract_and_mmaps(rec, server_dir, entry, eng)
+    current = extract.read_evidence(server_dir / "data")
+    assert current is not None
+    extract.write_evidence(
+        server_dir / "data", replace(current, offmesh_sha=extract.offmesh_sha(OFFMESH_OLD))
+    )
+    move = cmangos._OffmeshMove(sha=extract.offmesh_sha(OFFMESH_NEW), map_ids=("800",))
+    work = eng._offmesh_rebuild_work(server_dir, move)
+    assert work is not None
+    ctx = context(server_dir, entry=entry)
+    list(work.forward(ctx))
+    assert extract.read_evidence(server_dir / "data").offmesh_sha == extract.offmesh_sha(
+        OFFMESH_NEW
+    )
+    list(work.back(ctx))
+    assert extract.read_evidence(server_dir / "data").offmesh_sha == extract.offmesh_sha(
+        OFFMESH_OLD
+    )
+
+
+def test_an_old_install_without_a_record_rebuilds_nothing_and_records(tmp_path: Path) -> None:
+    entry, eng = tortoise_engine(Recorder())
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = Recorder()
+    entry, eng = tortoise_engine(rec)
+    extract_and_mmaps(rec, server_dir, entry, eng)
+    current = extract.read_evidence(server_dir / "data")
+    assert current is not None and current.offmesh_sha is None
+    core = server_dir / "src" / "tortoise-wow"
+    old, new = "a" * 40, "b" * 40
+    rec.heads[core] = new
+    rec.byte_trees[(core, old, "tools/mmap")] = {"offmesh.txt": OFFMESH_OLD}
+    rec.byte_trees[(core, new, "tools/mmap")] = {"offmesh.txt": OFFMESH_NEW}
+    (core / "tools" / "mmap").mkdir(parents=True, exist_ok=True)
+    (core / "tools" / "mmap" / "offmesh.txt").write_bytes(OFFMESH_OLD)
+    moved = [(next(s for s in entry.emulator.sources if s.dest == "src/tortoise-wow"), core, old)]
+    found = eng._offmesh_moved(server_dir, moved)
+    assert found is not None and found.map_ids == ()
+    assert eng._offmesh_rebuild_work(server_dir, found) is None
+    assert found.recorded_line != ""
+    before = len(rec.container_runs)
+    eng._note_offmesh(server_dir / "data", server_dir)
+    assert len(rec.container_runs) == before
+    assert extract.read_evidence(server_dir / "data").offmesh_sha == extract.offmesh_sha(
+        OFFMESH_OLD
+    ), "recording reads the checkout the maps were built from, which the test lays next"
+
+
+def test_a_failed_per_map_rebuild_keeps_the_old_record(tmp_path: Path) -> None:
+    _OffmeshMove = cmangos._OffmeshMove
+    entry, eng = tortoise_engine(Recorder())
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = Recorder()
+    entry, eng = tortoise_engine(rec)
+    extract_and_mmaps(rec, server_dir, entry, eng)
+    recorded = extract.offmesh_sha(OFFMESH_OLD)
+    current = extract.read_evidence(server_dir / "data")
+    extract.write_evidence(server_dir / "data", replace(current, offmesh_sha=recorded))
+    move = _OffmeshMove(sha=extract.offmesh_sha(OFFMESH_NEW), map_ids=("800",))
+    work = eng._offmesh_rebuild_work(server_dir, move)
+    assert work is not None
+    rec.run_result = docker.AttachedRun(3, ("broken",))
+    with pytest.raises(InstallerError, match="map 800"):
+        list(work.forward(context(server_dir, entry=entry)))
+    assert extract.read_evidence(server_dir / "data").offmesh_sha == recorded
