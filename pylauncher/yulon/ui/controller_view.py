@@ -32,12 +32,25 @@ import time
 from collections import deque
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 from functools import partial
 from pathlib import Path, PurePosixPath
 from typing import Any, NamedTuple, NoReturn, Protocol, TypeVar, assert_never, cast
 
 import shiboken6
-from PySide6.QtCore import QEvent, QObject, QPoint, QSize, Qt, QTimer, QUrl, Signal, Slot
+from PySide6.QtCore import (
+    QEvent,
+    QMetaObject,
+    QObject,
+    QPoint,
+    QSize,
+    Qt,
+    QThread,
+    QTimer,
+    QUrl,
+    Signal,
+    Slot,
+)
 from PySide6.QtGui import QAction, QColor, QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import (
     QAbstractButton,
@@ -112,6 +125,7 @@ from yulon import (
     server_time_zone,
     serverlock,
     sql_log_offer,
+    table_repair,
     teardown,
     tuning,
     unbound_settings,
@@ -2461,6 +2475,15 @@ class ControllerServices:
     means no banner and no check.
     """
 
+    table_repair: table_repair.TableRepair | None = None
+    """T822's "Repair the damaged table…" for the CMaNGOS family; None elsewhere.
+
+    Wired by `_for_tortoise`, `_for_tbc` and `_for_vanilla` and by no other factory, which
+    is a pinned fact (`test_table_repair.py`) rather than a habit. The object carries the
+    hold, the backup and the `docker cp` for one install, so the view asks nothing about
+    containers or schemas.
+    """
+
     update_to_latest: native.LatestRoute | None = None
     """Move this install's sources to upstream's newest code and rebuild; None when it cannot.
 
@@ -3152,6 +3175,54 @@ def _mysql_for(
     )
 
 
+def _copy_the_table_files(
+    tables: Sequence[table_repair.CrashedTable],
+    datadir: str,
+    engines: Mapping[str, str],
+    *,
+    container: str,
+    server_dir: Path,
+    wsl_distro: str | None,
+) -> Path:
+    """Copy each damaged table's own files into the backups folder (T822).
+
+    A whole dump is the backup; this is the specialist's copy of the files a repair may
+    rewrite. `docker cp` reads the table's `.frm` and its engine's data and index files
+    (`MYD`/`MYI` for MyISAM, `MAD`/`MAI` for Aria) out of the running database container,
+    whose `@@datadir` the caller read.
+
+    One folder per table, named `<stamp>_before-repair_<db>.<table>`, the first one
+    returned for the report. `docker cp`'s destination is a host path, so a server inside
+    a WSL distro gets its distro spelling of it (T125): the CLI runs in that distro.
+
+    Raises whatever `docker.copy_from_container()` raises for the first file it could not
+    copy; nothing is repaired on that failure until the player says so.
+    """
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    data = datadir.strip().rstrip("/")
+    folders: list[Path] = []
+    for table in tables:
+        folder = (
+            wotlk_maintenance.backups_dir(server_dir)
+            / f"{stamp}_before-repair_{table.db}.{table.table}"
+        )
+        folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+        engine = engines.get(table.sql_name, "").upper()
+        suffixes = ("frm", "MAD", "MAI") if engine == "ARIA" else ("frm", "MYD", "MYI")
+        target: Path | str = str(folder)
+        if wsl_distro is not None:
+            inside = platform.wsl_linux_path(folder)
+            if inside is not None:
+                target = inside
+        for suffix in suffixes:
+            source = f"{data}/{table.db}/{table.table}.{suffix}"
+            docker.copy_from_container(container, source, target, wsl_distro=wsl_distro)
+        folders.append(folder)
+    if not folders:  # pragma: no cover - `repair()` refuses an empty list first
+        raise ValueError("no damaged tables to copy")
+    return folders[0]
+
+
 def _database_alone(
     spec: docker.ContainerSpec, server_dir: Path, *, wsl_distro: str | None
 ) -> DatabaseAlone:
@@ -3463,6 +3534,7 @@ def _assemble(
     module_forget: Callable[[Manifest], bool] | None = None,
     default_addons: tuple[str, ...] = (),
     mysql: wotlk_maintenance.DockerMysql | None = None,
+    table_repair: table_repair.TableRepair | None = None,
 ) -> ControllerServices:
     """The seams that are the same sentence for every game, plus the ones that are not.
 
@@ -3705,6 +3777,9 @@ def _assemble(
         # T179 Task 6. HERE for the same reason: whether an update can leave the
         # map data or the world tables owing is the entry's engine's fact.
         world_upkeep=_world_upkeep(entry, server_dir, wsl_distro=wsl_distro),
+        # T822. HERE because it is a parameter of this assembly: only the three
+        # CMaNGOS factories build one, and an entry without it gets no banner.
+        table_repair=table_repair,
     )
 
 
@@ -4435,12 +4510,35 @@ def _for_tbc(
         channel_for_saved=channel.live_channel,
         hold_server=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
     )
+    # T822: a crash can leave `realmd.account` (MyISAM here) or one of `characters`'
+    # few MyISAM tables damaged. The row's hold is this install's SPEC, and the copy
+    # is read from this install's db container.
+    repair_route = table_repair.TableRepair(
+        schemas=(entry.databases.characters, entry.databases.auth),
+        mysql=mysql,
+        hold=partial(
+            docker.hold_the_server,
+            server_dir,
+            table_repair.REPAIR_HOLD_REASON,
+            press=table_repair.REPAIR_PRESS,
+            spec=spec,
+            wsl_distro=wsl_distro,
+        ),
+        backup=partial(tbc_maintenance.backup, server_dir, mysql, wsl_distro=wsl_distro),
+        copy_files=partial(
+            _copy_the_table_files,
+            container=spec.db,
+            server_dir=server_dir,
+            wsl_distro=wsl_distro,
+        ),
+    )
     return _assemble(
         entry,
         server_dir,
         client_dir=client_dir,
         wsl_distro=wsl_distro,
         mysql=mysql,
+        table_repair=repair_route,
         dashboard=watcher.tick,
         log_snapshot=recorder,
         channel_setup=channel,
@@ -4600,12 +4698,34 @@ def _for_vanilla(
         channel_for_saved=channel.live_channel,
         hold_server=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
     )
+    # T822: `realmd.account` is MyISAM on this tree, so a crash during bot activity
+    # reaches the card's read through the bot clause. Same seams as TBC's.
+    repair_route = table_repair.TableRepair(
+        schemas=(entry.databases.characters, entry.databases.auth),
+        mysql=mysql,
+        hold=partial(
+            docker.hold_the_server,
+            server_dir,
+            table_repair.REPAIR_HOLD_REASON,
+            press=table_repair.REPAIR_PRESS,
+            spec=spec,
+            wsl_distro=wsl_distro,
+        ),
+        backup=partial(vanilla_maintenance.backup, server_dir, mysql, wsl_distro=wsl_distro),
+        copy_files=partial(
+            _copy_the_table_files,
+            container=spec.db,
+            server_dir=server_dir,
+            wsl_distro=wsl_distro,
+        ),
+    )
     return _assemble(
         entry,
         server_dir,
         client_dir=client_dir,
         wsl_distro=wsl_distro,
         mysql=mysql,
+        table_repair=repair_route,
         dashboard=watcher.tick,
         log_snapshot=recorder,
         channel_setup=channel,
@@ -5095,12 +5215,34 @@ def _for_tortoise(
         if entry.has_manifests
         else None
     )
+    # T822: the reported table is here — `tw_char.characters` is MyISAM — and so is
+    # `tw_logon`'s account table. The hold is this package's SPEC.
+    repair_route = table_repair.TableRepair(
+        schemas=(entry.databases.characters, entry.databases.auth),
+        mysql=mysql,
+        hold=partial(
+            docker.hold_the_server,
+            server_dir,
+            table_repair.REPAIR_HOLD_REASON,
+            press=table_repair.REPAIR_PRESS,
+            spec=spec,
+            wsl_distro=wsl_distro,
+        ),
+        backup=partial(tortoise_maintenance.backup, server_dir, mysql, wsl_distro=wsl_distro),
+        copy_files=partial(
+            _copy_the_table_files,
+            container=spec.db,
+            server_dir=server_dir,
+            wsl_distro=wsl_distro,
+        ),
+    )
     services = _assemble(
         entry,
         server_dir,
         client_dir=client_dir,
         wsl_distro=wsl_distro,
         mysql=mysql,
+        table_repair=repair_route,
         dashboard=watcher.tick,
         log_snapshot=recorder,
         channel_setup=channel,
@@ -8140,6 +8282,7 @@ TUNING_RESET_BROKE = "Reset to default did not finish. Details below says why."
 TUNING_JOB_BROKE = "The {job} did not finish. Details below says why."
 """T214: a Tuning press that broke; what broke is in Details and the log."""
 TIME_ZONE_BROKE = "The time zone was not changed. Details below says why."
+REPAIR_BROKE = "The table repair did not finish; the log says why. Nothing else was changed."
 MODULE_JOB_BROKE = "{what} did not finish. Details below says why."
 MODULE_UPDATES_BROKE = "Yu'lon couldn't check for module updates. Details below says why."
 MODULE_SQL_BROKE = "The SQL run did not finish. Details below says why."
@@ -8771,6 +8914,11 @@ class ControllerView(QWidget):
         # T540: the verdict the line shows now, for the tray's cards (players,
         # bots, uptime). The same reading, kept; None whenever the line is gone.
         self.last_verdict: dashboard_module.Verdict | None = None
+        # T822: tables another table's damage kept out of the backup, kept for the next press;
+        # and the question a repair job asks the GUI thread from its worker.
+        self._repair_extra: tuple[table_repair.CrashedTable, ...] = ()
+        self._repair_copy_question = ""
+        self._repair_copy_answer = False
         # T382: the Tuning restart's wait for the world, which no button waits on.
         self._world_wait: threading.Event | None = None
         self._world_wait_number = 0
@@ -9509,8 +9657,9 @@ class ControllerView(QWidget):
         box.addWidget(self.kept_build_banner)
 
         realm, realm_column = section("Realm", tab)
+        realm_column.addWidget(self.verdict_label)
+        realm_column.addWidget(self.repair_banner)
         for label in (
-            self.verdict_label,
             self.docker_banner,
             self.status_label,
             self.distro_label,
@@ -9705,6 +9854,24 @@ class ControllerView(QWidget):
             f"background-color: {COLOR_BG_PARCHMENT}; border: 1px solid {COLOR_TEXT_WARNING};"
         )
         self.corrections_banner.setVisible(False)
+        # T822's banner, T106's shape: a crash left a table damaged and the card's line says
+        # so. It lives under that line, on the Server tab, because the error is seen there.
+        self.repair_banner = QWidget(tab)
+        repair_box = QHBoxLayout(self.repair_banner)
+        repair_box.setContentsMargins(8, 6, 8, 6)
+        self.repair_banner_label = QLabel("", self.repair_banner)
+        self.repair_banner_label.setWordWrap(True)
+        self.repair_banner_label.setStyleSheet(f"color: {COLOR_TEXT_WARNING};")
+        self.repair_banner_button = QPushButton(
+            table_repair.REPAIR_TABLES_LABEL, self.repair_banner
+        )
+        self.repair_banner_button.clicked.connect(self.repair_damaged_tables)
+        repair_box.addWidget(self.repair_banner_label, 1)
+        repair_box.addWidget(self.repair_banner_button)
+        self.repair_banner.setStyleSheet(
+            f"background-color: {COLOR_BG_PARCHMENT}; border: 1px solid {COLOR_TEXT_WARNING};"
+        )
+        self.repair_banner.setVisible(False)
         # T224 (owner D3): a finished build kept by a rebuild that replaced no
         # container, and the press that removes it now.
         self.kept_build_banner = QWidget(tab)
@@ -10003,6 +10170,7 @@ class ControllerView(QWidget):
         self.verdict_label.setVisible(True)
         self.last_verdict = result
         self.enable_channel_button.setEnabled(_press_is_allowed(result))
+        self._refresh_repair_banner()
         self._world_loops = result.state == "restart_loop"
         self._refresh_start_reason()
         # A stopped verdict only keeps the sentence on the tab (T608); it is not a world that
@@ -10085,6 +10253,7 @@ class ControllerView(QWidget):
         self.verdict_label.setText("")
         self.verdict_label.setVisible(False)
         self.last_verdict = None
+        self._refresh_repair_banner()
         self._world_loops = False
         self._world_failed = False
         self._world_ready = False
@@ -11301,6 +11470,8 @@ class ControllerView(QWidget):
             # T162: back to what the dashboard's files last said, never unconditionally.
             if self.dashboard_log is not None:
                 self._set_rebuild_dashboard_button()
+        # T822: the banner's press waits for whatever this tab is running.
+        self._refresh_repair_banner()
         # T187: the launcher window greys its settings while this tab is busy.
         self.play_state_changed.emit()
         if not busy and self._badge_held is not None:
@@ -21668,6 +21839,112 @@ class ControllerView(QWidget):
         self.corrections_banner_button.setVisible(True)
         self.corrections_banner.setVisible(True)
         self._refresh_start_reason()
+
+    # ------------------------------------ T822: a crash left a table damaged
+
+    def _refresh_repair_banner(self) -> None:
+        """Show the Repair banner exactly when the verdict names a table and a press exists."""
+        if not hasattr(self, "repair_banner"):
+            return
+        seam = self.services.table_repair
+        verdict = self.last_verdict
+        tables = verdict.crashed if verdict is not None else ()
+        if seam is None or not tables:
+            self.repair_banner.setVisible(False)
+            return
+        self.repair_banner_label.setText(table_repair.repair_banner_text(tables))
+        self.repair_banner_button.setText(table_repair.repair_button_label(tables))
+        self.repair_banner.setVisible(True)
+        log = getattr(self, "rebuild_log", None)
+        if self._busy:
+            set_enabled_why(self.repair_banner_button, wait_for(self._busy_job))
+        elif log is not None and log.running:
+            set_enabled_why(self.repair_banner_button, "Something else is running")
+        else:
+            set_enabled_why(self.repair_banner_button, None)
+
+    @Slot()
+    def repair_damaged_tables(self) -> bool:
+        """Ask, then repair the damaged tables on the job runner. False if nothing started.
+
+        The verdict's tables and the ones a refused backup found are the whole list: a
+        press never repairs a table the player was not shown. The engine takes the hold
+        itself, on the worker, because waiting for it is a Docker question.
+        """
+        seam = self.services.table_repair
+        verdict = self.last_verdict
+        if seam is None:
+            return False
+        tables = table_repair.merge_tables(
+            verdict.crashed if verdict is not None else (), self._repair_extra
+        )
+        if not tables:
+            return False
+        if self._busy or self.rebuild_log.running:
+            show_information(
+                self,
+                "Something else is running",
+                "This server is busy with another action — wait for it to finish, then press "
+                "this again. Nothing was started.",
+            )
+            return False
+        if not ask_yes_no(
+            self,
+            f"Repair the damaged table in {self.entry.name}?",
+            table_repair.confirmation(tables),
+        ):
+            logger.info(f"the table repair of {self.entry.id} was declined at the confirmation")
+            return False
+        self._set_busy(True, table_repair.REPAIR_TABLES_LABEL)
+        self._run(
+            lambda: seam.repair(tables, confirm_without_copy=self._ask_about_the_copy),
+            self._tables_repaired,
+            self._table_repair_failed,
+        )
+        return True
+
+    def _ask_about_the_copy(self, sentence: str) -> bool:
+        """Ask the copy's question on the GUI thread, even from the repair's worker.
+
+        A dialog opened on the worker would be a widget written from the wrong thread. The
+        job's thread is blocked until the GUI answers, which is the one thing it can do:
+        the repair cannot go on without knowing whether the player accepts no copy.
+        """
+        if QThread.currentThread() is self.thread():
+            return ask_yes_no(self, self.entry.name, sentence)
+        self._repair_copy_question = sentence
+        self._repair_copy_answer = False
+        QMetaObject.invokeMethod(
+            self, "_ask_about_the_copy_now", Qt.ConnectionType.BlockingQueuedConnection
+        )
+        return self._repair_copy_answer
+
+    @Slot()
+    def _ask_about_the_copy_now(self) -> None:
+        self._repair_copy_answer = ask_yes_no(self, self.entry.name, self._repair_copy_question)
+
+    @Slot(object)
+    def _tables_repaired(self, result: object) -> None:
+        """Say the one sentence; keep another damaged table for the next press."""
+        self._set_busy(False)
+        if not isinstance(result, table_repair.RepairReport):
+            return
+        if result.found_more:
+            self._repair_extra = table_repair.merge_tables(self._repair_extra, result.found_more)
+        if result.ok:
+            self._repair_extra = ()
+        if result.refused:
+            logger.warning(f"{self.entry.id}: {result.sentence} {result.detail}".strip())
+        show_information(self, self.entry.name, result.sentence)
+        self._refresh_repair_banner()
+
+    @Slot(object)
+    def _table_repair_failed(self, exc: object) -> None:
+        """A repair job that broke, not one that refused: T214's line and Details."""
+        self._set_busy(False)
+        logger.warning(_for_the_log(exc))
+        said = str(exc) if _said_by_yulon(exc) else REPAIR_BROKE
+        show_warning(self, self.entry.name, said)
 
     def apply_database_corrections(self) -> bool:
         """Ask, then apply the corrected steps the banner names (T129). False if not started.
