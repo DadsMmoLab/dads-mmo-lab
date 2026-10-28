@@ -317,6 +317,15 @@ services:
     volumes:
       - ./apps/coa-world:/src/apps/coa-world:ro{{BIND_LABEL}}
       - ./data/coa-world:/src/data/coa-world:ro{{BIND_LABEL}}
+      # `baseline.json`'s `coveredMigrations` hash every migration the baseline
+      # already carries, and `world_data.py` reads those files under `ROOT`
+      # (`/src`) before it loads a table: the core's `data/sql/updates/...` (80
+      # files at the pin) and `modules/mod-ascension/data/sql/...` (2). Without
+      # them the bootstrap dies on the first one with `[Errno 2] No such file or
+      # directory` (live proof, yulon-ubuntu2 2026-10-28). Read-only and narrow:
+      # the SQL the checksum pass needs, nothing the load writes.
+      - ./data/sql:/src/data/sql:ro{{BIND_LABEL}}
+      - ./modules/mod-ascension:/src/modules/mod-ascension:ro{{BIND_LABEL}}
     depends_on:
       {{CONTAINER_PREFIX}}database:
         condition: service_healthy
@@ -336,7 +345,7 @@ services:
     command:
       - |
         set -eu; umask 077
-        printf '[client]\nuser root\nhost {{DB_HOST}}\npassword %s\n' "$$DB_ROOT_PASSWORD" > /tmp/w.cnf
+        printf '[client]\nuser=root\nhost={{DB_HOST}}\npassword=%s\n' "$$DB_ROOT_PASSWORD" > /tmp/w.cnf
         chmod 600 /tmp/w.cnf
         q() { mysql --defaults-file=/tmp/w.cnf -N -B -e "$$1"; }
         q "CREATE DATABASE IF NOT EXISTS acore_world DEFAULT CHARACTER SET UTF8MB4 COLLATE utf8mb4_general_ci"

@@ -123,6 +123,28 @@ def _run_script(tmp_path: Path, state: str) -> tuple[str, str, int]:
         version, tables = "0", "0"
     (binds / "mysql").write_text(
         "#!/usr/bin/env bash\n" "for last; do :; done\n"
+        # The option file is parsed the way the real client parses it: a line
+        # that is not `name=value` is an unknown option, which is exactly how
+        # the shipped bootstrap died on `host coa-database` (live proof,
+        # 2026-10-28). The file is the one the rendered `--defaults-file=`
+        # names.
+        'cnf=""\n'
+        'for arg; do case "$arg" in --defaults-file=*) cnf="${arg#--defaults-file=}";; esac; done\n'
+        'if [ -n "$cnf" ]; then\n'
+        "  seen_client=0\n"
+        "  while IFS= read -r line; do\n"
+        '    case "$line" in\n'
+        '      "") continue;;\n'
+        '      "[client]") seen_client=1; continue;;\n'
+        '      "["*) echo "mysql: [ERROR] unknown group $line" >&2; exit 2;;\n'
+        "    esac\n"
+        '    case "$line" in\n'
+        "      *=*) ;;\n"
+        "      *) echo \"mysql: [ERROR] unknown option '--$line'\" >&2; exit 2;;\n"
+        "    esac\n"
+        '  done < "$cnf"\n'
+        '  [ "$seen_client" = 1 ] || { echo "mysql: [ERROR] no [client] group" >&2; exit 2; }\n'
+        "fi\n"
         # The version probe's query CONTAINS the table-count query's substring,
         # so it is matched first — as the rendered shell asks it first.
         "if [[ \"$last\" == *\"TABLE_SCHEMA='acore_world' AND TABLE_NAME='version'\"* ]]; then\n"
@@ -209,6 +231,48 @@ def test_the_password_is_never_in_argv_or_echoed() -> None:
     assert len(users) == 1 and users[0].lstrip().startswith("printf"), users
     assert "--password" not in script
     assert "MYSQL_PWD" not in script
+
+
+def test_the_mysql_option_file_is_name_equals_value() -> None:
+    """The option file the bootstrap hands `mysql --defaults-file` is parsed as MySQL parses it.
+
+    Written `user root` / `host coa-database` it is not an option file at all:
+    the one-shot dies `mysql: [ERROR] unknown option '--host coa-database'`
+    before a single table is loaded (live proof, yulon-ubuntu2 2026-10-28).
+    """
+    script = _script(_rendered_bootstrap())
+    line = next(line for line in script.splitlines() if "printf '[client]" in line)
+    proc = subprocess.run(
+        ["bash", "-c", line.split(">")[0]],
+        env={"PATH": "/usr/bin:/bin", "DB_ROOT_PASSWORD": "coa-test-password"},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert proc.returncode == 0, proc.stderr
+    lines = proc.stdout.splitlines()
+    assert lines[0] == "[client]", lines
+    assert lines[1] == "user=root", lines
+    assert lines[2].startswith("host=") and lines[2] != "host=", lines
+    assert lines[3] == "password=coa-test-password", lines
+    assert all("=" in entry or entry.startswith("[") for entry in lines), lines
+
+
+def test_the_option_file_is_what_the_one_shot_runs_with(tmp_path: Path) -> None:
+    """The rendered shell leaves 0 with the strict client, not exit 2 at its first query."""
+    out, _called, code = _run_script(tmp_path, "empty")
+    assert code == 0, out
+
+
+def test_the_bootstrap_mounts_the_migrations_the_baseline_hashes() -> None:
+    """`coveredMigrations` names files under `/src/data/sql` and `/src/modules/mod-ascension`.
+
+    Without the two mounts `world_data.py` stops before the first table with
+    `[Errno 2] No such file or directory` (live proof, yulon-ubuntu2 2026-10-28).
+    """
+    volumes = _rendered_bootstrap()["volumes"]
+    assert "./data/sql:/src/data/sql:ro" in volumes, volumes
+    assert "./modules/mod-ascension:/src/modules/mod-ascension:ro" in volumes, volumes
 
 
 def test_the_service_reads_the_core_checkout_at_src() -> None:
