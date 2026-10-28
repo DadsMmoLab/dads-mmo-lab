@@ -17,6 +17,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - **Update the server to latest…** on a Tortoise server also updates TortoiseBots Manager in your game client.
 
 ### Fixed
+- On a server inside WSL, each module row on the Modules tab shows its version again.
 - A failed build in a module you just installed now says the module is new and your server still runs its old build.
 - **Rebuild the server…** now warns when a new module may not build on a server that is off the tested commits.
 - On Bazzite and other image-based Fedora systems without Docker, the install now says how to get Docker.

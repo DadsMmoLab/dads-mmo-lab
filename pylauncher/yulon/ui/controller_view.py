@@ -190,7 +190,7 @@ from yulon.controller_wow_wotlk import console as wotlk_console
 from yulon.controller_wow_wotlk import maintenance as wotlk_maintenance
 from yulon.controller_wow_wotlk import modules as wotlk_modules
 from yulon.controller_wow_wotlk import rndbots as wotlk_rndbots
-from yulon.git import Behind, RunnerGit, is_behind
+from yulon.git import Behind, is_behind
 from yulon.log import get_logger
 from yulon.manifest import ConfKey, Manifest, ManifestType, Prompt, When
 from yulon.manifest_store import FAMILY_FILES, ManifestStore
@@ -4151,12 +4151,14 @@ def _for_wotlk(
         unfinished_modules=(
             (lambda: apply_module.unfinished_clones(server_dir)) if entry.has_manifests else None
         ),
-        # T44 item 1. `RunnerGit` and not the containerized git: this is a
-        # local read of a folder the user can see, it runs once per clone, and
-        # a `docker run` per module to print a sha would cost more than the
-        # line is worth. A machine with no host git answers `None` and the rows
-        # simply show nothing, which is the documented outcome.
-        module_version=(RunnerGit().head_version if entry.has_manifests else None),
+        # T44 item 1 (T774 inside WSL). The distro's git for a server inside WSL
+        # (`apply.module_git(server_dir)`), host git elsewhere: Git for Windows
+        # refuses a checkout reached over `\\wsl.localhost`, so host git left
+        # every row's version blank. A machine with no host git answers `None`
+        # and the rows simply show nothing, which is the documented outcome.
+        module_version=(
+            (apply_module.module_git(server_dir).head_version) if entry.has_manifests else None
+        ),
         # A module from a link or a folder (design page, lane C's four seams),
         # wired once lanes A and B were on the branch (2026-09-08). Lane C
         # left this as a comment naming the four lines because the objects
@@ -5055,7 +5057,9 @@ def _for_tortoise(
         unfinished_modules=(
             (lambda: apply_module.unfinished_clones(server_dir)) if entry.has_manifests else None
         ),
-        module_version=(RunnerGit().head_version if entry.has_manifests else None),
+        module_version=(
+            (apply_module.module_git(server_dir).head_version) if entry.has_manifests else None
+        ),
         # T612: the two Sagiroth client addons go in by themselves (new install, every Play).
         default_addons=tortoise_modules.DEFAULT_ADDONS if entry.has_manifests else (),
         applier=module_applier,
@@ -18892,10 +18896,14 @@ class ControllerView(QWidget):
     def _start_filling_versions(self) -> None:
         """Read the clones this tab has not read yet, AFTER the tab is on screen.
 
-        One module per event-loop turn, through `QTimer.singleShot(0, ...)`:
+        One module per event-loop turn (host git) or per job answer (a WSL
+        server), through `QTimer.singleShot(0, ...)` and `self._run()`:
         the reads are subprocesses, and twenty of them in a row on the GUI
         thread is the second of a frozen tab that item 1 forbids. A row that
-        fills in late is fine.
+        fills in late is fine. A WSL server's git is `wsl.exe ... docker run`
+        per module (T774), so those reads go off the GUI thread, one at a
+        time, under the same `_filling_versions` gate; host git keeps the
+        inline walk.
 
         `_filling_versions` keeps one walk running at a time. `reload_modules()`
         is called after every install, every remove and every update check, and
@@ -18911,18 +18919,21 @@ class ControllerView(QWidget):
     def _fill_next_version(self) -> None:
         """Read ONE unread clone, draw it, and come back for the next.
 
-        Every refusal this can meet is already inside the seam
-        (`git.RunnerGit.head_version` answers `None` for a folder with no
-        `.git`, a git that refused and a git that is not there), so there is
-        nothing to catch here and nothing that can turn a reload into a
-        failure.
+        Every refusal this can meet is already inside the seam (the version
+        seam answers `None` for a folder with no `.git`, a git that refused
+        and a git that is not there), so there is nothing to catch here and
+        nothing that can turn a reload into a failure. Host-git servers read
+        inline, one clone per tick; a WSL server's read is a job, one at a
+        time, whose done slot checks `_closed` again (T213) before drawing.
 
         T213: a closed tab ends the walk here. `drop_controller()` in main.py
         runs `shutdown()` and then `deleteLater()`, and a tick already queued
         used to come back after both and call `set_version` on a deleted
         label -- a `RuntimeError` traceback inside a Qt slot. The re-arm
         names `self` as the timer's context object as well, so a tick queued
-        before the delete is dropped by Qt rather than delivered.
+        before the delete is dropped by Qt rather than delivered. The WSL
+        job's done slot is a bound slot of this view, so a job answering
+        after the delete is dropped the same way (`job.py`).
         """
         if getattr(self, "_closed", False):
             self._filling_versions = False
@@ -18936,11 +18947,59 @@ class ControllerView(QWidget):
             row = widget.data
             if not row.installed or self._versions.has(server_dir, row.family, row.id):
                 continue
+            if platform.wsl_location(server_dir) is not None:
+                # T774: `docker run` per module must not run here. The row's
+                # key and clone path are bound now, on the GUI thread: the
+                # worker must not reach back into panel rows it may outlive.
+                self._run(
+                    self._version_job(server_dir, row.family, row.id),
+                    self._version_read,
+                    self._version_read_failed,
+                )
+                return
             self.modules_panel.set_version(
                 row.family, row.id, self._versions.fill(server_dir, row.family, row.id)
             )
             QTimer.singleShot(0, self, self._fill_next_version)
             return
+        self._filling_versions = False
+
+    def _version_job(self, server_dir: Path, family: str, item_id: str) -> Callable[[], object]:
+        """One WSL version read as a job: the row's key plus its cached answer (T774).
+
+        Bound here, on the GUI thread, so the worker takes no widget and no
+        row: `fill()` caches by `(server_dir, family, item_id)` and the done
+        slot draws from the same key.
+        """
+
+        def read() -> tuple[str, str, str | None]:
+            return (family, item_id, self._versions.fill(server_dir, family, item_id))
+
+        return read
+
+    @Slot(object)
+    def _version_read(self, answer: object) -> None:
+        """Draw one WSL version read, and come back for the next (T774).
+
+        The read ran off the GUI thread; the draw runs here. `_closed` ends
+        the walk (T213): the tab was shut down while the job was out.
+        """
+        if getattr(self, "_closed", False):
+            self._filling_versions = False
+            return
+        family, item_id, version = cast(tuple[str, str, str | None], answer)
+        self.modules_panel.set_version(family, item_id, version)
+        QTimer.singleShot(0, self, self._fill_next_version)
+
+    @Slot(object)
+    def _version_read_failed(self, exc: object) -> None:
+        """A WSL version read raised: end the walk, not the tab (T774).
+
+        The seam answers refusals with `None`, so reaching here is the bug
+        this logs rather than draws: the walk stops so one bad clone cannot
+        hold the gate (`_filling_versions`) shut against a later reload.
+        """
+        logger.warning(f"could not read a module version: {exc}")
         self._filling_versions = False
 
     def _forget_what_is_no_longer_installed(self, installed: Mapping[str, frozenset[str]]) -> None:
