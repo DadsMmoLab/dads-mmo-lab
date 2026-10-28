@@ -320,6 +320,35 @@ def test_a_spin_box_has_two_pressable_buttons_with_a_visible_glyph(themed, width
 
 
 @pytest.mark.parametrize("width", WIDTHS)
+def test_a_spin_box_with_a_wide_font_keeps_its_number_clear_of_the_buttons(
+    themed, width: int
+) -> None:
+    """T821: the CI runner's Qt (6.11.3) lays the number edge to edge with the buttons.
+
+    A larger pixel size must not push the number under either button at any
+    of the three widths.
+
+    Mutation: drop the theme's number guard and the number ends flush with
+    the up button again.
+    """
+    from PySide6.QtGui import QFont
+
+    spin = QSpinBox()
+    spin.setRange(1, 80)
+    spin.setValue(78)
+    font = QFont(spin.font())
+    font.setPixelSize(40)
+    spin.setFont(font)
+    holder = themed(width, spin)
+    up, down = _spin_rects(spin)
+    edit = spin.lineEdit().geometry()
+    assert not up.intersects(edit), f"up {up} covers the number {edit}"
+    assert not down.intersects(edit), f"down {down} covers the number {edit}"
+    assert down.right() < edit.left() and up.left() > edit.right(), (down, edit, up)
+    assert holder.isVisible() and spin.isVisible()
+
+
+@pytest.mark.parametrize("width", WIDTHS)
 def test_a_disabled_spin_box_greys_its_glyphs(themed, width: int) -> None:
     spin = QSpinBox()
     spin.setRange(1, 80)

@@ -19,6 +19,15 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ### Fixed
 - When Docker cannot fetch the git image, the Modules tab now shows Docker's reason instead of an unhelpful line.
 - Docker setup now asks for your password on Ubuntu 25.10+ and Kubuntu (sudo-rs) instead of failing every step.
+- **Return to the tested pin** no longer refuses because Windows changed a server file's permissions and nothing else.
+- **Rebuild** works for a WotLK server the old Dad's MMO Lab script built inside WSL, once you agree to it.
+- When Docker setup genuinely fails, the advice now lists every failed step to run, in order, instead of only the first.
+- Tortoise updates no longer stop on upstream's three rewritten database migrations.
+- Updating a WoW Tortoise server now rebuilds only the movement maps whose areas changed, in minutes.
+- A Tuning tab raw file Save that is interrupted now leaves the conf as it was instead of truncated.
+- Pressing **Update the server to latest…** during a backup or move names that job and says once what was not started.
+- A refused Tuning restart or Repair now shows the update or Repair press its sentence names.
+- Spin boxes keep their number clear of the buttons with any font.
 
 ### Changed
 
