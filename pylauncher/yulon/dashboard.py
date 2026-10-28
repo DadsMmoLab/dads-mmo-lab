@@ -33,6 +33,7 @@ from yulon.catalog import native
 from yulon.catalog.catalog import CatalogEntry
 from yulon.catalog.installer import InstallerError
 from yulon.log import get_logger
+from yulon.table_repair import CrashedTable
 
 logger = get_logger(__name__)
 
@@ -230,6 +231,10 @@ class Verdict:
     a failed update has no port, no SOAP and no bots, and the population read goes to a
     database that is up. Set means `ready` is False and `stable` is False.
     """
+    crashed: tuple[CrashedTable, ...] = ()
+    """Damaged tables the population read named (T822): what the Repair banner offers."""
+    crash_unnamed: bool = False
+    """A storage-engine crash error that named no usable table (T822): no banner, no press."""
     module_line: str = ""
     """A module's own health sentence (`module_health`), once this run is ready; empty before
     that, for an entry whose catalog has no `health` block, and for a run that is not up (T555 T5).
@@ -1027,6 +1032,8 @@ class Dashboard:
             bots=counts.bots,
             problem=counts.problem,
             warning=counts.warning,
+            crashed=counts.crashed,
+            crash_unnamed=counts.crash_unnamed,
             database_unreachable=bool(counts.problem),
             after_a_loop=after_a_loop,
             ready=ready,

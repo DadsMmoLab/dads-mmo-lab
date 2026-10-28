@@ -566,6 +566,11 @@ SEAMS: dict[str, tuple[str, str]] = {
         "docker build and compose up of the old script's own project; writes nothing in the "
         "folder or the databases, and refuses unless the world is stopped (script_built R8)",
     ),
+    "table_repair": (
+        "held",
+        "tests.test_table_repair."
+        "test_a_repair_while_another_yulon_holds_the_server_dumps_and_repairs_nothing",
+    ),
 }
 
 OPEN_SEAMS = {"backup", "restore", "forget_interrupted", "database_alone"}
