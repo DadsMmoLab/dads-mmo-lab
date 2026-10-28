@@ -5690,8 +5690,7 @@ UNINSTALL_FAILED_BROKE = "The uninstall did not finish. Details below says why."
 """An Uninstall that broke rather than being refused by Yu'lon; the error is in Details (T248)."""
 
 STOP_LOG_NOT_SAVED = (
-    "The server stopped. Yu'lon couldn't save a copy of its log this time; Details below "
-    "says why."
+    "The server stopped. Yu'lon couldn't save a copy of its log this time; Details below says why."
 )
 """A Stop whose log snapshot failed; what went wrong is in Details (T211)."""
 
@@ -15519,7 +15518,8 @@ class ControllerView(QWidget):
         if play is None or not name:
             return
         self._character_action(
-            "Teleporting", lambda: play.teleport(name, where)  # type: ignore[attr-defined]
+            "Teleporting",
+            lambda: play.teleport(name, where),  # type: ignore[attr-defined]
         )
 
     @Slot()
@@ -15555,7 +15555,8 @@ class ControllerView(QWidget):
         if play is None or not name:
             return
         self._character_action(
-            "Marking for rename", lambda: play.rename(name)  # type: ignore[attr-defined]
+            "Marking for rename",
+            lambda: play.rename(name),  # type: ignore[attr-defined]
         )
 
     @Slot()
@@ -17988,8 +17989,7 @@ class ControllerView(QWidget):
         ]
         if result.interrupted is not None and result.interrupted.readable:
             lines.append(
-                "  an earlier restore of "
-                f"{', '.join(result.interrupted.databases)} never finished"
+                f"  an earlier restore of {', '.join(result.interrupted.databases)} never finished"
             )
         if result.refusals:
             lines.append("")
@@ -20644,6 +20644,14 @@ class ControllerView(QWidget):
         self.upstream_label.setText("")
         self.upstream_label.setVisible(False)
 
+    _HOLD_TITLE_BY_PRESS = {
+        forgetting.PRESS_RESTORE: "A restore is running",
+        forgetting.PRESS_BACKUP: "A backup is running",
+        move_flows.PRESS_PACK: "A move is running",
+        move_flows.PRESS_BRING_IN: "A move is running",
+    }
+    """The update refusal's dialog title by the press holding the server (T738)."""
+
     def _update_route_busy(self) -> bool:
         """The two gates both T64 presses share, put to the user and answered True when hit.
 
@@ -20663,13 +20671,21 @@ class ControllerView(QWidget):
         failed — the update was not started" about a backup the user was
         watching succeed.
         """
-        held = docker.held_reason(self.services.controller.server_dir)
-        if self._restore_running or held is not None:
+        hold = docker.holder(self.services.controller.server_dir)
+        if self._restore_running or hold is not None:
             # T681 review: a restore of this server is loading (here, or in another window).
+            # T738: the title names the holder's press, and "Nothing was started." is
+            # added only when the held sentence has no "nothing was" of its own.
+            sentence = hold.reason if hold is not None else forgetting.RESTORE_HOLDS_THE_DATABASES
+            if "nothing was" not in sentence.lower():
+                sentence = f"{sentence} Nothing was started."
             show_information(
                 self,
-                "A restore is running",
-                f"{held or forgetting.RESTORE_HOLDS_THE_DATABASES} Nothing was started.",
+                self._HOLD_TITLE_BY_PRESS.get(
+                    hold.press if hold is not None else forgetting.PRESS_RESTORE,
+                    "A restore is running",
+                ),
+                sentence,
             )
             return True
         if self._backup_before_update:
