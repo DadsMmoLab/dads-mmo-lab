@@ -13,6 +13,9 @@ from __future__ import annotations
 
 import shutil
 import threading
+from collections.abc import Iterator
+from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -30,7 +33,8 @@ from yulon import default_addons
 from yulon.apply import Applier, ApplyError
 from yulon.catalog import native, upstream
 from yulon.catalog.native import LatestRoute
-from yulon.controller_wow_tortoise import game, modules as tortoise_modules
+from yulon.controller_wow_tortoise import game
+from yulon.controller_wow_tortoise import modules as tortoise_modules
 from yulon.git import git_available
 
 pytestmark = pytest.mark.skipif(
@@ -321,7 +325,7 @@ def test_a_failed_server_update_does_not_touch_the_addon(tmp_path: Path) -> None
 
 
 def test_a_stopped_update_does_not_touch_the_addon(tmp_path: Path) -> None:
-    rig = _rig(tmp_path)
+    _rig(tmp_path)
     seen: list[str] = []
 
     def follow() -> default_addons.AddonFollow:
@@ -359,9 +363,7 @@ def test_return_to_the_tested_pin_does_not_move_the_addon() -> None:
     assert wrapped.to_pin is inner.to_pin
 
 
-def test_the_tortoise_tab_wires_the_step(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_the_tortoise_tab_wires_the_step(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from yulon import install_wiring
     from yulon.ui.controller_view import ControllerServices
 
@@ -386,12 +388,10 @@ def test_a_finished_update_drops_the_addons_stale_count(
     tmp_path: Path, qapp: object, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from yulon.ui import controller_view as controller_view_module
-    from yulon.ui.controller_view import ControllerView, ControllerServices
+    from yulon.ui.controller_view import ControllerServices, ControllerView
     from yulon.ui.widgets.job import run_inline
 
-    monkeypatch.setattr(
-        controller_view_module, "threaded_job_runner", lambda _parent: run_inline
-    )
+    monkeypatch.setattr(controller_view_module, "threaded_job_runner", lambda _parent: run_inline)
     entry = game.entry()
     server = tmp_path / "server"
     server.mkdir()
@@ -409,12 +409,10 @@ def test_a_failed_update_keeps_the_addons_stale_count(
     tmp_path: Path, qapp: object, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from yulon.ui import controller_view as controller_view_module
-    from yulon.ui.controller_view import ControllerView, ControllerServices
+    from yulon.ui.controller_view import ControllerServices, ControllerView
     from yulon.ui.widgets.job import run_inline
 
-    monkeypatch.setattr(
-        controller_view_module, "threaded_job_runner", lambda _parent: run_inline
-    )
+    monkeypatch.setattr(controller_view_module, "threaded_job_runner", lambda _parent: run_inline)
     entry = game.entry()
     server = tmp_path / "server"
     server.mkdir()
@@ -429,6 +427,7 @@ def test_a_failed_update_keeps_the_addons_stale_count(
 
     assert reloads
     assert view._behind.get(("mod", tortoise_modules.ADDON_ID)) == 3
+
 
 def pump_until(done: Any) -> None:
     from tests.test_controller_view import pump_until as _pump

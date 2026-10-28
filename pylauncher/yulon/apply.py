@@ -3818,7 +3818,6 @@ class Applier:
         head: str | None = self._reader("head_sha", HeadReader)(self.clone_dir(manifest))
         return release, head
 
-
     def install(
         self,
         manifest: Manifest,

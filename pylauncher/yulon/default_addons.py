@@ -320,7 +320,7 @@ FOLLOW_FAILED = (
 def follow_server_update(
     server_dir: Path,
     applier: Applier,
-    manifests: Iterable[Manifest],
+    manifests: Callable[[], Iterable[Manifest]],
     item_id: str,
     *,
     place: Callable[[], ClientPlace],
@@ -365,9 +365,7 @@ def follow_server_update(
         if head == release.sha:
             if applier.client_files_missing(manifest):
                 applier.put_back_client_files(manifest)
-            return AddonFollow(
-                Followed.CURRENT, FOLLOW_CURRENT.format(name=name, tag=release.tag)
-            )
+            return AddonFollow(Followed.CURRENT, FOLLOW_CURRENT.format(name=name, tag=release.tag))
         applier.update(manifest)
         return AddonFollow(
             Followed.UPDATED,
@@ -378,7 +376,7 @@ def follow_server_update(
         return AddonFollow(Followed.FAILED, FOLLOW_FAILED.format(name=name, why=_short(exc)))
 
 
-def _display_name(manifests: Iterable[Manifest], item_id: str) -> str:
+def _display_name(manifests: Callable[[], Iterable[Manifest]], item_id: str) -> str:
     """The addon's player-facing name, without reading or writing anything (T814)."""
     if item_id in _NAMES:
         return _NAMES[item_id]

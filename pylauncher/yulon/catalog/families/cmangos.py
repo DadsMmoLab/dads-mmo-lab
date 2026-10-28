@@ -1481,7 +1481,7 @@ class CmangosInstaller(StagedInstaller):
 
         def back(ctx: StageContext) -> Iterator[str]:
             if not recorded:
-                return iter(())
+                return
             data_dir = server_dir / DATA_DIR
             current = extract.read_evidence(data_dir)
             if current is not None:

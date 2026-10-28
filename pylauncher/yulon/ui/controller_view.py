@@ -5111,9 +5111,7 @@ def _for_tortoise(
                 module_applier,
                 lambda: store.load_all("mod"),
                 tortoise_modules.ADDON_ID,
-                place=lambda: default_addons.client_place(
-                    client_dir, module_applier.client_dir
-                ),
+                place=lambda: default_addons.client_place(client_dir, module_applier.client_dir),
             ),
         )
     return replace(

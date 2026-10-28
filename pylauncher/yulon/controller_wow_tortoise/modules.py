@@ -86,7 +86,6 @@ from yulon.catalog.upstream import cached_row as upstream_cached_row
 from yulon.controller_wow_tortoise import autoupdate, custom
 from yulon.controller_wow_tortoise.autoupdate import Arming, GuardedApplier
 from yulon.controller_wow_tortoise.botpool import Press
-from yulon.default_addons import AddonFollow
 from yulon.controller_wow_wotlk.maintenance import BackupReport, backups_dir
 
 # Explicit re-exports: the user layer's place, the copy and the replace question
@@ -94,6 +93,7 @@ from yulon.controller_wow_wotlk.maintenance import BackupReport, backups_dir
 from yulon.controller_wow_wotlk.modules import CustomInstall as CustomInstall
 from yulon.controller_wow_wotlk.modules import replacement_question as replacement_question
 from yulon.controller_wow_wotlk.modules import user_manifests_dir as user_manifests_dir
+from yulon.default_addons import AddonFollow
 from yulon.git import Git, is_behind
 from yulon.log import get_logger
 from yulon.manifest import Db, Manifest, ManifestType
