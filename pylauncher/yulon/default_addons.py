@@ -35,6 +35,7 @@ import os
 import time
 from collections.abc import Callable, Collection, Iterable, Sequence
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 
 from yulon.apply import Applier, ApplyReport, installed_clones
@@ -238,3 +239,162 @@ def put_in(
                 logger.warning(f"could not note that {item} failed: {note_exc}")
     out.installed, out.restored = tuple(installed), tuple(restored)
     return out
+
+
+class ClientPlace(Enum):
+    """Where the game client folder is, as far as this computer can tell (T814)."""
+
+    HERE = "here"
+    UNKNOWN = "unknown"
+    ELSEWHERE = "elsewhere"
+
+
+def client_place(
+    recorded: Path | None, usable: Path | None, *, on_box: bool = False
+) -> ClientPlace:
+    """Which of the three the client folder is: here, unknown, or elsewhere (T814).
+
+    `recorded` is the folder the install record names; `usable` the applier's
+    `client_dir`, which is `None` when nothing is recorded or the folder has no
+    `Interface/`. `on_box` names a server on another computer, whose client
+    lives next to that Yu'lon instead.
+    """
+    if on_box:
+        return ClientPlace.ELSEWHERE
+    if recorded is None:
+        return ClientPlace.UNKNOWN
+    if not recorded.exists():
+        return ClientPlace.ELSEWHERE
+    if usable is None or not usable.is_dir():
+        return ClientPlace.UNKNOWN
+    return ClientPlace.HERE
+
+
+class Followed(Enum):
+    """What following the server update did with the addon (T814)."""
+
+    UPDATED = "updated"
+    INSTALLED = "installed"
+    CURRENT = "current"
+    UNKNOWN = "unknown"
+    ELSEWHERE = "elsewhere"
+    NOT_INSTALLED = "not_installed"
+    FAILED = "failed"
+
+
+@dataclass(frozen=True)
+class AddonFollow:
+    """What one `follow_server_update()` did (T814)."""
+
+    kind: Followed
+    sentence: str
+
+
+FOLLOW_UPDATED = (
+    "{name} in your game client was updated to {tag}, the release that goes with the new server."
+)
+FOLLOW_INSTALLED = (
+    "{name} was put into your game client at {tag}, the release that goes with the new server."
+)
+FOLLOW_CURRENT = (
+    "{name} in your game client is already on {tag}, the newest release, so it was left as it is."
+)
+FOLLOW_UNKNOWN = (
+    "{name} was not updated because Yu'lon does not know your game client folder; set it "
+    "on the Server tab, then press Update on its row on the Modules tab."
+)
+FOLLOW_ELSEWHERE = (
+    "{name} was not updated because your game client folder cannot be reached from this "
+    "computer; update it on the Modules tab of the Yu'lon next to your game client."
+)
+FOLLOW_NOT_INSTALLED = (
+    "{name} is not installed for this server, so your game client was left as it is; "
+    "install it on the Modules tab if you want it."
+)
+FOLLOW_FAILED = (
+    "The server update is done, but {name} in your game client could not be updated ({why}); "
+    "press Update on its row on the Modules tab to try again."
+)
+
+
+def follow_server_update(
+    server_dir: Path,
+    applier: Applier,
+    manifests: Iterable[Manifest],
+    item_id: str,
+    *,
+    place: Callable[[], ClientPlace],
+) -> AddonFollow:
+    """Bring the addon up to the release that goes with the new server (T814).
+
+    Never raises: whatever goes wrong is `FAILED`, in the player's own words,
+    because the server update it follows already finished. The player pressed
+    for the new server, so a never-installed addon is installed unless the
+    player removed it; there is no 24 h backoff here.
+    """
+    name = item_id
+    try:
+        found = place()
+        if found is ClientPlace.UNKNOWN:
+            return AddonFollow(
+                Followed.UNKNOWN, FOLLOW_UNKNOWN.format(name=_display_name(manifests, item_id))
+            )
+        if found is ClientPlace.ELSEWHERE:
+            return AddonFollow(
+                Followed.ELSEWHERE, FOLLOW_ELSEWHERE.format(name=_display_name(manifests, item_id))
+            )
+        manifest = next((m for m in manifests() if m.id == item_id and m.type == "mod"), None)
+        name = _display_name(manifests, item_id)
+        if manifest is None:
+            return AddonFollow(
+                Followed.FAILED,
+                FOLLOW_FAILED.format(name=name, why="its description is missing"),
+            )
+        present = installed_clones(server_dir).get("mod", frozenset())
+        if item_id not in present:
+            removed = declined(server_dir)
+            if removed is None or item_id in removed:
+                return AddonFollow(Followed.NOT_INSTALLED, FOLLOW_NOT_INSTALLED.format(name=name))
+            applier.install(manifest)
+            _change(server_dir, failed_drop=item_id)
+            return AddonFollow(
+                Followed.INSTALLED,
+                FOLLOW_INSTALLED.format(name=name, tag=_installed_release(applier, manifest)),
+            )
+        release, head = applier.newest_release_and_head(manifest)
+        if head == release.sha:
+            if applier.client_files_missing(manifest):
+                applier.put_back_client_files(manifest)
+            return AddonFollow(
+                Followed.CURRENT, FOLLOW_CURRENT.format(name=name, tag=release.tag)
+            )
+        applier.update(manifest)
+        return AddonFollow(
+            Followed.UPDATED,
+            FOLLOW_UPDATED.format(name=name, tag=_installed_release(applier, manifest)),
+        )
+    except Exception as exc:  # noqa: BLE001 - the server update is done; nothing here fails it
+        logger.warning(f"following the server update for {item_id}: {exc}")
+        return AddonFollow(Followed.FAILED, FOLLOW_FAILED.format(name=name, why=_short(exc)))
+
+
+def _display_name(manifests: Iterable[Manifest], item_id: str) -> str:
+    """The addon's player-facing name, without reading or writing anything (T814)."""
+    if item_id in _NAMES:
+        return _NAMES[item_id]
+    for manifest in manifests():
+        if manifest.id == item_id:
+            return manifest.name
+    return item_id
+
+
+def _installed_release(applier: Applier, manifest: Manifest) -> str:
+    """The release the clone is on now, read off its own claim (T814)."""
+    from yulon.apply import clone_release
+
+    return clone_release(applier.clone_dir(manifest), item_id=manifest.id)
+
+
+def _short(exc: Exception) -> str:
+    """One line of `exc`, for the FAILED sentence (T814)."""
+    return " ".join(str(exc).split())
