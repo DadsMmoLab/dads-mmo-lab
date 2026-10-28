@@ -1659,18 +1659,10 @@ class AzerothCoreInstaller(StagedInstaller):
         over the server's own `data/`. Asked in the start path so a `data/`
         emptied after a finished extract still refuses with the map sentence.
 
-        The realm-type gate (C3a) refuses when the marker traveling with the
-        data names another type than the folder's file: starting would run one
-        type's characters under another's rules. The marker read goes through
-        the engine's own SQL seams (the import probe's client, `sql_query`),
-        and a database that cannot be asked reads as no verdict, never a
-        refusal. An absent marker is a pre-marker install, which the import
-        path marks with the file's type and the start lets by.
+        The realm-type gate (C3a) is the spine's `family_start_refusal()`,
+        which `super()` already asks last: asked once, never twice.
         """
         refused = super().start_refusal(server_dir, rebuilding=rebuilding)
-        if refused is not None:
-            return refused
-        refused = self._realm_type_refusal(server_dir)
         if refused is not None:
             return refused
         plan_block = self._block().client_extract
@@ -1688,21 +1680,14 @@ class AzerothCoreInstaller(StagedInstaller):
     def family_start_refusal(self, server_dir: Path) -> str | None:
         """The C3a realm-type gate, through the spine's family hook (T812 C3a).
 
-        Kept beside `start_refusal()`'s own call of the same gate so both stay
-        one sentence: the install's `up` asks the override above for the same
-        verdict `Controller`'s tab asks the hook for.
-        """
-        return self._realm_type_refusal(server_dir)
-
-    def _realm_type_refusal(self, server_dir: Path) -> str | None:
-        """The C3a gate: marker/file agreement for a realm-types entry, else None.
-
-        The marker read goes through the engine's own SQL seams (the import
-        probe's client, `sql_query`), and a database that cannot be asked reads
-        as no verdict: the refusal must not fire on a stopped database it may
-        not start (a start's database comes up in `up`, after this). An absent
-        marker is a pre-marker install, written with the file's type over on
-        the import path, not here: this path never writes.
+        `coa_realm.refusal()` over the engine's own SQL seams (the import
+        probe's client, `sql_query`): an unfinished switch refuses, a marker
+        naming another type than the folder's file refuses, and a pre-marker
+        install is marked with the file's type. The engine asks it where its
+        database is up (the install's `up`, a rebuild's start); a database
+        that cannot be asked refuses once a switch has been made here
+        (`coa_realm.UNREADABLE_START_REFUSAL`), and secrets that cannot be
+        read are such a database.
         """
         from yulon import coa_realm
 
@@ -1710,15 +1695,17 @@ class AzerothCoreInstaller(StagedInstaller):
             return None
         try:
             password = self.resolve_secrets(server_dir).db_password
-        except Exception:  # noqa: BLE001 - unknown secrets refuse nothing
-            return None
+        except Exception as exc:  # noqa: BLE001 - unknown secrets: a database nobody can ask
+            logger.warning(f"the realm type gate could not read the secrets: {exc}")
+            return coa_realm.refusal(self.entry, server_dir, None)
         spec = self.entry.container_spec()
         client = self._native().db.client
 
         def ask(statement: str) -> str:
             return self._seams.sql_query(spec.db, client, password, None, statement)
 
-        return coa_realm.refusal(self.entry, server_dir, coa_realm.read_marker(ask, self.entry))
+        sql = coa_realm.FnSql(run=lambda statement: _ignore_answer(ask(statement)), ask=ask)
+        return coa_realm.refusal(self.entry, server_dir, sql)
 
     def _start_servers(self, ctx: StageContext) -> None:
         """The ordered start for an entry that asks for it, else the spine's (T812).
@@ -2000,8 +1987,11 @@ class AzerothCoreInstaller(StagedInstaller):
 
         Called after the install's `import`: the marker travels with the data,
         and a fresh import (like a fresh switch's one) names the type it was
-        built for. `ensure_marker()` is idempotent; a marker that will not
-        write is a line, never a failed install.
+        built for. A marker already there is left as it is (a repair import
+        over a switched set; the start gate judges it), and a marker that
+        cannot be read or written fails the stage: a server started unmarked
+        would let a later switch park a set nothing can tell from a partial
+        import.
         """
         from yulon import coa_realm
 
@@ -2026,11 +2016,18 @@ class AzerothCoreInstaller(StagedInstaller):
                 statement,
             ),
         )
+        file_type = coa_realm.active(self.entry, ctx.server_dir).id
         try:
-            file_type = coa_realm.active(self.entry, ctx.server_dir).id
-            coa_realm.ensure_marker(sql, self.entry, file_type)
-        except Exception as exc:  # noqa: BLE001 - the import stands without its marker line
-            yield f"The realm type marker could not be written ({exc})."
+            held = coa_realm.read_marker(sql.query, self.entry)
+            if held is None:
+                coa_realm.ensure_marker(sql, self.entry, file_type)
+        except Exception as exc:  # noqa: BLE001 - every failure refuses, worded once
+            raise InstallerError(
+                f"The databases could not be marked as the {file_type} realm type ({exc}). "
+                "Press Install again to retry; the server was not started."
+            ) from exc
+        if held is not None:
+            yield f"The databases are already marked as the {held} realm type."
             return
         yield f"The databases are marked as the {file_type} realm type."
 

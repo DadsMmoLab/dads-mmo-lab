@@ -1353,6 +1353,10 @@ class TrinityCoreInstaller(CmangosInstaller):
         """A world update left unfinished (T179); the spine's question, answered (T223)."""
         return world_update_start_refusal(server_dir)
 
+    def family_finish_refusal(self, server_dir: Path) -> str | None:
+        """A world update left unfinished: "Finish the world update" starts the kept build."""
+        return world_update_start_refusal(server_dir)
+
     def servers_down_work(
         self, server_dir: Path, changes: object, *, press: str
     ) -> ServersDownWork | None:

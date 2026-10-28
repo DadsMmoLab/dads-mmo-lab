@@ -3646,6 +3646,61 @@ def _settings_mods(store: ManifestStore) -> Callable[[], tuple[Manifest, ...]]:
     return mods
 
 
+def _before_the_servers(
+    *steps: Callable[[], str | None] | None,
+) -> Callable[[], str | None] | None:
+    """`Controller.before_servers` as the given steps in order: the first reason refuses.
+
+    None when no step is given, so a server with neither asks nothing.
+    """
+    given = [step for step in steps if step is not None]
+    if not given:
+        return None
+    if len(given) == 1:
+        return given[0]
+
+    def ask() -> str | None:
+        for step in given:
+            reason = step()
+            if reason:
+                return reason
+        return None
+
+    return ask
+
+
+def _realm_type_gate(
+    entry: CatalogEntry,
+    spec: docker.ContainerSpec,
+    server_dir: Path,
+    sql: DockerSql,
+    *,
+    wsl_distro: str | None,
+) -> Callable[[], str | None] | None:
+    """The realm-type start gate for a realm-types entry; None for every other (T812 C3a).
+
+    Asked once every refusal has passed, before the realm port keeper: it starts
+    the database alone and then reads the marker (`coa_realm.before_servers_gate`),
+    so the gate never decides on a database that was not up.
+    """
+    from yulon import coa_realm
+
+    return coa_realm.before_servers_gate(
+        entry,
+        server_dir,
+        start_db=lambda: docker.start_database(
+            spec,
+            server_dir,
+            because="the realm type of its databases could not be read",
+            wsl_distro=wsl_distro,
+        ),
+        sql=coa_realm.FnSql(
+            run=lambda statement: sql.run_statement("characters", statement),
+            ask=lambda statement: sql.query("characters", statement),
+        ),
+    )
+
+
 def _realm_port_keeper(
     entry: CatalogEntry,
     spec: docker.ContainerSpec,
@@ -3953,7 +4008,10 @@ def _for_wotlk(
             import_probe=probe,
             reset_unfinished=reset,
             pre_stop=recorder,
-            before_servers=_realm_port_keeper(entry, spec, server_dir, sql, wsl_distro=wsl_distro),
+            before_servers=_before_the_servers(
+                _realm_type_gate(entry, spec, server_dir, sql, wsl_distro=wsl_distro),
+                _realm_port_keeper(entry, spec, server_dir, sql, wsl_distro=wsl_distro),
+            ),
             # T678 review round 3: a copy before Repair clears an unfinished first import.
             safety_copy=lambda: wotlk_maintenance.safety_copy_sentence(
                 wotlk_maintenance.backup(

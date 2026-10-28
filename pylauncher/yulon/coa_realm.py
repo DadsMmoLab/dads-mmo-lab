@@ -36,8 +36,11 @@ SWITCH_MARKER_FILE = ".yulon-coa-switch.json"
 
 A killed switch must be retryable: the marker names the target, and the next
 press reads the parked schemas before it renames anything, so a half-moved set
-is put back rather than moved twice. It travels in the server dir, never in a
-database, because the databases are what the rename is moving.
+is put back rather than moved twice. `imported` turns true only once the
+rename is done and the first switch's fresh import is about to begin: only a
+plain set this switch began importing is ever dropped. While it exists no
+start runs (`refusal()`). It travels in the server dir, never in a database,
+because the databases are what the rename is moving.
 """
 
 _ID = re.compile(r"[a-z][a-z0-9]{1,9}")
@@ -201,63 +204,222 @@ def switch_env_for(entry: CatalogEntry, type_id: str) -> dict[str, str]:
     return {**composegen.DEFAULT_WORLD_ENV, **base, **types[type_id].world_env}
 
 
+class DatabaseUnreadable(RealmSwitchError):
+    """A read a decision rests on could not be made: neither present nor absent.
+
+    Every read the switch, the recovery, the verification or the start gate
+    decides on is three-valued: present, definitively absent (the query ran
+    and returned no such row or table), or unreadable (the query raised, or
+    answered something no one realm type can be). Unreadable always refuses:
+    an empty answer from a database that could not be asked is not a verdict.
+    """
+
+
+CRASH_START_REFUSAL = (
+    "A realm type switch did not finish, so the server was not started. Switch realm type "
+    "again on the Server tab to finish it."
+)
+"""The start refusal while `SWITCH_MARKER_FILE` exists: the plain schemas may hold a partial set."""
+
+UNREADABLE_START_REFUSAL = (
+    "The realm type this server's databases hold could not be read, so the server was not "
+    "started. Press Start again once its database answers."
+)
+"""The start refusal when the marker cannot be read and a switch has ever been made here."""
+
+MARK_START_REFUSAL = (
+    "The databases could not be marked with this server's realm type, so the server was not "
+    "started. Press Start again."
+)
+"""The start refusal when a pre-marker install's marker would not write or read back."""
+
+ACCOUNT_COLUMNS: tuple[str, ...] = (
+    "username",
+    "salt",
+    "verifier",
+    "email",
+    "reg_mail",
+    "joindate",
+    "expansion",
+)
+"""The AzerothCore `account` columns a first switch copies, by name and never `SELECT *`.
+
+The same columns `controller_wow_wotlk.accounts` writes for a new AzerothCore
+account (`INSERT INTO account (username, salt, verifier, expansion, reg_mail,
+email, joindate)`), so a copied account is one the core's own create would
+make: the SRP6 pair logs it in, `id` is the target's own AUTO_INCREMENT.
+"""
+
+
 def ensure_marker(sql: SqlRunner, entry: CatalogEntry, type_id: str) -> None:
     """Create the marker table and row if needed; INSERT IGNORE makes it idempotent."""
     _check_id(type_id)
-    auth = entry.databases.characters
-    _check_name(auth)
+    characters = entry.databases.characters
+    _check_name(characters)
     _check_name(MARKER_TABLE)
     sql.execute(
-        f"CREATE TABLE IF NOT EXISTS `{auth}`.`{MARKER_TABLE}` "
+        f"CREATE TABLE IF NOT EXISTS `{characters}`.`{MARKER_TABLE}` "
         "(id VARCHAR(16) PRIMARY KEY) CHARACTER SET utf8mb4;"
     )
-    sql.execute(f"INSERT IGNORE INTO `{auth}`.`{MARKER_TABLE}` (id) VALUES ('{type_id}');")
+    sql.execute(f"INSERT IGNORE INTO `{characters}`.`{MARKER_TABLE}` (id) VALUES ('{type_id}');")
+
+
+def _rows(text: str) -> list[str]:
+    return [line.strip() for line in text.splitlines() if line.strip()]
+
+
+def _tables_in(query: Callable[[str], str], schemas: Sequence[str]) -> list[list[str]]:
+    """Each schema's tables, in name order; a schema that does not exist has none.
+
+    Raises `DatabaseUnreadable` when a listing cannot be made: an error is never
+    an empty schema, or a switch would import a fresh set over a park it could
+    not see, and a verification would pass on a park it could not read.
+    """
+    found: list[list[str]] = []
+    for schema in schemas:
+        _check_name(schema)
+        try:
+            rows = query(
+                "SELECT TABLE_NAME FROM information_schema.TABLES "
+                f"WHERE TABLE_SCHEMA = '{schema}' ORDER BY TABLE_NAME;"
+            )
+        except Exception as exc:
+            raise DatabaseUnreadable(
+                f"The {schema} schema could not be listed ({exc}); nothing was switched."
+            ) from exc
+        tables = _rows(rows)
+        for table in tables:
+            _check_name(table)
+        found.append(tables)
+    return found
+
+
+def _marker_in(query: Callable[[str], str], schema: str) -> str | None:
+    """The realm type id the marker in `schema` names, None when it has none.
+
+    None only when the listing ran and showed no marker table, or the table is
+    there with no row yet (`ensure_marker()` killed between its two
+    statements): neither claims a type. A table that cannot be read, or reads
+    anything but one realm type id, raises `DatabaseUnreadable`.
+    """
+    (tables,) = _tables_in(query, [schema])
+    if MARKER_TABLE not in tables:
+        return None
+    try:
+        rows = query(f"SELECT id FROM `{schema}`.`{MARKER_TABLE}`;")
+    except Exception as exc:
+        raise DatabaseUnreadable(
+            f"The realm type marker in {schema} could not be read ({exc}); nothing was switched."
+        ) from exc
+    values = _rows(rows)
+    if not values:
+        return None
+    if len(values) == 1 and _ID.fullmatch(values[0]):
+        return values[0]
+    raise DatabaseUnreadable(
+        f"The realm type marker in {schema} reads {values[:3]}, which is not one realm type; "
+        "nothing was switched."
+    )
 
 
 def read_marker(query: Callable[[str], str], entry: CatalogEntry) -> str | None:
-    """The type id the data says it holds, or None when the table is absent.
+    """The type id the plain characters schema says it holds; None when it has no marker.
 
-    Takes the plain query callable rather than a `SqlRunner`: the start
-    refusals only ever read, and a read needs no ledger row. Anything the query
-    raises with reads as absent, never as a refusal: a database that cannot be
-    asked is not a verdict about what it holds.
+    Raises `DatabaseUnreadable` when the schema or its marker cannot be read:
+    absent and unreadable are two answers, and only the first is a verdict.
     """
-    auth = entry.databases.characters
-    _check_name(auth)
-    _check_name(MARKER_TABLE)
-    try:
-        rows = query(f"SELECT id FROM `{auth}`.`{MARKER_TABLE}`;")
-    except Exception as exc:  # noqa: BLE001 - absent/unreachable reads as None
-        logger.debug(f"{entry.id}: the realm-type marker could not be read: {exc}")
-        return None
-    for line in rows.splitlines():
-        value = line.strip()
-        if value and _ID.fullmatch(value):
-            return value
-    logger.debug(f"{entry.id}: the realm-type marker reads no realm type id; asked as absent")
-    return None
+    return _marker_in(query, entry.databases.characters)
 
 
-def refusal(entry: CatalogEntry, server_dir: Path, marker: str | None) -> str | None:
-    """Why the server must not start now, or None.
+def mismatch_sentence(marker: str, want: str) -> str:
+    """The start and switch refusal for databases holding another type than the file says."""
+    return (
+        f"The databases hold the {marker} realm type but this server is set to {want}. "
+        f"Switch realm type to {marker} on the Server tab to put it right."
+    )
 
-    The marker travels WITH the data and the file travels with the folder: a
+
+def refusal(entry: CatalogEntry, server_dir: Path, sql: SqlRunner | None) -> str | None:
+    """Why the server must not start now, or None; marks a pre-marker install (T812 C3a).
+
+    A crash marker refuses outright: a switch that did not finish may have left
+    a partial import in the plain schemas, with no marker to refuse on. The
+    marker travels WITH the data and the file travels with the folder: a
     mismatch means this folder's databases hold another type's characters, and
-    starting would run them under the wrong rules. An absent marker is a
-    pre-marker install, which the caller marks with the file's type and starts.
+    starting would run them under the wrong rules. An absent marker over a
+    characters table is a pre-marker install, marked here with the file's type
+    and read back before the start goes on; an absent marker over no
+    characters table is a database with nothing in it yet, which nothing here
+    marks. `sql` is None when the database cannot be asked at all.
+
+    A marker that cannot be read refuses once a realm-type file exists (a
+    switch has been made here, so the plain set may be any type); before one
+    exists only the default type can ever have been in the plain schemas.
     """
     if not has_realm_types(entry):
         return None
-    if marker is None:
-        return None
+    if (server_dir / SWITCH_MARKER_FILE).exists():
+        return CRASH_START_REFUSAL
+    claimed = (server_dir / ACTIVE_FILE).exists()
+    if sql is None:
+        return UNREADABLE_START_REFUSAL if claimed else None
     want = active(entry, server_dir).id
-    if marker != want:
-        return (
-            f"The databases hold the {marker} realm type but this server is set "
-            f"to {want}. Switch realm type to {marker} on the Server tab to "
-            "put it right."
-        )
+    try:
+        marker = read_marker(sql.query, entry)
+        if marker is None:
+            return _mark_at_start(entry, sql, want)
+    except RealmSwitchError as exc:
+        logger.warning(f"{entry.id}: the realm type marker could not be read: {exc}")
+        return UNREADABLE_START_REFUSAL if claimed else None
+    return None if marker == want else mismatch_sentence(marker, want)
+
+
+def _mark_at_start(entry: CatalogEntry, sql: SqlRunner, want: str) -> str | None:
+    (tables,) = _tables_in(sql.query, [entry.databases.characters])
+    if "characters" not in tables:
+        logger.info(f"{entry.id}: no characters table yet; the realm type marker waits")
+        return None
+    try:
+        ensure_marker(sql, entry, want)
+        back = read_marker(sql.query, entry)
+    except Exception as exc:  # noqa: BLE001 - any failure refuses the start, worded once
+        logger.warning(f"{entry.id}: the realm type marker could not be written: {exc}")
+        return MARK_START_REFUSAL
+    if back != want:
+        logger.warning(f"{entry.id}: the realm type marker reads {back!r} after writing {want!r}")
+        return MARK_START_REFUSAL
+    logger.info(f"{entry.id}: marked the pre-marker databases as the {want} realm type")
     return None
+
+
+def before_servers_gate(
+    entry: CatalogEntry,
+    server_dir: Path,
+    *,
+    start_db: Callable[[], object],
+    sql: SqlRunner,
+) -> Callable[[], str | None] | None:
+    """The Controller's realm-type gate, asked once every other refusal has passed.
+
+    The database alone is started first (`start_db`), then `refusal()` reads
+    the marker: the gate never decides on a database that was not up. A crash
+    marker refuses before anything is started. None for an entry without realm
+    types, so every other server starts exactly as it did.
+    """
+    if not has_realm_types(entry):
+        return None
+
+    def gate() -> str | None:
+        if (server_dir / SWITCH_MARKER_FILE).exists():
+            return CRASH_START_REFUSAL
+        try:
+            start_db()
+        except Exception as exc:  # noqa: BLE001 - a database that will not start is unreadable
+            logger.warning(f"{entry.id}: the database could not be started to read its type: {exc}")
+            return refusal(entry, server_dir, None)
+        return refusal(entry, server_dir, sql)
+
+    return gate
 
 
 def realm_name_update(entry: CatalogEntry, realm_name: str) -> str:
@@ -308,23 +470,6 @@ def _plain(entry: CatalogEntry) -> tuple[str, str, str]:
     return (databases.auth, databases.characters, databases.playerbots)
 
 
-def _tables_in(sql: SqlRunner, schemas: Sequence[str]) -> list[list[str]]:
-    """Each schema's tables, in name order; an unreadable schema reads as empty."""
-    found: list[list[str]] = []
-    for schema in schemas:
-        _check_name(schema)
-        try:
-            rows = sql.query(
-                "SELECT TABLE_NAME FROM information_schema.TABLES "
-                f"WHERE TABLE_SCHEMA = '{schema}' ORDER BY TABLE_NAME;"
-            )
-        except Exception:
-            found.append([])
-            continue
-        found.append([line.strip() for line in rows.splitlines() if line.strip()])
-    return found
-
-
 def switch(
     entry: CatalogEntry,
     server_dir: Path,
@@ -339,16 +484,21 @@ def switch(
 ) -> Iterator[str]:
     """Move every table set to `target_id`, then point the folder at it.
 
-    1 refuse while a server runs (its connections hold metadata locks); 2 read
-    the marker and refuse a file/marker split unless the target IS the marker
-    (the repair: rewrite the file + override, no rename); 3 refuse while the
-    active type's park schemas are non-empty; 4 create the active parks with
-    the source schemas' charset/collation; 5 ONE `RENAME TABLE` moving all
-    three sets both ways; 6 drop the emptied target parks; 7 on a first switch
-    run the import, name the realm row, mark the type and copy the player's
-    accounts; verify, clear the crash marker, 8 write the file, 9 rewrite the
-    override. A crash marker BEFORE the first rename names the target for a
-    killed press to retry.
+    1 refuse while a server runs (its connections hold metadata locks); 2 a
+    crash marker left by an earlier press is settled first (an interrupted
+    first import is put back, but only under every check in
+    `_recover_interrupted()`); 3 read the marker and refuse a file/marker split
+    unless the target IS the marker (the repair: rewrite the file + override,
+    no rename); 4 a plain set with no marker is marked as the file's type
+    before anything moves, so it travels marked; 5 refuse while the active
+    type's park schemas are non-empty, or the target's park reads as another
+    type; 6 create the active parks with the source schemas' charset/collation;
+    7 ONE `RENAME TABLE` moving all three sets both ways; 8 drop the emptied
+    target parks; 9 on a first switch record that its import began, run the
+    import, name the realm row, copy and verify the player's accounts, and
+    mark the type LAST (the marker is the import's commit); verify, clear the
+    crash marker, 10 write the file, 11 rewrite the override. Every read a
+    step decides on refuses when it cannot be made.
     """
     types = _types(entry)
     if target_id not in types:
@@ -362,60 +512,61 @@ def switch(
             "realm type. Nothing was switched."
         )
     current = active(entry, server_dir).id
-    if current == target_id:
+    crash = _read_crash(server_dir)
+    if crash is None and current == target_id:
         yield f"The server is already on the {target_id} realm type; nothing was switched."
         return
+    if crash is not None:
+        yield from _recover_interrupted(entry, sql, server_dir, current, target_id, crash)
     marker = read_marker(sql.query, entry)
     if marker is not None and marker != current:
         if target_id != marker:
-            raise RealmSwitchError(
-                f"The databases hold the {marker} realm type but this server is set to "
-                f"{current}. Switch realm type to {marker} on the Server tab to put "
-                "it right."
-            )
+            raise RealmSwitchError(mismatch_sentence(marker, current))
         yield (
             f"The databases already hold {marker} but the file said {current}; "
             "the file and the override were rewritten, and no database was touched."
         )
         write_active(server_dir, marker)
         write_override(switch_env_for(entry, marker))
+        _clear_crash(server_dir)
         return
     if marker is None:
-        yield from _recover_interrupted(entry, sql, server_dir, current, target_id)
-        marker = read_marker(sql.query, entry)
-        if marker is not None and marker != current:
-            if target_id != marker:
-                raise RealmSwitchError(
-                    f"The databases hold the {marker} realm type but this server is set to "
-                    f"{current}. Switch realm type to {marker} on the Server tab to put "
-                    "it right."
-                )
-            yield (
-                f"The databases already hold {marker} but the file said {current}; "
-                "the file and the override were rewritten, and no database was touched."
-            )
-            write_active(server_dir, marker)
-            write_override(switch_env_for(entry, marker))
-            return
+        yield from _mark_before_switch(entry, sql, current)
+    if current == target_id:
+        _clear_crash(server_dir)
+        yield f"The server is already on the {target_id} realm type; nothing was switched."
+        return
     yield from _refuse_non_empty_parks(entry, sql, current)
     parked = _parked(entry, current)
     for schema, source in zip(parked, _plain(entry), strict=True):
         _create_park_like(sql, source, schema)
     target_park = _parked(entry, target_id)
-    parked_tables = _tables_in(sql, target_park)
-    _write_crash(server_dir, target_id)
+    parked_tables = _tables_in(sql.query, target_park)
+    first = not any(parked_tables)
+    if not first:
+        held = _marker_in(sql.query, target_park[1])
+        if held != target_id:
+            raise RealmSwitchError(
+                f"The parked {target_id} databases do not read as the {target_id} realm type "
+                f"({held or 'no marker'}): renaming them in would start the wrong "
+                "characters. Nothing was switched."
+            )
+    _write_crash(server_dir, target_id, imported=False)
     yield from _rename_both_ways(entry, sql, current, target_id, parked, target_park, parked_tables)
     for schema in target_park:
         _drop_if_empty(sql, schema)
-    if not any(parked_tables):
+    if first:
+        # Recorded BEFORE the import writes anything: only a set this switch began
+        # importing is ever dropped by `_recover_interrupted()`.
+        _write_crash(server_dir, target_id, imported=True)
         yield (
             f"No {target_id} databases exist yet; importing them for the first time "
             "(a few minutes), then copying the player accounts over."
         )
         yield from run_import()
         set_realm_row(types[target_id].realm_name, str(entry.ports.world))
-        ensure_marker(sql, entry, target_id)
         yield from _copy_player_accounts(entry, sql, current, bot_prefix)
+        ensure_marker(sql, entry, target_id)
     _verify(sql, entry, current, target_id)
     _clear_crash(server_dir)
     write_active(server_dir, target_id)
@@ -423,20 +574,64 @@ def switch(
     yield f"The server now runs the {target_id} realm type ({types[target_id].realm_name})."
 
 
-def _crash_target(server_dir: Path) -> str | None:
+def _mark_before_switch(entry: CatalogEntry, sql: SqlRunner, current: str) -> Iterator[str]:
+    """Mark a pre-marker plain set as the file's type before it is parked.
+
+    Without it the parked set carries no marker, and the switch back cannot
+    tell it from a partial import: the review's reproduced data loss. Only a
+    set with a characters table is marked; anything else refuses.
+    """
+    (tables,) = _tables_in(sql.query, [entry.databases.characters])
+    if "characters" not in tables:
+        raise RealmSwitchError(
+            f"The {entry.databases.characters} schema holds no characters table and no realm "
+            "type marker, so there is no set to switch. Nothing was switched."
+        )
+    ensure_marker(sql, entry, current)
+    if read_marker(sql.query, entry) != current:
+        raise RealmSwitchError(
+            f"The databases could not be marked as the {current} realm type before the "
+            "switch. Nothing was switched."
+        )
+    yield f"Marked the databases as the {current} realm type before switching."
+
+
+@dataclass(frozen=True)
+class _Crash:
+    """What `SWITCH_MARKER_FILE` says: the target, and whether its fresh import began."""
+
+    target: str
+    imported: bool
+
+
+def _read_crash(server_dir: Path) -> _Crash | None:
+    """The crash marker, None when there is none; refuses one that cannot be read."""
+    path = server_dir / SWITCH_MARKER_FILE
+    if not path.exists():
+        return None
     try:
-        raw = json.loads((server_dir / SWITCH_MARKER_FILE).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    if not isinstance(raw, dict):
-        return None
-    value = raw.get("target")
-    return value if isinstance(value, str) and value else None
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise RealmSwitchError(
+            f"The note of an unfinished realm type switch ({path}) cannot be read ({exc}), "
+            "so nothing was switched."
+        ) from exc
+    target = raw.get("target") if isinstance(raw, dict) else None
+    if not isinstance(target, str) or not _ID.fullmatch(target):
+        raise RealmSwitchError(
+            f"The note of an unfinished realm type switch ({path}) names no realm type, "
+            "so nothing was switched."
+        )
+    return _Crash(target=target, imported=raw.get("imported") is True)
 
 
-def _write_crash(server_dir: Path, target_id: str) -> None:
-    (server_dir / SWITCH_MARKER_FILE).write_text(
-        json.dumps({"version": 1, "target": target_id}) + "\n", encoding="utf-8"
+def _write_crash(server_dir: Path, target_id: str, *, imported: bool) -> None:
+    from yulon.catalog import composegen
+
+    _check_id(target_id)
+    composegen._replace_whole(
+        server_dir / SWITCH_MARKER_FILE,
+        json.dumps({"version": 2, "target": target_id, "imported": imported}) + "\n",
     )
 
 
@@ -445,59 +640,70 @@ def _clear_crash(server_dir: Path) -> None:
 
 
 def _recover_interrupted(
-    entry: CatalogEntry, sql: SqlRunner, server_dir: Path, current: str, target_id: str
+    entry: CatalogEntry,
+    sql: SqlRunner,
+    server_dir: Path,
+    current: str,
+    target_id: str,
+    crash: _Crash,
 ) -> Iterator[str]:
-    """Put back a first switch killed during its import, so this press retries fresh.
+    """Put back a first switch killed after its rename, so this press starts clean.
 
-    Only when the crash marker names this same target, the plain marker is
-    still absent, and the parked set carries the current type's marker: the
-    parked set is then provably the complete pre-switch set (the rename is
-    atomic) and the plain set is claimed by nothing (no marker), so dropping
-    the plain's partial import and renaming back is safe. Anything else falls
-    through to the normal path, which refuses or proceeds on what it reads.
+    Nothing is dropped unless EVERY one of these reads holds: the plain marker
+    is definitively absent (a marked plain set is a whole set: the repair or
+    the normal path takes it); the press is for the crash's own target, or
+    back to the file's type (the undo); the parked set of the file's type
+    reads that type's marker (so it is the whole pre-switch set, the rename
+    being atomic); and the plain schemas are empty or the crash marker
+    records that this switch began their import. Any other state refuses with
+    nothing changed.
     """
-    if _crash_target(server_dir) != target_id:
-        yield from ()
-        return
     if read_marker(sql.query, entry) is not None:
-        yield from ()
         return
+    if crash.target != target_id and target_id != current:
+        raise RealmSwitchError(
+            f"A switch to {crash.target} did not finish. Switch realm type to {crash.target} "
+            f"again to finish it, or to {current} to undo it. Nothing was switched."
+        )
     parked = _parked(entry, current)
-    try:
-        rows = sql.query(f"SELECT id FROM `{parked[1]}`.`{MARKER_TABLE}`;")
-    except Exception:
-        yield from ()
-        return
-    if [line.strip() for line in rows.splitlines() if line.strip()] != [current]:
-        yield from ()
-        return
-    yield (
-        f"The last switch to {target_id} was interrupted during its first import; "
-        "its partial databases were dropped and the previous type's tables put back, "
-        "so this press starts the switch again."
-    )
+    held = _marker_in(sql.query, parked[1])
+    if held != current:
+        raise RealmSwitchError(
+            f"A switch to {crash.target} did not finish, and the parked {current} databases "
+            f"do not read as the {current} realm type ({held or 'no marker'}), so nothing "
+            "was dropped or switched."
+        )
     plain = _plain(entry)
-    for schema, names in zip(plain, _tables_in(sql, plain), strict=True):
-        for table in names:
-            _check_name(table)
+    plain_tables = _tables_in(sql.query, plain)
+    if any(plain_tables) and not crash.imported:
+        raise RealmSwitchError(
+            f"A switch to {crash.target} did not finish, and the plain databases hold tables "
+            "no import of that switch wrote, so nothing was dropped or switched."
+        )
+    yield (
+        f"The last switch to {crash.target} was interrupted during its first import; "
+        "its partial databases were dropped and the previous type's tables put back."
+    )
+    for schema, names in zip(plain, plain_tables, strict=True):
         if names:
             sql.execute(f"DROP TABLE {', '.join(f'`{schema}`.`{t}`' for t in names)};")
     moves = [
         f"`{park}`.`{table}` TO `{schema}`.`{table}`"
-        for schema, park, names in zip(plain, parked, _tables_in(sql, parked), strict=True)
+        for schema, park, names in zip(plain, parked, _tables_in(sql.query, parked), strict=True)
         for table in names
     ]
     if moves:
         sql.execute("RENAME TABLE " + ", ".join(moves) + ";")
     for schema in parked:
         _drop_if_empty(sql, schema)
+    _clear_crash(server_dir)
 
 
 def _refuse_non_empty_parks(entry: CatalogEntry, sql: SqlRunner, current: str) -> Iterator[str]:
-    tables = _tables_in(sql, _parked(entry, current))
+    parked = _parked(entry, current)
     holding = sorted(
         f"{schema}.{table}"
-        for schema, names in zip(_parked(entry, current), tables, strict=True)
+        for schema, names in zip(parked, _tables_in(sql.query, parked), strict=True)
         for table in names
     )
     if holding:
@@ -521,17 +727,20 @@ def _create_park_like(sql: SqlRunner, source: str, schema: str) -> None:
         raise RealmSwitchError(
             f"The {source} schema could not be read ({exc}); nothing was switched."
         ) from exc
-    collation = ""
     parts = rows.split()
-    if len(parts) >= 2:
-        _check_name(parts[0])
-        if not all(ch.isalnum() or ch in "_-" for ch in parts[1]):
-            raise RealmSwitchError(
-                f"The {source} schema's collation {parts[1]!r} is not one this switch "
-                "writes; nothing was switched."
-            )
-        collation = f" CHARACTER SET {parts[0]} COLLATE {parts[1]}"
-    sql.execute(f"CREATE DATABASE IF NOT EXISTS `{schema}`{collation};")
+    if len(parts) != 2:
+        raise RealmSwitchError(
+            f"The {source} schema's character set reads {rows.strip()!r}; nothing was switched."
+        )
+    _check_name(parts[0])
+    if not all(ch.isalnum() or ch in "_-" for ch in parts[1]):
+        raise RealmSwitchError(
+            f"The {source} schema's collation {parts[1]!r} is not one this switch "
+            "writes; nothing was switched."
+        )
+    sql.execute(
+        f"CREATE DATABASE IF NOT EXISTS `{schema}` CHARACTER SET {parts[0]} COLLATE {parts[1]};"
+    )
 
 
 def _rename_both_ways(
@@ -545,11 +754,11 @@ def _rename_both_ways(
 ) -> Iterator[str]:
     plain = _plain(entry)
     moves: list[str] = []
-    for schema, park in zip(plain, parked, strict=True):
-        for table in _live_tables(sql, schema):
-            moves.append(f"`{schema}`.`{table}` TO `{park}`.`{table}`")
-    for park, schema, names in zip(target_parked, plain, parked_tables, strict=True):
+    for schema, park, names in zip(plain, parked, _tables_in(sql.query, plain), strict=True):
         for table in names:
+            moves.append(f"`{schema}`.`{table}` TO `{park}`.`{table}`")
+    for park, schema, held in zip(target_parked, plain, parked_tables, strict=True):
+        for table in held:
             _check_name(table)
             moves.append(f"`{park}`.`{table}` TO `{schema}`.`{table}`")
     if not moves:
@@ -569,39 +778,52 @@ def _rename_both_ways(
     )
 
 
-def _live_tables(sql: SqlRunner, schema: str) -> list[str]:
-    _check_name(schema)
-    try:
-        rows = sql.query(
-            "SELECT TABLE_NAME FROM information_schema.TABLES "
-            f"WHERE TABLE_SCHEMA = '{schema}' ORDER BY TABLE_NAME;"
-        )
-    except Exception as exc:
-        raise RealmSwitchError(
-            f"The {schema} schema could not be listed ({exc}); nothing was switched."
-        ) from exc
-    tables = [line.strip() for line in rows.splitlines() if line.strip()]
-    for table in tables:
-        _check_name(table)
-    return tables
-
-
 def _drop_if_empty(sql: SqlRunner, schema: str) -> None:
-    _check_name(schema)
+    """Drop `schema` only when it reads empty; one that cannot be listed is left standing."""
     try:
-        rows = sql.query(
-            "SELECT TABLE_NAME FROM information_schema.TABLES "
-            f"WHERE TABLE_SCHEMA = '{schema}' ORDER BY TABLE_NAME;"
-        )
-    except Exception:
+        (tables,) = _tables_in(sql.query, [schema])
+    except RealmSwitchError as exc:
+        logger.warning(f"{schema} was left in place: {exc}")
         return
-    if not [line for line in rows.splitlines() if line.strip()]:
+    if not tables:
         sql.execute(f"DROP DATABASE IF EXISTS `{schema}`;")
+
+
+def _like_prefix(prefix: str) -> str:
+    """`prefix` for a `LIKE ... ESCAPE '!'`: `_`, `%` and `!` match only themselves."""
+    return "".join(f"!{ch}" if ch in "!_%" else ch for ch in prefix)
+
+
+def _one_int(sql: SqlRunner, statement: str, what: str) -> int | None:
+    """The one integer `statement` answers, None for no row; anything else refuses."""
+    try:
+        values = _rows(sql.query(statement))
+    except Exception as exc:
+        raise DatabaseUnreadable(
+            f"{what} could not be read ({exc}); nothing further was written. Press again to "
+            "retry."
+        ) from exc
+    if not values:
+        return None
+    if len(values) == 1 and values[0].isdigit():
+        return int(values[0])
+    raise DatabaseUnreadable(
+        f"{what} reads {values[:3]}; nothing further was written. Press again to retry."
+    )
 
 
 def _copy_player_accounts(
     entry: CatalogEntry, sql: SqlRunner, source_id: str, bot_prefix: str
 ) -> Iterator[str]:
+    """Copy the player's accounts into the fresh auth schema, each verified (D2).
+
+    Explicit columns (`ACCOUNT_COLUMNS`), never `SELECT *` and never `INSERT
+    IGNORE`: the target allocates its own `id`, a username the target already
+    holds refuses, and `account_access` (keyed `id`, the account's id) is
+    copied under the TARGET's id. Each account then reads back with its SRP6
+    pair intact and every GM-rights row matched, or the switch refuses before
+    the marker is written; only verified accounts are counted.
+    """
     from yulon import useraccounts
 
     _check_id(source_id)
@@ -611,36 +833,79 @@ def _copy_player_accounts(
             "nothing was copied."
         )
     databases = entry.databases
-    source_schema = f"{databases.auth}_{source_id}"
-    _check_name(source_schema)
-    target_schema = databases.auth
-    _check_name(target_schema)
+    source = f"{databases.auth}_{source_id}"
+    _check_name(source)
+    target = databases.auth
+    _check_name(target)
     try:
         rows = sql.query(
-            f"SELECT username FROM `{source_schema}`.account "
-            f"WHERE UPPER(username) NOT LIKE '{bot_prefix.upper()}%' "
+            f"SELECT username FROM `{source}`.account "
+            f"WHERE UPPER(username) NOT LIKE '{_like_prefix(bot_prefix.upper())}%' ESCAPE '!' "
             f"AND username <> '{useraccounts.AHBOT_ACCOUNT}';"
         )
     except Exception as exc:
         raise RealmSwitchError(
             f"The player accounts could not be listed ({exc}); nothing was copied."
         ) from exc
-    names = [line.strip() for line in rows.splitlines() if line.strip()]
+    names = _rows(rows)
     skipped = sorted({name for name in names if not _SAFE_NAME.fullmatch(name)})
+    columns = ", ".join(ACCOUNT_COLUMNS)
     copied = 0
     for name in sorted({name for name in names if _SAFE_NAME.fullmatch(name)}):
-        sql.execute(
-            f"INSERT IGNORE INTO `{target_schema}`.account SELECT * FROM `{source_schema}`.account "
-            f"WHERE username = '{name}';"
+        account = f"The {name} account"
+        source_key = _one_int(
+            sql, f"SELECT id FROM `{source}`.account WHERE username = '{name}';", account
         )
-        try:
-            sql.execute(
-                f"INSERT IGNORE INTO `{target_schema}`.account_access SELECT * "
-                f"FROM `{source_schema}`.account_access WHERE account_id = "
-                f"(SELECT id FROM `{source_schema}`.account WHERE username = '{name}');"
+        if source_key is None:
+            raise RealmSwitchError(
+                f"{account} is gone from {source}; nothing further was written. Press again "
+                "to retry."
             )
-        except Exception:
-            pass
+        lookup = f"SELECT id FROM `{target}`.account WHERE username = '{name}';"
+        if _one_int(sql, lookup, account) is not None:
+            raise RealmSwitchError(
+                f"The new realm type's databases already hold an account named {name}; it "
+                "was not overwritten and nothing further was written."
+            )
+        sql.execute(
+            f"INSERT INTO `{target}`.account ({columns}) SELECT {columns} "
+            f"FROM `{source}`.account WHERE id = {source_key};"
+        )
+        target_key = _one_int(sql, lookup, account)
+        same = _one_int(
+            sql,
+            f"SELECT COUNT(*) FROM `{target}`.account t JOIN `{source}`.account s "
+            "ON s.username = t.username AND s.salt = t.salt AND s.verifier = t.verifier "
+            f"WHERE t.id = {target_key} AND s.id = {source_key};",
+            account,
+        )
+        if target_key is None or same != 1:
+            raise RealmSwitchError(
+                f"{account} did not arrive in the new realm type's databases with its "
+                "password intact; nothing further was written. Press again to retry."
+            )
+        sql.execute(
+            f"INSERT INTO `{target}`.account_access (id, gmlevel, RealmID) "
+            f"SELECT {target_key}, gmlevel, RealmID FROM `{source}`.account_access "
+            f"WHERE id = {source_key};"
+        )
+        want = _one_int(
+            sql,
+            f"SELECT COUNT(*) FROM `{source}`.account_access WHERE id = {source_key};",
+            f"{account}'s GM rights",
+        )
+        got = _one_int(
+            sql,
+            f"SELECT COUNT(*) FROM `{target}`.account_access t JOIN `{source}`.account_access s "
+            "ON s.RealmID = t.RealmID AND s.gmlevel = t.gmlevel "
+            f"WHERE t.id = {target_key} AND s.id = {source_key};",
+            f"{account}'s GM rights",
+        )
+        if want != got:
+            raise RealmSwitchError(
+                f"{account}'s GM rights did not all arrive in the new realm type's databases "
+                f"({got} of {want}); nothing further was written. Press again to retry."
+            )
         copied += 1
     yield f"Copied {copied} player accounts into the new realm type's databases."
     if skipped:
@@ -651,16 +916,17 @@ def _copy_player_accounts(
 
 
 def _verify(sql: SqlRunner, entry: CatalogEntry, current: str, target_id: str) -> None:
-    """The crash marker is cleared only after this passes: one set is plain.
+    """The crash marker is cleared only after this passes: one set is plain, one parked.
 
     The target parks must be empty (their tables moved, the shells dropped),
-    and the plain marker must name the target (it traveled with the target's
-    set, or the first switch just wrote it). Anything else leaves the crash
-    marker for the next press and writes neither the file nor the override.
+    the plain marker must name the target (it traveled with the target's set,
+    or the first switch just wrote it), and the parked set of the previous type
+    must still read as that type. Anything else, an unreadable read included,
+    leaves the crash marker for the next press and writes neither the file nor
+    the override.
     """
-    for schema, names in zip(
-        _parked(entry, target_id), _tables_in(sql, _parked(entry, target_id)), strict=True
-    ):
+    target_park = _parked(entry, target_id)
+    for schema, names in zip(target_park, _tables_in(sql.query, target_park), strict=True):
         if names:
             raise RealmSwitchError(
                 f"The parked {schema} schema is not empty after the rename; "
@@ -669,5 +935,10 @@ def _verify(sql: SqlRunner, entry: CatalogEntry, current: str, target_id: str) -
     if read_marker(sql.query, entry) != target_id:
         raise RealmSwitchError(
             f"The plain databases do not read as the {target_id} realm type after "
+            "the rename; nothing further was written. Press again to retry."
+        )
+    if _marker_in(sql.query, _parked(entry, current)[1]) != current:
+        raise RealmSwitchError(
+            f"The parked {current} databases do not read as the {current} realm type after "
             "the rename; nothing further was written. Press again to retry."
         )

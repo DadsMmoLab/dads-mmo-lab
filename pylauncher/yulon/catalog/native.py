@@ -8291,11 +8291,33 @@ class StagedInstaller:
     def family_start_refusal(self, server_dir: Path) -> str | None:
         """The family's own reason no start may run, apart from `START_REFUSED_FILE` (T223).
 
-        None in the spine. TrinityCore's is a world update left unfinished. Asked by
-        the update route to decide whether a kept build's start is already refused
-        by its family, which then lets its own finish start it.
+        None in the spine. TrinityCore's is a world update left unfinished;
+        AzerothCore's is the realm-type gate (T812 C3a). Asked last by
+        `start_refusal()`.
         """
         return None
+
+    def family_finish_refusal(self, server_dir: Path) -> str | None:
+        """The family's refusal whose own finish press STARTS the kept build, or None (T223).
+
+        None in the spine. TrinityCore's is a world update left unfinished: "Finish
+        the world update" imports the kept build's tables and then starts it. A
+        family refusal with no such finish (AzerothCore's realm-type gate, T812 C3a)
+        is not one: forgetting the owed start for it would let the next Start run a
+        build that never started once its own refusal cleared.
+        """
+        return None
+
+    def owed_start_left_to_the_family(self, server_dir: Path) -> bool:
+        """Whether the untested-build refusal may be forgotten for the family's finish (T223).
+
+        Only when that refusal is the one recorded and the family's refusal is one
+        its own finish clears by starting (`family_finish_refusal()`).
+        """
+        return (
+            owed_start_refusal(server_dir) == UNTESTED_BUILD_REFUSAL
+            and self.family_finish_refusal(server_dir) is not None
+        )
 
     # -- the contract ----------------------------------------------------
 
@@ -11331,10 +11353,7 @@ class StagedInstaller:
                     yield from work.keep()
                 except (InstallerError, OSError) as kept_failed:
                     also = f" {kept_failed}"
-                if (
-                    owed_start_refusal(server_dir) == UNTESTED_BUILD_REFUSAL
-                    and self.family_start_refusal(server_dir) is not None
-                ):
+                if self.owed_start_left_to_the_family(server_dir):
                     # T223 (lead ruling, option 1): the family's own record refuses
                     # Start, and T179's "Finish the world update" imports the kept
                     # build's tables and then starts it -- the owner-approved exit.

@@ -3,14 +3,21 @@
 The ACTIVE type lives under the plain `acore_auth`/`acore_characters`/
 `acore_playerbots` names; inactive types are parked as `<db>_<id>` schemas and
 a switch is ONE atomic `RENAME TABLE`, with the servers stopped. A fake `sql`
-records the statements: no daemon, no database.
+models the databases the switch touches: tables per schema, the marker row
+that travels with its table, and the `account`/`account_access` rows with
+their keys (AUTO_INCREMENT ids, unique usernames, the `(id, RealmID)` primary
+key). A rename is validated whole before anything moves, as MySQL's is, and
+any statement shape the fake does not model fails the test: no daemon, no
+database, and no statement that passes only because nobody read it.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterator, Mapping
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -20,38 +27,36 @@ from yulon.catalog import composegen
 from yulon.catalog.catalog import CatalogEntry, load_catalog
 from yulon.resources import installers_dir
 
+PLAIN = ("acore_auth", "acore_characters", "acore_playerbots")
+MARKER = coa_realm.MARKER_TABLE
+
 
 def coa() -> CatalogEntry:
     return load_catalog().get("wow-coa")
 
 
 class FakeSql(coa_realm.SqlRunner):
-    """The databases as statement-keyed answers, and a record of the writes."""
+    """The databases a switch touches, and a record of every write."""
 
     def __init__(self) -> None:
         self.tables: dict[str, list[str]] = {}
         self.schemata: dict[str, tuple[str, str]] = {}
         self.executed: list[str] = []
+        self.queries: list[str] = []
         self.fail_on: str = ""
+        """A substring: an `execute()` containing it raises."""
+        self.fail_query_on: str = ""
+        """A substring: a `query()` containing it raises."""
         self.marker_rows: dict[str, str] = {}
-        """The `yulon_realm_type` row per characters schema, traveling with its tables."""
+        """The `yulon_realm_type` row per schema, traveling with its table."""
+        self.rows: dict[tuple[str, str], list[dict[str, object]]] = {}
+        """`account`/`account_access` rows per (schema, table), traveling with the table."""
 
     @property
     def marker(self) -> str | None:
         return self.marker_rows.get("acore_characters")
 
-    @marker.setter
-    def marker(self, value: str | None) -> None:
-        if value is None:
-            self.marker_rows.pop("acore_characters", None)
-        else:
-            self.marker_rows["acore_characters"] = value
-
-    def _schema_of(self, statement: str, prefix: str) -> str | None:
-        for token in statement.replace("`", " ").replace("(", " ").split():
-            if token.startswith(prefix):
-                return token
-        return None
+    # -- writes ------------------------------------------------------------
 
     def execute(self, statement: str) -> None:
         if self.fail_on and self.fail_on in statement:
@@ -63,94 +68,305 @@ class FakeSql(coa_realm.SqlRunner):
             self.tables.setdefault(name, [])
             self.schemata.setdefault(name, ("utf8mb4", "utf8mb4_unicode_ci"))
         elif upper.startswith("RENAME TABLE"):
-            for move in statement[len("RENAME TABLE") :].strip().rstrip(";").split(","):
-                old, _, new = move.strip().partition(" TO ")
-                old_schema = old.strip().split("`.`")[0].strip(" `")
-                old_table = old.strip().split("`.`")[1].strip(" `")
-                new_schema = new.strip().split("`.`")[0].strip(" `")
-                new_table = new.strip().split("`.`")[1].strip(" `")
-                assert old_table == new_table
-                self.tables.setdefault(old_schema, [])
-                self.tables.setdefault(new_schema, [])
-                assert old_table in self.tables[old_schema], (
-                    old_table,
-                    old_schema,
-                    self.tables[old_schema],
-                )
-                self.tables[old_schema].remove(old_table)
-                self.tables[new_schema].append(old_table)
-                self.tables[new_schema].sort()
-                if old_table == "yulon_realm_type" and old_schema in self.marker_rows:
-                    self.marker_rows[new_schema] = self.marker_rows.pop(old_schema)
+            self._rename(statement)
         elif upper.startswith("DROP DATABASE"):
             name = statement.split("`")[1]
-            self.tables[name] = []
+            self.tables.pop(name, None)
+            self.schemata.pop(name, None)
             self.marker_rows.pop(name, None)
+            for key in [key for key in self.rows if key[0] == name]:
+                del self.rows[key]
         elif upper.startswith("DROP TABLE"):
             parts = statement.split("`")
-            # the slices differ in length on a malformed statement, so zip stops at the shorter
-            for schema, table in zip(parts[1::4], parts[3::4], strict=False):
-                if table in self.tables.get(schema, []):
-                    self.tables[schema].remove(table)
-                if table == "yulon_realm_type":
+            for schema, table in zip(parts[1::4], parts[3::4], strict=True):
+                if table not in self.tables.get(schema, []):
+                    raise RuntimeError(f"Unknown table '{schema}.{table}'")
+                self.tables[schema].remove(table)
+                self.rows.pop((schema, table), None)
+                if table == MARKER:
                     self.marker_rows.pop(schema, None)
-        elif "YULON_REALM_TYPE" in statement.upper() and "CREATE TABLE" in upper:
+        elif upper.startswith("CREATE TABLE IF NOT EXISTS") and MARKER in statement:
             schema = statement.split("`")[1]
-            if "yulon_realm_type" not in self.tables.setdefault(schema, []):
-                self.tables[schema].append("yulon_realm_type")
-        elif "YULON_REALM_TYPE" in statement.upper() and "INSERT" in upper:
+            if schema not in self.tables:
+                raise RuntimeError(f"Unknown database '{schema}'")
+            if MARKER not in self.tables[schema]:
+                self.tables[schema].append(MARKER)
+                self.tables[schema].sort()
+        elif upper.startswith("INSERT IGNORE INTO") and MARKER in statement:
             schema = statement.split("`")[1]
-            self.marker_rows[schema] = statement.split("'")[1]
+            if MARKER not in self.tables.get(schema, []):
+                raise RuntimeError(f"Table '{schema}.{MARKER}' doesn't exist")
+            value = statement.split("'")[1]
+            held = self.marker_rows.get(schema)
+            if held is None:
+                self.marker_rows[schema] = value
+            elif value not in held.split("\n"):
+                self.marker_rows[schema] = f"{held}\n{value}"
+        elif self._copy_account(statement) or self._copy_access(statement):
+            pass
+        else:
+            raise AssertionError(f"a statement the fake does not model: {statement}")
+
+    def _rename(self, statement: str) -> None:
+        body = statement[len("RENAME TABLE") :].strip().rstrip(";").strip()
+        if not body:
+            raise RuntimeError("You have an error in your SQL syntax near ''")
+        moves = []
+        for move in body.split(","):
+            old, _, new = move.strip().partition(" TO ")
+            old_schema, old_table = (part.strip(" `") for part in old.split("`.`"))
+            new_schema, new_table = (part.strip(" `") for part in new.split("`.`"))
+            moves.append((old_schema, old_table, new_schema, new_table))
+        # Validated whole first, in statement order as MySQL runs it (a name freed by an
+        # earlier move may be taken by a later one): every table moves or none does.
+        names = {(schema, table) for schema, tables in self.tables.items() for table in tables}
+        for old_schema, old_table, new_schema, new_table in moves:
+            if (old_schema, old_table) not in names:
+                raise RuntimeError(f"Table '{old_schema}.{old_table}' doesn't exist")
+            if new_schema not in self.tables:
+                raise RuntimeError(f"Unknown database '{new_schema}'")
+            if (new_schema, new_table) in names:
+                raise RuntimeError(f"Table '{new_table}' already exists")
+            names.remove((old_schema, old_table))
+            names.add((new_schema, new_table))
+        for old_schema, old_table, new_schema, new_table in moves:
+            self.tables[old_schema].remove(old_table)
+            self.tables[new_schema].append(new_table)
+            self.tables[new_schema].sort()
+            if (old_schema, old_table) in self.rows:
+                self.rows[(new_schema, new_table)] = self.rows.pop((old_schema, old_table))
+            if old_table == MARKER and old_schema in self.marker_rows:
+                self.marker_rows[new_schema] = self.marker_rows.pop(old_schema)
+
+    def _need(self, schema: str, table: str) -> list[dict[str, object]]:
+        if table not in self.tables.get(schema, []):
+            raise RuntimeError(f"Table '{schema}.{table}' doesn't exist")
+        return self.rows.setdefault((schema, table), [])
+
+    def _copy_account(self, statement: str) -> bool:
+        found = re.fullmatch(
+            r"INSERT INTO `(\w+)`\.account \(([\w, ]+)\) SELECT ([\w, ]+) "
+            r"FROM `(\w+)`\.account WHERE id = (\d+);",
+            statement,
+        )
+        if found is None:
+            return False
+        target, into, picked, source, key = found.groups()
+        assert into == picked, statement
+        columns = [column.strip() for column in into.split(",")]
+        assert "id" not in columns, "the target allocates its own id"
+        rows = self._need(target, "account")
+        for row in self._need(source, "account"):
+            if row["id"] != int(key):
+                continue
+            new = {column: row[column] for column in columns}
+            if any(other["username"] == new["username"] for other in rows):
+                raise RuntimeError(f"Duplicate entry '{new['username']}' for key 'idx_username'")
+            new["id"] = max((int(str(other["id"])) for other in rows), default=0) + 1
+            rows.append(new)
+        return True
+
+    def _copy_access(self, statement: str) -> bool:
+        found = re.fullmatch(
+            r"INSERT INTO `(\w+)`\.account_access \(id, gmlevel, RealmID\) "
+            r"SELECT (\d+), gmlevel, RealmID FROM `(\w+)`\.account_access WHERE id = (\d+);",
+            statement,
+        )
+        if found is None:
+            return False
+        target, new_key, source, key = found.groups()
+        rows = self._need(target, "account_access")
+        for row in self._need(source, "account_access"):
+            if row["id"] != int(key):
+                continue
+            if any(o["id"] == int(new_key) and o["RealmID"] == row["RealmID"] for o in rows):
+                raise RuntimeError("Duplicate entry for key 'PRIMARY'")
+            rows.append({"id": int(new_key), "gmlevel": row["gmlevel"], "RealmID": row["RealmID"]})
+        return True
+
+    # -- reads -------------------------------------------------------------
 
     def query(self, statement: str) -> str:
+        if self.fail_query_on and self.fail_query_on in statement:
+            raise RuntimeError(f"the database did not answer: {statement[:60]}")
+        self.queries.append(statement)
         if "information_schema.SCHEMATA" in statement:
             schema = statement.split("'")[-2]
+            if schema not in self.tables:
+                return ""
             charset, collation = self.schemata.get(schema, ("utf8mb4", "utf8mb4_unicode_ci"))
             return f"{charset}\t{collation}\n"
-        if statement.startswith("SELECT id FROM `"):
-            schema = statement.split("`")[1]
-            return (self.marker_rows.get(schema, "") + "\n") if schema in self.marker_rows else ""
         if "information_schema.TABLES" in statement:
             schema = statement.split("'")[1]
             return "".join(f"{t}\n" for t in sorted(self.tables.get(schema, [])))
-        if ".account" in statement and statement.strip().upper().startswith("SELECT"):
+        if statement.startswith("SELECT id FROM `") and f"`.`{MARKER}`" in statement:
             schema = statement.split("`")[1]
-            if "account" not in self.tables.get(schema, []):
-                return ""
-            names = {
-                "acore_auth_coa": ["Player1", "rndbot7", "AHBOT", "Player2"],
-                "acore_auth_hero": ["Hero1", "rndbot3", "AHBOT"],
-            }.get(schema, [])
-            upper = statement.upper()
-            if "NOT LIKE" in upper:
-                prefix = upper.split("NOT LIKE")[1].split("'")[1].rstrip("%")
-                names = [n for n in names if not n.upper().startswith(prefix)]
-            if "<> 'AHBOT'" in upper:
-                names = [n for n in names if n != "AHBOT"]
-            return "".join(f"{n}\n" for n in names)
+            if MARKER not in self.tables.get(schema, []):
+                raise RuntimeError(f"Table '{schema}.{MARKER}' doesn't exist")
+            held = self.marker_rows.get(schema)
+            return f"{held}\n" if held is not None else ""
+        found = re.fullmatch(
+            r"SELECT username FROM `(\w+)`\.account WHERE UPPER\(username\) NOT LIKE "
+            r"'([^']*)' ESCAPE '!' AND username <> '(\w+)';",
+            statement,
+        )
+        if found is not None:
+            schema, pattern, ahbot = found.groups()
+            like = _like(pattern)
+            return "".join(
+                f"{row['username']}\n"
+                for row in self._need(schema, "account")
+                if not like.fullmatch(str(row["username"]).upper()) and row["username"] != ahbot
+            )
+        found = re.fullmatch(r"SELECT id FROM `(\w+)`\.account WHERE username = '(.+)';", statement)
+        if found is not None:
+            schema, name = found.groups()
+            return "".join(
+                f"{row['id']}\n" for row in self._need(schema, "account") if row["username"] == name
+            )
+        found = re.fullmatch(
+            r"SELECT COUNT\(\*\) FROM `(\w+)`\.account t JOIN `(\w+)`\.account s ON "
+            r"s\.username = t\.username AND s\.salt = t\.salt AND s\.verifier = t\.verifier "
+            r"WHERE t\.id = (\w+) AND s\.id = (\d+);",
+            statement,
+        )
+        if found is not None:
+            target, source, tid, sid = found.groups()
+            same = [
+                1
+                for t in self._need(target, "account")
+                for s in self._need(source, "account")
+                if str(t["id"]) == tid
+                and str(s["id"]) == sid
+                and all(t[c] == s[c] for c in ("username", "salt", "verifier"))
+            ]
+            return f"{len(same)}\n"
+        found = re.fullmatch(
+            r"SELECT COUNT\(\*\) FROM `(\w+)`\.account_access WHERE id = (\d+);", statement
+        )
+        if found is not None:
+            schema, key = found.groups()
+            return (
+                f"{sum(1 for r in self._need(schema, 'account_access') if str(r['id']) == key)}\n"
+            )
+        found = re.fullmatch(
+            r"SELECT COUNT\(\*\) FROM `(\w+)`\.account_access t JOIN `(\w+)`\.account_access s "
+            r"ON s\.RealmID = t\.RealmID AND s\.gmlevel = t\.gmlevel "
+            r"WHERE t\.id = (\d+) AND s\.id = (\d+);",
+            statement,
+        )
+        if found is not None:
+            target, source, tid, sid = found.groups()
+            same = [
+                1
+                for t in self._need(target, "account_access")
+                for s in self._need(source, "account_access")
+                if str(t["id"]) == tid
+                and str(s["id"]) == sid
+                and t["RealmID"] == s["RealmID"]
+                and t["gmlevel"] == s["gmlevel"]
+            ]
+            return f"{len(same)}\n"
+        raise AssertionError(f"a query the fake does not model: {statement}")
 
 
-def running_sql(entry: CatalogEntry, sql: FakeSql, schemas: Mapping[str, list[str]]) -> None:
-    for schema, tables in schemas.items():
-        sql.tables[schema] = sorted(tables)
+def _like(pattern: str) -> re.Pattern[str]:
+    """A MySQL `LIKE` pattern with `ESCAPE '!'`, as a regular expression."""
+    out = []
+    chars = iter(pattern)
+    for ch in chars:
+        if ch == "!":
+            out.append(re.escape(next(chars)))
+        elif ch == "%":
+            out.append(".*")
+        elif ch == "_":
+            out.append(".")
+        else:
+            out.append(re.escape(ch))
+    return re.compile("".join(out), re.DOTALL)
 
 
-def coa_schemas(sql: FakeSql) -> None:
-    running_sql(
-        coa(),
-        sql,
+def seed_accounts(sql: FakeSql, schema: str, accounts: Mapping[str, int | None]) -> None:
+    """`account` rows in `schema` (ids from 11, unlike any fresh target's), with GM rows."""
+    rows = sql.rows.setdefault((schema, "account"), [])
+    access = sql.rows.setdefault((schema, "account_access"), [])
+    for name, gm in accounts.items():
+        key = max((int(str(row["id"])) for row in rows), default=10) + 1
+        rows.append(
+            {
+                "id": key,
+                "username": name,
+                "salt": f"salt-{name}".encode(),
+                "verifier": f"verifier-{name}".encode(),
+                "email": f"{name.lower()}@example.invalid",
+                "reg_mail": "",
+                "joindate": "2026-10-01 12:00:00",
+                "expansion": 2,
+            }
+        )
+        if gm is not None:
+            access.append({"id": key, "gmlevel": gm, "RealmID": -1})
+
+
+PLAYERS = {"Player1": 3, "rndbot7": None, "AHBOT": 2, "Player2": None}
+"""The coa type's accounts: two players (one a GM), a bot and the auction house bot."""
+
+
+def coa_schemas(sql: FakeSql, *, marker: str | None = "coa", parks: tuple[str, ...] = ()) -> None:
+    """The plain schemas holding the coa set (marked unless `marker` is None)."""
+    sql.tables.update(
         {
             "acore_auth": ["account", "account_access", "realmlist"],
-            "acore_characters": ["characters", "yulon_realm_type"],
+            "acore_characters": ["characters"] + ([MARKER] if marker is not None else []),
             "acore_playerbots": ["playerbots_account_type"],
-            "acore_auth_coa": [],
-            "acore_characters_coa": [],
-            "acore_playerbots_coa": [],
-        },
+        }
     )
-    sql.marker_rows["acore_characters"] = "coa"
+    for park in parks:
+        for schema in PLAIN:
+            sql.tables[f"{schema}_{park}"] = []
+    if marker is not None:
+        sql.marker_rows["acore_characters"] = marker
+    seed_accounts(sql, "acore_auth", PLAYERS)
     for schema in sql.tables:
         sql.schemata[schema] = ("utf8mb4", "utf8mb4_unicode_ci")
+
+
+def parked_set(sql: FakeSql, type_id: str, *, marker: str | None = None) -> None:
+    """A whole parked set of `type_id`, marked as `marker` (default: `type_id`)."""
+    sql.tables[f"acore_auth_{type_id}"] = ["account", "account_access", "realmlist"]
+    sql.tables[f"acore_characters_{type_id}"] = ["characters", MARKER]
+    sql.tables[f"acore_playerbots_{type_id}"] = ["playerbots_account_type"]
+    sql.marker_rows[f"acore_characters_{type_id}"] = marker or type_id
+    seed_accounts(sql, f"acore_auth_{type_id}", {f"{type_id.title()}1": None})
+    for schema in PLAIN:
+        sql.schemata[f"{schema}_{type_id}"] = ("utf8mb4", "utf8mb4_unicode_ci")
+
+
+def fresh_import(sql: FakeSql) -> Iterator[str]:
+    """The db-import one-shot over empty plain schemas: AzerothCore's base tables, no accounts."""
+    sql.tables["acore_auth"].extend(["account", "account_access", "realmlist"])
+    sql.tables["acore_characters"].append("characters")
+    sql.tables["acore_playerbots"].append("playerbots_account_type")
+    for schema in PLAIN:
+        sql.tables[schema].sort()
+    yield "the import ran"
+
+
+def write_file(tmp_path: Path, type_id: str) -> None:
+    (tmp_path / coa_realm.ACTIVE_FILE).write_text(
+        json.dumps({"version": 1, "active": type_id}) + "\n", encoding="utf-8"
+    )
+
+
+def write_crash(tmp_path: Path, target: str, *, imported: bool) -> None:
+    (tmp_path / coa_realm.SWITCH_MARKER_FILE).write_text(
+        json.dumps({"version": 2, "target": target, "imported": imported}) + "\n",
+        encoding="utf-8",
+    )
+
+
+def file_type(tmp_path: Path) -> str:
+    return json.loads((tmp_path / coa_realm.ACTIVE_FILE).read_text(encoding="utf-8"))["active"]
 
 
 def switch_lines(
@@ -159,34 +375,16 @@ def switch_lines(
     target: str,
     sql: FakeSql,
     *,
-    file_type: str = "coa",
+    file: str | None = "coa",
     run_import=None,  # type: ignore[no-untyped-def]
     bot_prefix: str = "rndbot",
 ) -> list[str]:
-    (tmp_path / coa_realm.ACTIVE_FILE).write_text(
-        json.dumps({"version": 1, "active": file_type}) + "\n", encoding="utf-8"
-    )
-    rows = {"Conquest of Azeroth": "1", "CoA Free Pick": "1"}.get(
-        entry.install.native.azerothcore.realm_types[0].realm_name, "1"
-    )
-    del rows
+    if file is not None:
+        write_file(tmp_path, file)
     wrote: list[Mapping[str, str]] = []
-
-    def _import() -> Iterator[str]:
-        sql.tables.setdefault("acore_auth", []).extend(["account", "account_access"])
-        sql.tables.setdefault("acore_characters", []).extend(["characters", "yulon_realm_type"])
-        sql.tables.setdefault("acore_playerbots", []).append("playerbots_account_type")
-        for schema in ("acore_auth", "acore_characters", "acore_playerbots"):
-            sql.schemata[schema] = ("utf8mb4", "utf8mb4_unicode_ci")
-        yield "the import ran"
-        return
-        yield  # make this a generator even when the test never iterates past the first line
 
     def _row(name: str, port: str) -> None:
         sql.executed.append(f"REALM ROW {name} {port}")
-
-    def _override(env: Mapping[str, str]) -> None:
-        wrote.append(dict(env))
 
     lines = list(
         coa_realm.switch(
@@ -195,9 +393,9 @@ def switch_lines(
             target,
             sql=sql,
             servers_running=lambda: False,
-            run_import=run_import or _import,
+            run_import=run_import or (lambda: fresh_import(sql)),
             set_realm_row=_row,
-            write_override=_override,
+            write_override=lambda env: wrote.append(dict(env)),
             bot_prefix=bot_prefix,
         )
     )
@@ -205,14 +403,24 @@ def switch_lines(
     return lines
 
 
+def drops(sql: FakeSql) -> list[str]:
+    return [s for s in sql.executed if s.startswith("DROP TABLE")]
+
+
+def renames(sql: FakeSql) -> list[str]:
+    return [s for s in sql.executed if s.startswith("RENAME TABLE")]
+
+
+def usernames(sql: FakeSql, schema: str) -> list[str]:
+    return sorted(str(row["username"]) for row in sql.rows.get((schema, "account"), []))
+
+
 # -- the render -----------------------------------------------------------------
 
 
 def test_wildcard_env_has_the_wildcard_keys_and_coa_does_not(tmp_path: Path) -> None:
     entry = coa()
-    (tmp_path / coa_realm.ACTIVE_FILE).write_text(
-        json.dumps({"version": 1, "active": "wc"}) + "\n", encoding="utf-8"
-    )
+    write_file(tmp_path, "wc")
     plan = composegen.render(
         entry, tmp_path, templates_root=installers_dir(), platform_id=lambda: "linux"
     )
@@ -221,9 +429,7 @@ def test_wildcard_env_has_the_wildcard_keys_and_coa_does_not(tmp_path: Path) -> 
         service for name, service in override["services"].items() if name.endswith("worldserver")
     )
     assert world["environment"]["AC_CO_ACHALLENGES_GAME_MODES_REALM"] == "WildCard"
-    (tmp_path / coa_realm.ACTIVE_FILE).write_text(
-        json.dumps({"version": 1, "active": "coa"}) + "\n", encoding="utf-8"
-    )
+    write_file(tmp_path, "coa")
     plan = composegen.render(
         entry, tmp_path, templates_root=installers_dir(), platform_id=lambda: "linux"
     )
@@ -238,9 +444,7 @@ def test_wildcard_env_has_the_wildcard_keys_and_coa_does_not(tmp_path: Path) -> 
 
 def test_the_bot_count_still_wins_over_the_realm_type(tmp_path: Path) -> None:
     entry = coa()
-    (tmp_path / coa_realm.ACTIVE_FILE).write_text(
-        json.dumps({"version": 1, "active": "coa"}) + "\n", encoding="utf-8"
-    )
+    write_file(tmp_path, "coa")
     plan = composegen.render(
         entry,
         tmp_path,
@@ -267,9 +471,7 @@ def test_an_unreadable_file_reads_as_the_default(tmp_path: Path) -> None:
 
 
 def test_an_unknown_file_id_reads_as_the_default(tmp_path: Path) -> None:
-    (tmp_path / coa_realm.ACTIVE_FILE).write_text(
-        json.dumps({"version": 1, "active": "nope"}) + "\n", encoding="utf-8"
-    )
+    write_file(tmp_path, "nope")
     assert coa_realm.active(coa(), tmp_path).id == "coa"
 
 
@@ -279,74 +481,81 @@ def test_an_unknown_file_id_reads_as_the_default(tmp_path: Path) -> None:
 def test_the_switch_renames_both_ways_in_one_statement(tmp_path: Path) -> None:
     entry = coa()
     sql = FakeSql()
-    running_sql(
-        entry,
-        sql,
-        {
-            # A second switch: the plain set holds hero, and coa is parked full.
-            "acore_auth": ["account", "account_access", "realmlist"],
-            "acore_characters": ["characters", "yulon_realm_type"],
-            "acore_playerbots": ["playerbots_account_type"],
-            "acore_auth_coa": ["account", "account_access", "realmlist"],
-            "acore_characters_coa": ["characters", "yulon_realm_type"],
-            "acore_playerbots_coa": ["playerbots_account_type"],
-            "acore_auth_hero": [],
-            "acore_characters_hero": [],
-            "acore_playerbots_hero": [],
-        },
-    )
-    sql.marker_rows["acore_characters"] = "hero"
-    sql.marker_rows["acore_characters_coa"] = "coa"
-    for schema in sql.tables:
-        sql.schemata[schema] = ("utf8mb4", "utf8mb4_unicode_ci")
-    lines = switch_lines(tmp_path, entry, "coa", sql, file_type="hero")
-    renames = [s for s in sql.executed if s.startswith("RENAME TABLE")]
-    assert len(renames) == 1, sql.executed
-    assert renames[0].count(" TO ") == 12, renames[0]
-    assert "`acore_auth`.`account` TO `acore_auth_hero`.`account`" in renames[0]
-    assert "`acore_auth_coa`.`realmlist` TO `acore_auth`.`realmlist`" in renames[0]
-    creates = [s for s in sql.executed if s.startswith("CREATE DATABASE")]
-    assert len(creates) == 3
+    # A second switch: the plain set holds hero, and coa is parked whole.
+    coa_schemas(sql, marker="hero", parks=("hero",))
+    parked_set(sql, "coa")
+    lines = switch_lines(tmp_path, entry, "coa", sql, file="hero")
+    assert len(renames(sql)) == 1, sql.executed
+    assert renames(sql)[0].count(" TO ") == 12, renames(sql)[0]
+    assert "`acore_auth`.`account` TO `acore_auth_hero`.`account`" in renames(sql)[0]
+    assert "`acore_auth_coa`.`realmlist` TO `acore_auth`.`realmlist`" in renames(sql)[0]
+    assert len([s for s in sql.executed if s.startswith("CREATE DATABASE")]) == 3
     assert (tmp_path / coa_realm.ACTIVE_FILE).read_text(encoding="utf-8") == json.dumps(
         {"version": 1, "active": "coa"}, indent=2
     ) + "\n"
     assert not (tmp_path / coa_realm.SWITCH_MARKER_FILE).exists()
+    assert sql.marker == "coa"
+    assert sql.marker_rows["acore_characters_hero"] == "hero"
     assert any("coa" in line for line in lines)
 
 
 def test_switching_back_restores_every_table(tmp_path: Path) -> None:
     entry = coa()
     sql = FakeSql()
-    running_sql(
-        entry,
-        sql,
-        {
-            "acore_auth": ["account", "account_access", "realmlist"],
-            "acore_characters": ["characters", "yulon_realm_type"],
-            "acore_playerbots": ["playerbots_account_type"],
-            "acore_auth_hero": ["account", "account_access", "realmlist"],
-            "acore_characters_hero": ["characters", "yulon_realm_type"],
-            "acore_playerbots_hero": ["playerbots_account_type"],
-        },
-    )
-    sql.marker_rows["acore_characters"] = "coa"
-    sql.marker_rows["acore_characters_hero"] = "hero"
-    sql.schemata.update({name: ("utf8mb4", "utf8mb4_unicode_ci") for name in sql.tables})
+    coa_schemas(sql)
+    parked_set(sql, "hero")
+    before = {schema: sorted(sql.tables[schema]) for schema in PLAIN}
+    accounts = usernames(sql, "acore_auth")
     switch_lines(tmp_path, entry, "hero", sql)
-    before = {schema: sorted(tables) for schema, tables in sql.tables.items()}
-    switch_lines(tmp_path, entry, "coa", sql, file_type="hero")
-    assert sorted(sql.tables["acore_auth"]) == sorted(before["acore_auth_coa"]), sql.tables
-    assert sorted(sql.tables["acore_characters"]) == sorted(before["acore_characters_coa"])
-    assert sorted(sql.tables["acore_playerbots"]) == sorted(before["acore_playerbots_coa"])
+    switch_lines(tmp_path, entry, "coa", sql, file=None)
+    assert {schema: sorted(sql.tables[schema]) for schema in PLAIN} == before
+    assert usernames(sql, "acore_auth") == accounts
+    assert sql.marker == "coa" and file_type(tmp_path) == "coa"
+
+
+def test_a_pre_marker_install_switches_there_and_back_and_keeps_every_table(
+    tmp_path: Path,
+) -> None:
+    """The review's reproduced data loss: no marker, coa -> hero -> coa, three presses.
+
+    Before the fix the switch back refused in `_verify` (the parked coa set had
+    no marker), and the third press read it as an interrupted first import and
+    DROPPED the plain tables: the real coa characters. The switch now marks a
+    pre-marker set with the file's type before it parks it.
+    """
+    entry = coa()
+    sql = FakeSql()
+    coa_schemas(sql, marker=None)
+    accounts = usernames(sql, "acore_auth")
+    lines = switch_lines(tmp_path, entry, "hero", sql, file=None)
+    assert any("Marked the databases as the coa realm type" in line for line in lines)
+    assert sql.marker_rows["acore_characters_coa"] == "coa", "the parked set traveled marked"
+    assert file_type(tmp_path) == "hero"
+    switch_lines(tmp_path, entry, "coa", sql, file=None)
+    assert file_type(tmp_path) == "coa"
+    assert not (tmp_path / coa_realm.SWITCH_MARKER_FILE).exists()
+    switch_lines(tmp_path, entry, "coa", sql, file=None)
+    assert drops(sql) == []
+    assert sorted(sql.tables["acore_characters"]) == ["characters", MARKER]
+    assert usernames(sql, "acore_auth") == accounts
+    assert usernames(sql, "acore_auth_hero") == ["Player1", "Player2"]
+
+
+def test_a_marker_absent_over_no_characters_table_refuses_the_switch(tmp_path: Path) -> None:
+    entry = coa()
+    sql = FakeSql()
+    coa_schemas(sql, marker=None)
+    sql.tables["acore_characters"] = []
+    with pytest.raises(coa_realm.RealmSwitchError, match="no characters table"):
+        switch_lines(tmp_path, entry, "hero", sql)
+    assert sql.executed == []
 
 
 def test_a_running_server_is_never_switched(tmp_path: Path) -> None:
     entry = coa()
     sql = FakeSql()
     coa_schemas(sql)
-    (tmp_path / coa_realm.ACTIVE_FILE).write_text(
-        json.dumps({"version": 1, "active": "coa"}) + "\n", encoding="utf-8"
-    )
+    write_file(tmp_path, "coa")
     with pytest.raises(coa_realm.RealmSwitchError, match="Stop the server"):
         list(
             coa_realm.switch(
@@ -369,23 +578,8 @@ def test_an_unknown_target_is_refused_before_anything_runs(tmp_path: Path) -> No
     entry = coa()
     sql = FakeSql()
     coa_schemas(sql)
-    (tmp_path / coa_realm.ACTIVE_FILE).write_text(
-        json.dumps({"version": 1, "active": "coa"}) + "\n", encoding="utf-8"
-    )
     with pytest.raises(coa_realm.RealmSwitchError, match="'nope' is not one of"):
-        list(
-            coa_realm.switch(
-                entry,
-                tmp_path,
-                "nope",
-                sql=sql,
-                servers_running=lambda: False,
-                run_import=lambda: iter(()),
-                set_realm_row=lambda name, port: None,
-                write_override=lambda env: None,
-                bot_prefix="rndbot",
-            )
-        )
+        switch_lines(tmp_path, entry, "nope", sql)
     assert sql.executed == []
 
 
@@ -401,414 +595,737 @@ def test_switching_to_the_active_type_switches_nothing(tmp_path: Path) -> None:
 def test_a_non_empty_park_refuses_before_any_rename(tmp_path: Path) -> None:
     entry = coa()
     sql = FakeSql()
-    coa_schemas(sql)
+    coa_schemas(sql, parks=("coa",))
     sql.tables["acore_auth_coa"].append("orphan")
-    (tmp_path / coa_realm.ACTIVE_FILE).write_text(
-        json.dumps({"version": 1, "active": "coa"}) + "\n", encoding="utf-8"
-    )
     with pytest.raises(coa_realm.RealmSwitchError, match="not empty.*orphan"):
-        list(
-            coa_realm.switch(
-                entry,
-                tmp_path,
-                "hero",
-                sql=sql,
-                servers_running=lambda: False,
-                run_import=lambda: iter(()),
-                set_realm_row=lambda name, port: None,
-                write_override=lambda env: None,
-                bot_prefix="rndbot",
-            )
-        )
-    assert not [s for s in sql.executed if s.startswith("RENAME TABLE")]
+        switch_lines(tmp_path, entry, "hero", sql)
+    assert renames(sql) == []
     assert not (tmp_path / coa_realm.SWITCH_MARKER_FILE).exists()
 
 
-def test_a_marker_split_for_another_type_refuses_the_start(tmp_path: Path) -> None:
+def test_a_target_park_of_another_type_refuses_before_any_rename(tmp_path: Path) -> None:
     entry = coa()
     sql = FakeSql()
     coa_schemas(sql)
-    sql.marker_rows["acore_characters"] = "hero"
-    (tmp_path / coa_realm.ACTIVE_FILE).write_text(
-        json.dumps({"version": 1, "active": "coa"}) + "\n", encoding="utf-8"
-    )
-    refused = coa_realm.refusal(entry, tmp_path, coa_realm.read_marker(sql.query, entry))
-    assert refused is not None
-    assert "hero" in refused and "coa" in refused
-    assert "Server tab" in refused
+    parked_set(sql, "hero", marker="wc")
+    with pytest.raises(coa_realm.RealmSwitchError, match="do not read as the hero"):
+        switch_lines(tmp_path, entry, "hero", sql)
+    assert renames(sql) == []
+    assert not (tmp_path / coa_realm.SWITCH_MARKER_FILE).exists()
 
 
 def test_a_file_split_for_the_marker_type_refuses_the_switch(tmp_path: Path) -> None:
     entry = coa()
     sql = FakeSql()
-    coa_schemas(sql)
-    sql.marker_rows["acore_characters"] = "hero"
-    (tmp_path / coa_realm.ACTIVE_FILE).write_text(
-        json.dumps({"version": 1, "active": "coa"}) + "\n", encoding="utf-8"
-    )
+    coa_schemas(sql, marker="hero")
     with pytest.raises(coa_realm.RealmSwitchError, match="Switch realm type to hero"):
-        list(
-            coa_realm.switch(
-                entry,
-                tmp_path,
-                "wc",
-                sql=sql,
-                servers_running=lambda: False,
-                run_import=lambda: iter(()),
-                set_realm_row=lambda name, port: None,
-                write_override=lambda env: None,
-                bot_prefix="rndbot",
-            )
-        )
-    assert not [s for s in sql.executed if s.startswith("RENAME TABLE")]
-
-
-def test_a_marker_mismatch_refuses_the_start(tmp_path: Path) -> None:
-    entry = coa()
-    sql = FakeSql()
-    coa_schemas(sql)
-    sql.marker_rows["acore_characters"] = "wc"
-    (tmp_path / coa_realm.ACTIVE_FILE).write_text(
-        json.dumps({"version": 1, "active": "coa"}) + "\n", encoding="utf-8"
-    )
-    refused = coa_realm.refusal(entry, tmp_path, coa_realm.read_marker(sql.query, entry))
-    assert refused == (
-        "The databases hold the wc realm type but this server is set to coa. "
-        "Switch realm type to wc on the Server tab to put it right."
-    )
-
-
-def test_a_matching_marker_starts(tmp_path: Path) -> None:
-    entry = coa()
-    sql = FakeSql()
-    coa_schemas(sql)
-    sql.marker_rows["acore_characters"] = "coa"
-    (tmp_path / coa_realm.ACTIVE_FILE).write_text(
-        json.dumps({"version": 1, "active": "coa"}) + "\n", encoding="utf-8"
-    )
-    assert coa_realm.refusal(entry, tmp_path, coa_realm.read_marker(sql.query, entry)) is None
-
-
-def test_no_marker_starts_and_marks_nothing(tmp_path: Path) -> None:
-    entry = coa()
-    sql = FakeSql()
-    coa_schemas(sql)
-    sql.marker_rows.pop("acore_characters", None)
-    sql.tables["acore_characters"] = ["characters"]
-    (tmp_path / coa_realm.ACTIVE_FILE).write_text(
-        json.dumps({"version": 1, "active": "coa"}) + "\n", encoding="utf-8"
-    )
-    assert coa_realm.refusal(entry, tmp_path, coa_realm.read_marker(sql.query, entry)) is None
-    assert sql.executed == []
+        switch_lines(tmp_path, entry, "wc", sql)
+    assert renames(sql) == []
 
 
 def test_switching_back_to_the_marker_type_repairs_without_renaming(tmp_path: Path) -> None:
     entry = coa()
     sql = FakeSql()
-    coa_schemas(sql)
-    sql.marker_rows["acore_characters"] = "hero"
-    sql.tables["acore_auth_hero"] = ["account", "account_access"]
-    sql.tables["acore_characters_hero"] = ["characters", "yulon_realm_type"]
-    sql.tables["acore_playerbots_hero"] = ["playerbots_account_type"]
+    coa_schemas(sql, marker="hero")
+    parked_set(sql, "hero")
     lines = switch_lines(tmp_path, entry, "hero", sql)
-    assert not [s for s in sql.executed if s.startswith("RENAME TABLE")]
+    assert renames(sql) == []
     assert (tmp_path / coa_realm.ACTIVE_FILE).read_text(encoding="utf-8") == json.dumps(
         {"version": 1, "active": "hero"}, indent=2
     ) + "\n"
     assert any("no database was touched" in line for line in lines)
 
 
+def test_the_repair_clears_a_stale_crash_note(tmp_path: Path) -> None:
+    """A switch that renamed and verified but died before its file: the repair finishes it."""
+    entry = coa()
+    sql = FakeSql()
+    coa_schemas(sql, marker="hero")
+    write_crash(tmp_path, "hero", imported=False)
+    switch_lines(tmp_path, entry, "hero", sql)
+    assert file_type(tmp_path) == "hero"
+    assert not (tmp_path / coa_realm.SWITCH_MARKER_FILE).exists()
+
+
 def test_the_file_is_written_only_after_the_rename_succeeds(tmp_path: Path) -> None:
     entry = coa()
     sql = FakeSql()
     coa_schemas(sql)
-    sql.marker_rows["acore_characters"] = "coa"
     sql.fail_on = "RENAME TABLE"
-    (tmp_path / coa_realm.ACTIVE_FILE).write_text(
-        json.dumps({"version": 1, "active": "coa"}) + "\n", encoding="utf-8"
-    )
     with pytest.raises(coa_realm.RealmSwitchError, match="could not be renamed"):
-        list(
-            coa_realm.switch(
-                entry,
-                tmp_path,
-                "hero",
-                sql=sql,
-                servers_running=lambda: False,
-                run_import=lambda: iter(()),
-                set_realm_row=lambda name, port: None,
-                write_override=lambda env: None,
-                bot_prefix="rndbot",
-            )
-        )
-    assert json.loads((tmp_path / coa_realm.ACTIVE_FILE).read_text(encoding="utf-8")) == {
-        "version": 1,
-        "active": "coa",
-    }
+        switch_lines(tmp_path, entry, "hero", sql)
+    assert file_type(tmp_path) == "coa"
     assert (tmp_path / coa_realm.SWITCH_MARKER_FILE).is_file()
 
 
-def test_a_failed_rename_leaves_no_park_behind(tmp_path: Path) -> None:
+def test_a_failed_rename_leaves_no_park_behind_and_the_retry_switches(tmp_path: Path) -> None:
     entry = coa()
     sql = FakeSql()
     coa_schemas(sql)
-    sql.marker_rows["acore_characters"] = "coa"
     sql.fail_on = "RENAME TABLE"
-    (tmp_path / coa_realm.ACTIVE_FILE).write_text(
-        json.dumps({"version": 1, "active": "coa"}) + "\n", encoding="utf-8"
-    )
     with pytest.raises(coa_realm.RealmSwitchError, match="could not be renamed"):
-        list(
-            coa_realm.switch(
-                entry,
-                tmp_path,
-                "hero",
-                sql=sql,
-                servers_running=lambda: False,
-                run_import=lambda: iter(()),
-                set_realm_row=lambda name, port: None,
-                write_override=lambda env: None,
-                bot_prefix="rndbot",
-            )
-        )
+        switch_lines(tmp_path, entry, "hero", sql)
     assert [s for s in sql.executed if s.startswith("CREATE DATABASE")]
     assert not [s for s in sql.executed if s.startswith("DROP DATABASE")]
+    sql.fail_on = ""
+    switch_lines(tmp_path, entry, "hero", sql, file=None)
+    assert file_type(tmp_path) == "hero" and sql.marker == "hero"
+    assert drops(sql) == []
 
 
 def test_a_first_switch_runs_the_import_and_names_the_row(tmp_path: Path) -> None:
     entry = coa()
     sql = FakeSql()
-    running_sql(
-        entry,
-        sql,
-        {
-            "acore_auth": ["account", "account_access", "realmlist"],
-            "acore_characters": ["characters", "yulon_realm_type"],
-            "acore_playerbots": ["playerbots_account_type"],
-            "acore_auth_hero": [],
-            "acore_characters_hero": [],
-            "acore_playerbots_hero": [],
-        },
-    )
-    sql.marker_rows["acore_characters"] = "coa"
-    sql.schemata.update(
-        {
-            name: ("utf8mb4", "utf8mb4_unicode_ci")
-            for name in (
-                "acore_auth",
-                "acore_characters",
-                "acore_playerbots",
-                "acore_auth_coa",
-                "acore_characters_coa",
-                "acore_playerbots_coa",
-            )
-        }
-    )
+    coa_schemas(sql)
     lines = switch_lines(tmp_path, entry, "hero", sql)
     assert any("for the first time" in line for line in lines)
+    assert "the import ran" in lines
     assert any("REALM ROW CoA Free Pick 8087" in s for s in sql.executed)
     assert sql.marker == "hero"
+
+
+def test_the_marker_is_written_only_after_the_accounts_are_copied(tmp_path: Path) -> None:
+    """The marker is the first import's commit: written last, so a set without it is partial."""
+    entry = coa()
+    sql = FakeSql()
+    coa_schemas(sql)
+    switch_lines(tmp_path, entry, "hero", sql)
+    marks = [
+        i for i, s in enumerate(sql.executed) if s.startswith("INSERT IGNORE") and "'hero'" in s
+    ]
+    copies = [i for i, s in enumerate(sql.executed) if s.startswith("INSERT INTO `acore_auth`.")]
+    assert marks and copies and max(copies) < marks[0]
 
 
 def test_bot_and_ahbot_accounts_are_not_copied(tmp_path: Path) -> None:
     entry = coa()
     sql = FakeSql()
-    running_sql(
-        entry,
-        sql,
-        {
-            "acore_auth": ["account", "account_access", "realmlist"],
-            "acore_characters": ["characters", "yulon_realm_type"],
-            "acore_playerbots": ["playerbots_account_type"],
-            "acore_auth_hero": [],
-            "acore_characters_hero": [],
-            "acore_playerbots_hero": [],
-        },
-    )
-    sql.marker_rows["acore_characters"] = "coa"
-    sql.schemata.update({name: ("utf8mb4", "utf8mb4_unicode_ci") for name in sql.tables})
-    switch_lines(tmp_path, entry, "hero", sql)
-    copied = [s for s in sql.executed if "INTO `acore_auth`.account SELECT" in s]
-    assert any("Player1" in s for s in copied)
-    assert any("Player2" in s for s in copied)
-    assert not any("rndbot" in s for s in copied)
-    assert not any("AHBOT" in s for s in copied)
+    coa_schemas(sql)
+    lines = switch_lines(tmp_path, entry, "hero", sql)
+    assert usernames(sql, "acore_auth") == ["Player1", "Player2"]
+    assert "Copied 2 player accounts into the new realm type's databases." in lines
+
+
+def test_accounts_get_the_targets_own_ids_and_their_gm_rights(tmp_path: Path) -> None:
+    """Explicit columns, fresh ids, and `account_access` (keyed `id`) under the TARGET id."""
+    entry = coa()
+    sql = FakeSql()
+    coa_schemas(sql)
+    source = {row["username"]: row for row in sql.rows[("acore_auth", "account")]}
+
+    def seeded_import() -> Iterator[str]:
+        yield from fresh_import(sql)
+        seed_accounts(sql, "acore_auth", {"SEEDED": None})  # takes id 11 in the fresh target
+
+    switch_lines(tmp_path, entry, "hero", sql, run_import=seeded_import)
+    target = {row["username"]: row for row in sql.rows[("acore_auth", "account")]}
+    assert target["Player1"]["id"] != source["Player1"]["id"]
+    assert target["Player1"]["salt"] == source["Player1"]["salt"]
+    assert target["Player1"]["verifier"] == source["Player1"]["verifier"]
+    assert sql.rows[("acore_auth", "account_access")] == [
+        {"id": target["Player1"]["id"], "gmlevel": 3, "RealmID": -1}
+    ]
+
+
+def test_a_username_the_target_already_holds_refuses_and_marks_nothing(tmp_path: Path) -> None:
+    entry = coa()
+    sql = FakeSql()
+    coa_schemas(sql)
+
+    def colliding_import() -> Iterator[str]:
+        yield from fresh_import(sql)
+        seed_accounts(sql, "acore_auth", {"Player2": None})
+
+    with pytest.raises(coa_realm.RealmSwitchError, match="already hold an account named Player2"):
+        switch_lines(tmp_path, entry, "hero", sql, run_import=colliding_import)
+    assert sql.marker is None, "no marker: the next press puts the partial set back"
+    assert json.loads((tmp_path / coa_realm.SWITCH_MARKER_FILE).read_text())["imported"] is True
+    assert file_type(tmp_path) == "coa"
+
+
+def test_an_account_that_does_not_arrive_intact_refuses(tmp_path: Path) -> None:
+    entry = coa()
+
+    class Mangling(FakeSql):
+        def execute(self, statement: str) -> None:
+            super().execute(statement)
+            if statement.startswith("INSERT INTO `acore_auth`.account "):
+                self.rows[("acore_auth", "account")][-1]["verifier"] = b"mangled"
+
+    sql = Mangling()
+    coa_schemas(sql)
+    with pytest.raises(coa_realm.RealmSwitchError, match="password intact"):
+        switch_lines(tmp_path, entry, "hero", sql)
+    assert sql.marker is None and file_type(tmp_path) == "coa"
+
+
+def test_gm_rights_that_do_not_arrive_refuse(tmp_path: Path) -> None:
+    entry = coa()
+
+    class Dropping(FakeSql):
+        def execute(self, statement: str) -> None:
+            if "account_access (id, gmlevel, RealmID)" in statement:
+                self.executed.append(statement)
+                return
+            super().execute(statement)
+
+    sql = Dropping()
+    coa_schemas(sql)
+    with pytest.raises(coa_realm.RealmSwitchError, match="GM rights did not all arrive"):
+        switch_lines(tmp_path, entry, "hero", sql)
+    assert sql.marker is None
+
+
+def test_the_bot_prefix_matches_only_itself_in_like(tmp_path: Path) -> None:
+    """`_` in a prefix is a LIKE wildcard unless escaped: `rnd_bot` must not hide `rndXbot1`."""
+    entry = coa()
+    sql = FakeSql()
+    coa_schemas(sql)
+    sql.rows[("acore_auth", "account")].clear()
+    sql.rows[("acore_auth", "account_access")].clear()
+    seed_accounts(sql, "acore_auth", {"RNDXBOT1": None, "RND_BOT2": None, "Player9": None})
+    switch_lines(tmp_path, entry, "hero", sql, bot_prefix="rnd_bot")
+    assert usernames(sql, "acore_auth") == ["Player9", "RNDXBOT1"]
 
 
 def test_an_unsafe_bot_prefix_refuses_the_copy(tmp_path: Path) -> None:
     entry = coa()
     sql = FakeSql()
-    running_sql(
-        entry,
-        sql,
-        {
-            "acore_auth": ["account", "account_access", "realmlist"],
-            "acore_characters": ["characters", "yulon_realm_type"],
-            "acore_playerbots": ["playerbots_account_type"],
-            "acore_auth_hero": [],
-            "acore_characters_hero": [],
-            "acore_playerbots_hero": [],
-        },
-    )
-    sql.marker_rows["acore_characters"] = "coa"
+    coa_schemas(sql)
     with pytest.raises(coa_realm.RealmSwitchError, match="bot account prefix"):
         switch_lines(tmp_path, entry, "hero", sql, bot_prefix="a'b")
 
 
 def test_an_unsafe_account_name_is_skipped_and_named(tmp_path: Path) -> None:
     entry = coa()
-
-    class EvilSql(FakeSql):
-        def query(self, statement: str) -> str:
-            if "FROM `acore_auth_coa`.account" in statement:
-                return "GoodName\nevil'name\n"
-            return super().query(statement)
-
-    evil = EvilSql()
-    running_sql(
-        entry,
-        evil,
-        {
-            "acore_auth": ["account", "account_access", "realmlist"],
-            "acore_characters": ["characters", "yulon_realm_type"],
-            "acore_playerbots": ["playerbots_account_type"],
-            "acore_auth_hero": [],
-            "acore_characters_hero": [],
-            "acore_playerbots_hero": [],
-        },
-    )
-    evil.marker_rows["acore_characters"] = "coa"
-    lines = switch_lines(tmp_path, entry, "hero", evil)
-    copied = [s for s in evil.executed if "INTO `acore_auth`.account SELECT" in s]
-    assert any("GoodName" in s for s in copied)
-    assert not any("evil" in s for s in copied)
+    sql = FakeSql()
+    coa_schemas(sql)
+    seed_accounts(sql, "acore_auth", {"evil'name": None})
+    lines = switch_lines(tmp_path, entry, "hero", sql)
+    assert usernames(sql, "acore_auth") == ["Player1", "Player2"]
+    assert not any("evil" in s for s in sql.executed)
     assert any("Left 1 accounts uncopied" in line for line in lines)
+
+
+def test_an_account_list_that_fails_refuses_the_copy(tmp_path: Path) -> None:
+    entry = coa()
+    sql = FakeSql()
+    coa_schemas(sql)
+    sql.fail_query_on = "SELECT username FROM"
+    with pytest.raises(coa_realm.RealmSwitchError, match="player accounts could not be listed"):
+        switch_lines(tmp_path, entry, "hero", sql)
+    assert sql.marker is None
 
 
 def test_an_unreadable_source_schema_refuses_before_any_rename(tmp_path: Path) -> None:
     entry = coa()
     sql = FakeSql()
     coa_schemas(sql)
-    sql.marker_rows["acore_characters"] = "coa"
-    del sql.tables["acore_auth"]
-    (tmp_path / coa_realm.ACTIVE_FILE).write_text(
-        json.dumps({"version": 1, "active": "coa"}) + "\n", encoding="utf-8"
-    )
-
-    class BlindSql(FakeSql):
-        def query(self, statement: str) -> str:
-            if "information_schema.SCHEMATA" in statement and "acore_auth'" in statement:
-                raise RuntimeError("gone")
-            return super().query(statement)
-
-    blind = BlindSql()
-    blind.tables = dict(sql.tables)
-    blind.schemata = dict(sql.schemata)
-    blind.marker_rows["acore_characters"] = "coa"
+    sql.fail_query_on = "SCHEMA_NAME = 'acore_auth'"
     with pytest.raises(coa_realm.RealmSwitchError, match="could not be read"):
-        list(
-            coa_realm.switch(
-                entry,
-                tmp_path,
-                "hero",
-                sql=blind,
-                servers_running=lambda: False,
-                run_import=lambda: iter(()),
-                set_realm_row=lambda name, port: None,
-                write_override=lambda env: None,
-                bot_prefix="rndbot",
-            )
-        )
-    assert not [s for s in blind.executed if s.startswith("RENAME TABLE")]
+        switch_lines(tmp_path, entry, "hero", sql)
+    assert renames(sql) == []
     assert not (tmp_path / coa_realm.SWITCH_MARKER_FILE).exists()
 
 
-def test_a_dead_database_reads_no_marker_and_starts_nothing(tmp_path: Path) -> None:
+def test_a_collation_that_is_no_name_refuses_before_any_rename(tmp_path: Path) -> None:
     entry = coa()
-
-    class DeadSql(FakeSql):
-        def query(self, statement: str) -> str:
-            raise RuntimeError("the database is down")
-
-    (tmp_path / coa_realm.ACTIVE_FILE).write_text(
-        json.dumps({"version": 1, "active": "coa"}) + "\n", encoding="utf-8"
-    )
-    assert coa_realm.read_marker(DeadSql().query, entry) is None
+    sql = FakeSql()
+    coa_schemas(sql)
+    sql.schemata["acore_auth"] = ("utf8mb4", "utf8mb4_bin;DROP")
+    with pytest.raises(coa_realm.RealmSwitchError, match="collation"):
+        switch_lines(tmp_path, entry, "hero", sql)
+    assert renames(sql) == []
+    assert not [s for s in sql.executed if s.startswith("CREATE DATABASE")]
 
 
-def test_a_marker_answer_that_is_no_realm_type_id_reads_as_absent(tmp_path: Path) -> None:
-    """A canned test double answering every query with a count (C4a's) must not refuse a start.
-
-    `read_marker` takes the first id-shaped value and reads anything else as
-    absent: a map count or a row count is not a verdict about the realm type.
-    """
+def test_a_plain_table_whose_name_is_no_name_refuses_before_any_rename(tmp_path: Path) -> None:
     entry = coa()
-    (tmp_path / coa_realm.ACTIVE_FILE).write_text(
-        json.dumps({"version": 1, "active": "coa"}) + "\n", encoding="utf-8"
+    sql = FakeSql()
+    coa_schemas(sql)
+    sql.tables["acore_playerbots"].append("bad`name")
+    with pytest.raises(coa_realm.RealmSwitchError, match="not a schema or table name"):
+        switch_lines(tmp_path, entry, "hero", sql)
+    assert renames(sql) == []
+
+
+def test_an_unreadable_target_park_refuses_and_imports_no_fresh_set(tmp_path: Path) -> None:
+    """Codex: a listing error read as an empty park imported a fresh set over the real one."""
+    entry = coa()
+    sql = FakeSql()
+    coa_schemas(sql)
+    parked_set(sql, "hero")
+    sql.fail_query_on = "TABLE_SCHEMA = 'acore_auth_hero'"
+    with pytest.raises(coa_realm.DatabaseUnreadable, match="acore_auth_hero"):
+        switch_lines(tmp_path, entry, "hero", sql)
+    assert renames(sql) == []
+    assert not (tmp_path / coa_realm.SWITCH_MARKER_FILE).exists()
+
+
+def test_an_unreadable_marker_refuses_the_switch(tmp_path: Path) -> None:
+    entry = coa()
+    sql = FakeSql()
+    coa_schemas(sql)
+    sql.fail_query_on = f"`.`{MARKER}`"
+    with pytest.raises(coa_realm.DatabaseUnreadable):
+        switch_lines(tmp_path, entry, "hero", sql)
+    assert sql.executed == []
+
+
+# -- verification ---------------------------------------------------------------
+
+
+class AfterRename(FakeSql):
+    """Runs `then` once, right after the first RENAME TABLE: the state verify must catch."""
+
+    def __init__(self, then) -> None:  # type: ignore[no-untyped-def]
+        super().__init__()
+        self.then = then
+        self.done = False
+
+    def execute(self, statement: str) -> None:
+        super().execute(statement)
+        if statement.startswith("RENAME TABLE") and not self.done:
+            self.done = True
+            self.then(self)
+
+
+def _second_switch(sql: FakeSql) -> None:
+    coa_schemas(sql)
+    parked_set(sql, "hero")
+
+
+def test_verify_refuses_a_target_park_left_non_empty(tmp_path: Path) -> None:
+    sql = AfterRename(lambda s: s.tables["acore_auth_hero"].append("late"))
+    _second_switch(sql)
+    with pytest.raises(coa_realm.RealmSwitchError, match="acore_auth_hero schema is not empty"):
+        switch_lines(tmp_path, coa(), "hero", sql)
+    assert file_type(tmp_path) == "coa"
+    assert (tmp_path / coa_realm.SWITCH_MARKER_FILE).is_file()
+
+
+def test_verify_refuses_plain_databases_of_another_type(tmp_path: Path) -> None:
+    sql = AfterRename(lambda s: s.marker_rows.__setitem__("acore_characters", "wc"))
+    _second_switch(sql)
+    with pytest.raises(coa_realm.RealmSwitchError, match="plain databases do not read as the hero"):
+        switch_lines(tmp_path, coa(), "hero", sql)
+    assert file_type(tmp_path) == "coa"
+    assert (tmp_path / coa_realm.SWITCH_MARKER_FILE).is_file()
+
+
+def test_verify_refuses_a_previous_set_parked_unmarked(tmp_path: Path) -> None:
+    sql = AfterRename(lambda s: s.marker_rows.pop("acore_characters_coa"))
+    _second_switch(sql)
+    with pytest.raises(coa_realm.RealmSwitchError, match="parked coa databases do not read"):
+        switch_lines(tmp_path, coa(), "hero", sql)
+    assert file_type(tmp_path) == "coa"
+
+
+def test_verify_refuses_when_the_target_park_cannot_be_listed(tmp_path: Path) -> None:
+    sql = AfterRename(lambda s: setattr(s, "fail_query_on", "TABLE_SCHEMA = 'acore_auth_hero'"))
+    _second_switch(sql)
+    with pytest.raises(coa_realm.DatabaseUnreadable):
+        switch_lines(tmp_path, coa(), "hero", sql)
+    assert file_type(tmp_path) == "coa"
+    assert (tmp_path / coa_realm.SWITCH_MARKER_FILE).is_file()
+
+
+# -- an interrupted first switch -------------------------------------------------
+
+
+def _killed_during_import(sql: FakeSql) -> None:
+    """A first switch to hero killed during its import: coa parked whole, hero half-imported."""
+    coa_schemas(sql)
+    sql.tables.update(
+        {
+            "acore_auth_coa": sql.tables["acore_auth"],
+            "acore_characters_coa": sql.tables["acore_characters"],
+            "acore_playerbots_coa": sql.tables["acore_playerbots"],
+            "acore_auth": ["half_imported"],
+            "acore_characters": ["half_imported"],
+            "acore_playerbots": [],
+        }
     )
-    assert coa_realm.read_marker(lambda statement: "20000\n", entry) is None
-    assert coa_realm.refusal(entry, tmp_path, None) is None
+    sql.marker_rows = {"acore_characters_coa": "coa"}
+    sql.rows = {("acore_auth_coa", table): rows for (_, table), rows in sql.rows.items()}
+    for schema in sql.tables:
+        sql.schemata[schema] = ("utf8mb4", "utf8mb4_unicode_ci")
 
 
 def test_an_interrupted_first_switch_retries_from_scratch(tmp_path: Path) -> None:
     entry = coa()
     sql = FakeSql()
-    running_sql(
-        entry,
-        sql,
-        {
-            "acore_auth": ["half_imported"],
-            "acore_characters": ["half_imported"],
-            "acore_playerbots": [],
-            "acore_auth_coa": ["account", "account_access", "realmlist"],
-            "acore_characters_coa": ["characters", "yulon_realm_type"],
-            "acore_playerbots_coa": ["playerbots_account_type"],
-        },
-    )
-    sql.marker_rows.pop("acore_characters", None)
-    sql.schemata.update({name: ("utf8mb4", "utf8mb4_unicode_ci") for name in sql.tables})
-    (tmp_path / coa_realm.ACTIVE_FILE).write_text(
-        json.dumps({"version": 1, "active": "coa"}) + "\n", encoding="utf-8"
-    )
-    (tmp_path / coa_realm.SWITCH_MARKER_FILE).write_text(
-        json.dumps({"version": 1, "target": "hero"}) + "\n", encoding="utf-8"
-    )
-
-    parked = FakeSql()
-    parked.tables = {k: list(v) for k, v in sql.tables.items()}
-    parked.schemata = dict(sql.schemata)
-    parked.marker_rows["acore_characters_coa"] = "coa"
-    renames = [s for s in parked.executed if s.startswith("RENAME TABLE")]
-    assert renames == []
-    wrote: list[Mapping[str, str]] = []
-    lines = list(
-        coa_realm.switch(
-            entry,
-            tmp_path,
-            "hero",
-            sql=parked,
-            servers_running=lambda: False,
-            run_import=lambda: iter(["the import ran"]),
-            set_realm_row=lambda name, port: None,
-            write_override=wrote.append,
-            bot_prefix="rndbot",
-        )
-    )
+    _killed_during_import(sql)
+    write_file(tmp_path, "coa")
+    write_crash(tmp_path, "hero", imported=True)
+    lines = switch_lines(tmp_path, entry, "hero", sql, file=None)
     assert any("interrupted" in line for line in lines)
-    # The interrupted partial import was dropped and the parked set put back first
-    # (the recovery's own rename), so the fresh switch parked the preserved coa
-    # set again and the plain schemas hold the new hero import's marker.
-    assert sorted(parked.tables["acore_auth_coa"]) == ["account", "account_access", "realmlist"]
-    assert parked.marker_rows.get("acore_characters") == "hero"
-    assert parked.marker_rows.get("acore_characters_coa") == "coa"
+    assert drops(sql) == [
+        "DROP TABLE `acore_auth`.`half_imported`;",
+        "DROP TABLE `acore_characters`.`half_imported`;",
+    ]
+    assert sorted(sql.tables["acore_auth_coa"]) == ["account", "account_access", "realmlist"]
+    assert sql.marker == "hero"
+    assert sql.marker_rows.get("acore_characters_coa") == "coa"
+    assert usernames(sql, "acore_auth") == ["Player1", "Player2"]
     assert not (tmp_path / coa_realm.SWITCH_MARKER_FILE).exists()
 
 
-# -- the guards -----------------------------------------------------------------
+def test_switching_to_the_file_type_undoes_an_interrupted_first_switch(tmp_path: Path) -> None:
+    entry = coa()
+    sql = FakeSql()
+    _killed_during_import(sql)
+    write_file(tmp_path, "coa")
+    write_crash(tmp_path, "hero", imported=True)
+    lines = switch_lines(tmp_path, entry, "coa", sql, file=None)
+    assert lines[-1] == "The server is already on the coa realm type; nothing was switched."
+    assert sql.marker == "coa"
+    assert usernames(sql, "acore_auth") == ["AHBOT", "Player1", "Player2", "rndbot7"]
+    assert not (tmp_path / coa_realm.SWITCH_MARKER_FILE).exists()
+
+
+def test_a_plain_set_no_switch_began_importing_is_never_dropped(tmp_path: Path) -> None:
+    """The crash note says the import never began: the plain tables are not this switch's."""
+    entry = coa()
+    sql = FakeSql()
+    _killed_during_import(sql)
+    write_file(tmp_path, "coa")
+    write_crash(tmp_path, "hero", imported=False)
+    with pytest.raises(coa_realm.RealmSwitchError, match="no import of that switch wrote"):
+        switch_lines(tmp_path, entry, "hero", sql, file=None)
+    assert drops(sql) == [] and renames(sql) == []
+
+
+def test_an_empty_plain_set_is_put_back_without_the_import_note(tmp_path: Path) -> None:
+    """Killed between the rename and the import's note: nothing to drop, the park goes back."""
+    entry = coa()
+    sql = FakeSql()
+    _killed_during_import(sql)
+    for schema in PLAIN:
+        sql.tables[schema] = []
+    write_file(tmp_path, "coa")
+    write_crash(tmp_path, "hero", imported=False)
+    switch_lines(tmp_path, entry, "coa", sql, file=None)
+    assert drops(sql) == []
+    assert sql.marker == "coa"
+
+
+def test_a_press_for_another_target_leaves_an_interrupted_switch_alone(tmp_path: Path) -> None:
+    entry = coa()
+    sql = FakeSql()
+    _killed_during_import(sql)
+    write_file(tmp_path, "coa")
+    write_crash(tmp_path, "hero", imported=True)
+    with pytest.raises(coa_realm.RealmSwitchError, match="Switch realm type to hero again"):
+        switch_lines(tmp_path, entry, "wc", sql, file=None)
+    assert drops(sql) == [] and renames(sql) == []
+
+
+def test_a_parked_set_of_another_type_is_never_put_back(tmp_path: Path) -> None:
+    entry = coa()
+    sql = FakeSql()
+    _killed_during_import(sql)
+    sql.marker_rows["acore_characters_coa"] = "wc"
+    write_file(tmp_path, "coa")
+    write_crash(tmp_path, "hero", imported=True)
+    with pytest.raises(coa_realm.RealmSwitchError, match="nothing was dropped"):
+        switch_lines(tmp_path, entry, "hero", sql, file=None)
+    assert drops(sql) == [] and renames(sql) == []
+
+
+def test_a_marked_plain_set_under_a_crash_note_is_never_dropped(tmp_path: Path) -> None:
+    """Committed (the marker is the import's last write) but killed before the file."""
+    entry = coa()
+    sql = FakeSql()
+    _killed_during_import(sql)
+    sql.tables["acore_characters"] = ["characters", MARKER]
+    sql.marker_rows["acore_characters"] = "hero"
+    write_file(tmp_path, "coa")
+    write_crash(tmp_path, "hero", imported=True)
+    lines = switch_lines(tmp_path, entry, "hero", sql, file=None)
+    assert drops(sql) == [] and renames(sql) == []
+    assert any("no database was touched" in line for line in lines)
+    assert file_type(tmp_path) == "hero"
+
+
+def test_an_unreadable_crash_note_refuses_the_switch(tmp_path: Path) -> None:
+    entry = coa()
+    sql = FakeSql()
+    coa_schemas(sql)
+    (tmp_path / coa_realm.SWITCH_MARKER_FILE).write_text("{torn", encoding="utf-8")
+    with pytest.raises(coa_realm.RealmSwitchError, match="cannot be read"):
+        switch_lines(tmp_path, entry, "hero", sql)
+    assert sql.executed == []
+
+
+# -- the start gate --------------------------------------------------------------
+
+
+def test_a_marker_mismatch_refuses_the_start(tmp_path: Path) -> None:
+    sql = FakeSql()
+    coa_schemas(sql, marker="wc")
+    write_file(tmp_path, "coa")
+    assert coa_realm.refusal(coa(), tmp_path, sql) == (
+        "The databases hold the wc realm type but this server is set to coa. "
+        "Switch realm type to wc on the Server tab to put it right."
+    )
+
+
+def test_a_matching_marker_starts(tmp_path: Path) -> None:
+    sql = FakeSql()
+    coa_schemas(sql)
+    write_file(tmp_path, "coa")
+    assert coa_realm.refusal(coa(), tmp_path, sql) is None
+    assert sql.executed == []
+
+
+def test_no_marker_starts_and_marks_the_files_type(tmp_path: Path) -> None:
+    """A pre-marker install: marked at its next start with the file's type, read back."""
+    sql = FakeSql()
+    coa_schemas(sql, marker=None)
+    assert coa_realm.refusal(coa(), tmp_path, sql) is None
+    assert sql.marker == "coa"
+
+
+def test_no_marker_over_no_characters_table_starts_and_marks_nothing(tmp_path: Path) -> None:
+    sql = FakeSql()
+    coa_schemas(sql, marker=None)
+    sql.tables["acore_characters"] = []
+    assert coa_realm.refusal(coa(), tmp_path, sql) is None
+    assert sql.executed == []
+
+
+def test_a_marker_that_will_not_write_refuses_the_start(tmp_path: Path) -> None:
+    sql = FakeSql()
+    coa_schemas(sql, marker=None)
+    sql.fail_on = MARKER
+    assert coa_realm.refusal(coa(), tmp_path, sql) == coa_realm.MARK_START_REFUSAL
+
+
+def test_a_crash_note_refuses_the_start_before_any_read(tmp_path: Path) -> None:
+    """A first switch killed mid-import leaves plain schemas with no marker to refuse on."""
+    sql = FakeSql()
+    write_crash(tmp_path, "hero", imported=True)
+    assert coa_realm.refusal(coa(), tmp_path, sql) == coa_realm.CRASH_START_REFUSAL
+    assert coa_realm.refusal(coa(), tmp_path, None) == coa_realm.CRASH_START_REFUSAL
+    assert sql.queries == []
+
+
+def test_an_unreadable_marker_refuses_the_start_once_a_switch_was_made(tmp_path: Path) -> None:
+    """Codex: a transient error read as 'no marker' let a mismatched start by."""
+    sql = FakeSql()
+    coa_schemas(sql, marker="wc")
+    sql.fail_query_on = "information_schema.TABLES"
+    assert coa_realm.refusal(coa(), tmp_path, sql) is None, "no file: only the default ever ran"
+    write_file(tmp_path, "coa")
+    assert coa_realm.refusal(coa(), tmp_path, sql) == coa_realm.UNREADABLE_START_REFUSAL
+    assert coa_realm.refusal(coa(), tmp_path, None) == coa_realm.UNREADABLE_START_REFUSAL
+
+
+def test_the_controller_gate_starts_the_database_before_it_reads(tmp_path: Path) -> None:
+    order: list[str] = []
+
+    class Ordered(FakeSql):
+        def query(self, statement: str) -> str:
+            order.append("query")
+            return super().query(statement)
+
+    sql = Ordered()
+    coa_schemas(sql, marker="hero")
+    write_file(tmp_path, "coa")
+    gate = coa_realm.before_servers_gate(
+        coa(), tmp_path, start_db=lambda: order.append("start_db"), sql=sql
+    )
+    assert gate is not None
+    assert gate() == coa_realm.mismatch_sentence("hero", "coa")
+    assert order[0] == "start_db" and "query" in order
+
+
+def test_the_controller_gate_refuses_a_database_that_will_not_start(tmp_path: Path) -> None:
+    def refuse() -> None:
+        raise RuntimeError("the database did not become healthy")
+
+    sql = FakeSql()
+    write_file(tmp_path, "coa")
+    gate = coa_realm.before_servers_gate(coa(), tmp_path, start_db=refuse, sql=sql)
+    assert gate is not None and gate() == coa_realm.UNREADABLE_START_REFUSAL
+    write_crash(tmp_path, "hero", imported=False)
+    started: list[int] = []
+    gate = coa_realm.before_servers_gate(
+        coa(), tmp_path, start_db=lambda: started.append(1), sql=sql
+    )
+    assert gate is not None and gate() == coa_realm.CRASH_START_REFUSAL
+    assert started == [], "a crash note refuses before the database is started"
+
+
+def test_a_marker_answer_that_is_no_realm_type_id_reads_as_absent(tmp_path: Path) -> None:
+    """A canned test double answering every query with a count (C4a's) must not refuse a start.
+
+    The listing reads no marker table, so the marker is absent; and with no
+    characters table there is nothing to mark.
+    """
+    canned = coa_realm.FnSql(run=lambda statement: None, ask=lambda statement: "20000\n")
+    assert coa_realm.read_marker(canned.query, coa()) is None
+    assert coa_realm.refusal(coa(), tmp_path, canned) is None
+
+
+def test_a_marker_reading_two_types_is_unreadable(tmp_path: Path) -> None:
+    sql = FakeSql()
+    coa_schemas(sql)
+    sql.marker_rows["acore_characters"] = "coa\nhero"
+    with pytest.raises(coa_realm.DatabaseUnreadable, match="not one realm type"):
+        coa_realm.read_marker(sql.query, coa())
 
 
 def test_an_entry_without_realm_types_has_no_gate(tmp_path: Path) -> None:
     from tests.support_native import ENTRY
 
-    assert coa_realm.refusal(ENTRY, tmp_path, "coa") is None
+    write_crash(tmp_path, "hero", imported=True)
+    assert coa_realm.refusal(ENTRY, tmp_path, None) is None
     assert coa_realm.has_realm_types(ENTRY) is False
+    assert (
+        coa_realm.before_servers_gate(ENTRY, tmp_path, start_db=lambda: None, sql=FakeSql()) is None
+    )
+
+
+# -- the helpers' own guards ------------------------------------------------------
+
+
+def test_a_non_empty_schema_is_never_dropped(tmp_path: Path) -> None:
+    sql = FakeSql()
+    sql.tables = {"acore_auth_hero": ["account"], "acore_auth_wc": []}
+    coa_realm._drop_if_empty(sql, "acore_auth_hero")
+    coa_realm._drop_if_empty(sql, "acore_auth_wc")
+    assert sql.executed == ["DROP DATABASE IF EXISTS `acore_auth_wc`;"]
+    sql.fail_query_on = "acore_auth_hero"
+    coa_realm._drop_if_empty(sql, "acore_auth_hero")
+    assert sql.tables["acore_auth_hero"] == ["account"], "an unreadable schema is left standing"
+
+
+def test_a_rename_with_nothing_to_move_refuses(tmp_path: Path) -> None:
+    entry = coa()
+    sql = FakeSql()
+    sql.tables = {schema: [] for schema in PLAIN}
+    parked = coa_realm._parked(entry, "coa")
+    target = coa_realm._parked(entry, "hero")
+    with pytest.raises(coa_realm.RealmSwitchError, match="hold no tables to park"):
+        list(coa_realm._rename_both_ways(entry, sql, "coa", "hero", parked, target, [[], [], []]))
+    assert sql.executed == []
+
+
+def test_names_and_ids_are_checked_before_they_reach_sql(tmp_path: Path) -> None:
+    for bad in ("", "a`b", "a b", "a;b", "a-b"):
+        with pytest.raises(coa_realm.RealmSwitchError, match="not a schema or table name"):
+            coa_realm._check_name(bad)
+    coa_realm._check_name("acore_auth_hero")
+    for bad_id in ("Hero", "h", "hero'", "h-ro", "abcdefghijk"):
+        with pytest.raises(coa_realm.RealmSwitchError, match="not a realm type id"):
+            coa_realm.write_active(tmp_path, bad_id)
+    assert not (tmp_path / coa_realm.ACTIVE_FILE).exists()
+
+
+def test_a_quoted_realm_name_is_never_written_into_sql() -> None:
+    for name in ("O'Brien", 'say "hi"', "back\\slash"):
+        with pytest.raises(coa_realm.RealmSwitchError, match="cannot be written"):
+            coa_realm.realm_name_update(coa(), name)
+    assert "SET name='CoA Free Pick'" in coa_realm.realm_name_update(coa(), "CoA Free Pick")
+
+
+# -- the engine's glue ------------------------------------------------------------
+
+
+def _engine():  # type: ignore[no-untyped-def]
+    from tests.support_native import Recorder
+    from yulon.catalog.families.azerothcore import AzerothCoreInstaller
+
+    rec = Recorder()
+    return AzerothCoreInstaller(
+        coa(),
+        installers_root=installers_dir(),
+        import_probe=rec.probe,
+        reset_unfinished=rec.reset,
+        seams=rec.seams(),
+    )
+
+
+def test_the_engine_asks_the_realm_gate_once_per_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asked: list[Path] = []
+    real = coa_realm.refusal
+
+    def counting(entry: CatalogEntry, server_dir: Path, sql: object) -> str | None:
+        asked.append(server_dir)
+        return real(entry, server_dir, sql)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(coa_realm, "refusal", counting)
+    write_crash(tmp_path, "hero", imported=True)
+    assert _engine().start_refusal(tmp_path) == coa_realm.CRASH_START_REFUSAL
+    assert asked == [tmp_path]
+
+
+def test_a_realm_refusal_never_forgets_an_owed_start(tmp_path: Path) -> None:
+    """T223: only a family refusal its own finish clears by starting lets an owed start go."""
+    from yulon.catalog import native
+
+    engine = _engine()
+    write_crash(tmp_path, "hero", imported=True)
+    assert native.owe_start(tmp_path, why=native.UNTESTED_BUILD) == ""
+    assert engine.family_start_refusal(tmp_path) == coa_realm.CRASH_START_REFUSAL, "the ground"
+    assert engine.owed_start_left_to_the_family(tmp_path) is False
+
+
+def test_a_marker_the_install_cannot_write_fails_the_import_stage(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    from yulon.catalog.installer import InstallerError
+
+    engine = _engine()
+
+    def refuse(*args: object, **kwargs: object) -> str:
+        raise RuntimeError("the database refused")
+
+    engine._seams = replace(engine._seams, sql_query=refuse)
+    ctx = SimpleNamespace(server_dir=tmp_path, secrets=SimpleNamespace(db_password="pw"))
+    with pytest.raises(InstallerError, match="could not be marked as the coa realm type"):
+        list(engine._mark_realm_type(ctx))  # type: ignore[arg-type]
+
+
+def _wired_controller(monkeypatch: pytest.MonkeyPatch, server_dir: Path, sql: FakeSql) -> object:
+    """CoA's real Server-tab Controller, its database seams routed to `sql`."""
+    from yulon import apply, docker
+    from yulon.ui import controller_view
+
+    realm: list[str] = []
+
+    def run_statement(self: object, db: str, statement: str) -> None:
+        if "realmlist" in statement:
+            realm.append(statement)
+        else:
+            sql.execute(statement)
+
+    def query(self: object, db: str, statement: str) -> str:
+        return f"{coa().ports.world}\n" if "realmlist" in statement else sql.query(statement)
+
+    monkeypatch.setattr(apply.DockerSql, "run_statement", run_statement)
+    monkeypatch.setattr(apply.DockerSql, "query", query)
+    monkeypatch.setattr(docker, "start_database", lambda *_a, **_k: realm.append("start-db"))
+    services = controller_view._for_wotlk(coa(), server_dir, None, None)
+    services.realm = realm  # type: ignore[attr-defined]
+    return services
+
+
+def test_the_server_tab_start_asks_the_realm_gate_before_the_port(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Controller's start reaches the gate: a mismatch refuses before the realm row moves."""
+    sql = FakeSql()
+    coa_schemas(sql, marker="wc")
+    write_file(tmp_path, "coa")
+    services = _wired_controller(monkeypatch, tmp_path, sql)
+    controller = services.controller  # type: ignore[attr-defined]
+    assert controller.before_servers() == coa_realm.mismatch_sentence("wc", "coa")
+    assert services.realm == ["start-db"], "the database alone, and no port write"  # type: ignore[attr-defined]
+    sql.marker_rows["acore_characters"] = "coa"
+    assert controller.before_servers() is None
+    assert any("realmlist" in s for s in services.realm)  # type: ignore[attr-defined]
