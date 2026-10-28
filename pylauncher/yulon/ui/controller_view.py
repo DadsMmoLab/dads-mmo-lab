@@ -81,6 +81,7 @@ from yulon import (
     client_exe,
     client_names,
     client_packs,
+    coa_switch,
     commands,
     conf_dist,
     database_presence,
@@ -1923,6 +1924,97 @@ def _world_upkeep(
     return WorldUpkeep(read=read, reextract=reextract, finish_world=finish)
 
 
+def _realm_switch(
+    entry: CatalogEntry,
+    server_dir: Path,
+    sql: DockerSql,
+    *,
+    wsl_distro: str | None,
+) -> coa_switch.RealmSwitch | None:
+    """The Server tab's realm-type switch for a CoA server; None for every other (T812 C3b).
+
+    Built from the entry's own containers and the tab's own hold: the switch runs
+    stop → switch → start under `docker.server_hold` (the T607 seam every other
+    mutating press uses), so a switch, an Install/Repair import and a second
+    switch can never run at once. The SQL seams are the tab's `DockerSql`
+    (the import probe's client). Not for a server inside a WSL distro: the
+    import one-shot the first switch runs cannot be driven from here.
+    """
+    from yulon import account_rules, coa_realm
+
+    if wsl_distro is not None or not coa_realm.has_realm_types(entry):
+        return None
+    spec = entry.container_spec()
+    bot_prefix = account_rules.bot_prefix(entry, server_dir) or ""
+    return coa_switch.switch_for(
+        entry,
+        server_dir,
+        hold_server=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
+        sql=coa_realm.FnSql(
+            run=lambda statement: sql.run_statement("characters", statement),
+            ask=lambda statement: sql.query("characters", statement),
+        ),
+        servers_running=lambda: bool(
+            docker.world_running(spec.world, wsl_distro=wsl_distro)
+            or docker.world_running(spec.auth, wsl_distro=wsl_distro)
+        ),
+        run_import=lambda: _run_realm_import(entry, server_dir, wsl_distro=wsl_distro),
+        set_realm_row=lambda name, port: sql.run_statement(
+            "auth", coa_realm.realm_name_update(entry, name)
+        ),
+        write_override=lambda env: _write_realm_override(entry, server_dir, env),
+        stop=lambda: _stop_for_realm_switch(entry, server_dir, wsl_distro=wsl_distro),
+        start=lambda: _start_for_realm_switch(entry, server_dir, wsl_distro=wsl_distro),
+        bot_prefix=bot_prefix,
+    )
+
+
+def _stop_for_realm_switch(
+    entry: CatalogEntry, server_dir: Path, *, wsl_distro: str | None
+) -> bool:
+    """Stop for a realm-type switch: the existing Stop, saving every character (T812 C3b)."""
+    from yulon.controller import Controller as _Controller
+
+    return _Controller(entry.container_spec(), server_dir, wsl_distro=wsl_distro).stop()
+
+
+def _start_for_realm_switch(
+    entry: CatalogEntry, server_dir: Path, *, wsl_distro: str | None
+) -> None:
+    """Start for a realm-type switch: the existing Start, ordered for CoA (T812 C3b)."""
+    from yulon.controller import Controller as _Controller
+
+    _Controller(entry.container_spec(), server_dir, wsl_distro=wsl_distro).start()
+
+
+def _run_realm_import(
+    entry: CatalogEntry, server_dir: Path, *, wsl_distro: str | None
+) -> Iterator[str]:
+    """The db-import one-shot for a first switch, through the install wiring (T812 C3b)."""
+    from yulon import install_wiring
+    from yulon.catalog.installer import InstallOptions
+
+    engine = install_wiring.installer_for_app(entry, wsl_distro=wsl_distro)
+    options = InstallOptions(server_dir=server_dir)
+    yield from engine.run(options)
+
+
+def _write_realm_override(entry: CatalogEntry, server_dir: Path, env: Mapping[str, str]) -> None:
+    """Rewrite the compose override for the switch's target type (T812 C3b).
+
+    The render every writer goes through (`composegen.render`), so the bot-count
+    carry-over and the channel's enable still win; then the file's own writer
+    (`_replace_whole`), whole or left as it was.
+    """
+    from yulon.catalog import composegen
+    from yulon.resources import installers_dir
+
+    plan = composegen.render(
+        entry, server_dir, templates_root=installers_dir(), world_env=dict(env)
+    )
+    composegen._replace_whole(server_dir / composegen.OVERRIDE_FILE, plan.override)
+
+
 @dataclass
 class ControllerServices:
     """Everything the view calls down into. Real implementations by default; fakes in tests.
@@ -2438,6 +2530,14 @@ class ControllerServices:
     `None` hides both: every game whose update route leaves neither owing.
     """
 
+    realm_switch: coa_switch.RealmSwitch | None = None
+    """T812 C3b: the Server tab's realm-type choice and switch press for a CoA server.
+
+    `None` hides the choice: every entry without `realm_types`. Built in `_for_wotlk`
+    from the entry, the tab's hold (`docker.server_hold`, the T607 seam) and the
+    engine's SQL seams, so the switch, an Install/Repair import and a second
+    switch can never run at once.
+    """
     characters_withheld: Mapping[str, str] = field(default_factory=dict)
     """Characters verbs (`play.VERBS`) this tree does not offer, each with why (T179).
 
@@ -3530,6 +3630,11 @@ def _assemble(
         # T179 Task 6. HERE for the same reason: whether an update can leave the
         # map data or the world tables owing is the entry's engine's fact.
         world_upkeep=_world_upkeep(entry, server_dir, wsl_distro=wsl_distro),
+        # T812 C3b. HERE for T171's reason: the choice is a catalog fact
+        # (`realm_types`), and only a realm-types entry gets a switch. Held under
+        # the tab's per-server hold, so the switch, an Install/Repair import and
+        # a second switch can never run at once.
+        realm_switch=_realm_switch(entry, server_dir, sql, wsl_distro=wsl_distro),
     )
 
 
@@ -3667,6 +3772,21 @@ def _before_the_servers(
         return None
 
     return ask
+
+
+def _realm_type_of(entry: CatalogEntry, server_dir: Path) -> str | None:
+    """The active realm type id for the backup record, or None (T812 C3b).
+
+    Only an entry with `realm_types` records one: the file's active id (the
+    default when it is missing, C3a), so the dump's auth/characters/playerbots
+    files carry which set they hold. Read at press time, not at tab build: the
+    type can change between a Backup and a Restore.
+    """
+    from yulon import coa_realm
+
+    if not coa_realm.has_realm_types(entry):
+        return None
+    return coa_realm.active(entry, server_dir).id
 
 
 def _realm_type_gate(
@@ -4008,21 +4128,13 @@ def _for_wotlk(
             import_probe=probe,
             reset_unfinished=reset,
             pre_stop=recorder,
+            # T812 C3b: the Server tab's Repair import runs under the tab's
+            # per-server hold, so an Install/Repair import and a realm-type
+            # switch can never run at once.
+            hold_server=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
             before_servers=_before_the_servers(
                 _realm_type_gate(entry, spec, server_dir, sql, wsl_distro=wsl_distro),
                 _realm_port_keeper(entry, spec, server_dir, sql, wsl_distro=wsl_distro),
-            ),
-            # T678 review round 3: a copy before Repair clears an unfinished first import.
-            safety_copy=lambda: wotlk_maintenance.safety_copy_sentence(
-                wotlk_maintenance.backup(
-                    server_dir,
-                    mysql,
-                    game=wotlk_maintenance.game_of(entry),
-                    label="before-repair",
-                    spec=spec,
-                    core_databases=entry.core_databases(),
-                    wsl_distro=wsl_distro,
-                )
             ),
         ),
         sql=sql,
@@ -4179,6 +4291,9 @@ def _for_wotlk(
             spec=spec,
             core_databases=entry.core_databases(),
             wsl_distro=wsl_distro,
+            # T812 C3b: a CoA backup carries its realm type beside the game record;
+            # every other entry passes None and writes none.
+            realm_type=_realm_type_of(entry, server_dir),
         ),
         plan_restore=lambda path, can_start_database=False: wotlk_maintenance.plan_restore(
             path,
@@ -4187,6 +4302,7 @@ def _for_wotlk(
             spec=spec,
             wsl_distro=wsl_distro,
             can_start_database=can_start_database,
+            realm_type=_realm_type_of(entry, server_dir),
         ),
         # `confirm=plan.token` is not a rubber stamp: the token can only come
         # from a plan, a plan can only come from a real file, and the human
@@ -4208,6 +4324,7 @@ def _for_wotlk(
             # on the tab whose Backup button was already correct.
             core_databases=entry.core_databases(),
             wsl_distro=wsl_distro,
+            realm_type=_realm_type_of(entry, server_dir),
         ),
     )
 
@@ -8991,6 +9108,18 @@ class ControllerView(QWidget):
         self.finish_world_button = QPushButton(trinitycore.FINISH_WORLD_BUTTON, tab)
         self.finish_world_button.clicked.connect(self.finish_world_update)
         self._show_world_upkeep()
+        # T812 C3b: the realm-type choice, for entries with `realm_types`.
+        # A combo of labels with descriptions as tooltips, and a press that
+        # switches after the confirm dialog; hidden for every other entry.
+        self.realm_type_label = QLabel("", tab)
+        self.realm_type_label.setWordWrap(True)
+        self.realm_type_choice = QComboBox(tab)
+        self.realm_type_choice.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        self.realm_type_switch_button = QPushButton("Switch realm type…", tab)
+        self.realm_type_switch_button.clicked.connect(self.switch_realm_type)
+        self._show_realm_type()
         # T36. Visible for every game, including WotLK -- AzerothCore reads no
         # client itself, but the folder is still a host path a manifest's
         # `client` step or the Steam entry can use, and hiding the row there
@@ -9278,6 +9407,8 @@ class ControllerView(QWidget):
         )
         realm_column.addWidget(self.world_upkeep_label)
         realm_column.addWidget(_bar(realm, self.reextract_button, self.finish_world_button))
+        realm_column.addWidget(self.realm_type_label)
+        realm_column.addWidget(_bar(realm, self.realm_type_choice, self.realm_type_switch_button))
         realm_column.addWidget(
             _bar(
                 realm, self.start_button, self.stop_button, self.restart_button, self.refresh_button
@@ -9420,6 +9551,7 @@ class ControllerView(QWidget):
                 self.forget_client_dir_button,
                 self.remove_button,
                 self.repair_button,
+                self.realm_type_switch_button,
                 self.forget_install_button,
                 self.uninstall_button,
                 self.keep_characters_check,
@@ -10062,7 +10194,101 @@ class ControllerView(QWidget):
         self.finish_world_button.setVisible(can_finish)
         self.finish_world_button.setEnabled(can_finish and not held)
 
+    # ------------------------------------------------ T812 C3b: realm types
+
+    def _show_realm_type(self) -> None:
+        """Draw the realm-type choice; hidden for every entry without `realm_types`."""
+        if not hasattr(self, "realm_type_label"):
+            return  # `_set_busy()` before the Server tab exists
+        from yulon import coa_realm
+
+        entry = self.entry
+        types = list(coa_realm.types_of(entry))
+        if not types:
+            for widget in (
+                self.realm_type_label,
+                self.realm_type_choice,
+                self.realm_type_switch_button,
+            ):
+                widget.setVisible(False)
+            return
+
+        current = coa_realm.active(entry, self.services.controller.server_dir).id
+        self.realm_type_label.setText("Realm type: each keeps its own characters.")
+        self.realm_type_label.setVisible(True)
+        box = self.realm_type_choice
+        box.blockSignals(True)
+        box.clear()
+        for realm in types:
+            box.addItem(f"{realm.label} — {realm.realm_name}", realm.id)
+            box.setItemData(box.count() - 1, realm.description, Qt.ItemDataRole.ToolTipRole)
+        box.setCurrentIndex(max(0, box.findData(current)))
+        box.blockSignals(False)
+        box.setVisible(True)
+        self._set_realm_switch_button()
+
+    def _set_realm_switch_button(self) -> None:
+        """Offer the switch only for a type that is not the current one, and never while busy."""
+        if self.services.realm_switch is None:
+            self.realm_type_switch_button.setVisible(False)
+            self.realm_type_choice.setEnabled(False)
+            return
+        chosen = self.realm_type_choice.currentData()
+        from yulon import coa_realm
+
+        current = coa_realm.active(self.entry, self.services.controller.server_dir).id
+        offered = self.services.realm_switch is not None and chosen != current and not self._busy
+        self.realm_type_switch_button.setVisible(self.services.realm_switch is not None)
+        self.realm_type_switch_button.setEnabled(bool(offered))
+        self.realm_type_choice.setEnabled(self.services.realm_switch is not None and not self._busy)
+
     @Slot()
+    def switch_realm_type(self) -> None:
+        """Ask, then stop, switch and start again on the worker thread (T812 C3b)."""
+        switch = self.services.realm_switch
+        if switch is None or self._busy:
+            return
+        from yulon import coa_realm
+
+        target = self.realm_type_choice.currentData()
+        types = {realm.id: realm for realm in coa_realm.types_of(self.entry)}
+        if target not in types:
+            return
+        realm = types[target]
+        if not self._confirm(
+            "Switch realm type",
+            "Switching stops the server, keeps each type's characters apart and starts it "
+            f"again. The first switch to {realm.label} sets up its databases (a few minutes).\n\n"
+            f"Switch to {realm.label} ({realm.realm_name})?",
+        ):
+            return
+        self.problem_label.setText("")
+        self._set_busy(True, "Switch realm type")
+        self.status_label.setText("Switching realm type…")
+        self._run(
+            lambda: list(switch.switch_to(target)),
+            self._realm_switched,
+            self._realm_switch_failed,
+        )
+
+    @Slot(object)
+    def _realm_switched(self, lines: object) -> None:
+        """A finished switch: say what moved, refresh for the new world."""
+        self._set_busy(False)
+        said = "\n".join(str(line) for line in lines) if isinstance(lines, list) else str(lines)
+        self.problem_label.setText(said)
+        self._show_realm_type()
+        self.refresh_status()
+
+    @Slot(object)
+    def _realm_switch_failed(self, exc: object) -> None:
+        """A refused switch: said, with the holder's sentence when it is held."""
+        self._set_busy(False)
+        self.problem_label.setText(str(exc))
+        self.action_failed.emit(str(exc))
+        self._show_realm_type()
+        self.refresh_status()
+
     def reextract_map_data(self) -> bool:
         """Extract the map data again from the player's client; streams into the log panel.
 
@@ -11027,7 +11253,7 @@ class ControllerView(QWidget):
             # visible at all, and an invisible button being enabled is harmless.
             self.remove_button.setEnabled(True)
             self.repair_button.setEnabled(True)
-            self.reinstall_docker_button.setEnabled(True)
+            self._set_realm_switch_button()
             if self.uninstall_button is not None:
                 self.uninstall_button.setEnabled(True)
             if self.forget_install_button is not None:
@@ -11308,6 +11534,7 @@ class ControllerView(QWidget):
         self._set_busy(False)
         self._withdraw_the_database_offer()
         self._say_zone_problem()
+        self._show_realm_type()
         self.refresh_status()
         self._settle_the_channel()
         # T386: a Start's one ask lands while the world loads, as an install's
@@ -11321,8 +11548,6 @@ class ControllerView(QWidget):
             # T181: Play asked for this Start ("Start and play"); it is done.
             self._play_after_start = False
             self._play_wait_for_the_realm()
-
-    # -- the wait for the realm after Play's own Start (T672) ---------------
 
     def _play_wait_for_the_realm(self) -> None:
         """Hold the game until the Tuning tab's ready check says the realm is up.

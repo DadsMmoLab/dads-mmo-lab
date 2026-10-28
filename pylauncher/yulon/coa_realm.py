@@ -109,6 +109,12 @@ def has_realm_types(entry: CatalogEntry) -> bool:
     return bool(_types(entry))
 
 
+def types_of(entry: CatalogEntry) -> tuple[AcRealmType, ...]:
+    """This entry's realm types in catalog order; empty for every other entry (T812 C3b)."""
+    block = _block(entry)
+    return tuple(block.realm_types) if block is not None else ()
+
+
 def active_id(entry: CatalogEntry, server_dir: Path) -> str | None:
     """The file's active type id, or None when the file is missing or unreadable."""
     try:

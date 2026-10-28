@@ -365,6 +365,42 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         hits=(".azerothcore",),
     ),
     Site(
+        "yulon.coa_switch",
+        "switch_for",
+        "the Server tab's realm-type switch for a realm-types entry (T812 C3b)",
+        {
+            "azerothcore": supported("`realm_types`, when the entry names any"),
+            "cmangos": not_applicable("CMaNGOS sets its server through its conf table"),
+            "trinitycore": not_applicable("TrinityCore has no realm types"),
+        },
+        hits=(),
+        scanned=False,
+    ),
+    Site(
+        "yulon.ui.controller_view",
+        "ControllerView._show_realm_type",
+        "the Server tab's realm-type choice, for entries with realm types (T812 C3b)",
+        {
+            "azerothcore": supported("`realm_types`, when the entry names any"),
+            "cmangos": not_applicable("CMaNGOS sets its server through its conf table"),
+            "trinitycore": not_applicable("TrinityCore has no realm types"),
+        },
+        hits=(),
+        scanned=False,
+    ),
+    Site(
+        "yulon.ui.controller_view",
+        "ControllerView.switch_realm_type",
+        "the Server tab's realm-type switch press, for entries with realm types (T812 C3b)",
+        {
+            "azerothcore": supported("`realm_types`, when the entry names any"),
+            "cmangos": not_applicable("CMaNGOS sets its server through its conf table"),
+            "trinitycore": not_applicable("TrinityCore has no realm types"),
+        },
+        hits=(),
+        scanned=False,
+    ),
+    Site(
         "yulon.catalog.composegen",
         "_has_realm_types",
         "whether the rendered override layers a realm type's env over the block (T812 C3a)",

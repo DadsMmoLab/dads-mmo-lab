@@ -1976,7 +1976,28 @@ class AzerothCoreInstaller(StagedInstaller):
         realm-type switch is unfinished the stage refuses before anything is
         imported (`coa_realm.import_refusal()`): Install and "Repair the
         database" both run this stage.
+
+        On a realm-types entry the import runs under the Server tab's
+        per-server hold (T812 C3b, `coa_switch.held_import`): a switch moving
+        the plain schemas refuses with its own sentence instead of racing this
+        import, and the guards are re-checked under it.
         """
+        from yulon import coa_switch
+        from yulon.catalog import native as native_mod
+
+        if not coa_switch.needs_hold(self.entry):
+            yield from self._import_inner(ctx)
+            return
+        yield from coa_switch.held_import(
+            coa_switch.install_hold(
+                lambda press: self.reserved(ctx.server_dir, press), native_mod.INSTALL_PRESS
+            ),
+            coa_switch.INSTALL_PRESS,
+            lambda: self._import_inner(ctx),
+        )
+
+    def _import_inner(self, ctx: StageContext) -> Iterator[str]:
+        """`_import()` past the hold; the guards re-checked under it (T812 C3b)."""
         from yulon import coa_realm
 
         refused = coa_realm.import_refusal(self.entry, ctx.server_dir)
@@ -1997,10 +2018,27 @@ class AzerothCoreInstaller(StagedInstaller):
         and a fresh import (like a fresh switch's one) names the type it was
         built for. A marker already there is left as it is (a repair import
         over a switched set; the start gate judges it), and a marker that
-        cannot be read or written fails the stage: a server started unmarked
-        would let a later switch park a set nothing can tell from a partial
-        import.
+        cannot be read or written fails the stage.
+
+        On a realm-types entry this runs under the same hold as `_import`
+        (T812 C3b): it touches the same plain schemas a switch moves.
         """
+        from yulon import coa_switch
+        from yulon.catalog import native as native_mod
+
+        if not coa_switch.needs_hold(self.entry):
+            yield from self._mark_realm_type_inner(ctx)
+            return
+        yield from coa_switch.held_import(
+            coa_switch.install_hold(
+                lambda press: self.reserved(ctx.server_dir, press), native_mod.INSTALL_PRESS
+            ),
+            coa_switch.INSTALL_PRESS,
+            lambda: self._mark_realm_type_inner(ctx),
+        )
+
+    def _mark_realm_type_inner(self, ctx: StageContext) -> Iterator[str]:
+        """`_mark_realm_type()` past the hold."""
         from yulon import coa_realm
 
         if not coa_realm.has_realm_types(self.entry):

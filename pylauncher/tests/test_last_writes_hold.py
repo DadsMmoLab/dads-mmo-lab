@@ -554,6 +554,11 @@ SEAMS: dict[str, tuple[str, str]] = {
         "held",
         "tests.test_backup_shelf.test_another_yulon_holding_the_server_refuses_before_the_lease",
     ),
+    "realm_switch": (
+        "held",
+        "tests.test_coa_switch_hold."
+        "test_a_switch_while_another_yulon_holds_the_server_switches_nothing",
+    ),
 }
 
 OPEN_SEAMS = {"backup", "restore", "forget_interrupted", "database_alone"}
