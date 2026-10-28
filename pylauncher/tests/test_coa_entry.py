@@ -26,10 +26,10 @@ PATCH_DIR = (
 )
 
 COA_ID = "wow-coa"
-CORE_REPO = "Zyth45/azerothcore-wotlk-coa"
+CORE_REPO = "pjerra/azerothcore-wotlk-coa"
 CORE_BRANCH = "coa-bots-2.8"
 CORE_REV = "98570f248b6095a23ef14bbbfac6731ac4c20d66"
-BOTS_REPO = "Zyth45/mod-playerbots"
+BOTS_REPO = "pjerra/mod-playerbots-coa"
 BOTS_BRANCH = "coa"
 BOTS_REV = "2b7a4f6547b2e4b35a4ec3a89374e41e5c6e5272"
 """The two pins. The core branch `coa-bots-2.8` is `98570f24…` and the bots tag

@@ -232,7 +232,7 @@ _GAMES: dict[str, _GameRates] = {
     # worldserver.conf.dist at 98570f24).
     "wow-coa": _GameRates(
         file="env/dist/etc/worldserver.conf",
-        repo="Zyth45/azerothcore-wotlk-coa",
+        repo="pjerra/azerothcore-wotlk-coa",
         rev="98570f248b6095a23ef14bbbfac6731ac4c20d66",
         keys=_ALL_KEYS,
         notes={},

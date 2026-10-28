@@ -190,7 +190,7 @@ def test_every_shipped_source_is_classified_and_only_the_db_repos_stay() -> None
         "wow-vanilla": ("cmangos/mangos-classic", "cmangos/playerbots"),
         "wow-tortoise": ("tortoise-wow/tortoise-wow", "Sagiroth/TortoiseBots"),
         "wow-centurion": ("thomasjteachey/TrinityCore112",),
-        "wow-coa": ("Zyth45/azerothcore-wotlk-coa", "Zyth45/mod-playerbots"),
+        "wow-coa": ("pjerra/azerothcore-wotlk-coa", "pjerra/mod-playerbots-coa"),
     }, moving
 
 

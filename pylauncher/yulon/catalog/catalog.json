@@ -2740,21 +2740,21 @@
         "status": "beta",
         "description": "Conquest of Azeroth (3.3.5a) on the Ascension CoA fork, with bots that quest, group and fight alongside you. You bring your own Ascension 3.3.5a client; Yu'lon never downloads it.",
         "notes": [
-            "T812: the Conquest of Azeroth server. Core Zyth45/azerothcore-wotlk-coa @ coa-bots-2.8 98570f248b6095a23ef14bbbfac6731ac4c20d66; mod-playerbots Zyth45 v2.8 2b7a4f6547b2e4b35a4ec3a89374e41e5c6e5272 (on branch coa). The 30 CoA modules are in-tree. client_build.read_version reads Ascension.exe as 3.3.5 (12340), checked 2026-10-27 on the live client.",
+            "T812: the Conquest of Azeroth server. Core (Zyth45/azerothcore-wotlk-coa, mirrored as pjerra/azerothcore-wotlk-coa so an upstream 404 cannot break installs) @ coa-bots-2.8 98570f248b6095a23ef14bbbfac6731ac4c20d66; mod-playerbots (Zyth45, mirrored as pjerra/mod-playerbots-coa) v2.8 2b7a4f6547b2e4b35a4ec3a89374e41e5c6e5272 (on branch coa). The 30 CoA modules are in-tree. client_build.read_version reads Ascension.exe as 3.3.5 (12340), checked 2026-10-27 on the live client.",
             "Health markers read off the pin: src/server/coa/AscensionCompat.cpp:9472 (Ascension compatibility) and src/server/coa/CoADungeonBossKit.cpp:154 (CoA dungeon boss kit rows)."
         ],
         "emulator": {
             "name": "AzerothCore (Ascension CoA fork) + SquidBots playerbots",
             "sources": [
                 {
-                    "repo": "Zyth45/azerothcore-wotlk-coa",
+                    "repo": "pjerra/azerothcore-wotlk-coa",
                     "branch": "coa-bots-2.8",
                     "depth": null,
                     "dest": ".",
                     "rev": "98570f248b6095a23ef14bbbfac6731ac4c20d66"
                 },
                 {
-                    "repo": "Zyth45/mod-playerbots",
+                    "repo": "pjerra/mod-playerbots-coa",
                     "branch": "coa",
                     "dest": "modules/mod-playerbots",
                     "rev": "2b7a4f6547b2e4b35a4ec3a89374e41e5c6e5272"
