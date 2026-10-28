@@ -2100,6 +2100,76 @@ def test_an_uninstalled_server_loses_its_tab_and_every_registry_entry(
     assert tabs.indexOf(view) == -1, "the tab is still in the tab bar"
 
 
+def test_an_uninstall_tells_where_the_backups_went_after_its_tab_is_gone(
+    window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T722: the finished message outlives the tab it was written on.
+
+    `_uninstall_done` writes "was removed. Your backups were kept: …" to the tab's
+    label and then emits `uninstalled`, whose handler drops the tab — so the words
+    vanish with the label. The box after the drop names the backups folder.
+    """
+    from yulon import purge
+    from yulon.ui import message_box
+
+    kept = tmp_path / "t722-uninstall" / "wowserver - kept backups"
+    kept.mkdir(parents=True)
+    server_dir = tmp_path / "t722-uninstall"
+    catalog = _catalog_view(window)
+    catalog.installed.emit("wow-wotlk", server_dir, None)
+    view = _tab_for(window, server_dir)
+    tabs = window.property("tabs")
+    assert tabs.indexOf(view) != -1
+
+    shown: list[str] = []
+    order: list[str] = []
+
+    def show(parent: object, title: str, text: str) -> object:
+        order.append("box")
+        assert order == ["drop", "box"], "the box opened before the drop finished"
+        shown.append(title)
+        shown.append(text)
+        return None
+
+    real_forget = catalog.forget_installed
+
+    def forget(game: str, surviving: object) -> None:
+        real_forget(game, surviving)
+        order.append("drop")
+
+    monkeypatch.setattr(catalog, "forget_installed", forget)
+    monkeypatch.setattr(message_box, "show_information", show)
+    said: list[str] = []
+    view.uninstall_said.connect(said.append)
+    view._uninstall_done(purge.PurgeReport(folder_removed=True, backups_kept=kept))
+
+    assert said and f"Your backups were kept: they are now in {kept}." in said[0]
+    assert tabs.indexOf(view) == -1, "the tab survived its own uninstall"
+    process_events()
+    assert shown and shown[0] == "Server uninstalled", shown
+    assert f"Your backups were kept: they are now in {kept}." in shown[1], shown
+
+
+def test_a_failed_uninstall_shows_no_backups_box(
+    window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T722: `_uninstall_failed` emits nothing, so the drop's box stays shut."""
+    from yulon import purge
+    from yulon.ui import message_box
+
+    server_dir = tmp_path / "t722-failed"
+    _catalog_view(window).installed.emit("wow-wotlk", server_dir, None)
+    view = _tab_for(window, server_dir)
+    tabs = window.property("tabs")
+    shown: list[str] = []
+    monkeypatch.setattr(message_box, "show_information", lambda *a: shown.append("box"))
+    view._uninstall_failed(purge.PurgeRefusal("the folder could not be deleted"))
+    process_events()
+
+    assert tabs.indexOf(view) != -1, "a failed uninstall dropped the tab"
+    assert shown == [], shown
+
+
 def test_the_catalog_tile_is_recomputed_from_what_survived_the_uninstall(
     window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
