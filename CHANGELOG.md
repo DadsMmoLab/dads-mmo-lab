@@ -18,6 +18,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 
 ### Fixed
 - On a server inside WSL, each module row on the Modules tab shows its version again.
+- Removing a server now tells you where its kept backups went after its tab closes, instead of losing the message with the tab.
 - A failed build in a module you just installed now says the module is new and your server still runs its old build.
 - **Rebuild the server…** now warns when a new module may not build on a server that is off the tested commits.
 - On Bazzite and other image-based Fedora systems without Docker, the install now says how to get Docker.

@@ -1166,7 +1166,28 @@ def build_window() -> object:
             # And the header's name for the tab on screen with it: a tab removed
             # off screen moves no selection, so nothing else asks (T192).
             follow_the_tab_on_screen()
+        said = uninstall_text.pop(key, "")
+        if said:
+            # T722: after the drop, so the dead tab's frame is gone and the box
+            # has a live window for a parent. Not before it, and not inside the
+            # view's slot: the box would open over a tab about to vanish, and a
+            # nested loop there runs before `uninstalled` reaches the drop. A
+            # failure emits nothing, so this stays shut for one.
+            from PySide6.QtCore import QTimer
+
+            from yulon.ui.message_box import show_information
+
+            QTimer.singleShot(0, lambda: show_information(window, "Server uninstalled", said))
         catalog_view.forget_installed(game, state.installed_dirs())
+
+    uninstall_text: dict[tuple[str, Path], str] = {}
+    """What each finished uninstall said, kept past its tab (T722).
+
+    `_uninstall_done` writes the words to the tab's label and then emits
+    `uninstalled`, whose handler drops the tab — and the label with it. So the
+    view says them first through `uninstall_said`, and this remembers them for
+    the box shown once the tab is gone.
+    """
 
     removal_pending: set[tuple[str, Path]] = set()
     """Removals waiting on their stop (T95). A key is added right before
@@ -1784,6 +1805,7 @@ def build_window() -> object:
             if in_smoke_test()
             else ControllerView(entry, services)
         )
+        view.uninstall_said.connect(lambda text, k=key: uninstall_text.__setitem__(k, text))
         view.uninstalled.connect(on_uninstalled)
         view.client_dir_changed.connect(on_client_dir_changed)
         view.play_client_dir_changed.connect(on_play_client_dir_changed)

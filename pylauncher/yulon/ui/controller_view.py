@@ -8455,6 +8455,13 @@ class ControllerView(QWidget):
     Emitted only after `purge.run()` returned. A tab dropped after a FAILED
     removal would take away the only surface that could try again.
     """
+    uninstall_said = Signal(str)  # T722: the finished uninstall's words, before `uninstalled`
+    """What the finished uninstall said, while the tab still exists to say it.
+
+    The label carries the same words, but the window drops the tab on
+    `uninstalled` — and the label with it — before anyone could read them back.
+    So this goes first, and the window shows the box after the drop.
+    """
 
     remove_requested = Signal(str, object)  # game id, server_dir (T95)
     """"Remove from Yu'lon…" was pressed on this tab. The window asks, stops and forgets.
@@ -12514,7 +12521,9 @@ class ControllerView(QWidget):
         said.extend(report.warnings)
         if play_said is not None:
             said.append(play_said)
-        self.uninstall_label.setText(" ".join(said))
+        text = " ".join(said)
+        self.uninstall_label.setText(text)
+        self.uninstall_said.emit(text)
         # Last, and only on success: the window drops this tab on this signal,
         # which destroys the view. Nothing may touch `self` after it.
         self.uninstalled.emit(self.entry.id, self.services.controller.server_dir)
