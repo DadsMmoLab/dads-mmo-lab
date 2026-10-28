@@ -109,6 +109,12 @@ def has_realm_types(entry: CatalogEntry) -> bool:
     return bool(_types(entry))
 
 
+def types_of(entry: CatalogEntry) -> tuple[AcRealmType, ...]:
+    """This entry's realm types in catalog order; empty for every other entry (T812 C3b)."""
+    block = _block(entry)
+    return tuple(block.realm_types) if block is not None else ()
+
+
 def active_id(entry: CatalogEntry, server_dir: Path) -> str | None:
     """The file's active type id, or None when the file is missing or unreadable."""
     try:
@@ -606,6 +612,119 @@ def switch(
     write_active(server_dir, target_id)
     _clear_crash(server_dir)
     yield f"The server now runs the {target_id} realm type ({types[target_id].realm_name})."
+
+
+def pre_check(
+    entry: CatalogEntry,
+    server_dir: Path,
+    target_id: str,
+    *,
+    sql: SqlRunner,
+    bot_prefix: str,
+) -> str:
+    """Every validation that runs without the server stopped (T812 C3b fix round 1)."""
+    types = _types(entry)
+    if target_id not in types:
+        raise RealmSwitchError(
+            f"{target_id!r} is not one of this server's realm types "
+            f"{sorted(types)}; nothing was switched"
+        )
+    if not bot_prefix or not _SAFE_PREFIX.fullmatch(bot_prefix):
+        raise RealmSwitchError(
+            f"The bot account prefix {bot_prefix!r} cannot be used in a query; "
+            "nothing was copied."
+        )
+    current = active(entry, server_dir).id
+    crash = _read_crash(server_dir)
+    if crash is None and current == target_id:
+        return current
+    pending_recovery = False
+    if crash is not None:
+        pending_recovery = _refuse_unless_recoverable(
+            entry, sql, server_dir, current, target_id, crash
+        )
+    marker = read_marker(sql.query, entry)
+    if marker is not None and marker != current and target_id != marker:
+        raise RealmSwitchError(mismatch_sentence(marker, current))
+    if marker is None and not pending_recovery:
+        _check_markable(entry, sql, current)
+    if current == target_id:
+        if crash is not None and not pending_recovery:
+            _check_stale_crash(entry, sql, current, crash)
+        return current
+    if not pending_recovery:
+        _check_parks(entry, sql, current, target_id)
+    return current
+
+
+def _refuse_unless_recoverable(
+    entry: CatalogEntry,
+    sql: SqlRunner,
+    server_dir: Path,
+    current: str,
+    target_id: str,
+    crash: _Crash,
+) -> bool:
+    """The recovery's refusals, read without writing; True when it would write."""
+    if read_marker(sql.query, entry) is not None:
+        return False
+    if crash.target != target_id and target_id != current:
+        raise RealmSwitchError(
+            f"A switch to {crash.target} did not finish. Switch realm type to {crash.target} "
+            f"again to finish it, or to {current} to undo it. Nothing was switched."
+        )
+    parked = _parked(entry, current)
+    held = _marker_in(sql.query, parked[1])
+    if held != current:
+        raise RealmSwitchError(
+            f"A switch to {crash.target} did not finish, and the parked {current} databases "
+            f"do not read as the {current} realm type ({held or 'no marker'}), so nothing "
+            "was dropped or switched."
+        )
+    plain = _plain(entry)
+    plain_tables = _tables_in(sql.query, plain)
+    if any(plain_tables) and not crash.imported:
+        raise RealmSwitchError(
+            f"A switch to {crash.target} did not finish, and the plain databases hold tables "
+            "no import of that switch wrote, so nothing was dropped or switched."
+        )
+    return True
+
+
+def _check_markable(entry: CatalogEntry, sql: SqlRunner, current: str) -> None:
+    """The mark guard's read, refusing before the server stops."""
+    tables = _tables_in(sql.query, [entry.databases.characters])[0]
+    if "characters" not in tables:
+        raise RealmSwitchError(
+            f"The {entry.databases.characters} schema holds no characters table and no realm "
+            "type marker, so there is no set to switch. Nothing was switched."
+        )
+
+
+def _check_parks(entry: CatalogEntry, sql: SqlRunner, current: str, target_id: str) -> None:
+    """The park guards' reads, refusing before the server stops (T812 C3b fix round 1)."""
+    parked = _parked(entry, current)
+    holding = sorted(
+        f"{schema}.{table}"
+        for schema, names in zip(parked, _tables_in(sql.query, parked), strict=True)
+        for table in names
+    )
+    if holding:
+        listed = ", ".join(holding[:5]) + ("…" if len(holding) > 5 else "")
+        raise RealmSwitchError(
+            f"The parked {current} schemas are not empty ({listed}): a switch that "
+            "renamed now would orphan those tables. Nothing was switched."
+        )
+    target_park = _parked(entry, target_id)
+    parked_tables = _tables_in(sql.query, target_park)
+    if any(parked_tables):
+        held = _marker_in(sql.query, target_park[1])
+        if held != target_id:
+            raise RealmSwitchError(
+                f"The parked {target_id} databases do not read as the {target_id} realm type "
+                f"({held or 'no marker'}): renaming them in would start the wrong "
+                "characters. Nothing was switched."
+            )
 
 
 def _mark_before_switch(entry: CatalogEntry, sql: SqlRunner, current: str) -> Iterator[str]:

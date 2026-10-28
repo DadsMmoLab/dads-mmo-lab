@@ -21,6 +21,7 @@ import contextlib
 import dataclasses
 import time
 from collections.abc import Callable
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -246,8 +247,13 @@ class Controller:
         start_guard: Callable[[], str | None] | None = None,
         before_servers: Callable[[], str | None] | None = None,
         safety_copy: Callable[[], str] | None = None,
+        hold_server: Callable[[str], AbstractContextManager[None]] | None = None,
     ) -> None:
         self.spec = spec
+        # T812 C3b: the Server tab's realm-type hold (`coa_switch`, the same `docker.server_hold`
+        # the tab hands every other mutating press). `repair_import()` runs under it, so an
+        # Install/Repair import and a switch can never run at once.
+        self.hold_server = hold_server
         # T678 review round 3: dumps the core databases and says where, before Repair
         # clears what an unfinished first import wrote; that clear is refused without it.
         self.safety_copy = safety_copy
@@ -1329,10 +1335,26 @@ class Controller:
         caller in the UI layer hands in something that can cross threads rather
         than something that touches a widget.
 
+        On a realm-types entry this runs under the tab's per-server hold
+        (T812 C3b, `coa_switch.held_repair`): a switch moving the plain schemas
+        refuses with its own sentence instead of racing this import, and a second
+        Repair holds in turn. Other entries run as before.
+
         Raises:
             docker.DockerCommandError: any of those refusals, or an import that
                 ran and left the databases exactly as unimported as they were.
         """
+        from yulon import coa_switch
+
+        def run() -> bool:
+            return self._repair_import(output)
+
+        if self.hold_server is None:
+            return run()
+        return coa_switch.held_repair(self.hold_server, coa_switch.REPAIR_PRESS, run)
+
+    def _repair_import(self, output: docker.OutputSink | None = None) -> bool:
+        """`repair_import()` past the hold; the guards re-checked under it (T812 C3b)."""
         entry = self.entry or _entry_for(self.spec)
         if entry is not None:
             from yulon import coa_realm
