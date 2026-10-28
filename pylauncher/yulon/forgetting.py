@@ -52,7 +52,7 @@ UPDATE_BACKUP_RUNNING = (
     "then try again. Nothing was removed."
 )
 PANEL_RUNNING = (
-    "A rebuild, a database update or an adopt is running on this server's Modules tab. "
+    "A rebuild, a database update or an adopt is running on this server's Maintenance tab. "
     "Wait for it to finish, then try again. Nothing was removed."
 )
 SERVER_ACTION_RUNNING = (

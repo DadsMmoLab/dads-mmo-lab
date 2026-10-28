@@ -1974,14 +1974,14 @@ def test_the_two_confirmations_open_differently_and_neither_claims_an_undo() -> 
 
 
 def test_the_rewritten_history_refusal_says_where_the_press_is() -> None:
-    """T89 moved "Update the server to latest…" into the "Server build ▾" menu.
+    """T89 moved "Update the server to latest…" into a menu; T692a into the Server version section.
 
     This refusal tells the player to press it again, so it names the menu as
     well: the entry is not on the Modules toolbar itself any more.
     """
     said = str(native.RewrittenHistory("cmangos/x", "The release is on rewritten history."))
     assert "“Update the server to latest…”" in said
-    assert "“Server build ▾”" in said, said
+    assert "“Server version” on the Maintenance tab" in said, said
 
 
 # -- T179: what changed between two commits (the TrinityCore route's question) ---------------
@@ -2339,7 +2339,7 @@ def test_a_rollback_that_leaves_the_tags_mixed_says_a_rebuild_is_needed_and_reco
         "replaced, so it is still running the build from before this update if it is up. Its "
         "image tags are mixed, so it must be rebuilt before it can start, and Start is refused "
         "until it is: press “Rebuild the "
-        "server…” under “Server build ▾” on the Modules tab, which compiles every image from "
+        "server…” under “Server version” on the Maintenance tab, which compiles every image from "
         "those commits."
     )
     state = native.read_state(server_dir, valid=())
@@ -2373,8 +2373,8 @@ def test_a_rollback_that_leaves_the_tags_mixed_after_the_containers_moved_record
 MIXED_REFUSAL = (
     "This server's image tags are mixed: an update or rebuild could not put the build from "
     "before it back, and left some images on one build and the rest on the other. It must be "
-    "rebuilt before it can start: press “Rebuild the server…” under “Server build ▾” on the "
-    "Modules tab."
+    "rebuilt before it can start: press “Rebuild the server…” under “Server version” on the "
+    "Maintenance tab."
 )
 
 

@@ -645,7 +645,7 @@ def test_a_checkout_ahead_of_the_image_is_not_renamed_forward(
 
     said = str(refused.value)
     assert "older than its sources" in said
-    assert "Rebuild the server…" in said and "Server build ▾" in said
+    assert "Rebuild the server…" in said and "Server version" in said
     assert "AiPlayerbot.*" in said and "Playerbots.*" in said
     assert (tmp_path / CONF).read_bytes() == conf_before
     assert (tmp_path / OVERRIDE).read_bytes() == override_before

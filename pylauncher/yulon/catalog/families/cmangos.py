@@ -3381,14 +3381,14 @@ class CmangosInstaller(StagedInstaller):
                 f"itself may be the thing that is not answering — it reads a stopped container "
                 f"and Docker being down the same way — so check that Docker is running, "
                 f"then press Stop on the Server tab if the server is up, and apply these "
-                f'files with "{UPDATES_BUTTON_LABEL}" on the Modules tab (or run the install '
+                f'files with "{UPDATES_BUTTON_LABEL}" on the Maintenance tab (or run the install '
                 f"again from the command line)."
             )
         raise InstallerError(
             f"{self.entry.name}'s world server is running, and it holds these databases in "
             f"memory and writes back over whatever it finds in them. Nothing was applied, "
             f"nothing was imported and nothing was cleared. Press Stop on the Server tab, then "
-            f'apply these files with "{UPDATES_BUTTON_LABEL}" on the Modules tab — it starts '
+            f'apply these files with "{UPDATES_BUTTON_LABEL}" on the Maintenance tab — it starts '
             f"the database on its own and keeps the world server down — or run the install "
             f"again from the command line. (A remembered install's catalog tile reads "
             f"Installed and cannot be pressed, which is why the button is the remedy here; "

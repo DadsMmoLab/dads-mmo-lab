@@ -1098,9 +1098,9 @@ def _refusal_for(module: Path) -> str:
         f"mod-playerbots/mod-playerbots in {module} is on {NEW[:7]}, not on {OLD[:7]}, the "
         "commit this server was built from, and its world server would apply the database "
         "updates in that folder, so the server is not started: press \u201cReturn to the tested "
-        "pin\u2026\u201d under \u201cServer build \u25be\u201d on the Modules tab, or put the "
+        "pin\u2026\u201d under \u201cServer version\u201d on the Maintenance tab, or put the "
         "folder back with this command and press \u201cRebuild the server\u2026\u201d under "
-        "\u201cServer build \u25be\u201d on the Modules tab:\n"
+        "\u201cServer version\u201d on the Maintenance tab:\n"
         f"git -C {module} checkout --detach --force {OLD}"
     )
 

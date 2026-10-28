@@ -1,4 +1,8 @@
-"""Every sentence that names a "Server build ▾" press names it as the menu shows it (T155).
+"""Every sentence that names a "Server version" press names it as the section shows it (T155).
+
+T692a moved the presses out of the Modules tab's "Server build ▾" menu into the
+Maintenance tab's "Server version" section; the place is spelled once too
+(`SERVER_BUILD`, through `under_server_build()`).
 
 The rebuild-owed chip said "Press Rebuild server… on this tab" for weeks after
 the press became "Rebuild the server…", and after T89 moved it into the
@@ -65,7 +69,10 @@ STALE = re.compile(
     r"|\b[Pp]ress Return\b"
     r"|Update to latest"
     r"|Return to (?:the tested )?pin\b(?!…)"
-    r"|Server build\b(?! ▾)"
+    # T692a: the menu is gone, so its name is stale with or without the triangle,
+    # and so is the section named on the tab it is not on.
+    r"|Server build\b"
+    r"|Server version\W* on the Modules tab"
 )
 """Each alternative is one hand-typed spelling of a press, and none of them is its label."""
 
@@ -163,6 +170,8 @@ def test_the_rules_catch_each_way_a_press_is_typed_by_hand(tmp_path: Path) -> No
         "update_to_latest": '"Update to latest brings it in."',
         "return_to_pin": '"Return to pin undoes it."',
         "menu_without_triangle": '"under Server build on the Modules tab"',
+        "old_menu": '"under Server build \u25be on the Modules tab"',
+        "section_on_modules": '"under \u201cServer version\u201d on the Modules tab"',
         "label_retyped": '"Press \\u201cRebuild the server\\u2026\\u201d now."',
         "label_split_by_field": 'f"Press Update the server {x}to latest\\u2026 now."',
         "label_split_by_plus": '"Press Update the server " + "to latest\\u2026 now."',

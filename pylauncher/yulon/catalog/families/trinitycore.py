@@ -2630,7 +2630,7 @@ def _finish_advice(names: Sequence[str], press: str | None) -> str:
     again = (
         "the update again"
         if press is None
-        else f"\u201c{press}\u201d under \u201c{server_build_presses.SERVER_BUILD}\u201d again"
+        else f"{server_build_presses.under_server_build(press)} again"
     )
     return (
         f"Press \u201c{FINISH_WORLD_BUTTON}\u201d on the Server tab (or {again}) to import "
@@ -2765,7 +2765,7 @@ def _needed_and_missing(entry: CatalogEntry, missing: Sequence[str], *, past_the
         "finished and the server is still refused a start. Nothing was imported. Put "
         f"{'it' if one else 'them'} back in the sources and press "
         f"\u201c{FINISH_WORLD_BUTTON}\u201d again, or press {presses} under "
-        f"\u201c{server_build_presses.SERVER_BUILD}\u201d on the Modules tab, which builds a "
+        f"{server_build_presses.SERVER_BUILD_PLACE}, which builds a "
         "new version in place of the one this server was left on."
     )
 

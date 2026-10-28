@@ -4612,7 +4612,7 @@ def sources_still_off(server_dir: Path) -> tuple[SourceOff, ...]:
 
     Reads `.git/HEAD` (`read_head_file()`), no git run. Once none is left the
     record is forgotten. The one reading behind the start refusal and the
-    Modules tab's version line and "Return to the tested pin…", so the two
+    Maintenance tab's version line and "Return to the tested pin…", so the two
     cannot disagree about whether a folder is off.
     """
     path = server_dir / SOURCES_OFF_FILE
@@ -4655,7 +4655,7 @@ def sources_off_refusal(server_dir: Path) -> str | None:
     Read by `Controller.refuse_start()`, so Start, Start and play, the launcher's
     PLAY, Restart and Recreate all refuse; NOT by the engine's `start_refusal()`,
     because "Return to the tested pin…" is one of the two ways out it names, and
-    the Modules tab offers it while this refuses (`source_version()`).
+    the Maintenance tab offers it while this refuses (`source_version()`).
 
     Each `git` command is on a line of its own (the owner's T296 rule: a command
     the player types stays, on its own line). Never raises.
@@ -12305,8 +12305,8 @@ class StagedInstaller:
                 "have now could not be kept as a rollback and nothing was compiled over it. "
                 "Nothing was started. Check that Docker is running, then press the same entry "
                 # T155: `stage_recreate()`'s reason -- all three entries reach this.
-                f"under \u201c{server_build_presses.SERVER_BUILD}\u201d on the Modules tab "
-                "again."
+                # T692a: the entry is a button in the Server version section now.
+                f"under {server_build_presses.SERVER_BUILD_PLACE} again."
             )
         # T170 round 2: names gone is not a build gone. A retag or an `rmi -f`
         # takes the NAME off an image a container still holds by id, and that
@@ -15925,8 +15925,7 @@ class StagedInstaller:
                 raise InstallStopped(_cancelled_message("the build"))
         if unreachable:
             again = (
-                f"press the same entry under \u201c{server_build_presses.SERVER_BUILD}\u201d on "
-                f"the Modules tab again"
+                f"press the same entry under {server_build_presses.SERVER_BUILD_PLACE} again"
                 if ctx.force_build
                 else "try again"
             )
