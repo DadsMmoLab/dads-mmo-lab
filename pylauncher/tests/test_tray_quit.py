@@ -582,11 +582,11 @@ def test_the_first_close_note_sits_over_the_window(
     assert seen == [window]
 
 
-def test_a_stop_that_never_ends_ends_the_wait_after_its_deadline(
+def test_a_stop_that_never_leaves_stopping_keeps_waiting_past_its_deadline(
     tray: YulonTray, window: FakeWindow, quits: list[int]
 ) -> None:
-    """Adversarial review [high] on e76f5175: no status and no failure ever came; the wait
-    now has a deadline past the Stop's own (docker.STOP_PROCESS_DEADLINE_SECONDS)."""
+    """T762 #11: a badge that never leaves "stopping" is a Stop with no deadline: the wait
+    carries on past the timer, saying so once, and quits when the Stop ends down."""
     up = _add(window, FakeView("WotLK", "/srv/a", "running"))
     told: list[str] = []
     tray.tell = lambda title, text: told.append(text)  # type: ignore[method-assign]
@@ -597,10 +597,35 @@ def test_a_stop_that_never_ends_ends_the_wait_after_its_deadline(
     assert tray._stop_deadline.interval() > tray_module.docker.STOP_PROCESS_DEADLINE_SECONDS * 1000
     tray._stop_deadline.timeout.emit()
     assert quits == []
-    assert told and "WotLK" in told[0]
-    tray.choose_quit = lambda count: "leave"  # type: ignore[method-assign]
+    assert told and "WotLK" in told[0] and "still stopping" in told[0]
+    assert "did not report" not in told[0]
+    assert tray._stopping != [] and tray._stop_deadline.isActive()
+    up.realm_badge.set_status("stopped")
+    assert quits == [1]
+
+
+def test_a_deadline_with_nothing_still_stopping_gives_up_and_says_so(
+    tray: YulonTray, window: FakeWindow, quits: list[int]
+) -> None:
+    """T762 #11: the timer is only a reminder while a Stop reads "stopping": with no live
+    view stopping, the wait ends with today's "did not report its Stop in time"."""
+    from pathlib import Path
+
+    _add(window, FakeView("WotLK", "/srv/a", "running"))
+    told: list[str] = []
+    tray.tell = lambda title, text: told.append(text)  # type: ignore[method-assign]
+    tray.choose_quit = lambda count: "stop"  # type: ignore[method-assign]
     tray.ask_to_quit()
-    assert quits == [1], "the wait did not end"
+    assert tray._stopping != []
+    for view in tray._stopping:
+        view.realm_badge.status = "unknown"  # the Stop ended; its reading never answered
+    assert tray._stopping != []
+    tray._stop_deadline.timeout.emit()  # noqa: SLF001 - the timer under test
+    assert quits == []
+    assert told and "did not report its Stop in time" in told[-1], told
+    assert window.shown_tabs[-1] == ("game-wotlk", Path("/srv/a"))
+    assert tray._stopping == []
+    assert not tray._stop_deadline.isActive()
 
 
 def test_a_refused_application_quit_does_not_turn_close_to_tray_off(
@@ -766,3 +791,30 @@ def test_uninstall_gives_back_the_quit_for_good(window: FakeWindow) -> None:
     made.install()
     made.uninstall()
     assert window.yulon_quit_for_good == window.close  # type: ignore[attr-defined]
+
+
+def test_stop_then_quit_keeps_waiting_while_a_stop_is_still_stopping(
+    tray: YulonTray, window: FakeWindow, quits: list[int]
+) -> None:
+    """T762 #11: a Stop waiting on a loading world has no deadline: the wait carries on.
+
+    The deadline firing with the badge still "stopping" says so once and re-arms; it
+    never says the Stop "did not report in time". Quits when the Stop ends down.
+    """
+    up = _add(window, FakeView("WotLK", "/srv/a", "running"))
+    told: list[tuple[str, str]] = []
+    tray.tell = lambda title, text: told.append((title, text))  # type: ignore[method-assign]
+    tray.choose_quit = lambda count: "stop"  # type: ignore[method-assign]
+    tray.ask_to_quit()
+    assert up.realm_badge.status == "stopping"
+    assert tray._stop_deadline is not None and tray._stop_deadline.isActive()
+    tray._stop_deadline.timeout.emit()
+    assert quits == []
+    assert tray._stopping != [], "gave up while the Stop was still stopping"
+    assert tray._stop_deadline.isActive(), "the timer was not re-armed"
+    assert told and "is still stopping" in told[0][1], told
+    assert "did not report" not in told[0][1], told
+    tray._stop_deadline.timeout.emit()
+    assert len(told) == 1, "said it more than once"
+    up.realm_badge.set_status("stopped")
+    assert quits == [1]

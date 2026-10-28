@@ -11749,13 +11749,7 @@ class ControllerView(QWidget):
         self._offer_to_clear_a_leftover(exc)
         if isinstance(exc, DatabaseMissing):
             self._offer_to_repair_the_database(str(exc))
-        # T658: the sentence names the press, so the press is there beside it.
-        self.update_compose_button.setVisible(isinstance(exc, ComposeTooOld) and exc.offer)
-        if isinstance(exc, ImportEnded):
-            # T658: the refusal points at Repair; the reading it was refused on is the one
-            # Repair is offered on, now, not at the next status poll.
-            self._import_state = exc.state
-            self._show_repair()
+        self._offer_the_ways_out(exc)
         raw = str(exc)
         msg = raw
         why = ""
@@ -11806,6 +11800,23 @@ class ControllerView(QWidget):
         self.problem_details.set_text("" if rolled else why)
         self.action_failed.emit(rolled or (_for_the_log(exc) if why else msg))
         self.refresh_status()
+
+    def _offer_the_ways_out(self, exc: object) -> None:
+        """Show the press a refusal names, beside its sentence (T762 #8).
+
+        The Start path did this right: a refusal naming **Update Docker Compose**
+        shows that press, and one naming **Repair** offers it on the reading it
+        was refused on, now rather than at the next status poll. The press lives
+        on the Server tab, and the ComposeTooOld sentence says so (it names the
+        Server tab through its **Update Docker Compose** press).
+        """
+        # T658: the sentence names the press, so the press is there beside it.
+        self.update_compose_button.setVisible(isinstance(exc, ComposeTooOld) and exc.offer)
+        if isinstance(exc, ImportEnded):
+            # T658: the refusal points at Repair; the reading it was refused on is the one
+            # Repair is offered on, now, not at the next status poll.
+            self._import_state = exc.state
+            self._show_repair()
 
     def _roll_the_channel_back_if_it_took_the_port(self, message: str) -> str:
         """Undo the press when the start failed on the port the channel claims.
@@ -14658,6 +14669,7 @@ class ControllerView(QWidget):
         self._import_running = False
         # T214 review: the import's last lines go under Details, not in the line.
         self._say_under_the_presses(str(exc), details=_detail_of(exc))
+        self._offer_the_ways_out(exc)
         self.action_failed.emit(_for_the_log(exc))
         self._import_asked = False
         self.refresh_status()
@@ -22520,6 +22532,7 @@ class ControllerView(QWidget):
             # T377: refused before the stop; its ways out are on the Server tab.
             self.problem_label.setText(str(exc))
             self._offer_to_repair_the_database(str(exc))
+        self._offer_the_ways_out(exc)
         self.action_failed.emit(_for_the_log(exc))
 
     # -- T94: Reset to default

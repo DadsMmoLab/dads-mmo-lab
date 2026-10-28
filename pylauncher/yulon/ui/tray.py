@@ -355,6 +355,8 @@ class YulonTray(QObject):
         """Whether "Yu'lon stays in the tray" was said: this run, or "Don't show again"."""
         self._stopping: list[Any] = []
         """The tabs Stop-then-quit pressed Stop on and is waiting for (empty: not waiting)."""
+        self._stop_wait_said = False
+        """The "still stopping" note went up once for this wait (T762 #11)."""
         self._wait_tries = 0
         self._wait_timer: QTimer | None = None
         self._was_up: dict[int, bool] = {}
@@ -1019,6 +1021,7 @@ class YulonTray(QObject):
             return  # round 3 N4: the questions' event loops may have let a job begin
         self.open_window()
         self._stopping = list(running)
+        self._stop_wait_said = False
         for view in running:
             view.realm_badge.status_changed.connect(self._a_stop_moved)
             view.action_failed.connect(self._a_stop_failed)
@@ -1088,6 +1091,24 @@ class YulonTray(QObject):
         if not self._stopping:
             return
         left = [view for view in self._stopping if shiboken6.isValid(view)]
+        stopping = [view for view in left if view.realm_badge.status.lower() == "stopping"]
+        if stopping:
+            # T762 #11: a Stop that waits for a loading world has no deadline. The wait
+            # carries on: said once, then the timer is re-armed. `_a_stop_moved` is
+            # unchanged: a badge that has left "stopping" ends the wait as before.
+            names = ", ".join(self._title_of(view) for view in stopping)
+            logger.info(f"tray: a stop before quitting is still stopping: {names}")
+            if not self._stop_wait_said:
+                self._stop_wait_said = True
+                self.show_server(stopping[0])
+                self.tell(
+                    "Yu'lon has not quit yet",
+                    f"{names} is still stopping: a world that is loading or saving can take "
+                    "a while. Yu'lon quits as soon as it has stopped.",
+                )
+            if self._stop_deadline is not None:
+                self._stop_deadline.start()
+            return
         self._stop_waiting_to_quit()
         names = ", ".join(self._title_of(view) for view in left) or "a server"
         logger.warning(f"tray: no stop before quitting reported in time: {names}")
@@ -1125,6 +1146,7 @@ class YulonTray(QObject):
                 except (RuntimeError, TypeError):  # pragma: no cover - already gone
                     pass
         self._stopping = []
+        self._stop_wait_said = False
         if self._stop_deadline is not None:
             self._stop_deadline.stop()
 
