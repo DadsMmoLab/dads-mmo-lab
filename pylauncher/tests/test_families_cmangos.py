@@ -6030,3 +6030,169 @@ def test_a_failed_per_map_rebuild_keeps_the_old_record(tmp_path: Path) -> None:
     with pytest.raises(InstallerError, match="map 800"):
         list(work.forward(context(server_dir, entry=entry)))
     assert extract.read_evidence(server_dir / "data").offmesh_sha == recorded
+
+
+def old_map_800_files(server_dir: Path) -> dict[str, bytes]:
+    """Map 800's finished movement files, and a neighbour's tile, byte for byte (T811)."""
+    tiles = server_dir / "data" / "mmaps"
+    tiles.mkdir(parents=True, exist_ok=True)
+    old = {
+        "800.mmap": b"map 800's mmap, built from the old off-mesh file",
+        "8003232.mmtile": b"map 800's tile at 32,32, built from the old off-mesh file",
+        "8003233.mmtile": b"map 800's tile at 32,33, built from the old off-mesh file",
+    }
+    for name, body in old.items():
+        (tiles / name).write_bytes(body)
+    (tiles / "0010000.mmtile").write_bytes(b"map 1's tile, which no press may touch")
+    return old
+
+
+def drained(gen: Iterator[str]) -> tuple[list[str], object]:
+    """Everything a generator said, and what its `return` answered (the press's own shape)."""
+    said: list[str] = []
+    while True:
+        try:
+            said.append(next(gen))
+        except StopIteration as stop:
+            return said, stop.value
+
+
+def test_a_rolled_back_rebuild_puts_the_old_tiles_and_hash_back(tmp_path: Path) -> None:
+    """The failing case: the old build starts on tiles the rejected build's off-mesh made."""
+    entry, eng = tortoise_engine(Recorder())
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = Recorder()
+    entry, eng = tortoise_engine(rec)
+    extract_and_mmaps(rec, server_dir, entry, eng)
+    data = server_dir / "data"
+    old_sha = extract.offmesh_sha(OFFMESH_OLD)
+    new_sha = extract.offmesh_sha(OFFMESH_NEW)
+    extract.write_evidence(data, replace(extract.read_evidence(data), offmesh_sha=old_sha))
+    old = old_map_800_files(server_dir)
+    move = cmangos._OffmeshMove(sha=new_sha, map_ids=("800",))
+    work = eng._offmesh_rebuild_work(server_dir, move)
+    assert work is not None
+    ctx = context(server_dir, entry=entry)
+    rec.run_result = docker.AttachedRun(1, ("built",))
+    list(work.forward(ctx))
+    tiles = data / "mmaps"
+    # What the generator left for map 800, over the files it had set aside.
+    (tiles / "800.mmap").write_bytes(b"the mmap the rejected build wrote")
+    (tiles / "8003232.mmtile").write_bytes(b"the tile the rejected build wrote")
+    (tiles / "8009999.mmtile").write_bytes(b"a tile only the rejected build had")
+    assert extract.read_evidence(data).offmesh_sha == new_sha
+    said = list(work.back(ctx))
+    assert any("movement maps go back" in line for line in said), said
+    for name, body in old.items():
+        assert (tiles / name).read_bytes() == body, f"{name} did not come back byte for byte"
+    assert not (tiles / "8009999.mmtile").exists(), "the rejected build's own tile stayed"
+    assert (tiles / "0010000.mmtile").read_bytes() == b"map 1's tile, which no press may touch"
+    assert (
+        extract.read_evidence(data).offmesh_sha == old_sha
+    ), "the old build would run on tiles no off-mesh file recorded as current"
+    assert not (data / extract.MMAPS_BACKUP_DIR).exists(), "the rollback left its backup behind"
+
+
+def test_a_failed_per_map_rebuild_restores_that_map_at_once(tmp_path: Path) -> None:
+    """The failing case: a generator that fails leaves map 800's tiles half gone until rollback."""
+    entry, eng = tortoise_engine(Recorder())
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = Recorder()
+    entry, eng = tortoise_engine(rec)
+    extract_and_mmaps(rec, server_dir, entry, eng)
+    data = server_dir / "data"
+    old_sha = extract.offmesh_sha(OFFMESH_OLD)
+    extract.write_evidence(data, replace(extract.read_evidence(data), offmesh_sha=old_sha))
+    old = old_map_800_files(server_dir)
+    move = cmangos._OffmeshMove(sha=extract.offmesh_sha(OFFMESH_NEW), map_ids=("800",))
+    work = eng._offmesh_rebuild_work(server_dir, move)
+    assert work is not None
+    rec.run_result = docker.AttachedRun(3, ("broken",))
+    with pytest.raises(InstallerError, match="map 800"):
+        list(work.forward(context(server_dir, entry=entry)))
+    for name, body in old.items():
+        assert (
+            data / "mmaps" / name
+        ).read_bytes() == body, f"{name} was not put back the moment the generator failed"
+    assert not (data / extract.MMAPS_BACKUP_DIR).exists(), "a failed map left its backup behind"
+    assert extract.read_evidence(data).offmesh_sha == old_sha
+
+
+def test_a_leftover_backup_folder_is_put_back_at_the_next_press(tmp_path: Path) -> None:
+    """The failing case: a press that crashed mid-rebuild leaves map 800 out of `mmaps`."""
+    entry, eng = tortoise_engine(Recorder())
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = Recorder()
+    entry, eng = tortoise_engine(rec)
+    extract_and_mmaps(rec, server_dir, entry, eng)
+    data = server_dir / "data"
+    old_sha = extract.offmesh_sha(OFFMESH_OLD)
+    new_sha = extract.offmesh_sha(OFFMESH_NEW)
+    extract.write_evidence(data, replace(extract.read_evidence(data), offmesh_sha=old_sha))
+    old = old_map_800_files(server_dir)
+    # The press that did not finish: map 800 set aside, then the rejected build's
+    # tiles written where they were. The record still names the old off-mesh file.
+    extract.set_map_aside(data, "800", old_sha)
+    (data / "mmaps" / "8009999.mmtile").write_bytes(b"a tile the rejected build wrote")
+    core = server_dir / "src" / "tortoise-wow"
+    before, after = "a" * 40, "b" * 40
+    rec.heads[core] = after
+    rec.byte_trees[(core, before, "tools/mmap")] = {"offmesh.txt": OFFMESH_OLD}
+    rec.byte_trees[(core, after, "tools/mmap")] = {"offmesh.txt": OFFMESH_NEW}
+    core_source = next(s for s in entry.emulator.sources if s.dest == "src/tortoise-wow")
+    moved = [(core_source, core, before)]
+    said, changes = drained(eng.check_moved_sources(server_dir, moved, to_pin=False))
+    assert any("An earlier press did not finish" in line for line in said), said
+    for name, body in old.items():
+        assert (data / "mmaps" / name).read_bytes() == body, f"{name} did not come back"
+    assert not (data / "mmaps" / "8009999.mmtile").exists()
+    assert extract.read_evidence(data).offmesh_sha == old_sha
+    assert changes.offmesh is not None and changes.offmesh.map_ids == (
+        "800",
+    ), "the press did not go on to rebuild the map it had just put back"
+    assert changes.offmesh.sha == new_sha
+    assert not (data / extract.MMAPS_BACKUP_DIR).exists()
+
+
+def test_a_rebuild_that_stands_drops_the_tiles_it_replaced(tmp_path: Path) -> None:
+    """The failing case: the backup is removed before a rollback could need it."""
+    entry, eng = tortoise_engine(Recorder())
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = Recorder()
+    entry, eng = tortoise_engine(rec)
+    extract_and_mmaps(rec, server_dir, entry, eng)
+    data = server_dir / "data"
+    extract.write_evidence(
+        data, replace(extract.read_evidence(data), offmesh_sha=extract.offmesh_sha(OFFMESH_OLD))
+    )
+    old = old_map_800_files(server_dir)
+    move = cmangos._OffmeshMove(sha=extract.offmesh_sha(OFFMESH_NEW), map_ids=("800",))
+    work = eng._offmesh_rebuild_work(server_dir, move)
+    assert work is not None
+    rec.run_result = docker.AttachedRun(1, ("built",))
+    list(work.forward(context(server_dir, entry=entry)))
+    tiles = data / "mmaps"
+    new = {
+        "800.mmap": b"the mmap the new build wrote",
+        "8003232.mmtile": b"the tile the new build wrote",
+    }
+    for name, body in new.items():
+        (tiles / name).write_bytes(body)
+    assert (
+        data / extract.MMAPS_BACKUP_DIR
+    ).is_dir(), "the forward removed the backup before the new build had started"
+    said = list(work.done())
+    assert any("tiles they replaced are gone" in line for line in said), said
+    assert not (data / extract.MMAPS_BACKUP_DIR).exists(), "the new build is up: the backup goes"
+    assert not (data / extract.MMAPS_BACKUP_OLD).exists()
+    for name, body in new.items():
+        assert (tiles / name).read_bytes() == body, "the new build's tiles were put back too"
+    assert not (
+        tiles / "8003233.mmtile"
+    ).exists(), "a tile only the old build had survived a successful press"
+    assert extract.read_evidence(data).offmesh_sha == extract.offmesh_sha(OFFMESH_NEW)
+    assert old["800.mmap"] != new["800.mmap"]
