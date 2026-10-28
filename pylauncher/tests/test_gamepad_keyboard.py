@@ -208,10 +208,11 @@ def test_sdl_parity_detects_drift_and_returns_false(monkeypatch: pytest.MonkeyPa
 
 # --- T89: a button that opens a menu, driven without a mouse. ---------------
 #
-# The Modules tab's three server-build presses are one "Server build ▾" button
-# with a menu since T89. A menu's items are `QAction`s and not widgets, so the
-# D-pad walk has nothing to move between once one is open, and the keyboard
-# filter used to eat the arrows and Return the menu reads its own items with.
+# A menu's items are `QAction`s and not widgets, so the D-pad walk has nothing
+# to move between once one is open, and the keyboard filter used to eat the
+# arrows and Return the menu reads its own items with. (T692a moved the
+# server-build presses out of their menu into section buttons; menus elsewhere
+# keep this behavior.)
 
 
 class _MenuWindow:

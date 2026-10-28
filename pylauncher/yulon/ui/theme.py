@@ -991,11 +991,7 @@ PLAY_MENU_BUTTON = "play-menu"
 
 
 SERVER_BUILD_BUTTON = "server-build"
-"""objectName of the Modules toolbar's "Server build ▾" menu button (T89).
-
-Its label carries the triangle, so its QSS rule takes away the menu indicator the
-style would otherwise draw -- and reserve width for -- beside it: two arrows.
-"""
+"""objectName of the former Modules toolbar's menu button (T89), kept for T187's rule."""
 
 
 LAUNCHER_PLAY_BUTTON = "launcher-play"

@@ -165,7 +165,7 @@ def build_catalog_tab(
 
     The header goes onto the window as its `header` property rather than into
     this tuple (T90). `build_window()` is the only caller that wants it — for
-    `add_action()`, the home of the "Check for updates" button — and a fourth
+    `add_action()`, the home of the "Check for Yu'lon updates" button — and a fourth
     element would be a fourth thing for every OTHER caller to name and ignore.
     A property holds a QObject by pointer, which is safe here for the reason
     `_Window`'s docstring gives about lists: only a Python container is copied.
@@ -2548,7 +2548,7 @@ def build_window() -> object:
     # `.old`, and this is the earliest moment it is provably not needed.
     announce_previous_update(update_bar)
 
-    check_button = QPushButton("Check for updates", window)
+    check_button = QPushButton("Check for Yu'lon updates", window)
     check_button.setObjectName(CHECK_UPDATES_BUTTON)
     # Placed inside the Settings submenu panel (`SettingsView.add_action`).
     check_button.clicked.connect(update_host.check_now)

@@ -97,16 +97,16 @@ def _view(
     return ControllerView(WOTLK, services, status_poll_ms=0)
 
 
-def test_the_entry_is_in_the_server_build_menu_after_the_other_presses(
+def test_the_entry_is_in_the_server_version_section_after_the_other_presses(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
     rec = Recorder()
     server_dir = a_finished_install(rec, tmp_path)
     view = _view(ps, server_dir, rec)
 
-    labels = [a.text() for a in view.server_build_menu.actions()]
-    assert labels[-1] == "Put the folders back…", labels
-    assert view.server_build_button.text() == "Server build ▾"
+    assert view.server_version_section.isAncestorOf(view.put_the_folders_back_button)
+    assert view.put_the_folders_back_button.text() == "Put the folders back…"
+    assert view.server_version_section.title() == "Server version"
 
 
 def test_the_entry_is_hidden_while_the_engine_does_not_offer_the_press(
@@ -135,7 +135,7 @@ def test_the_entry_is_shown_while_a_folder_is_off_its_build(
 
     assert view.put_the_folders_back_action.isVisible()
     assert view.put_the_folders_back_action.isEnabled()
-    assert view.server_build_button.isEnabled()
+    assert view.put_the_folders_back_button.isEnabled()
 
 
 def test_the_entry_is_shown_while_the_write_back_marker_is_there(

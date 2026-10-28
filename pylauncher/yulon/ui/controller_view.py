@@ -212,7 +212,6 @@ from yulon.ui.theme import (
     COLOR_TEXT_MUTED,
     COLOR_TEXT_WARNING,
     PLAY_MENU_BUTTON,
-    SERVER_BUILD_BUTTON,
     get_theme,
     normalize_theme_name,
     resolve_widget_theme,
@@ -5489,7 +5488,20 @@ RETURN_TO_PIN_BUTTON_LABEL = server_build_presses.RETURN_TO_PIN
 """The way back off an untested commit, shown only once there is one to go back from."""
 
 PUT_THE_FOLDERS_BACK_BUTTON_LABEL = server_build_presses.PUT_THE_FOLDERS_BACK
-"""T766's press, in the same menu (T786); shown while `put_the_folders_back_offered()` is True."""
+"""T766's press, in the section's Advanced fold (T692a, T786); shown while offered."""
+
+ON_THE_TESTED_PIN = "On the tested pin."
+"""The Server version line for an install whose sources all sit on their catalog pins (T692a)."""
+
+ADOPT_NOT_READY = "The databases do not read as a finished import waiting to be claimed."
+"""Why Adopt as imported… is greyed until the databases read `populated` (T692a/T195).
+
+One sentence for every other probe answer. `imported` means the row is already
+there and the press would refuse; `absent` and `partial` mean there is no
+import to make a claim about; `unreadable` means nobody could look -- and no
+reading yet means the same. Each is, definitionally, not the one answer this
+press can act on.
+"""
 
 
 class UpdateChoice(enum.Enum):
@@ -5590,8 +5602,8 @@ def _relabel(box: QMessageBox, which: QMessageBox.StandardButton, text: str) -> 
 REBUILD_BUTTON_LABEL = server_build_presses.REBUILD
 """The rebuild press's label, in one place because many things say it.
 
-The press wears it -- the banner's button, the first entry under
-`SERVER_BUILD_LABEL` since T89, and a rebuild-owed chip's subpanel button -- and
+The press wears it -- the banner's button, the Maintenance tab's Server version
+section button, and a rebuild-owed chip's subpanel button -- and
 `_format_report()`, the chip's sentence and the engine's refusals tell the user
 to press it by name. Two literals would be one rename away from a report that
 points at a control that is not there any more, which is the class of defect
@@ -5600,21 +5612,14 @@ spelling now lives in `server_build_presses`, below everything that says it.
 """
 
 SERVER_BUILD_LABEL = server_build_presses.SERVER_BUILD
-"""The Modules toolbar button that holds the three compile-this-server presses (T89).
+"""The Maintenance tab's section holding the compile-this-server presses (T692a).
 
-Rebuild, "Update the server to latest…" and "Return to the tested pin…" were
-three buttons side by side, and with a route wired -- every catalog entry that
-offers one -- the bar was seven buttons and wrapped at the 1280x800 the app
-opens at. The owner's decision of 2026-09-27: one button with a menu, the three
-labels unchanged. The triangle is in the label because it is the only thing on
-the bar that says this press opens a list rather than acting or asking.
+T89's "Server build ▾" menu button held them before: Rebuild, "Update the server
+to latest…" and "Return to the tested pin…" were three buttons side by side,
+and with a route wired the bar was seven buttons and wrapped at the 1280x800
+the app opens at. The section holds one button per press now, each bound to the
+same QAction the menu entries were.
 """
-
-SERVER_BUILD_TIP = (
-    "Compile this server again: from the same code, from the newest code, or back on the "
-    "commit this app was tested against. Every entry asks first."
-)
-"""The menu button's own tooltip; each entry keeps the one its button had (T89)."""
 
 PATHFINDING_START = mmaps.START_PRESS
 PATHFINDING_STOP = "Stop making the pathfinding data"
@@ -6855,7 +6860,7 @@ class _TabFit(QObject):
     def __init__(
         self,
         tab: QWidget,
-        log: _IdleLogPanel,
+        log: _IdleLogPanel | None,
         report: _ReportStrip,
         listing: QWidget,
         floor: int,
@@ -6868,6 +6873,9 @@ class _TabFit(QObject):
         # T613: the add-on box keeps its sentence exactly where the card keeps its own.
         self._addon_box = addon_box
         self._tab = tab
+        # T692a: None where the tab holds no log panel -- the rebuild log lives
+        # on Maintenance now, so Modules folds only its report. A foreign log
+        # must not be settled from here: its fold would follow this tab's room.
         self._log = log
         self._report = report
         self._listing = listing
@@ -6883,7 +6891,8 @@ class _TabFit(QObject):
         # caught by -- but a record of a press, and the only thing it does is
         # move that panel to the END of the give order below.
         self._asked_for: _IdleLogPanel | _ReportStrip | None = None
-        log.wants_changed.connect(lambda by_hand: self._asked(log, by_hand))
+        if log is not None:
+            log.wants_changed.connect(lambda by_hand: self._asked(log, by_hand))
         report.wants_changed.connect(lambda by_hand: self._asked(report, by_hand))
         tab.installEventFilter(self)
 
@@ -6909,8 +6918,9 @@ class _TabFit(QObject):
 
         `LOG, REPORT` is the published order and the one that holds until a
         person says otherwise; the panel they last pressed open goes last.
+        With no log (T692a) the report is the whole order.
         """
-        order: list[QObject] = [self._log, self._report]
+        order: list[QObject] = [self._report] if self._log is None else [self._log, self._report]
         if self._asked_for is self._log:
             order.reverse()
         return order
@@ -6926,13 +6936,13 @@ class _TabFit(QObject):
         this at the list's ordinary floor first, because the list is step 3 and
         nothing may spend it in advance.
         """
-        open_now: dict[QObject, bool] = {
-            self._log: self._log.wants_open(),
-            self._report: self._report.wants_open(),
-        }
+        open_now: dict[QObject, bool] = {self._report: self._report.wants_open()}
+        log = self._log
+        if log is not None:
+            open_now[log] = log.wants_open()
         for panel in self._give_order():
             if self._owed(
-                log_open=open_now[self._log],
+                log_open=bool(open_now[log]) if log is not None else False,
                 report_open=open_now[self._report],
                 list_floor=list_floor,
             ) <= page_room(self._tab):
@@ -6996,9 +7006,11 @@ class _TabFit(QObject):
                 with_the_list = self._fold_until_it_fits(_LIST_FLOOR_FLOOR)
                 if with_the_list[asked]:
                     open_now = with_the_list
-            log_room = open_now[self._log]
+            log = self._log
+            log_room = bool(open_now[log]) if log is not None else False
             report_room = open_now[self._report]
-            self._log.set_room(log_room)
+            if log is not None:
+                log.set_room(log_room)
             self._report.set_room(report_room)
             # Step 3 (T153): what the list would have with the card whole AND
             # both boxes folded, the list billed at nothing so the answer is
@@ -7156,7 +7168,7 @@ class _TabFit(QObject):
             shown += 1
             if widget is self._addon_box:
                 owed += self._addon_box.minimum_for(inner, card_whole)
-            elif widget is self._log:
+            elif widget is self._log and self._log is not None:
                 owed += self._log.open_minimum() if log_open else self._log.folded_minimum()
             elif widget is self._listing:
                 owed += list_floor
@@ -8160,7 +8172,7 @@ will not write module SQL underneath a running worldserver (checklist 8.7a) —
 before the click rather than after it. It is a courtesy, not the guard.
 """
 
-MODULE_UPDATES_BUTTON_LABEL = "Check for updates"
+MODULE_UPDATES_BUTTON_LABEL = "Check module updates"
 """The Modules tab's read-only button (checklist 8.7a's first clause)."""
 
 MODULE_UPDATES_TIP = (
@@ -9007,6 +9019,10 @@ class ControllerView(QWidget):
         # T171: built before any tab, like T99's box, so `_set_busy()` can
         # always reach it; the Tuning tab is what shows it.
         self._build_time_zone_group()
+        # T692a: the server-build actions, owned by no tab. The Maintenance
+        # tab's Server version section binds buttons to them, and the Modules
+        # tab's banner reaches the same `rebuild_server` slot.
+        self._build_server_build_actions()
         self._build_server_tab()
         self._build_console_tab()
         self._build_accounts_tab()
@@ -9099,6 +9115,52 @@ class ControllerView(QWidget):
                     page.ensureWidgetVisible(widget)
                 return
 
+    def _build_server_build_actions(self) -> None:
+        """T692a: the server-build QActions the Server version section binds to.
+
+        Structural visibility is settled here and never touched again: Rebuild
+        and Apply pending database updates… are shown while this install has
+        wiring for them, hidden where nothing would ever enable them (the tab's
+        own rule for Update to latest). Enabled follows the jobs; greyed
+        buttons say why on the section's reason line.
+        """
+        self.rebuild_action = QAction(REBUILD_BUTTON_LABEL, self)
+        self.rebuild_action.triggered.connect(self.rebuild_server)
+        self.rebuild_action.setToolTip(
+            "Compile the server again so modules installed since the last build are in it. "
+            "Asks first — it takes as long as an install's compile and the server goes down."
+        )
+        self.rebuild_action.setVisible(self.services.rebuild is not None)
+        self.updates_action = QAction(native.UPDATES_BUTTON_LABEL, self)
+        self.updates_action.triggered.connect(self.apply_database_updates)
+        self.updates_action.setToolTip(
+            "Apply the SQL this server's install plan has gained since it was installed. "
+            "Asks first, names every file, and refuses while the server is running."
+        )
+        self.updates_action.setVisible(self.services.updates is not None)
+        self.update_to_latest_action = QAction(UPDATE_TO_LATEST_BUTTON_LABEL, self)
+        self.update_to_latest_action.triggered.connect(self.update_to_latest)
+        self.update_to_latest_action.setToolTip(
+            "Fetch the newest code from the repositories this server was built from and compile "
+            "it. Asks first, and offers a backup: this is code nobody has tested with this app."
+        )
+        self.update_to_latest_action.setVisible(self.services.update_to_latest is not None)
+        self.return_to_pin_action = QAction(RETURN_TO_PIN_BUTTON_LABEL, self)
+        self.return_to_pin_action.triggered.connect(self.return_to_the_tested_pin)
+        self.return_to_pin_action.setToolTip(
+            "Compile the server again from the commit this app was tested against. It does not "
+            "undo anything the newer server wrote into your databases."
+        )
+        self.return_to_pin_action.setVisible(False)
+        self._put_back_offered = False
+        self.put_the_folders_back_action = QAction(PUT_THE_FOLDERS_BACK_BUTTON_LABEL, self)
+        self.put_the_folders_back_action.triggered.connect(self.put_the_folders_back)
+        self.put_the_folders_back_action.setToolTip(
+            "Put the source folders back on the build they were made from and write this app's "
+            "own files back. Asks first; compiles nothing, and the server must be stopped."
+        )
+        self.put_the_folders_back_action.setVisible(False)
+
     # ------------------------------------------------------------ server tab
 
     def _build_server_tab(self) -> None:
@@ -9154,12 +9216,6 @@ class ControllerView(QWidget):
         self.distro_label = QLabel("", tab)
         self.distro_label.setWordWrap(True)
         self._show_the_distro()
-        # T124: what upstream has that this server was not built from. Hidden
-        # until a reading says there is something -- and for no network, no
-        # route, or nothing new, it stays hidden rather than saying so.
-        self.upstream_label = QLabel("", tab)
-        self.upstream_label.setWordWrap(True)
-        self.upstream_label.setVisible(False)
         # T179: how far the background movement-map job has got, read off the
         # GUI thread on the poll, with Start where a run could begin and Stop
         # where one is running. Hidden for a server without the job.
@@ -9458,7 +9514,6 @@ class ControllerView(QWidget):
             self.docker_banner,
             self.status_label,
             self.distro_label,
-            self.upstream_label,
             self.pathfinding_label,
         ):
             realm_column.addWidget(label)
@@ -10894,14 +10949,18 @@ class ControllerView(QWidget):
         another action of ours is live is two writers.
         """
         state = self._adopt_state
-        offered = (
-            self.services.adopt is not None
-            and state is not None
-            and state.state == "populated"
-            and not self._busy
-            and not self.rebuild_log.running
-        )
-        self.adopt_button.setEnabled(offered)
+        # Structural: no adopt route, no button rather than a dead one.
+        self.adopt_button.setVisible(self.services.adopt is not None)
+        if self.services.adopt is None:
+            return
+        if self._busy:
+            set_enabled_why(self.adopt_button, wait_for(self._busy_job))
+        elif self.rebuild_log.running:
+            set_enabled_why(self.adopt_button, wait_for("the server build"))
+        elif state is None or state.state != "populated":
+            set_enabled_why(self.adopt_button, ADOPT_NOT_READY)
+        else:
+            set_enabled_why(self.adopt_button, None)
 
     @Slot(object)
     def _import_failed(self, exc: object) -> None:
@@ -11096,22 +11155,21 @@ class ControllerView(QWidget):
             # reached for (review, 2026-08-23).
             for press in self._server_presses():
                 set_enabled_why(press, wait_for(job))
-            self.rebuild_action.setEnabled(False)
+            self._grey_build_action(self.rebuild_action, wait_for(job))
             # And both T64 presses, for the rebuild's reason exactly: each of
             # them IS that rebuild with a fetch in front of it. Disabled and not
             # hidden -- whether they exist at all is `_refresh_source_version()`'s
-            # question and a job of ours must not answer it. All three dead
-            # greys "Server build ▾" itself (`_set_server_build_button`, T89).
-            self.update_to_latest_action.setEnabled(False)
-            self.return_to_pin_action.setEnabled(False)
-            self.put_the_folders_back_action.setEnabled(False)
+            # question and a job of ours must not answer it.
+            self._grey_build_action(self.update_to_latest_action, wait_for(job))
+            self._grey_build_action(self.return_to_pin_action, wait_for(job))
+            self._grey_build_action(self.put_the_folders_back_action, wait_for(job))
             # And the updates press, for the importer's reason above rather than
             # for symmetry: it reaches the same `import` stage against the same
             # databases, so one while another action is live is two writers.
-            self.updates_button.setEnabled(False)
+            self._grey_build_action(self.updates_action, wait_for(job))
             # And the adopt press, which starts the database and writes a row
             # into it -- the same rule again, one size smaller.
-            self.adopt_button.setEnabled(False)
+            set_enabled_why(self.adopt_button, wait_for(job))
             # The Modules tab's importer too, and for the reason above rather
             # than for symmetry: `repair_import()` and `apply_module_sql()` run
             # the SAME one-shot service against the same databases, so one
@@ -11219,7 +11277,7 @@ class ControllerView(QWidget):
             if self.play_menu_button is not None:
                 self.play_menu_button.setEnabled(True)
             self.delete_play_client_check.setEnabled(True)
-            self.rebuild_action.setEnabled(self.services.rebuild is not None)
+            self._offer_rebuild_button()
             # Back to what this install can do, never unconditionally, and then
             # the version line is re-read: the job that just finished may BE the
             # press that moved this server off its pins, so the line and the
@@ -11234,7 +11292,7 @@ class ControllerView(QWidget):
             # Back to what this install can do, never unconditionally: three of
             # the four games have no such phase and must not be handed a live
             # button by any job of their own finishing.
-            self.updates_button.setEnabled(self.services.updates is not None)
+            self._offer_updates_button()
             # Back to what this install can do AND what its databases last said,
             # which is why this one goes through the rule rather than repeating
             # half of it: a job of ours finishing must not hand back a control
@@ -17570,6 +17628,157 @@ class ControllerView(QWidget):
 
     # -------------------------------------------------------- maintenance tab
 
+    #: Property holding why a server-build action is greyed, for its button's line (T692a/T195).
+    _GREY_WHY = "yulon_grey_why"
+
+    @staticmethod
+    def _bind_button_to_action(button: QPushButton, action: QAction) -> None:
+        """Mirror an action's text, tip, visible and enabled onto its section button (T692a).
+
+        Enabled goes through `set_enabled_why()`, so a greyed button says why
+        on the section's reason line (T195, I3/A10/A23/I4: a Deck has no
+        hover). The reason is the one the greying site stored on the action
+        with `_grey_build_action()`; a hidden action's button stays dead
+        without one, because the guard only reads buttons that are drawn.
+        """
+
+        def sync() -> None:
+            button.setText(action.text())
+            button.setToolTip(action.toolTip())
+            button.setVisible(action.isVisible())
+            if action.isEnabled():
+                set_enabled_why(button, None)
+            elif action.isVisible():
+                set_enabled_why(button, str(action.property(ControllerView._GREY_WHY) or ""))
+            else:
+                button.setEnabled(False)
+
+        action.changed.connect(sync)
+        sync()
+
+    def _grey_build_action(self, action: QAction, reason: str) -> None:
+        """Grey a server-build action, with its button saying why (T692a/T195).
+
+        The reason is stored on the action because the button only follows
+        `changed`: whoever greys the action next without one would leave the
+        button greyed with yesterday's words. `set_enabled_why()` refuses an
+        empty reason, which is what makes a silent grey loud here instead.
+        """
+        action.setProperty(ControllerView._GREY_WHY, reason)
+        action.setEnabled(False)
+
+    def _offer_build_action(self, action: QAction) -> None:
+        """Offer a server-build action again, clearing why it was greyed."""
+        action.setProperty(ControllerView._GREY_WHY, None)
+        action.setEnabled(True)
+
+    def _build_server_version_section(self, tab: QWidget, box: QVBoxLayout) -> None:
+        """T692a: the server-level presses, as buttons on the Maintenance tab."""
+        version, column = section(server_build_presses.SERVER_BUILD, tab)
+        self.server_version_section = version
+        self.source_version_label = QLabel("", version)
+        self.source_version_label.setWordWrap(True)
+        self.source_version_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self.source_version_label.setVisible(False)
+        self.upstream_label = QLabel("", version)
+        self.upstream_label.setWordWrap(True)
+        self.upstream_label.setVisible(False)
+        column.addWidget(self.source_version_label)
+        column.addWidget(self.upstream_label)
+        # QPushButtons bound to the existing QActions by hand, not QToolButtons:
+        # `setDefaultAction()` strips the labels' trailing ellipsis, which the
+        # pinned-label guard owns. Each press triggers its action, and each
+        # action's `changed` syncs its button's text, tip, enabled and visible.
+        self.rebuild_button = QPushButton(REBUILD_BUTTON_LABEL, version)
+        self.rebuild_button.clicked.connect(self.rebuild_action.trigger)
+        self.update_to_latest_button = QPushButton(UPDATE_TO_LATEST_BUTTON_LABEL, version)
+        self.update_to_latest_button.clicked.connect(self.update_to_latest_action.trigger)
+        self.apply_updates_button = QPushButton(native.UPDATES_BUTTON_LABEL, version)
+        self.apply_updates_button.clicked.connect(self.updates_action.trigger)
+        for button, action in (
+            (self.rebuild_button, self.rebuild_action),
+            (self.update_to_latest_button, self.update_to_latest_action),
+            (self.apply_updates_button, self.updates_action),
+        ):
+            self._bind_button_to_action(button, action)
+        column.addWidget(
+            _bar(
+                version,
+                self.rebuild_button,
+                self.update_to_latest_button,
+                self.apply_updates_button,
+            )
+        )
+        # T195 (I3/A10/A23/I4): why a Server version press is greyed -- a job
+        # of ours running, or the databases not reading as an import -- for a
+        # Deck, which has no hover.
+        self.server_version_reasons = ReasonLine(version)
+        column.addWidget(self.server_version_reasons)
+        for watched in (
+            self.rebuild_button,
+            self.update_to_latest_button,
+            self.apply_updates_button,
+        ):
+            self.server_version_reasons.watch(watched)
+        self.advanced_fold = QToolButton(version)
+        self.advanced_fold.setText("Advanced ▸")
+        self.advanced_fold.setCheckable(True)
+        self.advanced_fold.setChecked(False)
+        self.return_to_pin_button = QPushButton(RETURN_TO_PIN_BUTTON_LABEL, version)
+        self.return_to_pin_button.clicked.connect(self.return_to_pin_action.trigger)
+        self._bind_button_to_action(self.return_to_pin_button, self.return_to_pin_action)
+        self.put_the_folders_back_button = QPushButton(PUT_THE_FOLDERS_BACK_BUTTON_LABEL, version)
+        self.put_the_folders_back_button.clicked.connect(self.put_the_folders_back_action.trigger)
+        self._bind_button_to_action(
+            self.put_the_folders_back_button, self.put_the_folders_back_action
+        )
+        self.adopt_button = QPushButton(native.ADOPT_BUTTON_LABEL, version)
+        self.adopt_button.clicked.connect(self.adopt_as_imported)
+        self.adopt_button.setToolTip(
+            "Say that these databases are a finished import, for a server this app did not "
+            "install. Asks first, names the one row it writes, and refuses while the server "
+            "is running. Yu'lon cannot check the import finished -- you are saying so."
+        )
+        advanced_box = QWidget(version)
+        advanced_column = QVBoxLayout(advanced_box)
+        advanced_column.addWidget(
+            _bar(version, self.return_to_pin_button, self.put_the_folders_back_button)
+        )
+        advanced_column.addWidget(_bar(version, self.adopt_button))
+        for watched in (
+            self.return_to_pin_button,
+            self.put_the_folders_back_button,
+            self.adopt_button,
+        ):
+            self.server_version_reasons.watch(watched)
+        advanced_box.setVisible(False)
+        self.advanced_box = advanced_box
+        self.advanced_fold.toggled.connect(self._advanced_toggled)
+        column.addWidget(self.advanced_fold)
+        column.addWidget(advanced_box)
+        self.rebuild_log = _IdleLogPanel(version)
+        self.rebuild_log.run_started.connect(self._rebuild_started)
+        self.rebuild_log.run_finished.connect(self._rebuild_finished)
+        self.rebuild_stop_anyway_button = QPushButton(STOP_ANYWAY_LABEL, version)
+        self.rebuild_stop_anyway_button.setProperty("danger", True)
+        self.rebuild_stop_anyway_button.setToolTip(STOP_ANYWAY_TIP)
+        self.rebuild_stop_anyway_button.setVisible(False)
+        self.rebuild_stop_anyway_button.clicked.connect(self.rebuild_stop_now_anyway)
+        self._rebuild_force: threading.Event | None = None
+        self._rebuild_wait_relay = LineRelay(self)
+        self._rebuild_wait_relay.line.connect(self._rebuild_wait_line)
+        column.addWidget(self.rebuild_stop_anyway_button)
+        column.addWidget(self.rebuild_log)
+        box.addWidget(version)
+
+    @Slot(bool)
+    def _advanced_toggled(self, checked: bool) -> None:
+        """Fold or unfold the Advanced presses, and keep the fold's own label honest."""
+        self.advanced_box.setVisible(checked)
+        self.advanced_fold.setText("Advanced ▾" if checked else "Advanced ▸")
+
     def _build_maintenance_tab(self) -> None:
         """Backups, and a restore that cannot happen without its plan on screen.
 
@@ -17581,6 +17790,8 @@ class ControllerView(QWidget):
         """
         tab = QWidget(self)
         box = QVBoxLayout(tab)
+
+        self._build_server_version_section(tab, box)
 
         self.interrupted_label = QLabel("", tab)
         self.interrupted_label.setWordWrap(True)
@@ -18631,162 +18842,6 @@ class ControllerView(QWidget):
         self.module_folder_button.clicked.connect(self.install_module_from_folder)
         self.module_sql_button.clicked.connect(self.apply_module_sql)
         self.module_updates_button.clicked.connect(self.check_module_updates)
-        # The action `_format_report` has always named. It sits on THIS tab
-        # because this is the tab that prints "worldserver REBUILD required
-        # before this takes effect" — for 20 of the 41 shipped manifests, every
-        # one of them a `module` — and until 2026-09-08 a grep for a
-        # rebuild/compile/build button across `yulon/ui/` returned nothing at
-        # all, so that sentence named an action this app did not have.
-        #
-        # The ellipsis is the convention for "this opens a dialog first".
-        #
-        # T89: an ENTRY in the "Server build ▾" menu, with the two T64 presses
-        # below it, and no longer a button of its own. Seven buttons wrapped
-        # the bar at the 1280x800 the app opens at; the three are one act --
-        # compile this server again -- at three sources, so they are one
-        # button, on the owner's decision of 2026-09-27. Each is a `QAction`
-        # named `_action` and not `_button`, so a caller that still expects a
-        # widget (`click()`, `isHidden()`) fails at mypy rather than reading
-        # plausibly.
-        self.server_build_button = QPushButton(SERVER_BUILD_LABEL, tab)
-        self.server_build_button.setObjectName(SERVER_BUILD_BUTTON)
-        self.server_build_button.setToolTip(SERVER_BUILD_TIP)
-        self.server_build_menu = QMenu(self.server_build_button)
-        # Off by default on a `QMenu`, and each entry's sentence is the only
-        # place it says what it costs.
-        self.server_build_menu.setToolTipsVisible(True)
-        self.rebuild_action = self.server_build_menu.addAction(REBUILD_BUTTON_LABEL)
-        self.rebuild_action.triggered.connect(self.rebuild_server)
-        self.rebuild_action.setToolTip(
-            "Compile the server again so modules installed since the last build are in it. "
-            "Asks first — it takes as long as an install's compile and the server goes down."
-        )
-        # Beside the Rebuild button and never on the Catalog tab's tile, which
-        # greys to "Installed" the moment the app knows the folder: an
-        # established install is operated from its controller view. The ellipsis
-        # is the same convention — it asks first, and the dialog names every file.
-        #
-        # Dead for three of the four games, and that is the honest state rather
-        # than a gap: only `wow-tortoise`'s plan declares a phase meant to be
-        # re-applied to a server that already exists (T10/T11).
-        self.updates_button = QPushButton(native.UPDATES_BUTTON_LABEL, tab)
-        self.updates_button.clicked.connect(self.apply_database_updates)
-        self.updates_button.setToolTip(
-            "Apply the SQL this server's install plan has gained since it was installed. "
-            "Asks first, names every file, and refuses while the server is running."
-        )
-        # Beside the button it exists for, and dead for almost every install --
-        # by design, and not the same "dead" the updates button carries. That
-        # one is greyed on the CATALOG; this one is greyed until the databases
-        # themselves say `populated`, which is the state of an install this app
-        # did not make. On a server Yu'lon installed it never lights up at all,
-        # because that server already carries the row (T19).
-        self.adopt_button = QPushButton(native.ADOPT_BUTTON_LABEL, tab)
-        self.adopt_button.clicked.connect(self.adopt_as_imported)
-        self.adopt_button.setToolTip(
-            "Say that these databases are a finished import, for a server this app did not "
-            "install. Asks first, names the one row it writes, and refuses while the server "
-            "is running. Yu'lon cannot check the import finished -- you are saying so."
-        )
-        # T64, immediately below Rebuild (right of it, until T89 made the three
-        # one menu), which is what the approved design asks for: the two are
-        # the same act -- compile this server again -- and they differ only in
-        # what is compiled. Put anywhere else, a user looking for "how do I get
-        # the newest code" would find the press that recompiles the same commit.
-        #
-        # ABSENT rather than greyed where there is no route, which is the one
-        # place this tab breaks its own rule (see `ControllerServices.
-        # update_to_latest`): for a WSL-resident server or an entry the catalog
-        # does not offer this for, there is nothing that would ever enable it.
-        self.update_to_latest_action = self.server_build_menu.addAction(
-            UPDATE_TO_LATEST_BUTTON_LABEL
-        )
-        self.update_to_latest_action.triggered.connect(self.update_to_latest)
-        self.update_to_latest_action.setToolTip(
-            "Fetch the newest code from the repositories this server was built from and compile "
-            "it. Asks first, and offers a backup: this is code nobody has tested with this app."
-        )
-        self.update_to_latest_action.setVisible(self.services.update_to_latest is not None)
-        # Hidden until this install has actually been moved off its pins, and
-        # that is not the same rule as the entry above. There is nothing to
-        # return FROM on a server that is still on the commit the gates ran on,
-        # and a live "Return to the tested pin…" there would offer a multi-hour
-        # compile that ends exactly where it started.
-        self.return_to_pin_action = self.server_build_menu.addAction(RETURN_TO_PIN_BUTTON_LABEL)
-        self.return_to_pin_action.triggered.connect(self.return_to_the_tested_pin)
-        self.return_to_pin_action.setToolTip(
-            "Compile the server again from the commit this app was tested against. It does not "
-            "undo anything the newer server wrote into your databases."
-        )
-        self.return_to_pin_action.setVisible(False)
-        # T786: T766's press, the way out of the Start and Rebuild refusals that name it. Hidden
-        # until the engine says the press is offered (`_refresh_put_the_folders_back()`).
-        self._put_back_offered = False
-        self.put_the_folders_back_action = self.server_build_menu.addAction(
-            PUT_THE_FOLDERS_BACK_BUTTON_LABEL
-        )
-        self.put_the_folders_back_action.triggered.connect(self.put_the_folders_back)
-        self.put_the_folders_back_action.setToolTip(
-            "Put the source folders back on the build they were made from and write this app's "
-            "own files back. Asks first; compiles nothing, and the server must be stopped."
-        )
-        self.put_the_folders_back_action.setVisible(False)
-        self.server_build_button.setMenu(self.server_build_menu)
-        # The button greys when every entry it SHOWS is dead, and only then, so
-        # the bar still says "nothing here can act" without a press -- one of
-        # the two things `flow_layout`'s module docstring holds a menu costs
-        # (the other, a tooltip a touch screen cannot reach, it still does). Driven off
-        # each entry's own `changed`, so every place that enables, disables,
-        # shows or hides an entry (the busy lock, T64's backup window, T77's
-        # reading) moves the button without having to know it exists.
-        for action in self.server_build_menu.actions():
-            action.changed.connect(self._set_server_build_button)
-        self._set_server_build_button()
-        # What this install was last built from, in `native.source_revs_line()`'s
-        # words. Blank -- and the whole row hidden -- for a server still on its
-        # pins, which is every install that has never pressed the button above:
-        # a line repeating the catalog would be a reading of `catalog.json`
-        # dressed up as a reading of the folder.
-        self.source_version_label = QLabel("", tab)
-        self.source_version_label.setWordWrap(True)
-        self.source_version_label.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse
-        )
-        self.source_version_label.setVisible(False)
-        # Its own panel, not the report box above it. `module_report` is a
-        # `setPlainText` field that shows the LAST action's result, and a
-        # multi-hour job written into it would show one line and then look
-        # frozen — which is the exact reading that produced this feature's bug
-        # report. `LogPanel` is timestamped, follows the bottom, carries a
-        # ticking elapsed field and owns the Stop button, and it already exists.
-        #
-        # ONE panel for both long jobs on this tab, and shared rather than
-        # doubled: a rebuild and a database update must not run at once — they
-        # want the same containers — and a second panel would have to be locked
-        # against the first, registered with `log_panels()` for the exit path,
-        # and stopped by it. The panel's own `running` flag is that lock already.
-        self.rebuild_log = _IdleLogPanel(tab)
-        # The lock, in both directions. A rebuild replaces the containers the
-        # Server tab's Start/Stop/Remove act on, so those go dead for its
-        # duration; `rebuild_server()` refuses while `_busy` for the mirror
-        # case. Driven off the PANEL's own signals rather than set by hand
-        # around the call, so a job that fails, is stopped, or raises before its
-        # first line still unlocks — the shape `_set_busy(False)` is missed by
-        # is exactly how the Server tab's own buttons were left dead once
-        # before.
-        self.rebuild_log.run_started.connect(self._rebuild_started)
-        self.rebuild_log.run_finished.connect(self._rebuild_finished)
-        # T158: the rebuild panel's own "Stop now anyway", for a rebuild or a
-        # rollback that is waiting to stop a world still loading. Shown only
-        # while the panel's lines say so (`_watch_for_load_wait`).
-        self.rebuild_stop_anyway_button = QPushButton(STOP_ANYWAY_LABEL, tab)
-        self.rebuild_stop_anyway_button.setProperty("danger", True)
-        self.rebuild_stop_anyway_button.setToolTip(STOP_ANYWAY_TIP)
-        self.rebuild_stop_anyway_button.setVisible(False)
-        self.rebuild_stop_anyway_button.clicked.connect(self.rebuild_stop_now_anyway)
-        self._rebuild_force: threading.Event | None = None
-        self._rebuild_wait_relay = LineRelay(self)
-        self._rebuild_wait_relay.line.connect(self._rebuild_wait_line)
         # ONE action bar, where there used to be two toolbars of nine buttons:
         # the two that acted on "the selection" have moved onto the rows
         # themselves and the two custom-module presses have moved into their own
@@ -18804,14 +18859,8 @@ class ControllerView(QWidget):
         actions = self.module_actions.flow()
         actions.addWidget(self.module_updates_button)
         actions.addWidget(self.refresh_modules_button)
-        # Where the `addStretch(1)` was: the gap between the two that only read
-        # this install and the four that change it, drawn while the bar is one
-        # line and spent when it wraps.
         actions.add_gap()
-        actions.addWidget(self.adopt_button)
-        actions.addWidget(self.updates_button)
         actions.addWidget(self.module_sql_button)
-        actions.addWidget(self.server_build_button)
         # The banner, hidden until something owes a rebuild. It is above the
         # cards rather than on each owing row because the ACTION is one action
         # for all of them -- one compile covers every module installed since the
@@ -18823,9 +18872,11 @@ class ControllerView(QWidget):
         self.rebuild_banner_label.setWordWrap(True)
         self.rebuild_banner_label.setStyleSheet(f"color: {COLOR_TEXT_WARNING};")
         self.rebuild_banner_button = QPushButton(REBUILD_BUTTON_LABEL, self.rebuild_banner)
-        # The SAME slot as the toolbar's, not a copy: the dialog, the refusals
+        # The SAME slot as the section's, not a copy: the dialog, the refusals
         # and the busy gate are `rebuild_server()`'s, and a second caller that
         # skipped any of them would be a second rebuild route to keep in step.
+        # T692a: the slot brings the Maintenance tab up once the run starts, so
+        # the log it runs in is seen.
         self.rebuild_banner_button.clicked.connect(self.rebuild_server)
         banner_box.addWidget(self.rebuild_banner_label, 1)
         banner_box.addWidget(self.rebuild_banner_button)
@@ -18895,7 +18946,6 @@ class ControllerView(QWidget):
         # tab's 900 and two whole rows of forty, and at the 1280x800 the app
         # opens at it had 70 -- a scrollbar and the top of a family card.
         box.addWidget(self.module_actions)
-        box.addWidget(self.source_version_label)
         box.addWidget(self.rebuild_banner)
         box.addWidget(self.modules_panel, 1)
         box.addWidget(custom)
@@ -18917,15 +18967,13 @@ class ControllerView(QWidget):
         self.module_details = Details(tab)
         self.module_report.textChanged.connect(lambda: self.module_details.set_text(""))
         box.addWidget(self.module_details)
-        box.addWidget(self.rebuild_stop_anyway_button)
-        box.addWidget(self.rebuild_log)
         self.modules_panel.setMinimumHeight(MODULE_LIST_MIN_HEIGHT)
         # T83: the one place that decides what gives when this tab cannot hold
         # everything on it. Built after every widget above is in `box`, because
         # it walks that layout.
         self.modules_fit = _TabFit(
             tab,
-            self.rebuild_log,
+            None,
             self.module_report_strip,
             self.modules_panel,
             MODULE_LIST_MIN_HEIGHT,
@@ -18991,14 +19039,15 @@ class ControllerView(QWidget):
         # worldservers are still compiled from a checkout somebody may have
         # patched. Tying the rebuild to `store` would have taken the control
         # away from three of the four games for a reason that is about
-        # manifests.
-        self.rebuild_action.setEnabled(self.services.rebuild is not None)
+        # manifests. The press lives on the Maintenance tab now; the banner
+        # beside it reaches the same slot.
+        self._offer_rebuild_button()
         self.rebuild_banner_button.setEnabled(self.services.rebuild is not None)
         # A third gate, separate again and for the mirror reason: this one is
         # about the install PLAN, not about the store and not about the
         # checkout. It is live for the one game whose plan declares a phase to
         # be re-applied to a server that already exists.
-        self.updates_button.setEnabled(self.services.updates is not None)
+        self._offer_updates_button()
         # A fourth gate, and the only one in this method that is not settled
         # here: the reading it also needs has not been taken yet, so the button
         # starts dead and lights up (or does not) the first time the status poll
@@ -20700,7 +20749,7 @@ class ControllerView(QWidget):
         route = self.services.module_updates
         if route is None:
             return
-        self._set_busy(True, "Check for updates")
+        self._set_busy(True, "Check module updates")
         self._module_pending = "check for module updates"
         self.module_report.setPlainText(MODULE_UPDATES_RUNNING)
         self._run_module_job(route, self._module_updates_done, self._module_updates_failed)
@@ -20971,12 +21020,19 @@ class ControllerView(QWidget):
         cancel = self._rebuild_cancel()
         self._rebuild_is_compile = True
         self._rebuild_moves_sources = False
-        return self.rebuild_log.run(
+        started = self.rebuild_log.run(
             lambda: self._watch_for_load_wait(source(cancel)),
             title=f"Rebuilding {self.entry.name}",
             cancel=cancel,
             record_as=self._run_record_kind(),
         )
+        # T692a: the log is on the Maintenance tab, and the banner and a chip's
+        # button press this from the Modules tab: bring the log up once a run
+        # has started, so a declined or refused press leaves the player where
+        # they were.
+        if started:
+            self._show_page_of(self.rebuild_log)
+        return started
 
     def _rebuild_note(self) -> str:
         """The wiring's heads-up for the Rebuild question; "" when none, and never raises (T795)."""
@@ -20989,6 +21045,28 @@ class ControllerView(QWidget):
             logger.warning(f"could not read the rebuild note for {self.entry.id}: {exc}")
             return ""
 
+    def _offer_rebuild_button(self) -> None:
+        """Show Rebuild while this install has wiring for it, live while no job runs (T692a)."""
+        wired = self.services.rebuild is not None
+        self.rebuild_action.setVisible(wired)
+        if not wired:
+            self.rebuild_action.setEnabled(False)
+        elif not self._busy:
+            self._offer_build_action(self.rebuild_action)
+        else:
+            self._grey_build_action(self.rebuild_action, wait_for(self._busy_job))
+
+    def _offer_updates_button(self) -> None:
+        """Show Apply pending database updates… while this install's plan declares it (T692a)."""
+        phased = self.services.updates is not None
+        self.updates_action.setVisible(phased)
+        if not phased:
+            self.updates_action.setEnabled(False)
+        elif not self._busy:
+            self._offer_build_action(self.updates_action)
+        else:
+            self._grey_build_action(self.updates_action, wait_for(self._busy_job))
+
     def _set_update_buttons(self) -> None:
         """Both T64 presses, back to what this install can do and what is running.
 
@@ -20996,14 +21074,24 @@ class ControllerView(QWidget):
         these buttons back — a job finishing, a chained backup finishing, and a
         chained backup failing — and a rule spelled three times is a rule that
         drifts. A backup in flight keeps them dead, because `_busy` cannot see
-        one.
+        one; the buttons say so on the section's reason line (T195).
         """
-        offered = self.services.update_to_latest is not None and not self._backup_before_update
-        self.update_to_latest_action.setEnabled(offered)
-        self.return_to_pin_action.setEnabled(offered)
-        self.put_the_folders_back_action.setEnabled(
-            self._put_back_offered and not self._backup_before_update
-        )
+        backed = self._backup_before_update
+        backed_why = wait_for("the backup before the update")
+        # No route: both T64 presses stay as `_build_server_build_actions()` left
+        # them, hidden and dead. The put-back below is not one of them -- it is
+        # offered by the engine, route or none (T786) -- so it is not skipped.
+        if self.services.update_to_latest is not None:
+            if backed:
+                self._grey_build_action(self.update_to_latest_action, backed_why)
+                self._grey_build_action(self.return_to_pin_action, backed_why)
+            else:
+                self._offer_build_action(self.update_to_latest_action)
+                self._offer_build_action(self.return_to_pin_action)
+        if self._put_back_offered and not backed:
+            self._offer_build_action(self.put_the_folders_back_action)
+        elif self._put_back_offered:
+            self._grey_build_action(self.put_the_folders_back_action, backed_why)
 
     def _refresh_put_the_folders_back(self) -> None:
         """Show "Put the folders back…" exactly when the engine offers it, and read it again (T786).
@@ -21026,23 +21114,17 @@ class ControllerView(QWidget):
                 logger.warning(f"could not read whether {self.entry.id} owes a put-back: {exc}")
         self._put_back_offered = offered
         self.put_the_folders_back_action.setVisible(offered)
-        self.put_the_folders_back_action.setEnabled(
-            offered and not self._busy and not self._backup_before_update
-        )
-
-    @Slot()
-    def _set_server_build_button(self) -> None:
-        """Grey "Server build ▾" exactly when no entry it shows can act (T89).
-
-        `isEnabled()` alone is already "shown and enabled": a hidden `QAction`
-        reports itself disabled whatever it was last set to, and gets that
-        setting back when it is shown (measured, PySide6 6.11). So an entry
-        hidden for want of a route or a pin cannot light a button whose menu
-        holds nothing but a dead Rebuild.
-        """
-        self.server_build_button.setEnabled(
-            any(a.isEnabled() for a in self.server_build_menu.actions())
-        )
+        if offered and not self._busy and not self._backup_before_update:
+            self._offer_build_action(self.put_the_folders_back_action)
+        elif offered and self._backup_before_update:
+            self._grey_build_action(
+                self.put_the_folders_back_action, wait_for("the backup before the update")
+            )
+        elif offered:
+            self._grey_build_action(self.put_the_folders_back_action, wait_for(self._busy_job))
+        # T692a: the fold opens by itself while the put-back is offered.
+        if offered and not self.advanced_fold.isChecked():
+            self.advanced_fold.setChecked(True)
 
     @staticmethod
     def _module_report_options(
@@ -21094,9 +21176,16 @@ class ControllerView(QWidget):
         except OSError as exc:
             logger.warning(f"could not read what {self.entry.id} was built from: {exc}")
             said = native.SourceVersion(line="", past_the_pin=False)
+            read = False
+        else:
+            read = True
         self._last_source_version = said
-        self.source_version_label.setText(said.line)
-        self.source_version_label.setVisible(bool(said.line))
+        # T692a: on the pins the label reads ON_THE_TESTED_PIN instead of
+        # hiding. No new reading: what is already carried is the line or not.
+        # A read that failed says nothing -- it does not know the server is on
+        # its pins, and saying so would be a guess dressed up as a reading.
+        self.source_version_label.setText(said.line or (ON_THE_TESTED_PIN if read else ""))
+        self.source_version_label.setVisible(bool(said.line) or read)
         self.return_to_pin_action.setVisible(said.past_the_pin)
 
     def _refresh_upstream_news(self) -> None:
@@ -21585,7 +21674,7 @@ class ControllerView(QWidget):
         `apply_database_updates()`'s: the dialog composed before it is shown
         (composing it can refuse), Yes/No with No the default and `said_yes`,
         and the same panel -- the lock that keeps a rebuild, an updates press and
-        this one from running at once. The panel lives on the Modules tab, so
+        this one from running at once. The panel lives on the Maintenance tab, so
         the press brings it forward.
         """
         route = self.services.corrections
@@ -24415,20 +24504,20 @@ def _format_report(
                 f"  ⚠ {item} is a C++ module: it is off disk now, but the worldserver still "
                 "runs whatever was compiled into it -- worldserver REBUILD required before this "
                 f"takes effect. If {item} was in the last build it is still in there until you "
-                # T89: a removal raises no banner, so the one Rebuild left on
-                # the tab is the entry in the menu, and the sentence says so.
-                f'press "{SERVER_BUILD_LABEL}" and then "{REBUILD_BUTTON_LABEL}".'
+                # T89: a removal raises no banner, so the one Rebuild left is the
+                # section's press on Maintenance, and the sentence says so.
+                f"press {server_build_presses.under_server_build(REBUILD_BUTTON_LABEL)}."
             )
         else:
             lines.append(
                 f"  ⚠ {item} is a C++ module: it does nothing until its code is compiled "
                 "into the worldserver -- worldserver REBUILD required before this takes effect. "
                 # T155: it said "below", and the banner this report raises is
-                # ABOVE the cards and so above this box; the menu entry is the
-                # same slot and is named as the second place to find it.
+                # ABOVE the cards and so above this box; the section's press on
+                # the Maintenance tab is named as the second place to find it.
                 f'Press "{REBUILD_BUTTON_LABEL}" on the banner above the module list (it is '
-                f'also under "{SERVER_BUILD_LABEL}"); until that has run it is on disk and '
-                "inert."
+                f"also {server_build_presses.under_server_build(REBUILD_BUTTON_LABEL)}); until "
+                "that has run it is on disk and inert."
             )
             if server_moves:
                 lines.append(
@@ -24436,7 +24525,7 @@ def _format_report(
                     "server code than this server has: press "
                     f'"{server_build_presses.UPDATE_TO_LATEST}"'
                     + (f' or "{server_build_presses.RETURN_TO_PIN}"' if pin_moved else "")
-                    + f' under "{SERVER_BUILD_LABEL}" instead, which '
+                    + f" under {server_build_presses.SERVER_BUILD_PLACE} instead, which "
                     f"{'build' if pin_moved else 'builds'} the server code with {item}. If "
                     f"Yu'lon put {item} back after that build, update it here again first, without "
                     f'pressing "{REBUILD_BUTTON_LABEL}" in between.'
