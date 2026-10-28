@@ -14,6 +14,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ## Unreleased
 
 ### New
+- The server card offers **Repair the damaged table…** when a crash left a database table damaged.
 - Edit **worldserver.conf** and **authserver.conf** on the Tuning tab; settings Yu'lon manages stay locked.
 - **Update the server to latest…** on a Tortoise server also updates TortoiseBots Manager in your game client.
 - Updating a module now adds its new settings to your kept config file, leaving your own values alone.
