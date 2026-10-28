@@ -205,6 +205,14 @@ def _os_refusal(pack: ClientPack, exc: OSError) -> PackError:
     """A `PackError` for a failed read, write or folder: what failed, where, and what to do."""
     where = exc.filename or cache_dir()
     reason = exc.strerror or str(exc)
+    text = str(exc)
+    winerror = getattr(exc, "winerror", None)
+    if winerror == 225 or "contains a virus" in text.casefold():
+        return PackError(
+            f"Windows virus protection blocked the downloaded {pack.label} file, so it was "
+            "not installed. Nothing was changed. Lumenveil is optional and the rest of the "
+            "client works without it."
+        )
     return PackError(
         f"{pack.label}: Yu'lon could not use {where} ({reason}). Free some space and check "
         "that Yu'lon may write there, then press Play again; a download continues from what "
@@ -1570,6 +1578,25 @@ def wanted(
     )
 
 
+def update_state(pack: ClientPack, record: Mapping[str, Any] | None) -> str:
+    """Whether an installed pack is behind the catalog: `"not installed"`, `"current"` or `"update available"`.
+
+    Qt-free: what the Client options dialog and the launcher extras row read. `"update
+    available"` when the catalog's pinned sha256 differs from the record's installed
+    sha256. A record without a sha256 (an older pin wrote none) counts as behind too:
+    its bytes were proved against something else, so the next Play proves them again.
+    """
+    if not isinstance(record, Mapping):
+        return "not installed"
+    have = record.get("sha256")
+    if not isinstance(have, str) or not have:
+        return "update available"
+    pinned = pack.sha256
+    if pinned is None or have == pinned:
+        return "current"
+    return "update available"
+
+
 _LOADER = "version.dll"
 """The mod loader: only one of them can sit beside Wow.exe, so a foreign one refuses (D7)."""
 
@@ -1669,6 +1696,62 @@ def refuse_foreign_loader(
             "version.dll, and only one can be loaded. Take that mod out of your "
             "own client, or leave Lumenveil off."
         )
+
+
+def reap_stale_loader(
+    play_dir: Path, pack: ClientPack, record: Mapping[str, Any] | None
+) -> bool:
+    """Remove a loader the copy holds that neither the original nor a record owns (T809 W6B).
+
+    After a foreign `version.dll` refused Play, the player takes that mod out of their
+    OWN client -- but the ready-to-play copy still holds the file, so Play kept
+    refusing with advice that did nothing. Only a top-level loader name
+    (`version.dll`, whatever the case) is ever removed, and only when the step (a)
+    marker's own client no longer has it (case-folded) and no pack record owns a
+    file under that name: a recorded Lumenveil loader is never reaped here.
+    NOT called from `refuse_foreign_loader` (which touches nothing): the Play
+    pipeline and the Update button call it when that guard is about to refuse.
+    True when a file was removed (the caller re-checks); False when nothing went.
+    """
+    if not isinstance(record, Mapping):
+        record = {}
+    try:
+        marker = play_client.read_marker(play_dir)
+    except OSError:
+        return False
+    if marker is None:
+        return False
+    original = Path(marker.source_client_dir)
+    try:
+        original_names = {child.name.casefold() for child in original.iterdir()}
+    except OSError:
+        return False
+    owned: set[str] = set()
+    packs = record.get("packs")
+    if isinstance(packs, dict):
+        for entry in packs.values():
+            files = entry.get("files") if isinstance(entry, dict) else None
+            if not isinstance(files, dict):
+                continue
+            for rel in files:
+                clean = _clean_rel(rel)
+                if clean is not None and len(clean.parts) == 1:
+                    owned.add(clean.as_posix().casefold())
+    reaped = False
+    for name in foreign_files(play_dir, pack, record):
+        if name.casefold() != _LOADER:
+            continue
+        if name.casefold() in owned or _LOADER in original_names:
+            continue
+        try:
+            target = play_dir / name
+            if play_client._is_link(target):
+                continue
+            target.unlink()
+        except OSError:
+            continue
+        reaped = True
+    return reaped
 
 
 def _gate(play_dir: Path, *, game: str, server_dir: Path, what: str) -> None:

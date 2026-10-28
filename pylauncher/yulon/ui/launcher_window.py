@@ -499,7 +499,9 @@ class LauncherWindow(QWidget):
         self._online_asked = 0
         self.pack_boxes: dict[str, QCheckBox] = {}
         self.pack_sizes: dict[str, QLabel] = {}
-        self._always: dict[str, str] = {}
+        self.update_notes: dict[str, QLabel] = {}
+        self.update_buttons: dict[str, QPushButton] = {}
+        self._update_ids_cache: frozenset[str] = frozenset()
         self._borderless = False
         self._compact = False
         self.setMinimumSize(MINIMUM_SIZE)
@@ -870,6 +872,9 @@ class LauncherWindow(QWidget):
         self._extras_layout.addLayout(self._extras_rows)
         self.extras_note = _muted("", self.extras_box)
         self._extras_layout.addWidget(self.extras_note)
+        self._update_say = _muted("", self.extras_box)
+        self._update_say.setVisible(False)
+        self._extras_layout.addWidget(self._update_say)
         column.addWidget(self.extras_box)
 
         self.addons_box = QGroupBox("Addons in this client", inner)
@@ -938,6 +943,9 @@ class LauncherWindow(QWidget):
                         widget.deleteLater()
         self.pack_boxes = {}
         self.pack_sizes = {}
+        self.update_notes = {}
+        self.update_buttons = {}
+        self._update_ids_cache = self._update_ids(entry)
         here = client_packs.offered_on()
         shown = [
             pack
@@ -946,7 +954,8 @@ class LauncherWindow(QWidget):
         ]
         for pack in shown:
             row = QHBoxLayout()
-            check = QCheckBox(pack.label, self.extras_box)
+            label = pack.label + (f" {pack.version}" if pack.version else "")
+            check = QCheckBox(label, self.extras_box)
             if pack.credit or pack.description:
                 check.setToolTip(pack.credit or pack.description)
             check.clicked.connect(lambda on, pack_id=pack.id: self._pack_toggled(pack_id, on))
@@ -959,6 +968,21 @@ class LauncherWindow(QWidget):
             self._extras_rows.addLayout(row)
             self.pack_boxes[pack.id] = check
             self.pack_sizes[pack.id] = size
+            if pack.version and pack.id in self._update_ids_cache:
+                update_row = QHBoxLayout()
+                note = _muted(
+                    f"A newer {pack.label} ({pack.version}) is available.", self.extras_box
+                )
+                update_row.addWidget(note)
+                update_row.addStretch(1)
+                update = QPushButton(f"Update {pack.label}", self.extras_box)
+                update.clicked.connect(
+                    lambda _on=False, pack_id=pack.id: self._update_pack(pack_id)
+                )
+                update_row.addWidget(update)
+                self._extras_rows.addLayout(update_row)
+                self.update_notes[pack.id] = note
+                self.update_buttons[pack.id] = update
         credits = [pack.credit for pack in shown if pack.credit]
         if self.pack_boxes and credits:
             self.extras_note.setText(
@@ -1272,6 +1296,7 @@ class LauncherWindow(QWidget):
         idle = view is not None and view.play_client_busy() is None
         for box in (self.display_box, self.account_box, self.realm_box, self.extras_box):
             box.setEnabled(has_play and idle)
+        self._render_extras()
         self.play_button.setEnabled(view is not None and has_play and not self._saving)
         for button in (
             self.refresh_button,
@@ -1538,14 +1563,65 @@ class LauncherWindow(QWidget):
         chosen = record.choices["packs"] if record is not None else {}
         installed = record.packs if record is not None else {}
         entry = view.entry if view is not None else None
+        busy = view is not None and view.play_client_busy() is not None
         for pack in entry.client.packs if entry is not None else ():
             check = self.pack_boxes.get(pack.id)
             if check is None:
                 continue
             gone = pack.id in unavailable
-            check.setText(f"{pack.label} (unavailable)" if gone else pack.label)
+            label = pack.label + (f" {pack.version}" if pack.version else "")
+            check.setText(f"{label} (unavailable)" if gone else label)
             check.setChecked(bool(chosen.get(pack.id, pack.default)))
             check.setEnabled(not gone or pack.id in installed)
+            update = self.update_buttons.get(pack.id)
+            note = self.update_notes.get(pack.id)
+            behind = (
+                pack.version is not None
+                and pack.id in installed
+                and client_packs.update_state(pack, installed.get(pack.id)) == "update available"
+            )
+            if update is not None:
+                update.setVisible(behind)
+                update.setEnabled(behind and not busy)
+            if note is not None:
+                note.setVisible(behind)
+
+    def _update_ids(self, entry: CatalogEntry) -> frozenset[str]:
+        """Packs whose Update row is built: a version is pinned and a record names one."""
+        reading = self._record()
+        held = reading.packs if reading is not None else {}
+        return frozenset(
+            pack.id
+            for pack in entry.client.packs
+            if pack.version
+            and pack.id in held
+            and client_packs.update_state(pack, held.get(pack.id)) == "update available"
+        )
+
+    @Slot()
+    def _update_pack(self, pack_id: str) -> None:
+        """Run one installed pack's update through the shared apply; one sentence said."""
+        view = self._pressing()
+        if view is None or not self._has_play():
+            return
+        for button in self.update_buttons.values():
+            button.setEnabled(False)
+        self._update_say.setText("")
+        self._update_say.setVisible(False)
+        view.update_client_pack(
+            pack_id,
+            done=lambda _pack, sentence: self._update_done(sentence),
+            failed=lambda _pack, sentence: self._update_failed(sentence),
+        )
+
+    def _update_done(self, sentence: str) -> None:
+        self._update_say.setText(sentence)
+        self._update_say.setVisible(True)
+
+    def _update_failed(self, sentence: str) -> None:
+        self._update_say.setText(sentence)
+        self._update_say.setVisible(True)
+        self._render_enabled()
 
     def _render_addons(self) -> None:
         names = self._client.addons if self._client is not None else ()

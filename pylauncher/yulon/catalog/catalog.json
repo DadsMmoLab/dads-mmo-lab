@@ -106,6 +106,7 @@
             "id": "lumenveil",
             "label": "Lumenveil",
             "description": "Volumetric fog, sun and moon shafts, lamp light at night and moving water for the 3.3.5a client.",
+            "version": "0.1.0",
             "source": {
               "kind": "url",
               "url": "https://github.com/lumenveil/Lumenveil/releases/download/v0.1.0/Lumenveil-0.1.0.zip"
@@ -2752,6 +2753,7 @@
             "id": "lumenveil",
             "label": "Lumenveil",
             "description": "Volumetric fog, sun and moon shafts, lamp light at night and moving water for the 3.3.5a client.",
+            "version": "0.1.0",
             "source": {
               "kind": "url",
               "url": "https://github.com/lumenveil/Lumenveil/releases/download/v0.1.0/Lumenveil-0.1.0.zip"

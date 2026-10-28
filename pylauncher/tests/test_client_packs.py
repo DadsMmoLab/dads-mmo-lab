@@ -4650,3 +4650,92 @@ def test_a_repair_marks_an_edited_output_for_regeneration(
     assert len(retry) == 2, "the edited output regenerates instead of refusing"
     assert after["files"]["lampdata.bin"] == _sha(b"lamps")
     assert "setup_pending" not in after
+
+
+def test_update_state_is_current_when_the_record_matches_the_pin(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T809 W6: an installed record at the pinned sha256 is current, not an update."""
+    monkeypatch.setattr(client_packs.platform, "detect", lambda: "windows")
+    pack, done = _install_lumen(rig)
+    assert client_packs.update_state(pack, {"sha256": pack.sha256}) == "current"
+    assert client_packs.update_state(pack, done) == "update available"
+    assert client_packs.update_state(pack, None) == "not installed"
+
+
+def test_update_state_is_available_after_a_pin_bump_and_current_after_update() -> None:
+    """T809 W6: a pin bump reads as available; the bumped record reads as current."""
+    pack = _lumen_pack()
+    bumped = _lumen_pack(sha256="0" * 64)
+    assert client_packs.update_state(pack, {"sha256": bumped.sha256}) == "update available"
+    assert client_packs.update_state(pack, {}) == "update available"
+    assert client_packs.update_state(bumped, {"sha256": pack.sha256}) == "update available"
+    assert client_packs.update_state(pack, {"sha256": pack.sha256}) == "current"
+    assert client_packs.update_state(pack, {"sha256": None}) == "update available"
+    assert client_packs.update_state(pack, {"sha256": ""}) == "update available"
+
+
+def test_defender_blocking_the_zip_says_so_in_one_plain_sentence() -> None:
+    """T809 W6A: winerror 225 maps to the virus-protection sentence, never the disk one."""
+    pack = _lumen_pack()
+    blocked = OSError(22, "Invalid argument")
+    blocked.winerror = 225  # type: ignore[attr-defined]
+    blocked.filename = str("Lumenveil-0.1.0.zip.part")
+    refused = client_packs._os_refusal(pack, blocked)
+    assert "virus protection blocked" in str(refused)
+    assert "Nothing was changed" in str(refused)
+    assert "Free some space" not in str(refused)
+    assert "exclusion" not in str(refused).casefold()
+    assert "turn" not in str(refused).casefold()
+    assert "`" not in str(refused)
+
+
+def test_virus_text_without_a_winerror_says_so_too() -> None:
+    """T809 W6A mutation: the 'contains a virus' text alone takes the same sentence."""
+    pack = _lumen_pack()
+    refused = client_packs._os_refusal(pack, OSError("[WinError 225] [contains a virus] foo"))
+    assert "virus protection blocked" in str(refused)
+    assert "Free some space" not in str(refused)
+
+
+def test_an_ordinary_disk_failure_keeps_the_old_sentence() -> None:
+    """T809 W6A mutation: a real disk error still says the free-space line."""
+    pack = _lumen_pack()
+    refused = client_packs._os_refusal(pack, OSError(28, "No space left on device"))
+    assert "Free some space" in str(refused)
+    assert "virus" not in str(refused).casefold()
+
+
+def test_a_stale_copy_loader_goes_when_the_original_lost_it(rig: _Rig) -> None:
+    """T809 W6B: the copy's loader with no original and no owner is reaped, not refused."""
+    pack = _lumen_pack()
+    (rig.original / "version.dll").write_bytes(b"someone else's loader")
+    (rig.play / "version.dll").write_bytes(b"someone else's loader")
+    with pytest.raises(PackError, match="another mod's"):
+        client_packs.refuse_foreign_loader(rig.play, pack, None)
+    assert client_packs.reap_stale_loader(rig.play, pack, None) is False
+    assert (rig.play / "version.dll").exists(), "the guard touches nothing; the original keeps it"
+    (rig.original / "version.dll").unlink()
+    assert client_packs.reap_stale_loader(rig.play, pack, None) is True
+    assert not (rig.play / "version.dll").exists()
+    client_packs.refuse_foreign_loader(rig.play, pack, None)
+
+def test_a_loader_the_original_keeps_still_refuses(rig: _Rig) -> None:
+    """T809 W6B mutation: the original still holding it means the refusal stands."""
+    pack = _lumen_pack()
+    (rig.original / "version.dll").write_bytes(b"someone else's loader")
+    (rig.play / "VERSION.dll").write_bytes(b"someone else's loader")
+    with pytest.raises(PackError, match="another mod's"):
+        client_packs.refuse_foreign_loader(rig.play, pack, None)
+    assert client_packs.reap_stale_loader(rig.play, pack, None) is False
+    assert (rig.play / "VERSION.dll").exists(), "nothing is touched when the original keeps it"
+
+
+def test_a_recorded_lumenveil_loader_is_never_reaped(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T809 W6B: Lumenveil's own recorded loader stays even when the original lacks it."""
+    monkeypatch.setattr(client_packs.platform, "detect", lambda: "windows")
+    pack, done = _install_lumen(rig)
+    assert client_packs.reap_stale_loader(rig.play, pack, done) is False
+    client_packs.refuse_foreign_loader(rig.play, pack, done)

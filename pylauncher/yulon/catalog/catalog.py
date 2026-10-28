@@ -2813,6 +2813,15 @@ class ClientPack(_Strict):
 
     id: Slug
     label: str = Field(min_length=1)
+    version: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=32,
+        description=(
+            "The display version shown beside the pack (set for lumenveil from its URL); "
+            "the played version is the record's installed version, never this."
+        ),
+    )
     description: str = ""
     source: PackSource
     sha256: Sha256 | None = None

@@ -1211,6 +1211,9 @@ class ClientOptionsBox(QWidget):
         *,
         installed: Collection[str] = (),
         unavailable: Collection[str] = (),
+        records: Mapping[str, Mapping[str, Any]] | None = None,
+        on_update: Callable[[str], None] | None = None,
+        updates_enabled: bool = True,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -1237,6 +1240,9 @@ class ClientOptionsBox(QWidget):
         box.addWidget(self.extra_label)
         self.pack_boxes: dict[str, QCheckBox] = {}
         self._sizes: dict[str, int] = {}
+        self.update_notes: dict[str, QLabel] = {}
+        self.update_buttons: dict[str, QPushButton] = {}
+        held = records or {}
         for pack in shown_packs(client):
             gone = pack.id in unavailable
             check = QCheckBox(self._pack_text(pack, gone), self)
@@ -1251,6 +1257,21 @@ class ClientOptionsBox(QWidget):
             check.toggled.connect(self._update_extra)
             self.pack_boxes[pack.id] = check
             box.addWidget(check)
+            if (
+                pack.id in installed
+                and pack.version
+                and client_packs.update_state(pack, held.get(pack.id)) == "update available"
+            ):
+                note = QLabel(f"A newer {pack.label} ({pack.version}) is available.", self)
+                note.setWordWrap(True)
+                box.addWidget(note)
+                self.update_notes[pack.id] = note
+                if on_update is not None:
+                    update = QPushButton(f"Update {pack.label}", self)
+                    update.setEnabled(updates_enabled)
+                    update.clicked.connect(lambda _on=False, pack_id=pack.id: on_update(pack_id))
+                    box.addWidget(update)
+                    self.update_buttons[pack.id] = update
         self.exe_boxes: dict[str, QCheckBox] = {}
         if client.exe_patch is not None:
             for name, option in client.exe_patch.options.items():
@@ -1263,6 +1284,8 @@ class ClientOptionsBox(QWidget):
     @staticmethod
     def _pack_text(pack: ClientPack, gone: bool) -> str:
         text = pack.label
+        if pack.version:
+            text += f" {pack.version}"
         if pack.description:
             text += f" — {pack.description}"
         if pack.size_hint:
@@ -1292,13 +1315,15 @@ class ClientOptionsOffer:
     """What "Client options…" shows: the client section, the record's choices, what is where.
 
     `installed` are the pack ids the record says are in the ready-to-play client;
-    `unavailable` the optional packs whose address answered 404 at the last Play.
+    `unavailable` the optional packs whose address answered 404 at the last Play;
+    `records` the record's per-pack entries, so the dialog can say an update is available.
     """
 
     client: Client
     choices: dict[str, Any]
     installed: frozenset[str]
     unavailable: frozenset[str]
+    records: Mapping[str, Mapping[str, Any]] | None = None
 
 
 ClientOptionsAsker = Callable[[QWidget, ClientOptionsOffer], dict[str, Any] | None]
@@ -1308,9 +1333,13 @@ ClientOptionsAsker = Callable[[QWidget, ClientOptionsOffer], dict[str, Any] | No
 class ClientOptionsDialog(QDialog):
     """ "Client options…": the checkboxes, Save and Cancel. Save applies at the next Play."""
 
-    def __init__(self, offer: ClientOptionsOffer, parent: QWidget | None = None) -> None:
+    def __init__(
+        self, offer: ClientOptionsOffer, parent: QWidget | None = None,
+        view: ControllerView | None = None,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle(CLIENT_OPTIONS_LABEL.rstrip("…"))
+        self._view = view
         box = QVBoxLayout(self)
         intro = QLabel(
             "Choose what this server's ready-to-play client has. A change takes effect "
@@ -1319,11 +1348,18 @@ class ClientOptionsDialog(QDialog):
         )
         intro.setWordWrap(True)
         box.addWidget(intro)
+        self._say = QLabel("", self)
+        self._say.setWordWrap(True)
+        self._say.setVisible(False)
+        box.addWidget(self._say)
         self.options = ClientOptionsBox(
             offer.client,
             offer.choices,
             installed=offer.installed,
             unavailable=offer.unavailable,
+            records=offer.records,
+            on_update=self.update_pack,
+            updates_enabled=self._updates_idle(),
             parent=self,
         )
         box.addWidget(self.options)
@@ -1334,10 +1370,45 @@ class ClientOptionsDialog(QDialog):
         buttons.rejected.connect(self.reject)
         box.addWidget(buttons)
 
+    def _updates_idle(self) -> bool:
+        """Whether the Update button starts enabled: never on a held client."""
+        view = self._view
+        if view is None:
+            return True
+        return view.play_client_busy() is None
 
-def ask_client_options(parent: QWidget, offer: ClientOptionsOffer) -> dict[str, Any] | None:
+    @Slot()
+    def update_pack(self, pack_id: str) -> None:
+        """Run one pack's update through the view's shared apply; say done or failed in a line."""
+        view = self._view
+        if view is None:
+            return
+        for button in self.options.update_buttons.values():
+            button.setEnabled(False)
+        self._say.setText("")
+        self._say.setVisible(False)
+        view.update_client_pack(
+            pack_id,
+            done=lambda _pack, sentence: self._update_done(sentence),
+            failed=lambda _pack, sentence: self._update_failed(sentence),
+        )
+
+    def _update_done(self, sentence: str) -> None:
+        self._say.setText(sentence)
+        self._say.setVisible(True)
+
+    def _update_failed(self, sentence: str) -> None:
+        self._say.setText(sentence)
+        self._say.setVisible(True)
+        for button in self.options.update_buttons.values():
+            button.setEnabled(self._updates_idle())
+
+
+def ask_client_options(
+    parent: QWidget, offer: ClientOptionsOffer, view: ControllerView | None = None,
+) -> dict[str, Any] | None:
     """The real `ClientOptionsAsker`: the dialog, modal; None for Cancel."""
-    dialog = ClientOptionsDialog(offer, parent)
+    dialog = ClientOptionsDialog(offer, parent, view=view)
     if dialog.exec() != QDialog.DialogCode.Accepted:
         return None
     return dialog.options.choices()
@@ -13528,7 +13599,9 @@ class ControllerView(QWidget):
                 try:
                     client_packs.refuse_foreign_loader(play, pack, packs.get(pack.id))
                 except client_packs.PackError as exc:
-                    raise _PackStopped(pack, str(exc)) from exc
+                    if not client_packs.reap_stale_loader(play, pack, packs.get(pack.id)):
+                        raise _PackStopped(pack, str(exc)) from exc
+                    client_packs.refuse_foreign_loader(play, pack, packs.get(pack.id))
             say(f"Getting {pack.label}…")
             try:
                 # Each kind by name, and nothing falls through to the downloader: a
@@ -13896,6 +13969,107 @@ class ControllerView(QWidget):
 
         return report
 
+    def _lumen_update_work(self, pack_id: str) -> tuple[str, str]:
+        """Fetch, prove, install (with `previous=`) and set up one installed pack (T809 W6).
+
+        The shared Play apply for a single pack: fetch by kind, then `install` over the
+        recorded entry (`previous=`), then `run_setup` over the new install. The record is
+        written at every step like Play's (pending note first, final entry after setup),
+        so a killed update resumes where Play would. Returns `(pack_id, done_sentence)`.
+        Anything the player reads comes back as `PackError`, so a failed update raises
+        with the record as it was and says so in one sentence.
+        """
+        play = self.services.play_client_dir
+        assert play is not None
+        client = self.entry.client
+        game = self.entry.id
+        server_dir = self.services.controller.server_dir
+        pack = next(p for p in client.packs if p.id == pack_id)
+        say = self._play_relay.emit_line
+        cancelled = self._play_cancel.is_set
+        packs = dict(client_packs.read_record(play).packs)
+        have = packs.get(pack.id)
+
+        def save() -> None:
+            record = client_packs.read_record(play)
+            client_packs.write_record(
+                play,
+                client_packs.PackRecord(
+                    dict(packs), record.exe, record.choices, record.config_seeded,
+                    record.launcher,
+                ),
+                game=game,
+                server_dir=server_dir,
+            )
+
+        say(f"Getting {pack.label}…")
+        kind = pack.source.kind
+        try:
+            if kind == "checkout":
+                fetched = client_packs.fetch_checkout(pack, server_dir)
+            elif kind == "checkout_folder":
+                fetched = client_packs.fetch_checkout_folder(
+                    pack, server_dir, entry_id=game, cancelled=cancelled
+                )
+            elif kind == "url":
+                fetched = client_packs.fetch_url(
+                    pack,
+                    entry_id=game,
+                    allowed_hosts=client.hosts(),
+                    progress=self._download_progress(pack),
+                    cancelled=cancelled,
+                )
+            else:
+                assert_never(kind)
+        except client_packs.Cancelled:
+            raise
+        except client_packs.PackUnavailable as exc:
+            raise client_packs.PackError(str(exc)) from exc
+        except client_packs.PackError as exc:
+            raise client_packs.PackError(
+                _checkout_refusal(
+                    pack, server_dir, wsl_distro=self.services.controller.wsl_distro
+                )
+                or str(exc)
+            ) from exc
+        if client_packs.pack_installs_loader(pack):
+            try:
+                client_packs.refuse_foreign_loader(play, pack, have)
+            except client_packs.PackError as exc:
+                if not client_packs.reap_stale_loader(play, pack, have):
+                    raise client_packs.PackError(str(exc)) from exc
+                client_packs.refuse_foreign_loader(play, pack, have)
+        try:
+            done = client_packs.install(
+                play, pack, fetched, game=game, server_dir=server_dir, previous=have,
+            )
+        except client_packs.PartialInstall as exc:
+            packs[pack.id] = exc.entry
+            save()
+            raise client_packs.PackError(str(exc)) from exc
+        except client_packs.PackError as exc:
+            raise client_packs.PackError(str(exc)) from exc
+        packs[pack.id] = done
+        save()
+        if pack.setup is not None:
+            say(f"Preparing {pack.label}\u2019s light and water data (1-5 minutes)…")
+            pack_key = pack.id
+
+            def keep_pending(pending_entry: Mapping[str, Any]) -> None:
+                packs[pack_key] = dict(pending_entry)
+                save()
+
+            try:
+                packs[pack.id] = client_packs.run_setup(
+                    play, pack, done, game=game, server_dir=server_dir,
+                    record=have, on_pending=keep_pending,
+                )
+            except client_packs.PackError as exc:
+                raise client_packs.PackError(str(exc)) from exc
+            save()
+        label = pack.version or pack.label
+        return pack.id, f"{label} is updated."
+
     @staticmethod
     def _removal_notes(
         play: Path,
@@ -14087,8 +14261,12 @@ class ControllerView(QWidget):
             choices=record.choices,
             installed=frozenset(record.packs),
             unavailable=self._client_unavailable,
+            records=dict(record.packs),
         )
-        chosen = self._client_options_asker(self, offer)
+        if self._client_options_asker is ask_client_options:
+            chosen = ask_client_options(self, offer, view=self)
+        else:
+            chosen = self._client_options_asker(self, offer)
         if chosen is None:
             return
         # Again: the dialog is modal, and a job may have started behind it.
@@ -14117,6 +14295,81 @@ class ControllerView(QWidget):
             )
 
         self._run(save, self._client_options_saved, self._play_client_job_failed)
+
+    def update_client_pack(
+        self,
+        pack_id: str,
+        *,
+        done: Callable[[ClientPack, str], None] | None = None,
+        failed: Callable[[ClientPack, str], None] | None = None,
+    ) -> None:
+        """Update one installed pack now through the shared Play apply (T809 W6).
+
+        The button's path: the SAME fetch/prove/install/setup as Play for that pack
+        (`_lumen_update_work`, `previous=` the recorded entry), on the worker under the
+        play-client lock. `done`/`failed` hear the pack and one plain sentence; a failure
+        leaves the record as it was, so the old pack keeps working. Refused while a
+        server hold, a module job, or a Play (or another pack write) runs; off Windows
+        the pack's own checkbox is never shown, so no button is either.
+        """
+        play = self.services.play_client_dir
+        pack = next((p for p in self.entry.client.packs if p.id == pack_id), None)
+        if self.services.set_play_client_dir is None or play is None or pack is None:
+            return
+        if client_packs.update_state(pack, client_packs.read_record(play).packs.get(pack_id)) != "update available":
+            return
+        refusal = self._play_client_refusal()
+        if refusal is None and self._play_pending:
+            refusal = PLAY_PENDING
+        if refusal is not None:
+            if failed is not None:
+                failed(pack, refusal)
+            else:
+                self._play_refused(refusal)
+            return
+        marker = self._usable_play_client()
+        if marker is None:
+            return
+        self._play_client_running = True
+        self._hold_busy()
+        self._say_play(f"Updating {pack.label}…")
+        self._run(
+            lambda: self._lumen_update_work(pack_id),
+            lambda result: self._update_done(pack, result, done),
+            lambda exc: self._update_failed(pack, exc, done, failed),
+        )
+
+    @Slot(object)
+    def _update_done(
+        self, pack: ClientPack, result: object,
+        done: Callable[[ClientPack, str], None] | None,
+    ) -> None:
+        """An update's worker answered: give back the lock and hand on its sentence."""
+        self._release_play_client()
+        sentence = result[1] if isinstance(result, tuple) else f"{pack.label} is updated."
+        if done is not None:
+            done(pack, sentence)
+        else:
+            self._say_play(sentence)
+
+    @Slot(object)
+    def _update_failed(
+        self, pack: ClientPack, exc: object,
+        done: Callable[[ClientPack, str], None] | None,
+        failed: Callable[[ClientPack, str], None] | None,
+    ) -> None:
+        """An update failed: the record is as it was, so the old pack keeps working."""
+        self._release_play_client()
+        if isinstance(exc, client_packs.Cancelled):
+            sentence = "Update cancelled. Nothing was changed."
+        elif isinstance(exc, client_packs.PackError):
+            sentence = f"{pack.label} could not be updated: {exc}"
+        else:
+            sentence = f"{pack.label} could not be updated."
+        if failed is not None:
+            failed(pack, sentence)
+        else:
+            self._play_refused(sentence)
 
     @Slot(object)
     def _client_options_saved(self, _result: object) -> None:

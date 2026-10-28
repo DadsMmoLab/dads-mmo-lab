@@ -27563,6 +27563,7 @@ def test_play_with_a_foreign_loader_refuses_lumenveil_but_not_an_addons_pack(
     original = _game_client(tmp_path / "clients" / "WoW")
     play = _built(original, tmp_path)
     (play / "Data" / "enUS").mkdir(parents=True, exist_ok=True)
+    (original / "version.dll").write_bytes(b"someone else's loader")
     (play / "version.dll").write_bytes(b"someone else's loader")
     site.members["lumenveil"] = _lumen_members()
     site.members["addons"] = {"Foo/Foo.toc": b"## Interface: 30300"}
@@ -27588,6 +27589,132 @@ def test_play_with_a_foreign_loader_refuses_lumenveil_but_not_an_addons_pack(
     assert len(launched) == 1
     assert (play / "version.dll").read_bytes() == b"someone else's loader", "untouched"
     assert (play / "Interface" / "AddOns" / "Foo" / "Foo.toc").is_file()
+
+
+def test_play_after_removing_the_foreign_loader_from_the_original_proceeds(
+    qapp: object, ps: _Ps, tmp_path: Path, site: _Site, steps: list[str],
+    asks: _Asks, monkeypatch: pytest.MonkeyPatch, launched: list[object],
+) -> None:
+    """T809 W6B: the copy's stale loader goes once the original lost it; Play proceeds."""
+    entry, original, play, seen, _ = _lumen_play(tmp_path, monkeypatch, site)
+    (original / "version.dll").write_bytes(b"someone else's loader")
+    (play / "version.dll").write_bytes(b"someone else's loader")
+    (original / "version.dll").unlink()
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+
+    view.play()
+
+    assert len(launched) == 1, "the stale loader is reaped and Play starts the game"
+    assert asks.calls == [], "no refusal question once the original lost it"
+    assert (play / "version.dll").read_bytes() == b"lumen loader"
+
+
+def test_an_update_button_appears_after_a_pin_bump_and_updates_through_the_shared_apply(
+    qapp: object, ps: _Ps, tmp_path: Path, site: _Site, steps: list[str],
+    asks: _Asks, monkeypatch: pytest.MonkeyPatch, launched: list[object],
+) -> None:
+    """T809 W6: a pin bump shows the note and the button; the button runs the shared apply."""
+    ClientOptionsDialog = controller_view_module.ClientOptionsDialog
+    entry, original, play, seen, _ = _lumen_play(tmp_path, monkeypatch, site)
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+
+    view.play()
+
+    site.members["lumenveil"] = {
+        **_lumen_members(), "version.dll": b"lumen loader v2",
+        "Lumenveil/lamp_extract.exe": b"exe v2",
+    }
+    site.version = "2"
+    seen.clear()
+    again, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    record = client_packs.read_record(play)
+    bumped = entry.client.packs[0].model_copy(update={"sha256": "0" * 64})
+    bumped_entry = entry.model_copy(
+        update={"client": entry.client.model_copy(update={"packs": (bumped,)})}
+    )
+    again.entry = bumped_entry
+    offer = controller_view_module.ClientOptionsOffer(
+        client=bumped_entry.client,
+        choices=record.choices,
+        installed=frozenset(record.packs),
+        unavailable=frozenset(),
+        records=dict(record.packs),
+    )
+    dialog = ClientOptionsDialog(offer, None, view=again)
+
+    assert list(dialog.options.update_notes) == ["lumenveil"]
+    assert "A newer Lumenveil (0.1.0) is available." in dialog.options.update_notes["lumenveil"].text()
+    assert list(dialog.options.update_buttons) == ["lumenveil"]
+    assert "Lumenveil 0.1.0" in dialog.options.pack_boxes["lumenveil"].text()
+    assert dialog.options.update_buttons["lumenveil"].isEnabled()
+    calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    real_install = client_packs.install
+
+    def spy_install(play_dir: object, pack: object, fetched: object, **kw: object) -> object:
+        calls.append(((play_dir, pack, fetched), dict(kw)))
+        return real_install(play_dir, pack, fetched, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(client_packs, "install", spy_install)
+    said: list[str] = []
+    dialog.update_pack("lumenveil")
+    dialog._say.setVisible(True)
+    said.append(dialog._say.text())
+    # The fake site proves the new zip under its own hash: the bumped pin differs, so the
+    # apply runs the shared engine path and the record takes the fetched hash.
+    assert len(calls) == 1 and calls[0][1].get("previous") == dict(record.packs["lumenveil"])
+    done = client_packs.read_record(play).packs["lumenveil"]
+    assert done["sha256"] != record.packs["lumenveil"]["sha256"]
+    assert "setup_pending" not in done
+    assert said and "\n" not in said[0], "one plain sentence"
+
+
+def test_no_update_button_when_current_and_failed_update_keeps_the_old_pack(
+    qapp: object, ps: _Ps, tmp_path: Path, site: _Site, steps: list[str],
+    asks: _Asks, monkeypatch: pytest.MonkeyPatch, launched: list[object],
+) -> None:
+    """T809 W6: current shows no button; a failed update keeps the record and says one line."""
+    ClientOptionsDialog = controller_view_module.ClientOptionsDialog
+    entry, original, play, seen, _ = _lumen_play(tmp_path, monkeypatch, site)
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+
+    view.play()
+
+    record = client_packs.read_record(play)
+    before = dict(record.packs["lumenveil"])
+    matched = entry.client.packs[0].model_copy(update={"sha256": before["sha256"]})
+    matched_entry = entry.model_copy(
+        update={"client": entry.client.model_copy(update={"packs": (matched,)})}
+    )
+    offer = controller_view_module.ClientOptionsOffer(
+        client=matched_entry.client,
+        choices=record.choices,
+        installed=frozenset(record.packs),
+        unavailable=frozenset(),
+        records=dict(record.packs),
+    )
+    dialog = ClientOptionsDialog(offer, None, view=view)
+    assert dialog.options.update_buttons == {}, "current: no button"
+    assert dialog.options.update_notes == {}
+
+    bumped = entry.client.packs[0].model_copy(update={"sha256": "0" * 64})
+    view.entry = entry.model_copy(
+        update={"client": entry.client.model_copy(update={"packs": (bumped,)})}
+    )
+    site.errors["lumenveil"] = client_packs.PackError("the makers moved it.")
+    said: list[tuple[object, str]] = []
+    view.update_client_pack(
+        "lumenveil",
+        done=lambda pack, sentence: said.append((pack, sentence)),
+        failed=lambda pack, sentence: said.append((pack, sentence)),
+    )
+    record = client_packs.read_record(play)
+    assert record.packs["lumenveil"] == before, "a failed update keeps the old pack working"
+    assert (play / "version.dll").read_bytes() == b"lumen loader"
+    assert len(said) == 1 and "could not be updated" in said[0][1]
+    assert said[0][1].count(".") >= 1 and "\n" not in said[0][1], "one plain sentence"
 
 def test_make_saves_the_choices_into_the_record(
     qapp: object, ps: _Ps, tmp_path: Path, site: _Site
