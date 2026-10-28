@@ -732,7 +732,10 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         "read_only_confs",
         "the server's own confs the Tuning raw editor lists read-only (T43, T179 fix round 1)",
         {
-            "azerothcore": supported("its three confs, `AZEROTHCORE_CORE_FILES`"),
+            "azerothcore": supported(
+                "since T819 its three confs are editable with locked keys "
+                "(`yulon.core_conf`), so none is listed read-only"
+            ),
             "cmangos": supported(
                 "as before T179: handed WotLK's paths, which its install never has, so its raw "
                 "editor lists module confs only"
@@ -741,7 +744,22 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
                 "the world and login servers' confs (spec §2); its bot conf is the bot card's"
             ),
         },
-        hits=(".trinitycore", ".trinitycore"),
+        hits=("'azerothcore'", ".trinitycore", ".trinitycore"),
+    ),
+    Site(
+        "yulon.core_conf",
+        "is_editable_core",
+        "whether this game owns editable core confs (T819: the Tuning tab lists them "
+        "editable with locked keys instead of read-only)",
+        {
+            "azerothcore": supported("its three confs are the editable ones"),
+            "cmangos": not_applicable("only the azerothcore family owns editable core confs"),
+            "trinitycore": not_applicable(
+                "only the azerothcore family owns editable core confs; its own confs stay "
+                "read-only"
+            ),
+        },
+        hits=("'azerothcore'",),
     ),
     Site(
         "yulon.ui.controller_view",

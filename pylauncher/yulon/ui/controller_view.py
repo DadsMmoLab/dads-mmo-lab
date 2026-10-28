@@ -23372,7 +23372,10 @@ class ControllerView(QWidget):
                 core_conf.masked_view(raw),
                 read_only=False,
                 note=note,
-                shadowed=(),
+                shadowed=composegen.shadowed_by_env(
+                    raw,
+                    composegen.shadowing_env(self.entry, self.services.controller.server_dir),
+                ),
                 locked=core_conf.locked(self.entry, server_dir, file, raw),
                 defaults=core_conf.default_lines(dist_text),
             )

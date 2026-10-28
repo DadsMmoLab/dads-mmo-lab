@@ -3257,6 +3257,19 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "and Yu'lon's records skipped) to READ its files into a move package. It decides no "
         "write: the files are read, never changed, and the package is written elsewhere"
     ),
+    ("move_flows.py", "_sql_files_under"): (
+        "T802. Walks one update folder (`updates_include` under the server folder, or a "
+        "module's `data/sql/<pool>`) for the `.sql` files the one-shot updater would run "
+        "after a pack import. Read-only; it decides only whether the tail proof may let "
+        "the import in. A folder that is not there holds none, and a listing that "
+        "fails, or a folder reached through a link, answers None, which refuses"
+    ),
+    ("move_flows.py", "_module_sql_folders"): (
+        "T802. Lists `modules/` and each module's `data/sql/` for the `<pool>` folders "
+        "the updater walks, as a superset of what the one-shot is handed, so a withheld "
+        "module can only refuse, never let a file through. Read-only; an unreadable "
+        "folder answers None, which refuses"
+    ),
     ("catalog/families/mmaps.py", "_keep_finished"): (
         "T209. Lists `data/mmaps` -- the pathfinding job's own output folder, refused when it "
         "or `data/` is a link -- to remove each `.mmtile` that is not whole (the tile the "

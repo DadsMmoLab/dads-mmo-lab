@@ -301,7 +301,7 @@ FOLLOW_CURRENT = (
 )
 FOLLOW_UNKNOWN = (
     "{name} was not updated because Yu'lon does not know your game client folder; set it "
-    "on the Server tab, then press Update on its row on the Modules tab."
+    "on the Server tab, then update it from its row on the Modules tab."
 )
 FOLLOW_ELSEWHERE = (
     "{name} was not updated because your game client folder cannot be reached from this "
@@ -313,7 +313,7 @@ FOLLOW_NOT_INSTALLED = (
 )
 FOLLOW_FAILED = (
     "The server update is done, but {name} in your game client could not be updated ({why}); "
-    "press Update on its row on the Modules tab to try again."
+    "update it again from its row on the Modules tab."
 )
 
 
