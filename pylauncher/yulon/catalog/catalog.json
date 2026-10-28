@@ -100,6 +100,111 @@
         "required_build": 12340,
         "notes": [
           "set realmlist 127.0.0.1 (or the host's LAN/public IP for other players)"
+        ],
+        "packs": [
+          {
+            "id": "lumenveil",
+            "label": "Lumenveil",
+            "description": "Volumetric fog, sun and moon shafts, lamp light at night and moving water for the 3.3.5a client.",
+            "version": "0.1.0",
+            "source": {
+              "kind": "url",
+              "url": "https://github.com/lumenveil/Lumenveil/releases/download/v0.1.0/Lumenveil-0.1.0.zip"
+            },
+            "sha256": "78d1e1ca7450858a67d6ec2298343c3f67cda9aa920aa800e28982d8d3fee83b",
+            "install": [
+              {
+                "member": "version.dll",
+                "to": "version.dll"
+              },
+              {
+                "member": "CoAVolFog.dll",
+                "to": "CoAVolFog.dll"
+              },
+              {
+                "member": "CoAVolFog.ini",
+                "to": "CoAVolFog.ini"
+              },
+              {
+                "member": "CoAVolFog-regions.ini",
+                "to": "CoAVolFog-regions.ini"
+              },
+              {
+                "member": "Lumenveil-Setup.cmd",
+                "to": "Lumenveil-Setup.cmd"
+              },
+              {
+                "member": "Lumenveil-Uninstall.cmd",
+                "to": "Lumenveil-Uninstall.cmd"
+              },
+              {
+                "member": "Lumenveil/lamp_extract.exe",
+                "to": "Lumenveil/lamp_extract.exe"
+              },
+              {
+                "member": "Lumenveil/LEGAL.txt",
+                "to": "Lumenveil/LEGAL.txt"
+              },
+              {
+                "member": "Lumenveil/LICENSE.txt",
+                "to": "Lumenveil/LICENSE.txt"
+              },
+              {
+                "member": "Lumenveil/README.txt",
+                "to": "Lumenveil/README.txt"
+              },
+              {
+                "member": "Lumenveil/THIRD-PARTY-NOTICES.txt",
+                "to": "Lumenveil/THIRD-PARTY-NOTICES.txt"
+              },
+              {
+                "member": "Lumenveil/licenses/bzip2.txt",
+                "to": "Lumenveil/licenses/bzip2.txt"
+              },
+              {
+                "member": "Lumenveil/licenses/DearImGui-MIT.txt",
+                "to": "Lumenveil/licenses/DearImGui-MIT.txt"
+              },
+              {
+                "member": "Lumenveil/licenses/Everwood-MIT.txt",
+                "to": "Lumenveil/licenses/Everwood-MIT.txt"
+              },
+              {
+                "member": "Lumenveil/licenses/GPL-2.0.txt",
+                "to": "Lumenveil/licenses/GPL-2.0.txt"
+              },
+              {
+                "member": "Lumenveil/licenses/zlib.txt",
+                "to": "Lumenveil/licenses/zlib.txt"
+              }
+            ],
+            "remove_when_off": [
+              "CoAVolFog.log"
+            ],
+            "optional": true,
+            "default": false,
+            "size_hint": 1233402,
+            "platforms": [
+              "windows"
+            ],
+            "redirect_hosts": [
+              "release-assets.githubusercontent.com",
+              "objects.githubusercontent.com"
+            ],
+            "setup": {
+              "run": "Lumenveil/lamp_extract.exe",
+              "runs": [
+                ["--data", "{data}", "--out", "{dir}/lampdata.bin", "--locale", "{locale}", "--background"],
+                ["--data", "{data}", "--liquids", "{dir}/liquiddata.bin", "--maps", "0,1,530,571", "--locale", "{locale}", "--background"]
+              ],
+              "writes": [
+                "lampdata.bin",
+                "liquiddata.bin"
+              ],
+              "timeout_seconds": 600
+            },
+            "credit": "Lumenveil, GPL-2.0, built on CoAVolFog; downloaded from its makers (github.com/lumenveil/Lumenveil)."
+          }
         ]
       },
       "play": {
@@ -2653,6 +2758,109 @@
                 "to_dir": "Interface/AddOns"
               }
             ]
+          },
+          {
+            "id": "lumenveil",
+            "label": "Lumenveil",
+            "description": "Volumetric fog, sun and moon shafts, lamp light at night and moving water for the 3.3.5a client.",
+            "version": "0.1.0",
+            "source": {
+              "kind": "url",
+              "url": "https://github.com/lumenveil/Lumenveil/releases/download/v0.1.0/Lumenveil-0.1.0.zip"
+            },
+            "sha256": "78d1e1ca7450858a67d6ec2298343c3f67cda9aa920aa800e28982d8d3fee83b",
+            "install": [
+              {
+                "member": "version.dll",
+                "to": "version.dll"
+              },
+              {
+                "member": "CoAVolFog.dll",
+                "to": "CoAVolFog.dll"
+              },
+              {
+                "member": "CoAVolFog.ini",
+                "to": "CoAVolFog.ini"
+              },
+              {
+                "member": "CoAVolFog-regions.ini",
+                "to": "CoAVolFog-regions.ini"
+              },
+              {
+                "member": "Lumenveil-Setup.cmd",
+                "to": "Lumenveil-Setup.cmd"
+              },
+              {
+                "member": "Lumenveil-Uninstall.cmd",
+                "to": "Lumenveil-Uninstall.cmd"
+              },
+              {
+                "member": "Lumenveil/lamp_extract.exe",
+                "to": "Lumenveil/lamp_extract.exe"
+              },
+              {
+                "member": "Lumenveil/LEGAL.txt",
+                "to": "Lumenveil/LEGAL.txt"
+              },
+              {
+                "member": "Lumenveil/LICENSE.txt",
+                "to": "Lumenveil/LICENSE.txt"
+              },
+              {
+                "member": "Lumenveil/README.txt",
+                "to": "Lumenveil/README.txt"
+              },
+              {
+                "member": "Lumenveil/THIRD-PARTY-NOTICES.txt",
+                "to": "Lumenveil/THIRD-PARTY-NOTICES.txt"
+              },
+              {
+                "member": "Lumenveil/licenses/bzip2.txt",
+                "to": "Lumenveil/licenses/bzip2.txt"
+              },
+              {
+                "member": "Lumenveil/licenses/DearImGui-MIT.txt",
+                "to": "Lumenveil/licenses/DearImGui-MIT.txt"
+              },
+              {
+                "member": "Lumenveil/licenses/Everwood-MIT.txt",
+                "to": "Lumenveil/licenses/Everwood-MIT.txt"
+              },
+              {
+                "member": "Lumenveil/licenses/GPL-2.0.txt",
+                "to": "Lumenveil/licenses/GPL-2.0.txt"
+              },
+              {
+                "member": "Lumenveil/licenses/zlib.txt",
+                "to": "Lumenveil/licenses/zlib.txt"
+              }
+            ],
+            "remove_when_off": [
+              "CoAVolFog.log"
+            ],
+            "optional": true,
+            "default": false,
+            "size_hint": 1233402,
+            "platforms": [
+              "windows"
+            ],
+            "redirect_hosts": [
+              "release-assets.githubusercontent.com",
+              "objects.githubusercontent.com"
+            ],
+            "setup": {
+              "run": "Lumenveil/lamp_extract.exe",
+              "runs": [
+                ["--data", "{data}", "--out", "{dir}/lampdata.bin", "--locale", "{locale}", "--background"],
+                ["--data", "{data}", "--liquids", "{dir}/liquiddata.bin", "--maps", "0,1,530,571", "--locale", "{locale}", "--background"]
+              ],
+              "writes": [
+                "lampdata.bin",
+                "liquiddata.bin"
+              ],
+              "timeout_seconds": 600
+            },
+            "credit": "Lumenveil, GPL-2.0, built on CoAVolFog; downloaded from its makers (github.com/lumenveil/Lumenveil)."
           }
         ],
         "config_wtf": {

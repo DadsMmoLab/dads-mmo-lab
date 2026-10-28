@@ -17,6 +17,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Edit **worldserver.conf** and **authserver.conf** on the Tuning tab; settings Yu'lon manages stay locked.
 - **Update the server to latest…** on a Tortoise server also updates TortoiseBots Manager in your game client.
 - Updating a module now adds its new settings to your kept config file, leaving your own values alone.
+- Lumenveil graphics mod as an optional WotLK client extra, with an **Update Lumenveil** button.
 
 ### Fixed
 - On a server inside WSL, each module row on the Modules tab shows its version again.

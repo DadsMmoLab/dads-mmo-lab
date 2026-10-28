@@ -843,9 +843,71 @@ def test_extras_are_the_client_options_packs_with_their_sizes(
 
 
 def test_a_server_with_no_extras_says_so(qapp: object, ps: _Ps, tmp_path: Path) -> None:
-    window, _view, _ = _launcher(ps, tmp_path)
+    window, _view, _ = _launcher(ps, tmp_path, entry=_client_entry(tmp_path, with_packs=False))
     assert window.pack_boxes == {}
     assert "no extras" in window.extras_note.text()
+
+
+def test_the_shipped_wotlk_entry_offers_lumenveil_as_its_only_extra(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T809 W4: on Windows the launcher shows the shipped Lumenveil extra and its credit."""
+    monkeypatch.setattr(client_packs.platform, "detect", lambda: "windows")
+    window, _view, _ = _launcher(ps, tmp_path)
+    assert list(window.pack_boxes) == ["lumenveil"]
+    assert window.pack_boxes["lumenveil"].text() == "Lumenveil 0.1.0"
+    assert "Lumenveil" in window.extras_note.text() and "GPL-2.0" in window.extras_note.text()
+    assert window.update_buttons == {}, "a fresh copy is current: no Update button"
+
+def test_an_updated_lumenveil_shows_an_update_row_on_the_launcher(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    launched: list[object],
+) -> None:
+    """T809 W6: after a pin bump the extras row shows the versioned label, note and button."""
+    from tests.test_controller_view import _lumen_play, _play_view, _Site
+    from tests.test_controller_view import WORLD_UP as _WORLD_UP
+
+    monkeypatch.setattr(client_packs.platform, "detect", lambda: "windows")
+    site = _Site(tmp_path / "downloads")
+    monkeypatch.setattr(client_packs, "fetch_url", site)
+    from yulon import platform as yulon_platform
+    monkeypatch.setattr(yulon_platform, "config_dir", lambda: tmp_path / "config")
+    entry, original, play, _seen, _ = _lumen_play(tmp_path, monkeypatch, site)
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = _WORLD_UP
+
+    view.play()
+
+    record = client_packs.read_record(play)
+    bumped = entry.client.packs[0].model_copy(update={"sha256": "0" * 64})
+    bumped_entry = entry.model_copy(
+        update={"client": entry.client.model_copy(update={"packs": (bumped,)})}
+    )
+    fresh, _ = _play_view(ps, tmp_path, original=original, play=play, entry=bumped_entry)
+    played = LauncherWindow(
+        fresh,
+        reads=_Reads(fresh, SERVER),
+        job_runner=run_inline,
+        open_folder=lambda path: True,
+    )
+    played._client = played.reads.client(play)
+    played._bind_entry(bumped_entry, tmp_path)
+    played._render()
+    assert played.pack_boxes["lumenveil"].text() == "Lumenveil 0.1.0"
+    assert list(played.update_buttons) == ["lumenveil"]
+    assert "A newer Lumenveil (0.1.0) is available." in played.update_notes["lumenveil"].text()
+    assert played.update_buttons["lumenveil"].isEnabled()
+
+
+def test_the_shipped_wotlk_entry_hides_lumenveil_off_windows(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T809 W4: Wine/Linux/mac hide the Windows-only pack instead of offering it."""
+    for here in ("linux", "macos"):
+        monkeypatch.setattr(client_packs.platform, "detect", lambda here=here: here)
+        window, _view, _ = _launcher(ps, tmp_path / here)
+        assert window.pack_boxes == {}, here
+        assert "no extras" in window.extras_note.text(), here
 
 
 def test_the_addons_in_the_client_are_listed_and_their_folder_opens(

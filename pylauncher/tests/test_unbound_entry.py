@@ -413,7 +413,7 @@ def test_the_install_checks_what_the_unbound_sql_must_have_made() -> None:
 
 def test_the_client_carries_the_modules_addon_folder_as_one_required_pack() -> None:
     client = unbound().client
-    assert [p.id for p in client.packs] == ["unbound-addons"]
+    assert [p.id for p in client.packs] == ["unbound-addons", "lumenveil"]
     pack = client.packs[0]
     assert pack.label == "Unbound addons"
     assert (pack.source.kind, pack.source.path) == (
@@ -424,6 +424,19 @@ def test_the_client_carries_the_modules_addon_folder_as_one_required_pack() -> N
     assert (pack.sha256, pack.md5, pack.md5_file) == (None, None, None)
     assert [(r.member, r.to_dir, r.to) for r in pack.install] == [("*", "Interface/AddOns", None)]
     assert not pack.optional, "required: every Play keeps the client half in step with the server"
+
+
+def test_the_client_offers_lumenveil_as_an_optional_windows_extra() -> None:
+    """T809 W2: the same Lumenveil pack as wow-wotlk (held equal there); required addons stay first."""
+    from tests.test_catalog_client_packs import LUMENVEIL_SHA256, LUMENVEIL_URL
+
+    client = unbound().client
+    pack = client.packs[1]
+    assert pack.id == "lumenveil"
+    assert (pack.source.kind, pack.source.url) == ("url", LUMENVEIL_URL)
+    assert pack.sha256 == LUMENVEIL_SHA256
+    assert pack.optional is True and pack.default is False
+    assert pack.platforms == ("windows",)
 
 
 def test_the_pack_reads_the_module_the_entry_builds() -> None:
@@ -443,9 +456,14 @@ def test_load_out_of_date_addons_is_set_at_every_play_never_only_once() -> None:
     assert not cfg.remove_locale_realmlists
 
 
-def test_wotlks_client_has_no_packs_and_no_config_wtf() -> None:
+def test_wotlks_client_carries_lumenveil_and_no_config_wtf() -> None:
+    """T809 W2: wow-wotlk gained the Lumenveil extra; still no exe patch, no Config.wtf."""
+    from tests.test_catalog_client_packs import LUMENVEIL_SHA256
+
     client = load_catalog().get("wow-wotlk").client
-    assert client.packs == () and client.config_wtf is None and client.exe_patch is None
+    assert [pack.id for pack in client.packs] == ["lumenveil"]
+    assert client.packs[0].sha256 == LUMENVEIL_SHA256
+    assert client.config_wtf is None and client.exe_patch is None
 
 
 def test_the_installer_runs_the_patch_and_lua_stages_and_wotlks_tuple_is_unchanged() -> None:
