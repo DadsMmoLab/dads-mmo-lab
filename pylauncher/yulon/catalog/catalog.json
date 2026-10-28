@@ -201,7 +201,7 @@
                 "lampdata.bin",
                 "liquiddata.bin"
               ],
-              "timeout_seconds": 600
+              "timeout_seconds": 1800
             },
             "credit": "Lumenveil, GPL-2.0, built on CoAVolFog; downloaded from its makers (github.com/lumenveil/Lumenveil)."
           }
@@ -2858,7 +2858,7 @@
                 "lampdata.bin",
                 "liquiddata.bin"
               ],
-              "timeout_seconds": 600
+              "timeout_seconds": 1800
             },
             "credit": "Lumenveil, GPL-2.0, built on CoAVolFog; downloaded from its makers (github.com/lumenveil/Lumenveil)."
           }
