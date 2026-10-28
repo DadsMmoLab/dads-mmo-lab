@@ -27,7 +27,7 @@ import yaml
 from tests.support_bash import bash_available
 from tests.support_native import ENTRY, Recorder
 from yulon import docker, resources
-from yulon.catalog import composegen
+from yulon.catalog import build_context, composegen, native
 from yulon.catalog.catalog import CatalogEntry
 from yulon.catalog.families.azerothcore import AzerothCoreInstaller
 from yulon.catalog.installer import InstallOptions
@@ -357,3 +357,72 @@ def test_the_done_marker_is_version_not_updates() -> None:
     chunk = _script(_rendered_bootstrap())
     assert "TABLE_NAME='version'" in chunk
     assert "TABLE_NAME='updates'" not in chunk
+
+
+def coa_linux() -> CatalogEntry:
+    entry = coa()
+    return entry.model_copy(
+        update={"install": entry.install.model_copy(update={"platforms": ("linux",)})}
+    )
+
+
+def _stage_context(server_dir: Path) -> native.StageContext:
+    entry = coa_linux()
+    return native.StageContext(
+        server_dir=server_dir,
+        client_dir=None,
+        state=native.InstallState(
+            game_id=entry.id,
+            install_id=composegen.install_id(server_dir, platform_id=lambda: "linux"),
+        ),
+        cancel=None,
+        secrets=native.Secrets(db_password="pw"),
+    )
+
+
+def test_the_extracted_data_is_left_out_of_the_build_context(tmp_path: Path) -> None:
+    """D9: after install `data/` is 6.6 GB, and a Rebuild uploaded all of it.
+
+    BuildKit logged "transferring context: 2.02GB" and the fingerprint gave no
+    answer ("the build context holds more than 4294967296 bytes") while the
+    install's disk filled (yulon-ubuntu2, 2026-10-28). The generated ignore
+    leaves the extracted folders out and keeps `data/sql`, the only part the
+    db-import image copies.
+    """
+    server = tmp_path / "server"
+    server.mkdir()
+    ignore = server / ".dockerignore"
+    ignore.write_text("/cmake-build-debug/*\n", encoding="utf-8")
+    made = make(coa_linux(), Recorder())
+    list(made.stage_generate_compose(_stage_context(server)))
+    text = ignore.read_text(encoding="utf-8")
+    assert text.startswith("/cmake-build-debug/*"), text
+    assert "data/*" in text.splitlines(), text
+    assert "!data/sql" in text.splitlines(), text
+    # Docker's own rules, as this project reads them for the build fingerprint:
+    # the extracted folders are not sent, the SQL the importer needs still is.
+    rules = build_context.parse_dockerignore(text)
+    assert rules is not None
+    assert rules.excludes("data/maps/0004331.map")
+    assert rules.excludes("data/vmaps/1.vmo")
+    assert not rules.excludes("data/sql/base/db_world/instance_template.sql")
+    # A repair or an update's put-back runs this stage again: no second block.
+    list(made.stage_generate_compose(_stage_context(server)))
+    assert ignore.read_text(encoding="utf-8") == text
+
+
+def test_a_game_that_extracts_nothing_gets_no_ignore_block(tmp_path: Path) -> None:
+    server = tmp_path / "server"
+    server.mkdir()
+    made = make(ENTRY, Recorder())
+    list(made.stage_generate_compose(_stage_context(server)))
+    assert not (server / ".dockerignore").exists()
+
+
+def test_the_coa_install_owns_the_ignore_block_an_update_restores(tmp_path: Path) -> None:
+    """An update's reset restores upstream's .dockerignore; the guard must read it as ours."""
+    owned = make(coa_linux(), Recorder()).app_written_paths(tmp_path / "server")
+    assert ".dockerignore" in owned["."]
+    assert (
+        ".dockerignore" not in make(ENTRY, Recorder()).app_written_paths(tmp_path / "server")["."]
+    )
