@@ -8044,6 +8044,11 @@ TUNING_CORE_EDITABLE = (
 TUNING_CORE_LOCKED = "Nothing was written. Yu'lon sets these lines, so they stay as they are:"
 """The refusal when a core-conf Save touches a locked key (T819): the keys follow."""
 
+TUNING_CORE_CHANGED = (
+    "The file changed while it was open, so nothing was saved; reopen it to see what it says now."
+)
+"""The refusal when a core conf on disk is no longer the text the editor opened (T819)."""
+
 TUNING_CORE_CONFIRM = "Save these {n} changes to {name}? A backup is taken first.\n{lines}{more}"
 """The one confirm before a core-conf Save writes (T819): the diff, then the backup."""
 
@@ -24243,11 +24248,32 @@ class ControllerView(QWidget):
         if not file or self._tuning_core_denied(file):
             return
         server_dir = self.services.controller.server_dir
+        entry = self.entry
         original = self._tuning_raw
         editable_core = self._tuning_core_editable(file)
         unmasked = core_conf.unmask(text, original) if editable_core else text
+        # The lint confirm stays first for a core conf too (T819 review): a line
+        # that no longer looks like a setting is the more basic question, and a
+        # core file is held to the same cheap pass a module's is.
+        said = tuning.lint_sentence(tuning.lint(unmasked))
+        if said is None:
+            # T371: an `int` key typed in the raw box is held to the card's own
+            # rule, as a warning on the same confirm and not a refusal.
+            said = tuning.value_sentence(tuning.int_problems(unmasked, self._raw_file_keys(file)))
+        if said is not None:
+            answer = QMessageBox.question(
+                self,
+                TUNING_LINT_CONFIRM_TITLE,
+                said,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            # `==` and an int, not `is`: PySide6's static `question()` returns a
+            # plain int, so `is StandardButton.Yes` is always False (T33).
+            if answer != QMessageBox.StandardButton.Yes:
+                return
         if editable_core:
-            locked = core_conf.locked(self.entry, server_dir, file, original, unmasked)
+            locked = core_conf.locked(entry, server_dir, file, original, unmasked)
             refused = core_conf.locked_edits(original, unmasked, locked)
             if refused:
                 refused_lines = "\n".join(f"{k}: {locked[k]}" for k in refused)
@@ -24274,29 +24300,39 @@ class ControllerView(QWidget):
             # plain int, so `is StandardButton.Yes` is always False (T33).
             if answer != QMessageBox.StandardButton.Yes:
                 return
-        else:
-            said = tuning.lint_sentence(tuning.lint(text))
-            if said is None:
-                # T371: an `int` key typed in the raw box is held to the card's own
-                # rule, as a warning on the same confirm and not a refusal.
-                said = tuning.value_sentence(tuning.int_problems(text, self._raw_file_keys(file)))
-            if said is not None:
-                answer = QMessageBox.question(
-                    self,
-                    TUNING_LINT_CONFIRM_TITLE,
-                    said,
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                    QMessageBox.StandardButton.No,
-                )
-                # `==` and an int, not `is`: PySide6's static `question()` returns a
-                # plain int, so `is StandardButton.Yes` is always False (T33).
-                if answer != QMessageBox.StandardButton.Yes:
-                    return
         if self._tuning_write_refused():
             return
         path = server_dir / file
 
         def body() -> TuningWrite:
+            if editable_core:
+                # The text the checks above compared must still be what is on
+                # disk: a module or server update, or another edit, made while
+                # the editor was open would otherwise be erased by this Save
+                # (T819 review). Read inside the hold, where nothing else here
+                # writes it.
+                try:
+                    with open(path, "rb") as handle:
+                        blob = handle.read(tuning.MAX_EDIT_BYTES + 1)
+                except OSError as exc:
+                    return TuningWrite(
+                        TUNING_FILE_FAILED.format(file=file, exc=exc), failed=str(exc)
+                    )
+                if len(blob) > tuning.MAX_EDIT_BYTES or blob != original.encode("utf-8"):
+                    return TuningWrite(TUNING_CORE_CHANGED, failed=TUNING_CORE_CHANGED)
+                # And the last look is against the bytes just read, not the ones
+                # the editor opened: a locked key or a no-op is refused here too.
+                current = blob.decode("utf-8")
+                locked_now = core_conf.locked(entry, server_dir, file, current, unmasked)
+                refused_now = core_conf.locked_edits(current, unmasked, locked_now)
+                if refused_now:
+                    refused_lines = "\n".join(f"{k}: {locked_now[k]}" for k in refused_now)
+                    report = TUNING_CORE_LOCKED + "\n" + refused_lines
+                    return TuningWrite(report, failed=report)
+                if not core_conf.changed_keys(current, unmasked):
+                    return TuningWrite(
+                        TUNING_NOTHING_CHANGED.format(module=reset_defaults.label(file))
+                    )
             try:
                 # Refuses a link out of the server folder, before any byte moves (T573).
                 made = tuning.write_raw(path, unmasked, original=original, root=server_dir)

@@ -13460,7 +13460,9 @@ def test_wotlks_own_conf_opens_editable_and_names_its_locked_keys(
     _deploy(
         tmp_path,
         "env/dist/etc/worldserver.conf",
-        "[worldserver]\nWorldServerPort = 8085\nMotd = hi\n",
+        "[worldserver]\n"
+        'LoginDatabaseInfo = "127.0.0.1;3306;acore;s3cret;acore_auth"\n'
+        "WorldServerPort = 8085\nMotd = hi\n",
     )
     view = _tuned_view(ps, tmp_path)
     core = next(
@@ -13474,6 +13476,8 @@ def test_wotlks_own_conf_opens_editable_and_names_its_locked_keys(
     assert view.tuning_panel.file_note.text() == controller_view_module.TUNING_CORE_EDITABLE
     assert view.tuning_panel.file_save_button.isEnabled()
     assert "WorldServerPort" in view.tuning_panel.locked_list.text()
+    assert "s3cret" not in view.tuning_panel.editor.toPlainText()
+    assert "acore;***;acore_auth" in view.tuning_panel.editor.toPlainText()
 
 
 def test_a_raw_save_that_still_looks_like_a_conf_asks_nothing(
@@ -32242,6 +32246,84 @@ def test_a_core_save_asks_with_the_diff_then_backs_up_and_writes(
     assert len(backups) == 1
     assert "s3cret" in path.read_text(encoding="utf-8")
     assert "Rate.XP.Kill = 2" in path.read_text(encoding="utf-8")
+
+
+def test_a_core_save_refuses_when_the_file_changed_while_it_was_open(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A module or server update between open and Save is never erased (Codex)."""
+    path = _deploy(tmp_path, "env/dist/etc/worldserver.conf", "[worldserver]\nMotd = hi\n")
+    view = _tuned_view(ps, tmp_path)
+    _open_core(view)
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "question",
+        lambda *a, **k: int(controller_view_module.QMessageBox.StandardButton.Yes),
+    )
+    after_update = "[worldserver]\nMotd = updated by a module\n"
+    path.write_text(after_update, encoding="utf-8")
+
+    view.save_tuning_file("[worldserver]\nMotd = yo\n")
+
+    assert path.read_text(encoding="utf-8") == after_update
+    assert tuning.backups_of(path) == ()
+    assert view.tuning_report.toPlainText() == controller_view_module.TUNING_CORE_CHANGED
+
+
+def test_a_core_save_reopens_the_file_and_never_holds_the_password(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The saved file is read back masked, so the editor holds the new text (Opus)."""
+    path = _deploy(
+        tmp_path,
+        "env/dist/etc/worldserver.conf",
+        "[worldserver]\n"
+        'LoginDatabaseInfo = "127.0.0.1;3306;acore;s3cret;acore_auth"\n'
+        "Motd = hi\n",
+    )
+    view = _tuned_view(ps, tmp_path)
+    _open_core(view)
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "question",
+        lambda *a, **k: int(controller_view_module.QMessageBox.StandardButton.Yes),
+    )
+    # The reload after a save waits for a stopped WSL distro; the save's own
+    # reopen does not, so this is the path that reads the file back (T133).
+    monkeypatch.setattr(view, "_waits_for_the_distro", lambda *_a: True)
+
+    view.save_tuning_file(
+        "[worldserver]\n"
+        'LoginDatabaseInfo = "127.0.0.1;3306;acore;***;acore_auth"\n'
+        "Motd = yo\n"
+    )
+
+    assert "Motd = yo" in path.read_text(encoding="utf-8")
+    assert view._tuning_raw == path.read_bytes().decode("utf-8")
+    assert "s3cret" not in view.tuning_panel.editor.toPlainText()
+
+
+def test_a_core_save_lints_first_and_an_answer_of_no_writes_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The lint confirm stays first for a core conf too, as on a module's (Opus)."""
+    path = _deploy(tmp_path, "env/dist/etc/worldserver.conf", "[worldserver]\nMotd = hi\n")
+    view = _tuned_view(ps, tmp_path)
+    _open_core(view)
+    asked: list[str] = []
+
+    def question(_parent: object, _title: str, said: str, *_a: object, **_k: object) -> int:
+        asked.append(said)
+        return int(controller_view_module.QMessageBox.StandardButton.No)
+
+    monkeypatch.setattr(controller_view_module.QMessageBox, "question", question)
+
+    view.save_tuning_file("[worldserver]\nMotd\n")
+
+    assert len(asked) == 1, asked
+    assert "does not look like a setting" in asked[0]
+    assert path.read_text(encoding="utf-8") == "[worldserver]\nMotd = hi\n"
+    assert tuning.backups_of(path) == ()
 
 
 def test_a_core_save_answered_no_writes_nothing(

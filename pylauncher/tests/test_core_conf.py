@@ -149,6 +149,51 @@ def test_the_password_never_reaches_the_editor_and_its_bytes_survive_a_save() ->
     )
 
 
+def test_a_password_key_is_locked_masked_and_never_saved_as_asterisks(tmp_path: Path) -> None:
+    """Every `*password*` key is a secret: shown masked, locked, and restored on a save (Opus)."""
+    from yulon import core_conf
+
+    raw = "[worldserver]\r\nSomePassword = s3cret\r\nMotd = hi\r\n"
+    locked = core_conf.locked(WOTLK, tmp_path, WORLD_CONF, raw, raw)
+    assert locked["SomePassword"] == core_conf.SECRET_REASON
+
+    view = core_conf.masked_view(raw)
+    assert "s3cret" not in view
+    assert "SomePassword = ***" in view
+
+    edited = view.replace("SomePassword = ***", "SomePassword = hunter2")
+    assert core_conf.locked_edits(raw, core_conf.unmask(edited, raw), locked) == ("SomePassword",)
+
+    kept = view.replace("Motd = hi", "Motd = hello")
+    assert tuning.save_text(raw, core_conf.unmask(kept, raw)) == (
+        "[worldserver]\r\nSomePassword = s3cret\r\nMotd = hello\r\n"
+    )
+
+
+def test_changed_keys_reads_the_masked_view_not_the_raw_bytes() -> None:
+    """A view compared with the raw file would report a secret as an edit (Opus)."""
+    from yulon import core_conf
+
+    raw = (
+        "[worldserver]\n"
+        'LoginDatabaseInfo = "127.0.0.1;3306;acore;s3cret;acore_auth"\n'
+        "Motd = hi\n"
+    )
+    assert core_conf.changed_keys(raw, core_conf.masked_view(raw)) == ()
+    edited = core_conf.masked_view(raw).replace("Motd = hi", "Motd = yo")
+    assert core_conf.changed_keys(raw, edited) == (("Motd", "hi", "yo"),)
+
+
+def test_the_locked_set_covers_a_key_the_edit_adds(tmp_path: Path) -> None:
+    """A key the file does not carry is still locked when the edit adds it (Opus)."""
+    from yulon import core_conf
+
+    raw = "[playerbots]\n"
+    added = raw + "AiPlayerbot.MinRandomBots = 50\n"
+    assert "AiPlayerbot.MinRandomBots" not in core_conf.locked(WOTLK, tmp_path, BOTS_CONF, raw)
+    assert "AiPlayerbot.MinRandomBots" in core_conf.locked(WOTLK, tmp_path, BOTS_CONF, raw, added)
+
+
 def test_locked_edits_catch_a_change_a_comment_out_and_an_added_line(tmp_path: Path) -> None:
     """A refusal that reads the value the core reads: first active line wins."""
     from yulon import core_conf
