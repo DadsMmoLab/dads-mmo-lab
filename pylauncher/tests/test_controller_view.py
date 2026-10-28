@@ -848,12 +848,12 @@ def test_removing_a_cpp_module_is_not_told_it_is_inert_on_disk() -> None:
     )
     assert "If mod-solocraft was in the last build it is still in there" in text
     assert "is on disk and inert" not in text
-    # T89: no banner is raised for a removal, so the only Rebuild on the tab is
-    # the entry under "Server build ▾" -- and the sentence says where it is.
-    assert (
-        f'"{controller_view_module.SERVER_BUILD_LABEL}"' in text
-        and f'"{controller_view_module.REBUILD_BUTTON_LABEL}"' in text
-    ), text
+    # T89: no banner is raised for a removal, so the only Rebuild is the
+    # press in the Server version section (T692a) -- and the sentence says where.
+    from yulon import server_build_presses
+
+    said = server_build_presses.under_server_build(controller_view_module.REBUILD_BUTTON_LABEL)
+    assert said in text, text
 
 
 def test_pending_sql_is_drawn_as_not_applied_with_the_file_count() -> None:
