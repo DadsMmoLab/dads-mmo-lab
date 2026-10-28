@@ -148,9 +148,7 @@ def test_client_defaults_keep_every_shipped_entry_loading() -> None:
 
 def test_realm_type_ids_must_be_unique() -> None:
     with pytest.raises(ValidationError, match="realm type ids must be unique"):
-        AzerothCoreData.model_validate(
-            {"realm_types": [REALM, REALM], "default_realm_type": "coa"}
-        )
+        AzerothCoreData.model_validate({"realm_types": [REALM, REALM], "default_realm_type": "coa"})
 
 
 def test_a_default_realm_type_that_is_not_listed_is_refused() -> None:
@@ -173,9 +171,7 @@ def test_a_realm_type_repeating_a_world_env_key_is_refused() -> None:
         AzerothCoreData.model_validate(
             {
                 "world_env": {"AC_AI_PLAYERBOT_MIN_RANDOM_BOTS": "150"},
-                "realm_types": [
-                    {**REALM, "world_env": {"AC_AI_PLAYERBOT_MIN_RANDOM_BOTS": "1"}}
-                ],
+                "realm_types": [{**REALM, "world_env": {"AC_AI_PLAYERBOT_MIN_RANDOM_BOTS": "1"}}],
                 "default_realm_type": "coa",
             }
         )
@@ -260,7 +256,6 @@ def test_an_extract_image_that_is_not_built_is_refused() -> None:
     native["azerothcore"]["client_extract"]["extract"]["image"] = "client-data"
     with pytest.raises(ValidationError, match="azerothcore.extract.image 'client-data'"):
         NativeInstall.model_validate(native)
-
 
 
 def test_client_extract_without_requires_client_dir_is_refused() -> None:

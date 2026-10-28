@@ -612,8 +612,7 @@ class AzerothCoreData(_Strict):
     realm_types: tuple[AcRealmType, ...] = Field(
         default=(),
         description=(
-            "The realm types this entry may switch between (T812). Empty: one realm, as "
-            "before."
+            "The realm types this entry may switch between (T812). Empty: one realm, as " "before."
         ),
     )
     default_realm_type: str | None = Field(
@@ -641,8 +640,7 @@ class AzerothCoreData(_Strict):
     def _a_default_realm_type_is_a_listed_one(self) -> AzerothCoreData:
         if self.realm_types and self.default_realm_type is None:
             raise ValueError(
-                "an entry with realm types names its default realm type "
-                "(default_realm_type)"
+                "an entry with realm types names its default realm type " "(default_realm_type)"
             )
         if self.default_realm_type is not None:
             if not self.realm_types:
@@ -3278,8 +3276,7 @@ class Client(_Strict):
         default=None,
         pattern=r"^[A-Za-z0-9_.,;=-]+$",
         description=(
-            "The `WINEDLLOVERRIDES` value Play runs the client with (T812). "
-            "None: no overrides."
+            "The `WINEDLLOVERRIDES` value Play runs the client with (T812). " "None: no overrides."
         ),
     )
     notes: tuple[str, ...] = ()

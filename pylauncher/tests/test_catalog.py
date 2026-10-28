@@ -35,7 +35,8 @@ V1_GAMES = (
     "wow-unbound",
     "wow-coa",
 )
-"""README §1's four v1 servers, Centurion after them (T179 Task 7), Unbound (T554) and CoA (T812)."""
+"""README §1's four v1 servers, Centurion after them (T179 Task 7), Unbound (T554) and CoA
+(T812)."""
 
 
 def test_bundled_catalog_describes_exactly_the_seven_servers() -> None:

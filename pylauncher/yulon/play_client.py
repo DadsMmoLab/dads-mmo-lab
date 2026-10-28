@@ -81,6 +81,8 @@ PARTIAL_SUFFIX = ".yulon-partial"
 _PACK_SWAP_NAME = re.compile(r"(.+)\.yulon-pack-(?:tmp|old)(?:\.\d+)?", re.IGNORECASE)
 """A name `client_packs`' swap gives a file beside its target `<name>` (its `_STAGING` and
 `_ASIDE`, numbered when the plain one is taken), matched whole; group 1 is `<name>`."""
+
+
 def _is_linked(name: str) -> bool:
     """Whether a ready-to-play client shares this file name instead of copying it.
 
@@ -1582,9 +1584,7 @@ def restore_original_exe(
     except OSError:
         readable = False  # permission denied, device not ready: the same as missing
     if not readable:
-        logger.info(
-            "ready-to-play client: %s has no readable game exe, patched exe kept", original
-        )
+        logger.info("ready-to-play client: %s has no readable game exe, patched exe kept", original)
         return False
     tmp = dst.with_name(dst.name + REFRESH_SUFFIX)
     never: list[LostFlag] = []  # its temporary is always a copy (`copy2`), never a link
@@ -1644,7 +1644,11 @@ def _reapply_exe(
     )
     options = client_exe.options_for(patch, chosen)
     try:
-        kwargs: dict[str, Any] = {"exe_names": exe_names} if opener is None else {"opener": opener, "exe_names": exe_names}
+        kwargs: dict[str, Any] = (
+            {"exe_names": exe_names}
+            if opener is None
+            else {"opener": opener, "exe_names": exe_names}
+        )
         made = client_exe.apply(play_dir, original, patch, options, **kwargs)
         client_packs.write_record(
             play_dir,

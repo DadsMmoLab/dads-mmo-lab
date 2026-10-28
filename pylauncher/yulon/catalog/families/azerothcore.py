@@ -47,6 +47,7 @@ from yulon import (
 from yulon.catalog import composegen, snapshot
 from yulon.catalog.catalog import AcClientExtract, AzerothCoreData, CatalogEntry, EmulatorSource
 from yulon.catalog.families import carried, extract, scriptdeploy, surgical
+from yulon.catalog.families.direction import moves_forward
 from yulon.catalog.installer import (
     ImportWindowStopped,
     InstallerError,
@@ -409,6 +410,10 @@ SEEDED_WORLD_PORT = 8085
 world server listens on inside its container (`…:8085`). T552."""
 
 
+def _ignore_answer(_answer: object) -> None:
+    """`FnSql.run` is for statements whose answer nobody reads."""
+
+
 class AzerothCoreInstaller(StagedInstaller):
     """Install one AzerothCore entry: clone, generate compose, build, fetch data, import, start."""
 
@@ -453,7 +458,6 @@ class AzerothCoreInstaller(StagedInstaller):
     already loaded: the service exits 0 at its done-marker) — the same reason
     `client-data` re-asks its volume.
     """
-
 
     EXTRACT_STAGE: ClassVar[str] = "extract-maps"
     MMAPS_STAGE: ClassVar[str] = "mmaps"
@@ -1384,6 +1388,7 @@ class AzerothCoreInstaller(StagedInstaller):
                 raise OneShotLeftRunning(download_left_sentence(left, earlier=False))
         self._check_run(run, "the world bootstrap", ctx.cancel, IMPORT_STAGE_CANCEL_NOTE)
         yield "The CoA world's base data is in place."
+
     DATA_DIR = "data"
     """`data/` under the server directory: what the extract stage fills and mmaps reads."""
 
@@ -1631,19 +1636,20 @@ class AzerothCoreInstaller(StagedInstaller):
         first = plan_block.extract.tools[0].argv[0]
         return first.rpartition("/")[0] or "/"
 
-    def _lay_mmaps_config(self, ctx: StageContext, plan_block: AcClientExtract, data_dir: Path) -> None:
+    def _lay_mmaps_config(
+        self, ctx: StageContext, plan_block: AcClientExtract, data_dir: Path
+    ) -> None:
         source = ctx.server_dir / plan_block.mmaps_config
         try:
             text = source.read_bytes()
-        except OSError:
+        except OSError as err:
             raise InstallerError(
                 f"{source} holds no {self.MMAPS_CONFIG_NAME}: the checkout this install was "
                 "built from has no mmaps config where the entry says it is "
                 f"({plan_block.mmaps_config}). Nothing was run."
-            )
+            ) from err
         target = data_dir / self.MMAPS_CONFIG_NAME
         target.write_bytes(text)
-
 
     def start_refusal(self, server_dir: Path, *, rebuilding: bool = False) -> str | None:
         """The spine's refusal, the realm-type gate, then the extract gate (T812 C3a, C4a).
@@ -1850,9 +1856,11 @@ class AzerothCoreInstaller(StagedInstaller):
             return
         if not control.abandon.is_set():
             raise docker.DockerRefusal(
-                ordered_start.WORLD_NEVER_READY
-                if ready.auth is None
-                else ordered_start.AUTH_NEVER_READY,
+                (
+                    ordered_start.WORLD_NEVER_READY
+                    if ready.auth is None
+                    else ordered_start.AUTH_NEVER_READY
+                ),
                 detail=docker.logs_command(spec.service_for(spec.world), server_dir),
             )
         logger.info(docker.STOP_WAITS_FOR_THE_LOAD)
@@ -2001,12 +2009,14 @@ class AzerothCoreInstaller(StagedInstaller):
             return
             yield  # unreachable: keeps this a generator on the no-types path
         sql = coa_realm.FnSql(
-            run=lambda statement: self._seams.sql_query(
-                self.entry.container_spec().db,
-                self._native().db.client,
-                ctx.secrets.db_password,
-                None,
-                statement,
+            run=lambda statement: _ignore_answer(
+                self._seams.sql_query(
+                    self.entry.container_spec().db,
+                    self._native().db.client,
+                    ctx.secrets.db_password,
+                    None,
+                    statement,
+                )
             ),
             ask=lambda statement: self._seams.sql_query(
                 self.entry.container_spec().db,

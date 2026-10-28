@@ -21,7 +21,9 @@ from yulon.party import InstallParty
 from yulon.ui import catalog_view
 from yulon.ui.widgets.dadcraft_decorations import DadcraftCampaignCard
 
-PATCH_DIR = Path(__file__).resolve().parent.parent / "catalog" / "installers" / "wow-coa" / "patches"
+PATCH_DIR = (
+    Path(__file__).resolve().parent.parent / "catalog" / "installers" / "wow-coa" / "patches"
+)
 
 COA_ID = "wow-coa"
 CORE_REPO = "Zyth45/azerothcore-wotlk-coa"
@@ -118,8 +120,10 @@ def test_the_carried_vmap_patch_applies_to_the_pin() -> None:
     assert b"\r" not in data, "the patch must be LF-only"
     files = [line for line in data.decode().splitlines() if line.startswith("diff --git")]
     assert files == [
-        "diff --git a/src/tools/vmap4_extractor/adtfile.cpp b/src/tools/vmap4_extractor/adtfile.cpp",
-        "diff --git a/src/tools/vmap4_extractor/wdtfile.cpp b/src/tools/vmap4_extractor/wdtfile.cpp",
+        "diff --git a/src/tools/vmap4_extractor/adtfile.cpp "
+        "b/src/tools/vmap4_extractor/adtfile.cpp",
+        "diff --git a/src/tools/vmap4_extractor/wdtfile.cpp "
+        "b/src/tools/vmap4_extractor/wdtfile.cpp",
     ], "the patch touches only the two vmap extractor name-list files"
     assert data.count(b"new char[size + 1]") == 3
     assert data.count(b"buf[size] = 0;") == 3
@@ -145,7 +149,9 @@ COA_ENV_KEYS = {
     "AiPlayerbot.RandomBotJoinBG": "AC_AI_PLAYERBOT_RANDOM_BOT_JOIN_BG",
     "AiPlayerbot.RandomBotAutoJoinBG": "AC_AI_PLAYERBOT_RANDOM_BOT_AUTO_JOIN_BG",
     "AiPlayerbot.SyncLevelWithPlayers": "AC_AI_PLAYERBOT_SYNC_LEVEL_WITH_PLAYERS",
-    "AiPlayerbot.RandomBotConcentrateInPlayerZone": "AC_AI_PLAYERBOT_RANDOM_BOT_CONCENTRATE_IN_PLAYER_ZONE",
+    "AiPlayerbot.RandomBotConcentrateInPlayerZone": (
+        "AC_AI_PLAYERBOT_RANDOM_BOT_CONCENTRATE_IN_PLAYER_ZONE"
+    ),
     "CoA.ClassModel": "AC_CO_A_CLASS_MODEL",
     "CoA.MapClass10ToWarrior": "AC_CO_A_MAP_CLASS_10_TO_WARRIOR",
     "CoAChallenges.GameModes.Realm": "AC_CO_ACHALLENGES_GAME_MODES_REALM",
@@ -223,6 +229,7 @@ def test_the_health_block_names_the_coa_startup_lines() -> None:
 def test_coa_compose_has_no_client_data_volume_and_binds_data_ro(tmp_path: Path) -> None:
     from yulon import resources
     from yulon.catalog import composegen as gen
+
     plan = gen.render(
         coa(),
         tmp_path / "coa",
@@ -314,8 +321,6 @@ def test_help_names_the_coa_forks_then_yulon() -> None:
     ]
 
 
-
-
 def test_account_arguments_are_looked_up_by_name_as_on_wotlk() -> None:
     assert not useraccounts.digits_are_ids(coa())
     assert not useraccounts.password_digits_are_ids(coa())
@@ -343,10 +348,7 @@ def test_the_catalog_tile_has_its_own_glyph_subtitle_and_software_words() -> Non
         catalog_view._CAMPAIGN_SUBTITLES[entry.id]
         == "Wrath of the Lich King, Conquest of Azeroth classes"
     )
-    assert (
-        catalog_view._server_software(entry)
-        == "AzerothCore CoA fork with SquidBots playerbots"
-    )
+    assert catalog_view._server_software(entry) == "AzerothCore CoA fork with SquidBots playerbots"
 
 
 def test_the_coa_tile_draws_the_wotlk_backdrop_under_its_own_name(qapp: QApplication) -> None:

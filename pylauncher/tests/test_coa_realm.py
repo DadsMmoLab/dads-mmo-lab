@@ -11,7 +11,6 @@ from __future__ import annotations
 import json
 from collections.abc import Iterator, Mapping
 from pathlib import Path
-from typing import Any
 
 import pytest
 import yaml
@@ -89,7 +88,8 @@ class FakeSql(coa_realm.SqlRunner):
             self.marker_rows.pop(name, None)
         elif upper.startswith("DROP TABLE"):
             parts = statement.split("`")
-            for schema, table in zip(parts[1::4], parts[3::4]):
+            # the slices differ in length on a malformed statement, so zip stops at the shorter
+            for schema, table in zip(parts[1::4], parts[3::4], strict=False):
                 if table in self.tables.get(schema, []):
                     self.tables[schema].remove(table)
                 if table == "yulon_realm_type":
@@ -170,7 +170,6 @@ def switch_lines(
         entry.install.native.azerothcore.realm_types[0].realm_name, "1"
     )
     del rows
-    types = {realm.id: realm for realm in entry.install.native.azerothcore.realm_types}  # type: ignore[union-attr]
     wrote: list[Mapping[str, str]] = []
 
     def _import() -> Iterator[str]:
@@ -219,9 +218,7 @@ def test_wildcard_env_has_the_wildcard_keys_and_coa_does_not(tmp_path: Path) -> 
     )
     override = yaml.safe_load(plan.override)
     world = next(
-        service
-        for name, service in override["services"].items()
-        if name.endswith("worldserver")
+        service for name, service in override["services"].items() if name.endswith("worldserver")
     )
     assert world["environment"]["AC_CO_ACHALLENGES_GAME_MODES_REALM"] == "WildCard"
     (tmp_path / coa_realm.ACTIVE_FILE).write_text(
@@ -310,9 +307,9 @@ def test_the_switch_renames_both_ways_in_one_statement(tmp_path: Path) -> None:
     assert "`acore_auth_coa`.`realmlist` TO `acore_auth`.`realmlist`" in renames[0]
     creates = [s for s in sql.executed if s.startswith("CREATE DATABASE")]
     assert len(creates) == 3
-    assert (tmp_path / coa_realm.ACTIVE_FILE).read_text(
-        encoding="utf-8"
-    ) == json.dumps({"version": 1, "active": "coa"}, indent=2) + "\n"
+    assert (tmp_path / coa_realm.ACTIVE_FILE).read_text(encoding="utf-8") == json.dumps(
+        {"version": 1, "active": "coa"}, indent=2
+    ) + "\n"
     assert not (tmp_path / coa_realm.SWITCH_MARKER_FILE).exists()
     assert any("coa" in line for line in lines)
 
@@ -334,9 +331,7 @@ def test_switching_back_restores_every_table(tmp_path: Path) -> None:
     )
     sql.marker_rows["acore_characters"] = "coa"
     sql.marker_rows["acore_characters_hero"] = "hero"
-    sql.schemata.update(
-        {name: ("utf8mb4", "utf8mb4_unicode_ci") for name in sql.tables}
-    )
+    sql.schemata.update({name: ("utf8mb4", "utf8mb4_unicode_ci") for name in sql.tables})
     switch_lines(tmp_path, entry, "hero", sql)
     before = {schema: sorted(tables) for schema, tables in sql.tables.items()}
     switch_lines(tmp_path, entry, "coa", sql, file_type="hero")
@@ -517,9 +512,9 @@ def test_switching_back_to_the_marker_type_repairs_without_renaming(tmp_path: Pa
     sql.tables["acore_playerbots_hero"] = ["playerbots_account_type"]
     lines = switch_lines(tmp_path, entry, "hero", sql)
     assert not [s for s in sql.executed if s.startswith("RENAME TABLE")]
-    assert (tmp_path / coa_realm.ACTIVE_FILE).read_text(
-        encoding="utf-8"
-    ) == json.dumps({"version": 1, "active": "hero"}, indent=2) + "\n"
+    assert (tmp_path / coa_realm.ACTIVE_FILE).read_text(encoding="utf-8") == json.dumps(
+        {"version": 1, "active": "hero"}, indent=2
+    ) + "\n"
     assert any("no database was touched" in line for line in lines)
 
 
@@ -631,9 +626,7 @@ def test_bot_and_ahbot_accounts_are_not_copied(tmp_path: Path) -> None:
         },
     )
     sql.marker_rows["acore_characters"] = "coa"
-    sql.schemata.update(
-        {name: ("utf8mb4", "utf8mb4_unicode_ci") for name in sql.tables}
-    )
+    sql.schemata.update({name: ("utf8mb4", "utf8mb4_unicode_ci") for name in sql.tables})
     switch_lines(tmp_path, entry, "hero", sql)
     copied = [s for s in sql.executed if "INTO `acore_auth`.account SELECT" in s]
     assert any("Player1" in s for s in copied)
@@ -664,7 +657,6 @@ def test_an_unsafe_bot_prefix_refuses_the_copy(tmp_path: Path) -> None:
 
 def test_an_unsafe_account_name_is_skipped_and_named(tmp_path: Path) -> None:
     entry = coa()
-    sql = FakeSql()
 
     class EvilSql(FakeSql):
         def query(self, statement: str) -> str:
@@ -774,9 +766,7 @@ def test_an_interrupted_first_switch_retries_from_scratch(tmp_path: Path) -> Non
         },
     )
     sql.marker_rows.pop("acore_characters", None)
-    sql.schemata.update(
-        {name: ("utf8mb4", "utf8mb4_unicode_ci") for name in sql.tables}
-    )
+    sql.schemata.update({name: ("utf8mb4", "utf8mb4_unicode_ci") for name in sql.tables})
     (tmp_path / coa_realm.ACTIVE_FILE).write_text(
         json.dumps({"version": 1, "active": "coa"}) + "\n", encoding="utf-8"
     )

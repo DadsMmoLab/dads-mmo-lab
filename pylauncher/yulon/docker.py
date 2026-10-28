@@ -9106,9 +9106,7 @@ def _claim_coming_up(
             kind = (
                 ClaimImageGone
                 if _IMAGE_GONE.search(said)
-                else ClaimDockerDown
-                if _DAEMON_DOWN.search(said)
-                else ClaimUnavailable
+                else ClaimDockerDown if _DAEMON_DOWN.search(said) else ClaimUnavailable
             )
             raise kind(refused)
         if time.monotonic() > deadline:

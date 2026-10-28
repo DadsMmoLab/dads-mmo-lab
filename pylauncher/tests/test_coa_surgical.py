@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import subprocess
 import threading
-from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -67,27 +66,25 @@ def _fake_tools(binds: Path, marker: Path) -> None:
         'mkdir -p "$out/maps"\n'
         'if [ "${FAKE_THIN:-0}" = "1" ]; then\n'
         '  touch "$out/maps/9364341.map" "$out/maps/9364342.map" "$out/maps/0000000.map"\n'
-        'else\n'
+        "else\n"
         '  touch "$out/maps/9364341.map" "$out/maps/9364342.map" "$out/maps/9364343.map"\n'
         '  touch "$out/maps/9364441.map" "$out/maps/9364442.map" "$out/maps/9364443.map"\n'
         '  touch "$out/maps/9364541.map" "$out/maps/9364542.map" "$out/maps/9364543.map"\n'
         '  touch "$out/maps/0000000.map"\n'
-        'fi\n'
-        'echo done\n'
+        "fi\n"
+        "echo done\n"
         "exit 0\n",
         encoding="utf-8",
     )
     (binds / "vmap4_extractor").write_text(
-        "#!/usr/bin/env bash\n"
-        'echo "fake vmap_extractor $*" >> "$FAKE_MARKER"\n'
-        "exit 0\n",
+        "#!/usr/bin/env bash\n" 'echo "fake vmap_extractor $*" >> "$FAKE_MARKER"\n' "exit 0\n",
         encoding="utf-8",
     )
     (binds / "vmap4_assembler").write_text(
         "#!/usr/bin/env bash\n"
         'echo "fake vmap_assembler $*" >> "$FAKE_MARKER"\n'
-        'mkdir -p vmaps Buildings\n'
-        'touch vmaps/936.vmtree vmaps/936_42_44.vmtile vmaps/936_43_44.vmtile\n'
+        "mkdir -p vmaps Buildings\n"
+        "touch vmaps/936.vmtree vmaps/936_42_44.vmtile vmaps/936_43_44.vmtile\n"
         "touch vmaps/000.vmtree vmaps/000_00_00.vmtile\n"
         "touch Buildings/Ns_Inquisitorial_Dungeon.wmo.vmo\n"
         'echo "Ok, all done"\n'
@@ -149,7 +146,8 @@ def _run_script(
 
 @needs_bash
 def test_the_script_copies_only_the_named_map_and_vmo(tmp_path: Path) -> None:
-    """The script's filter: 936 maps + vmtree + vmtile + the named vmo land in /out, 000 does not."""
+    """The script's filter: 936 maps + vmtree + vmtile + the named vmo land in /out,
+    000 does not."""
     client = _client_with_wb1(tmp_path)
     out = tmp_path / "out"
     (out / "maps").mkdir(parents=True)
@@ -176,7 +174,8 @@ def test_the_script_copies_only_the_named_map_and_vmo(tmp_path: Path) -> None:
 
 
 def test_the_script_never_links_the_disabled_archive_into_the_main_client() -> None:
-    """WB1 stays OUT of the main run: tools 0-2 keep their catalog argv, only the appended one is bash."""
+    """WB1 stays OUT of the main run: tools 0-2 keep their catalog argv, only the appended one
+    is bash."""
     plan = plan936()
     catalog_argv = [tool.argv for tool in block().extract.tools]
     assert [tool.argv for tool in plan.tools[: len(catalog_argv)]] == catalog_argv
@@ -220,9 +219,10 @@ def _lay_config_and_evidence(server_dir: Path) -> None:
     source.parent.mkdir(parents=True, exist_ok=True)
     source.write_text("tileProducer: RecastMeshBuilder\n", encoding="utf-8")
     lay_evidence_maps(server_dir / "data", (0, 1, 530, 571, 936, 937))
-    plan = block().mmaps
     evidence = extract.expected_evidence(
-        ExtractPlan(image="tools", tools=[ExtractTool(name="x", argv=("x",), produces={"maps": 1})]),
+        ExtractPlan(
+            image="tools", tools=[ExtractTool(name="x", argv=("x",), produces={"maps": 1})]
+        ),
         server_dir,
         None,
     )
@@ -282,7 +282,8 @@ def test_progress_lines_every_minute(tmp_path: Path, monkeypatch: pytest.MonkeyP
 
 
 def test_cmangos_mmaps_output_is_unchanged(tmp_path: Path) -> None:
-    """Default cadence is off: `run_mmaps()` without `progress_every` sinks exactly the old lines."""
+    """Default cadence is off: `run_mmaps()` without `progress_every` sinks exactly the old
+    lines."""
     from tests.test_extract import FULL, PLAN, Runner, driven
 
     runner = Runner(FULL)
@@ -296,7 +297,11 @@ def test_cmangos_mmaps_output_is_unchanged(tmp_path: Path) -> None:
             self.calls = 0
 
         def __call__(
-            self, spec: docker.ContainerRun, *, sink: docker.OutputSink, cancel: threading.Event | None
+            self,
+            spec: docker.ContainerRun,
+            *,
+            sink: docker.OutputSink,
+            cancel: threading.Event | None,
         ) -> docker.AttachedRun:
             out = next(mount.host for mount in spec.mounts if mount.guest == "/out")
             folder = out / "mmaps"
@@ -323,8 +328,10 @@ def test_cmangos_mmaps_output_is_unchanged(tmp_path: Path) -> None:
     assert not any("Movement maps:" in line for line in said_default), said_default
     assert any("mmaps: done" in line for line in said_default)
 
+
 def test_mmaps_stage_lays_the_config_and_says_progress(tmp_path: Path) -> None:
-    """The stage copies the checkout config into `data/` and yields the progress line before the run."""
+    """The stage copies the checkout config into `data/` and yields the progress line before
+    the run."""
     from tests.test_coa_extract import coa_produce
 
     server_dir = tmp_path / "srv"

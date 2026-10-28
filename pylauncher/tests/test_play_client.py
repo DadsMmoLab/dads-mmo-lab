@@ -1493,7 +1493,9 @@ def test_refresh_keeps_an_archive_the_original_lacks_even_when_listed(
     play = tmp_path / "t"
     build(orig, play, tmp_path)
     (orig / "DivxDecoder.dll").unlink()
-    monkeypatch.setattr(play_client, "stale", lambda play_dir, original, **_k: (Path("DivxDecoder.dll"),))
+    monkeypatch.setattr(
+        play_client, "stale", lambda play_dir, original, **_k: (Path("DivxDecoder.dll"),)
+    )
     assert refresh(play, orig, tmp_path) == ()
     assert (play / "DivxDecoder.dll").read_bytes() == b"dll"
 

@@ -157,10 +157,13 @@ def test_a_resume_with_evidence_skips_the_extract(tmp_path: Path) -> None:
     first = len(rec.container_runs)
     block_data = block()
     assert block_data is not None
-    effective = surgical.effective_plan(AzerothCoreData(client_extract=block_data), "/azerothcore/env/dist/bin")
+    effective = surgical.effective_plan(
+        AzerothCoreData(client_extract=block_data), "/azerothcore/env/dist/bin"
+    )
     assert first == len(effective.tools), "a skip is only observable once something ran"
     list(eng._extract_maps(context(server_dir, client)))
     assert len(rec.container_runs) == first, "every tool had a record and its counts; none re-ran"
+
 
 def test_the_extract_stage_refuses_when_936_is_missing_after_the_run(tmp_path: Path) -> None:
     """The stage-end gate (not the counts): full counts but no 936 grid files still refuses."""
@@ -207,7 +210,9 @@ def test_the_extract_stage_names_the_tools_image(tmp_path: Path) -> None:
     list(engine(rec)._extract_maps(context(server_dir, client)))
     block_data = block()
     assert block_data is not None
-    plan = surgical.effective_plan(AzerothCoreData(client_extract=block_data), "/azerothcore/env/dist/bin")
+    plan = surgical.effective_plan(
+        AzerothCoreData(client_extract=block_data), "/azerothcore/env/dist/bin"
+    )
     assert [run.argv for run in rec.container_runs] == [tool.argv for tool in plan.tools]
     for run in rec.container_runs:
         mounts = {m.guest: m for m in run.mounts}

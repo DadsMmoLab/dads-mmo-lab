@@ -30,7 +30,7 @@ import time
 import urllib.error
 import urllib.parse
 import zlib
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 

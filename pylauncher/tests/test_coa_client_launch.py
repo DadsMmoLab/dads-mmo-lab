@@ -61,6 +61,7 @@ def test_the_coa_client_runs_ascension_exe_not_wow_exe(tmp_path: Path) -> None:
 
     assert spec.argv == (str(play / "Ascension.exe"),)
 
+
 def test_a_missing_ascension_exe_names_that_exe(tmp_path: Path) -> None:
     play = tmp_path / "play"
     play.mkdir()
@@ -70,6 +71,7 @@ def test_a_missing_ascension_exe_names_that_exe(tmp_path: Path) -> None:
 
     assert "ascension.exe" in str(caught.value).casefold()
     assert "Refresh from your original client" in str(caught.value)
+
 
 def test_proton_and_wine_get_the_dll_override(tmp_path: Path) -> None:
     play = _coa_client(tmp_path)
@@ -104,6 +106,8 @@ def test_proton_and_wine_get_the_dll_override(tmp_path: Path) -> None:
     assert proton.env["WINEDLLOVERRIDES"] == "divxtac=d"
     assert wine.argv == ("/usr/bin/wine", str(play / "Ascension.exe"))
     assert wine.env["WINEDLLOVERRIDES"] == "divxtac=d"
+
+
 def test_windows_gets_no_override(tmp_path: Path) -> None:
     play = _coa_client(tmp_path)
 
@@ -133,9 +137,7 @@ def test_a_steam_shortcut_carries_the_override(tmp_path: Path) -> None:
     ).add()
 
     root, _ = steam.vdf_parse((config / "shortcuts.vdf").read_bytes())
-    entry = next(
-        e for e in root["shortcuts"].values() if e["AppName"] == "WoW Conquest of Azeroth"
-    )
+    entry = next(e for e in root["shortcuts"].values() if e["AppName"] == "WoW Conquest of Azeroth")
     assert entry["Exe"] == f'"{client / "Ascension.exe"}"'
     assert entry["LaunchOptions"] == 'WINEDLLOVERRIDES="divxtac=d" %command%'
 

@@ -658,7 +658,9 @@ def _verify(sql: SqlRunner, entry: CatalogEntry, current: str, target_id: str) -
     set, or the first switch just wrote it). Anything else leaves the crash
     marker for the next press and writes neither the file nor the override.
     """
-    for schema, names in zip(_parked(entry, target_id), _tables_in(sql, _parked(entry, target_id))):
+    for schema, names in zip(
+        _parked(entry, target_id), _tables_in(sql, _parked(entry, target_id)), strict=True
+    ):
         if names:
             raise RealmSwitchError(
                 f"The parked {schema} schema is not empty after the rename; "

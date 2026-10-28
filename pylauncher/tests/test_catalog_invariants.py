@@ -1331,9 +1331,6 @@ def test_an_inherited_value_names_the_tree_it_came_from_and_that_tree_measured_i
         ),
         "wow-vanilla:play.mail_item_cap": catalog_provenance.Provenance("inherited", "wow-tbc"),
     }
-    bad_no_such_tree = {
-        "wow-vanilla:play.mail_item_cap": catalog_provenance.Provenance("inherited", "wow-turtle")
-    }
     bad_nothing_at_the_end = {
         "wow-tbc:play.mail_item_cap": catalog_provenance.Provenance("inherited", "wow-vanilla"),
         "wow-vanilla:play.mail_item_cap": catalog_provenance.Provenance("inherited", "wow-tbc"),

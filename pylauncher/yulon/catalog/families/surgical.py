@@ -64,7 +64,7 @@ def script(spec: AcSurgicalMap, tools_bin: str) -> str:
         f'cp "$w/Buildings/"{key}_*.vmtile /out/vmaps/ 2>/dev/null || true',
     ]
     tail = (
-        f'n=$(ls /out/maps/{key}*.map 2>/dev/null | wc -l)\n'
+        f"n=$(ls /out/maps/{key}*.map 2>/dev/null | wc -l)\n"
         f'if [ "$n" -lt {spec.min_maps} ]; then echo "yulon: map {map_id}: $n files, '
         f'at least {spec.min_maps} expected"; exit {FAILED_EXIT}; fi\n'
         'rm -rf "$w"\n'
@@ -80,12 +80,9 @@ def script(spec: AcSurgicalMap, tools_bin: str) -> str:
         f'"{tools_bin}/map_extractor" -i "$w/view" -o "$w/out" -e 1\n'
         f'"{tools_bin}/vmap4_extractor" -d "$w/view/Data"\n'
         f'"{tools_bin}/vmap4_assembler" Buildings vmaps\n'
-        "mkdir -p /out/maps /out/vmaps\n"
-        + "\n".join(copies)
-        + "\n"
-        + copy_extra
-        + tail
+        "mkdir -p /out/maps /out/vmaps\n" + "\n".join(copies) + "\n" + copy_extra + tail
     )
+
 
 def tool_name(spec: AcSurgicalMap) -> str:
     """The appended tool's evidence name: `map <id> from <archive>`."""

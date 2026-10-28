@@ -2062,7 +2062,6 @@ def _progress_watcher(
     return watch, flush
 
 
-
 def run_mmaps(
     plan: MmapPlan,
     *,

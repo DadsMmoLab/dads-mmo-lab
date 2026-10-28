@@ -68,12 +68,16 @@ def run(entry: CatalogEntry, rec: Recorder, server_dir: Path, **overrides: objec
     rec.remotes[server_dir] = entry.emulator.sources[0].url
     for source in entry.emulator.sources[1:]:
         rec.remotes[server_dir / source.dest] = source.url
-    made = make(entry, rec) if not overrides else AzerothCoreInstaller(
-        entry,
-        installers_root=resources.installers_dir(),
-        import_probe=rec.probe,
-        reset_unfinished=rec.reset,
-        seams=rec.seams(**overrides),
+    made = (
+        make(entry, rec)
+        if not overrides
+        else AzerothCoreInstaller(
+            entry,
+            installers_root=resources.installers_dir(),
+            import_probe=rec.probe,
+            reset_unfinished=rec.reset,
+            seams=rec.seams(**overrides),
+        )
     )
     return list(made.run(InstallOptions(server_dir=server_dir)))
 
@@ -118,11 +122,10 @@ def _run_script(tmp_path: Path, state: str) -> tuple[str, str, int]:
     else:
         version, tables = "0", "0"
     (binds / "mysql").write_text(
-        "#!/usr/bin/env bash\n"
-        "for last; do :; done\n"
+        "#!/usr/bin/env bash\n" "for last; do :; done\n"
         # The version probe's query CONTAINS the table-count query's substring,
         # so it is matched first — as the rendered shell asks it first.
-        'if [[ "$last" == *"TABLE_SCHEMA=\'acore_world\' AND TABLE_NAME=\'version\'"* ]]; then\n'
+        "if [[ \"$last\" == *\"TABLE_SCHEMA='acore_world' AND TABLE_NAME='version'\"* ]]; then\n"
         f'  echo "{version}"; exit 0\n'
         "fi\n"
         'if [[ "$last" == *"TABLE_SCHEMA=\'acore_world\'"* ]]; then\n'
@@ -266,7 +269,12 @@ def test_a_failed_bootstrap_fails_the_install(tmp_path: Path) -> None:
         return ok
 
     with pytest.raises(InstallerError, match="the world bootstrap failed \\(exit 1\\)"):
-        run(coa_entry(world_bootstrap_service=BOOTSTRAP_SERVICE), rec, tmp_path / "server", one_shot=one_shot)
+        run(
+            coa_entry(world_bootstrap_service=BOOTSTRAP_SERVICE),
+            rec,
+            tmp_path / "server",
+            one_shot=one_shot,
+        )
 
 
 def test_the_import_still_runs_over_a_bootstrapped_world(tmp_path: Path) -> None:
