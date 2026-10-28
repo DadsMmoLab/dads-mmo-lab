@@ -1004,6 +1004,29 @@ def update_name_queries(schema: str) -> tuple[str, str]:
     return core, modules
 
 
+def tail_row_queries(schema: str) -> str:
+    """The `(name, hash, state)` SELECT for the `updates` rows of `schema` (T802).
+
+    The full rows the tail classifier (`appliable_tail()`) compares: the sentences
+    above (`update_name_queries()`) answer names only, because they only say which
+    side is behind. Asked once a tail sentence is owed, off the server alone.
+    """
+    return (
+        f"SELECT `name`, `hash`, `state` FROM `{schema}`.`updates` "
+        "WHERE `state` IN ('RELEASED', 'ARCHIVED') ORDER BY `name`;"
+    )
+
+
+def ledger_row_queries(schema: str) -> str:
+    """The `(name, hash, state)` SELECT for EVERY `updates` row of `schema` (T802).
+
+    Every state, module and custom rows too: the one-shot's updater skips a file by
+    its name in any row, so the scope check (`move_flows._one_shot_pending()`)
+    needs the whole ledger, not the core rows `tail_row_queries()` answers.
+    """
+    return f"SELECT `name`, `hash`, `state` FROM `{schema}`.`updates` ORDER BY `name`;"
+
+
 def checked_names(
     core: Sequence[str], modules: Sequence[str], evidence: Evidence
 ) -> UpdateNames | None:
@@ -1040,6 +1063,98 @@ def _which_is_behind(
     if here_set < file_set:
         return "server"
     return "different"
+
+
+TailRow = tuple[str, str, str]
+"""One ledger row: `(name, sha1 hex, state)`; ledger hashes read uppercase, compared case-free."""
+
+
+Tail = tuple[str, ...]
+"""The update names the target already ran that the file lacks, per schema, sorted."""
+
+
+def appliable_tail(file_rows: Sequence[TailRow], server_rows: Sequence[TailRow]) -> Tail | None:
+    """The tail names the target ran but the file lacks, or None (T802).
+
+    Both sides are `(name, sha1, state)` rows read off the `updates` ledger of one
+    schema. The file's core names must be a STRICT subset of the server's: every
+    name the file holds the server holds too with the same sha1 (or both say the
+    row is ARCHIVED), and the server holds at least one name more. Every missing
+    name sorts after the file's newest name (a gap in the middle is another merge
+    order and is refused), and every missing row is RELEASED on the server (no
+    ARCHIVED backfill from a very old file). Module rows must match exactly; a
+    row that is not a core state on one side and is on the other is a mismatch.
+    """
+    file_core = {name: (sha1, state) for name, sha1, state in file_rows if state in _CORE_STATES}
+    server_core = {
+        name: (sha1, state) for name, sha1, state in server_rows if state in _CORE_STATES
+    }
+    file_module = sorted(
+        (name, sha1) for name, sha1, state in file_rows if state not in _CORE_STATES
+    )
+    server_module = sorted(
+        (name, sha1) for name, sha1, state in server_rows if state not in _CORE_STATES
+    )
+    if file_module != server_module:
+        return None
+    if not file_core or set(file_core) >= set(server_core):
+        return None
+    for name, (sha1, state) in file_core.items():
+        held = server_core.get(name)
+        if held is None:
+            return None
+        if state != "ARCHIVED" or held[1] != "ARCHIVED":
+            if sha1.upper() != held[0].upper():
+                return None
+    if not all(
+        server_core.get(name, (None, None))[1] == "RELEASED"
+        for name in set(server_core) - set(file_core)
+    ):
+        return None
+    newest = max(file_core)
+    missing = sorted(set(server_core) - set(file_core))
+    if not all(name > newest for name in missing):
+        return None
+    return tuple(missing)
+
+
+CORE_UPDATE_DIR = "data/sql/updates"
+"""Where the core's released updates live in a core checkout (`db_<x>` folders under it)."""
+
+MODULE_UPDATES_DIR = "modules/mod-playerbots/data/sql/playerbots/updates"
+"""Where mod-playerbots' released updates live in a server folder."""
+
+
+def tail_update_path(server_dir: Path, schema: str, name: str) -> Path:
+    """The checkout file an appliable tail row is proved against (T802).
+
+    The core checkout IS the server folder (source `dest` "."): `data/sql/updates`
+    holds `db_auth`, `db_characters` and `db_world` folders. mod-playerbots keeps
+    its own tree under `modules/mod-playerbots/data/sql/playerbots/updates`.
+    The playerbots schema is the only module one an import touches; no other
+    module row can reach the tail (module rows must match exactly above).
+    """
+    if schema == "acore_playerbots":
+        return server_dir / MODULE_UPDATES_DIR / f"{name}"
+    return server_dir / CORE_UPDATE_DIR / f"db_{schema.removeprefix('acore_')}" / f"{name}"
+
+
+def tail_file_matches(path: Path, sha1: str) -> bool:
+    """Whether `path`'s bytes hash to the ledger's `sha1` (T802).
+
+    The updater hashes the whole file's bytes (`UpdateFetcher.cpp`:
+    `SHA1::GetDigestOf(ReadSQLUpdate(path))`, and `ReadSQLUpdate` reads
+    `in.rdbuf()` to the end), so this hashes the whole file too, in 1 MB
+    chunks: a hash-equal file holds the bytes the target already ran.
+    """
+    digest = hashlib.sha1()
+    try:
+        with open(path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(_CHUNK), b""):
+                digest.update(chunk)
+    except OSError:
+        return False
+    return digest.hexdigest().upper() == sha1.upper()
 
 
 def _ordered_sentence(details: Sequence[str], sides: Sequence[str], *, built_here: bool) -> str:

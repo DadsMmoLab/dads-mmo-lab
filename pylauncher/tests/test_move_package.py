@@ -747,3 +747,82 @@ def test_unknown_names_keep_the_plain_sentence() -> None:
         server_names=lambda schema: (NAMES[:4], ()),
     )
     assert said is not None and said.startswith("The databases in this file are not at the same")
+
+
+# ------------------------------------------------------------ appliable tails (T802)
+
+
+def _row(name: str, state: str = "RELEASED") -> move.TailRow:
+    return (name, hashlib.sha1(name.encode()).hexdigest().upper(), state)
+
+
+def _rows(names: tuple[str, ...], state: str = "RELEASED") -> list[move.TailRow]:
+    return [_row(name, state) for name in names]
+
+
+def test_a_file_behind_by_a_tail_is_appliable(tmp_path: Path) -> None:
+    tail = move.appliable_tail(_rows(NAMES[:4]), _rows(NAMES))
+    assert tail == (NAMES[4],)
+
+
+def test_a_matching_ledger_has_no_tail() -> None:
+    assert move.appliable_tail(_rows(NAMES), _rows(NAMES)) is None
+
+
+def test_a_file_ahead_has_no_tail() -> None:
+    assert move.appliable_tail(_rows(NAMES), _rows(NAMES[:4])) is None
+
+
+def test_a_different_set_has_no_tail() -> None:
+    file = _rows(NAMES[:3]) + [_row("only_file.sql")]
+    here = _rows(NAMES[:3]) + [_row("only_here.sql")]
+    assert move.appliable_tail(file, here) is None
+
+
+def test_a_shared_name_with_another_hash_has_no_tail() -> None:
+    file = _rows(NAMES[:4])
+    here = _rows(NAMES)
+    name, _, state = here[0]
+    here[0] = (name, "B" * 40, state)
+    assert move.appliable_tail(file, here) is None
+
+
+def test_a_gap_before_the_newest_has_no_tail() -> None:
+    file = _rows((NAMES[0], NAMES[2], NAMES[3], NAMES[4]))
+    assert move.appliable_tail(file, _rows(NAMES)) is None
+
+
+def test_an_archived_missing_row_has_no_tail() -> None:
+    file = _rows(NAMES[:4])
+    here = _rows(NAMES[:4]) + [_row(NAMES[4], "ARCHIVED")]
+    assert move.appliable_tail(file, here) is None
+
+
+def test_module_rows_must_match() -> None:
+    file = _rows(NAMES[:4]) + [("mod_a.sql", "A" * 40, "MODULE")]
+    here = _rows(NAMES) + [("mod_a.sql", "B" * 40, "MODULE")]
+    assert move.appliable_tail(file, here) is None
+
+
+def test_tail_file_paths_point_at_the_checkout(tmp_path: Path) -> None:
+    root = tmp_path / "server"
+    assert move.tail_update_path(root, "acore_auth", "2026_10_05_00.sql") == (
+        root / "data" / "sql" / "updates" / "db_auth" / "2026_10_05_00.sql"
+    )
+    assert move.tail_update_path(root, "acore_playerbots", "a.sql") == (
+        root / "modules" / "mod-playerbots" / "data" / "sql" / "playerbots" / "updates" / "a.sql"
+    )
+
+
+def test_tail_file_matches_hashes_the_whole_file(tmp_path: Path) -> None:
+    body = b"-- an update\nINSERT INTO t VALUES (1);\n"
+    path = tmp_path / "2026_10_05_00.sql"
+    path.write_bytes(body)
+    assert move.tail_file_matches(path, hashlib.sha1(body).hexdigest())
+    assert not move.tail_file_matches(path, "0" * 40)
+    assert not move.tail_file_matches(tmp_path / "missing.sql", hashlib.sha1(body).hexdigest())
+
+    # Mutation: hashing only the first byte would pass a prefix but not the file.
+    other = tmp_path / "other.sql"
+    other.write_bytes(b"-- an update\nINSERT INTO t VALUES (2);\n")
+    assert not move.tail_file_matches(other, hashlib.sha1(body).hexdigest())

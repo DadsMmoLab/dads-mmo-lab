@@ -34,11 +34,15 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import json
+import os
+import re
 import shutil
+import zipfile
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import IO, Protocol
 
 from yulon import docker, forgetting, move
@@ -52,6 +56,7 @@ from yulon.controller_wow_wotlk.maintenance import (
     RestorePlan,
     RestoreReport,
 )
+from yulon.docker import OutputSink
 from yulon.log import get_logger
 from yulon.move import (
     Counts,
@@ -90,6 +95,164 @@ Not the same label as the copy above: backup file names are `<second>_<label>_<s
 and a backup refuses to overwrite a file, so two copies with one label made in one second
 collide (found by running the real engine in the flow's tests).
 """
+
+TAIL_MARKER_NAME = "move-tail-pending.json"
+"""The unfinished-import marker for a tail one-shot, in the server's backups folder (T802).
+
+Written just before the first load of an import that owes a tail, never earlier: a
+refusal before that loads nothing and leaves none. It holds the before-move backup
+paths and the ledgers the server will hold right after the dumps load (the
+package's own evidence), before the one-shot runs. While this server's ledgers
+still EQUAL those, a plan refuses: the databases are the file's, and the updates
+it lacked may be missing. A restore (or a one-shot that got part-way) changes the
+ledgers and frees the server; a verified success clears the marker. A marker that
+is there but cannot be read refuses as well (fail closed): absent, valid and
+unreadable are three different answers.
+"""
+
+
+@dataclass(frozen=True)
+class _TailMarker:
+    """What an unfinished tail import wrote down (T802)."""
+
+    copies: tuple[str, ...]
+    ledger: Mapping[str, Evidence]
+    """Schema -> the ledger it holds right after the load, before the one-shot."""
+
+
+class _TailMarkerUnreadable(Exception):
+    """A marker is there but does not say what it should (T802)."""
+
+
+def _tail_marker_path(world: MoveWorld) -> Path:
+    """Where the unfinished tail-import marker lives (T802)."""
+    return maintenance.backups_dir(world.server_dir) / TAIL_MARKER_NAME
+
+
+def _read_tail_marker(world: MoveWorld) -> _TailMarker | None:
+    """The unfinished tail import's record, None when there is none (T802).
+
+    Raises `_TailMarkerUnreadable` for a marker that is there but cannot be read,
+    is not JSON, or lacks its backups or ledgers: the caller refuses on it.
+    """
+    try:
+        raw = _tail_marker_path(world).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise _TailMarkerUnreadable(str(exc)) from exc
+    try:
+        found = json.loads(raw)
+    except ValueError as exc:
+        raise _TailMarkerUnreadable(str(exc)) from exc
+    if not isinstance(found, dict):
+        raise _TailMarkerUnreadable("not an object")
+    copies = found.get("copies")
+    ledger = found.get("ledger")
+    if (
+        not isinstance(copies, list)
+        or not copies
+        or not all(isinstance(p, str) and p for p in copies)
+    ):
+        raise _TailMarkerUnreadable("no before-move copies")
+    if not isinstance(ledger, dict) or not ledger:
+        raise _TailMarkerUnreadable("no ledgers")
+    try:
+        held = {str(schema): Evidence.model_validate(ev) for schema, ev in ledger.items()}
+    except ValueError as exc:
+        raise _TailMarkerUnreadable(str(exc)) from exc
+    return _TailMarker(copies=tuple(copies), ledger=held)
+
+
+def _same_ledger(a: Evidence | None, b: Evidence | None) -> bool:
+    if a is None or b is None:
+        return False
+    return (a.kind, a.count, a.digest, tuple(sorted(a.modules))) == (
+        b.kind,
+        b.count,
+        b.digest,
+        tuple(sorted(b.modules)),
+    )
+
+
+def _tail_marker_refusal(world: MoveWorld, here: Mapping[str, Evidence | None]) -> str | None:
+    """The refusal an unfinished tail import owes this server now, else None (T802).
+
+    Absent: None. Unreadable: a refusal. Valid: a refusal only while every ledger it
+    holds still equals this server's (`here`), the state right after its load.
+    """
+    try:
+        marker = _read_tail_marker(world)
+    except _TailMarkerUnreadable as exc:
+        logger.warning(f"could not read the unfinished tail-import marker: {exc}")
+        return _unreadable_marker_sentence(_tail_marker_path(world))
+    if marker is None:
+        return None
+    if all(_same_ledger(here.get(schema), ev) for schema, ev in marker.ledger.items()):
+        return _unfinished_tail_sentence(marker.copies)
+    return None
+
+
+def _write_tail_marker(
+    world: MoveWorld, copies: Sequence[object], ledger: Mapping[str, Evidence]
+) -> None:
+    """Write down the import's before-move backups and its post-load ledgers (T802).
+
+    Atomic: a temporary file in the same folder, flushed and synced, then renamed
+    over the marker. A marker an earlier press left keeps its backup paths: those
+    are the server's state before the FIRST press, which a second press's copies
+    (taken over a half-updated server) are not. Raises OSError, and
+    `_TailMarkerUnreadable` for an earlier marker that cannot be read.
+    """
+    path = _tail_marker_path(world)
+    earlier = _read_tail_marker(world)
+    kept = list(earlier.copies) if earlier is not None else [str(p) for p in copies]
+    body = json.dumps(
+        {
+            "copies": kept,
+            "ledger": {schema: ev.model_dump(mode="json") for schema, ev in ledger.items()},
+        }
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    try:
+        with open(temporary, "w", encoding="utf-8") as handle:
+            handle.write(body)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        with contextlib.suppress(OSError):
+            temporary.unlink(missing_ok=True)
+
+
+def _clear_tail_marker(world: MoveWorld) -> None:
+    """Forget an unfinished tail import after a verified success (T802)."""
+    try:
+        _tail_marker_path(world).unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        logger.warning(f"could not clear the unfinished tail-import marker: {exc}")
+
+
+def _unfinished_tail_sentence(copies: Sequence[object]) -> str:
+    """The refusal while an earlier tail import's marker names backups (T802)."""
+    named = ", ".join(str(p) for p in copies) or "the copies taken first (before-move)"
+    return (
+        "An earlier import did not finish: restore the databases from "
+        f"{named} first, then import again."
+    )
+
+
+def _unreadable_marker_sentence(path: Path) -> str:
+    """The refusal while an unfinished import's record cannot be read (T802)."""
+    return (
+        f"An earlier import left a record Yu'lon cannot read ({path}), so it will not bring a "
+        "file in until the databases are restored from the copies taken first (before-move) "
+        "and that record is removed."
+    )
+
 
 APP_ACCOUNT_PREFIX = "YULON_"
 """The command channel's account (`channel_setup.ACCOUNT_PREFIX`): the app's, never a player's."""
@@ -184,6 +347,14 @@ class MoveWorld:
     """This server's containers. Given, a move reserves the server across processes (T568) for
     its whole database stretch, as the other writes do; None (a harness) holds in this process."""
     wsl_distro: str | None = None
+    apply_updates: Callable[[OutputSink], docker.AttachedRun] | None = None
+    """Run the importer one-shot over this server's checkout (T802).
+
+    Bound by the tab's wiring to `wotlk_modules.apply_module_sql()` on an
+    AzerothCore-family server Yu'lon owns, and None for every other family. The
+    one-shot applies the bundled updates the file lacks after the load, with the
+    servers stopped and the database up; None binds the tail refusal at plan time.
+    """
 
 
 def engine_for(
@@ -443,6 +614,400 @@ def _version_problem(
         server_names=server_names,
         built_here=world.ownership() is Ownership.OWNED,
     )
+
+
+TailRowsOf = Callable[[str], "Sequence[move.TailRow] | None"]
+"""Schema -> its `(name, sha1, state)` rows, or None when they are not known."""
+
+
+def _tail_rows_of_dump(package: move.Package, schema: str) -> Sequence[move.TailRow] | None:
+    """A package's `updates` rows for `schema`, or None when unsure (T802).
+
+    `updates_names_in_dump()` decides whether the names are known at all; the
+    full rows (with the hashes the tail proof compares) are re-parsed here from
+    the same statement, so one parse decides and this one only carries.
+    """
+    from yulon.move import _rows_of_insert  # noqa: PLC2701 - the dump grammar's own reader
+
+    if move.updates_names_in_dump(package, schema) is None:
+        return None
+    try:
+        member = package.member(schema)
+        found: list[move.TailRow] = []
+        with zipfile.ZipFile(package.path) as archive, archive.open(member.file) as fh:
+            for raw in fh:
+                if not raw.startswith(b"INSERT INTO `updates`"):
+                    continue
+                rows = _rows_of_insert(raw.decode("utf-8"))
+                if rows is None:
+                    return None
+                found.extend(rows)
+    except (OSError, ValueError, KeyError, zipfile.BadZipFile, MovePackageError):
+        return None
+    return found or None
+
+
+def _tail_rows_of_server(world: MoveWorld, schema: str) -> Sequence[move.TailRow] | None:
+    """This server's `updates` rows for `schema`, or None when unsure (T802).
+
+    The statement lives with the ledger knowledge that reads it
+    (`move.tail_row_queries()`); the tab-separated answer is turned into rows
+    the same way `_read_update_names()` turns its two answers into checked names.
+    """
+    if world.entry.install.native is None or world.entry.install.native.family != "azerothcore":
+        return None
+    try:
+        out = world.mysql.query(move.tail_row_queries(schema))
+    except Exception as exc:  # noqa: BLE001 - rows that cannot be asked are not a tail
+        logger.info(f"could not read the update rows of {schema}: {exc}")
+        return None
+    rows: list[move.TailRow] = []
+    for line in out.splitlines():
+        if not line.strip():
+            continue
+        name, tab, rest = line.partition("\t")
+        sha1, tab2, state = rest.partition("\t")
+        if not tab or not tab2 or not name.strip() or not sha1.strip() or not state.strip():
+            return None
+        rows.append((name.strip(), sha1.strip(), state.strip()))
+    return rows or None
+
+
+def tail_updates(
+    world: MoveWorld,
+    manifest: Manifest,
+    here: Mapping[str, Evidence | None],
+    package: move.Package | None,
+) -> dict[str, move.Tail] | None:
+    """The per-schema tails the file lacks that the updater may apply, or None (T802).
+
+    Every schema the version check compares on an AzerothCore-family server
+    Yu'lon owns must classify as an appliable tail; anything else (a server
+    that is behind, a different set, an unknown row, a missing file or a hash
+    mismatch on disk, or a module or `updates_include` row that differs) answers
+    None and keeps the old refusal. The caller also needs `apply_updates`: None
+    for every other family binds the refusal too.
+    """
+    if package is None:
+        return None
+    if world.entry.install.native is None or world.entry.install.native.family != "azerothcore":
+        return None
+    if world.entry.containers.db_import is None:
+        return None
+    if world.ownership() is not Ownership.OWNED:
+        return None
+    # Asked through the world's own spec only when the caller already bound the
+    # seam: the harness MoveWorld carries no `apply_updates`, and a compose config
+    # probe here would shell out on every refused plan (the T802 tests forbid
+    # that). `None` below binds the same refusal as a failed probe.
+    if world.apply_updates is None:
+        return None
+    try:
+        sees = docker.importer_sees_modules(world.entry.containers.db_import, world.server_dir)
+    except Exception:  # noqa: BLE001 - unreadable compose config is not a tail
+        sees = None
+    if sees is False:
+        return None
+    for schema, ours in here.items():
+        # A ledger this server holds that the file has none of is a difference the
+        # version check refuses (an optional schema the dump would not replace); no
+        # tail answers it.
+        if ours is not None and schema not in manifest.schema_evidence:
+            return None
+    found: dict[str, move.Tail] = {}
+    compared = 0
+    for schema, theirs in manifest.schema_evidence.items():
+        if theirs.kind != "updates":
+            return None
+        ours = here.get(schema)
+        if ours is None or ours.kind != "updates":
+            return None
+        compared += 1
+        if ours.digest == theirs.digest:
+            if tuple(sorted(ours.modules)) != tuple(sorted(theirs.modules)):
+                return None
+            continue
+        if tuple(sorted(ours.modules)) != tuple(sorted(theirs.modules)):
+            return None
+        file_rows = _tail_rows_of_dump(package, schema)
+        server_rows = _tail_rows_of_server(world, schema)
+        if file_rows is None or server_rows is None:
+            return None
+        tail = move.appliable_tail(file_rows, server_rows)
+        if not tail:
+            return None
+        by_name = {name: sha1 for name, sha1, _ in server_rows}
+        for name in tail:
+            if not move.tail_file_matches(
+                move.tail_update_path(world.server_dir, schema, name), by_name[name]
+            ):
+                return None
+        include_here = _include_rows_of_server(world, schema)
+        include_file = _include_rows_of_dump(package, schema)
+        if include_here is None or include_file is None or include_here != include_file:
+            return None
+        found[schema] = tail
+    if not compared or not found:
+        return None
+    return found
+
+
+def _include_rows_of_server(world: MoveWorld, schema: str) -> set[str] | None:
+    """This server's `updates_include` rows for `schema`, or None when unread (T802)."""
+    try:
+        out = world.mysql.query(
+            f"SELECT `path`, `state` FROM `{schema}`.`updates_include` ORDER BY `path`;"
+        )
+    except Exception as exc:  # noqa: BLE001 - rows that cannot be asked are not a tail
+        logger.info(f"could not read the updates_include rows of {schema}: {exc}")
+        return None
+    rows: set[str] = set()
+    for line in out.splitlines():
+        if not line.strip():
+            continue
+        path, tab, state = line.partition("\t")
+        if not tab or not path.strip() or not state.strip():
+            return None
+        rows.add(f"{path.strip()}|{state.strip()}")
+    return rows
+
+
+def _include_rows_of_dump(package: move.Package, schema: str) -> set[str] | None:
+    """A package dump's `updates_include` rows for `schema`, or None when unsure (T802)."""
+    try:
+        member = package.member(schema)
+        found: set[str] = set()
+        seen = False
+        with zipfile.ZipFile(package.path) as archive, archive.open(member.file) as fh:
+            for raw in fh:
+                if not raw.startswith(b"INSERT INTO `updates_include`"):
+                    continue
+                seen = True
+                rows = _include_tuples(raw.decode("utf-8"))
+                if rows is None:
+                    return None
+                found.update(rows)
+        return found if seen else set()
+    except (OSError, ValueError, KeyError, zipfile.BadZipFile, MovePackageError):
+        return None
+
+
+_INCLUDE_VALUE = re.compile(r"^INSERT INTO `updates_include` VALUES (.*);\s*$", re.DOTALL)
+"""The value list of one `updates_include` insert, or no match when unsure."""
+
+
+def _include_tuples(statement: str) -> set[str] | None:
+    """The `path|state` rows of one `updates_include` insert, or None when unsure."""
+    found = _INCLUDE_VALUE.match(statement)
+    if found is None:
+        return None
+    rows: set[str] = set()
+    for part in found.group(1).split("),("):
+        fields = part.removeprefix("(").removesuffix(")").split("','")
+        if len(fields) != 2:
+            return None
+        path, state = fields[0].removeprefix("'"), fields[1].removesuffix("'")
+        if not path or not state or "'" in path or "'" in state:
+            return None
+        rows.add(f"{path}|{state}")
+    return rows
+
+
+_ONE_SHOT_POOLS: tuple[str, ...] = ("auth", "characters", "world")
+"""The databases the importer one-shot updates: one `DBUpdater` pass each (T802).
+
+The playerbots database is not one: mod-playerbots runs its own updater at a Start."""
+
+
+PendingFile = tuple[str, str, str]
+"""`(schema, file name, SHA1 of its bytes)`: one file the one-shot would run (T802)."""
+
+
+def _one_shot_schemas(world: MoveWorld) -> dict[str, str]:
+    """Pool -> schema for the databases the one-shot updates (T802)."""
+    dbs = world.entry.databases
+    return {"auth": dbs.auth, "characters": dbs.characters, "world": dbs.world}
+
+
+def _ledger_rows_of_server(world: MoveWorld, schema: str) -> Sequence[move.TailRow] | None:
+    """Every `updates` row of `schema` on this server, or None when unsure (T802)."""
+    try:
+        out = world.mysql.query(move.ledger_row_queries(schema))
+    except Exception as exc:  # noqa: BLE001 - a ledger that cannot be asked is not known
+        logger.info(f"could not read the update ledger of {schema}: {exc}")
+        return None
+    rows: list[move.TailRow] = []
+    for line in out.splitlines():
+        if not line.strip():
+            continue
+        name, tab, rest = line.partition("\t")
+        sha1, tab2, state = rest.partition("\t")
+        if not tab or not tab2 or not name.strip() or not sha1.strip() or not state.strip():
+            return None
+        rows.append((name.strip(), sha1.strip(), state.strip()))
+    return rows
+
+
+def _sql_files_under(folder: Path) -> list[Path] | None:
+    """Every `.sql` file under `folder`, recursively, as the updater lists them (T802).
+
+    A folder that is not there holds none (the updater skips it with a warning).
+    None when a listing fails or a folder is a link: what the updater would see
+    there is not known, so nothing is decided on it.
+    """
+    if not folder.is_dir():
+        return []
+    found: list[Path] = []
+    failed: list[OSError] = []
+    for root, dirs, files in os.walk(folder, onerror=failed.append):
+        here = Path(root)
+        if any((here / d).is_symlink() for d in dirs):
+            return None
+        found.extend(here / f for f in files if f.endswith(".sql"))
+    if failed:
+        return None
+    return sorted(found)
+
+
+def _sha1_of_file(path: Path) -> str | None:
+    digest = hashlib.sha1()
+    try:
+        with open(path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(chunk)
+    except OSError:
+        return None
+    return digest.hexdigest().upper()
+
+
+def _module_sql_folders(server_dir: Path, pool: str) -> list[Path] | None:
+    """Every module folder the updater walks for `pool`, or None when unreadable (T802).
+
+    Every module on disk, not only the ones the one-shot is handed: a superset, so
+    a module that is withheld can only make this refuse, never let a file through.
+    """
+    from yulon.apply import IMPORTER_SQL_ROOT, updater_folder_dbs
+
+    modules = server_dir / docker.MODULES_DIR_NAME
+    if not modules.exists():
+        return []
+    try:
+        names = sorted(p.name for p in modules.iterdir() if p.is_dir())
+        found: list[Path] = []
+        for name in names:
+            root = modules / name / IMPORTER_SQL_ROOT
+            if not root.is_dir():
+                continue
+            found.extend(
+                sub
+                for sub in sorted(root.iterdir())
+                if sub.is_dir() and pool in updater_folder_dbs(sub.name)
+            )
+    except OSError as exc:
+        logger.info(f"could not list the modules' SQL folders: {exc}")
+        return None
+    return found
+
+
+def _one_shot_pending(
+    world: MoveWorld, package: move.Package, loaded: Sequence[str]
+) -> set[PendingFile] | None:
+    """Every file the one-shot would run right after the load, or None when unsure (T802).
+
+    What the updater does, per pool (auth, characters, world): it lists every
+    `.sql` under the `updates_include` folders (`$` is the server folder) and
+    under each module's `data/sql/<folder naming the pool>`, and runs a file whose
+    name the ledger lacks, or whose bytes changed, unless both the row and the
+    folder are ARCHIVED. The ledger is the one the load leaves: the dump's for a
+    schema the package loads, this server's for the rest (world). Two files with
+    one name make the updater stop, so they answer None too.
+    """
+    pending: set[PendingFile] = set()
+    for pool, schema in _one_shot_schemas(world).items():
+        if schema in loaded:
+            rows = _tail_rows_of_dump(package, schema)
+            include = _include_rows_of_dump(package, schema)
+        else:
+            rows = _ledger_rows_of_server(world, schema)
+            include = _include_rows_of_server(world, schema)
+        modules = _module_sql_folders(world.server_dir, pool)
+        if rows is None or include is None or modules is None:
+            return None
+        folders: list[tuple[Path, str]] = []
+        for row in sorted(include):
+            where, _bar, state = row.partition("|")
+            relative = where.removeprefix("$/")
+            if relative == where or ".." in PurePosixPath(relative).parts:
+                return None
+            folders.append((world.server_dir / relative, state))
+        folders.extend((folder, "MODULE") for folder in modules)
+        files: dict[str, tuple[Path, str]] = {}
+        for folder, state in folders:
+            listed = _sql_files_under(folder)
+            if listed is None:
+                return None
+            for path in listed:
+                if path.name in files:
+                    return None
+                files[path.name] = (path, state)
+        applied = {name: (sha1, state) for name, sha1, state in rows}
+        for name, (path, state) in sorted(files.items()):
+            held = applied.get(name)
+            if held is not None and held[1] == "ARCHIVED" and state == "ARCHIVED":
+                continue
+            sha1 = _sha1_of_file(path)
+            if sha1 is None:
+                return None
+            if held is None or held[0].upper() != sha1:
+                pending.add((schema, name, sha1))
+    return pending
+
+
+def _one_shot_scope_problem(
+    world: MoveWorld, package: move.Package, tails: Mapping[str, move.Tail]
+) -> str | None:
+    """The refusal when the one-shot would run more than the approved tail, else None (T802).
+
+    The tail proof approves the auth and characters names the file lacks; the
+    one-shot runs EVERY pending file, so the two sets must be equal, by name, by
+    hash and by database. Asked before anything is backed up or loaded.
+    """
+    run_tail = _run_tail(world, tails)
+    if not run_tail:
+        return None
+    approved: set[PendingFile] = set()
+    for schema, names in run_tail.items():
+        rows = _tail_rows_of_server(world, schema)
+        if rows is None:
+            return _SCOPE_UNKNOWN
+        by_name = {name: sha1.upper() for name, sha1, _ in rows}
+        approved.update((schema, name, by_name.get(name, "")) for name in names)
+    loaded = [m.schema_name for m in package.manifest.databases]
+    pending = _one_shot_pending(world, package, loaded)
+    if pending is None:
+        return _SCOPE_UNKNOWN
+    if pending != approved:
+        extra = sorted(f"{schema}: {name}" for schema, name, _ in pending - approved)
+        shown = ", ".join(extra[:4]) + (f" and {len(extra) - 4} more" if len(extra) > 4 else "")
+        return _SCOPE_WIDER.format(names=shown or "the missing ones differ on disk")
+    return None
+
+
+_SCOPE_UNKNOWN = (
+    "Yu'lon could not tell which database updates this server would run after the load, so "
+    "it will not bring the file in."
+)
+_SCOPE_WIDER = (
+    "This server has other database updates waiting besides the ones the file lacks "
+    "({names}), and applying the missing ones would run those too, so Yu'lon will not bring "
+    "the file in."
+)
+
+
+def _run_tail(world: MoveWorld, tails: Mapping[str, move.Tail]) -> dict[str, move.Tail]:
+    """The part of a tail the one-shot applies: auth and characters (T802)."""
+    dbs = world.entry.databases
+    return {s: n for s, n in tails.items() if s in (dbs.auth, dbs.characters)}
 
 
 def _bot_and_app_clauses(world: MoveWorld) -> tuple[str, str]:
@@ -863,6 +1428,14 @@ class ImportPlan:
     server_running: bool = False
     counts: tuple[int, int] | None = None
     replaces: Replaces | None = None
+    updates_to_apply: Mapping[str, move.Tail] | None = None
+    """Per-schema tails the file lacks the updater applies after the load (T802).
+
+    Set exactly when the plan is allowed through the tail: every name here is an
+    update the target already ran, proved against the checkout files. `None` on
+    every refused plan and on every plan whose versions already match. Part of
+    the tokened answer: the run re-classifies and refuses when it differs.
+    """
 
     @property
     def allowed(self) -> bool:
@@ -871,7 +1444,15 @@ class ImportPlan:
     @property
     def token(self) -> str:
         manifest = self.manifest.model_dump_json(by_alias=True) if self.manifest else ""
-        material = f"{self.path.resolve()}|{manifest}|{self.counts}"
+        tails = (
+            "|".join(
+                f"{schema}:{','.join(names)}"
+                for schema, names in sorted((self.updates_to_apply or {}).items())
+            )
+            if self.updates_to_apply
+            else ""
+        )
+        material = f"{self.path.resolve()}|{manifest}|{self.counts}|{tails}"
         return hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
 
 
@@ -989,9 +1570,16 @@ def plan_import(world: MoveWorld, path: Path) -> ImportPlan:
             refusals=(f"Yu'lon could not look at this server: {exc}",),
             schemas=schemas,
         )
-    said = _version_problem(world, manifest, roles, here, package)
-    if said:
-        refusals.append(said)
+    said = _tail_marker_refusal(world, here)
+    tails: dict[str, move.Tail] | None = None
+    if said is None:
+        said = _version_problem(world, manifest, roles, here, package)
+        if said:
+            tails = tail_updates(world, manifest, here, package)
+            if tails is not None:
+                said = _one_shot_scope_problem(world, package, tails)
+                if said is not None:
+                    tails = None
     if counts is None:
         refusals.append(_COUNT_UNKNOWN)
     if uncovered:
@@ -999,11 +1587,12 @@ def plan_import(world: MoveWorld, path: Path) -> ImportPlan:
     return ImportPlan(
         path=path,
         manifest=manifest,
-        refusals=tuple(refusals),
+        refusals=tuple(refusals) if said is None else (*refusals, said),
         schemas=schemas,
         server_running=running,
         counts=counts,
         replaces=_replaces(*counts) if counts is not None else None,
+        updates_to_apply=tails,
     )
 
 
@@ -1216,9 +1805,19 @@ def _import_locked(
     manifest = package.manifest
     roles = _present_roles(world)
     here = _read_versions(world, roles)
+    unfinished = _tail_marker_refusal(world, here)
+    if unfinished is not None:
+        raise MoveError(f"{unfinished} {_NOT_IN}")
     said = _version_problem(world, manifest, roles, here, package)
+    tails: dict[str, move.Tail] | None = None
     if said:
-        raise MoveError(f"{said} {_NOT_IN}")
+        tails = tail_updates(world, manifest, here, package)
+        planned = dict(plan.updates_to_apply or {})
+        if tails is None or tails != planned:
+            raise MoveError(f"{said} {_NOT_IN}")
+        wider = _one_shot_scope_problem(world, package, tails)
+        if wider is not None:
+            raise MoveError(f"{wider} {_NOT_IN}")
     counts = _survey_counts(world, roles)
     if counts is None or counts != plan.counts:
         raise MoveError(CHANGED_SINCE_THE_PLAN)
@@ -1240,6 +1839,8 @@ def _import_locked(
     folder.mkdir(parents=True, exist_ok=False, mode=0o700)
     try:
         plans = _checked_plans(world, package, plan.schemas, folder)
+        if tails is not None:
+            _mark_unfinished(world, manifest, plan.schemas, copies)
         loaded: list[str] = []
         safety: list[Path] = list(copies)
         for schema, restore_plan in plans:
@@ -1253,6 +1854,8 @@ def _import_locked(
             loaded.append(schema)
             safety.extend(report.safety_backup)
         notes = _fix_ups(world, manifest, roles, use_old_realm_name)
+        notes = (*notes, *_apply_tail_updates(world, package, tails, here))
+        _clear_tail_marker(world)
     finally:
         shutil.rmtree(folder, ignore_errors=True)
     left = [name for name in (roles.get(r) for r in ROLES) if name and name not in plan.schemas]
@@ -1265,6 +1868,31 @@ def _import_locked(
         stopped=stopped,
         notes=notes,
     )
+
+
+def _mark_unfinished(
+    world: MoveWorld, manifest: Manifest, schemas: Sequence[str], copies: Sequence[Path]
+) -> None:
+    """Write the unfinished-import marker just before the first load (T802).
+
+    Its ledgers are the package's evidence for the schemas the load replaces: what
+    this server holds once the dumps are in and before the one-shot has run.
+    """
+    ledger = {s: manifest.schema_evidence[s] for s in schemas if s in manifest.schema_evidence}
+    try:
+        _write_tail_marker(world, copies, ledger)
+    except _TailMarkerUnreadable as exc:
+        logger.warning(f"could not read the unfinished tail-import marker: {exc}")
+        raise MoveError(
+            f"{_unreadable_marker_sentence(_tail_marker_path(world))} {_NOT_IN}"
+        ) from exc
+    except OSError as exc:
+        raise MoveError(
+            f"Yu'lon could not write down that this import was starting, so it loaded "
+            f"nothing. {_NOT_IN} The copies taken first (before-move) are "
+            f"{', '.join(str(p) for p in copies) or 'none'}.",
+            detail=str(exc),
+        ) from exc
 
 
 def _checked_plans(
@@ -1354,6 +1982,159 @@ def _fix_ups(
             "The realm name could not be changed to the old one.",
         )
     return tuple(notes)
+
+
+def _apply_tail_updates(
+    world: MoveWorld,
+    package: move.Package,
+    tails: dict[str, move.Tail] | None,
+    here: Mapping[str, Evidence | None],
+) -> tuple[str, ...]:
+    """Apply the tails the file lacks with the import one-shot, then re-read (T802).
+
+    Only auth and characters run here, with the servers stopped and the database
+    up: the same state the Update route runs its one-shot in. Every schema named
+    here was classified as a tail at plan time and re-classified just before the
+    loads, and the one-shot was shown to have nothing else to run
+    (`_one_shot_scope_problem()`). After it, EVERY database it can write is read
+    again: the tail's must hold the file's names plus the tail and their module rows
+    as before, and every other (world among them) must be as it was just before.
+    Playerbots is left to the next Start, which applies it the way an update does
+    (T217); the result says so.
+    """
+    if not tails:
+        return ()
+    if world.apply_updates is None:
+        raise MoveError(f"Yu'lon cannot apply the updates the file lacks here. {_NOT_IN}")
+    run_tail = _run_tail(world, tails)
+    if not run_tail:
+        return (_playerbots_next_start_note(tails),)
+    present = set(world.mysql.databases())
+    expected: dict[str, tuple[Evidence | None, tuple[str, ...], tuple[str, ...]]] = {}
+    file_core_names = _tail_expected_core_names(package, tails, run_tail)
+    for schema in run_tail:
+        want = here.get(schema)
+        expected[schema] = (
+            want,
+            file_core_names.get(schema, ()),
+            tuple(sorted(want.modules)) if want is not None else (),
+        )
+    for schema in _one_shot_schemas(world).values():
+        if schema in run_tail or schema not in present:
+            continue
+        now = _read_version(world, schema)
+        names = _read_update_names(world, schema, now) if now is not None else None
+        if now is None or names is None:
+            raise MoveError(
+                f"Yu'lon could not read the update ledger of {schema} before applying the "
+                "updates the file lacked, so it did not apply them. The accounts and characters "
+                f"are loaded without those updates. {_tail_copies_sentence()} {_NOT_IN}"
+            )
+        expected[schema] = (now, tuple(sorted(names[0])), tuple(sorted(names[1])))
+    lines: list[str] = []
+    try:
+        run = world.apply_updates(lines.append)
+    except (docker.DockerCommandError, OSError) as exc:
+        detail = (
+            getattr(exc, "detail", "") if isinstance(exc, docker.DockerCommandError) else str(exc)
+        )
+        raise MoveError(
+            _tail_failure_sentence(tails, world, detail),
+            detail=detail,
+        ) from exc
+    if run.returncode != 0:
+        detail = "\n".join(run.tail)
+        raise MoveError(_tail_failure_sentence(tails, world, detail), detail=detail)
+    for schema, (want, core, modules) in expected.items():
+        got = _read_version(world, schema)
+        names = _read_update_names(world, schema, got) if got is not None else None
+        if (
+            want is None
+            or got is None
+            or names is None
+            or got.digest != want.digest
+            or tuple(sorted(names[0])) != core
+            or tuple(sorted(names[1])) != modules
+        ):
+            have = got.count if got is not None else "?"
+            need = want.count if want is not None else "?"
+            raise MoveError(
+                f"The database updates the file lacked did not land as expected ({schema}): "
+                f"it should hold {need} updates and holds {have} now. "
+                "The accounts and characters are loaded but their databases may be partly "
+                f"updated. {_tail_copies_sentence()} {_NOT_IN}"
+            )
+    return _tail_run_notes(tails, run_tail)
+
+
+def _tail_expected_core_names(
+    package: move.Package, tails: Mapping[str, move.Tail], run_tail: Mapping[str, move.Tail]
+) -> dict[str, tuple[str, ...]]:
+    """The core update names each run schema should hold after the one-shot (T802).
+
+    The file's own ledger names plus the planned tail for that schema: the
+    digest alone cannot tell a silent updater from a rename that kept the
+    count, and the names alone cannot tell the tail from a different set.
+    """
+    found: dict[str, tuple[str, ...]] = {}
+    for schema in run_tail:
+        names = move.updates_names_in_dump(package, schema)
+        if names is None:
+            continue
+        found[schema] = tuple(sorted((*names[0], *tails.get(schema, ()))))
+    return found
+
+
+def _tail_run_notes(
+    tails: Mapping[str, move.Tail], run_tail: Mapping[str, move.Tail]
+) -> tuple[str, ...]:
+    """The done sentences for a one-shot that landed every name it owed (T802)."""
+    notes = [_tail_applied_sentence(run_tail)]
+    if any(schema not in run_tail for schema in tails):
+        notes.append(_playerbots_next_start_note(tails))
+    return tuple(notes)
+
+
+def _tail_applied_sentence(tails: Mapping[str, move.Tail]) -> str:
+    parts = []
+    for schema in sorted(tails):
+        names = tails[schema]
+        parts.append(f"{schema}: {len(names)} {'update' if len(names) == 1 else 'updates'}")
+    return (
+        "The updates the file lacked were applied after the load "
+        f"({'; '.join(parts)}), so this server's databases match what they were."
+    )
+
+
+def _playerbots_next_start_note(tails: Mapping[str, move.Tail]) -> str:
+    bots = {schema: names for schema, names in tails.items() if schema == "acore_playerbots"}
+    left = sorted(f"{schema} ({len(names)})" for schema, names in sorted(bots.items()))
+    return (
+        "The updates the file lacked for the bot database are applied by the next Start, "
+        f"the way an update applies them ({'; '.join(left)})."
+    )
+
+
+def _tail_copies_sentence() -> str:
+    return (
+        "The copies taken first (before-move) hold this server's prior state, and the "
+        "Maintenance tab restores from them."
+    )
+
+
+def _tail_failure_sentence(
+    tails: Mapping[str, move.Tail],
+    world: MoveWorld,
+    detail: str,
+) -> str:
+    names = sorted(f"{schema}:{','.join(names)}" for schema, names in sorted(tails.items()))
+    run = docker.AttachedRun(returncode=1, tail=tuple(detail.splitlines()) if detail else ())
+    return (
+        f"{docker.importer_failure(run, 'Applying the updates the file lacked')}: "
+        "the accounts and characters are loaded but their databases may be partly updated "
+        f"({'; '.join(names)}). {_tail_copies_sentence()} The package is unchanged: "
+        f"bring it in again after that restore. {_NOT_IN}"
+    )
 
 
 # --------------------------------------------------------------- what the tab calls

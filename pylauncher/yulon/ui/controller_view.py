@@ -3121,6 +3121,8 @@ def _move_services(
     *,
     wsl_distro: str | None,
     store: ManifestStore | None = None,
+    sql: apply_module.LedgerReader | None = None,
+    user_game: str | None = None,
 ) -> move_flows.MoveServices:
     """The Move group's four presses, over the same engine the Backup and Restore buttons use.
 
@@ -3182,6 +3184,25 @@ def _move_services(
             # The cross-process hold for the move's database stretch (lead's decision, 2026-10-09).
             spec=entry.container_spec(),
             wsl_distro=wsl_distro,
+            # T802: the tail's one-shot, on AzerothCore-family servers alone. None
+            # everywhere else binds the tail refusal at plan time.
+            apply_updates=(
+                (
+                    lambda output: wotlk_modules.apply_module_sql(
+                        server_dir,
+                        spec=entry.container_spec(),
+                        output=output,
+                        wsl_distro=wsl_distro,
+                        ledger=sql,
+                        user_game=user_game or entry.id,
+                    )
+                )
+                if entry.install.native is not None
+                and entry.install.native.family == "azerothcore"
+                and sql is not None
+                and user_game is not None
+                else None
+            ),
         ),
         whole=whole,
     )
@@ -3388,7 +3409,16 @@ def _assemble(
         # factory that never bound `play`.
         database_alone=_database_alone(spec, server_dir, wsl_distro=wsl_distro),
         move=(
-            _move_services(entry, server_dir, mysql, controller, wsl_distro=wsl_distro, store=store)
+            _move_services(
+                entry,
+                server_dir,
+                mysql,
+                controller,
+                wsl_distro=wsl_distro,
+                store=store,
+                sql=sql,
+                user_game=entry.id,
+            )
             if mysql is not None
             else None
         ),
