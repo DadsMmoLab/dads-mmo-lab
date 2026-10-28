@@ -1725,9 +1725,16 @@ def _sql_names(prefix: str, count: int) -> tuple[str, ...]:
 
 
 def ledger_package(
-    tmp_path: Path, names: dict[str, tuple[str, ...]], *, name: str = "ledger.zip"
+    tmp_path: Path,
+    names: dict[str, tuple[str, ...]],
+    *,
+    name: str = "ledger.zip",
+    include: dict[str, tuple[str, ...]] | None = None,
 ) -> Path:
-    """A package whose dumps hold a real `updates` insert for each schema in `names`."""
+    """A package whose dumps hold a real `updates` insert for each schema in `names`.
+
+    `include` adds an `updates_include` insert (`path|state` rows) to a schema's dump.
+    """
     src = tmp_path / "ledger"
     src.mkdir(exist_ok=True)
     dumps = []
@@ -1738,6 +1745,10 @@ def ledger_package(
             for n in held
         )
         insert = f"INSERT INTO `updates` VALUES {rows};\n".encode()
+        folders = (include or {}).get(schema, ())
+        if folders:
+            values = ",".join("('{}','{}')".format(*row.split("|", 1)) for row in folders)
+            insert += f"INSERT INTO `updates_include` VALUES {values};\n".encode()
         path = src / f"{schema}.sql"
         body = dump_text(schema).replace(b"-- Dump completed", insert + b"-- Dump completed")
         path.write_bytes(body)
@@ -1867,6 +1878,13 @@ def _tail_names(prefix: str, count: int) -> tuple[str, ...]:
     return tuple(f"2026_10_{n:02d}_00_{prefix}.sql" for n in range(count))
 
 
+TAIL_INCLUDE = {
+    schema: (f"$/data/sql/updates/db_{schema.removeprefix('acore_')}|RELEASED",)
+    for schema in ("acore_auth", "acore_characters", "acore_world")
+}
+"""The `updates_include` rows of a stock AzerothCore ledger, as far as these tests need."""
+
+
 def _tail_box(
     tmp_path: Path, file_names: dict[str, tuple[str, ...]], here_names: dict[str, tuple[str, ...]]
 ) -> tuple[Box, Path]:
@@ -1875,7 +1893,7 @@ def _tail_box(
     Both sides' `updates` rows are scripted `(name, hash, state)` answers; the
     checkout files the tail proof hashes are laid under the target's server dir.
     """
-    package = ledger_package(tmp_path, file_names)
+    package = ledger_package(tmp_path, file_names, include=TAIL_INCLUDE)
     hashes = {
         name: hashlib.sha1(name.encode()).hexdigest().upper()
         for names in here_names.values()
@@ -1886,7 +1904,14 @@ def _tail_box(
         for schema, names in here_names.items()
     }
     present = ("acore_auth", "acore_characters", "acore_world", "acore_playerbots")
-    db = Db([], present=present, tail_rows=rows, updates_by_schema=dict(here_names))
+    db = Db(
+        [],
+        present=present,
+        tail_rows=rows,
+        updates_by_schema=dict(here_names),
+        include_rows=dict(TAIL_INCLUDE),
+    )
+    db.updates_by_schema.setdefault("acore_playerbots", ())  # no bot ledger unless given
     box = target(tmp_path, db=db)
     for schema, names in here_names.items():
         for name in names:
@@ -1948,7 +1973,7 @@ def test_a_tail_without_the_seam_is_refused(
     box.world = replace(box.world, apply_updates=None)
     plan = move_flows.plan_import(box.world, package)
     assert not plan.allowed
-    assert "not at the same version" in " ".join(plan.refusals)
+    assert "The file is behind this server" in " ".join(plan.refusals)
 
 
 def test_a_tail_with_a_failing_one_shot_names_the_copies(
@@ -2113,7 +2138,7 @@ def test_a_tail_without_a_db_import_service_is_refused(
     box.world = replace(box.world, entry=entry)
     plan = move_flows.plan_import(box.world, package)
     assert not plan.allowed
-    assert "not at the same version" in " ".join(plan.refusals)
+    assert "The file is behind this server" in " ".join(plan.refusals)
 
 
 def test_a_tail_on_an_unowned_server_is_refused(
@@ -2147,7 +2172,7 @@ def test_a_tail_the_compose_file_hides_is_refused(
     monkeypatch.setattr(docker, "importer_sees_modules", lambda *a, **k: False)
     plan = move_flows.plan_import(box.world, package)
     assert not plan.allowed
-    assert "not at the same version" in " ".join(plan.refusals)
+    assert "The file is behind this server" in " ".join(plan.refusals)
 
 
 def test_a_migrations_ledger_is_never_a_tail(
@@ -2329,7 +2354,7 @@ def test_a_tail_whose_file_is_missing_on_disk_is_refused(
     missing.unlink()
     plan = move_flows.plan_import(box.world, package)
     assert not plan.allowed
-    assert "not at the same version" in " ".join(plan.refusals)
+    assert "The file is behind this server" in " ".join(plan.refusals)
 
 
 def test_a_tail_whose_bytes_differ_on_disk_is_refused(
@@ -2348,7 +2373,7 @@ def test_a_tail_whose_bytes_differ_on_disk_is_refused(
     changed.write_bytes(b"changed bytes")
     plan = move_flows.plan_import(box.world, package)
     assert not plan.allowed
-    assert "not at the same version" in " ".join(plan.refusals)
+    assert "The file is behind this server" in " ".join(plan.refusals)
 
 
 def test_a_tail_whose_include_rows_differ_is_refused(
@@ -2366,7 +2391,7 @@ def test_a_tail_whose_include_rows_differ_is_refused(
     box.db.include_rows = {"acore_auth": ("some_update.sql|RELEASED",)}
     plan = move_flows.plan_import(box.world, package)
     assert not plan.allowed
-    assert "not at the same version" in " ".join(plan.refusals)
+    assert "The file is behind this server" in " ".join(plan.refusals)
 
 
 def test_a_target_updated_after_the_plan_refuses_the_run(
@@ -2388,7 +2413,7 @@ def test_a_target_updated_after_the_plan_refuses_the_run(
     box.db.tail_rows["acore_auth"] = tuple(
         (n, hashlib.sha1(n.encode()).hexdigest().upper(), "RELEASED") for n in auth[:21]
     )
-    with pytest.raises(MaintenanceError, match="not at the same version|changed after the plan"):
+    with pytest.raises(MaintenanceError, match="behind|changed after the plan"):
         move_flows.run_import(
             box.world, plan, confirm=None, use_old_realm_name=False, stop_allowed=False
         )
@@ -2531,18 +2556,28 @@ def test_a_restored_database_clears_the_way_past_the_marker(
     box.db.updates_by_schema["acore_auth"] = tuple(auth[:22])
     box.db.updates_by_schema["acore_playerbots"] = ()
     box.db.tail_rows["acore_playerbots"] = ()
-    move_flows._write_tail_marker(box.world, ["some/before-move_acore_auth.sql"])
+    marker_here = move_flows._read_versions(box.world, move_flows._present_roles(box.world))
+    move_flows._write_tail_marker(
+        box.world,
+        ["some/before-move_acore_auth.sql"],
+        {s: e for s, e in marker_here.items() if e is not None},
+    )
     again = move_flows.plan_import(box.world, package)
     assert not again.allowed
     assert "did not finish" in " ".join(again.refusals)
     second = _tail_names("second", 24)
     restored = ledger_package(
-        tmp_path, {"acore_auth": second[:22], "acore_characters": chars}, name="ledger-second.zip"
+        tmp_path,
+        {"acore_auth": second[:22], "acore_characters": chars},
+        name="ledger-second.zip",
+        include=TAIL_INCLUDE,
     )
     box.db.updates_by_schema["acore_auth"] = tuple(second)
     box.db.tail_rows["acore_auth"] = tuple(
         (n, hashlib.sha1(n.encode()).hexdigest().upper(), "RELEASED") for n in second
     )
+    for name in auth:  # the checkout moved on with the server: only `second` is on disk
+        move.tail_update_path(box.server_dir, "acore_auth", name).unlink()
     for name in second:
         path = move.tail_update_path(box.server_dir, "acore_auth", name)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -2617,3 +2652,513 @@ def test_a_playerbots_only_tail_needs_no_one_shot(
     )
     assert seen == []
     assert "next Start" in result.text()
+
+
+# ------------------------------------- T802 round 2: marker states and one-shot scope
+
+
+def _standard_tail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Box, Path, tuple[str, ...], tuple[str, ...]]:
+    """A target one auth update ahead of the package, with its seam bound."""
+    monkeypatch.setattr(docker, "importer_sees_modules", lambda *a, **k: True)
+    auth = _tail_names("auth", 23)
+    chars = ("2024_01_a", "2024_01_b")
+    box, package = _tail_box(
+        tmp_path,
+        {"acore_auth": auth[:22], "acore_characters": chars},
+        {"acore_auth": auth, "acore_characters": chars},
+    )
+    return box, package, auth, chars
+
+
+def _run(box: Box, plan: move_flows.ImportPlan) -> move_flows.ImportResult:
+    return move_flows.run_import(
+        box.world, plan, confirm=None, use_old_realm_name=False, stop_allowed=False
+    )
+
+
+def _failing_one_shot(box: Box) -> None:
+    from dataclasses import replace
+
+    def failing(sink: object) -> docker.AttachedRun:
+        box.events.append("apply-updates")
+        return docker.AttachedRun(returncode=1, tail=("Applying of file 'x.sql' failed",))
+
+    box.world = replace(box.world, apply_updates=failing)
+
+
+def _loads(box: Box) -> list[str]:
+    return [e for e in box.events if e.startswith(("dump:", "load:")) or e == "apply-updates"]
+
+
+def _set_aside(box: Box) -> None:
+    """Move a press's copies away: the backup names carry the wall clock's second, so a
+    second press within it would collide with them (the marker keeps their paths)."""
+    for p in maintenance.backups_dir(box.server_dir).glob("*.sql"):
+        p.rename(f"{p}.first")
+
+
+def test_the_marker_holds_the_post_load_ledgers_and_the_first_copies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    box, package, auth, chars = _standard_tail(tmp_path, monkeypatch)
+    _failing_one_shot(box)
+    plan = move_flows.plan_import(box.world, package)
+    assert plan.allowed, plan.refusals
+    with pytest.raises(MaintenanceError, match="Applying the updates the file lacked"):
+        _run(box, plan)
+    marker = move_flows._read_tail_marker(box.world)
+    assert marker is not None
+    assert marker.copies and all("before-move" in c for c in marker.copies)
+    evidence = move.read_package(package).manifest.schema_evidence
+    assert dict(marker.ledger) == {s: evidence[s] for s in ("acore_auth", "acore_characters")}
+
+
+def test_a_restore_after_a_failed_tail_frees_a_same_version_import(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The round-1 lockout: a restore and a fresh same-version file were refused forever."""
+    box, package, auth, chars = _standard_tail(tmp_path, monkeypatch)
+    _failing_one_shot(box)
+    plan = move_flows.plan_import(box.world, package)
+    with pytest.raises(MaintenanceError):
+        _run(box, plan)
+    assert move_flows._tail_marker_path(box.world).exists()
+    refused = move_flows.plan_import(box.world, package)
+    assert not refused.allowed
+    assert "did not finish" in " ".join(refused.refusals)
+    first = move_flows._read_tail_marker(box.world)
+    assert first is not None
+    _set_aside(box)
+    # The Maintenance tab put the before-move copies back: the target's own ledger again.
+    box.db.updates_by_schema["acore_auth"] = auth
+    box.db.tail_rows["acore_auth"] = tuple(
+        (n, hashlib.sha1(n.encode()).hexdigest().upper(), "RELEASED") for n in auth
+    )
+    same = ledger_package(
+        tmp_path,
+        {"acore_auth": auth, "acore_characters": chars},
+        name="same-version.zip",
+        include=TAIL_INCLUDE,
+    )
+    fresh = move_flows.plan_import(box.world, same)
+    assert fresh.allowed, fresh.refusals
+    assert fresh.updates_to_apply is None
+    _run(box, fresh)
+    assert not move_flows._tail_marker_path(box.world).exists()
+
+
+def test_a_second_press_keeps_the_first_presses_copies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from dataclasses import replace
+
+    box, package, auth, chars = _standard_tail(tmp_path, monkeypatch)
+    _failing_one_shot(box)
+    with pytest.raises(MaintenanceError):
+        _run(box, move_flows.plan_import(box.world, package))
+    first = move_flows._read_tail_marker(box.world)
+    assert first is not None
+    # The ledger moved off the post-load state (a restore, or a one-shot that got part-way).
+    box.db.updates_by_schema["acore_auth"] = auth
+    box.db.tail_rows["acore_auth"] = tuple(
+        (n, hashlib.sha1(n.encode()).hexdigest().upper(), "RELEASED") for n in auth
+    )
+    box.world = replace(box.world, now=lambda: datetime(2026, 10, 9, 16, 0, 0))
+    _set_aside(box)
+    again = move_flows.plan_import(box.world, package)
+    assert again.allowed, again.refusals
+    with pytest.raises(MaintenanceError):
+        _run(box, again)
+    kept = move_flows._read_tail_marker(box.world)
+    assert kept is not None
+    assert kept.copies == first.copies
+    every = {str(p) for p in maintenance.backups_dir(box.server_dir).rglob("*before-move*.sql")}
+    assert every - set(first.copies), "the second press made copies of its own"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "",
+        '{"copies": ["a.sql"], "ledger": {',
+        "[]",
+        '{"copies": [], "ledger": {"acore_auth": {"kind": "updates", "count": 1, '
+        '"digest": "' + "0" * 64 + '"}}}',
+        '{"copies": ["a.sql"]}',
+        '{"copies": ["a.sql"], "ledger": {}}',
+        '{"copies": ["a.sql"], "ledger": {"acore_auth": {"kind": "updates"}}}',
+        '{"copies": [""], "ledger": {"acore_auth": {"kind": "updates", "count": 1, '
+        '"digest": "' + "0" * 64 + '"}}}',
+    ],
+    ids=[
+        "empty",
+        "truncated",
+        "not-an-object",
+        "no-copies",
+        "no-ledger",
+        "empty-ledger",
+        "bad-evidence",
+        "blank-copy",
+    ],
+)
+def test_a_marker_that_cannot_be_read_refuses_the_plan_and_the_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str
+) -> None:
+    box, package, auth, chars = _standard_tail(tmp_path, monkeypatch)
+    plan = move_flows.plan_import(box.world, package)
+    assert plan.allowed, plan.refusals
+    path = move_flows._tail_marker_path(box.world)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body, encoding="utf-8")
+    refused = move_flows.plan_import(box.world, package)
+    assert not refused.allowed
+    said = " ".join(refused.refusals)
+    assert "cannot read" in said and str(path) in said
+    with pytest.raises(MaintenanceError, match="cannot read"):
+        _run(box, plan)
+    assert _loads(box) == []
+
+
+def test_a_marker_the_os_will_not_let_us_read_refuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mutation: let a read OSError mean "no marker" and the plan goes through."""
+    box, package, auth, chars = _standard_tail(tmp_path, monkeypatch)
+    path = move_flows._tail_marker_path(box.world)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{}", encoding="utf-8")
+    real = Path.read_text
+
+    def denied(self: Path, *a: object, **k: object) -> str:
+        if self.name == move_flows.TAIL_MARKER_NAME:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real(self, *a, **k)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "read_text", denied)
+    refused = move_flows.plan_import(box.world, package)
+    assert not refused.allowed
+    assert "cannot read" in " ".join(refused.refusals)
+
+
+def test_a_marker_that_appears_between_plan_and_run_refuses_the_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mutation: drop the run's own marker check and a server another press half-loaded loads."""
+    box, package, auth, chars = _standard_tail(tmp_path, monkeypatch)
+    plan = move_flows.plan_import(box.world, package)
+    assert plan.allowed, plan.refusals
+    here = move_flows._read_versions(box.world, move_flows._present_roles(box.world))
+    move_flows._write_tail_marker(
+        box.world, ["elsewhere/before-move.sql"], {s: e for s, e in here.items() if e is not None}
+    )
+    with pytest.raises(MaintenanceError, match="did not finish"):
+        _run(box, plan)
+    assert _loads(box) == []
+
+
+def test_a_marker_whose_ledgers_differ_from_this_server_does_not_refuse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    box, package, auth, chars = _standard_tail(tmp_path, monkeypatch)
+    other = Evidence(kind="updates", count=1, digest=_digest(("x.sql",)))
+    move_flows._write_tail_marker(box.world, ["old/before-move.sql"], {"acore_auth": other})
+    plan = move_flows.plan_import(box.world, package)
+    assert plan.allowed, plan.refusals
+    _run(box, plan)
+    assert not move_flows._tail_marker_path(box.world).exists()
+
+
+def test_a_refusal_before_the_first_load_leaves_no_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    box, package, auth, chars = _standard_tail(tmp_path, monkeypatch)
+    plan = move_flows.plan_import(box.world, package)
+
+    def refuse(path: Path, schema: str) -> None:
+        raise MaintenanceError("That file is not a database copy.")
+
+    monkeypatch.setattr(maintenance, "verify_dump", refuse)
+    with pytest.raises(MaintenanceError, match="not a database copy"):
+        _run(box, plan)
+    assert not move_flows._tail_marker_path(box.world).exists()
+    assert not [e for e in box.events if e.startswith("load:")]
+
+
+def test_a_marker_that_cannot_be_written_stops_before_the_load(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    box, package, auth, chars = _standard_tail(tmp_path, monkeypatch)
+    plan = move_flows.plan_import(box.world, package)
+    real = os.replace
+
+    def full(src: object, dst: object) -> None:
+        if Path(str(dst)).name == move_flows.TAIL_MARKER_NAME:
+            raise OSError(28, "No space left on device")
+        real(src, dst)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "replace", full)
+    with pytest.raises(MaintenanceError) as raised:
+        _run(box, plan)
+    said = str(raised.value)
+    assert "loaded nothing" in said and "before-move" in said
+    assert not [e for e in box.events if e.startswith("load:")]
+    assert not move_flows._tail_marker_path(box.world).exists()
+    assert not list(move_flows._tail_marker_path(box.world).parent.glob(".*.tmp"))
+
+
+def test_a_marker_that_cannot_be_cleared_still_finishes_the_import(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mutation: let a clear OSError escape and a verified import reads as failed."""
+    box, package, auth, chars = _standard_tail(tmp_path, monkeypatch)
+    plan = move_flows.plan_import(box.world, package)
+    real = Path.unlink
+
+    def denied(self: Path, *a: object, **k: object) -> None:
+        if self.name == move_flows.TAIL_MARKER_NAME:
+            raise PermissionError(13, "Permission denied", str(self))
+        real(self, *a, **k)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "unlink", denied)
+    result = _run(box, plan)
+    assert "applied after the load" in result.text()
+
+
+def test_a_target_that_gains_an_update_after_the_plan_refuses_the_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mutation: compare the run's tail to None only and a longer tail runs unplanned."""
+    box, package, auth, chars = _standard_tail(tmp_path, monkeypatch)
+    plan = move_flows.plan_import(box.world, package)
+    assert plan.updates_to_apply == {"acore_auth": (auth[22],)}
+    extra = "2026_10_30_00_auth.sql"
+    box.db.updates_by_schema["acore_auth"] = (*auth, extra)
+    box.db.tail_rows["acore_auth"] = tuple(
+        (n, hashlib.sha1(n.encode()).hexdigest().upper(), "RELEASED") for n in (*auth, extra)
+    )
+    path = move.tail_update_path(box.server_dir, "acore_auth", extra)
+    path.write_bytes(extra.encode())
+    package_now = move.read_package(package)
+    here = move_flows._read_versions(box.world, move_flows._present_roles(box.world))
+    tails = move_flows.tail_updates(box.world, package_now.manifest, here, package_now)
+    assert tails == {"acore_auth": (auth[22], extra)}  # a tail still, only not the planned one
+    with pytest.raises(MaintenanceError, match="The file is behind this server"):
+        _run(box, plan)
+    assert _loads(box) == []
+
+
+def _verify_breaker(box: Box, change: Callable[[], None]) -> None:
+    """A one-shot that lands the tail and then also does `change`."""
+    from dataclasses import replace
+
+    def landing(sink: object) -> docker.AttachedRun:
+        box.events.append("apply-updates")
+        box.db.updates_by_schema["acore_auth"] = _tail_names("auth", 23)
+        box.db.updates_by_schema["acore_characters"] = ("2024_01_a", "2024_01_b")
+        change()
+        return docker.AttachedRun(returncode=0, tail=())
+
+    box.world = replace(box.world, apply_updates=landing)
+
+
+def test_a_one_shot_that_changes_module_rows_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mutation: drop the module-rows compare after the one-shot and a new module row passes."""
+    box, package, auth, chars = _standard_tail(tmp_path, monkeypatch)
+
+    def module_row() -> None:
+        box.db.module_rows["acore_auth"] = (("mod_extra.sql", "C" * 40),)
+
+    _verify_breaker(box, module_row)
+    plan = move_flows.plan_import(box.world, package)
+    assert plan.allowed, plan.refusals
+    with pytest.raises(MaintenanceError, match=r"did not land as expected \(acore_auth\)"):
+        _run(box, plan)
+
+
+def test_a_one_shot_that_changes_the_world_ledger_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    box, package, auth, chars = _standard_tail(tmp_path, monkeypatch)
+
+    def world_row() -> None:
+        box.db.updates_by_schema["acore_world"] = ("2024_01_a", "2024_01_b", "2026_11_w.sql")
+
+    _verify_breaker(box, world_row)
+    plan = move_flows.plan_import(box.world, package)
+    with pytest.raises(MaintenanceError, match=r"did not land as expected \(acore_world\)"):
+        _run(box, plan)
+
+
+def test_a_world_module_row_the_one_shot_adds_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    box, package, auth, chars = _standard_tail(tmp_path, monkeypatch)
+
+    def world_module() -> None:
+        box.db.module_rows["acore_world"] = (("mod_world.sql", "D" * 40),)
+
+    _verify_breaker(box, world_module)
+    plan = move_flows.plan_import(box.world, package)
+    with pytest.raises(MaintenanceError, match=r"did not land as expected \(acore_world\)"):
+        _run(box, plan)
+
+
+def test_a_ledger_whose_names_cannot_be_read_after_the_one_shot_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mutation: drop `names is None` and an unread ledger crashes instead of refusing."""
+    box, package, auth, chars = _standard_tail(tmp_path, monkeypatch)
+    flaky = {"on": False, "asked": 0}
+
+    def after() -> None:
+        flaky["on"] = True
+
+    _verify_breaker(box, after)
+    real = box.db.query
+    core = move.update_name_queries("acore_auth")[0]
+
+    def query(sql: str) -> str:
+        if flaky["on"] and sql == core:
+            flaky["asked"] += 1
+            if flaky["asked"] == 2:  # the version reads; the names re-read does not answer
+                raise RuntimeError("the database went away")
+        return real(sql)
+
+    box.db.query = query  # type: ignore[method-assign]
+    plan = move_flows.plan_import(box.world, package)
+    with pytest.raises(MaintenanceError, match=r"did not land as expected \(acore_auth\)"):
+        _run(box, plan)
+
+
+def test_a_mixed_tail_names_only_the_bot_database_for_the_next_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mutation: name every tail in the next-Start note and auth reads as still owed."""
+    monkeypatch.setattr(docker, "importer_sees_modules", lambda *a, **k: True)
+    auth = _tail_names("auth", 23)
+    chars = ("2024_01_a", "2024_01_b")
+    bots = _tail_names("bots", 36)
+    box, package = _tail_box(
+        tmp_path,
+        {"acore_auth": auth[:22], "acore_characters": chars, "acore_playerbots": bots[:31]},
+        {"acore_auth": auth, "acore_characters": chars, "acore_playerbots": bots},
+    )
+    plan = move_flows.plan_import(box.world, package)
+    assert plan.allowed, plan.refusals
+    text = _run(box, plan).text()
+    assert "applied by the next Start, the way an update applies them (acore_playerbots (5))." in (
+        text
+    )
+    assert "acore_auth (" not in text
+
+
+@pytest.mark.parametrize(
+    "where",
+    [
+        "data/sql/updates/db_world/2026_11_01_00_world.sql",
+        "data/sql/updates/db_auth/2026_10_99_00_local.sql",
+        "modules/mod-extra/data/sql/db-world/extra.sql",
+        "modules/mod-extra/data/sql/db-characters/base/extra_chars.sql",
+    ],
+    ids=["world", "unreleased-auth", "module-world", "module-characters"],
+)
+def test_other_pending_sql_refuses_the_plan_before_anything_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, where: str
+) -> None:
+    """Mutation: drop the scope check and the one-shot would run files nobody approved."""
+    box, package, auth, chars = _standard_tail(tmp_path, monkeypatch)
+    path = box.server_dir / where
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"DROP TABLE `account`;\n")
+    plan = move_flows.plan_import(box.world, package)
+    assert not plan.allowed
+    said = " ".join(plan.refusals)
+    assert "other database updates waiting" in said
+    assert Path(where).name in said
+    assert plan.updates_to_apply is None
+
+
+def test_other_pending_sql_that_appears_after_the_plan_refuses_before_any_copy_or_load(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    box, package, auth, chars = _standard_tail(tmp_path, monkeypatch)
+    plan = move_flows.plan_import(box.world, package)
+    assert plan.allowed, plan.refusals
+    path = box.server_dir / "data/sql/updates/db_world/2026_11_01_00_world.sql"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"UPDATE `creature` SET `id1` = 1;\n")
+    with pytest.raises(MaintenanceError, match="other database updates waiting"):
+        _run(box, plan)
+    assert _loads(box) == []
+    assert box.db.executed == []
+    assert not move_flows._tail_marker_path(box.world).exists()
+
+
+def test_a_released_file_whose_bytes_changed_on_disk_counts_as_pending(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The updater re-runs a RELEASED file whose hash changed: that is a pending file too."""
+    box, package, auth, chars = _standard_tail(tmp_path, monkeypatch)
+    move.tail_update_path(box.server_dir, "acore_auth", auth[0]).write_bytes(b"edited")
+    plan = move_flows.plan_import(box.world, package)
+    assert not plan.allowed
+    assert f"acore_auth: {auth[0]}" in " ".join(plan.refusals)
+
+
+def test_a_bot_ledger_the_file_lacks_is_not_answered_by_a_tail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A one-sided playerbots ledger stays the version refusal, tail or no tail."""
+    box, package, auth, chars = _standard_tail(tmp_path, monkeypatch)
+    box.db.updates_by_schema["acore_playerbots"] = _tail_names("bots", 3)
+    plan = move_flows.plan_import(box.world, package)
+    assert not plan.allowed
+    assert "acore_playerbots: this server has an update record" in " ".join(plan.refusals)
+
+
+def test_an_archived_file_in_an_archived_folder_is_not_rehashed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    box, package, auth, chars = _standard_tail(tmp_path, monkeypatch)
+    folder = box.server_dir / "data/sql/archive/db_world"
+    folder.mkdir(parents=True)
+    (folder / "2019_old.sql").write_bytes(b"changed since")
+    box.db.include_rows["acore_world"] = (
+        *TAIL_INCLUDE["acore_world"],
+        "$/data/sql/archive/db_world|ARCHIVED",
+    )
+    box.db.tail_rows["acore_world"] = (("2019_old.sql", "A" * 40, "ARCHIVED"),)
+    plan = move_flows.plan_import(box.world, package)
+    assert plan.allowed, plan.refusals
+
+
+@pytest.mark.parametrize(
+    "shape",
+    ["outside", "duplicate", "unreadable-ledger"],
+)
+def test_a_one_shot_whose_files_cannot_be_known_refuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shape: str
+) -> None:
+    box, package, auth, chars = _standard_tail(tmp_path, monkeypatch)
+    if shape == "outside":
+        box.db.include_rows["acore_world"] = ("/opt/custom/sql|RELEASED",)
+    elif shape == "duplicate":
+        twin = box.server_dir / "modules/mod-twin/data/sql/db-auth" / auth[0]
+        twin.parent.mkdir(parents=True)
+        twin.write_bytes(auth[0].encode())
+    else:
+        real = box.db.query
+
+        def query(sql: str) -> str:
+            if sql == move.ledger_row_queries("acore_world"):
+                raise RuntimeError("no answer")
+            return real(sql)
+
+        box.db.query = query  # type: ignore[method-assign]
+    plan = move_flows.plan_import(box.world, package)
+    assert not plan.allowed
+    assert "could not tell which database updates" in " ".join(plan.refusals)

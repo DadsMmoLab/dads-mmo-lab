@@ -1017,6 +1017,16 @@ def tail_row_queries(schema: str) -> str:
     )
 
 
+def ledger_row_queries(schema: str) -> str:
+    """The `(name, hash, state)` SELECT for EVERY `updates` row of `schema` (T802).
+
+    Every state, module and custom rows too: the one-shot's updater skips a file by
+    its name in any row, so the scope check (`move_flows._one_shot_pending()`)
+    needs the whole ledger, not the core rows `tail_row_queries()` answers.
+    """
+    return f"SELECT `name`, `hash`, `state` FROM `{schema}`.`updates` ORDER BY `name`;"
+
+
 def checked_names(
     core: Sequence[str], modules: Sequence[str], evidence: Evidence
 ) -> UpdateNames | None:

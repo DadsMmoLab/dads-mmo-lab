@@ -24,6 +24,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A refused import now says which server is behind and what to do, instead of pointing at a button that refuses.
 - Bringing in accounts from a server that is behind now applies the missing updates after the load instead of refusing.
 - An import whose update step did not finish now says to restore the first copies and try again, instead of looking done.
+- Bringing in accounts now refuses before loading anything when the server has other database updates waiting.
 - LAN mode now advertises the wired network's address instead of a VPN adapter's, so other computers can connect.
 - Installing WoW Tortoise no longer runs every CPU core flat out while making movement maps, which could restart some PCs.
 - On WoW Tortoise, an account with a GM level no longer logs in invisible in GM mode with new characters on GM Island.

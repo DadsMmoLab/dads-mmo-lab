@@ -3121,7 +3121,7 @@ def _move_services(
     *,
     wsl_distro: str | None,
     store: ManifestStore | None = None,
-    sql: object = None,
+    sql: apply_module.LedgerReader | None = None,
     user_game: str | None = None,
 ) -> move_flows.MoveServices:
     """The Move group's four presses, over the same engine the Backup and Restore buttons use.
