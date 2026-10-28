@@ -2319,6 +2319,14 @@ def _removable_tab(
     return view, stops
 
 
+def _answer_off_the_list(view: Any) -> None:
+    """Answer the remove dialog with "off this list" and press Remove this server… (T695)."""
+    from yulon.ui.widgets.remove_dialog import RemovalChoice
+
+    view._ask_removal = lambda _offered: RemovalChoice.OFF_THE_LIST
+    view.remove_server_button.click()
+
+
 def _remembered(window: Any, game: str, server_dir: Path) -> bool:
     """The window's LIVE state: `saved_states[-1]` is the one `AppState` every tab writes into."""
     return window.saved_states[-1].find(game, server_dir) is not None
@@ -2347,7 +2355,7 @@ def test_the_server_tab_button_on_a_tbc_tab_asks_stops_forgets_and_keeps_every_f
     assert str(server_dir) in _catalog_view(window).button_for("wow-tbc").toolTip()
     saves_before = len(window.saved_states)
 
-    view.forget_install_button.click()
+    _answer_off_the_list(view)
 
     assert len(asked) == 1
     title, text, default = asked[0]
@@ -2374,7 +2382,7 @@ def test_answering_no_keeps_the_tab_the_record_and_the_server(
     server_dir = tmp_path / "t95-no"
     view, stops = _removable_tab(window, monkeypatch, server_dir)
 
-    view.forget_install_button.click()
+    _answer_off_the_list(view)
 
     assert len(asked) == 1
     assert stops == []
@@ -2412,7 +2420,7 @@ def test_a_server_the_last_poll_saw_stopped_is_still_stopped_before_it_is_forgot
 
     view.services.controller.stop = stop_what_was_started_outside
 
-    view.forget_install_button.click()
+    _answer_off_the_list(view)
 
     assert "If it is running, it is stopped first" in asked[0][1]
     assert stops == [1], "a server the last poll saw stopped was forgotten without a stop"
@@ -2434,7 +2442,7 @@ def test_a_stop_that_finds_nothing_running_goes_on_to_forget(
 
     view.services.controller.stop = nothing_running
 
-    view.forget_install_button.click()
+    _answer_off_the_list(view)
 
     assert stops == [1]
     assert window.property("tabs").indexOf(view) == -1
@@ -2451,7 +2459,7 @@ def test_a_server_the_last_poll_saw_running_is_told_it_is_running(
     view.services.controller.status = lambda: InstallStatus(db=True, auth=True, world=True)
     view.refresh_status()
 
-    view.forget_install_button.click()
+    _answer_off_the_list(view)
 
     assert "It is running, so it is stopped first" in asked[0][1]
 
@@ -2466,7 +2474,7 @@ def test_a_busy_tab_refuses_with_its_own_reason_and_asks_nothing(
         type(view), "busy_reason", lambda _self: "The database import is still running."
     )
 
-    view.forget_install_button.click()
+    _answer_off_the_list(view)
 
     assert told == ["The database import is still running."]
     assert asked == [] and stops == []
@@ -2489,7 +2497,7 @@ def test_a_failed_stop_asks_again_and_no_keeps_everything(
 
     view.services.controller.stop = refuse
 
-    view.forget_install_button.click()
+    _answer_off_the_list(view)
 
     assert [title for title, _, _ in asked] == [forgetting.TITLE, forgetting.STOP_FAILED_TITLE]
     assert "Docker would not say" in asked[1][1]
@@ -2513,7 +2521,7 @@ def test_a_failed_stop_overridden_by_a_second_yes_forgets_anyway(
 
     view.services.controller.stop = refuse
 
-    view.forget_install_button.click()
+    _answer_off_the_list(view)
 
     assert window.property("tabs").indexOf(view) == -1
     assert not _remembered(window, "wow-tbc", server_dir)
@@ -2541,7 +2549,7 @@ def test_a_job_started_during_the_stop_refuses_the_forget_after_it(
 
     view.services.controller.stop = stop_while_a_restore_starts
 
-    view.forget_install_button.click()
+    _answer_off_the_list(view)
 
     assert len(asked) == 1 and stops == [1]
     assert told == [forgetting.RESTORE_RUNNING]
@@ -2564,7 +2572,7 @@ def test_a_record_that_cannot_be_written_keeps_the_tab_and_the_live_record(
 
     monkeypatch.setattr(state, "save_state", _refuse)
 
-    view.forget_install_button.click()
+    _answer_off_the_list(view)
 
     assert told and "Access is denied" in told[0]
     assert window.property("tabs").indexOf(view) != -1, "the tab went over a record still on disk"
@@ -2579,7 +2587,7 @@ def test_a_gone_folder_is_forgotten_without_a_stop_and_with_t34s_words(
     view, stops = _removable_tab(window, monkeypatch, server_dir)
     shutil.rmtree(server_dir)
 
-    view.forget_install_button.click()
+    _answer_off_the_list(view)
 
     assert "no longer exists" in asked[0][1] and "NOT touched" in asked[0][1]
     assert stops == [], "a folder that is gone was stopped by a project-name guess (T34's rule)"
@@ -5037,7 +5045,7 @@ def test_remove_from_yulon_names_the_ready_to_play_client_it_leaves(
     view.play_client_dir_changed.emit("wow-tbc", server_dir, play)
     view = _tab_for(window, server_dir)
 
-    view.forget_install_button.click()
+    _answer_off_the_list(view)
 
     assert len(asked) == 1
     assert f"ready-to-play client at {play} is left where it is" in asked[0][1]

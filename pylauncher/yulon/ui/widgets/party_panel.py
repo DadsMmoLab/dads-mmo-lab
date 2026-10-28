@@ -225,7 +225,7 @@ name a path the reader does not read."""
 DISMISS_ALL_IDLE = "Dismiss every bot…"
 """One button, two labels, and the armed one carries the count.
 
-The tab's own gesture (`controller_view.REMOVE_IDLE`/`REMOVE_ARMED`) rather than
+The Server tab's own two-press gesture rather than
 a second kind of confirmation: a user who has learned that pressing once only
 arms is not surprised here. A modal would be the other option and it is the wrong
 one twice over -- this panel's answers arrive from a worker thread, and the

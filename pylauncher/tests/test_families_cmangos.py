@@ -2243,9 +2243,9 @@ def test_a_press_on_an_install_built_before_the_patch_refuses_and_says_what_to_p
 
 def test_the_refusal_names_an_action_the_server_tab_actually_offers() -> None:
     """A remedy sentence naming a button that is not there is worse than no sentence."""
-    from yulon.ui import controller_view
+    from yulon.ui.widgets import remove_dialog
 
-    assert cmangos.REBUILD_ACTION == controller_view.REMOVE_IDLE
+    assert cmangos.REBUILD_ACTION == remove_dialog.REMOVE_CONTAINERS_LABEL
 
 
 def finished_extraction(rec: Recorder, server_dir: Path, client: Path) -> Path:
@@ -3143,7 +3143,7 @@ def test_the_scan_sees_a_volume_deleting_action_the_wording_check_is_blind_to() 
 
     Run 2026-09-01 (K.3 review, and again here): with a real volume-deleting
     action present in `controller_view`, `"volume, which is kept" in source`
-    is still true, because that substring belongs to the REMOVE_IDLE warning
+    is still true, because that substring belongs to the containers warning
     and an ADDED action removes nothing. A test whose name promised to go red
     the day the Server tab grew such an action was therefore green with the
     action sitting in the file. Only the scan reacts to it.

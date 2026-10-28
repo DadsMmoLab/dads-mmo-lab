@@ -44,6 +44,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A refused Tuning restart or Repair now shows the update or Repair press its sentence names.
 
 ### Changed
+- The Danger zone now has one **Remove this server…** press offering off the list, uninstall, or containers.
 
 ## v0.9.18-Public — 2026-10-17
 
