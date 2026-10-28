@@ -23341,9 +23341,7 @@ class ControllerView(QWidget):
         def body() -> TuningWrite:
             try:
                 # Refuses a link out of the server folder, before any byte moves (T573).
-                made = tuning.backup(path, root=server_dir)
-                with open(path, "w", encoding="utf-8", newline="") as handle:
-                    handle.write(tuning.save_text(original, text))
+                made = tuning.write_raw(path, text, original=original, root=server_dir)
             except tuning.TuningError as exc:
                 return TuningWrite(str(exc), failed=str(exc))
             except OSError as exc:

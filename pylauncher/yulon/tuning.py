@@ -1373,7 +1373,9 @@ def _atomic_write(path: Path, text: str) -> None:
     A sibling temp file and `os.replace`, which is atomic on both platforms this
     app runs on. The temp file is removed if anything goes wrong, so a failed
     save leaves neither a truncated conf nor a `.yulon-tmp` beside it for
-    somebody to find later and wonder about.
+    somebody to find later and wonder about. The bytes are synced before the
+    rename (T820: a power cut then leaves the old conf or the new one, never a
+    half-written temp published as the conf).
 
     The replaced file KEEPS its own mode (T116). The temp used to be opened at
     the umask default, so a 0600 CMaNGOS conf came back 0644 -- `mangosd.conf`
@@ -1394,6 +1396,8 @@ def _atomic_write(path: Path, text: str) -> None:
         fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, PRIVATE_MODE)
         with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
             handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
         if mode is not None:
             # Owner-writable always, as `conf._write` keeps it: a read-only
             # temp is one Windows cannot remove after a failed rename.
@@ -1402,6 +1406,22 @@ def _atomic_write(path: Path, text: str) -> None:
     except BaseException:
         temp.unlink(missing_ok=True)
         raise
+
+
+def write_raw(path: Path, edited: str, *, original: str, root: Path | None = None) -> Path:
+    """Write the raw editor's text back atomically, and return the backup's path (T820).
+
+    The sibling-temp rename `write()` already uses, now around
+    `save_text()`: the call above used to write through `open(path, "w")`,
+    which truncates first, so a crash mid-write left a truncated conf with
+    only the backup beside it. The backup is taken after the link check and
+    before the first byte moves, exactly as `write()` takes it; the temp is
+    this write's own, takes the file's own mode, and is removed on failure.
+    """
+    check_inside(path, root)
+    made = backup(path, root=root)
+    _atomic_write(path, save_text(original, edited))
+    return made
 
 
 def _key_line(lines: Sequence[str], key: str) -> int | None:

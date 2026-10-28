@@ -848,6 +848,78 @@ def test_a_write_that_fails_leaves_the_file_whole(
     assert leftovers == [], f"a temp file was left behind: {leftovers}"
 
 
+def test_a_raw_save_that_fails_halfway_leaves_the_conf_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T820: the raw Save wrote through `open(path, "w")`, which truncates first.
+
+    A write that dies after the first chunk must leave the old conf and no temp
+    file beside it. Faked at `os.fdopen`: the handle lands the first chunk and
+    then raises, so an in-place `open(path, "w")` fails red too (the truncate
+    already happened) while a sibling-temp write stays green. Binary copies pass
+    through, so the backup the save takes still lands.
+    """
+    path = _write(tmp_path, CONF, CLEAN)
+    real_fdopen = os.fdopen
+
+    class HalfWritten:
+        """A text handle that lands the first chunk, then dies (ENOSPC)."""
+
+        def __init__(self, handle: object) -> None:
+            self._handle = handle
+
+        def write(self, text: str) -> int:
+            self._handle.write(text[: len(text) // 2])  # type: ignore[attr-defined]
+            raise OSError("no space left on device")
+
+        def flush(self) -> None:
+            self._handle.flush()  # type: ignore[attr-defined]
+
+        def fileno(self) -> int:
+            return self._handle.fileno()  # type: ignore[attr-defined,no-any-return]
+
+        def __enter__(self) -> HalfWritten:
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            self._handle.close()  # type: ignore[attr-defined]
+
+    def half_fdopen(fd: int, *args: object, **kwargs: object) -> object:  # type: ignore[no-untyped-def]
+        mode = kwargs.get("mode", args[0] if args else "r")
+        handle = real_fdopen(fd, *args, **kwargs)  # type: ignore[arg-type]
+        if isinstance(mode, str) and "b" not in mode:
+            return HalfWritten(handle)
+        return handle
+
+    monkeypatch.setattr(tuning.os, "fdopen", half_fdopen)
+    with pytest.raises(OSError, match="no space left"):
+        tuning.write_raw(path, "BeastMaster.Enable = 0\n", original=CLEAN)
+    assert path.read_text(encoding="utf-8") == CLEAN
+    (backup,) = tuning.backups_of(path)
+    assert backup.read_text(encoding="utf-8") == CLEAN
+    assert [p for p in path.parent.iterdir() if p.suffix == tuning.TEMP_SUFFIX] == []
+
+
+def test_a_raw_save_replaces_the_whole_conf(tmp_path: Path) -> None:
+    """T820: the whole text the raw editor hands back lands, byte for byte."""
+    path = _write(tmp_path, CONF, CLEAN)
+    tuning.write_raw(path, "BeastMaster.Enable = 0\n", original=CLEAN)
+    assert path.read_text(encoding="utf-8") == "BeastMaster.Enable = 0\n"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
+def test_a_raw_save_keeps_the_files_own_mode(tmp_path: Path) -> None:
+    """T820: a 0600 conf comes back 0600, not the umask default (`_atomic_write`)."""
+    path = _write(tmp_path, CONF, CLEAN)
+    os.chmod(path, 0o600)
+    old = os.umask(0o022)
+    try:
+        tuning.write_raw(path, "BeastMaster.Enable = 0\n", original=CLEAN)
+    finally:
+        os.umask(old)
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
 def test_two_saves_inside_one_second_are_two_backups(tmp_path: Path) -> None:
     """A stamp to the second collides, and the earlier backup is overwritten."""
     path = _write(tmp_path, CONF, "K = 1\n")

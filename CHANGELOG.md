@@ -34,6 +34,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - When Docker setup genuinely fails, the advice now lists every failed step to run, in order, instead of only the first.
 - Tortoise updates no longer stop on upstream's three rewritten database migrations.
 - Updating a WoW Tortoise server now rebuilds only the movement maps whose areas changed, in minutes.
+- A Tuning tab raw file Save that is interrupted now leaves the conf as it was instead of truncated.
 
 ### Changed
 
