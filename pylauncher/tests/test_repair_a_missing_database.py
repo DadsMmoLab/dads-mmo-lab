@@ -172,7 +172,7 @@ def test_the_wsl_repair_keeps_every_seam_wsl_does_not_address_and_finishes(
     )
     assert "one-shot:ac-db-import" in rec.calls and "start" in rec.calls, rec.calls
     assert not docker.one_shot_ended_marker(server_dir, "ac-db-import").is_file()
-    assert said[-1].endswith("restore it on the Maintenance tab."), said[-1]
+    assert said[-1].endswith("restore it on the Backups & updates tab."), said[-1]
 
 
 # -- the wiring ----------------------------------------------------------------------------

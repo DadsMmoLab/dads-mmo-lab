@@ -54,6 +54,7 @@ from yulon import (
 from yulon.after_stop import StopTookEffect, TrueAfterStop
 from yulon.log import get_logger
 from yulon.said import SaidByYulon, details_below
+from yulon.server_build_presses import MAINTENANCE_TAB
 from yulon.ui import lines
 
 logger = get_logger(__name__)
@@ -2899,7 +2900,7 @@ def repair_import(
                 f"an earlier import of this install did not finish, but characters {counted} in "
                 f"its databases ({before.detail}). A first import never writes a character, so "
                 "somebody may have played on this server since, and nothing was cleared or run. "
-                "To go back, restore one of its backups on the Maintenance tab."
+                f"To go back, restore one of its backups on the {MAINTENANCE_TAB} tab."
             )
         logger.warning(
             f"repair_import(): copying, then clearing, what an unfinished first import wrote "
@@ -2944,7 +2945,8 @@ def repair_import(
         raise DockerRefusal(
             f"this install's databases hold player data ({before.detail}). Re-running the import "
             "would overwrite it, so it was not run. If the database is damaged, restore the last "
-            "backup from the Maintenance tab instead — that is the path that keeps characters."
+            f"backup from the {MAINTENANCE_TAB} tab instead — that is the path that keeps "
+            "characters."
         )
     if before.state == "imported":
         raise DockerRefusal(

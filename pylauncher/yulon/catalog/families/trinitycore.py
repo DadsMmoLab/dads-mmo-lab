@@ -108,6 +108,7 @@ from yulon.catalog.native import (
 from yulon.catalog.snapshot import DatabaseSnapshot
 from yulon.log import get_logger
 from yulon.manifest import Db
+from yulon.server_build_presses import MAINTENANCE_TAB
 
 logger = get_logger(__name__)
 
@@ -2620,8 +2621,8 @@ def _backup_advice(press: str | None) -> str:
     if press != server_build_presses.UPDATE_TO_LATEST:
         return ""
     return (
-        " If you took the backup offered before the update, it has them as they were (Restore on "
-        "the Maintenance tab)."
+        " If you took the backup offered before the update, it has them as they were (Restore "
+        f"on the {MAINTENANCE_TAB} tab)."
     )
 
 

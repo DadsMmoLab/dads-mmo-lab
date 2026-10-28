@@ -20,7 +20,8 @@ from tests.test_controller_view import (
     _services,
 )
 from yulon import runner, server_build_presses
-from yulon.ui.controller_view import ControllerView
+from yulon.server_build_presses import MAINTENANCE_TAB
+from yulon.ui.controller_view import ControllerView, _drawn_title
 
 
 @pytest.fixture
@@ -55,7 +56,7 @@ def test_the_server_version_section_is_on_maintenance_and_modules_has_no_server_
         )
     )
     assert upkeep is not None
-    assert view._tabs.tabText(view._tabs.indexOf(upkeep)) == "Maintenance"
+    assert view._tabs.tabText(view._tabs.indexOf(upkeep)) == _drawn_title(MAINTENANCE_TAB)
 
 
 def test_a_hidden_action_hides_its_button(qapp: object, ps: _Ps, tmp_path: Path) -> None:
@@ -122,7 +123,7 @@ def test_the_banner_rebuild_brings_maintenance_up(
     view.rebuild_banner_button.click()
     assert asked, "the banner's press skipped the rebuild question"
     assert started, "the rebuild did not start"
-    assert view._tabs.tabText(view._tabs.currentIndex()) == "Maintenance"
+    assert view._tabs.tabText(view._tabs.currentIndex()) == _drawn_title(MAINTENANCE_TAB)
 
 
 def test_a_declined_banner_rebuild_stays_on_modules(
@@ -138,7 +139,9 @@ def test_a_declined_banner_rebuild_stays_on_modules(
 
 def test_under_server_build_names_the_maintenance_tab() -> None:
     said = server_build_presses.under_server_build(server_build_presses.REBUILD)
-    assert said == "“Rebuild the server…” under “Server version” on the Maintenance tab", said
+    assert said == (
+        "“Rebuild the server…” under “Server version” on the Backups & updates tab"
+    ), said
 
 
 def test_the_module_updates_button_checks_modules_not_the_server(
@@ -162,7 +165,7 @@ def test_the_server_version_section_reads_whole_at_every_t191_window(
     before it wrapped (T83).
     """
     view, _spy, _rebuilt = _past_the_pin(ps, tmp_path)
-    window, tab = _controller_in_the_real_window(view, "Maintenance")
+    window, tab = _controller_in_the_real_window(view, MAINTENANCE_TAB)
     view.advanced_fold.setChecked(True)
     _ran_a_job(view)
     presses = (

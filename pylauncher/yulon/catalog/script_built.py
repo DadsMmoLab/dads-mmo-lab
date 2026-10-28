@@ -36,6 +36,7 @@ from yulon.catalog import composegen
 from yulon.catalog.installer import InstallerError, InstallStopped
 from yulon.log import get_logger
 from yulon.ownership import Ownership
+from yulon.server_build_presses import MAINTENANCE_TAB
 
 logger = get_logger(__name__)
 
@@ -96,7 +97,7 @@ def question(server_dir: Path, distro: str) -> str:
         "stay unavailable for it.\n\n"
         "When the server starts, its database applies any SQL the new modules bring, and that "
         "cannot be undone without a backup. If you have none, press No and take one on the "
-        "Maintenance tab first.\n\n"
+        f"{MAINTENANCE_TAB} tab first.\n\n"
         "Rebuild it now?"
     )
 

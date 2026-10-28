@@ -123,6 +123,7 @@ from yulon.catalog.native import (
 )
 from yulon.log import get_logger
 from yulon.manifest import Db
+from yulon.server_build_presses import MAINTENANCE_TAB
 
 logger = get_logger(__name__)
 
@@ -239,8 +240,8 @@ def newer_migrations_refusal(
     return (
         f"{head} To go back, first put {_listed(databases)} back as "
         f"{'it was' if one else 'they were'} before {those}: press Stop on the Server tab, "
-        f"restore {dumps} on Maintenance (it works with the server stopped), then press "
-        f"{back} again without starting the server in between, since a start would apply "
+        f"restore {dumps} on the {MAINTENANCE_TAB} tab (it works with the server stopped), then "
+        f"press {back} again without starting the server in between, since a start would apply "
         f"{those} again. Restoring loses whatever changed in {_listed(databases)} since that "
         "copy was taken."
     )
@@ -3381,16 +3382,16 @@ class CmangosInstaller(StagedInstaller):
                 f"itself may be the thing that is not answering — it reads a stopped container "
                 f"and Docker being down the same way — so check that Docker is running, "
                 f"then press Stop on the Server tab if the server is up, and apply these "
-                f'files with "{UPDATES_BUTTON_LABEL}" on the Maintenance tab (or run the install '
-                f"again from the command line)."
+                f'files with "{UPDATES_BUTTON_LABEL}" on the {MAINTENANCE_TAB} tab (or run the '
+                f"install again from the command line)."
             )
         raise InstallerError(
             f"{self.entry.name}'s world server is running, and it holds these databases in "
             f"memory and writes back over whatever it finds in them. Nothing was applied, "
             f"nothing was imported and nothing was cleared. Press Stop on the Server tab, then "
-            f'apply these files with "{UPDATES_BUTTON_LABEL}" on the Maintenance tab — it starts '
-            f"the database on its own and keeps the world server down — or run the install "
-            f"again from the command line. (A remembered install's catalog tile reads "
+            f'apply these files with "{UPDATES_BUTTON_LABEL}" on the {MAINTENANCE_TAB} tab — '
+            f"it starts the database on its own and keeps the world server down — or run the "
+            f"install again from the command line. (A remembered install's catalog tile reads "
             f"Installed and cannot be pressed, which is why the button is the remedy here; "
             f"Codex on T24.)"
         )

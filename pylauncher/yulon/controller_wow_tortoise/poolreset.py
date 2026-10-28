@@ -100,6 +100,7 @@ from yulon.controller import StartRefused
 from yulon.controller_wow_tortoise import botpool
 from yulon.log import get_logger
 from yulon.said import SaidByYulon
+from yulon.server_build_presses import MAINTENANCE_TAB
 
 logger = get_logger(__name__)
 
@@ -817,8 +818,8 @@ APPLIED_TAKEN_BACK = (
     "this rebuild makes it happen again."
 )
 WHO_CLEARS_IT = (
-    f"Yu'lon sets it back to off before any restore from the Maintenance tab, and once the "
-    f"Bots tab shows the new bots you can set {KEY} to off yourself."
+    f"Yu'lon sets it back to off before any restore from the {MAINTENANCE_TAB} tab, and once "
+    f"the Bots tab shows the new bots you can set {KEY} to off yourself."
 )
 """What every message that LEAVES the request says (T144 round 4): nothing else clears it."""
 FINISHES_AT_NEXT_START = (

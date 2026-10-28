@@ -73,6 +73,7 @@ from yulon.move import (
     updates_names_in_dump,
 )
 from yulon.ownership import Ownership
+from yulon.server_build_presses import MAINTENANCE_TAB
 
 logger = get_logger(__name__)
 
@@ -286,8 +287,8 @@ INSTALL_RECORD_DAMAGED = (
 )
 _UNFINISHED_RESTORE = (
     "A restore of this server's databases did not finish, so they may be half-written. "
-    "Restore again from the Maintenance tab (that is how it is put right) before moving "
-    "anything."
+    f"Restore again from the {MAINTENANCE_TAB} tab (that is how it is put right) before "
+    "moving anything."
 )
 
 
@@ -1940,7 +1941,7 @@ def _failed_part_way(
     return (
         f"{exc} {done}, and {', '.join(rest)} was not. The databases may be half-written. "
         f"The copies taken first (before-move) are {', '.join(str(p) for p in copies) or 'none'}; "
-        "the Maintenance tab restores from them."
+        f"the {MAINTENANCE_TAB} tab restores from them."
     )
 
 
@@ -2119,7 +2120,7 @@ def _playerbots_next_start_note(tails: Mapping[str, move.Tail]) -> str:
 def _tail_copies_sentence() -> str:
     return (
         "The copies taken first (before-move) hold this server's prior state, and the "
-        "Maintenance tab restores from them."
+        f"{MAINTENANCE_TAB} tab restores from them."
     )
 
 

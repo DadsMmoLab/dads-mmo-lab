@@ -1981,7 +1981,7 @@ def test_the_rewritten_history_refusal_says_where_the_press_is() -> None:
     """
     said = str(native.RewrittenHistory("cmangos/x", "The release is on rewritten history."))
     assert "“Update the server to latest…”" in said
-    assert "“Server version” on the Maintenance tab" in said, said
+    assert "“Server version” on the Backups & updates tab" in said, said
 
 
 # -- T179: what changed between two commits (the TrinityCore route's question) ---------------
@@ -2339,8 +2339,8 @@ def test_a_rollback_that_leaves_the_tags_mixed_says_a_rebuild_is_needed_and_reco
         "replaced, so it is still running the build from before this update if it is up. Its "
         "image tags are mixed, so it must be rebuilt before it can start, and Start is refused "
         "until it is: press “Rebuild the "
-        "server…” under “Server version” on the Maintenance tab, which compiles every image from "
-        "those commits."
+        "server…” under “Server version” on the Backups & updates tab, which compiles every "
+        "image from those commits."
     )
     state = native.read_state(server_dir, valid=())
     assert state is not None and state.source_revs == before, "the record is as it was"
@@ -2374,7 +2374,7 @@ MIXED_REFUSAL = (
     "This server's image tags are mixed: an update or rebuild could not put the build from "
     "before it back, and left some images on one build and the rest on the other. It must be "
     "rebuilt before it can start: press “Rebuild the server…” under “Server version” on the "
-    "Maintenance tab."
+    "Backups & updates tab."
 )
 
 

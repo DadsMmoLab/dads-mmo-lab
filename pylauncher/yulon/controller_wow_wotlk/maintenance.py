@@ -112,6 +112,7 @@ from yulon import docker, platform, runner
 from yulon.apply import DB_NAMES, RootPassword, mysql_client, mysql_env
 from yulon.controller_wow_wotlk import docker_ctl
 from yulon.log import get_logger
+from yulon.server_build_presses import MAINTENANCE_TAB
 
 logger = get_logger(__name__)
 
@@ -1267,8 +1268,8 @@ def unfinished_restore_sentence(
         return (
             f"A restore of this server did not finish, and its record at {record.marker} cannot "
             f"be read, so the databases may be half-written and {held_off} "
-            "them. On the Maintenance tab, restore a backup again, or press Forget that record "
-            "if you have already put the databases right."
+            f"them. On the {MAINTENANCE_TAB} tab, restore a backup again, or press Forget that "
+            "record if you have already put the databases right."
         )
     named = ", ".join(record.databases) or "this server's databases"
     copy = ", ".join(str(p) for p in record.safety_backup)
@@ -1282,7 +1283,7 @@ def unfinished_restore_sentence(
         return (
             f"A restore of {named} was still loading when Yu'lon last closed, and Yu'lon cannot "
             f"tell whether it finished, so {held_off} those databases. On "
-            "the Maintenance tab, restore a backup again to be sure, or press Forget that "
+            f"the {MAINTENANCE_TAB} tab, restore a backup again to be sure, or press Forget that "
             f"record if you know it finished.{taken}"
         )
     if moving_in and record.backup.parent.name.startswith(MOVE_IN_COPY_FOLDER):
@@ -1294,7 +1295,7 @@ def unfinished_restore_sentence(
         )
     return (
         f"A restore of {named} did not finish, so those databases may be half-written and "
-        f"{held_off} them. On the Maintenance tab, restore a backup again to "
+        f"{held_off} them. On the {MAINTENANCE_TAB} tab, restore a backup again to "
         f"finish it, or press Forget that record if you have already put them right.{taken}"
     )
 

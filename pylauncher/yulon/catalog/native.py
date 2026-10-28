@@ -149,6 +149,7 @@ from yulon.log import get_logger
 from yulon.manifest import Db
 from yulon.ownership import Ownership as Ownership
 from yulon.said import SaidByYulon, carry_detail
+from yulon.server_build_presses import MAINTENANCE_TAB
 from yulon.support.redact import Redactor
 from yulon.ui import lines
 
@@ -1311,7 +1312,7 @@ divergence before it moves anything (T126), and names it the next time.
 
 COPIES_RULE = (
     "A copy is kept until an update succeeds, and then only the newest stays; "
-    "Maintenance \u2192 Clean up\u2026 removes old ones sooner."
+    f"{MAINTENANCE_TAB} \u2192 Clean up\u2026 removes old ones sooner."
 )
 """The owner's rule (T633) as it is true: older copies go only after an update succeeded (T646)."""
 
@@ -3740,14 +3741,14 @@ def copy_not_put_back(copy: snapshot.Snapshot, reason: str, *, rebuild: bool = F
         return (
             f"{_listed(names)} could not be put back {_as_it_was(names)} before the database "
             f"updates ran ({reason}), so the old build was not started on the databases they "
-            f"changed. Open Maintenance, choose {_in_backups(copy.files)} and press Restore (it "
-            "works with the server stopped), then press Start."
+            f"changed. Open the {MAINTENANCE_TAB} tab, choose {_in_backups(copy.files)} and "
+            "press Restore (it works with the server stopped), then press Start."
         )
     return (
         f"{_listed(names)} could not be put back {_as_it_was(names)} just before the new build "
         f"started ({reason}), so the old build was not started on the database the new one "
-        f"changed. Open Maintenance, choose {_in_backups(copy.files)} and press Restore (it "
-        "works with the server stopped), then press Start."
+        f"changed. Open the {MAINTENANCE_TAB} tab, choose {_in_backups(copy.files)} and press "
+        "Restore (it works with the server stopped), then press Start."
     )
 
 
@@ -3761,8 +3762,8 @@ def copy_not_usable(copy: snapshot.Snapshot, reason: str, *, rebuild: bool = Fal
             f"{'that database is' if len(names) == 1 else 'those databases are'} as the "
             f"rebuild left {'it' if len(names) == 1 else 'them'}. The copy "
             f"({_in_backups(copy.files)}) cannot be restored either. If you have a backup of "
-            "your own from before this rebuild, restore it on Maintenance (it works with the "
-            "server stopped), then press Start."
+            f"your own from before this rebuild, restore it on the {MAINTENANCE_TAB} tab (it "
+            "works with the server stopped), then press Start."
         )
     return (
         f"{_listed(names)} could not be put back {_as_it_was(names)} just before the new build "
@@ -3770,7 +3771,8 @@ def copy_not_usable(copy: snapshot.Snapshot, reason: str, *, rebuild: bool = Fal
         f"{'that database is' if len(names) == 1 else 'those databases are'} as the new build "
         f"left {'it' if len(names) == 1 else 'them'}. The copy ({_in_backups(copy.files)}) "
         "cannot be restored either. If you have a backup of your own from before this update, "
-        "restore it on Maintenance (it works with the server stopped), then press Start."
+        f"restore it on the {MAINTENANCE_TAB} tab (it works with the server stopped), then "
+        "press Start."
     )
 
 
@@ -3816,11 +3818,11 @@ def copy_old_build_down(
         return (
             f"{head}. Yu'lon could not stop its servers ({not_stopped}), so they may still be "
             f"restarting: press Stop on the Server tab. {kept} Once it is stopped, restore the "
-            "one you want on Maintenance, then press Start."
+            f"one you want on the {MAINTENANCE_TAB} tab, then press Start."
         )
     return (
-        f"{head}, so its servers were stopped. {kept} Restore the one you want on Maintenance "
-        "(it works with the server stopped), then press Start."
+        f"{head}, so its servers were stopped. {kept} Restore the one you want on the "
+        f"{MAINTENANCE_TAB} tab (it works with the server stopped), then press Start."
     )
 
 
@@ -4535,8 +4537,8 @@ def _record_unread(server_dir: Path, why: str) -> str:
     return (
         f"The server in {server_dir} has a restore record Yu'lon cannot read{why}, so it cannot "
         "tell whether a restore is still writing there, and nothing was stopped. If no restore "
-        "is running there, press Forget that record on that server's Maintenance tab, then "
-        "try again."
+        "is running there, press Forget that record on that server's "
+        f"{MAINTENANCE_TAB} tab, then try again."
     )
 
 
@@ -8932,7 +8934,7 @@ class StagedInstaller:
         yield from self._staged(self.repair_database_stages(), ctx)
         yield (
             f"{self.entry.name}'s database was made again from the server files and the server "
-            f"is running. If you have a backup, restore it on the Maintenance tab."
+            f"is running. If you have a backup, restore it on the {MAINTENANCE_TAB} tab."
         )
 
     def _guard_then(

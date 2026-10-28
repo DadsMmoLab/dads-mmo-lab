@@ -197,6 +197,7 @@ from yulon.manifest import ConfKey, Manifest, ManifestType, Prompt, When
 from yulon.manifest_store import FAMILY_FILES, ManifestStore
 from yulon.networking import Mode, NetworkPlan, NetworkReport
 from yulon.said import SaidByYulon, split_details
+from yulon.server_build_presses import MAINTENANCE_TAB
 from yulon.support.redact import hide_account_passwords
 from yulon.ui import lines, single_instance
 from yulon.ui.answers import said_yes
@@ -5683,8 +5684,8 @@ STOP_OVER_A_LOAD_TITLE = "A restore is still running"
 STOP_OVER_A_LOAD = (
     "A restore from the last session is still writing into {name}'s databases in Docker. "
     "Stopping the server now stops its database under that restore and leaves those "
-    "databases half-written. Wait for it to finish (the Maintenance tab says when), or stop "
-    "anyway."
+    f"databases half-written. Wait for it to finish (the {MAINTENANCE_TAB} tab says when), "
+    "or stop anyway."
 )
 """T711: the question before a Stop over a restore load that outlived the last Yu'lon."""
 CLEAR_RESERVATION_LABEL = "Clear it"
@@ -5820,7 +5821,7 @@ REPAIR_DATABASE_CONFIRM = (
     "Docker no longer has this server's database. Repair makes it again from the server files, "
     "the way the install did, and then starts the server.\n\n"
     "Your accounts and characters are not in the server files, so they do not come back. If you "
-    "have a backup, restore it on the Maintenance tab once the repair has finished.\n\n"
+    f"have a backup, restore it on the {MAINTENANCE_TAB} tab once the repair has finished.\n\n"
     "This can take several minutes. Repair now?"
 )
 """What the Server tab's **Repair the database…** asks before it runs (T377)."""
@@ -6119,8 +6120,8 @@ def repair_armed_unfinished(state: docker.ImportState) -> str:
         f"{counted}, written by that import, and no characters. A copy of all three is saved "
         "in the server's backups folder first, and the Repair is refused if any character is "
         "found. If people have played on this server, press Cancel now and restore a backup "
-        "from the Maintenance tab instead. The server must be stopped; a full import takes "
-        "10-30 minutes and cannot be stopped once it starts.\n\n"
+        f"from the {MAINTENANCE_TAB} tab instead. The server must be stopped; a full import "
+        "takes 10-30 minutes and cannot be stopped once it starts.\n\n"
     )
 
 
@@ -7484,8 +7485,8 @@ who fixes one field and a user who wonders what state their conf is in.
 TUNING_REVERTED = "{module}: put {file} back from {backup}.\n{rule}"
 
 TUNING_PUT_BACK_DURING_RESTORE = (
-    "{press}: a restore is running on the Maintenance tab, so nothing was put back. Press it "
-    "again once the restore has finished."
+    "{press}: a restore is running on the " + f"{MAINTENANCE_TAB} tab, so nothing was put "
+    "back. Press it again once the restore has finished."
 )
 """T145: Tortoise's restore sets aiplayerbot.conf's rebuild request off as it starts, on its
 worker, and a put-back at the same moment would race that write."""
@@ -8552,6 +8553,16 @@ and a page around it would be a second answer to the same question.
 """
 
 
+def _drawn_title(title: str) -> str:
+    """`title` as a `QTabBar` draws it: one ampersand marks a mnemonic, so it is doubled.
+
+    "Backups & updates" (T692b) without this draws as "Backups  updates",
+    underlining the space. `tabText()` returns what was set, so a test that
+    compares the drawn title goes through here too.
+    """
+    return title.replace("&", "&&")
+
+
 class _FieldLabel(QLabel):
     """A form label as tall as the field beside it, so its words sit at the field's middle.
 
@@ -9094,10 +9105,11 @@ class ControllerView(QWidget):
 
         In a `ScrollPage` (T191), so a tab that needs more height than the
         window has scrolls instead of drawing everything on it shorter than it
-        needs -- except the pages in `_PAGES_THAT_FIT_THEMSELVES`.
+        needs -- except the pages in `_PAGES_THAT_FIT_THEMSELVES`. The label is
+        drawn through `_drawn_title`; the tooltip keeps the plain title.
         """
         page = tab if title in _PAGES_THAT_FIT_THEMSELVES else ScrollPage(tab)
-        index = self._tabs.addTab(page, get_tab_icon(icon_name), title)
+        index = self._tabs.addTab(page, get_tab_icon(icon_name), _drawn_title(title))
         self._tabs.setTabToolTip(index, title)
 
     def _show_page_of(self, widget: QWidget) -> None:
@@ -15073,10 +15085,10 @@ class ControllerView(QWidget):
                 "characters and world databases is OVERWRITTEN. It is offered because those "
                 "databases hold no accounts and no characters — if that is wrong, press "
                 "Cancel now, while nothing has happened yet, and restore a backup from the "
-                "Maintenance tab instead. The server must be stopped; the database is started "
-                "if it is not running and is left running afterwards. A full import takes "
-                "10-30 minutes, and once it starts it cannot be stopped and the window cannot "
-                "be closed until it finishes.\n\n" + ARMED_LAST_LINE
+                f"{MAINTENANCE_TAB} tab instead. The server must be stopped; the database is "
+                "started if it is not running and is left running afterwards. A full import "
+                "takes 10-30 minutes, and once it starts it cannot be stopped and the window "
+                "cannot be closed until it finishes.\n\n" + ARMED_LAST_LINE
             )
             return
         self._disarm_repair()
@@ -17903,7 +17915,7 @@ class ControllerView(QWidget):
                 parent=tab,
             )
             box.addWidget(self._move_panel)
-        self._add_panel_tab(tab, "maintenance", "Maintenance")
+        self._add_panel_tab(tab, "maintenance", MAINTENANCE_TAB)
         self.refresh_backups()
 
     def _selected_backup(self) -> Path | None:

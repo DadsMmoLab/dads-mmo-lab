@@ -20,6 +20,7 @@ from tests.test_backup_shelf import GAME, dump_of, folder_of
 from tests.test_backup_shelf import put as _put
 from tests.test_controller_view import WOTLK, _FakeMaintenance, _Ps, _services, ps  # noqa: F401
 from yulon import backup_shelf, docker
+from yulon.server_build_presses import MAINTENANCE_TAB
 from yulon.ui import controller_view as view_module
 from yulon.ui.controller_view import ControllerView
 from yulon.ui.widgets import clean_up_dialog
@@ -655,7 +656,7 @@ def test_no_maintenance_button_is_cut_short_down_to_800_wide(
 
     from tests.test_controller_view import _at, _clipped, _controller_in_the_real_window
 
-    window, tab = _controller_in_the_real_window(view, "Maintenance")
+    window, tab = _controller_in_the_real_window(view, MAINTENANCE_TAB)
     try:
         window.setMinimumSize(800, 600)
         _at(window, size)

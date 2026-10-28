@@ -1287,7 +1287,7 @@ def test_a_stop_that_failed_on_a_run_that_has_not_planned_keeps_the_request(
     assert "could not be stopped" in said and "compose stop said no" in said
     assert "came up" not in said
     assert world.key() == f"once:{TOKEN}"
-    assert "Maintenance tab" in said
+    assert "Backups & updates tab" in said
 
 
 def test_restart_world_says_which_half_failed() -> None:
@@ -1338,7 +1338,7 @@ def test_restart_world_says_which_half_failed() -> None:
     ids=["still-running", "part-way"],
 )
 def test_a_request_left_in_place_says_who_clears_it(said: str) -> None:
-    assert "Maintenance tab" in said and "Bots tab" in said
+    assert "Backups & updates tab" in said and "Bots tab" in said
     assert "until it has finished" not in said or "restore" in said
 
 

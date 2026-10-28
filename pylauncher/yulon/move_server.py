@@ -55,7 +55,7 @@ from yulon.log import get_logger
 from yulon.manifest import Manifest, ManifestType
 from yulon.move import PackedModule, PackedSource, PackFile, ServerFacts, ServerSpec, counts_phrase
 from yulon.move_flows import PRESS_BRING_IN, MoveError, MoveWorld, move_held_reason
-from yulon.server_build_presses import REBUILD, under_server_build
+from yulon.server_build_presses import MAINTENANCE_TAB, REBUILD, under_server_build
 from yulon.support import redact
 from yulon.support.sources import conf_files
 
@@ -641,7 +641,8 @@ STEPS = ("revs", "answers", "modules", "rebuild", "confs", "data")
 
 KIND_CHARACTERS = (
     "This file holds accounts and characters only, not a whole server. Install the game from "
-    "the Catalog first, then bring them in on its Maintenance tab (Move to another computer)."
+    "the Catalog first, then bring them in on its "
+    f"{MAINTENANCE_TAB} tab (Move to another computer)."
 )
 
 

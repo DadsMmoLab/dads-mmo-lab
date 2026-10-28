@@ -47,7 +47,8 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 
 ### Changed
 - The Danger zone now has one **Remove this server…** press offering off the list, uninstall, or containers.
-- Server updates live in a **Server version** section on the Maintenance tab instead of a Modules menu.
+- Server updates live in a **Server version** section on the Backups & updates tab instead of a Modules menu.
+- The Maintenance tab is now **Backups & updates**, saying what you find on it.
 
 ## v0.9.18-Public — 2026-10-17
 

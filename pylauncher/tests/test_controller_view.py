@@ -105,6 +105,7 @@ from yulon.manifest import Build, ConfKey, Manifest, ManifestType, Source, parse
 from yulon.manifest_store import ManifestStore
 from yulon.networking import NetworkPlan, NetworkReport
 from yulon.runner import run as _REAL_RUN
+from yulon.server_build_presses import MAINTENANCE_TAB
 from yulon.support import runlog
 from yulon.ui import controller_view as controller_view_module
 from yulon.ui import lines as log_lines
@@ -360,7 +361,8 @@ def test_the_sub_tabs_carry_icon_and_title_in_the_tab_itself(
 
     for i in range(view._tabs.count()):
         assert view._tabs.tabText(i) != "", f"tab {i} missing its title"
-        assert view._tabs.tabToolTip(i) == view._tabs.tabText(i)
+        # The bar's text is escaped for Qt (`_drawn_title`); the tooltip is the plain title.
+        assert view._tabs.tabToolTip(i) == view._tabs.tabText(i).replace("&&", "&")
 
     assert view._tabs.tabText(0) == "Server"
     assert view._tabs.tabText(2) == "Accounts"
@@ -16839,11 +16841,25 @@ def _main_menu(window: Any) -> Any:
     return bar.catalog_button
 
 
+def _tab_index(view: ControllerView, title: str) -> int:
+    """Where the sub-tab whose plain title is `title` sits.
+
+    `tabText()` returns what `_add_panel_tab` set, which is the Qt-escaped form
+    (`_drawn_title`), so the comparison goes through the same escaping.
+    """
+    from yulon.ui.controller_view import _drawn_title
+
+    return next(
+        i for i in range(view._tabs.count()) if view._tabs.tabText(i) == _drawn_title(title)
+    )
+
+
 def _controller_in_the_real_window(view: ControllerView, tab_title: str) -> tuple[Any, Any]:
     """Lay `view` out inside the window `build_window()` builds, and show it.
 
     Returns the window -- so the caller can drive it across the range a user can
-    drag it to -- and `view`'s now-current sub-tab.
+    drag it to -- and `view`'s now-current sub-tab. `tab_title` is the plain
+    title, as `MAINTENANCE_TAB` spells it.
     """
     import main
     from yulon.ui.catalog_view import CatalogView
@@ -16855,7 +16871,7 @@ def _controller_in_the_real_window(view: ControllerView, tab_title: str) -> tupl
     tabs, _banner, _splitter = main.build_catalog_tab(window, catalog_view, panel)
     tabs.addTab(view, WOTLK.name)
     tabs.setCurrentWidget(view)
-    index = next(i for i in range(view._tabs.count()) if view._tabs.tabText(i) == tab_title)
+    index = _tab_index(view, tab_title)
     view._tabs.setCurrentIndex(index)
     window.setMinimumSize(*main.MINIMUM_WINDOW_SIZE)
     window.show()
@@ -17181,7 +17197,7 @@ def test_the_rebuild_log_takes_its_height_back_when_a_job_starts(
     out, and its height is nobody's number.
     """
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
-    window, _tab = _controller_in_the_real_window(view, "Maintenance")
+    window, _tab = _controller_in_the_real_window(view, MAINTENANCE_TAB)
     _at(window, (1920, 1080))
     # Before a job it is not drawn at all (T191, I8); the smallest it is ever
     # drawn is its strip.
@@ -18308,7 +18324,7 @@ def test_the_log_strip_folds_the_output_away_and_brings_it_back(
     scroll room there rather than to the Modules list.
     """
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
-    window, _tab = _controller_in_the_real_window(view, "Maintenance")
+    window, _tab = _controller_in_the_real_window(view, MAINTENANCE_TAB)
     _at(window, DESKTOP_1080P)
     _ran_a_job(view)
     open_log = view.rebuild_log.height()
@@ -18727,7 +18743,7 @@ def test_the_pad_reaches_update_from_the_server_version_section(
     qmb = controller_view_module.QMessageBox
     boxes = _answer(monkeypatch, qmb.StandardButton.Cancel)
     view, spy, rebuilt = _past_the_pin(ps, tmp_path)
-    window, _tab = _controller_in_the_real_window(view, "Maintenance")
+    window, _tab = _controller_in_the_real_window(view, MAINTENANCE_TAB)
     _at(window, (1280, 800))
     nav, keyboard, gamepad = install_gamepad_navigation(window)
     try:
@@ -19230,7 +19246,7 @@ def test_a_failed_jobs_folded_strip_says_what_failed_on_one_line(
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
     # T692a: the log lives on Maintenance now -- a panel on a tab nobody looks
     # at is never laid out, and its field's height is nobody's number.
-    window, _tab = _controller_in_the_real_window(view, "Maintenance")
+    window, _tab = _controller_in_the_real_window(view, MAINTENANCE_TAB)
     _at(window, (1000, 700))
     refusal = (
         "that compose file was not written by Yu'lon, so this app will not rebuild the "
@@ -20591,7 +20607,7 @@ def test_the_maintenance_job_row_is_not_drawn_until_a_job_runs_and_then_stays(
     from PySide6.QtTest import QTest
 
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
-    window, _tab = _controller_in_the_real_window(view, "Maintenance")
+    window, _tab = _controller_in_the_real_window(view, MAINTENANCE_TAB)
     _at(window, T191_SIZES[2])
     log = view.rebuild_log
     assert log.isHidden(), "an idle job row is drawn before any job ran"
@@ -20600,7 +20616,7 @@ def test_the_maintenance_job_row_is_not_drawn_until_a_job_runs_and_then_stays(
     view._tabs.setCurrentIndex(titles.index("Server"))
     _ran_a_job(view)
     assert not log.isHidden(), "the job ran and its log is still not drawn"
-    view._tabs.setCurrentIndex(titles.index("Maintenance"))
+    view._tabs.setCurrentIndex(_tab_index(view, MAINTENANCE_TAB))
     process_events()
 
     QTest.mouseClick(log._collapse, Qt.MouseButton.LeftButton)
@@ -20648,7 +20664,7 @@ def test_a_job_leaves_nothing_on_the_maintenance_tab_cut_at_the_narrow_windows(
     asks for the room (T80).
     """
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
-    window, tab = _controller_in_the_real_window(view, "Maintenance")
+    window, tab = _controller_in_the_real_window(view, MAINTENANCE_TAB)
     _at(window, DESKTOP_1080P)
     _ran_a_job(view)
     assert not view.rebuild_log.collapsed, "the job did not open the log, so nothing is tested"
@@ -20678,7 +20694,7 @@ def test_the_maintenance_log_opens_for_a_job_and_keeps_a_hand_fold(
     next job, and the next job opens it again with its new output.
     """
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
-    window, _tab = _controller_in_the_real_window(view, "Maintenance")
+    window, _tab = _controller_in_the_real_window(view, MAINTENANCE_TAB)
     _at(window, DESKTOP_1080P)
     _ran_a_job(view)
 
@@ -22692,7 +22708,7 @@ def test_the_logs_minimum_in_the_state_it_is_not_in_is_the_one_it_really_has(
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
     # T692a: the log lives on Maintenance now; the derivation is the panel's
     # own, but its numbers need the theme polish a visible tab gives.
-    window, _tab = _controller_in_the_real_window(view, "Maintenance")
+    window, _tab = _controller_in_the_real_window(view, MAINTENANCE_TAB)
     _at(window, DESKTOP_1080P)
     log = view.rebuild_log
     # A job first: before one the row is not drawn (T191), and a hidden widget

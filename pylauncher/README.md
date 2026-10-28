@@ -73,9 +73,9 @@ Apple silicon only.
 
 This is the part that works most widely. Point the app at an existing install with "Use existing…"
 — that button is deliberately enabled on every platform — and you get the Server, Console,
-Accounts, Maintenance, Modules and Networking tabs. On Windows, start, stop, following the log and
-the database work behind a module apply have each been run against a real install; the rest of
-those tabs are built and unit-tested there but have not been driven by hand.
+Accounts, Backups & updates, Modules and Networking tabs. On Windows, start, stop, following
+the log and the database work behind a module apply have each been run against a real install;
+the rest of those tabs are built and unit-tested there but have not been driven by hand.
 
 Three honest gaps:
 

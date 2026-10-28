@@ -70,6 +70,7 @@ from yulon.catalog.native import (
 )
 from yulon.log import get_logger
 from yulon.manifest import Db
+from yulon.server_build_presses import MAINTENANCE_TAB
 
 logger = get_logger(__name__)
 
@@ -219,11 +220,12 @@ def newer_updates_refusal(
     return (
         f"{head} To move it there, first put {_listed(databases)} back as "
         f"{'it was' if one else 'they were'} before {those}: press Stop on the Server tab, "
-        f"restore {files} on Maintenance (it works with the server stopped), then press "
-        f"{back} again without starting the server in between, since a start would apply "
+        f"restore {files} on the {MAINTENANCE_TAB} tab (it works with the server stopped), then "
+        f"press {back} again without starting the server in between, since a start would apply "
         f"{those} again. Restoring loses whatever changed in {_listed(databases)} since that "
-        f"copy was taken. Do not press Clean up… on Maintenance before restoring: it keeps "
-        f"only the newest copies and may remove {'this one' if len(found) == 1 else 'these'}."
+        f"copy was taken. Do not press Clean up… on the {MAINTENANCE_TAB} tab before restoring: "
+        f"it keeps only the newest copies and may remove "
+        f"{'this one' if len(found) == 1 else 'these'}."
     )
 
 

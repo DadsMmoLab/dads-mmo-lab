@@ -885,7 +885,7 @@ def test_a_put_back_temp_is_never_a_backup_revert_would_offer(
 # write exists), and the two Reverts check `_busy` themselves instead of trusting
 # a greyed button.
 
-RESTORING = "a restore is running on the Maintenance tab"
+RESTORING = "a restore is running on the Backups & updates tab"
 BUSY = "another action is running on this server"
 
 

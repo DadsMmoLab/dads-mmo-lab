@@ -1661,4 +1661,4 @@ def test_another_window_during_a_whole_server_load_is_told_a_server_is_being_bro
         forgetting.MOVE_IN_WRITES_ALONE,
     ):
         assert "brought in from another computer" in sentence, sentence
-        assert "Accounts and characters" not in sentence and "Maintenance" not in sentence
+        assert "Accounts and characters" not in sentence and "Backups & updates" not in sentence
