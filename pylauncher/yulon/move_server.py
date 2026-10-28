@@ -1730,6 +1730,8 @@ def load_the_data(
         alone=forgetting.MOVE_IN_WRITES_ALONE,
         leased=forgetting.MOVE_IN_HOLDS_THE_DATABASES,
         held=forgetting.MOVE_IN_HOLDS_THE_SERVER,
+        # T738 part 4: a move on the same folder gets this load's own move sentence.
+        for_a_move=forgetting.MOVE_IN_HOLDS_A_MOVE,
     ):
         roles = _present_roles(world, SERVER_ROLES)
         here = _read_versions(world, roles)

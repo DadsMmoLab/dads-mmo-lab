@@ -436,24 +436,19 @@ def _server_is_up(world: MoveWorld) -> bool:
     return spec.world in names or spec.auth in names
 
 
-_FOR_A_MOVE = {
-    forgetting.RESTORE_HOLDS_THE_SERVER: forgetting.RESTORE_HOLDS_A_MOVE,
-    forgetting.MOVE_IN_HOLDS_THE_SERVER: forgetting.MOVE_IN_HOLDS_A_MOVE,  # T738
-}
-"""A hold's sentence that is about starting and stopping -> what a move is told instead (T737)."""
-
-
 def move_held_reason(server_dir: Path | str) -> str | None:
-    """`docker.held_reason()` in a move's words, or None when nothing holds the server.
+    """`docker.holder()`'s move sentence, or None when nothing holds the server.
 
     T737: the Maintenance tab's Restore holds the server with the sentence a Start or Stop is
-    told (why starting or stopping would harm the restore). A Pack or Bring in is told
-    `RESTORE_HOLDS_A_MOVE` instead. T738: likewise a whole-server bring-in's load
-    (`MOVE_IN_HOLDS_THE_SERVER` -> `MOVE_IN_HOLDS_A_MOVE`). Every other holder's sentence is
-    passed as it is.
+    told (why starting or stopping would harm the restore). A Pack or Bring in is told the
+    holder's own `for_a_move` sentence (`RESTORE_HOLDS_A_MOVE`) instead. T738: likewise a
+    whole-server bring-in's load (`MOVE_IN_HOLDS_A_MOVE`). Every other holder's sentence --
+    and a hold with no `for_a_move` -- is passed as it is. The orphaned-load path is unchanged.
     """
-    held = docker.held_reason(server_dir)
-    return None if held is None else _FOR_A_MOVE.get(held, held)
+    hold = docker.holder(server_dir)
+    if hold is None:
+        return docker.held_reason(server_dir)
+    return hold.for_a_move or hold.reason
 
 
 def _refuse_if_unsafe(world: MoveWorld) -> None:
@@ -1088,11 +1083,14 @@ def _database_session(
     alone: str | None = None,
     leased: str = forgetting.MOVE_HOLDS_THE_DATABASES,
     held: str = forgetting.MOVE_HOLDS_THE_SERVER,
+    for_a_move: str | None = None,
 ) -> Iterator[None]:
     """The leased, held, database-up stretch a move works in. `undone` names what did not happen.
 
     `leased` and `held` are what another press is told while it runs: the Maintenance tab's
     Pack and Bring in by default, the whole-server bring-in's own sentences from its load (T737).
+    `for_a_move` (T738 part 4) is what a Pack, a Bring in, or a second "Bring from another
+    computer…" on the same folder is told while it holds: the holder's own move sentence.
 
     The same four steps the Maintenance tab's Backup and Restore take, in the same order: the
     lease (one Backup, Restore or move of a server at a time), the hold (no Start, Stop or
@@ -1116,6 +1114,7 @@ def _database_session(
                     wsl_distro=world.wsl_distro,
                     # A load passes `alone` (T681 review): no Modules SQL mid-load.
                     alone=alone,
+                    for_a_move=for_a_move,
                 )
             )
         except docker.ServerHeldError as exc:

@@ -1496,6 +1496,7 @@ def test_a_carry_on_while_this_yulons_own_restore_holds_the_folder_names_the_res
         forgetting.RESTORE_HOLDS_THE_SERVER,
         press=forgetting.PRESS_RESTORE,
         alone=forgetting.RESTORE_WRITES_ALONE,
+        for_a_move=forgetting.RESTORE_HOLDS_A_MOVE,
     ):
         lines, refused = _carry_on(mv)
     assert str(refused) == forgetting.RESTORE_HOLDS_A_MOVE  # T737: a move's own reason
@@ -1519,7 +1520,8 @@ def test_another_window_during_a_whole_server_load_is_told_a_server_is_being_bro
     T738: a move (Pack, Bring in, a second Bring from another computer… on the same folder)
     is told the hold in a move's words, `MOVE_IN_HOLDS_A_MOVE` ("Nothing was packed or
     brought in."); the Start keeps "Nothing was started or stopped."
-    Mutation: drop the MOVE_IN entry from `move_flows._FOR_A_MOVE`.
+    Mutation: drop `for_a_move=` from `load_the_data`'s session (a move is told the load's
+    Start/Stop sentence).
     """
     from tests.test_move_flows import packed
 

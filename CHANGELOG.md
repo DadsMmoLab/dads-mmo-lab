@@ -41,6 +41,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Updating a WoW Tortoise server now rebuilds only the movement maps whose areas changed, in minutes.
 - A Tuning tab raw file Save that is interrupted now leaves the conf as it was instead of truncated.
 - Pressing **Update the server to latest…** during a backup or move names that job and says once what was not started.
+- Packing or bringing in accounts during a restore or a server bring-in now says what the move cannot do, in its own words.
 - A refused Tuning restart or Repair now shows the update or Repair press its sentence names.
 - Spin boxes keep their number clear of the buttons with any font.
 
