@@ -358,9 +358,9 @@ def write_file(tmp_path: Path, type_id: str) -> None:
     )
 
 
-def write_crash(tmp_path: Path, target: str, *, imported: bool) -> None:
+def write_crash(tmp_path: Path, target: str, *, imported: bool, source: str = "coa") -> None:
     (tmp_path / coa_realm.SWITCH_MARKER_FILE).write_text(
-        json.dumps({"version": 2, "target": target, "imported": imported}) + "\n",
+        json.dumps({"version": 2, "target": target, "imported": imported, "source": source}) + "\n",
         encoding="utf-8",
     )
 
@@ -1345,3 +1345,441 @@ def test_the_server_tab_start_asks_the_realm_gate_before_the_port(
     sql.marker_rows["acore_characters"] = "coa"
     assert controller.before_servers() is None
     assert any("realmlist" in s for s in services.realm)  # type: ignore[attr-defined]
+
+
+# -- round 3: an import under an unfinished switch, the publish order, the reads --
+
+
+def _seamed_engine(sql: FakeSql):  # type: ignore[no-untyped-def]
+    """`_engine()` whose `sql_query` seam is `sql`: SELECTs read it, the rest write it."""
+    from dataclasses import replace
+
+    engine = _engine()
+
+    def seam(*args: object, **_kwargs: object) -> str:
+        statement = str(args[-1])
+        if statement.lstrip().upper().startswith("SELECT"):
+            return sql.query(statement)
+        sql.execute(statement)
+        return ""
+
+    engine._seams = replace(engine._seams, sql_query=seam)
+    return engine
+
+
+def _ctx(server_dir: Path) -> SimpleNamespace:
+    return SimpleNamespace(server_dir=server_dir, secrets=SimpleNamespace(db_password="pw"))
+
+
+def _killed_after_rename(sql: FakeSql) -> None:
+    """A first switch coa -> hero killed right after its rename: coa parked whole, plain empty."""
+    parked_set(sql, "coa")
+    for schema in PLAIN:
+        sql.tables[schema] = []
+        sql.schemata[schema] = ("utf8mb4", "utf8mb4_unicode_ci")
+    seed_accounts(sql, "acore_auth_coa", {"Player1": 3})
+
+
+def test_the_import_refuses_under_an_unfinished_switch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Opus round 3, reproduced: Install marked a fresh plain set coa beside the parked one.
+
+    Install and "Repair the database" both run the `import` stage; neither may
+    import or mark while the crash note stands.
+    """
+    from yulon.catalog.families.azerothcore import AzerothCoreInstaller
+    from yulon.catalog.installer import InstallerError
+
+    sql = FakeSql()
+    _killed_after_rename(sql)
+    write_file(tmp_path, "coa")
+    write_crash(tmp_path, "hero", imported=False)
+    imported: list[int] = []
+    monkeypatch.setattr(
+        AzerothCoreInstaller,
+        "stage_import",
+        lambda self, ctx, gate, service: iter(imported.append(1) or ["imported"]),
+    )
+    engine = _seamed_engine(sql)
+    with pytest.raises(InstallerError, match="no database import was run"):
+        list(engine._import(_ctx(tmp_path)))
+    with pytest.raises(InstallerError, match="no database import was run"):
+        list(engine._mark_realm_type(_ctx(tmp_path)))
+    assert imported == [] and sql.executed == []
+    assert "import" in [stage.name for stage in engine.repair_database_stages()], "the ground"
+    # Pressing coa then undoes the switch: every account is back in the plain set.
+    switch_lines(tmp_path, coa(), "coa", sql, file=None)
+    assert usernames(sql, "acore_auth") == ["Coa1", "Player1"]
+    assert sql.marker == "coa"
+    assert not (tmp_path / coa_realm.SWITCH_MARKER_FILE).exists()
+
+
+def test_the_server_tabs_repair_import_refuses_under_an_unfinished_switch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yulon import docker
+
+    ran: list[int] = []
+    monkeypatch.setattr(docker, "repair_import", lambda *_a, **_k: ran.append(1) or True)
+    sql = FakeSql()
+    _killed_after_rename(sql)
+    write_crash(tmp_path, "hero", imported=False)
+    services = _wired_controller(monkeypatch, tmp_path, sql)
+    with pytest.raises(docker.DockerRefusal, match="no database import was run"):
+        services.controller.repair_import()  # type: ignore[attr-defined]
+    assert ran == []
+
+
+def test_the_import_marks_and_is_marked_by_the_import_stage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yulon.catalog.families.azerothcore import AzerothCoreInstaller
+
+    sql = FakeSql()
+    coa_schemas(sql, marker=None)
+    monkeypatch.setattr(
+        AzerothCoreInstaller, "stage_import", lambda self, ctx, gate, service: iter(["imported"])
+    )
+    lines = list(_seamed_engine(sql)._import(_ctx(tmp_path)))
+    assert sql.marker == "coa"
+    assert lines[-1] == "The databases are marked as the coa realm type."
+
+
+def test_the_import_never_overwrites_a_marker(tmp_path: Path) -> None:
+    sql = FakeSql()
+    coa_schemas(sql, marker="hero")
+    lines = list(_seamed_engine(sql)._mark_realm_type(_ctx(tmp_path)))
+    assert sql.marker == "hero" and sql.executed == []
+    assert lines == ["The databases are already marked as the hero realm type."]
+
+
+def test_an_import_beside_a_parked_set_keeps_the_crash_note(tmp_path: Path) -> None:
+    """The state the import refusal prevents, reached anyway: the note is not called stale."""
+    sql = FakeSql()
+    _killed_after_rename(sql)
+    sql.tables["acore_characters"] = ["characters", MARKER]
+    sql.marker_rows["acore_characters"] = "coa"
+    write_crash(tmp_path, "hero", imported=False)
+    with pytest.raises(coa_realm.RealmSwitchError, match="also parked"):
+        switch_lines(tmp_path, coa(), "coa", sql)
+    assert (tmp_path / coa_realm.SWITCH_MARKER_FILE).is_file()
+    assert drops(sql) == [] and renames(sql) == []
+    assert usernames(sql, "acore_auth_coa") == ["Coa1", "Player1"]
+
+
+def test_a_stale_note_whose_other_park_is_of_another_type_is_kept(tmp_path: Path) -> None:
+    sql = FakeSql()
+    coa_schemas(sql, marker="hero")
+    parked_set(sql, "coa", marker="wc")
+    write_file(tmp_path, "hero")
+    write_crash(tmp_path, "hero", imported=False, source="coa")
+    with pytest.raises(coa_realm.RealmSwitchError, match="parked coa databases do not read"):
+        switch_lines(tmp_path, coa(), "hero", sql, file=None)
+    assert (tmp_path / coa_realm.SWITCH_MARKER_FILE).is_file()
+
+
+def test_the_switch_publishes_override_then_file_then_clears_the_note(tmp_path: Path) -> None:
+    sql = FakeSql()
+    coa_schemas(sql)
+    seen: list[tuple[str, bool]] = []
+
+    def override(env: Mapping[str, str]) -> None:
+        seen.append((file_type(tmp_path), (tmp_path / coa_realm.SWITCH_MARKER_FILE).exists()))
+        assert dict(env) == coa_realm.switch_env_for(coa(), "hero")
+
+    write_file(tmp_path, "coa")
+    list(
+        coa_realm.switch(
+            coa(),
+            tmp_path,
+            "hero",
+            sql=sql,
+            servers_running=lambda: False,
+            run_import=lambda: fresh_import(sql),
+            set_realm_row=lambda name, port: None,
+            write_override=override,
+            bot_prefix="rndbot",
+        )
+    )
+    assert seen == [("coa", True)], "the override first, while the old file and the note stand"
+    assert file_type(tmp_path) == "hero"
+    assert not (tmp_path / coa_realm.SWITCH_MARKER_FILE).exists()
+
+
+def _killed_publishing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sql: FakeSql, step: str
+) -> list[Mapping[str, str]]:
+    """A second switch coa -> hero killed right after `step` of its publication."""
+    coa_schemas(sql)
+    parked_set(sql, "hero")
+    real = {"write_active": coa_realm.write_active, "_clear_crash": coa_realm._clear_crash}
+    wrote: list[Mapping[str, str]] = []
+
+    def die(*_args: object) -> None:
+        raise OSError("killed")
+
+    if step == "override":
+        monkeypatch.setattr(coa_realm, "write_active", die)
+    elif step == "active":
+        monkeypatch.setattr(coa_realm, "_clear_crash", die)
+    write_file(tmp_path, "coa")
+    with pytest.raises(OSError, match="killed"):
+        list(
+            coa_realm.switch(
+                coa(),
+                tmp_path,
+                "hero",
+                sql=sql,
+                servers_running=lambda: False,
+                run_import=lambda: fresh_import(sql),
+                set_realm_row=lambda name, port: None,
+                write_override=lambda env: wrote.append(dict(env)),
+                bot_prefix="rndbot",
+            )
+        )
+    for name, function in real.items():
+        monkeypatch.setattr(coa_realm, name, function)
+    return wrote
+
+
+@pytest.mark.parametrize("step", ["override", "active"])
+def test_a_switch_killed_while_publishing_is_finished_by_the_next_press(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, step: str
+) -> None:
+    sql = FakeSql()
+    wrote = _killed_publishing(tmp_path, monkeypatch, sql, step)
+    assert wrote == [coa_realm.switch_env_for(coa(), "hero")]
+    assert (tmp_path / coa_realm.SWITCH_MARKER_FILE).is_file()
+    assert coa_realm.refusal(coa(), tmp_path, sql) == coa_realm.CRASH_START_REFUSAL
+    assert file_type(tmp_path) == ("coa" if step == "override" else "hero")
+    lines = switch_lines(tmp_path, coa(), "hero", sql, file=None)
+    assert lines[-1] == f"OVERRIDE {sorted(coa_realm.switch_env_for(coa(), 'hero'))}"
+    assert file_type(tmp_path) == "hero"
+    assert not (tmp_path / coa_realm.SWITCH_MARKER_FILE).exists()
+    assert len(renames(sql)) == 1, "finished, never switched twice"
+    assert coa_realm.refusal(coa(), tmp_path, sql) is None
+
+
+def test_the_repair_rewrites_the_override(tmp_path: Path) -> None:
+    sql = FakeSql()
+    coa_schemas(sql, marker="hero")
+    lines = switch_lines(tmp_path, coa(), "hero", sql)
+    assert lines[-1] == f"OVERRIDE {sorted(coa_realm.switch_env_for(coa(), 'hero'))}"
+
+
+def test_a_switch_rewrites_the_override_for_its_target(tmp_path: Path) -> None:
+    sql = FakeSql()
+    coa_schemas(sql)
+    lines = switch_lines(tmp_path, coa(), "wc", sql)
+    assert lines[-1] == f"OVERRIDE {sorted(coa_realm.switch_env_for(coa(), 'wc'))}"
+    assert "AC_CO_ACHALLENGES_GAME_MODES_REALM" in coa_realm.switch_env_for(coa(), "wc")
+
+
+def test_a_second_switch_drops_the_emptied_target_park(tmp_path: Path) -> None:
+    sql = FakeSql()
+    coa_schemas(sql)
+    parked_set(sql, "hero")
+    switch_lines(tmp_path, coa(), "hero", sql)
+    assert not any(schema.endswith("_hero") for schema in sql.tables), sql.tables
+
+
+def test_the_gate_refuses_any_unreadable_database_file_or_no_file(tmp_path: Path) -> None:
+    """Codex round 3: no realm-type file is no licence to start on a database nobody read."""
+
+    def refuse() -> None:
+        raise RuntimeError("no database")
+
+    sql = FakeSql()
+    coa_schemas(sql, marker="hero")  # would disagree with the default
+    gate = coa_realm.before_servers_gate(coa(), tmp_path, start_db=refuse, sql=sql)
+    assert gate is not None and gate() == coa_realm.UNREADABLE_START_REFUSAL
+    sql.fail_query_on = "information_schema.TABLES"
+    gate = coa_realm.before_servers_gate(coa(), tmp_path, start_db=lambda: None, sql=sql)
+    assert gate is not None and gate() == coa_realm.UNREADABLE_START_REFUSAL
+    sql.fail_query_on = ""
+    assert gate() == coa_realm.mismatch_sentence("hero", "coa")
+
+
+def test_the_server_tab_gate_writes_the_marker_through_the_database(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sql = FakeSql()
+    coa_schemas(sql, marker=None)
+    services = _wired_controller(monkeypatch, tmp_path, sql)
+    assert services.controller.before_servers() is None  # type: ignore[attr-defined]
+    assert sql.marker == "coa"
+
+
+def test_the_engine_gate_without_secrets_refuses_once_a_switch_was_made(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine = _engine()
+
+    def no_secrets(server_dir: Path) -> object:
+        raise OSError("no .env")
+
+    monkeypatch.setattr(engine, "resolve_secrets", no_secrets)
+    assert engine.family_start_refusal(tmp_path) is None, "no file, no secrets: the default"
+    write_file(tmp_path, "coa")
+    assert engine.family_start_refusal(tmp_path) == coa_realm.UNREADABLE_START_REFUSAL
+
+
+# -- reads that cannot be made refuse ------------------------------------------------
+
+
+def test_recovery_refuses_an_unreadable_plain_marker(tmp_path: Path) -> None:
+    sql = FakeSql()
+    _killed_during_import(sql)
+    sql.tables["acore_characters"].append(MARKER)
+    sql.fail_query_on = f"SELECT id FROM `acore_characters`.`{MARKER}`"
+    write_file(tmp_path, "coa")
+    write_crash(tmp_path, "hero", imported=True)
+    with pytest.raises(coa_realm.DatabaseUnreadable):
+        switch_lines(tmp_path, coa(), "hero", sql, file=None)
+    assert drops(sql) == [] and renames(sql) == []
+
+
+def test_recovery_refuses_an_unreadable_park_marker(tmp_path: Path) -> None:
+    sql = FakeSql()
+    _killed_during_import(sql)
+    sql.fail_query_on = f"SELECT id FROM `acore_characters_coa`.`{MARKER}`"
+    write_file(tmp_path, "coa")
+    write_crash(tmp_path, "hero", imported=True)
+    with pytest.raises(coa_realm.DatabaseUnreadable):
+        switch_lines(tmp_path, coa(), "hero", sql, file=None)
+    assert drops(sql) == [] and renames(sql) == []
+
+
+def test_recovery_refuses_unreadable_plain_schemas(tmp_path: Path) -> None:
+    sql = FakeSql()
+    _killed_during_import(sql)
+    sql.fail_query_on = "TABLE_SCHEMA = 'acore_auth'"
+    write_file(tmp_path, "coa")
+    write_crash(tmp_path, "hero", imported=False)
+    with pytest.raises(coa_realm.DatabaseUnreadable):
+        switch_lines(tmp_path, coa(), "coa", sql, file=None)
+    assert drops(sql) == [] and renames(sql) == []
+
+
+def test_a_recovery_that_put_the_set_back_clears_its_note_even_if_the_switch_then_fails(
+    tmp_path: Path,
+) -> None:
+    sql = FakeSql()
+    _killed_during_import(sql)
+    sql.fail_on = "CREATE DATABASE"
+    write_file(tmp_path, "coa")
+    write_crash(tmp_path, "hero", imported=True)
+    with pytest.raises(RuntimeError, match="CREATE DATABASE"):
+        switch_lines(tmp_path, coa(), "hero", sql, file=None)
+    assert sql.marker == "coa"
+    assert not (tmp_path / coa_realm.SWITCH_MARKER_FILE).exists()
+    assert coa_realm.refusal(coa(), tmp_path, sql) is None
+
+
+def test_an_undo_drops_the_emptied_parks(tmp_path: Path) -> None:
+    sql = FakeSql()
+    _killed_during_import(sql)
+    write_file(tmp_path, "coa")
+    write_crash(tmp_path, "hero", imported=True)
+    switch_lines(tmp_path, coa(), "coa", sql, file=None)
+    assert not any(schema.endswith("_coa") for schema in sql.tables), sql.tables
+
+
+def test_an_unreadable_target_park_marker_refuses_before_any_rename(tmp_path: Path) -> None:
+    sql = FakeSql()
+    coa_schemas(sql)
+    parked_set(sql, "hero")
+    sql.fail_query_on = f"SELECT id FROM `acore_characters_hero`.`{MARKER}`"
+    with pytest.raises(coa_realm.DatabaseUnreadable):
+        switch_lines(tmp_path, coa(), "hero", sql)
+    assert renames(sql) == []
+
+
+def test_verify_refuses_an_unreadable_plain_marker(tmp_path: Path) -> None:
+    sql = AfterRename(
+        lambda s: setattr(s, "fail_query_on", f"SELECT id FROM `acore_characters`.`{MARKER}`")
+    )
+    _second_switch(sql)
+    with pytest.raises(coa_realm.DatabaseUnreadable):
+        switch_lines(tmp_path, coa(), "hero", sql)
+    assert file_type(tmp_path) == "coa"
+    assert (tmp_path / coa_realm.SWITCH_MARKER_FILE).is_file()
+
+
+class Deaf(FakeSql):
+    """Answers every `INSERT IGNORE` (the marker) with success and writes nothing."""
+
+    def execute(self, statement: str) -> None:
+        if statement.startswith("INSERT IGNORE"):
+            self.executed.append(statement)
+            return
+        super().execute(statement)
+
+
+def test_a_pre_marker_mark_that_does_not_read_back_refuses_the_switch(tmp_path: Path) -> None:
+    sql = Deaf()
+    coa_schemas(sql, marker=None)
+    with pytest.raises(coa_realm.RealmSwitchError, match="could not be marked"):
+        switch_lines(tmp_path, coa(), "hero", sql)
+    assert renames(sql) == []
+
+
+def test_an_unreadable_second_listing_at_start_refuses(tmp_path: Path) -> None:
+    class SecondFails(FakeSql):
+        listed = 0
+
+        def query(self, statement: str) -> str:
+            if "TABLE_SCHEMA = 'acore_characters'" in statement:
+                self.listed += 1
+                if self.listed == 2:
+                    raise RuntimeError("gone")
+            return super().query(statement)
+
+    sql = SecondFails()
+    coa_schemas(sql, marker=None)
+    write_file(tmp_path, "coa")
+    assert coa_realm.refusal(coa(), tmp_path, sql) == coa_realm.UNREADABLE_START_REFUSAL
+    assert sql.executed == []
+
+
+# -- the account checks ------------------------------------------------------------
+
+
+class Answering(FakeSql):
+    """Answers the queries containing a key with a fixed text instead of the model."""
+
+    def __init__(self, answers: Mapping[str, str]) -> None:
+        super().__init__()
+        self.answers = dict(answers)
+
+    def query(self, statement: str) -> str:
+        for key, answer in self.answers.items():
+            if key in statement:
+                self.queries.append(statement)
+                return answer
+        return super().query(statement)
+
+
+def test_an_account_gone_from_its_source_refuses(tmp_path: Path) -> None:
+    sql = Answering({"FROM `acore_auth_coa`.account WHERE username = 'Player1'": ""})
+    coa_schemas(sql)
+    with pytest.raises(coa_realm.RealmSwitchError, match="Player1 account is gone"):
+        switch_lines(tmp_path, coa(), "hero", sql)
+    assert sql.marker is None
+
+
+def test_an_account_that_matches_twice_refuses(tmp_path: Path) -> None:
+    sql = Answering({"JOIN `acore_auth_coa`.account s": "2\n"})
+    coa_schemas(sql)
+    with pytest.raises(coa_realm.RealmSwitchError, match="password intact"):
+        switch_lines(tmp_path, coa(), "hero", sql)
+    assert sql.marker is None
+
+
+def test_an_id_that_reads_as_no_number_is_unreadable(tmp_path: Path) -> None:
+    sql = Answering({"FROM `acore_auth`.account WHERE username = 'Player1'": "NULL\n"})
+    coa_schemas(sql)
+    with pytest.raises(coa_realm.DatabaseUnreadable, match="Player1 account reads"):
+        switch_lines(tmp_path, coa(), "hero", sql)
+    assert usernames(sql, "acore_auth") == []

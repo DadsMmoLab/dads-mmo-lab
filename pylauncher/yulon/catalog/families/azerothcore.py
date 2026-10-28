@@ -1972,8 +1972,16 @@ class AzerothCoreInstaller(StagedInstaller):
         preflight refuses the other combination — so "no probe" and "no
         service" are the same skip, worded here and not in the spine (A7). A
         realm-types entry's import then marks the plain databases with the
-        default type (T812 C3a): the marker travels with the data.
+        default type (T812 C3a): the marker travels with the data. While a
+        realm-type switch is unfinished the stage refuses before anything is
+        imported (`coa_realm.import_refusal()`): Install and "Repair the
+        database" both run this stage.
         """
+        from yulon import coa_realm
+
+        refused = coa_realm.import_refusal(self.entry, ctx.server_dir)
+        if refused is not None:
+            raise InstallerError(refused)
         service = self.entry.containers.db_import
         probe, reset = self._gate_for(ctx.server_dir)
         if probe is None or not service:
@@ -1998,6 +2006,9 @@ class AzerothCoreInstaller(StagedInstaller):
         if not coa_realm.has_realm_types(self.entry):
             return
             yield  # unreachable: keeps this a generator on the no-types path
+        refused = coa_realm.import_refusal(self.entry, ctx.server_dir)
+        if refused is not None:
+            raise InstallerError(refused)
         sql = coa_realm.FnSql(
             run=lambda statement: _ignore_answer(
                 self._seams.sql_query(

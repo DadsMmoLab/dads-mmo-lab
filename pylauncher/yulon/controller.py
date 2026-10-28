@@ -1333,6 +1333,15 @@ class Controller:
             docker.DockerCommandError: any of those refusals, or an import that
                 ran and left the databases exactly as unimported as they were.
         """
+        entry = self.entry or _entry_for(self.spec)
+        if entry is not None:
+            from yulon import coa_realm
+
+            refused = coa_realm.import_refusal(entry, self.server_dir)
+            if refused is not None:
+                # T812 C3a: the plain schemas may be mid-switch; an import would fill
+                # them with a fresh set while the real one sits parked.
+                raise docker.DockerRefusal(refused)
         if self.import_probe is None:
             raise docker.DockerRefusal(
                 "this game cannot be asked what state its databases are in, so its import will "

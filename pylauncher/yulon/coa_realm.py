@@ -142,13 +142,15 @@ def active(entry: CatalogEntry, server_dir: Path) -> AcRealmType:
 
 
 def write_active(server_dir: Path, type_id: str) -> None:
-    """Publish the active type id, last of all (T812 C3a).
+    """Publish the active type id (T812 C3a).
 
     Through `composegen._replace_whole()`: whole beside the file, fsynced, and
     `os.replace`d over it, so a crash leaves the old file and a retry still
     reads the old type. The rename is what moves the data; this file only says
-    which set the plain schemas hold. Written after the crash marker is
-    cleared, so a crash before it leaves the marker for the next press.
+    which set the plain schemas hold. A switch publishes in this order: the
+    target's override first, then this file, then it clears the crash marker
+    last, so a press killed between any two finds the marker and finishes the
+    publication (`switch()`).
     """
     from yulon.catalog import composegen
 
@@ -226,6 +228,17 @@ UNREADABLE_START_REFUSAL = (
     "started. Press Start again once its database answers."
 )
 """The start refusal when the marker cannot be read and a switch has ever been made here."""
+
+IMPORT_REFUSAL = (
+    "A realm type switch did not finish, so no database import was run. Switch realm type "
+    "again on the Server tab to finish it first."
+)
+"""Install, Repair and the import's marking refuse while `SWITCH_MARKER_FILE` exists.
+
+An import over the plain schemas mid-switch would fill them with a fresh set
+and mark it as the file's type, while that type's real set sits parked: the
+next switch would then call the crash note stale and strand those characters.
+"""
 
 MARK_START_REFUSAL = (
     "The databases could not be marked with this server's realm type, so the server was not "
@@ -331,6 +344,13 @@ def read_marker(query: Callable[[str], str], entry: CatalogEntry) -> str | None:
     return _marker_in(query, entry.databases.characters)
 
 
+def import_refusal(entry: CatalogEntry, server_dir: Path) -> str | None:
+    """`IMPORT_REFUSAL` while a switch is unfinished on a realm-types entry, else None."""
+    if has_realm_types(entry) and (server_dir / SWITCH_MARKER_FILE).exists():
+        return IMPORT_REFUSAL
+    return None
+
+
 def mismatch_sentence(marker: str, want: str) -> str:
     """The start and switch refusal for databases holding another type than the file says."""
     return (
@@ -339,7 +359,9 @@ def mismatch_sentence(marker: str, want: str) -> str:
     )
 
 
-def refusal(entry: CatalogEntry, server_dir: Path, sql: SqlRunner | None) -> str | None:
+def refusal(
+    entry: CatalogEntry, server_dir: Path, sql: SqlRunner | None, *, strict: bool = False
+) -> str | None:
     """Why the server must not start now, or None; marks a pre-marker install (T812 C3a).
 
     A crash marker refuses outright: a switch that did not finish may have left
@@ -355,12 +377,14 @@ def refusal(entry: CatalogEntry, server_dir: Path, sql: SqlRunner | None) -> str
     A marker that cannot be read refuses once a realm-type file exists (a
     switch has been made here, so the plain set may be any type); before one
     exists only the default type can ever have been in the plain schemas.
+    `strict` (the Server tab's gate, which started the database itself) refuses
+    every unreadable read, file or no file.
     """
     if not has_realm_types(entry):
         return None
     if (server_dir / SWITCH_MARKER_FILE).exists():
         return CRASH_START_REFUSAL
-    claimed = (server_dir / ACTIVE_FILE).exists()
+    claimed = strict or (server_dir / ACTIVE_FILE).exists()
     if sql is None:
         return UNREADABLE_START_REFUSAL if claimed else None
     want = active(entry, server_dir).id
@@ -403,8 +427,9 @@ def before_servers_gate(
 
     The database alone is started first (`start_db`), then `refusal()` reads
     the marker: the gate never decides on a database that was not up. A crash
-    marker refuses before anything is started. None for an entry without realm
-    types, so every other server starts exactly as it did.
+    marker refuses before anything is started, and any start or read failure
+    refuses (`strict`), realm-type file or not. None for an entry without
+    realm types, so every other server starts exactly as it did.
     """
     if not has_realm_types(entry):
         return None
@@ -416,8 +441,8 @@ def before_servers_gate(
             start_db()
         except Exception as exc:  # noqa: BLE001 - a database that will not start is unreadable
             logger.warning(f"{entry.id}: the database could not be started to read its type: {exc}")
-            return refusal(entry, server_dir, None)
-        return refusal(entry, server_dir, sql)
+            return UNREADABLE_START_REFUSAL
+        return refusal(entry, server_dir, sql, strict=True)
 
     return gate
 
@@ -496,8 +521,11 @@ def switch(
     7 ONE `RENAME TABLE` moving all three sets both ways; 8 drop the emptied
     target parks; 9 on a first switch record that its import began, run the
     import, name the realm row, copy and verify the player's accounts, and
-    mark the type LAST (the marker is the import's commit); verify, clear the
-    crash marker, 10 write the file, 11 rewrite the override. Every read a
+    mark the type LAST (the marker is the import's commit); verify, then
+    publish: 10 rewrite the override, 11 write the file, 12 clear the crash
+    marker last. A press killed between those finds the marker and finishes
+    (the repair, or a press for the type the file names, which clears a crash
+    marker only when `_check_stale_crash()` proves it stale). Every read a
     step decides on refuses when it cannot be made.
     """
     types = _types(entry)
@@ -518,6 +546,7 @@ def switch(
         return
     if crash is not None:
         yield from _recover_interrupted(entry, sql, server_dir, current, target_id, crash)
+        crash = _read_crash(server_dir)
     marker = read_marker(sql.query, entry)
     if marker is not None and marker != current:
         if target_id != marker:
@@ -526,14 +555,17 @@ def switch(
             f"The databases already hold {marker} but the file said {current}; "
             "the file and the override were rewritten, and no database was touched."
         )
-        write_active(server_dir, marker)
         write_override(switch_env_for(entry, marker))
+        write_active(server_dir, marker)
         _clear_crash(server_dir)
         return
     if marker is None:
         yield from _mark_before_switch(entry, sql, current)
     if current == target_id:
-        _clear_crash(server_dir)
+        if crash is not None:
+            _check_stale_crash(entry, sql, current, crash)
+            write_override(switch_env_for(entry, current))
+            _clear_crash(server_dir)
         yield f"The server is already on the {target_id} realm type; nothing was switched."
         return
     yield from _refuse_non_empty_parks(entry, sql, current)
@@ -551,14 +583,14 @@ def switch(
                 f"({held or 'no marker'}): renaming them in would start the wrong "
                 "characters. Nothing was switched."
             )
-    _write_crash(server_dir, target_id, imported=False)
+    _write_crash(server_dir, target_id, imported=False, source=current)
     yield from _rename_both_ways(entry, sql, current, target_id, parked, target_park, parked_tables)
     for schema in target_park:
         _drop_if_empty(sql, schema)
     if first:
         # Recorded BEFORE the import writes anything: only a set this switch began
         # importing is ever dropped by `_recover_interrupted()`.
-        _write_crash(server_dir, target_id, imported=True)
+        _write_crash(server_dir, target_id, imported=True, source=current)
         yield (
             f"No {target_id} databases exist yet; importing them for the first time "
             "(a few minutes), then copying the player accounts over."
@@ -568,9 +600,11 @@ def switch(
         yield from _copy_player_accounts(entry, sql, current, bot_prefix)
         ensure_marker(sql, entry, target_id)
     _verify(sql, entry, current, target_id)
-    _clear_crash(server_dir)
-    write_active(server_dir, target_id)
+    # Published override, then file, then the crash marker cleared LAST: a press
+    # killed between any two still finds the marker and finishes the publication.
     write_override(switch_env_for(entry, target_id))
+    write_active(server_dir, target_id)
+    _clear_crash(server_dir)
     yield f"The server now runs the {target_id} realm type ({types[target_id].realm_name})."
 
 
@@ -602,6 +636,8 @@ class _Crash:
 
     target: str
     imported: bool
+    source: str | None
+    """The file's type when the switch began; None in a note from before it was recorded."""
 
 
 def _read_crash(server_dir: Path) -> _Crash | None:
@@ -622,17 +658,57 @@ def _read_crash(server_dir: Path) -> _Crash | None:
             f"The note of an unfinished realm type switch ({path}) names no realm type, "
             "so nothing was switched."
         )
-    return _Crash(target=target, imported=raw.get("imported") is True)
+    source = raw.get("source")
+    return _Crash(
+        target=target,
+        imported=raw.get("imported") is True,
+        source=source if isinstance(source, str) and _ID.fullmatch(source) else None,
+    )
 
 
-def _write_crash(server_dir: Path, target_id: str, *, imported: bool) -> None:
+def _write_crash(server_dir: Path, target_id: str, *, imported: bool, source: str) -> None:
     from yulon.catalog import composegen
 
     _check_id(target_id)
+    _check_id(source)
     composegen._replace_whole(
         server_dir / SWITCH_MARKER_FILE,
-        json.dumps({"version": 2, "target": target_id, "imported": imported}) + "\n",
+        json.dumps({"version": 2, "target": target_id, "imported": imported, "source": source})
+        + "\n",
     )
+
+
+def _check_stale_crash(entry: CatalogEntry, sql: SqlRunner, current: str, crash: _Crash) -> None:
+    """Refuse to clear a crash marker unless the databases prove it stale.
+
+    Called with the plain marker already read as `current`. The marker is
+    stale only when `current`'s own park is empty (its set is the plain one,
+    not parked as well: an import mid-switch would leave a fresh plain set
+    marked `current` beside the real parked one), and the other type the
+    switch involved is either not parked at all or parked under its own
+    marker. Any read that cannot be made refuses too.
+    """
+    own = _parked(entry, current)
+    held = sorted(
+        f"{schema}.{table}"
+        for schema, names in zip(own, _tables_in(sql.query, own), strict=True)
+        for table in names
+    )
+    if held:
+        raise RealmSwitchError(
+            f"The {current} databases are in the plain schemas and also parked ({held[0]}), so "
+            f"the note of the unfinished switch to {crash.target} was kept and nothing was "
+            "switched."
+        )
+    other = crash.source if crash.target == current else crash.target
+    if other is None or other == current:
+        return
+    parked = _parked(entry, other)
+    if any(_tables_in(sql.query, parked)) and _marker_in(sql.query, parked[1]) != other:
+        raise RealmSwitchError(
+            f"The parked {other} databases do not read as the {other} realm type, so the note "
+            f"of the unfinished switch to {crash.target} was kept and nothing was switched."
+        )
 
 
 def _clear_crash(server_dir: Path) -> None:
