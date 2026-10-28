@@ -1646,14 +1646,25 @@ class AzerothCoreInstaller(StagedInstaller):
 
 
     def start_refusal(self, server_dir: Path, *, rebuilding: bool = False) -> str | None:
-        """The spine's refusal, then the extract gate for a `client_extract` entry (T812 C4a).
+        """The spine's refusal, the realm-type gate, then the extract gate (T812 C3a, C4a).
 
         The server must not start without the map data its start check would
         refuse on: `extract.missing_map_data()` of the entry's `required_maps`
         over the server's own `data/`. Asked in the start path so a `data/`
         emptied after a finished extract still refuses with the map sentence.
+
+        The realm-type gate (C3a) refuses when the marker traveling with the
+        data names another type than the folder's file: starting would run one
+        type's characters under another's rules. The marker read goes through
+        the engine's own SQL seams (the import probe's client, `sql_query`),
+        and a database that cannot be asked reads as no verdict, never a
+        refusal. An absent marker is a pre-marker install, which the import
+        path marks with the file's type and the start lets by.
         """
         refused = super().start_refusal(server_dir, rebuilding=rebuilding)
+        if refused is not None:
+            return refused
+        refused = self._realm_type_refusal(server_dir)
         if refused is not None:
             return refused
         plan_block = self._block().client_extract
@@ -1667,6 +1678,41 @@ class AzerothCoreInstaller(StagedInstaller):
             f"({'; '.join(missing)}). Press Install to extract it from your client first. "
             "Nothing was started."
         )
+
+    def family_start_refusal(self, server_dir: Path) -> str | None:
+        """The C3a realm-type gate, through the spine's family hook (T812 C3a).
+
+        Kept beside `start_refusal()`'s own call of the same gate so both stay
+        one sentence: the install's `up` asks the override above for the same
+        verdict `Controller`'s tab asks the hook for.
+        """
+        return self._realm_type_refusal(server_dir)
+
+    def _realm_type_refusal(self, server_dir: Path) -> str | None:
+        """The C3a gate: marker/file agreement for a realm-types entry, else None.
+
+        The marker read goes through the engine's own SQL seams (the import
+        probe's client, `sql_query`), and a database that cannot be asked reads
+        as no verdict: the refusal must not fire on a stopped database it may
+        not start (a start's database comes up in `up`, after this). An absent
+        marker is a pre-marker install, written with the file's type over on
+        the import path, not here: this path never writes.
+        """
+        from yulon import coa_realm
+
+        if not coa_realm.has_realm_types(self.entry):
+            return None
+        try:
+            password = self.resolve_secrets(server_dir).db_password
+        except Exception:  # noqa: BLE001 - unknown secrets refuse nothing
+            return None
+        spec = self.entry.container_spec()
+        client = self._native().db.client
+
+        def ask(statement: str) -> str:
+            return self._seams.sql_query(spec.db, client, password, None, statement)
+
+        return coa_realm.refusal(self.entry, server_dir, coa_realm.read_marker(ask, self.entry))
 
     def _start_servers(self, ctx: StageContext) -> None:
         """The ordered start for an entry that asks for it, else the spine's (T812).
@@ -1929,7 +1975,9 @@ class AzerothCoreInstaller(StagedInstaller):
 
         `_probe` may be absent only for an entry with no `db_import` service —
         preflight refuses the other combination — so "no probe" and "no
-        service" are the same skip, worded here and not in the spine (A7).
+        service" are the same skip, worded here and not in the spine (A7). A
+        realm-types entry's import then marks the plain databases with the
+        default type (T812 C3a): the marker travels with the data.
         """
         service = self.entry.containers.db_import
         probe, reset = self._gate_for(ctx.server_dir)
@@ -1937,6 +1985,44 @@ class AzerothCoreInstaller(StagedInstaller):
             yield "This server has no separate database import step."
             return
         yield from self.stage_import(ctx, CallableGate(probe, reset), service)
+        yield from self._mark_realm_type(ctx)
+
+    def _mark_realm_type(self, ctx: StageContext) -> Iterator[str]:
+        """Mark the plain databases with the default realm type, once (T812 C3a).
+
+        Called after the install's `import`: the marker travels with the data,
+        and a fresh import (like a fresh switch's one) names the type it was
+        built for. `ensure_marker()` is idempotent; a marker that will not
+        write is a line, never a failed install.
+        """
+        from yulon import coa_realm
+
+        if not coa_realm.has_realm_types(self.entry):
+            return
+            yield  # unreachable: keeps this a generator on the no-types path
+        sql = coa_realm.FnSql(
+            run=lambda statement: self._seams.sql_query(
+                self.entry.container_spec().db,
+                self._native().db.client,
+                ctx.secrets.db_password,
+                None,
+                statement,
+            ),
+            ask=lambda statement: self._seams.sql_query(
+                self.entry.container_spec().db,
+                self._native().db.client,
+                ctx.secrets.db_password,
+                None,
+                statement,
+            ),
+        )
+        try:
+            file_type = coa_realm.active(self.entry, ctx.server_dir).id
+            coa_realm.ensure_marker(sql, self.entry, file_type)
+        except Exception as exc:  # noqa: BLE001 - the import stands without its marker line
+            yield f"The realm type marker could not be written ({exc})."
+            return
+        yield f"The databases are marked as the {file_type} realm type."
 
 
 def _sql_of(lines: Sequence[str]) -> tuple[str, ...]:

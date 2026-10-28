@@ -8204,7 +8204,8 @@ class StagedInstaller:
         (T197 fix round 2), which a Rebuild (`rebuilding`) may clear for itself.
         TrinityCore's adds a world update left unfinished
         (`trinitycore.world_update_start_refusal`). Then, but not for a Rebuild, an import
-        that never finished (`unfinished_import_refusal(strict=True)`, T739).
+        that never finished (`unfinished_import_refusal(strict=True)`, T739), then the
+        family's own (`family_start_refusal()`).
         """
         # T225 (live): with a stopped rebuild's build that may have landed since.
         # T739: an import that never finished. A Rebuild is no way out of one -- its importer
@@ -8215,7 +8216,10 @@ class StagedInstaller:
             # A Rebuild under the record is not refused: it holds (`_held_by_an_unfinished_
             # import()`), builds, and leaves the server stopped for Repair.
             return refused
-        return self.unfinished_import_refusal(server_dir, strict=True)
+        refused = self.unfinished_import_refusal(server_dir, strict=True)
+        if refused is not None:
+            return refused
+        return self.family_start_refusal(server_dir)
 
     def unfinished_import_refusal(self, server_dir: Path, *, strict: bool = False) -> str | None:
         """Why no world may start while this server's import record stands, or None (T739).

@@ -354,6 +354,31 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         hits=(".azerothcore", ".azerothcore"),
     ),
     Site(
+        "yulon.coa_realm",
+        "_block",
+        "the realm-type engine reads the AzerothCore block (T812 C3a)",
+        {
+            "azerothcore": supported(),
+            "cmangos": not_applicable("only a realm-types entry reaches this module"),
+            "trinitycore": not_applicable("only a realm-types entry reaches this module"),
+        },
+        hits=(".azerothcore",),
+    ),
+    Site(
+        "yulon.catalog.composegen",
+        "_has_realm_types",
+        "whether the rendered override layers a realm type's env over the block (T812 C3a)",
+        {
+            "azerothcore": supported("`realm_types`, when the entry names any"),
+            "cmangos": not_applicable("CMaNGOS sets its server through its conf table"),
+            "trinitycore": not_applicable(
+                "TrinityCore sets its servers through its conf table; its override template "
+                "carries no environment block"
+            ),
+        },
+        hits=(".azerothcore",),
+    ),
+    Site(
         "yulon.catalog.preflight",
         "client_spec_of",
         "the client rules of an AzerothCore entry with client_extract (T812 C4a)",

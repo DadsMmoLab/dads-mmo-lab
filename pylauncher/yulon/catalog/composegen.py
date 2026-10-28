@@ -171,6 +171,13 @@ def env_name_for(ini_key: str) -> str:
     return "AC_" + "".join(out)
 
 
+def _has_realm_types(entry: CatalogEntry) -> bool:
+    """Whether this entry switches realm types: an AzerothCore block naming any (T812 C3a)."""
+    native = entry.install.native
+    block = native.azerothcore if native is not None else None
+    return block is not None and bool(block.realm_types)
+
+
 def world_env(entry: CatalogEntry, override: Mapping[str, str] | None = None) -> dict[str, str]:
     """The runtime environment this install's generated override carries.
 
@@ -689,6 +696,17 @@ def render(
     # the `cmangos` family — which carries no `world_env`, because a CMaNGOS
     # server is configured through its `.conf` files and not through container
     # environment.
+    # A realm-types entry layers its ACTIVE type's keys between the block and an
+    # explicit `world_env` (T812 C3a): the override always matches the type the
+    # plain schemas hold, so a world started on it reads its own rules. The
+    # layering sits here, in the one render every writer goes through, so an
+    # explicit map — the bot-count carry-over, the channel's enable — still
+    # wins: the install's environment with the type already inside it would
+    # drop the type's keys wherever it was built.
+    if _has_realm_types(entry):
+        from yulon import coa_realm
+
+        world_env = coa_realm.world_env_for(entry, server_dir, base=world_env)
     env = _world_env(entry, world_env)
     # T657: every bot name as this server's mod-playerbots checkout reads it (the catalog
     # spells the old `AC_AI_PLAYERBOT_*`); a checkout that cannot say changes nothing.
