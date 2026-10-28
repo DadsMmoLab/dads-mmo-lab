@@ -18527,6 +18527,9 @@ class ControllerView(QWidget):
                         # T681: the only writer for the whole load; a Modules job's SQL, an
                         # account or a network write of this Yu'lon is refused meanwhile.
                         alone=forgetting.RESTORE_WRITES_ALONE,
+                        # T738 part 4: a Pack or Bring in is told the restore's own move
+                        # sentence, not the Start/Stop one keyed on its text.
+                        for_a_move=forgetting.RESTORE_HOLDS_A_MOVE,
                     )
                 )
             except docker.ServerHeldError as exc:

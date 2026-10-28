@@ -563,10 +563,12 @@ _ALONE: dict[str, tuple[str, str]] = {}
 
 @dataclass(frozen=True)
 class _Hold:
-    """A Maintenance job holding the server: its sentence and the press that took it (T738)."""
+    """A Maintenance job holding the server: its sentence, the press that took it (T738),
+    and what a move is told while it holds (`for_a_move`, T738 part 4)."""
 
     reason: str
     press: str
+    for_a_move: str | None = None
 
 
 _P = ParamSpec("_P")
@@ -733,6 +735,7 @@ def hold_the_server(
     spec: ContainerSpec | None = None,
     wsl_distro: str | None = None,
     alone: str | None = None,
+    for_a_move: str | None = None,
 ) -> Iterator[None]:
     """Keep every start, stop and recreate of this server away while the block runs (T216).
 
@@ -777,13 +780,18 @@ def hold_the_server(
     the block is refused while one of them is inside. Another Yu'lon is kept out by the
     cross-process reservation above, as before.
 
+    `for_a_move` (T738 part 4) is what a Pack, a Bring in, or a second "Bring from another
+    computer…" on the same folder is told while it holds: the holder's own move sentence.
+    Keying that answer on the hold's text breaks the day the sentence is reworded, and keying
+    it on the press alone cannot tell the two bring-ins apart (both hold with PRESS_BRING_IN).
+
     Raises:
         ServerHeldError: a start, stop or recreate of this server is running
             (`SERVER_IN_MOTION`), another Yu'lon holds the server (`ServerReserved`), or, with
             `alone`, another press of this process is working on it.
     """
     key = _server_key(server_dir)
-    hold = _Hold(reason, press)
+    hold = _Hold(reason, press, for_a_move)
     with _HOLD_LOCK:
         if _IN_FLIGHT.get(key):
             raise ServerHeldError(SERVER_IN_MOTION)
@@ -851,6 +859,33 @@ def holder(server_dir: Path | str) -> _Hold | None:
     with _HOLD_LOCK:
         holds = _HELD.get(_server_key(server_dir))
         return holds[-1] if holds else None
+
+
+def move_held_reason(server_dir: Path | str) -> str | None:
+    """The sentence a Pack or Bring in is told while the server is held, or None (T738 part 4).
+
+    One locked read, for `move_flows.move_held_reason()`'s only call: the current local
+    `_Hold`'s `for_a_move` sentence (else its `reason`), else the orphaned-load sentence.
+    The split `holder()` / `held_reason()` reads let a hold taken between them read as
+    unheld -- the first saw nothing, then `orphaned_restore_reason()` saw `_HELD` and
+    answered None -- so a move wrote its record under an active hold. Here the orphan
+    record is read only after one lock saw no local hold, and a second lock then answers
+    a hold taken in between instead of the orphan result, so a newly acquired local hold
+    is never missed.
+    """
+    key = _server_key(server_dir)
+    with _HOLD_LOCK:
+        holds = _HELD.get(key)
+        if holds:
+            hold = holds[-1]
+            return hold.for_a_move or hold.reason
+    orphan = orphaned_restore_reason(server_dir)
+    with _HOLD_LOCK:
+        holds = _HELD.get(key)
+        if holds:
+            hold = holds[-1]
+            return hold.for_a_move or hold.reason
+    return orphan
 
 
 def held_here(server_dir: Path | str) -> bool:

@@ -319,7 +319,7 @@ def test_the_lumenveil_pack_is_pinned_identical_and_windows_only() -> None:
             ),
         )
         assert pack.setup.writes == ("lampdata.bin", "liquiddata.bin")
-        assert pack.setup.timeout_seconds == 600
+        assert pack.setup.timeout_seconds == 1800
         assert pack.credit.startswith("Lumenveil") and "GPL-2.0" in pack.credit
         assert "CoAVolFog" in pack.credit
 

@@ -201,6 +201,31 @@ def cache_dir() -> Path:
     return platform.config_dir() / "client-packs"
 
 
+def _defender_hid_einval(pack: ClientPack, exc: OSError) -> bool:
+    """Whether `exc` looks like Defender hiding a blocked file as EINVAL (T809 eino).
+
+    On Windows 11 with real-time protection, opening a just-downloaded zip Defender
+    blocked raises `OSError: [Errno 22] Invalid argument` with no `winerror` and no
+    'virus' text: the C runtime hides the Windows error. Only a read of a file whose
+    size matches what was expected counts -- a genuine EINVAL elsewhere keeps its own
+    wording. `exc.filename` names the file the failed `open()`/`read()` named; where
+    it ends in `.part`, that file itself holds the download, so its own size is held
+    against the pack's `size_hint` (the dialog's download size).
+    """
+    if exc.errno != errno.EINVAL or getattr(exc, "winerror", None) is not None:
+        return False
+    if platform.detect() != "windows":
+        return False
+    name = exc.filename
+    if not name or pack.size_hint is None:
+        return False
+    try:
+        size = Path(name).stat().st_size
+    except OSError:
+        return False
+    return size == pack.size_hint
+
+
 def _os_refusal(pack: ClientPack, exc: OSError) -> PackError:
     """A `PackError` for a failed read, write or folder: what failed, where, and what to do."""
     where = exc.filename or cache_dir()
@@ -208,6 +233,12 @@ def _os_refusal(pack: ClientPack, exc: OSError) -> PackError:
     text = str(exc)
     winerror = getattr(exc, "winerror", None)
     if winerror == 225 or "contains a virus" in text.casefold():
+        return PackError(
+            f"Windows virus protection blocked the downloaded {pack.label} file, so it was "
+            "not installed. Nothing was changed. Lumenveil is optional and the rest of the "
+            "client works without it."
+        )
+    if _defender_hid_einval(pack, exc):
         return PackError(
             f"Windows virus protection blocked the downloaded {pack.label} file, so it was "
             "not installed. Nothing was changed. Lumenveil is optional and the rest of the "

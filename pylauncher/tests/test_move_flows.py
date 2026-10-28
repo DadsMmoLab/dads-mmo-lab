@@ -1510,11 +1510,12 @@ def _press_during_own_restore(
 
     The lease and the hold are `controller_view._restore_with_the_database()` and
     `_restore_under_the_lease()`'s own: `RESTORE_HOLDS_THE_DATABASES`, then
-    `hold_the_server(alone=RESTORE_WRITES_ALONE)`. The engine's restore then writes its record
-    and loads; `press` runs on a thread of its own (the tab's JobRunner gives each press one)
-    while the first database is being loaded. `live_pid` names a real process as the load's,
-    as a real `docker exec` load is recorded. Returns what the press returned or raised, and
-    whether the restore record was in place when it was pressed.
+    `hold_the_server(alone=RESTORE_WRITES_ALONE, for_a_move=RESTORE_HOLDS_A_MOVE)`. The
+    engine's restore then writes its record and loads; `press` runs on a thread of its own
+    (the tab's JobRunner gives each press one) while the first database is being loaded.
+    `live_pid` names a real process as the load's, as a real `docker exec` load is recorded.
+    Returns what the press returned or raised, and whether the restore record was in
+    place when it was pressed.
     """
     from yulon import forgetting
 
@@ -1556,6 +1557,7 @@ def _press_during_own_restore(
             forgetting.RESTORE_HOLDS_THE_SERVER,
             press=forgetting.PRESS_RESTORE,
             alone=forgetting.RESTORE_WRITES_ALONE,
+            for_a_move=forgetting.RESTORE_HOLDS_A_MOVE,
         ),
     ):
         box.world.restore(plan, "before-the-test")
@@ -1624,6 +1626,65 @@ def test_a_bring_in_plan_during_this_yulons_own_restore_names_the_restore(
     assert record_there
     assert isinstance(plan, move_flows.ImportPlan), plan
     assert plan.refusals == (forgetting.RESTORE_HOLDS_A_MOVE,), plan.refusals
+
+
+def test_a_move_gets_the_holders_own_move_sentence_even_when_the_reason_is_reworded(
+    tmp_path: Path,
+) -> None:
+    """T738 part 4: a move is told the holder's own move sentence, never the Start/Stop one.
+
+    The hold carries a reworded Start/Stop sentence no text map knows; the move still gets
+    the holder's own `for_a_move` sentence. Keying on the press alone is not enough either:
+    the account Bring in and the whole-server bring-in both hold with PRESS_BRING_IN but
+    with different sentences.
+    Mutation: ignore `for_a_move` (return the reason); restore the `_FOR_A_MOVE` text map.
+    """
+    from yulon import forgetting
+
+    box = target(tmp_path)
+    reworded = (
+        "A restore is writing into this server's databases. Starting the server now would "
+        "ruin it. Nothing was started or stopped."
+    )
+    with docker.hold_the_server(
+        box.server_dir,
+        reworded,
+        press=forgetting.PRESS_RESTORE,
+        for_a_move=forgetting.RESTORE_HOLDS_A_MOVE,
+    ):
+        plan = move_flows.plan_export(box.world)
+    assert plan.refusals == (forgetting.RESTORE_HOLDS_A_MOVE,), plan.refusals
+
+
+def test_two_bring_in_holds_with_one_press_tell_a_move_their_own_sentences(
+    tmp_path: Path,
+) -> None:
+    """T738 part 4: the holder's press alone cannot pick the move's sentence.
+
+    The account Bring in and the whole-server bring-in both hold with PRESS_BRING_IN; the
+    move is told each holder's own `for_a_move` (or its reason when it holds none).
+    Mutation: key the move's sentence on the holder's press instead of `for_a_move`.
+    """
+    from yulon import forgetting
+
+    whole = target(tmp_path, name="whole")
+    with docker.hold_the_server(
+        whole.server_dir,
+        forgetting.MOVE_IN_HOLDS_THE_SERVER,
+        press=move_flows.PRESS_BRING_IN,
+        for_a_move=forgetting.MOVE_IN_HOLDS_A_MOVE,
+    ):
+        plan = move_flows.plan_export(whole.world)
+    assert plan.refusals == (forgetting.MOVE_IN_HOLDS_A_MOVE,), plan.refusals
+
+    accounts = target(tmp_path, name="accounts")
+    with docker.hold_the_server(
+        accounts.server_dir,
+        forgetting.MOVE_HOLDS_THE_SERVER,
+        press=move_flows.PRESS_BRING_IN,
+    ):
+        plan = move_flows.plan_export(accounts.world)
+    assert plan.refusals == (forgetting.MOVE_HOLDS_THE_SERVER,), plan.refusals
 
 
 def test_a_start_during_the_same_restore_keeps_the_start_and_stop_sentence(tmp_path: Path) -> None:

@@ -135,3 +135,31 @@ def test_two_holds_with_the_same_reason_let_go_one_at_a_time(tmp_path: Path) -> 
         assert docker.held_reason(tmp_path) == "same"
     assert docker.holder(tmp_path) is None
     assert not docker.held_here(tmp_path)
+
+
+def test_the_restore_hold_carries_the_move_sentence_a_move_is_told(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Part 4: the Maintenance tab's Restore hold tells a move its own sentence.
+
+    Through the real `_restore_under_the_lease()`, not a hand-taken hold: the stub restore
+    reads the holder mid-load. Mutation: drop `for_a_move=` from the Restore's hold.
+    """
+    from yulon.controller_wow_wotlk import maintenance
+
+    view, _ = _view(ps, tmp_path)
+    seen: list[docker._Hold | None] = []
+
+    def capture(plan: object) -> object:
+        seen.append(docker.holder(tmp_path))
+        return object()
+
+    object.__setattr__(view.services, "restore", capture)
+    plan = maintenance.RestorePlan(
+        backup=tmp_path / "backup.sql", server_dir=tmp_path, databases=(), size_bytes=0
+    )
+    view._restore_under_the_lease(plan)
+    assert seen and seen[0] is not None, "the stub restore never ran under the hold"
+    assert seen[0] is not None
+    assert seen[0].reason == forgetting.RESTORE_HOLDS_THE_SERVER, seen[0]
+    assert seen[0].for_a_move == forgetting.RESTORE_HOLDS_A_MOVE, seen[0]
