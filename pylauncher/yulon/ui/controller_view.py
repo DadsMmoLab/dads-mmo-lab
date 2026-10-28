@@ -10255,11 +10255,11 @@ class ControllerView(QWidget):
         if target not in types:
             return
         realm = types[target]
+        from yulon import coa_switch
+
         if not self._confirm(
             "Switch realm type",
-            "Switching stops the server, keeps each type's characters apart and starts it "
-            f"again. The first switch to {realm.label} sets up its databases (a few minutes).\n\n"
-            f"Switch to {realm.label} ({realm.realm_name})?",
+            coa_switch.confirm_text(realm.label, realm.realm_name),
         ):
             return
         self.problem_label.setText("")

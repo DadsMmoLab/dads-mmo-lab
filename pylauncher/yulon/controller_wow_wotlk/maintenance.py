@@ -140,6 +140,25 @@ SYSTEM_SCHEMAS = frozenset({"information_schema", "performance_schema", "mysql",
 # (Discord report, 2026-08-26). `backup(core_databases=...)` is what a caller
 # holding the catalog entry passes instead.
 CORE_DATABASES: tuple[str, ...] = (DB_NAMES["auth"], DB_NAMES["characters"], DB_NAMES["world"])
+REALM_DATABASES: tuple[str, ...] = (
+    DB_NAMES["auth"],
+    DB_NAMES["characters"],
+    DB_NAMES["playerbots"],
+)
+"""The schemas one realm type's characters live in (T812 C3b fix round 1).
+
+An auth/characters/playerbots dump without the realm-type record is refused while a
+realm type is active: every CoA dump made before the record carries none, and its
+names say nothing about which type its rows belong to. The world database holds no
+type's characters, so its dumps are unaffected.
+"""
+
+
+def _dump_touches_a_realm_database(databases: tuple[str, ...]) -> bool:
+    """Whether a dump writes into any schema a realm type's characters live in."""
+    lowered = {name.lower() for name in databases}
+    return any(name.lower() in lowered for name in REALM_DATABASES)
+
 
 CLIENT_CACHE_NOTE = (
     "Item and spell changes are cached by the WoW client, not the server. Each "
@@ -1282,6 +1301,13 @@ def _wrong_realm_refusal(found: str, active: str) -> str:
     )
 
 
+UNPROVEN_REALM_BACKUP = (
+    "This backup does not say which realm type it belongs to, so it was not restored. "
+    "It was made before Yu'lon wrote that down. Restore it only if you made it on the "
+    "realm type this server runs now."
+)
+
+
 UNLABELED_BACKUP = (
     "This backup does not say which game it is from. It was made before Yu'lon wrote that "
     "down. Restore it only if you made it on this server: a backup from another game would "
@@ -1906,8 +1932,12 @@ def plan_restore(
     * the backup records another realm type than `realm_type` (T812 C3b). A parked
       type's dump names the plain schemas, so without this the restore would load
       another type's characters under this one's rules. A backup with NO realm
-      record is not refused: every other game's dumps, and old CoA ones, carry
-      none. One naming the same type as the server is allowed.
+      record that touches a realm database (auth/characters/playerbots) is refused
+      while a realm type is active: every other game's dumps carry none, but so does
+      every CoA dump made before the record, and the names say nothing about which
+      type its rows belong to. One naming the same type as the server is allowed, and
+      a headerless dump of the world database alone is allowed: it holds no type's
+      characters.
     """
     refusals: list[str] = []
     earlier_run = interrupted_restore(server_dir)
@@ -1959,13 +1989,10 @@ def plan_restore(
             except MaintenanceError as exc:
                 refusals.append(str(exc))
             else:
-                mismatched = (
-                    recorded_realm is not None
-                    and realm_type is not None
-                    and recorded_realm != realm_type
-                )
-                if mismatched:
-                    assert recorded_realm is not None and realm_type is not None
+                if recorded_realm is None:
+                    if realm_type is not None and _dump_touches_a_realm_database(databases):
+                        refusals.append(UNPROVEN_REALM_BACKUP)
+                elif realm_type is not None and recorded_realm != realm_type:
                     refusals.append(_wrong_realm_refusal(recorded_realm, realm_type))
 
     try:
@@ -2150,11 +2177,10 @@ def _restore_from(
     if recorded is None and not plan.unlabeled_accepted:
         raise MaintenanceError(f"{UNLABELED_BACKUP} Nothing was restored.")
     recorded_realm = _recorded_realm_of(source, plan.backup.name)
-    mismatched = (
-        recorded_realm is not None and realm_type is not None and recorded_realm != realm_type
-    )
-    if mismatched:
-        assert recorded_realm is not None and realm_type is not None
+    if recorded_realm is None:
+        if realm_type is not None and _dump_touches_a_realm_database(plan.databases):
+            raise MaintenanceError(f"restore refused: {UNPROVEN_REALM_BACKUP}")
+    elif realm_type is not None and recorded_realm != realm_type:
         raise MaintenanceError(
             f"restore refused: {_wrong_realm_refusal(recorded_realm, realm_type)}"
         )

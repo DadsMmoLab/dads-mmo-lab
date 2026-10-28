@@ -73,26 +73,105 @@ class RealmSwitch:
     def switch_to(self, target_id: str) -> Iterator[str]:
         """Stop, move every table set to `target_id`, point the folder at it, start.
 
-        The hold wraps the Stop too, and the engine's guards run inside it: a
-        second switch while one holds is refused with the hold's sentence
-        before the engine is asked anything, and the engine re-checks its
-        file-plus-database guards under it. The engine still refuses on a
-        running server (metadata locks), so the Stop is what lets it through.
+        The hold wraps the whole sequence, and the engine's own pre-checks run inside
+        it BEFORE the Stop: a refusal there stops nothing, and a second switch while
+        one holds is refused with the hold's sentence before the engine is asked
+        anything. After the Stop the press says what the failure left behind: a
+        failure BEFORE the engine's first database write starts the ORIGINAL type
+        again and says so in one plain sentence; a failure after the first write
+        (the crash marker now stands) leaves the server stopped, and the next press
+        of Switch finishes or undoes it. The engine still refuses on a running
+        server (metadata locks), so the Stop is what lets it through; the restart
+        after a pre-write failure runs only when the engine says starting is safe.
         """
         with self._hold_server(SWITCH_PRESS):
-            self._stop()
-            yield from coa_realm.switch(
+            original = coa_realm.pre_check(
                 self._entry,
                 self._server_dir,
                 target_id,
                 sql=self._sql,
-                servers_running=self._servers_running,
-                run_import=self._run_import,
-                set_realm_row=self._set_realm_row,
-                write_override=self._write_override,
                 bot_prefix=self._bot_prefix,
             )
+            self._stop()
+            before = len(_writes_of(self._sql))
+            try:
+                yield from coa_realm.switch(
+                    self._entry,
+                    self._server_dir,
+                    target_id,
+                    sql=self._sql,
+                    servers_running=self._servers_running,
+                    run_import=self._run_import,
+                    set_realm_row=self._set_realm_row,
+                    write_override=self._write_override,
+                    bot_prefix=self._bot_prefix,
+                )
+            except Exception as exc:
+                if len(_writes_of(self._sql)) == before and _safe_to_start_again(
+                    self._entry, self._server_dir, self._sql
+                ):
+                    try:
+                        self._start()
+                    except Exception as start_exc:
+                        raise _stopped_after_failed_switch(
+                            exc, f"starting it again failed ({start_exc})"
+                        ) from exc
+                    raise _restarted_after_failed_switch(exc, original) from exc
+                raise _stopped_after_failed_switch(exc) from exc
             self._start()
+
+
+def confirm_text(target_label: str, target_realm_name: str) -> str:
+    """The switch confirm dialog's question for the target type (T812 C3b fix round 1)."""
+    return (
+        "Switching stops the server and keeps each type's characters apart. "
+        "If the switch fails before anything is written, the server starts again on "
+        "its current type; if it fails after that, it stays stopped, and pressing "
+        "Switch realm type again finishes it or puts it back. "
+        f"The first switch to {target_label} sets up its databases (a few minutes).\n\n"
+        f"Switch to {target_label} ({target_realm_name})?"
+    )
+
+
+def _writes_of(sql: coa_realm.SqlRunner) -> list[str]:
+    """The database writes the switch has made so far, as the seam records them."""
+    recorded = getattr(sql, "executed", None)
+    if isinstance(recorded, list):
+        return recorded
+    return []
+
+
+def _safe_to_start_again(entry: CatalogEntry, server_dir: Path, sql: coa_realm.SqlRunner) -> bool:
+    """Whether starting the original type again is safe after a pre-write failure."""
+    if not callable(getattr(sql, "query", None)):
+        return True
+    try:
+        return coa_realm.refusal(entry, server_dir, sql) is None
+    except Exception:
+        return False
+
+
+def _restarted_after_failed_switch(exc: BaseException, original: str) -> BaseException:
+    """`exc`, plus the one plain sentence saying the original type started again."""
+    message = (
+        f"{exc} The switch did not go through, and the server started again "
+        f"on the {original} realm type."
+    )
+    if isinstance(exc, coa_realm.RealmSwitchError):
+        return coa_realm.RealmSwitchError(message)
+    return RuntimeError(message)
+
+
+def _stopped_after_failed_switch(exc: BaseException, extra: str = "") -> BaseException:
+    """`exc`, plus the stopped sentence naming the next Switch press as the way out."""
+    tail = f" {extra}." if extra else ""
+    message = (
+        f"{exc} The server is stopped. Switch realm type again to finish the switch "
+        f"or put it back.{tail}"
+    )
+    if isinstance(exc, coa_realm.RealmSwitchError):
+        return coa_realm.RealmSwitchError(message)
+    return RuntimeError(message)
 
 
 def held_import(
