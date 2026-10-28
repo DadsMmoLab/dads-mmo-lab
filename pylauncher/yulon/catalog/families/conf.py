@@ -362,6 +362,61 @@ def apply_table(
     return tuple(changed)
 
 
+_KEY_LINE = re.compile(r"^[ \t]*#?[ \t]*([A-Za-z0-9_.\-]+)[ \t]*=.*$", re.DOTALL)
+"""An assignment line the conf reader sees, active or commented out.
+
+Deliberately narrower than `patch()`'s column-0 rule: T818 needs to know which
+keys a conf HAS, not to rewrite them, and the playerbots rename's `_CONF_LINE`
+only matches its two module prefixes. A prose line with a bare `=` in it reads
+as a key here, but that only withholds a key the module just added from being
+appended, which is the safe direction: nothing is overwritten either way.
+"""
+
+ADDED_MARKER = "# --- Added by Yu'lon from the module's new .conf.dist ---"
+"""The line above keys T818 appended, written once (T662's own playerbots marker
+stays where it was, on the files that press already wrote)."""
+
+
+def add_missing_keys(text: str, dist: str) -> tuple[str, int]:
+    """`text` with the keys `dist` assigns and `text` lacks appended, and how many.
+
+    Pure, like `patch()`: the caller reads, backs up and writes. Each missing
+    key comes with the comment block above it in the dist, under `ADDED_MARKER`
+    (written once). A key is there when the conf has it active or commented
+    out -- only a truly absent key comes back, which is also the documented
+    caveat: a key the player deleted on purpose is indistinguishable from one
+    they never had, so it is re-added with the module's default. Keys the
+    module dropped stay where they are. No value in the conf is ever changed.
+    """
+    have = {
+        match.group(1)
+        for line in text.replace("\r\n", "\n").split("\n")
+        if (match := _KEY_LINE.match(line.removeprefix("\ufeff"))) is not None
+    }
+    dist_lines = dist.replace("\r\n", "\n").split("\n")
+    missing: list[list[str]] = []
+    for index, line in enumerate(dist_lines):
+        match = _KEY_LINE.match(line.removeprefix("\ufeff"))
+        if match is None or line.lstrip().startswith("#"):
+            continue
+        if match.group(1) in have:
+            continue
+        start = index
+        while start > 0 and dist_lines[start - 1].lstrip().startswith("#"):
+            start -= 1
+        missing.append(dist_lines[start : index + 1])
+    if not missing:
+        return text, 0
+    ending = "\r\n" if "\r\n" in text else "\n"
+    block: list[str] = []
+    if ADDED_MARKER not in text:
+        block += ["", ADDED_MARKER]
+    for lines in missing:
+        block += ["", *lines]
+    lead = "" if text.endswith("\n") or not text else ending
+    return text + lead + ending.join(block) + ending, len(missing)
+
+
 def set_keys(path: Path, keys: Mapping[str, str]) -> bool:
     """Set `keys` in the conf at `path` in place, by `patch()`'s rules; True if its bytes changed.
 

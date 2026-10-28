@@ -62,6 +62,7 @@ from yulon import (
 )
 from yulon.catalog import composegen, upstream
 from yulon.catalog.catalog import CatalogEntry
+from yulon.catalog.installer import InstallerError
 from yulon.dbreads import SqlReader
 from yulon.git import (
     CLONE_MARKER,
@@ -7499,6 +7500,7 @@ class Applier:
                     f"{conf.file} at its next start"
                 )
                 log.conf_restart = True
+            self._add_new_conf_keys(manifest, clone, conf, target, log)
             writes = [(k.key, k.default) for k in conf.keys if k.default is not None]
             # A key the catalog names with no `default` is a step nobody takes.
             # Measured on yulon-ubuntu 2026-09-08 (8.7a, defect 1): the four
@@ -7536,6 +7538,65 @@ class Applier:
                 f"{conf.file} at its next start"
             )
             log.conf_restart = True
+
+    def _add_new_conf_keys(
+        self, manifest: Manifest, clone: Path, conf: ConfFile, target: Path, log: _Log
+    ) -> None:
+        """Append the keys the module's template has and the live conf lacks (T818).
+
+        A module update re-runs `_conf()` over a conf the player has edited. New
+        keys the module's `.conf.dist` adds never reached that file, so the
+        server ran on the module's built-in default for them. This adds only
+        those, with their comment blocks, and never changes an existing value:
+        a key is there when the conf has it active or commented out. A key the
+        player deleted on purpose comes back with the default -- the app does
+        not track deliberate deletes.
+
+        Guarded on the vocabulary, not on the whole file: the live conf must
+        share at least one key with this same template. That is weaker than the
+        first-install aside's `_conf_written_from` on purpose -- a conf that is
+        missing the new keys fails that check BY DEFINITION, so using it here
+        would run on nothing but a file that needs nothing. A player's own
+        extra keys do not disqualify it (the rename keeps those too), and an
+        empty or foreign file shares nothing and is left alone. Skipped for a
+        template not in the clone; nothing to add writes nothing, backs up
+        nothing, and says nothing. Backed up beside itself first
+        (`tuning.backup`, which the Tuning tab's Revert lists) and written
+        atomically, the way `playerbots_rename` settles. A file that cannot be
+        read is left alone -- an install over it that rewrote bytes it could
+        not decode would be the defect, not the repair.
+        """
+        if conf.template is None or not target.is_file():
+            return
+        _look_again(clone, conf.template)
+        template = clone / conf.template
+        if not template.is_file():
+            return
+        if not _conf_shares_keys(target, template):
+            return
+        try:
+            before = target.read_text(encoding="utf-8")
+            dist = template.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return
+        # Local: the families package imports this module (through `installer`).
+        from yulon.catalog.families.conf import add_missing_keys, replace_file  # noqa: PLC0415
+
+        after, added = add_missing_keys(before, dist)
+        if not added:
+            return
+        try:
+            tuning.backup(target, root=self.server_dir)
+            replace_file(target, after)
+        except (OSError, tuning.TuningError, InstallerError) as exc:
+            raise ApplyError(
+                f"conf {conf.file} could not be updated with the module's new "
+                f"setting(s) ({exc}), so nothing in it was changed."
+            ) from exc
+        log.done.append(
+            f"added {added} new setting(s) to {conf.file}; your own values were not changed"
+        )
+        log.conf_restart = True
 
     def _record_conf_before(
         self, manifest: Manifest, rel: str, key: str, was: str | None, value: str, log: _Log
@@ -9559,6 +9620,27 @@ def _conf_written_from(conf: Path, template: Path) -> bool:
     except (OSError, UnicodeDecodeError):
         return False
     return want <= have
+
+
+def _conf_shares_keys(conf: Path, template: Path) -> bool:
+    """Does `conf` set at least one key `template` sets? Then it speaks its language (T818).
+
+    The guard for appending new keys on an update. Weaker than
+    `_conf_written_from` on purpose: a conf missing the template's new keys
+    fails that check by definition, so it would only ever run where there is
+    nothing to add. One shared key is enough because the step only ADDS keys
+    the conf lacks -- nothing in it is ever changed, and the catalog's own key
+    writes below already overwrite same-named keys unconditionally. An empty
+    or foreign file shares nothing and is left alone.
+
+    Unreadable either way reads as "no": the conf is then left alone, never written.
+    """
+    try:
+        have = set(_CONF_KEY.findall(conf.read_text(encoding="utf-8")))
+        want = set(_CONF_KEY.findall(template.read_text(encoding="utf-8")))
+    except (OSError, UnicodeDecodeError):
+        return False
+    return bool(have & want)
 
 
 def _set_conf_key(path: Path, key: str, value: str) -> _KeyMode:
