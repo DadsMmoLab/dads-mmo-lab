@@ -121,12 +121,6 @@ class Crashed:
     tables: tuple[CrashedTable, ...] = ()
     unnamed: bool = False
 
-    def plus(self, other: Crashed) -> Crashed:
-        """Both readings, deduped in order: a press keeps what a backup's failure found."""
-        seen = {table.sql_name for table in self.tables}
-        extra = tuple(table for table in other.tables if table.sql_name not in seen)
-        return Crashed(self.tables + extra, self.unnamed or other.unnamed)
-
 
 def crashed_tables(text: str, schemas: Sequence[str]) -> Crashed:
     """Every table `text` names as crashed, and whether an error named none of them.
@@ -252,7 +246,6 @@ COPY_FAILED_QUESTION = (
 NOTHING_REPAIRED_BACKUP_KEPT = "Nothing was repaired; the backup is kept."
 BACKUP_FAILED = "Yu'lon could not take the backup, so nothing was repaired."
 REPAIR_FAILED = "The repair did not finish. The backup is kept."
-CHECK_UNREADABLE = "Yu'lon could not check the repaired table."
 
 
 @dataclass(frozen=True)
