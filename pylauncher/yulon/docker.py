@@ -553,12 +553,21 @@ SERVER_IN_MOTION = (
 """Why a hold could not be taken: a lifecycle command for the same server is running."""
 
 _HOLD_LOCK = threading.Lock()
-_HELD: dict[str, list[str]] = {}
+_HELD: dict[str, list[_Hold]] = {}
 _IN_FLIGHT: dict[str, int] = {}
 _PRESSES: dict[str, list[str]] = {}
 """The presses of this process inside a reservation of each server right now (T681)."""
 _ALONE: dict[str, tuple[str, str]] = {}
 """A server one job writes to alone: `(its press, what every other press is told)` (T681)."""
+
+
+@dataclass(frozen=True)
+class _Hold:
+    """A Maintenance job holding the server: its sentence and the press that took it (T738)."""
+
+    reason: str
+    press: str
+
 
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
@@ -774,6 +783,7 @@ def hold_the_server(
             `alone`, another press of this process is working on it.
     """
     key = _server_key(server_dir)
+    hold = _Hold(reason, press)
     with _HOLD_LOCK:
         if _IN_FLIGHT.get(key):
             raise ServerHeldError(SERVER_IN_MOTION)
@@ -782,15 +792,15 @@ def hold_the_server(
             if inside:
                 raise ServerHeldError(forgetting.another_press_writes(inside[-1]))
             _ALONE[key] = (press, alone)
-        _HELD.setdefault(key, []).append(reason)
+        _HELD.setdefault(key, []).append(hold)
     try:
         with _reserved_for(server_dir, press, spec, wsl_distro):
             yield
     finally:
         with _HOLD_LOCK:
-            reasons = _HELD[key]
-            reasons.remove(reason)
-            if not reasons:
+            holds = _HELD[key]
+            holds.remove(hold)
+            if not holds:
                 del _HELD[key]
             if alone is not None:
                 del _ALONE[key]
@@ -825,10 +835,22 @@ def held_reason(server_dir: Path | str) -> str | None:
     folder is re-entrant, so the reservation alone would not refuse.
     """
     with _HOLD_LOCK:
-        reasons = _HELD.get(_server_key(server_dir))
-        if reasons:
-            return reasons[-1]
+        holds = _HELD.get(_server_key(server_dir))
+        if holds:
+            return holds[-1].reason
     return orphaned_restore_reason(server_dir)
+
+
+def holder(server_dir: Path | str) -> _Hold | None:
+    """The Maintenance job holding the server now, or None (T738).
+
+    This process's own holds only, newest one: `held_reason()`'s sentence plus the press
+    that took it, for the title of the dialog refusing over it. An orphaned load another
+    Yu'lon left running is not one of this process's holds: None, as `held_here()`.
+    """
+    with _HOLD_LOCK:
+        holds = _HELD.get(_server_key(server_dir))
+        return holds[-1] if holds else None
 
 
 def held_here(server_dir: Path | str) -> bool:
@@ -925,8 +947,8 @@ def _in_flight(
     with _HOLD_LOCK:
         held = _HELD.get(key)
         if held:
-            logger.warning(f"refused a start/stop/recreate of {server_dir}: {held[-1]}")
-            raise ServerHeldError(held[-1])
+            logger.warning(f"refused a start/stop/recreate of {server_dir}: {held[-1].reason}")
+            raise ServerHeldError(held[-1].reason)
         _IN_FLIGHT[key] = _IN_FLIGHT.get(key, 0) + 1
     try:
         stopping = press == forgetting.PRESS_STOP
@@ -9041,7 +9063,7 @@ def _take_claim(
         "-c",
         "cat >/dev/null",
     ]
-    logger.info(f"claiming the folder: `docker {' '.join(argv[len(prefix):])}`")
+    logger.info(f"claiming the folder: `docker {' '.join(argv[len(prefix) :])}`")
     try:
         proc = subprocess.Popen(
             argv,
