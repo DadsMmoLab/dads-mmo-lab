@@ -9,6 +9,7 @@ order, and the guards are the flow's own.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import stat
@@ -2758,6 +2759,14 @@ def test_a_second_press_keeps_the_first_presses_copies(
     _failing_one_shot(box)
     with pytest.raises(MaintenanceError):
         _run(box, move_flows.plan_import(box.world, package))
+    written = move_flows._read_tail_marker(box.world)
+    assert written is not None
+    # Name the first press's copies apart: backup names carry the wall clock's second, so
+    # two presses inside one second would otherwise name the same paths.
+    path = move_flows._tail_marker_path(box.world)
+    body = json.loads(path.read_text(encoding="utf-8"))
+    body["copies"] = ["first-press/before-move_acore_auth.sql"]
+    path.write_text(json.dumps(body), encoding="utf-8")
     first = move_flows._read_tail_marker(box.world)
     assert first is not None
     # The ledger moved off the post-load state (a restore, or a one-shot that got part-way).
