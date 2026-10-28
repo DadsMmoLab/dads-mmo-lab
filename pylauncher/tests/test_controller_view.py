@@ -13630,7 +13630,11 @@ def test_a_raw_save_on_a_conf_that_links_to_another_folder_of_the_server_still_s
 
     view.save_tuning_file("BeastMaster.Enable = 0\n")
 
-    assert real.read_text(encoding="utf-8") == "BeastMaster.Enable = 0\n"
+    # T820: the atomic rename lands at the conf's own path -- the link itself is
+    # replaced, exactly as the card save's `_atomic_write` always did -- rather
+    # than writing through to the linked file as `open(path, "w")` did.
+    assert (tmp_path / file).read_text(encoding="utf-8") == "BeastMaster.Enable = 0\n"
+    assert "outside the server folder" not in view.tuning_report.toPlainText()
 
 
 def test_a_card_save_on_a_conf_that_links_to_another_folder_of_the_server_still_saves(
