@@ -186,7 +186,7 @@ def _run_switch(
     stopped: list[str],
     started: list[str],
     servers_running: bool | Callable[[], bool] = False,
-    run_import: Callable[[], Iterator[str]] | None = None,
+    run_import: Callable[[coa_realm.SwitchImport], Iterator[str]] | None = None,
     set_realm_row: Callable[[str, str], None] | None = None,
     write_override: Callable[[dict[str, str]], None] | None = None,
     stop: Callable[[], bool] | None = None,
@@ -202,10 +202,12 @@ def _run_switch(
         servers_running=(
             servers_running if callable(servers_running) else (lambda: servers_running)
         ),
-        run_import=run_import or (lambda: fresh_import(sql)),
+        run_import=run_import or (lambda context: fresh_import(sql, context)),
         set_realm_row=set_realm_row or (lambda name, port: None),
         write_override=write_override or (lambda env: wrote.append(dict(env))),
-        stop=stop or (lambda: stopped.append("stop") or False),
+        check_import=lambda: None,
+        stop=stop or (lambda: stopped.append("stop") or not sql.stop_database()),
+        start_db=sql.start_database,
         start=start or (lambda: started.append("start")),
         bot_prefix=bot_prefix,
     )
@@ -428,7 +430,7 @@ def test_a_failed_first_import_leaves_the_server_stopped(tmp_path: Path) -> None
     stopped: list[str] = []
     started: list[str] = []
 
-    def _blow_up() -> Iterator[str]:
+    def _blow_up(_context: coa_realm.SwitchImport) -> Iterator[str]:
         raise RuntimeError("the import blew up")
         yield "unreached"
 
@@ -480,8 +482,8 @@ def test_a_colliding_account_leaves_the_server_stopped(tmp_path: Path) -> None:
     stopped: list[str] = []
     started: list[str] = []
 
-    def _colliding() -> Iterator[str]:
-        yield from fresh_import(sql)
+    def _colliding(context: coa_realm.SwitchImport) -> Iterator[str]:
+        yield from fresh_import(sql, context)
         seed_accounts(sql, "acore_auth", {"Player2": None})
 
     switch = _run_switch(

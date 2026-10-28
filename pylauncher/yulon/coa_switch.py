@@ -21,9 +21,10 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import AbstractContextManager
+from dataclasses import dataclass
 from pathlib import Path
 
-from yulon import coa_realm
+from yulon import coa_realm, docker
 from yulon.catalog.catalog import CatalogEntry
 
 SWITCH_PRESS = "Switch realm type"
@@ -47,10 +48,12 @@ class RealmSwitch:
         hold_server: Callable[[str], AbstractContextManager[None]],
         sql: coa_realm.SqlRunner,
         servers_running: Callable[[], bool],
-        run_import: Callable[[], Iterator[str]],
+        run_import: Callable[[coa_realm.SwitchImport], Iterator[str]],
+        check_import: Callable[[], None],
         set_realm_row: Callable[[str, str], None],
         write_override: Callable[[Mapping[str, str]], None],
         stop: Callable[[], bool],
+        start_db: Callable[[], object],
         start: Callable[[], None],
         bot_prefix: str,
     ) -> None:
@@ -60,9 +63,11 @@ class RealmSwitch:
         self._sql = sql
         self._servers_running = servers_running
         self._run_import = run_import
+        self._check_import = check_import
         self._set_realm_row = set_realm_row
         self._write_override = write_override
         self._stop = stop
+        self._start_db = start_db
         self._start = start
         self._bot_prefix = bot_prefix
 
@@ -83,6 +88,13 @@ class RealmSwitch:
         of Switch finishes or undoes it. The engine still refuses on a running
         server (metadata locks), so the Stop is what lets it through; the restart
         after a pre-write failure runs only when the engine says starting is safe.
+
+        The Stop is the tab's own (it saves every character) and stops the
+        database too, which every read of the switch needs (T812 C8 D5, the live
+        run: "the acore_characters schema could not be listed (container ... is
+        not running)"). So the database alone is started again right after it
+        (`start_db`, the start-db seam the install and the start gate use),
+        before the engine reads anything; the world and auth stay down.
         """
         with self._hold_server(SWITCH_PRESS):
             original = coa_realm.pre_check(
@@ -91,10 +103,12 @@ class RealmSwitch:
                 target_id,
                 sql=self._sql,
                 bot_prefix=self._bot_prefix,
+                check_import=self._check_import,
             )
             self._stop()
             before = len(_writes_of(self._sql))
             try:
+                self._start_db()
                 yield from coa_realm.switch(
                     self._entry,
                     self._server_dir,
@@ -105,6 +119,7 @@ class RealmSwitch:
                     set_realm_row=self._set_realm_row,
                     write_override=self._write_override,
                     bot_prefix=self._bot_prefix,
+                    check_import=self._check_import,
                 )
             except Exception as exc:
                 if len(_writes_of(self._sql)) == before and _safe_to_start_again(
@@ -230,10 +245,12 @@ def switch_for(
     hold_server: Callable[[str], AbstractContextManager[None]] | None,
     sql: coa_realm.SqlRunner,
     servers_running: Callable[[], bool],
-    run_import: Callable[[], Iterator[str]],
+    run_import: Callable[[coa_realm.SwitchImport], Iterator[str]],
+    check_import: Callable[[], None],
     set_realm_row: Callable[[str, str], None],
     write_override: Callable[[Mapping[str, str]], None],
     stop: Callable[[], bool],
+    start_db: Callable[[], object],
     start: Callable[[], None],
     bot_prefix: str,
 ) -> RealmSwitch | None:
@@ -249,9 +266,100 @@ def switch_for(
         sql=sql,
         servers_running=servers_running,
         run_import=run_import,
+        check_import=check_import,
         set_realm_row=set_realm_row,
         write_override=write_override,
         stop=stop,
+        start_db=start_db,
         start=start,
         bot_prefix=bot_prefix,
     )
+
+
+@dataclass(frozen=True)
+class ImportSeams:
+    """What a first switch's import stage runs through (T812 C8 D6/D8); docker by default.
+
+    `service` is the entry's db-import one-shot (`ContainerSpec.import_service`),
+    `probe` the install's import probe (`install_wiring.import_gate_for`), and
+    the three callables are `docker.end_one_shot`, `docker.run_one_shot` and
+    `docker.verify_import` bound to this install's daemon.
+    """
+
+    service: str | None
+    probe: docker.ImportProbe | None
+    end_one_shot: Callable[[str, Path], docker.OneShotLeft | None]
+    one_shot: Callable[[str, Path, docker.OutputSink], docker.AttachedRun]
+    verify: Callable[[docker.ImportProbe, str, Path, docker.AttachedRun], docker.ImportState]
+
+
+def check_switch_import(server_dir: Path, seams: ImportSeams) -> None:
+    """Every refusal of a first switch's import that is knowable before the rename (D6).
+
+    The live run's switch renamed 259 tables and only then heard the installer
+    refuse for a client folder it was never given. The switch's import is now
+    the db-import one-shot alone (`switch_import()`), which needs no client
+    folder; what it does need is asked here, before the Stop and again just
+    before the crash note: the entry names its import service, the import can
+    be verified afterwards (a probe), and no earlier import of this server is
+    standing unfinished (its record would make the new set's verdict a guess).
+    """
+    if not seams.service:
+        raise coa_realm.RealmSwitchError(
+            "This server names no database import service, so a new realm type's databases "
+            "cannot be set up. Nothing was switched."
+        )
+    if seams.probe is None:
+        raise coa_realm.RealmSwitchError(
+            "This server's databases cannot be asked what state they are in, so an import for "
+            "a new realm type could not be checked afterwards. Nothing was switched."
+        )
+    if docker.one_shot_ended_marker(server_dir, seams.service).is_file():
+        raise coa_realm.RealmSwitchError(
+            "An earlier database import of this server did not finish. Press Repair the "
+            "database on the Server tab first, then switch realm type. Nothing was switched."
+        )
+
+
+def switch_import(
+    entry: CatalogEntry,
+    server_dir: Path,
+    context: coa_realm.SwitchImport,
+    seams: ImportSeams,
+) -> Iterator[str]:
+    """A first switch's import: the db-import one-shot alone into the fresh plain schemas (D8).
+
+    Not the installer: the live run's `engine.run()` preflighted a client folder
+    (D6), refused on the switch's own crash note (D7), refused again at `up`,
+    and its marking stage labelled the fresh set with the default type, after
+    which the switch could not be undone (D8). This runs only what the switch
+    needs: the crash-note check under the switch's own trusted context (an
+    Install or Repair keeps refusing), the pre-checks again, any leftover
+    importer ended, the one-shot, and the probe's verdict. It writes no realm
+    type marker and starts no server: the switch marks the set last, after the
+    accounts are copied, and the tab's Start runs after the switch.
+    """
+    from yulon.catalog import native
+
+    refused = coa_realm.import_refusal(entry, server_dir, switch=context)
+    if refused is not None:
+        raise coa_realm.RealmSwitchError(refused)
+    check_switch_import(server_dir, seams)
+    service, probe = seams.service, seams.probe
+    assert service and probe is not None  # check_switch_import refused otherwise
+    left = seams.end_one_shot(service, server_dir)
+    if left is not None:
+        raise coa_realm.RealmSwitchError(native._one_shot_left_sentence(left, earlier=True))
+    check_switch_import(server_dir, seams)
+    yield f"Importing the {context.target} databases ({service}). This takes several minutes."
+    run = yield from native.pump_lines(
+        lambda sink: seams.one_shot(service, server_dir, sink), cancel=None, stage="import"
+    )
+    if run.returncode != 0:
+        failed = docker.import_failed(service, server_dir, run)
+        raise coa_realm.RealmSwitchError(str(failed)) from failed
+    try:
+        after = seams.verify(probe, service, server_dir, run)
+    except docker.DockerCommandError as exc:
+        raise coa_realm.RealmSwitchError(str(exc)) from exc
+    yield f"The {context.target} databases now read as {after.state}."

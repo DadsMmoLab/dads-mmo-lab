@@ -350,9 +350,41 @@ def read_marker(query: Callable[[str], str], entry: CatalogEntry) -> str | None:
     return _marker_in(query, entry.databases.characters)
 
 
-def import_refusal(entry: CatalogEntry, server_dir: Path) -> str | None:
-    """`IMPORT_REFUSAL` while a switch is unfinished on a realm-types entry, else None."""
-    if has_realm_types(entry) and (server_dir / SWITCH_MARKER_FILE).exists():
+@dataclass(frozen=True)
+class SwitchImport:
+    """The trusted context a first switch hands its own import (T812 C8 D7).
+
+    `switch()` writes its crash note (`imported` true) and then runs the import
+    of the target's fresh databases; every other import refuses on that very
+    note (`IMPORT_REFUSAL`). Only this context lets an import through, and only
+    while the note on disk names the same target with its import begun: the
+    note, not the object, is the proof, so a context built anywhere else for
+    any other state still refuses. Install and "Repair the database" never
+    pass one, and keep refusing while the note exists.
+    """
+
+    server_dir: Path
+    target: str
+
+
+def import_refusal(
+    entry: CatalogEntry, server_dir: Path, *, switch: SwitchImport | None = None
+) -> str | None:
+    """`IMPORT_REFUSAL` while a switch is unfinished on a realm-types entry, else None.
+
+    `switch` is the first switch's own import (`SwitchImport`): it passes only
+    when the crash note in this folder names its target with `imported` true.
+    A note that cannot be read refuses like any other.
+    """
+    if not has_realm_types(entry) or not (server_dir / SWITCH_MARKER_FILE).exists():
+        return None
+    if switch is None or switch.server_dir != server_dir:
+        return IMPORT_REFUSAL
+    try:
+        crash = _read_crash(server_dir)
+    except RealmSwitchError:
+        return IMPORT_REFUSAL
+    if crash is None or crash.target != switch.target or not crash.imported:
         return IMPORT_REFUSAL
     return None
 
@@ -508,10 +540,11 @@ def switch(
     *,
     sql: SqlRunner,
     servers_running: Callable[[], bool],
-    run_import: Callable[[], Iterator[str]],
+    run_import: Callable[[SwitchImport], Iterator[str]],
     set_realm_row: Callable[[str, str], None],
     write_override: Callable[[Mapping[str, str]], None],
     bot_prefix: str,
+    check_import: Callable[[], None] | None = None,
 ) -> Iterator[str]:
     """Move every table set to `target_id`, then point the folder at it.
 
@@ -533,6 +566,14 @@ def switch(
     (the repair, or a press for the type the file names, which clears a crash
     marker only when `_check_stale_crash()` proves it stale). Every read a
     step decides on refuses when it cannot be made.
+
+    `run_import` is the import STAGE alone (T812 C8 D8): the db-import into
+    the fresh plain schemas, handed the `SwitchImport` context that lets it
+    past the crash note (D7); never the installer's start or its marking,
+    since the marker is this function's to write, last. `check_import` raises
+    every refusal of that import that can be known beforehand (D6); a first
+    switch asks it before the crash note and the rename, so nothing is moved
+    for an import that was always going to refuse.
     """
     types = _types(entry)
     if target_id not in types:
@@ -589,6 +630,8 @@ def switch(
                 f"({held or 'no marker'}): renaming them in would start the wrong "
                 "characters. Nothing was switched."
             )
+    if first and check_import is not None:
+        check_import()
     _write_crash(server_dir, target_id, imported=False, source=current)
     yield from _rename_both_ways(entry, sql, current, target_id, parked, target_park, parked_tables)
     for schema in target_park:
@@ -601,7 +644,7 @@ def switch(
             f"No {target_id} databases exist yet; importing them for the first time "
             "(a few minutes), then copying the player accounts over."
         )
-        yield from run_import()
+        yield from run_import(SwitchImport(server_dir=server_dir, target=target_id))
         set_realm_row(types[target_id].realm_name, str(entry.ports.world))
         yield from _copy_player_accounts(entry, sql, current, bot_prefix)
         ensure_marker(sql, entry, target_id)
@@ -621,8 +664,13 @@ def pre_check(
     *,
     sql: SqlRunner,
     bot_prefix: str,
+    check_import: Callable[[], None] | None = None,
 ) -> str:
-    """Every validation that runs without the server stopped (T812 C3b fix round 1)."""
+    """Every validation that runs without the server stopped (T812 C3b fix round 1).
+
+    `check_import` (T812 C8 D6): on a first switch to `target_id` (its park
+    empty) the import's own refusals are asked here too, before the Stop.
+    """
     types = _types(entry)
     if target_id not in types:
         raise RealmSwitchError(
@@ -654,6 +702,8 @@ def pre_check(
         return current
     if not pending_recovery:
         _check_parks(entry, sql, current, target_id)
+    if check_import is not None and not any(_tables_in(sql.query, _parked(entry, target_id))):
+        check_import()
     return current
 
 

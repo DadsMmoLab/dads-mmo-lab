@@ -1939,6 +1939,10 @@ def _realm_switch(
     switch can never run at once. The SQL seams are the tab's `DockerSql`
     (the import probe's client). Not for a server inside a WSL distro: the
     import one-shot the first switch runs cannot be driven from here.
+
+    T812 C8 (the live run): the Stop is followed by the database alone
+    (`start_db`, D5), and a first switch's import is the db-import one-shot
+    alone (`coa_switch.switch_import`, D6-D8), never the whole installer.
     """
     from yulon import account_rules, coa_realm
 
@@ -1946,6 +1950,7 @@ def _realm_switch(
         return None
     spec = entry.container_spec()
     bot_prefix = account_rules.bot_prefix(entry, server_dir) or ""
+    seams = _realm_import_seams(entry, server_dir, wsl_distro=wsl_distro)
     return coa_switch.switch_for(
         entry,
         server_dir,
@@ -1958,12 +1963,16 @@ def _realm_switch(
             docker.world_running(spec.world, wsl_distro=wsl_distro)
             or docker.world_running(spec.auth, wsl_distro=wsl_distro)
         ),
-        run_import=lambda: _run_realm_import(entry, server_dir, wsl_distro=wsl_distro),
+        run_import=lambda context: coa_switch.switch_import(entry, server_dir, context, seams),
+        check_import=lambda: coa_switch.check_switch_import(server_dir, seams),
         set_realm_row=lambda name, port: sql.run_statement(
             "auth", coa_realm.realm_name_update(entry, name)
         ),
         write_override=lambda env: _write_realm_override(entry, server_dir, env),
         stop=lambda: _stop_for_realm_switch(entry, server_dir, wsl_distro=wsl_distro),
+        start_db=lambda: docker.start_database(
+            spec, server_dir, because="nothing was switched", wsl_distro=wsl_distro
+        ),
         start=lambda: _start_for_realm_switch(entry, server_dir, wsl_distro=wsl_distro),
         bot_prefix=bot_prefix,
     )
@@ -1993,16 +2002,31 @@ def _start_for_realm_switch(
     controller.start()
 
 
-def _run_realm_import(
+def _realm_import_seams(
     entry: CatalogEntry, server_dir: Path, *, wsl_distro: str | None
-) -> Iterator[str]:
-    """The db-import one-shot for a first switch, through the install wiring (T812 C3b)."""
-    from yulon import install_wiring
-    from yulon.catalog.installer import InstallOptions
+) -> coa_switch.ImportSeams:
+    """The docker seams a first switch's import runs through (T812 C8 D6-D8).
 
-    engine = install_wiring.installer_for_app(entry, wsl_distro=wsl_distro)
-    options = InstallOptions(server_dir=server_dir)
-    yield from engine.run(options)
+    The entry's own one-shot service and this folder's import probe (the
+    password is the folder's own, T748), so the switch imports and verifies
+    exactly as the install's import stage does, without the installer's other
+    stages around it.
+    """
+    spec = entry.container_spec()
+    probe, _reset = install_wiring.import_gate_for(
+        entry, server_dir=server_dir, wsl_distro=wsl_distro
+    )
+    return coa_switch.ImportSeams(
+        service=spec.import_service,
+        probe=probe,
+        end_one_shot=lambda service, folder: docker.end_one_shot(
+            service, folder, wsl_distro=wsl_distro, record_ended=True
+        ),
+        one_shot=lambda service, folder, sink: docker.run_one_shot(
+            service, folder, sink=sink, wsl_distro=wsl_distro
+        ),
+        verify=docker.verify_import,
+    )
 
 
 def _write_realm_override(entry: CatalogEntry, server_dir: Path, env: Mapping[str, str]) -> None:

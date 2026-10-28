@@ -107,10 +107,12 @@ def _switch(
         hold_server=hold,
         sql=sql,
         servers_running=lambda: False,
-        run_import=lambda: fresh_import(sql),
+        run_import=lambda context: fresh_import(sql, context),
+        check_import=lambda: None,
         set_realm_row=lambda name, port: sql.executed.append(f"REALM ROW {name} {port}"),
         write_override=lambda env: wrote.append(dict(env)),
-        stop=lambda: stopped.append("stop") or False,
+        stop=lambda: stopped.append("stop") or not sql.stop_database(),
+        start_db=sql.start_database,
         start=lambda: started.append("start"),
         bot_prefix="rndbot",
     )
@@ -168,17 +170,20 @@ def test_a_switch_stops_switches_starts_in_order(tmp_path: Path) -> None:
         hold_server=_Hold([]),
         sql=sql,
         servers_running=lambda: False,
-        run_import=lambda: fresh_import(sql),
+        run_import=lambda context: fresh_import(sql, context),
+        check_import=lambda: order.append("check-import"),
         set_realm_row=lambda name, port: order.append(f"row:{name}") or None,
         write_override=lambda env: order.append("override") or wrote.append(dict(env)),
-        stop=lambda: order.append("stop") or False,
+        stop=lambda: order.append("stop") or not sql.stop_database(),
+        start_db=lambda: order.append("start-db") or sql.start_database(),
         start=lambda: order.append("start"),
         bot_prefix="rndbot",
     )
     list(switch.switch_to("hero"))
-    assert order[0] == "stop", order
+    assert order[0] == "check-import", "a first switch asks its import's refusals before the Stop"
     row_at = order.index("row:CoA Free Pick")
-    assert order.index("stop") < row_at < order.index("override") < order.index("start")
+    assert order.index("stop") < order.index("start-db") < row_at
+    assert row_at < order.index("override") < order.index("start")
 
 
 def test_switch_for_answers_a_switch_only_for_entries_with_types(tmp_path: Path) -> None:
@@ -196,10 +201,12 @@ def test_switch_for_answers_a_switch_only_for_entries_with_types(tmp_path: Path)
         hold_server=hold,
         sql=sql,
         servers_running=lambda: False,
-        run_import=lambda: fresh_import(sql),
+        run_import=lambda context: fresh_import(sql, context),
+        check_import=lambda: None,
         set_realm_row=lambda _n, _p: None,
         write_override=lambda _e: None,
         stop=lambda: False,
+        start_db=lambda: None,
         start=lambda: None,
         bot_prefix="rndbot",
     )
@@ -214,10 +221,12 @@ def test_switch_for_answers_a_switch_only_for_entries_with_types(tmp_path: Path)
                 hold_server=hold,
                 sql=sql,
                 servers_running=lambda: False,
-                run_import=lambda: fresh_import(sql),
+                run_import=lambda context: fresh_import(sql, context),
+                check_import=lambda: None,
                 set_realm_row=lambda _n, _p: None,
                 write_override=lambda _e: None,
                 stop=lambda: False,
+                start_db=lambda: None,
                 start=lambda: None,
                 bot_prefix="rndbot",
             )

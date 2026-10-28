@@ -51,6 +51,22 @@ class FakeSql(coa_realm.SqlRunner):
         """The `yulon_realm_type` row per schema, traveling with its table."""
         self.rows: dict[tuple[str, str], list[dict[str, object]]] = {}
         """`account`/`account_access` rows per (schema, table), traveling with the table."""
+        self.db_up = True
+        """Whether the database container runs (T812 C8 D5): the tab's Stop stops it too,
+        and every statement on a stopped database fails as `docker exec` does."""
+
+    def stop_database(self) -> bool:
+        """The tab's Stop, as the live run showed it: world, auth AND the database."""
+        self.db_up = False
+        return True
+
+    def start_database(self) -> bool:
+        self.db_up = True
+        return True
+
+    def _need_up(self) -> None:
+        if not self.db_up:
+            raise RuntimeError("Error response from daemon: container coa-database is not running")
 
     @property
     def marker(self) -> str | None:
@@ -59,6 +75,7 @@ class FakeSql(coa_realm.SqlRunner):
     # -- writes ------------------------------------------------------------
 
     def execute(self, statement: str) -> None:
+        self._need_up()
         if self.fail_on and self.fail_on in statement:
             raise RuntimeError(f"the database refused: {statement[:60]}")
         self.executed.append(statement)
@@ -187,6 +204,7 @@ class FakeSql(coa_realm.SqlRunner):
     # -- reads -------------------------------------------------------------
 
     def query(self, statement: str) -> str:
+        self._need_up()
         if self.fail_query_on and self.fail_query_on in statement:
             raise RuntimeError(f"the database did not answer: {statement[:60]}")
         self.queries.append(statement)
@@ -342,8 +360,17 @@ def parked_set(sql: FakeSql, type_id: str, *, marker: str | None = None) -> None
         sql.schemata[f"{schema}_{type_id}"] = ("utf8mb4", "utf8mb4_unicode_ci")
 
 
-def fresh_import(sql: FakeSql) -> Iterator[str]:
-    """The db-import one-shot over empty plain schemas: AzerothCore's base tables, no accounts."""
+def fresh_import(sql: FakeSql, context: coa_realm.SwitchImport) -> Iterator[str]:
+    """The db-import one-shot over empty plain schemas: AzerothCore's base tables, no accounts.
+
+    Modelled on what the live run showed (T812 C8): the import refuses on the
+    switch's crash note unless it is the switch's own trusted import (D7), needs
+    the database up (D5), and marks nothing: the marker is the switch's (D8).
+    """
+    refused = coa_realm.import_refusal(coa(), context.server_dir, switch=context)
+    if refused is not None:
+        raise coa_realm.RealmSwitchError(refused)
+    sql._need_up()
     sql.tables["acore_auth"].extend(["account", "account_access", "realmlist"])
     sql.tables["acore_characters"].append("characters")
     sql.tables["acore_playerbots"].append("playerbots_account_type")
@@ -393,7 +420,7 @@ def switch_lines(
             target,
             sql=sql,
             servers_running=lambda: False,
-            run_import=run_import or (lambda: fresh_import(sql)),
+            run_import=run_import or (lambda context: fresh_import(sql, context)),
             set_realm_row=_row,
             write_override=lambda env: wrote.append(dict(env)),
             bot_prefix=bot_prefix,
@@ -564,7 +591,7 @@ def test_a_running_server_is_never_switched(tmp_path: Path) -> None:
                 "hero",
                 sql=sql,
                 servers_running=lambda: True,
-                run_import=lambda: iter(()),
+                run_import=lambda _context: iter(()),
                 set_realm_row=lambda name, port: None,
                 write_override=lambda env: None,
                 bot_prefix="rndbot",
@@ -713,8 +740,8 @@ def test_accounts_get_the_targets_own_ids_and_their_gm_rights(tmp_path: Path) ->
     coa_schemas(sql)
     source = {row["username"]: row for row in sql.rows[("acore_auth", "account")]}
 
-    def seeded_import() -> Iterator[str]:
-        yield from fresh_import(sql)
+    def seeded_import(context: coa_realm.SwitchImport) -> Iterator[str]:
+        yield from fresh_import(sql, context)
         seed_accounts(sql, "acore_auth", {"SEEDED": None})  # takes id 11 in the fresh target
 
     switch_lines(tmp_path, entry, "hero", sql, run_import=seeded_import)
@@ -732,8 +759,8 @@ def test_a_username_the_target_already_holds_refuses_and_marks_nothing(tmp_path:
     sql = FakeSql()
     coa_schemas(sql)
 
-    def colliding_import() -> Iterator[str]:
-        yield from fresh_import(sql)
+    def colliding_import(context: coa_realm.SwitchImport) -> Iterator[str]:
+        yield from fresh_import(sql, context)
         seed_accounts(sql, "acore_auth", {"Player2": None})
 
     with pytest.raises(coa_realm.RealmSwitchError, match="already hold an account named Player2"):
@@ -1496,7 +1523,7 @@ def test_the_switch_publishes_override_then_file_then_clears_the_note(tmp_path: 
             "hero",
             sql=sql,
             servers_running=lambda: False,
-            run_import=lambda: fresh_import(sql),
+            run_import=lambda context: fresh_import(sql, context),
             set_realm_row=lambda name, port: None,
             write_override=override,
             bot_prefix="rndbot",
@@ -1532,7 +1559,7 @@ def _killed_publishing(
                 "hero",
                 sql=sql,
                 servers_running=lambda: False,
-                run_import=lambda: fresh_import(sql),
+                run_import=lambda context: fresh_import(sql, context),
                 set_realm_row=lambda name, port: None,
                 write_override=lambda env: wrote.append(dict(env)),
                 bot_prefix="rndbot",
