@@ -36,7 +36,7 @@ from pathlib import Path
 from yulon import server_build_presses
 
 BUTTON_LABEL = "Remove from Yu'lon…"
-"""The tab menu's entry and the Server tab's button (`controller_view.REMOVE_FROM_YULON`)."""
+"""The tab menu's entry (`controller_view.REMOVE_FROM_YULON`)."""
 
 TITLE = "Remove this server from Yu'lon?"
 REFUSED_TITLE = "This server cannot be removed yet"

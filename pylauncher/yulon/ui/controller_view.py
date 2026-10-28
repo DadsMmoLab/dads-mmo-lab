@@ -244,6 +244,7 @@ from yulon.ui.widgets.page import (
 from yulon.ui.widgets.party_panel import PartyPanel
 from yulon.ui.widgets.prompt import InputPrompter
 from yulon.ui.widgets.reasons import ReasonLine, drop_reason, reason_of, set_enabled_why
+from yulon.ui.widgets.remove_dialog import RemovalChoice, ask_removal, offered_choices
 from yulon.ui.widgets.tuning_panel import TuningPanel, build_tuning_cards
 
 logger = get_logger(__name__)
@@ -1293,6 +1294,14 @@ class ClientOptionsOffer:
 
 ClientOptionsAsker = Callable[[QWidget, ClientOptionsOffer], dict[str, Any] | None]
 """How the tab asks "Client options…": a seam, so a test answers it without a modal."""
+
+
+RemovalAsker = Callable[[tuple[RemovalChoice, ...]], RemovalChoice | None]
+"""How the tab asks "Remove this server…": a seam, so a test answers it without a modal.
+
+Called with the choices offered for this wiring, in dialog order; answers the
+choice, or None for Cancel. The default builds `remove_dialog.RemoveDialog`.
+"""
 
 
 class ClientOptionsDialog(QDialog):
@@ -5509,18 +5518,11 @@ WORLD_UPKEEP_BUSY = (
     "Nothing was started."
 )
 
-REMOVE_IDLE = "Stop and remove containers…"
-REMOVE_ARMED = "Press again to remove"
-"""Two labels for one button, because a teardown should not be one click away.
-
-The wording changes rather than a dialog appearing: the explanation is a
-paragraph naming what is kept, `danger_label` renders it directly under the
-press (T189: in Realm's `problem_label` it was a page away at 960), and a
-modal would arrive from a worker thread.
-"""
+REMOVE_THIS_SERVER = "Remove this server…"
+"""T695: the Danger zone's one removal press, opening the dialog with the three routes."""
 
 REMOVE_FROM_YULON = "Remove from Yu'lon…"
-"""T95: the Server tab's way off the list, the same words as `forgetting.BUTTON_LABEL`.
+"""T95: the tab menu's way off the list, the same words as `forgetting.BUTTON_LABEL`.
 
 A local constant rather than an import, so this ticket adds no line to the
 module's import block (a parallel ticket edits it). `test_controller_view.py`
@@ -8296,9 +8298,8 @@ SUB_TABS_NAME = "server-sub-tabs"
 """The object name of a server's sub-tab widget, which its own style sheet selects by (T191)."""
 
 UNINSTALL_ABSENT = (
-    "Uninstall is not offered for {name} yet: Stop and remove containers… frees its "
-    "containers, Remove from Yu'lon… takes it off the list, and the folder {server_dir} "
-    "stays for you to delete."
+    "Uninstall is not offered for {name} yet: Remove this server… takes it off the list "
+    "or frees its containers, and the folder {server_dir} stays for you to delete."
 )
 """The Danger zone's sentence for a game with no uninstall seam (T189 A27)."""
 
@@ -8494,6 +8495,7 @@ class ControllerView(QWidget):
         pick_client_dir: DirPicker = _qt_dir_picker,
         play_client_asker: PlayClientAsker | None = None,
         client_options_asker: ClientOptionsAsker | None = None,
+        removal_asker: RemovalAsker | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -8514,6 +8516,12 @@ class ControllerView(QWidget):
         )
         # T181 b/c: "Client options…" for the same reason.
         self._client_options_asker: ClientOptionsAsker = client_options_asker or ask_client_options
+        # T695's removal dialog, a seam for the other askers' reason. The real
+        # one is the dialog, with this tab behind it as the parent.
+        self._ask_removal: RemovalAsker = removal_asker or self._default_ask_removal
+        # What the dialog opens with selected. Off the list, unless the way-out
+        # highlight says that is the answer (`_update_forget_visibility()`).
+        self._removal_preselect = RemovalChoice.OFF_THE_LIST
         # A Make…, Refresh or Delete writing the ready-to-play client: it holds
         # the close (`busy_reason()`) the way the import does.
         self._play_client_running = False
@@ -8657,16 +8665,15 @@ class ControllerView(QWidget):
         layout.addWidget(self._tabs)
 
         self._restore_plan: wotlk_maintenance.RestorePlan | None = None
-        self._remove_armed = False
         # T95. The last status poll's answer, or None while no poll has answered
         # (never polled, or docker unreachable). The window reads it to decide
         # whether a removal stops the server first.
         self._last_status: InstallStatus | None = None
-        # T95. Set by a "Stop and remove containers…" press that found nothing to
+        # T95. Set by a container removal that found nothing to
         # remove. Cleared by the next Start, by a removal that did find some, and
         # by a fresh poll that sees the server running (a Rebuild, an Update, a
         # Return-to-pin or an outside start brings it up without Start). While it
-        # holds, "Remove from Yu'lon…" is highlighted: it is the way out of the
+        # holds, "Remove this server…" is highlighted: it is the way out of the
         # dead end in Andood's video.
         self._nothing_to_remove = False
         # T145 round 7: a Tuning backup is being put back (Revert, raw Revert,
@@ -9100,20 +9107,23 @@ class ControllerView(QWidget):
         self.restart_button.setToolTip(RESTART_TIP)
         self.refresh_button = QPushButton("Refresh", tab)
         self.refresh_button.setIcon(dadcraft_icon("refresh", COLOR_TEXT_GOLD, 14))
-        # Deliberate, per checklist 6.5: nothing removes a container today, and
-        # whatever does must not be a stray click next to Stop. It arms on the
-        # first press and acts on the second, and anything else disarms it.
-        self.remove_button = QPushButton(REMOVE_IDLE, tab)
-        self.remove_button.setIcon(dadcraft_icon("trash", "#FFB8B8", 14))
-        self.remove_button.setProperty("danger", True)
+        # T695: the Danger zone's one removal press. It opens the dialog with
+        # the three routes; Repair stays its own press because it repairs.
+        self.remove_server_button = QPushButton(REMOVE_THIS_SERVER, tab)
+        self.remove_server_button.setIcon(dadcraft_icon("trash", "#FFB8B8", 14))
+        self.remove_server_button.setProperty("danger", True)
+        self.remove_server_button.setToolTip(
+            "Take this server off the list, uninstall it, or remove its containers. "
+            "You choose first; nothing happens until you do."
+        )
         # Hidden unless the database has said there is an unfinished import to
         # finish. A destructive action that is always on screen is one that gets
         # pressed by accident, and this one is only ever right for a broken
         # install — the installer imports on every healthy path.
         self.repair_button = QPushButton(REPAIR_IDLE, tab)
         self.repair_button.setVisible(False)
-        # C35 (T195): the way out of an armed Remove or Repair, beside it in the
-        # Danger zone. Shown only while one of them is armed.
+        # C35 (T195): the way out of an armed Repair, beside it in the
+        # Danger zone. Shown only while it is armed.
         self.arm_cancel_button = QPushButton(ARM_CANCEL, tab)
         self.arm_cancel_button.setVisible(False)
         # Hidden until a Start is actually refused for the ports. Every v1
@@ -9185,24 +9195,11 @@ class ControllerView(QWidget):
         self.repair_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.repair_label.setVisible(False)
         # 8.9a. Built only where the seam is wired, so a game outside 8.9a/8.9b
-        # has no uninstall controls rather than ones that cannot work. The three
-        # are a set: a button that shows the PLAN, the checkbox owner answer 2
-        # asked for, and a second button that only appears once a plan is on
-        # screen.
-        self.uninstall_button: QPushButton | None = None
-        # T34's button, and since T95 it is on EVERY tab and ALWAYS shown (owner
-        # decision 4, 2026-09-23). TBC and Tortoise have no Uninstall, so gating
-        # it on `services.uninstall` left them no way off the list at all (Andood,
-        # 2026-09-22). The × on the sidebar tab is mouse-only; this is the route
-        # for a gamepad. It is low-key: no `primary`/`danger` property, and it
-        # sits after the row's stretch, away from Start and Stop.
-        # `_update_forget_visibility()` lights it up (`primary`) when it is the
-        # answer. The press asks the window (`remove_requested`), which does the rest.
-        self.forget_install_button: QPushButton | None = QPushButton(REMOVE_FROM_YULON, tab)
-        self.forget_install_button.setToolTip(
-            "Stop listing this server in Yu'lon. Nothing is deleted; you are asked first."
-        )
-        self.forget_install_button.clicked.connect(self.forget_install)
+        # has no uninstall controls rather than ones that cannot work. The plan,
+        # the checkbox owner answer 2 asked for, and the red press that acts on
+        # them are reached through the remove dialog now, not through a button
+        # of their own. T677 and T690 keep their behaviour: the plan, the
+        # play-client tick and the red "Uninstall this server" confirm stay.
         # T520: where a player takes a problem with this game -- its server's
         # project, its bots' project, its community, Yu'lon -- from the catalog.
         # Never greyed: a job running is no reason not to read where help is.
@@ -9253,19 +9250,16 @@ class ControllerView(QWidget):
             self.steam_button = QPushButton("Add to Steam\u2026", tab)
             self.steam_button.clicked.connect(self.add_to_steam)
         self._build_play_controls(tab)
-        if self.services.uninstall is not None:
-            self.uninstall_button = QPushButton("Uninstall\u2026", tab)
-            self.uninstall_button.clicked.connect(self.show_uninstall_plan)
-            self.uninstall_confirm_button.clicked.connect(self.run_uninstall)
-            self.uninstall_cancel_button.clicked.connect(self.put_away_uninstall_plan)
-            self.keep_characters_check.toggled.connect(self._redraw_uninstall_plan)
-            self.delete_play_client_check.toggled.connect(self._redraw_uninstall_plan)
-            self.uninstall_label.setVisible(True)
+        self.uninstall_confirm_button.clicked.connect(self.run_uninstall)
+        self.uninstall_cancel_button.clicked.connect(self.put_away_uninstall_plan)
+        self.keep_characters_check.toggled.connect(self._redraw_uninstall_plan)
+        self.delete_play_client_check.toggled.connect(self._redraw_uninstall_plan)
+        self.uninstall_label.setVisible(self.services.uninstall is not None)
         self.start_button.clicked.connect(self.start_server)
         self.stop_button.clicked.connect(self.stop_server)
         self.restart_button.clicked.connect(self.restart_from_server_tab)
         self.refresh_button.clicked.connect(self.recheck)
-        self.remove_button.clicked.connect(self.remove_containers)
+        self.remove_server_button.clicked.connect(self.remove_server)
         self.repair_button.clicked.connect(self.repair_import)
         self.arm_cancel_button.clicked.connect(self.cancel_armed)
         self.stop_other_button.clicked.connect(self.stop_other_and_start)
@@ -9396,23 +9390,14 @@ class ControllerView(QWidget):
         help_column.addWidget(_bar(help_box, self.help_button))
         self._add_section(box, help_box, bool(self.entry.help_places))
 
-        # Every press that removes something, in one red-bordered box (T189
+        # T695: one removal press and Repair, in one red-bordered box (T189
         # A22/C27): none of them sits beside Refresh any more. Under the
         # presses, T188's order: what the plan removes, then the two choices
         # that change it, then the press that acts on them.
         danger, danger_column = section("Danger zone", tab, danger=True)
-        danger_presses = [
-            b
-            for b in (
-                self.remove_button,
-                self.arm_cancel_button,
-                self.repair_button,
-                self.forget_install_button,
-                self.uninstall_button,
-            )
-            if b is not None
-        ]
-        danger_column.addWidget(_bar(danger, *danger_presses))
+        danger_column.addWidget(
+            _bar(danger, self.remove_server_button, self.arm_cancel_button, self.repair_button)
+        )
         danger_column.addWidget(self.danger_label)
         danger_column.addWidget(self.danger_details)
         danger_column.addWidget(self.repair_label)
@@ -9427,7 +9412,7 @@ class ControllerView(QWidget):
         self.uninstall_absent_label.setStyleSheet(f"color: {COLOR_TEXT_MUTED};")
         self.uninstall_absent_label.setVisible(self.services.uninstall is None)
         danger_column.addWidget(self.uninstall_absent_label)
-        if self.uninstall_button is not None:
+        if self.services.uninstall is not None:
             danger_column.addWidget(self.uninstall_label)
             danger_column.addWidget(self.uninstall_details)
             danger_column.addWidget(self.keep_characters_check)
@@ -9455,10 +9440,8 @@ class ControllerView(QWidget):
                 self.play_menu_button,
                 self.set_client_dir_button,
                 self.forget_client_dir_button,
-                self.remove_button,
+                self.remove_server_button,
                 self.repair_button,
-                self.forget_install_button,
-                self.uninstall_button,
                 self.keep_characters_check,
                 self.delete_play_client_check,
                 self.uninstall_confirm_button,
@@ -10472,7 +10455,7 @@ class ControllerView(QWidget):
         """Whether this server's folder is confirmed gone on this host (T34; T95).
 
         One predicate for the two things that depend on it: the highlight on
-        "Remove from Yu'lon…" (`_update_forget_visibility()`) and, through
+        "Remove this server…" (`_update_forget_visibility()`) and, through
         `folder_is_gone()`, which question the window asks and whether it
         stops the server first. Asked fresh each time, never cached, because
         a folder can come back between a poll and a press (review, T34 round 2).
@@ -10485,7 +10468,7 @@ class ControllerView(QWidget):
         return controller.wsl_distro is None and platform.folder_is_gone(controller.server_dir)
 
     def _update_forget_visibility(self) -> None:
-        """Highlight "Remove from Yu'lon…" while it is the way out (T34, T54; T95 decision 4).
+        """Highlight "Remove this server…" while it is the way out (T34, T54; T95 decision 4).
 
         The button itself is always shown now. What this re-reads on every poll,
         including a poll that could not reach Docker (T54), is whether it is
@@ -10493,17 +10476,18 @@ class ControllerView(QWidget):
         nothing (until the next Start). Read fresh on every poll rather than
         once at tab-build time, because the folder can be deleted out from
         under an open tab. `primary` is the theme's own emphasis, the property
-        Start carries, so no new QSS is needed.
+        Start carries, so no new QSS is needed. While highlighted the dialog
+        opens with "Only take it off this list" selected.
         """
-        if self.forget_install_button is None:
-            return
         highlight = self._forget_is_eligible() or self._nothing_to_remove
-        if bool(self.forget_install_button.property("primary")) == highlight:
+        if highlight:
+            self._removal_preselect = RemovalChoice.OFF_THE_LIST
+        if bool(self.remove_server_button.property("primary")) == highlight:
             return
-        self.forget_install_button.setProperty("primary", highlight)
-        style = self.forget_install_button.style()
-        style.unpolish(self.forget_install_button)
-        style.polish(self.forget_install_button)
+        self.remove_server_button.setProperty("primary", highlight)
+        style = self.remove_server_button.style()
+        style.unpolish(self.remove_server_button)
+        style.polish(self.remove_server_button)
 
     def folder_is_gone(self) -> bool:
         """Confirmed absent on this host, for the window's dialog (T95). `_forget_is_eligible()`."""
@@ -11062,13 +11046,9 @@ class ControllerView(QWidget):
             self._refresh_sql_log_offer()
             # Re-enabled, not re-shown: `_show_repair()` owns whether Repair is
             # visible at all, and an invisible button being enabled is harmless.
-            self.remove_button.setEnabled(True)
+            self.remove_server_button.setEnabled(True)
             self.repair_button.setEnabled(True)
             self.reinstall_docker_button.setEnabled(True)
-            if self.uninstall_button is not None:
-                self.uninstall_button.setEnabled(True)
-            if self.forget_install_button is not None:
-                self.forget_install_button.setEnabled(True)
             self.uninstall_confirm_button.setEnabled(True)
             self.uninstall_cancel_button.setEnabled(True)
             self.keep_characters_check.setEnabled(True)
@@ -14416,31 +14396,49 @@ class ControllerView(QWidget):
         self.action_failed.emit(message)
 
     @Slot()
-    def remove_containers(self) -> None:
-        """Arm on the first press; remove on the second.
+    def remove_server(self) -> None:
+        """Open the removal dialog and route its answer; Cancel removes nothing (T695).
 
-        The action is safe for player data — the database is a named volume and
-        `remove_staged()` never passes `-v` — but it is still a teardown, and it
-        sits in the Danger zone. Arming says what will happen, under the presses
-        (`danger_label`, T189), before anything is touched.
+        With no new removal code: "off this list" reaches `forget_install()`;
+        "keep" ticks the box then `show_uninstall_plan()`; "everything" unticks
+        it then the plan; Advanced runs `_remove_containers_now()`. The dialog
+        is reached through `self._ask_removal` (default builds the dialog) so
+        tests answer it without a modal.
         """
-        if not self._remove_armed:
-            # Only one of the two destructive buttons is ever armed. Both write
-            # their warning into the same label, so two armed at once would show
-            # one paragraph over two loaded buttons, and the second press would
-            # do whichever the user had forgotten about.
-            self._disarm_repair()
-            self._remove_armed = True
-            self.remove_button.setText(REMOVE_ARMED)
-            self.arm_cancel_button.setVisible(True)
-            self._say_under_the_presses(
-                "This stops the server and deletes its containers. Your characters are NOT "
-                "affected — the database lives in a Docker volume, which is kept. The next "
-                "Start recreates the containers, which takes longer than a normal start. "
-                + ARMED_LAST_LINE
-            )
+        offered = offered_choices(self.services.uninstall is not None)
+        choice = self._ask_removal(offered)
+        if choice is None:
             return
-        self._disarm_remove()
+        if choice is RemovalChoice.OFF_THE_LIST:
+            self.forget_install()
+        elif choice is RemovalChoice.REMOVE_CONTAINERS:
+            self._remove_containers_now()
+        elif self.services.uninstall is None:
+            return
+        elif choice is RemovalChoice.KEEP_CHARACTERS:
+            self.keep_characters_check.setChecked(True)
+            self.show_uninstall_plan()
+        else:
+            self.keep_characters_check.setChecked(False)
+            self.show_uninstall_plan()
+
+    def _default_ask_removal(self, offered: tuple[RemovalChoice, ...]) -> RemovalChoice | None:
+        """Build the dialog for this wiring; the choice, or None for Cancel."""
+        return ask_removal(
+            self,
+            uninstall_available=self.services.uninstall is not None,
+            preselect=self._removal_preselect,
+        )
+
+    def _remove_containers_now(self) -> None:
+        """Stop the server and delete its containers, at once (T695).
+
+        The armed branch of the old two-press gesture, factored out: choosing
+        Advanced in the dialog IS the deliberate second step, so there is no
+        arming path. The action is safe for player data — the database is a
+        named volume and `remove_staged()` never passes `-v`.
+        """
+        self._disarm_repair()
         self._set_busy(True, "Remove containers")
         self._stop_forced = ""
         self._stop_forced_details = ""
@@ -14480,26 +14478,17 @@ class ControllerView(QWidget):
         self.danger_label.setVisible(False)
         self.danger_details.set_text("")
 
-    def _disarm_remove(self) -> None:
-        """Unload the press; its warning goes with it, and only its own.
-
-        A press that was not armed leaves the line alone: it may be the other
-        press's warning, or how a remove or repair went -- which every import
-        probe's answer would otherwise wipe, through `_show_repair`.
-        """
-        was = self._remove_armed
-        self._remove_armed = False
-        self.remove_button.setText(REMOVE_IDLE)
-        self.arm_cancel_button.setVisible(self._repair_armed)
-        if was:
-            self._clear_danger_label()
-
     def _disarm_repair(self) -> None:
-        """`_disarm_remove`'s twin."""
+        """Unload the armed Repair press; its warning goes with it, and only its own.
+
+        A press that was not armed leaves the line alone: it may be how a remove
+        or repair went -- which every import probe's answer would otherwise
+        wipe, through `_show_repair`.
+        """
         was = self._repair_armed
         self._repair_armed = False
         self.repair_button.setText(REPAIR_IDLE)
-        self.arm_cancel_button.setVisible(self._remove_armed)
+        self.arm_cancel_button.setVisible(False)
         if was:
             self._clear_danger_label()
 
@@ -14514,7 +14503,6 @@ class ControllerView(QWidget):
         So the line under the Danger zone's presses goes too, armed or not --
         except while the import it is reporting is still running.
         """
-        self._disarm_remove()
         self._disarm_repair()
         self._hide_stop_other()
         self.clear_reservation_button.setVisible(False)
@@ -14525,13 +14513,12 @@ class ControllerView(QWidget):
 
     @Slot()
     def cancel_armed(self) -> None:
-        """Put the armed Remove or Repair down, and the warning with it (C35, T195).
+        """Put the armed Repair down, and the warning with it (C35, T195).
 
         Only what the armed press wrote goes: its paragraph under the presses.
         A refusal in `problem_label` -- a pointer at the Docker box, a port in
         use -- and the offer that answers it are another matter's, and stay.
         """
-        self._disarm_remove()
         self._disarm_repair()
 
     @Slot(object)
@@ -14542,13 +14529,13 @@ class ControllerView(QWidget):
         # lights up.
         self._nothing_to_remove = not result
         # Under the presses, where the player pressed: "in the row above" is
-        # the Danger zone's row, which holds Remove from Yu'lon.
+        # the Danger zone's row, which holds Remove this server….
         self._say_under_the_presses(
             self._after_the_stop(
                 "Containers removed; volumes kept. The next Start will recreate them."
                 if result
                 else (
-                    f'There were no containers to remove. "{REMOVE_FROM_YULON}" in the row '
+                    f'There were no containers to remove. "{REMOVE_THIS_SERVER}" in the row '
                     "above takes this server off Yu'lon's list and deletes nothing."
                 )
             )
@@ -14578,7 +14565,6 @@ class ControllerView(QWidget):
         this text is a warning and not the guard.
         """
         if not self._repair_armed:
-            self._disarm_remove()
             self._repair_armed = True
             self.repair_button.setText(REPAIR_ARMED)
             self.arm_cancel_button.setVisible(True)

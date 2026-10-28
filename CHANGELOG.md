@@ -34,6 +34,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Updating a WoW Tortoise server now rebuilds only the movement maps whose areas changed, in minutes.
 
 ### Changed
+- The Danger zone now has one **Remove this server…** press offering off the list, uninstall, or containers.
 
 ## v0.9.18-Public — 2026-10-17
 

@@ -577,7 +577,7 @@ def test_a_level_left_alone_sends_no_level_at_all(qapp: object) -> None:
 
 
 def test_dismiss_all_arms_first_and_names_the_count_it_would_send_away(qapp: object) -> None:
-    """The tab's own two-press gesture (`controller_view.REMOVE_ARMED`), for the
+    """The Server tab's own two-press gesture, for the
     same reason: a teardown should not be one click away. The armed label carries
     the count, so what the second press does is on the button itself."""
     stub = _StubParty(
@@ -641,7 +641,7 @@ def test_dismiss_all_with_no_bots_in_the_list_sends_nothing_and_never_arms(qapp:
 
 
 def test_showing_the_party_stands_an_armed_dismiss_all_down_and_says_so(qapp: object) -> None:
-    """The idle button's own escape route, and the tab's (`REMOVE_ARMED`'s
+    """The idle button's own escape route, and the tab's (its
     paragraph said "Press Refresh to cancel" until T195). It has to SAY it happened: a read
     clears the report line, so an armed press followed by a refresh would
     otherwise leave a disarmed button and no record of the cancellation."""

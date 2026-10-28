@@ -134,6 +134,7 @@ from yulon.ui.widgets.modules_panel import (
     BADGE_NOT_INSTALLED,
     NOT_IN_CATALOG,
 )
+from yulon.ui.widgets.remove_dialog import RemovalChoice
 
 WOTLK = load_catalog().get("wow-wotlk")
 TBC = load_catalog().get("wow-tbc")
@@ -3289,74 +3290,62 @@ def _watch_remove(view: ControllerView, result: bool = True) -> list[int]:
     return calls
 
 
-def test_removing_containers_takes_two_presses(qapp: object, ps: _Ps, tmp_path: Path) -> None:
-    """A teardown sitting next to Stop must not be one click away."""
+def test_removing_containers_through_the_dialog_takes_effect_at_once(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T695: choosing Advanced in the dialog IS the deliberate step; there is no arming path."""
+    from yulon.ui.widgets.remove_dialog import RemovalChoice
+
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
     calls = _watch_remove(view)
+    view._ask_removal = lambda _offered: RemovalChoice.REMOVE_CONTAINERS  # type: ignore[method-assign]
 
-    view.remove_containers()
-    assert calls == [], "the first press removed something"
-    assert view.remove_button.text() == controller_view_module.REMOVE_ARMED
+    view.remove_server_button.click()
 
-    view.remove_containers()
     assert calls == [1]
-    assert view.remove_button.text() == controller_view_module.REMOVE_IDLE, "still armed after"
 
 
-def test_the_armed_warning_says_the_characters_are_kept(
+def test_the_advanced_choice_says_the_characters_are_kept_before_anything_runs(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
     """The reason this action is safe is the reason it must be stated.
 
     Someone reading "delete containers" next to a server they have played on
     will assume the worst unless told otherwise, and the truth — the database is
-    a volume and volumes are kept — is exactly what makes it pressable.
+    a volume and volumes are kept — is exactly what makes it pressable. It is
+    said on the dialog's Advanced choice, before anything runs.
     """
-    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
-    _watch_remove(view)
-    view.remove_containers()
-    said = view.danger_label.text()
-    assert "NOT" in said and "characters" in said
-    assert "volume" in said
-    assert "Cancel" in said, "no way out was offered"
+    from yulon.ui.widgets.remove_dialog import RemoveDialog
+
+    box = RemoveDialog(None, uninstall_available=True)
+    tip = box.containers_radio.toolTip()
+    assert "characters" in tip and "kept" in tip
+    assert "volume" in tip
 
 
-def test_refresh_cancels_an_armed_remove(qapp: object, ps: _Ps, tmp_path: Path) -> None:
-    """Arming then walking away must not leave a loaded button behind."""
+def test_dialog_cancel_removes_nothing_and_leaves_no_loaded_button(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Answering the dialog with Cancel removes nothing and arms nothing."""
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
     calls = _watch_remove(view)
+    view._ask_removal = lambda _offered: None  # type: ignore[method-assign]
 
-    view.remove_containers()
-    assert view.remove_button.text() == controller_view_module.REMOVE_ARMED
-    view.recheck()
-    assert view.remove_button.text() == controller_view_module.REMOVE_IDLE
+    view.remove_server_button.click()
 
-    view.remove_containers()
-    assert calls == [], "the press after a cancel removed something"
-
-
-def test_starting_or_stopping_also_disarms(qapp: object, ps: _Ps, tmp_path: Path) -> None:
-    """Any other server action means the user moved on."""
-    for action in ("start_server", "stop_server"):
-        view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
-        calls = _watch_remove(view)
-        view.remove_containers()
-        getattr(view, action)()
-        assert view.remove_button.text() == controller_view_module.REMOVE_IDLE, action
-        view.remove_containers()
-        assert calls == [], action
+    assert calls == []
+    assert view.arm_cancel_button.isHidden()
 
 
 def test_a_removal_that_found_nothing_says_so(qapp: object, ps: _Ps, tmp_path: Path) -> None:
     """False means "there was nothing of ours", which is not the same as done."""
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
     _watch_remove(view, result=False)
-    view.remove_containers()
-    view.remove_containers()
+    view._remove_containers_now()
     assert "no containers to remove" in view.danger_label.text()
 
 
-def test_a_removal_that_found_nothing_points_at_remove_from_yulon(
+def test_a_removal_that_found_nothing_points_at_remove_this_server(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
     """Andood's video (T95): every press ended "no containers to remove" and pointed nowhere.
@@ -3367,22 +3356,20 @@ def test_a_removal_that_found_nothing_points_at_remove_from_yulon(
     """
     view = ControllerView(TORTOISE, _services(ps, tmp_path, []), status_poll_ms=0)
     _watch_remove(view, result=False)
-    assert view.forget_install_button is not None
-    assert not _highlighted(view.forget_install_button)
+    assert not _highlighted(view.remove_server_button)
 
-    view.remove_containers()
-    view.remove_containers()
+    view._remove_containers_now()
 
     said = view.danger_label.text()
     assert "no containers to remove" in said
-    assert f'"{controller_view_module.REMOVE_FROM_YULON}" in the row above' in said, said
-    assert _highlighted(view.forget_install_button)
+    assert f'"{controller_view_module.REMOVE_THIS_SERVER}" in the row above' in said, said
+    assert _highlighted(view.remove_server_button)
     # T189: "the row above" is true where it is said -- the label is the
     # Danger zone's next item after the row that holds the button.
     column = view.danger_label.parentWidget().layout()
     at = column.indexOf(view.danger_label)
     row = column.itemAt(at - 1).widget()
-    assert row is not None and row.isAncestorOf(view.forget_install_button)
+    assert row is not None and row.isAncestorOf(view.remove_server_button)
     assert not view.danger_label.isHidden()
     assert "no containers" not in view.problem_label.text(), "said a page away as well"
     view._show_repair()  # what every import probe's answer ends in
@@ -3394,37 +3381,31 @@ def test_a_removal_that_removed_something_does_not_highlight_it(
 ) -> None:
     view = ControllerView(TORTOISE, _services(ps, tmp_path, []), status_poll_ms=0)
     _watch_remove(view, result=True)
-    view.remove_containers()
-    view.remove_containers()
-    assert view.forget_install_button is not None
-    assert not view.forget_install_button.isHidden(), "decision 4: always shown"
-    assert not _highlighted(view.forget_install_button)
+    view._remove_containers_now()
+    assert not view.remove_server_button.isHidden(), "decision 4: always shown"
+    assert not _highlighted(view.remove_server_button)
 
 
 def test_a_start_takes_the_highlight_back(qapp: object, ps: _Ps, tmp_path: Path) -> None:
     """The next Start recreates the containers, so "nothing to remove" is no longer true."""
     view = ControllerView(TORTOISE, _services(ps, tmp_path, []), status_poll_ms=0)
     _watch_remove(view, result=False)
-    view.remove_containers()
-    view.remove_containers()
-    assert view.forget_install_button is not None
-    assert _highlighted(view.forget_install_button)
+    view._remove_containers_now()
+    assert _highlighted(view.remove_server_button)
 
     view.start_server()
 
-    assert not _highlighted(view.forget_install_button)
-    assert not view.forget_install_button.isHidden()
+    assert not _highlighted(view.remove_server_button)
+    assert not view.remove_server_button.isHidden()
 
 
 def _nothing_to_remove_view(ps: _Ps, tmp_path: Path, **kwargs: Any) -> ControllerView:
-    """A Tortoise tab whose last "Stop and remove containers…" found nothing (T95)."""
+    """A Tortoise tab whose last container removal found nothing (T95)."""
     view = ControllerView(TORTOISE, _services(ps, tmp_path, []), status_poll_ms=0, **kwargs)
     _watch_remove(view, result=False)
     ps.names = ""
-    view.remove_containers()
-    view.remove_containers()
-    assert view.forget_install_button is not None
-    assert _highlighted(view.forget_install_button)
+    view._remove_containers_now()
+    assert _highlighted(view.remove_server_button)
     return view
 
 
@@ -3435,7 +3416,7 @@ def test_a_poll_that_sees_nothing_running_keeps_the_highlight(
     view = _nothing_to_remove_view(ps, tmp_path)
     view.refresh_status()
     view.refresh_status()
-    assert _highlighted(view.forget_install_button)
+    assert _highlighted(view.remove_server_button)
 
 
 def test_a_poll_that_sees_the_server_running_takes_the_highlight_back(
@@ -3443,14 +3424,14 @@ def test_a_poll_that_sees_the_server_running_takes_the_highlight_back(
 ) -> None:
     """A Rebuild, an Update, a Return-to-pin or an outside start brings it up without Start.
 
-    "Remove from Yu'lon…" lit with Start's own emphasis beside a live server
+    "Remove this server…" lit with Start's own emphasis beside a live server
     points the player at removing it (T95 Task 3 review, round 1).
     """
     view = _nothing_to_remove_view(ps, tmp_path)
     ps.names = view.services.controller.spec.world + "\n"
     view.refresh_status()
     assert view.last_seen_running() is True
-    assert not _highlighted(view.forget_install_button)
+    assert not _highlighted(view.remove_server_button)
 
 
 def test_a_stale_running_answer_does_not_take_the_highlight_back(
@@ -3468,14 +3449,12 @@ def test_a_stale_running_answer_does_not_take_the_highlight_back(
     gate.queued = []
     gate.hold = False
     ps.names = ""
-    view.remove_containers()
-    view.remove_containers()  # its own refresh is dropped: the poll is still out
-    assert view.forget_install_button is not None
-    assert _highlighted(view.forget_install_button)
+    view._remove_containers_now()  # its own refresh is dropped: the poll is still out
+    assert _highlighted(view.remove_server_button)
 
     run_inline(lambda: InstallStatus(db=True, auth=True, world=True), on_done, on_error)
 
-    assert _highlighted(view.forget_install_button), "an answer older than the removal cleared it"
+    assert _highlighted(view.remove_server_button), "an answer older than the removal cleared it"
     assert view.last_seen_running() is False, "the dropped refresh was asked again, and answered"
 
 
@@ -3484,9 +3463,8 @@ def test_a_removal_that_finds_containers_after_one_that_did_not_takes_it_back(
 ) -> None:
     view = _nothing_to_remove_view(ps, tmp_path)
     _watch_remove(view, result=True)
-    view.remove_containers()
-    view.remove_containers()
-    assert not _highlighted(view.forget_install_button)
+    view._remove_containers_now()
+    assert not _highlighted(view.remove_server_button)
     assert "Containers removed" in view.danger_label.text()
 
 
@@ -3600,32 +3578,29 @@ def test_the_repair_takes_two_presses_and_says_what_is_overwritten(
     assert view.repair_button.text() == controller_view_module.REPAIR_IDLE, "still armed after"
 
 
-def test_the_two_destructive_buttons_are_never_armed_together(
+def test_the_containers_route_stands_an_armed_repair_down(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
-    """Both write their warning into the same label (`danger_label`), so one disarms the other.
+    """The dialog's Advanced route runs at once, so an armed Repair must not survive it.
 
-    Two loaded buttons under one paragraph is a second press that does whichever
-    of them the user had forgotten about.
+    T695 keeps Repair as its own press, and `_remove_containers_now()` disarms
+    it first: one paragraph under the presses, one loaded button at most.
     """
+    from yulon.ui.widgets.remove_dialog import RemovalChoice
+
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
     removals = _watch_remove(view)
     repairs = _watch_repair(view)
     _db_up(view, ps)
-
-    view.remove_containers()
-    # The repair offer withdrawn (`_show_repair`) disarms a repair that is not
-    # armed: the teardown's warning stays with the teardown's armed press.
-    view._disarm_repair()
-    assert "characters are NOT" in view.danger_label.text()
     view.repair_import()
-    assert view.remove_button.text() == controller_view_module.REMOVE_IDLE
     assert view.repair_button.text() == controller_view_module.REPAIR_ARMED
-    assert "OVERWRITTEN" in view.danger_label.text(), "the warning is the teardown's"
+    view._ask_removal = lambda _offered: RemovalChoice.REMOVE_CONTAINERS  # type: ignore[method-assign]
 
-    view.remove_containers()
-    assert repairs == [], "arming the teardown left the import armed and it ran"
-    assert removals == [], "the teardown ran on what was its first press again"
+    view.remove_server_button.click()
+
+    assert removals == [1]
+    assert view.repair_button.text() == controller_view_module.REPAIR_IDLE
+    assert repairs == [], "the stood-down repair ran"
 
 
 def test_refresh_start_and_stop_all_cancel_an_armed_repair(
@@ -3718,7 +3693,12 @@ def test_neither_the_armed_copy_nor_the_running_one_offers_a_stop(
     disabled: list[bool] = []
 
     def fake_repair(output: docker.OutputSink | None = None) -> bool:
-        buttons = (view.start_button, view.stop_button, view.remove_button, view.repair_button)
+        buttons = (
+            view.start_button,
+            view.stop_button,
+            view.remove_server_button,
+            view.repair_button,
+        )
         disabled.append(not any(b.isEnabled() for b in buttons))
         return True
 
@@ -3840,10 +3820,10 @@ def test_every_action_button_is_locked_while_an_action_runs(
     """
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
     view._set_busy(True)
-    for name in ("start_button", "stop_button", "remove_button", "repair_button"):
+    for name in ("start_button", "stop_button", "remove_server_button", "repair_button"):
         assert not getattr(view, name).isEnabled(), name
     view._set_busy(False)
-    for name in ("remove_button", "repair_button"):
+    for name in ("remove_server_button", "repair_button"):
         assert getattr(view, name).isEnabled(), name
 
 
@@ -7296,7 +7276,13 @@ def _uninstall_view(ps: _Ps, tmp_path: Path, fake: _FakeUninstall) -> Controller
     return ControllerView(WOTLK, services, status_poll_ms=0)
 
 
-def test_the_uninstall_button_will_not_act_until_its_plan_is_on_screen(
+def _answer_removal(view: ControllerView, choice: RemovalChoice) -> None:
+    """Answer the remove dialog with `choice` and press Remove this server… (T695)."""
+    view._ask_removal = lambda _offered: choice  # type: ignore[method-assign]
+    view.remove_server_button.click()
+
+
+def test_the_uninstall_route_will_not_act_until_its_plan_is_on_screen(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
     """The restore action's gate, not the typed-name box the decisions doc assumed.
@@ -7404,7 +7390,7 @@ def test_keep_my_characters_is_hidden_until_a_plan_is_on_screen(
     view = _uninstall_view(ps, tmp_path, fake)
     assert view.keep_characters_check.isHidden() is True
 
-    view.uninstall_button.click()
+    _answer_removal(view, RemovalChoice.EVERYTHING)
 
     assert view.keep_characters_check.isHidden() is False
 
@@ -7413,7 +7399,7 @@ def test_a_refused_plan_offers_no_keep_my_characters(qapp: object, ps: _Ps, tmp_
     fake = _FakeUninstall(tmp_path, refusal="ac-worldserver: still running. Stop the server first.")
     view = _uninstall_view(ps, tmp_path, fake)
 
-    view.uninstall_button.click()
+    _answer_removal(view, RemovalChoice.EVERYTHING)
 
     assert view.keep_characters_check.isHidden() is True
 
@@ -7424,7 +7410,6 @@ def test_keep_my_characters_sits_between_the_plan_and_the_confirm_button(
     """Audit A14: it sat above the plan, read before the thing it changes."""
     fake = _FakeUninstall(tmp_path)
     view = _uninstall_view(ps, tmp_path, fake)
-    view.uninstall_button.click()
 
     keep = _server_box_index(view, view.keep_characters_check)
     assert _server_box_index(view, view.uninstall_label) < keep
@@ -7439,7 +7424,7 @@ def test_the_confirm_button_names_what_happens_to_the_characters(
 ) -> None:
     fake = _FakeUninstall(tmp_path)
     view = _uninstall_view(ps, tmp_path, fake)
-    view.uninstall_button.click()
+    _answer_removal(view, RemovalChoice.EVERYTHING)
     assert view.uninstall_confirm_button.text() == (
         "Uninstall this server and delete my characters"
     )
@@ -7475,12 +7460,12 @@ def test_a_plan_with_no_character_volume_offers_no_keep_and_says_delete(
     """T188 fix round 1 (M3): there is nothing to keep, so a tick from before cannot promise it."""
     fake = _VolumeGoesAway(tmp_path)
     view = _uninstall_view(ps, tmp_path, fake)
-    view.uninstall_button.click()
+    _answer_removal(view, RemovalChoice.EVERYTHING)
     view.keep_characters_check.click()
     assert view.uninstall_confirm_button.text() == UNINSTALL_KEEP
 
     fake.volume = False
-    view.uninstall_button.click()
+    _answer_removal(view, RemovalChoice.EVERYTHING)
 
     assert view.keep_characters_check.isHidden() is True
     assert view.keep_characters_check.isChecked() is False
@@ -7730,12 +7715,17 @@ def test_a_ticked_plan_says_the_client_data_volume_is_kept_not_removed(
     assert removed and "_client-data" not in removed[0], said
 
 
-def test_a_tab_with_no_uninstall_wired_shows_no_uninstall_controls(
+def test_a_tab_with_no_uninstall_wired_shows_no_uninstall_plan_widgets(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
-    """8.9a is WotLK; 8.9b is Vanilla. A tree without the seam offers no button."""
+    """8.9a is WotLK; 8.9b is Vanilla. A tree without the seam offers no plan of its own."""
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
-    assert view.uninstall_button is None
+    assert view.services.uninstall is None
+    assert not view.uninstall_absent_label.isHidden()
+    offered: list[tuple[RemovalChoice, ...]] = []
+    view._ask_removal = lambda choices: offered.append(choices) or None  # type: ignore[method-assign]
+    view.remove_server_button.click()
+    assert offered == [(RemovalChoice.OFF_THE_LIST,)]
 
 
 def _highlighted(button: object) -> bool:
@@ -7743,10 +7733,10 @@ def _highlighted(button: object) -> bool:
     return bool(button.property("primary"))  # type: ignore[attr-defined]
 
 
-# -- "Forget this install…", for a folder that is gone (T34) -------------------
+# -- "Remove this server…" highlighted, for a folder that is gone (T34, T95, T695) --
 
 
-def test_the_forget_button_is_plain_while_the_folder_exists_and_highlighted_once_gone(
+def test_the_remove_press_is_plain_while_the_folder_exists_and_highlighted_once_gone(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
     """Re-checked on the same poll as the status line, not only at tab-build time.
@@ -7757,19 +7747,18 @@ def test_the_forget_button_is_plain_while_the_folder_exists_and_highlighted_once
     """
     fake = _FakeUninstall(tmp_path)
     view = _uninstall_view(ps, tmp_path, fake)
-    assert view.forget_install_button is not None
     view.refresh_status()
-    assert not _highlighted(view.forget_install_button)
+    assert not _highlighted(view.remove_server_button)
 
     shutil.rmtree(tmp_path)
     view.refresh_status()
-    assert _highlighted(view.forget_install_button)
+    assert _highlighted(view.remove_server_button)
     # Mutation: negate `_update_forget_visibility()`'s `is_dir()` check (or
     # drop it) and this assertion is what catches it — the button would then
     # be highlighted for the folder that exists and plain for the one that is gone.
 
 
-def test_the_forget_button_stays_plain_for_a_wsl_install_with_no_folder_here(
+def test_the_remove_press_stays_plain_for_a_wsl_install_with_no_folder_here(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
     """`server_dir.is_dir()` asks THIS process, which is right for a native
@@ -7782,17 +7771,16 @@ def test_the_forget_button_stays_plain_for_a_wsl_install_with_no_folder_here(
     view.services.controller.wsl_distro = "dml-arch"
     shutil.rmtree(tmp_path)
     view.refresh_status()
-    assert view.forget_install_button is not None
-    assert not _highlighted(view.forget_install_button)
+    assert not _highlighted(view.remove_server_button)
     # Mutation: drop the `wsl_distro is None` clause from
     # `_update_forget_visibility()` and this fails — the button would light up
     # for a distro path this process cannot evaluate.
 
 
-# -- "Remove from Yu'lon…" (T95): the tab asks the window; the window decides --
+# -- "Remove this server…" (T695): one press, the dialog routes; the window decides --
 
 
-def test_every_tab_has_the_remove_button_uninstall_or_not(
+def test_every_tab_has_the_remove_press_uninstall_or_not(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
     """TBC and Tortoise have no Uninstall seam: until T95 they had no way off the list at all."""
@@ -7802,18 +7790,16 @@ def test_every_tab_has_the_remove_button_uninstall_or_not(
 
     view = ControllerView(TBC, _services(ps, tmp_path, []), status_poll_ms=0)
     assert view.services.uninstall is None
-    assert view.uninstall_button is None, "T95 adds no Uninstall"
-    assert view.forget_install_button is not None
-    assert view.forget_install_button.text() == forgetting.BUTTON_LABEL
     assert controller_view_module.REMOVE_FROM_YULON == forgetting.BUTTON_LABEL
+    assert view.remove_server_button.text() == controller_view_module.REMOVE_THIS_SERVER
     view.refresh_status()
-    assert not view.forget_install_button.isHidden(), "decision 4: always on the Server tab"
-    assert view.forget_install_button.focusPolicy() & Qt.FocusPolicy.TabFocus, "no gamepad reach"
-    assert not _highlighted(view.forget_install_button)
+    assert not view.remove_server_button.isHidden(), "decision 4: always on the Server tab"
+    assert view.remove_server_button.focusPolicy() & Qt.FocusPolicy.TabFocus, "no gamepad reach"
+    assert not _highlighted(view.remove_server_button)
     shutil.rmtree(tmp_path)
     view.refresh_status()
-    assert not view.forget_install_button.isHidden()
-    assert _highlighted(view.forget_install_button)
+    assert not view.remove_server_button.isHidden()
+    assert _highlighted(view.remove_server_button)
     # Mutation: put back `if self.services.uninstall is None: return False` in
     # `_forget_is_eligible()` and the last assertion fails.
 
@@ -8098,8 +8084,7 @@ def test_a_force_stop_warning_from_another_stop_path_does_not_reach_the_next_sto
     fake.on_look = lambda: view.stop_anyway_button.click() if fake.looks == 2 else None
     view.stop_for_removal()
     _loading_vanilla(view, monkeypatch, [_HEARS])
-    view._remove_armed = True
-    view.remove_containers()
+    view._remove_containers_now()
     assert docker.WORLD_STOPPED_ANYWAY not in view.problem_label.text()
 
 
@@ -11180,7 +11165,7 @@ def test_a_clone_matched_in_one_family_is_not_listed_again_as_unknown_in_another
     assert bmah[0].data.family == "keg" and bmah[0].data.catalogued is True
 
 
-def test_the_forget_button_is_highlighted_even_when_the_status_poll_cannot_reach_docker(
+def test_the_remove_press_is_highlighted_even_when_the_status_poll_cannot_reach_docker(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
     """The button's whole case is an install that is gone — Docker usually with it (T54).
@@ -11214,9 +11199,8 @@ def test_the_forget_button_is_highlighted_even_when_the_status_poll_cannot_reach
 
     view.refresh_status()
 
-    assert view.forget_install_button is not None
     assert _highlighted(
-        view.forget_install_button
+        view.remove_server_button
     ), "the poll failed, so the user is told to press a button they cannot see"
     # The failure is still reported — this must not paper over Docker being gone.
     assert not view.docker_banner.isHidden()
@@ -19437,7 +19421,7 @@ def test_every_sub_tab_but_tuning_scrolls_instead_of_squeezing(
 def _server_with_the_plan_up(
     tmp_path: Path, size: tuple[int, int] = T191_SIZES[0]
 ) -> tuple[ControllerView, Any, Any]:
-    """WotLK's Server tab in the real window at `size`, with Uninstall… pressed.
+    """WotLK's Server tab in the real window at `size`, with the plan up through the dialog.
 
     The factory's wiring, as the app builds it (the client folder row, the
     command channel), with only the plan's answer fixed. Returns the view, the
@@ -19463,8 +19447,7 @@ def _server_with_the_plan_up(
     view = ControllerView(WOTLK, services, status_poll_ms=0)
     window, _tab = _controller_in_the_real_window(view, "Server")
     _at(window, size)
-    assert view.uninstall_button is not None
-    view.uninstall_button.click()
+    _answer_removal(view, RemovalChoice.EVERYTHING)
     process_events()
     return view, window, view._tabs.currentWidget()
 
@@ -19552,10 +19535,8 @@ def test_the_server_tab_is_five_sections_with_every_control_in_its_own(
         ],
         "Help": [view.help_button],
         "Danger zone": [
-            view.remove_button,
+            view.remove_server_button,
             view.repair_button,
-            view.forget_install_button,
-            view.uninstall_button,
             view.repair_label,
             view.uninstall_label,
             view.keep_characters_check,
@@ -19693,15 +19674,12 @@ def test_the_danger_zone_is_bordered_red_and_its_buttons_keep_the_windows_style(
         _pixel_near(realm, 0, realm.height() // 2), QColor(COLOR_DANGER)
     ), "the Realm section is red too: the sheet is not scoped to the Danger zone"
     view.stop_button.setEnabled(True)
-    view.remove_button.setEnabled(True)
+    view.remove_server_button.setEnabled(True)
     process_events()
     # Its edge and its fill, for a danger button and a plain one, each against
     # its twin outside the zone: a sheet that reached the buttons shows first
     # in their borders.
-    for inside_button, outside_button in (
-        (view.remove_button, view.stop_button),
-        (view.forget_install_button, view.refresh_button),
-    ):
+    for inside_button, outside_button in ((view.remove_server_button, view.stop_button),):
         for x in (0, 4):
             inside = _pixel_near(inside_button, x, inside_button.height() // 2)
             outside = _pixel_near(outside_button, x, outside_button.height() // 2)
@@ -19716,73 +19694,59 @@ def test_a_game_with_no_uninstall_says_so_in_the_danger_zone(
 ) -> None:
     """A27: Tortoise has no Uninstall; the zone says what it has instead."""
     view = _server_view(TORTOISE, tmp_path, uninstall=None)
-    assert view.uninstall_button is None
     label = view.uninstall_absent_label
     assert not label.isHidden()
     assert _section_of(view, label) == "Danger zone"
-    assert "Remove from Yu'lon" in label.text() and TORTOISE.name in label.text()
+    assert "Remove this server" in label.text() and TORTOISE.name in label.text()
     assert str(view.services.controller.server_dir) in label.text()
 
     wotlk = _server_view(WOTLK, tmp_path / "w", uninstall=_PlanOnlyUninstall(tmp_path))
     assert wotlk.uninstall_absent_label.isHidden()
 
 
-def test_the_armed_warning_shows_in_the_danger_zone_under_its_press(
+def test_the_remove_outcome_shows_in_the_danger_zone_under_its_press(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
-    """At 960 Realm's `problem_label` is a page away from the press that arms.
+    """At 960 Realm's `problem_label` is a page away from the press.
 
     The page starts at its top, where `problem_label` is, and the press is then
-    brought on screen as the pad brings it (`_scroll_into_view`). The warning
-    has to be there, in the Danger zone, directly under the presses; and
-    Realm's label keeps what it said before.
+    brought on screen as the pad brings it (`_scroll_into_view`). How the
+    remove went has to be there, in the Danger zone, directly under the
+    presses.
     """
     from yulon.ui.gamepad import _scroll_into_view
 
     view, _window, page = _server_with_the_plan_up(tmp_path)
     page.verticalScrollBar().setValue(0)
-    view.problem_label.setText("A message from before the press.")
     process_events()
-    assert not _whole_in_the_page(view.remove_button, page), "the press was on screen already"
+    assert not _whole_in_the_page(
+        view.remove_server_button, page
+    ), "the press was on screen already"
     label = view.danger_label
-    assert label.isHidden(), "a warning before anything was armed"
-
-    view.remove_button.click()
-    _scroll_into_view(view.remove_button)
-    process_events()
-    assert view.remove_button.text() == controller_view_module.REMOVE_ARMED
-    assert _section_of(view, label) == "Danger zone"
-    assert not label.isHidden() and "characters are NOT" in label.text(), label.text()
-    assert _whole_in_the_page(view.remove_button, page)
-    assert _whole_in_the_page(label, page), "the warning is off screen under its press"
-    row = view.remove_button.parentWidget()
-    assert label.y() >= row.geometry().bottom(), "the warning is not under the presses"
-    assert view.problem_label.text() == "A message from before the press."
-
-    view.recheck()
-    process_events()
-    assert label.isHidden() and label.text() == "", "the warning outlived the cancel"
 
     view.services.controller.remove = lambda: True  # type: ignore[method-assign]
-    view.remove_button.click()
-    assert not label.isHidden()
-    view.remove_button.click()
-    pump_until(lambda: "Containers removed" in label.text(), "the remove to finish")
-    assert "characters are NOT" not in label.text(), "the warning outlived the press it armed"
-    assert not label.isHidden(), "how the remove went is said where it was pressed"
+    _answer_removal(view, RemovalChoice.REMOVE_CONTAINERS)
+    _scroll_into_view(view.remove_server_button)
+    process_events()
+    assert _section_of(view, label) == "Danger zone"
+    assert not label.isHidden() and "Containers removed" in label.text(), label.text()
+    assert _whole_in_the_page(view.remove_server_button, page)
+    assert _whole_in_the_page(label, page), "the outcome is off screen under its press"
+    row = view.remove_server_button.parentWidget()
+    assert label.y() >= row.geometry().bottom(), "the outcome is not under the presses"
 
 
-def test_a_press_at_the_bottom_edge_brings_its_warning_on_screen(
+def test_a_press_at_the_bottom_edge_brings_its_outcome_on_screen(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
-    """A mouse press on a remove button the window's bottom edge cuts under.
+    """A mouse press on a remove press the window's bottom edge cuts under.
 
-    Nothing moves the focus, so the pad's scroll does not run: the warning
+    Nothing moves the focus, so the pad's scroll does not run: the outcome
     would open under the edge unless the page is asked to show it.
     """
     view, _window, page = _server_with_the_plan_up(tmp_path)
     body = page.widget()
-    button = view.remove_button
+    button = view.remove_server_button
     bottom = button.mapTo(body, button.rect().bottomLeft()).y()
     page.verticalScrollBar().setValue(bottom + 1 - page.viewport().height())
     process_events()
@@ -19790,10 +19754,11 @@ def test_a_press_at_the_bottom_edge_brings_its_warning_on_screen(
     below = button.mapTo(page.viewport(), button.rect().bottomLeft()).y()
     assert page.viewport().height() - below < 8, "the press is not at the bottom edge"
 
-    button.click()
+    view.services.controller.remove = lambda: True  # type: ignore[method-assign]
+    _answer_removal(view, RemovalChoice.REMOVE_CONTAINERS)
     process_events()
-    assert _whole_in_the_page(view.danger_label, page), "the warning opened under the edge"
-    assert _whole_in_the_page(button, page), "the press it warns about scrolled away"
+    assert _whole_in_the_page(view.danger_label, page), "the outcome opened under the edge"
+    assert _whole_in_the_page(button, page), "the press it reports on scrolled away"
 
 
 @pytest.mark.parametrize("outcome", ["done", "refused"])
@@ -19890,9 +19855,7 @@ def test_a_remove_that_ends_on_another_tab_leaves_the_server_page_where_it_was(
         return True
 
     view.services.controller.remove = remove_while_away  # type: ignore[method-assign]
-    view.remove_button.click()
-    process_events()
-    view.remove_button.click()
+    _answer_removal(view, RemovalChoice.REMOVE_CONTAINERS)
     process_events()
     assert "Containers removed" in view.danger_label.text(), view.danger_label.text()
     assert view._tabs.tabText(view._tabs.currentIndex()) == "Console"
@@ -19951,14 +19914,13 @@ def test_realm_and_play_end_at_their_last_row_when_nothing_is_said(
 def _server_states(view: ControllerView) -> Iterator[str]:
     """Put the Server tab through the states that grow it; yield each one's name."""
     yield "idle"
-    assert view.uninstall_button is not None
-    view.uninstall_button.click()
+    _answer_removal(view, RemovalChoice.EVERYTHING)
     process_events()
     yield "plan up"
-    view.remove_button.click()
+    view.services.controller.remove = lambda: True  # type: ignore[method-assign]
+    _answer_removal(view, RemovalChoice.REMOVE_CONTAINERS)
     process_events()
-    assert view.remove_button.text() == controller_view_module.REMOVE_ARMED
-    yield "remove armed"
+    yield "remove done"
     view._disarm_actions()
     view.problem_label.setText(" ".join(["The server refused to stop because of a reason."] * 12))
     process_events()
@@ -19973,11 +19935,10 @@ def _server_states(view: ControllerView) -> Iterator[str]:
 def test_the_server_tab_is_whole_in_every_state_at_every_size(
     qapp: object, ps: _Ps, tmp_path: Path, size: tuple[int, int]
 ) -> None:
-    """Nothing cut, overlapped or sideways: idle, plan up, armed, a long refusal, the stop offers.
+    """Nothing cut, overlapped or sideways: idle, plan up, remove done, a long refusal, stops.
 
-    The plan-up state at 960x640 is T188's after-render: "Refresh", "Stop and
-    remove containers…", "Remove from Yu'lon…" and "Add to Steam…" cut short in
-    one row of ten.
+    The plan-up state at 960x640 is T188's after-render: "Refresh",
+    "Remove this server…" and "Add to Steam…" cut short in one row of ten.
     """
     from yulon.ui.gamepad import _scroll_into_view
 
@@ -19990,15 +19951,15 @@ def test_the_server_tab_is_whole_in_every_state_at_every_size(
         process_events()
         if found := _page_faults(page):
             faults[shown] = found
-        if shown == "remove armed":
-            # The warning is next to the press that armed it, on screen with it.
-            _scroll_into_view(view.remove_button)
+        if shown == "remove done":
+            # The outcome is next to the press that ran it, on screen with it.
+            _scroll_into_view(view.remove_server_button)
             process_events()
             label = view.danger_label
             assert _section_of(view, label) == "Danger zone", size
-            assert not label.isHidden() and "characters are NOT" in label.text(), size
-            assert _whole_in_the_page(view.remove_button, page), size
-            assert _whole_in_the_page(label, page), f"the armed warning is off screen at {size}"
+            assert not label.isHidden() and "Containers removed" in label.text(), size
+            assert _whole_in_the_page(view.remove_server_button, page), size
+            assert _whole_in_the_page(label, page), f"the remove outcome is off screen at {size}"
     assert faults == {}, f"the Server tab at {size}: {faults}"
 
 
@@ -20015,7 +19976,7 @@ def test_the_server_tabs_buttons_keep_their_own_width_at_1080p(
     view = _server_view(WOTLK, tmp_path, uninstall=_PlanOnlyUninstall(tmp_path))
     window, tab = _controller_in_the_real_window(view, "Server")
     _at(window, T191_SIZES[2])
-    view.uninstall_button.click()
+    _answer_removal(view, RemovalChoice.EVERYTHING)
     process_events()
     wide = [
         f"{b.text()!r}: {b.width()} for a hint of {b.sizeHint().width()}"
@@ -20044,7 +20005,7 @@ def test_the_pad_reaches_every_server_control_and_walks_down_the_sections_in_ord
     view = _server_view(WOTLK, tmp_path, uninstall=_PlanOnlyUninstall(tmp_path))
     window, tab = _controller_in_the_real_window(view, "Server")
     _at(window, size)
-    view.uninstall_button.click()
+    _answer_removal(view, RemovalChoice.EVERYTHING)
     process_events()
     nav, keyboard, gamepad = install_gamepad_navigation(window)
     try:
@@ -30242,7 +30203,7 @@ def test_a_running_start_greys_the_server_presses_with_a_wait(
     The Start never answers here, so the tab stays busy for the asserts.
     """
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
-    base = view.forget_install_button.toolTip()
+    base = view.remove_server_button.toolTip()
     view._run = lambda *_a, **_k: None  # type: ignore[method-assign]
 
     view.start_button.click()
@@ -30254,8 +30215,7 @@ def test_a_running_start_greys_the_server_presses_with_a_wait(
         view.start_button,
         view.stop_button,
         view.refresh_button,
-        view.remove_button,
-        view.forget_install_button,
+        view.remove_server_button,
     ):
         assert not button.isEnabled(), button.text()
         assert button.toolTip() == "Wait: Start is running.", button.text()
@@ -30263,7 +30223,7 @@ def test_a_running_start_greys_the_server_presses_with_a_wait(
     view._set_busy(False)
 
     assert "Wait:" not in line.text()
-    assert view.forget_install_button.toolTip() == base
+    assert view.remove_server_button.toolTip() == base
 
 
 def test_the_server_line_says_why_start_or_stop_is_greyed_after_a_reading(
@@ -30284,41 +30244,6 @@ def _shown_in_row(press: Any) -> list[Any]:
     flow = press.parentWidget().flow()
     widgets = [flow.itemAt(i).widget() for i in range(flow.count())]
     return [w for w in widgets if w is not None and not w.isHidden()]
-
-
-def test_an_armed_remove_offers_cancel_beside_it(qapp: object, ps: _Ps, tmp_path: Path) -> None:
-    """C35: the way out of an armed press was "Press Refresh to cancel.", a press elsewhere.
-
-    Mutation: leave Cancel's click unconnected and the remove stays armed.
-    """
-    from PySide6.QtWidgets import QGroupBox
-
-    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
-    calls = _watch_remove(view)
-    cancel = view.arm_cancel_button
-    assert cancel.isHidden() and cancel.text() == "Cancel"
-
-    view.remove_button.click()
-
-    assert not cancel.isHidden()
-    danger = view.findChild(QGroupBox, "danger-zone")
-    assert danger is not None and danger.isAncestorOf(cancel)
-    row = _shown_in_row(view.remove_button)
-    assert abs(row.index(cancel) - row.index(view.remove_button)) == 1, [b.text() for b in row]
-    said = view.danger_label.text()
-    assert said.endswith("Press it again to go ahead, or Cancel."), said
-    assert "Press Refresh to cancel" not in said
-
-    view.problem_label.setText("Port 3724 is in use by another program.")
-    cancel.click()
-
-    assert view.remove_button.text() == controller_view_module.REMOVE_IDLE
-    assert cancel.isHidden()
-    assert view.danger_label.isHidden()
-    # Fix round 1, F5 (the lead's ruling): only what the armed press wrote goes.
-    assert view.problem_label.text() == "Port 3724 is in use by another program."
-    view.remove_button.click()
-    assert calls == [], "the press after Cancel removed something"
 
 
 def test_an_armed_repair_offers_cancel_beside_it(qapp: object, ps: _Ps, tmp_path: Path) -> None:
@@ -30558,13 +30483,14 @@ def test_cancel_leaves_a_pointer_at_the_docker_box_alone(
     view.start_server()
     pointer = controller_view_module.START_FAILED_NO_DOCKER
     assert view.problem_label.text() == pointer
-    _watch_remove(view)
+    _watch_repair(view)
+    _db_up(view, ps)
 
-    view.remove_button.click()
+    view.repair_import()
     view.arm_cancel_button.click()
 
     assert view.problem_label.text() == pointer
-    assert view.remove_button.text() == controller_view_module.REMOVE_IDLE
+    assert view.repair_button.text() == controller_view_module.REPAIR_IDLE
     assert view.docker_banner.isVisibleTo(view)
 
 
