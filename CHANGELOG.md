@@ -21,6 +21,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Lumenveil graphics mod as an optional WotLK client extra, with an **Update Lumenveil** button.
 
 ### Fixed
+- The install's free-space check now measures Docker's containerd images too, so a full root disk stops it early.
 - On a server inside WSL, each module row on the Modules tab shows its version again.
 - Removing a server now tells you where its kept backups went after its tab closes, instead of losing the message with the tab.
 - A failed build in a module you just installed now says the module is new and your server still runs its old build.

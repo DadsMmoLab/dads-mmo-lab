@@ -379,6 +379,90 @@ def test_no_docker_binary_leaves_the_linux_data_root_unknown(
     assert platform.docker_desktop_data_root() is None
 
 
+# -- the containerd image store is a second disk (Docker 29) -------------------
+# Measured on yulon-ubuntu2, 2026-10-28: the owner had moved `data-root` to a
+# 135 GB disk (`/mnt/coa/docker`) but the containerd image store and build cache
+# kept their layers in `/var/lib/containerd` on the root disk, which had 0 B
+# free. `docker info` reports `DockerRootDir` only, so the data-root answer was
+# the wrong disk and the first build died with "no space left on device".
+_CONTAINERD_STORE_INFO = (
+    '{"OperatingSystem": "Ubuntu 26.04.1 LTS", "DockerRootDir": "/mnt/coa/docker", '
+    '"Driver": "overlayfs", "DriverStatus": [["driver-type", "io.containerd.snapshotter.v1"]]}'
+)
+_OVERLAY2_INFO = (
+    '{"OperatingSystem": "Ubuntu 26.04.1 LTS", "DockerRootDir": "/var/lib/docker", '
+    '"Driver": "overlay2", "DriverStatus": []}'
+)
+
+
+@pytest.mark.parametrize(
+    "info",
+    [
+        _CONTAINERD_STORE_INFO,
+        # The `Storage Driver` alone can say it (Docker reports `overlayfs`
+        # for the containerd snapshotter).
+        '{"OperatingSystem": "Ubuntu 26.04.1 LTS", "DockerRootDir": "/var/lib/docker", '
+        '"Driver": "overlayfs", "DriverStatus": []}',
+        # …and so can `DriverStatus` alone, when the driver name does not.
+        '{"OperatingSystem": "Ubuntu 26.04.1 LTS", "DockerRootDir": "/var/lib/docker", '
+        '"DriverStatus": [["driver-type", "io.containerd.snapshotter.v1"]]}',
+    ],
+)
+def test_a_containerd_store_names_its_own_root(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, info: str
+) -> None:
+    monkeypatch.setattr(platform, "docker_program", lambda: "docker")
+    root = tmp_path / "containerd"
+    root.mkdir()
+    monkeypatch.setattr(platform, "_CONTAINERD_ROOT", root)
+    assert platform.docker_containerd_root(_canned(info)) == root
+
+
+def test_an_overlay2_engine_has_no_containerd_root_to_measure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The disk move that is safe today stays a one-disk answer."""
+    monkeypatch.setattr(platform, "docker_program", lambda: "docker")
+    root = tmp_path / "containerd"
+    root.mkdir()
+    monkeypatch.setattr(platform, "_CONTAINERD_ROOT", root)
+    assert platform.docker_containerd_root(_canned(_OVERLAY2_INFO)) is None
+
+
+@pytest.mark.parametrize("shape", ["absent", "a-file"])
+def test_a_containerd_root_that_cannot_be_read_keeps_todays_answer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, shape: str
+) -> None:
+    """No directory and not a directory are both "could not tell", never DockerRootDir's number."""
+    monkeypatch.setattr(platform, "docker_program", lambda: "docker")
+    root = tmp_path / "containerd"
+    if shape == "a-file":
+        root.write_text("not a directory", encoding="utf-8")
+    monkeypatch.setattr(platform, "_CONTAINERD_ROOT", root)
+    assert platform.docker_containerd_root(_canned(_CONTAINERD_STORE_INFO)) is None
+
+
+def test_docker_desktops_wsl_integration_is_not_measured_at_the_distros_root(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Desktop's containerd store lives inside its VM, on the vhdx already measured.
+
+    The distro the launcher runs in has no `/var/lib/containerd` for that
+    daemon at all, so a directory that happens to exist there belongs to
+    something else.
+    """
+    monkeypatch.setattr(platform, "docker_program", lambda: "docker")
+    root = tmp_path / "containerd"
+    root.mkdir()
+    monkeypatch.setattr(platform, "_CONTAINERD_ROOT", root)
+    info = (
+        '{"OperatingSystem": "Docker Desktop", "DockerRootDir": "/var/lib/docker", '
+        '"Driver": "overlayfs", "DriverStatus": '
+        '[["driver-type", "io.containerd.snapshotter.v1"]]}'
+    )
+    assert platform.docker_containerd_root(_canned(info)) is None
+
+
 def test_windows_drive_mounts_are_single_letters_only(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

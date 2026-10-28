@@ -5961,6 +5961,98 @@ def _through_wsl_mount(location: PureWindowsPath) -> Path | None:
     return None
 
 
+_CONTAINERD_ROOT = Path("/var/lib/containerd")
+"""Where a Linux daemon's containerd image store writes.
+
+Docker 29 with the containerd image store keeps its layers and build cache
+here, NOT under `DockerRootDir`: `data-root` moves `/var/lib/docker`, and the
+containerd store stays on the root disk. Measured on yulon-ubuntu2 on
+2026-10-28 — `DockerRootDir` was `/mnt/coa/docker` on a 135 GB disk, this
+directory was on the root disk with 0 B free, and the first build died with
+"no space left on device" while preflight reported 135 GB free.
+
+`docker info` does not report containerd's own configured `root`
+(`/etc/containerd/config.toml` may move it), so this is the path used, and a
+daemon that keeps it elsewhere is not something this can tell. A path that is
+not a directory here is "could not tell", and the caller keeps the data-root
+answer.
+"""
+
+_CONTAINERD_SNAPSHOTTER = "io.containerd.snapshotter.v1"
+"""The snapshotter name that says the image store is containerd's."""
+
+
+def _containerd_image_store(info: dict[str, object]) -> bool:
+    """Did this daemon say it uses the containerd image store?
+
+    Docker 29's containerd store reports `Driver=overlayfs` (the classic
+    overlay2 store reports `overlay2`) and/or a `DriverStatus` pair
+    `["driver-type", "io.containerd.snapshotter.v1"]`. Either is enough; a
+    daemon whose answer says neither is read exactly as it was before this
+    existed.
+    """
+    driver = info.get("Driver")
+    if isinstance(driver, str) and driver.strip() in ("overlayfs", _CONTAINERD_SNAPSHOTTER):
+        return True
+    status = info.get("DriverStatus")
+    if not isinstance(status, list):
+        return False
+    for entry in status:
+        if isinstance(entry, (list, tuple)) and len(entry) >= 2:
+            key, value = entry[0], entry[1]
+        elif isinstance(entry, str):
+            key, _, value = entry.partition(":")
+        else:
+            continue
+        if (
+            isinstance(key, str)
+            and key.strip().lower() in ("driver-type", "driver type")
+            and isinstance(value, str)
+            and _CONTAINERD_SNAPSHOTTER in value
+        ):
+            return True
+    return False
+
+
+def docker_containerd_root(run: RunCmd | None = None) -> Path | None:
+    """The disk the containerd image store writes, or None when this daemon has none.
+
+    Linux only: the caller asks it only when `detect()` answered "linux". On
+    Docker Desktop (including its WSL integration) the store is inside the
+    VM's own disk, which `_windows_data_root()`/`_desktop_wsl_vhdx()` already
+    measure, so this answers None there.
+
+    None is also the answer for overlay2 (no containerd store), for a daemon
+    that did not answer, and for a containerd root that is not a readable
+    directory — every one of those keeps today's answer, which is the data
+    root's free space. It never falls back to `DockerRootDir` with a *number*
+    for containerd: a path that cannot be read is not a zero.
+    """
+    info = docker_info(run)
+    if info is None:
+        return None
+    operating_system = info.get("OperatingSystem")
+    if (
+        isinstance(operating_system, str)
+        and operating_system.strip() == _DOCKER_DESKTOP_OPERATING_SYSTEM
+    ):
+        return None
+    root = info.get("DockerRootDir")
+    if not isinstance(root, str) or not root.strip():
+        logger.info(f"docker info reported DockerRootDir={root!r}; no data root to fall back on")
+        return None
+    if not _containerd_image_store(info):
+        return None
+    try:
+        if not _CONTAINERD_ROOT.is_dir():
+            logger.info(f"{_CONTAINERD_ROOT} is not a directory; keeping the data-root answer")
+            return None
+    except OSError as exc:
+        logger.info(f"could not look at {_CONTAINERD_ROOT}: {exc}")
+        return None
+    return _CONTAINERD_ROOT
+
+
 def _linux_data_root(run: RunCmd | None) -> Path | None:
     """Where a daemon reached from a Linux (or WSL) launcher actually keeps its images.
 

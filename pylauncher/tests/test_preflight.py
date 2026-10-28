@@ -447,6 +447,121 @@ def test_the_one_drive_row_reports_the_smaller_of_the_two_readings() -> None:
     assert "not a pass" in _space_rows(neither)[0].detail
 
 
+CONTAINERD = Path("/var/lib/containerd")
+"""Where Docker 29's containerd image store writes, measured on yulon-ubuntu2."""
+
+
+def test_a_containerd_store_on_the_root_disk_refuses_although_the_data_root_has_room() -> None:
+    """yulon-ubuntu2, 2026-10-28: data-root moved to a 135 GB disk, root disk at 0 B.
+
+    Docker 29 with the containerd image store keeps layers and build cache in
+    /var/lib/containerd, NOT under `DockerRootDir`. The preflight read the moved
+    data root only, reported 135 GB free, and the first build died mid-way with
+    "no space left on device". The row must report the smaller of the two.
+    """
+    moved = facts(
+        data_root=Path("/mnt/coa/docker"),
+        data_root_free=135 * GIB,
+        server_dir_free=135 * GIB,
+        same_volume=False,
+        containerd_root=CONTAINERD,
+        containerd_free=0,
+    )
+    report = preflight.evaluate(ENTRY, SERVER_DIR, moved)
+    refused = [check for check in report.refusals() if check.name == "free space on Docker's disk"]
+    assert len(refused) == 1, [check.line() for check in report.checks]
+    assert "0 GB free" in refused[0].detail, refused[0].detail
+    # The sentence names the disk that is short, in words, not a command.
+    assert str(CONTAINERD) in refused[0].detail, refused[0].detail
+    assert "135 GB" not in refused[0].detail, refused[0].detail
+    assert str(CONTAINERD) in refused[0].remedy, refused[0].remedy
+
+
+def test_containerd_with_little_room_warns_although_the_data_root_has_room() -> None:
+    moved = facts(
+        data_root=Path("/mnt/coa/docker"),
+        data_root_free=135 * GIB,
+        server_dir_free=135 * GIB,
+        same_volume=False,
+        containerd_root=CONTAINERD,
+        containerd_free=45 * GIB,
+    )
+    report = preflight.evaluate(ENTRY, SERVER_DIR, moved)
+    assert verdict(report, "free space on Docker's disk") == "warn"
+    row = [check for check in report.checks if check.name == "free space on Docker's disk"][0]
+    assert "45 GB free" in row.detail, row.detail
+    assert str(CONTAINERD) in row.detail, row.detail
+
+
+def test_the_data_root_is_named_when_it_is_the_shorter_of_the_two_disks() -> None:
+    """Names the path that is short, whichever of the two it is."""
+    moved = facts(
+        data_root=Path("/mnt/coa/docker"),
+        data_root_free=20 * GIB,
+        server_dir_free=135 * GIB,
+        same_volume=False,
+        containerd_root=CONTAINERD,
+        containerd_free=135 * GIB,
+    )
+    row = [
+        check
+        for check in preflight.evaluate(ENTRY, SERVER_DIR, moved).refusals()
+        if check.name == "free space on Docker's disk"
+    ][0]
+    assert "20 GB free" in row.detail, row.detail
+    assert str(moved.data_root) in row.detail, row.detail
+    assert str(CONTAINERD) not in row.detail, row.detail
+
+
+def test_an_unread_containerd_path_keeps_the_data_roots_answer() -> None:
+    """A reading that could not be taken is not a zero, and not a new sentence."""
+    moved = facts(
+        data_root=Path("/mnt/coa/docker"),
+        data_root_free=135 * GIB,
+        server_dir_free=135 * GIB,
+        same_volume=False,
+        containerd_root=CONTAINERD,
+        containerd_free=None,
+    )
+    report = preflight.evaluate(ENTRY, SERVER_DIR, moved)
+    assert verdict(report, "free space on Docker's disk") == "pass"
+    row = [check for check in report.checks if check.name == "free space on Docker's disk"][0]
+    assert str(CONTAINERD) not in row.detail, row.detail
+
+
+def test_an_overlay2_engine_is_measured_by_its_data_root_alone() -> None:
+    """No containerd store: the row is exactly today's row."""
+    plain = facts(
+        data_root=Path("/var/lib/docker"),
+        data_root_free=135 * GIB,
+        server_dir_free=135 * GIB,
+        same_volume=False,
+        containerd_root=None,
+        containerd_free=None,
+    )
+    report = preflight.evaluate(ENTRY, SERVER_DIR, plain)
+    assert verdict(report, "free space on Docker's disk") == "pass"
+    disk = [check for check in report.checks if check.name == "free space on Docker's disk"][0]
+    assert disk.detail == "135 GB free", disk.detail
+
+
+def test_the_one_drive_row_also_reports_a_short_containerd_disk() -> None:
+    """The data root and the folder share a drive; containerd still lives elsewhere."""
+    shared = facts(
+        data_root=Path("/mnt/coa/docker"),
+        data_root_free=135 * GIB,
+        server_dir_free=135 * GIB,
+        same_volume=True,
+        containerd_root=CONTAINERD,
+        containerd_free=0,
+    )
+    report = preflight.evaluate(ENTRY, SERVER_DIR, shared)
+    row = _space_rows(report)[0]
+    assert row.verdict == "refuse", row.line()
+    assert "0 GB free" in row.detail, row.detail
+    assert str(CONTAINERD) in row.detail, row.detail
+
+
 def test_macos_keeps_both_rows_because_there_they_are_not_duplicates() -> None:
     """Collapsing them on a Mac would promote an `unchecked` to a pass.
 
@@ -1199,6 +1314,70 @@ def test_gather_on_macos_assembles_platform_facts(tmp_path: Path) -> None:
     # On macOS, ample data root free space is unchecked, not pass
     assert verdict(report, "free space on Docker's disk") == "unchecked"
     assert verdict(report, "sharing the folder with Docker") == "pass"
+
+
+def test_gather_carries_the_containerd_root_and_its_own_free_space(tmp_path: Path) -> None:
+    """The seam reaches `Facts`, and the row is judged against the shorter disk."""
+    root = tmp_path / "moved" / "docker"
+    containerd = tmp_path / "containerd"
+    containerd.mkdir()
+
+    def free(path: Path) -> int:
+        return 3 * GIB if path == containerd else 135 * GIB
+
+    got = preflight.gather(
+        ENTRY,
+        tmp_path / "server",
+        platform_id=lambda: "linux",
+        docker_ready=lambda: True,
+        compose_ready=lambda: True,
+        compose_version=lambda: None,
+        vm_resources=lambda: None,
+        data_root=lambda: root,
+        containerd_root=lambda: containerd,
+        disk_free=free,
+        dir_problem=lambda _p: None,
+        bind_mount_ok=lambda _p: True,
+        port_conflicts=lambda: [],
+        probe_port=lambda host, port: platform_module.PortProbe(host, port, "unknown", ""),
+        bind_port=_free,
+        port_holders=lambda _ports: docker.PortHolders(),
+        selinux=lambda: False,
+        fs_type=lambda _p: "ext4",
+        in_wsl=lambda: False,
+    )
+    assert got.containerd_root == containerd
+    assert got.containerd_free == 3 * GIB
+    report = preflight.evaluate(ENTRY, tmp_path / "server", got)
+    assert verdict(report, "free space on Docker's disk") == "refuse"
+
+
+def test_gather_does_not_ask_about_containerd_with_no_data_root(tmp_path: Path) -> None:
+    def never() -> Path | None:
+        raise AssertionError("asked about containerd with no data root to compare")
+
+    got = preflight.gather(
+        ENTRY,
+        tmp_path / "server",
+        platform_id=lambda: "linux",
+        docker_ready=lambda: True,
+        compose_ready=lambda: True,
+        compose_version=lambda: None,
+        vm_resources=lambda: None,
+        data_root=lambda: None,
+        containerd_root=never,
+        disk_free=lambda _p: 135 * GIB,
+        dir_problem=lambda _p: None,
+        bind_mount_ok=lambda _p: True,
+        port_conflicts=lambda: [],
+        probe_port=lambda host, port: platform_module.PortProbe(host, port, "unknown", ""),
+        bind_port=_free,
+        port_holders=lambda _ports: docker.PortHolders(),
+        selinux=lambda: False,
+        fs_type=lambda _p: "ext4",
+        in_wsl=lambda: False,
+    )
+    assert (got.containerd_root, got.containerd_free) == (None, None)
 
 
 @pytest.mark.parametrize(
