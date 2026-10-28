@@ -305,6 +305,30 @@ class SchemaMysql(MysqlDocker, Protocol):
 RunningNames = Callable[[], list[str]]
 """What is running right now, by container name — `yulon.docker.status`."""
 
+LOCK_ACQUIRE_S = 10.0
+"""How long the database may take to grant a table read lock before it is reported (T822).
+
+A lock queues behind whatever is already writing that table, and a MyISAM table lock queues
+behind its readers too. Ten seconds is longer than any single statement a world is playing
+through, and short enough that the player behind the copy is still watching for the answer.
+"""
+
+LOCK_RELEASE_S = 10.0
+"""How long the locking client may take to unlock and exit; after that it is killed (T822).
+
+Killing the client releases the lock at the server just as `UNLOCK TABLES` does. What must
+never happen is the block ending while a client still holds the table.
+"""
+
+LOCK_ANSWERED = "yulon-table-locked"
+"""The word the client prints once the server has granted the lock (T822).
+
+The client's stdin is a pipe, so "it did not exit" is not the same as "it holds the lock":
+`FLUSH TABLES … WITH READ LOCK` can wait indefinitely. `SELECT '<this word>'` after the
+statement is the only proof that the lock is held, and `--unbuffered` is what makes that
+answer leave the client's own buffer.
+"""
+
 
 @dataclass(frozen=True)
 class DockerMysql:
@@ -450,6 +474,124 @@ class DockerMysql:
             raise MaintenanceError(f"the query failed: {_stderr(proc)}")
         return (proc.stdout or b"").decode("utf-8", "replace")
 
+    @contextlib.contextmanager
+    def read_lock(self, *statements: str) -> Iterator[None]:
+        """Hold a table read lock from the first of `statements` the server grants (T822).
+
+        A **lock outlives the session that took it and no longer**, so this is the one
+        `DockerMysql` call that does not start a client per statement: it starts ONE client,
+        feeds it the lock, waits for the server to answer, and keeps that process alive until
+        the block ends — then sends `UNLOCK TABLES` and closes it. That is what makes the
+        files a caller copies while inside the block a consistent snapshot rather than a copy
+        taken under a server that is still writing.
+
+        `statements` are tried in order in SEPARATE sessions: MySQL's batch client aborts on
+        the first error, so a refused `FLUSH TABLES … WITH READ LOCK` cannot be followed by
+        `LOCK TABLES … READ` on the same one. The first statement that is answered wins.
+
+        The wait is bounded (`LOCK_ACQUIRE_S`): a lock queued behind a long write is reported
+        rather than waited on indefinitely, because the caller has something useful to say
+        about a copy it could not make consistent.
+
+        Raises:
+            MaintenanceError: no statement could be granted, there is no docker CLI to run, or
+                the client died before answering. The block is never entered on a refusal.
+
+        The session is closed in a `finally`, on every path including an exception inside the
+        block: closing its stdin makes the client exit, and a client that has exited holds no
+        lock. A client that does not exit within `LOCK_RELEASE_S` is killed, which releases
+        the lock at the server the same way.
+        """
+        last: MaintenanceError | None = None
+        session: _LockSession | None = None
+        for statement in statements:
+            try:
+                session = self._lock_session(statement)
+                break
+            except MaintenanceError as exc:
+                last = exc
+                logger.warning(f"a table lock could not be taken: {exc.detail or exc}")
+        if session is None:
+            raise last or MaintenanceError("no table lock was asked for")
+        try:
+            yield
+        finally:
+            session.release()
+
+    def _lock_session(self, statement: str) -> _LockSession:
+        """Start one client, feed it `statement`, and answer once the server has granted it."""
+        prefix = platform.docker_prefix(self.wsl_distro)
+        if prefix is None:
+            raise MaintenanceError(platform.DOCKER_CLI_MISSING_HELP)
+        argv = [
+            *prefix,
+            "exec",
+            "-i",
+            "-e",
+            "MYSQL_PWD",  # value taken from OUR env by `docker exec`, never written here
+            self.db_container,
+            mysql_client(self.db_container, client=self.client),
+            "-uroot",
+            "--batch",
+            "--skip-column-names",
+            # Without it the client's stdout is block-buffered when it is a pipe, and the
+            # answer to the lock would sit in that buffer while we waited for it.
+            "--unbuffered",
+        ]
+        try:
+            proc = subprocess.Popen(  # noqa: S603 - argv is built above, never a shell string
+                argv,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                env=runner.child_env(mysql_env(self.root_password, self.wsl_distro)),
+                creationflags=runner.creationflags(),
+            )
+        except OSError as exc:
+            logger.warning(f"{argv[0]} could not be started: {exc}")
+            raise MaintenanceError(platform.DOCKER_CLI_MISSING_HELP) from exc
+        said: list[str] = []
+        answered = threading.Event()
+
+        def listen() -> None:
+            out = proc.stdout
+            if out is None:  # pragma: no cover - Popen above always gives one
+                answered.set()
+                return
+            for raw in out:
+                line = raw.decode("utf-8", "replace").rstrip("\r\n")
+                said.append(line)
+                if line.strip() == LOCK_ANSWERED:
+                    answered.set()
+            answered.set()  # the client ended: an answer too, and not a granted lock
+
+        threading.Thread(target=listen, name="yulon-db-lock", daemon=True).start()
+        try:
+            assert proc.stdin is not None
+            proc.stdin.write(f"{statement}\nSELECT '{LOCK_ANSWERED}';\n".encode())
+            proc.stdin.flush()
+        except (OSError, ValueError) as exc:
+            logger.warning(f"the lock's client could not be written to: {exc}")
+        granted = answered.wait(LOCK_ACQUIRE_S) and any(
+            line.strip() == LOCK_ANSWERED for line in said
+        )
+        if granted:
+            return _LockSession(proc)
+        stdin = proc.stdin
+        if stdin is not None:
+            try:
+                stdin.close()
+            except (OSError, ValueError) as exc:
+                logger.warning(f"the lock's client could not be closed: {exc}")
+        try:
+            proc.wait(timeout=LOCK_RELEASE_S)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+        words = " / ".join(line for line in said if line.strip())
+        detail = words or f"no answer in {LOCK_ACQUIRE_S:g} seconds"
+        raise MaintenanceError("Yu'lon could not hold the tables still.", detail=detail)
+
     def _dump_argv(self, database: str, ignore: Sequence[str] = ()) -> list[str]:
         """`mysqldump` for one database, with the flags each justified.
 
@@ -576,6 +718,37 @@ class DockerMysql:
         except OSError as exc:
             logger.warning(f"{argv[0]} could not be started: {exc}")
             raise MaintenanceError(platform.DOCKER_CLI_MISSING_HELP) from exc
+
+
+class _LockSession:
+    """One live client holding a table lock, and the one way to let it go (T822).
+
+    A small class and not a dataclass: `proc` is the whole state, and the class exists so
+    `release()` -- the one thing that must not be forgotten -- has somewhere to live.
+    """
+
+    def __init__(self, proc: subprocess.Popen[bytes]) -> None:
+        self.proc = proc
+
+    def release(self) -> None:
+        """`UNLOCK TABLES`, then end the client; a client that will not end is killed.
+
+        Both roads release the lock at the server, which is the property that matters: an
+        exception inside the copy finishes here exactly as an ordinary finish does.
+        """
+        stdin = self.proc.stdin
+        if stdin is not None:
+            try:
+                stdin.write(b"UNLOCK TABLES;\n")
+                stdin.flush()
+                stdin.close()
+            except (OSError, ValueError) as exc:
+                logger.warning(f"the table lock's client could not be told to unlock: {exc}")
+        try:
+            self.proc.wait(timeout=LOCK_RELEASE_S)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+            self.proc.wait()
 
 
 @dataclass(frozen=True)

@@ -8,12 +8,14 @@ answer, and a public reader for the game record in the head of a file already in
 from __future__ import annotations
 
 import subprocess
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import IO
 
 import pytest
 
+from yulon import platform
 from yulon.controller_wow_wotlk import maintenance
 from yulon.controller_wow_wotlk.maintenance import DockerMysql, Game, MaintenanceError
 
@@ -129,3 +131,155 @@ def test_a_garbled_record_in_a_head_in_hand_is_an_error_not_no_record() -> None:
     head = b"-- yulon-backup: game=Wow WotLK!\n-- MySQL dump 10.13\n"
     with pytest.raises(MaintenanceError, match="cannot be read"):
         maintenance.game_recorded_in(head, "x.sql")
+
+
+# -- the read lock a file copy is taken under (T822) -----------------------
+
+
+class _Stdin:
+    def __init__(self) -> None:
+        self.written = b""
+        self.closed = False
+
+    def write(self, data: bytes) -> int:
+        self.written += data
+        return len(data)
+
+    def flush(self) -> None:
+        return None
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _Client:
+    """A database client process that answers what it is given from `lines`."""
+
+    def __init__(self, lines: list[bytes], *, returncode: int = 0) -> None:
+        self.stdin = _Stdin()
+        self.stdout = iter(lines)
+        self.returncode = returncode
+        self.killed = False
+
+    def wait(self, timeout: float | None = None) -> int:
+        return self.returncode
+
+    def kill(self) -> None:
+        self.killed = True
+
+
+class _Silent:
+    """A client that never prints and never ends, until the test lets it."""
+
+    def __init__(self) -> None:
+        self.ended = threading.Event()
+        self.stdin = _Stdin()
+        self.stdout = self
+        self.returncode = 0
+
+    def wait(self, timeout: float | None = None) -> int:
+        return 0
+
+    def kill(self) -> None:
+        return None
+
+    def __iter__(self) -> _Silent:
+        return self
+
+    def __next__(self) -> bytes:
+        self.ended.wait(5)
+        raise StopIteration
+
+
+def _locking(monkeypatch: pytest.MonkeyPatch, *clients: _Client | _Silent) -> list[list[str]]:
+    """Hand the calls to Popen these clients in order, and return the argvs it saw."""
+    remaining = list(clients)
+    argvs: list[list[str]] = []
+
+    def fake_popen(argv: list[str], **kwargs: object) -> object:
+        argvs.append(list(argv))
+        return remaining.pop(0)
+
+    monkeypatch.setattr(maintenance, "mysql_client", lambda *_a, **_k: "mariadb")
+    monkeypatch.setattr(platform, "docker_prefix", lambda *_a, **_k: ["docker"])
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    return argvs
+
+
+def test_a_read_lock_keeps_one_client_until_the_block_ends_then_unlocks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mutation: take the lock with `execute()`; its session ends and the lock is gone."""
+    client = _Client([b"yulon-table-locked\n"])
+    argvs = _locking(monkeypatch, client)
+    client_stdin = client.stdin
+    with DockerMysql(DB, "hunter2").read_lock(
+        "FLUSH TABLES `tw_char`.`characters` WITH READ LOCK;"
+    ):
+        assert b"FLUSH TABLES `tw_char`.`characters` WITH READ LOCK;" in client_stdin.written
+        assert not client_stdin.closed, "the session must stay open while the table is held"
+    assert client_stdin.written.endswith(b"\nUNLOCK TABLES;\n")
+    assert client_stdin.closed
+    assert "--unbuffered" in argvs[0]
+    assert "hunter2" not in " ".join(argvs[0])
+
+
+def test_a_refused_lock_falls_back_to_the_next_statement_in_a_new_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Batch clients abort on the first error, so a fallback cannot share the session."""
+    refused = _Client(
+        [b"ERROR 1194 (HY000): Table 'characters' is marked as crashed\n"], returncode=1
+    )
+    granted = _Client([b"yulon-table-locked\n"])
+    argvs = _locking(monkeypatch, refused, granted)
+    with DockerMysql(DB, "pw").read_lock(
+        "FLUSH TABLES `tw_char`.`characters` WITH READ LOCK;",
+        "LOCK TABLES `tw_char`.`characters` READ;",
+    ):
+        pass
+    assert len(argvs) == 2
+    assert b"LOCK TABLES `tw_char`.`characters` READ;" in granted.stdin.written
+    assert refused.stdin.closed
+
+
+def test_a_lock_no_statement_can_take_raises_with_the_clients_words(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = _Client(
+        [b"ERROR 1194 (HY000): Table 'characters' is marked as crashed\n"], returncode=1
+    )
+    second = _Client([b"ERROR 1044 (42000): Access denied\n"], returncode=1)
+    _locking(monkeypatch, first, second)
+    with pytest.raises(MaintenanceError) as caught:
+        with DockerMysql(DB, "pw").read_lock(
+            "FLUSH TABLES t WITH READ LOCK;", "LOCK TABLES t READ;"
+        ):
+            raise AssertionError("the block must not be entered")
+    assert "Access denied" in caught.value.detail
+
+
+def test_a_lock_that_is_never_answered_is_reported_not_waited_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    silent = _Silent()
+    _locking(monkeypatch, silent)
+    monkeypatch.setattr(maintenance, "LOCK_ACQUIRE_S", 0.05)
+    monkeypatch.setattr(maintenance, "LOCK_RELEASE_S", 0.05)
+    try:
+        with pytest.raises(MaintenanceError) as caught:
+            with DockerMysql(DB, "pw").read_lock("FLUSH TABLES t WITH READ LOCK;"):
+                raise AssertionError("the block must not be entered")
+    finally:
+        silent.ended.set()
+    assert "no answer" in caught.value.detail
+
+
+def test_an_exception_inside_the_block_still_unlocks(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _Client([b"yulon-table-locked\n"])
+    _locking(monkeypatch, client)
+    with pytest.raises(RuntimeError):
+        with DockerMysql(DB, "pw").read_lock("LOCK TABLES t READ;"):
+            raise RuntimeError("the copy went wrong")
+    assert client.stdin.closed
+    assert b"UNLOCK TABLES" in client.stdin.written
