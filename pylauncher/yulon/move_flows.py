@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import json
 import re
 import shutil
 import zipfile
@@ -93,6 +94,70 @@ Not the same label as the copy above: backup file names are `<second>_<label>_<s
 and a backup refuses to overwrite a file, so two copies with one label made in one second
 collide (found by running the real engine in the flow's tests).
 """
+
+TAIL_MARKER_NAME = "move-tail-pending.json"
+"""The unfinished-import marker for a tail one-shot, in the server's backups folder (T802).
+
+Written BEFORE the one-shot runs, holding the before-move backup paths: the run
+loads the databases first and only then applies the tail, so a failure after the
+loads leaves applied databases and a file that still reads behind. While it
+names those backups, a plan that finds no ledger difference refuses instead of
+calling the import done: restore those backups first, then bring the file in
+again. A restore replaces the databases (the marker's backups among them), so
+the ledger differs again, the normal path proceeds, and a verified success
+clears the marker. A plan with a version difference never meets it.
+"""
+
+
+def _tail_marker_path(world: MoveWorld) -> Path:
+    """Where the unfinished tail-import marker lives (T802)."""
+    return maintenance.backups_dir(world.server_dir) / TAIL_MARKER_NAME
+
+
+def _read_tail_marker(world: MoveWorld) -> list[str]:
+    """The backup paths an unfinished tail import named, or [] when none (T802)."""
+    try:
+        raw = _tail_marker_path(world).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        logger.warning(f"could not read the unfinished tail-import marker: {exc}")
+        return []
+    try:
+        found = json.loads(raw)
+    except ValueError as exc:
+        logger.warning(f"could not read the unfinished tail-import marker: {exc}")
+        return []
+    if not isinstance(found, dict) or not isinstance(found.get("copies"), list):
+        return []
+    return [str(p) for p in found["copies"]]
+
+
+def _write_tail_marker(world: MoveWorld, copies: Sequence[object]) -> None:
+    """Name the before-move backups before the one-shot runs (T802)."""
+    path = _tail_marker_path(world)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"copies": [str(p) for p in copies]}), encoding="utf-8")
+
+
+def _clear_tail_marker(world: MoveWorld) -> None:
+    """Forget an unfinished tail import after a verified success (T802)."""
+    try:
+        _tail_marker_path(world).unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        logger.warning(f"could not clear the unfinished tail-import marker: {exc}")
+
+
+def _unfinished_tail_sentence(copies: Sequence[object]) -> str:
+    """The refusal while an earlier tail import's marker names backups (T802)."""
+    named = ", ".join(str(p) for p in copies) or "the copies taken first (before-move)"
+    return (
+        "An earlier import did not finish: restore the databases from "
+        f"{named} first, then import again."
+    )
+
 
 APP_ACCOUNT_PREFIX = "YULON_"
 """The command channel's account (`channel_setup.ACCOUNT_PREFIX`): the app's, never a player's."""
@@ -1215,6 +1280,8 @@ def plan_import(world: MoveWorld, path: Path) -> ImportPlan:
             said = None
         else:
             tails = None
+    elif pending := _read_tail_marker(world):
+        said = _unfinished_tail_sentence(pending)
     if counts is None:
         refusals.append(_COUNT_UNKNOWN)
     if uncovered:
@@ -1448,6 +1515,8 @@ def _import_locked(
         if tails is None or tails != planned:
             raise MoveError(f"{said} {_NOT_IN}")
         said = None
+    elif pending := _read_tail_marker(world):
+        raise MoveError(f"{_unfinished_tail_sentence(pending)} {_NOT_IN}")
     counts = _survey_counts(world, roles)
     if counts is None or counts != plan.counts:
         raise MoveError(CHANGED_SINCE_THE_PLAN)
@@ -1467,6 +1536,8 @@ def _import_locked(
     # The owner's alone (T745): the auth dump unpacked here holds every verifier, and a
     # backups folder made before T683 S5 is 0775.
     folder.mkdir(parents=True, exist_ok=False, mode=0o700)
+    if tails is not None:
+        _write_tail_marker(world, copies)
     try:
         plans = _checked_plans(world, package, plan.schemas, folder)
         loaded: list[str] = []
@@ -1482,7 +1553,8 @@ def _import_locked(
             loaded.append(schema)
             safety.extend(report.safety_backup)
         notes = _fix_ups(world, manifest, roles, use_old_realm_name)
-        notes = (*notes, *_apply_tail_updates(world, manifest, tails, here))
+        notes = (*notes, *_apply_tail_updates(world, package, tails, here))
+        _clear_tail_marker(world)
     finally:
         shutil.rmtree(folder, ignore_errors=True)
     left = [name for name in (roles.get(r) for r in ROLES) if name and name not in plan.schemas]
@@ -1585,12 +1657,10 @@ def _fix_ups(
         )
     return tuple(notes)
 
-    return tuple(notes)
-
 
 def _apply_tail_updates(
     world: MoveWorld,
-    manifest: Manifest,
+    package: move.Package,
     tails: dict[str, move.Tail] | None,
     here: Mapping[str, Evidence | None],
 ) -> tuple[str, ...]:
@@ -1615,8 +1685,10 @@ def _apply_tail_updates(
     lines: list[str] = []
     try:
         run = world.apply_updates(lines.append)
-    except docker.DockerCommandError as exc:
-        detail = getattr(exc, "detail", "")
+    except (docker.DockerCommandError, OSError) as exc:
+        detail = (
+            getattr(exc, "detail", "") if isinstance(exc, docker.DockerCommandError) else str(exc)
+        )
         raise MoveError(
             _tail_failure_sentence(tails, world, detail),
             detail=detail,
@@ -1625,10 +1697,19 @@ def _apply_tail_updates(
         detail = "\n".join(run.tail)
         raise MoveError(_tail_failure_sentence(tails, world, detail), detail=detail)
     after = _read_versions(world, {r: s for r, s in _present_roles(world).items() if s in run_tail})
+    file_core_names = _tail_expected_core_names(package, tails, run_tail)
     for schema in run_tail:
         want = before.get(schema)
         got = after.get(schema)
-        if want is None or got is None or got.digest != want.digest:
+        names = _read_update_names(world, schema, got) if got is not None else None
+        if (
+            want is None
+            or got is None
+            or names is None
+            or got.digest != want.digest
+            or tuple(sorted(names[0])) != tuple(sorted(file_core_names.get(schema, ())))
+            or tuple(sorted(names[1])) != tuple(sorted(want.modules))
+        ):
             have = got.count if got is not None else "?"
             need = want.count if want is not None else "?"
             raise MoveError(
@@ -1637,6 +1718,31 @@ def _apply_tail_updates(
                 "The accounts and characters are loaded but their databases may be partly "
                 f"updated. {_tail_copies_sentence()} {_NOT_IN}"
             )
+    return _tail_run_notes(tails, run_tail)
+
+
+def _tail_expected_core_names(
+    package: move.Package, tails: Mapping[str, move.Tail], run_tail: Mapping[str, move.Tail]
+) -> dict[str, tuple[str, ...]]:
+    """The core update names each run schema should hold after the one-shot (T802).
+
+    The file's own ledger names plus the planned tail for that schema: the
+    digest alone cannot tell a silent updater from a rename that kept the
+    count, and the names alone cannot tell the tail from a different set.
+    """
+    found: dict[str, tuple[str, ...]] = {}
+    for schema in run_tail:
+        names = move.updates_names_in_dump(package, schema)
+        if names is None:
+            continue
+        found[schema] = tuple(sorted((*names[0], *tails.get(schema, ()))))
+    return found
+
+
+def _tail_run_notes(
+    tails: Mapping[str, move.Tail], run_tail: Mapping[str, move.Tail]
+) -> tuple[str, ...]:
+    """The done sentences for a one-shot that landed every name it owed (T802)."""
     notes = [_tail_applied_sentence(run_tail)]
     if any(schema not in run_tail for schema in tails):
         notes.append(_playerbots_next_start_note(tails))
@@ -1656,8 +1762,8 @@ def _tail_applied_sentence(tails: Mapping[str, move.Tail]) -> str:
 
 
 def _playerbots_next_start_note(tails: Mapping[str, move.Tail]) -> str:
-    auth_chars = tails
-    left = sorted(f"{schema} ({len(names)})" for schema, names in sorted(auth_chars.items()))
+    bots = {schema: names for schema, names in tails.items() if schema == "acore_playerbots"}
+    left = sorted(f"{schema} ({len(names)})" for schema, names in sorted(bots.items()))
     return (
         "The updates the file lacked for the bot database are applied by the next Start, "
         f"the way an update applies them ({'; '.join(left)})."

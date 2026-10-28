@@ -781,7 +781,7 @@ def test_a_different_set_has_no_tail() -> None:
 
 def test_a_shared_name_with_another_hash_has_no_tail() -> None:
     file = _rows(NAMES[:4])
-    here = _rows(NAMES[:4])
+    here = _rows(NAMES)
     name, _, state = here[0]
     here[0] = (name, "B" * 40, state)
     assert move.appliable_tail(file, here) is None
