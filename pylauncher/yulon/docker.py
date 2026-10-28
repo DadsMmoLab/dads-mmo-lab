@@ -861,6 +861,33 @@ def holder(server_dir: Path | str) -> _Hold | None:
         return holds[-1] if holds else None
 
 
+def move_held_reason(server_dir: Path | str) -> str | None:
+    """The sentence a Pack or Bring in is told while the server is held, or None (T738 part 4).
+
+    One locked read, for `move_flows.move_held_reason()`'s only call: the current local
+    `_Hold`'s `for_a_move` sentence (else its `reason`), else the orphaned-load sentence.
+    The split `holder()` / `held_reason()` reads let a hold taken between them read as
+    unheld -- the first saw nothing, then `orphaned_restore_reason()` saw `_HELD` and
+    answered None -- so a move wrote its record under an active hold. Here the orphan
+    record is read only after one lock saw no local hold, and a second lock then answers
+    a hold taken in between instead of the orphan result, so a newly acquired local hold
+    is never missed.
+    """
+    key = _server_key(server_dir)
+    with _HOLD_LOCK:
+        holds = _HELD.get(key)
+        if holds:
+            hold = holds[-1]
+            return hold.for_a_move or hold.reason
+    orphan = orphaned_restore_reason(server_dir)
+    with _HOLD_LOCK:
+        holds = _HELD.get(key)
+        if holds:
+            hold = holds[-1]
+            return hold.for_a_move or hold.reason
+    return orphan
+
+
 def held_here(server_dir: Path | str) -> bool:
     """A Maintenance job of THIS process holds the server right now (`hold_the_server()`).
 

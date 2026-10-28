@@ -437,18 +437,20 @@ def _server_is_up(world: MoveWorld) -> bool:
 
 
 def move_held_reason(server_dir: Path | str) -> str | None:
-    """`docker.holder()`'s move sentence, or None when nothing holds the server.
+    """`docker.move_held_reason()`'s sentence, or None when nothing holds the server.
 
     T737: the Maintenance tab's Restore holds the server with the sentence a Start or Stop is
     told (why starting or stopping would harm the restore). A Pack or Bring in is told the
     holder's own `for_a_move` sentence (`RESTORE_HOLDS_A_MOVE`) instead. T738: likewise a
     whole-server bring-in's load (`MOVE_IN_HOLDS_A_MOVE`). Every other holder's sentence --
     and a hold with no `for_a_move` -- is passed as it is. The orphaned-load path is unchanged.
+
+    T738 part 4: one Docker-layer call, never the split `holder()` / `held_reason()`
+    reads. A hold taken between the two read as unheld -- the first saw nothing, then
+    `orphaned_restore_reason()` saw `_HELD` and answered None -- so a move wrote its
+    record under an active hold.
     """
-    hold = docker.holder(server_dir)
-    if hold is None:
-        return docker.held_reason(server_dir)
-    return hold.for_a_move or hold.reason
+    return docker.move_held_reason(server_dir)
 
 
 def _refuse_if_unsafe(world: MoveWorld) -> None:

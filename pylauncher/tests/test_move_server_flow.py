@@ -1504,6 +1504,66 @@ def test_a_carry_on_while_this_yulons_own_restore_holds_the_folder_names_the_res
     assert (record.read_bytes(), record.stat().st_mtime_ns) == before, "the record was written"
 
 
+def test_a_hold_taken_during_the_hold_check_still_refuses_before_anything_is_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T738 part 4: a hold taken mid-check still refuses, before the record or anything else.
+
+    `move_held_reason()` used to read `docker.holder()` and then `docker.held_reason()`
+    separately: a hold taken between the two read as unheld -- the first saw nothing, then
+    `orphaned_restore_reason()` saw `_HELD` and answered None -- so `MovedInInstall.run()`
+    saved its move-in record under an active hold. The check is one Docker-layer call now:
+    the orphan record is read only after one lock saw no local hold, and a second lock then
+    answers a hold taken in between instead of the orphan result.
+    Mutation: the split reads back in `move_flows.move_held_reason()` -> red (no refusal,
+    the record is written).
+    """
+    mv = Move(tmp_path)
+    server_dir = mv.target.server_dir
+    record = server_dir / move_server.MOVE_IN_FILE
+    events_before = list(mv.events)
+    main_ident = threading.get_ident()
+    at_check = threading.Event()
+    hold_on = threading.Event()
+    release = threading.Event()
+    tripped = False
+    real_orphaned = docker.orphaned_restore_reason
+
+    def orphan_between_the_reads(server: Path | str) -> str | None:
+        nonlocal tripped
+        if threading.get_ident() == main_ident and not tripped:
+            tripped = True
+            at_check.set()
+            assert hold_on.wait(timeout=30), "the second window never took its hold"
+        return real_orphaned(server)
+
+    def take_the_hold() -> None:
+        assert at_check.wait(timeout=30), "the bring-in never reached its hold check"
+        with docker.hold_the_server(
+            server_dir,
+            forgetting.MOVE_IN_HOLDS_THE_SERVER,
+            press=move_flows.PRESS_BRING_IN,
+            for_a_move=forgetting.MOVE_IN_HOLDS_A_MOVE,
+        ):
+            hold_on.set()
+            assert release.wait(timeout=30)
+
+    monkeypatch.setattr(docker, "orphaned_restore_reason", orphan_between_the_reads)
+    worker = threading.Thread(target=take_the_hold)
+    worker.start()
+    try:
+        options = InstallOptions(server_dir=server_dir)
+        with pytest.raises(MoveError) as refused:
+            list(mv.install().run(options))
+    finally:
+        release.set()
+        worker.join(timeout=30)
+    assert not worker.is_alive(), "the second window's hold never ended"
+    assert str(refused.value) == forgetting.MOVE_IN_HOLDS_A_MOVE
+    assert not record.exists(), "the move-in record was written under the hold"
+    assert mv.engine.runs == 0 and mv.rows == [] and mv.events == events_before
+
+
 # ================================================== another window during a whole-server load
 
 
