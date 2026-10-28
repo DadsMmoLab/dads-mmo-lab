@@ -15,6 +15,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 
 ### New
 - **Update the server to latest…** on a Tortoise server also updates TortoiseBots Manager in your game client.
+- Updating a module now adds its new settings to your kept config file, leaving your own values alone.
 
 ### Fixed
 - A failed build in a module you just installed now says the module is new and your server still runs its old build.
