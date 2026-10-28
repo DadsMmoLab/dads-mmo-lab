@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import html
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
@@ -155,6 +155,17 @@ READ_ONLY_SUFFIX = " · read-only"
 
 COMPOSE_OVERRIDE = "docker-compose.override.yml"
 """Where the `AC_*` rows that beat a conf key live, named so a user can go there."""
+
+
+def locked_sentence(locked: Mapping[str, str]) -> str:
+    """What to say about the keys of this file Yu'lon sets and the Save refuses (T819).
+
+    Named and counted rather than gestured at: the question in front of a
+    refusal is whether the line just typed is one of them, and the answer is
+    here before the Save is pressed.
+    """
+    pairs = "; ".join(f"{key} ({why})" for key, why in sorted(locked.items()))
+    return f"Locked here, Yu'lon sets these: {pairs}."
 
 
 def shadow_warning(shadowed: Sequence[tuple[str, str]]) -> str:
@@ -1176,6 +1187,10 @@ class TuningPanel(QWidget):
         """Whether the open file's typing outlived the file's place in the list."""
         self._note = ""
         """The note `set_file_text` was handed; `file_note` adds `EDITOR_STALE` to it."""
+        self._locked: dict[str, str] = {}
+        """The open file's locked keys and why (T819), drawn under the editor."""
+        self._defaults: dict[str, str] = {}
+        """The open file's `.dist` line per key (T819), for the Default press."""
         self._reverting = False
         """Set while Revert file is handled: the file it puts back replaces the typing."""
         right_box.addWidget(self.file_buttons_area)
@@ -1217,6 +1232,18 @@ class TuningPanel(QWidget):
         editor, so the typing is not hidden behind the Settings side."""
         self.editor.textChanged.connect(self._typed)
         right_box.addWidget(self.editor, 1)
+        # T819: which keys of a core conf Yu'lon sets, under the editor because
+        # it is about what typing into it will and will not do. Hidden when empty.
+        self.locked_list = QLabel("", right)
+        self.locked_list.setWordWrap(True)
+        self.locked_list.setStyleSheet(f"color: {COLOR_TEXT_MUTED};")
+        self.locked_list.setVisible(False)
+        right_box.addWidget(self.locked_list)
+        self.locked_note = QLabel("", right)
+        self.locked_note.setWordWrap(True)
+        self.locked_note.setStyleSheet(f"color: {COLOR_TEXT_WARNING};")
+        self.locked_note.setVisible(False)
+        right_box.addWidget(self.locked_note)
         self.lint_label = QLabel("", right)
         self.lint_label.setWordWrap(True)
         self.lint_label.setStyleSheet(f"color: {COLOR_TEXT_WARNING};")
@@ -1236,6 +1263,16 @@ class TuningPanel(QWidget):
         # on a line of its own above them (T190, the height at 960x640).
         file_actions = QHBoxLayout()
         file_actions.addWidget(self.lint_label, 1)
+        # T819: put the shipped line back on the cursor's line, in the editor
+        # only. Enabled only where there are defaults to offer and the file
+        # may be written; it writes nothing on disk itself.
+        self.default_button = QPushButton("Default for this line", right)
+        self.default_button.setToolTip(
+            "Replace the cursor's line with the line the default file carries for its key."
+        )
+        self.default_button.setEnabled(False)
+        self.default_button.clicked.connect(self._default_line_pressed)
+        file_actions.addWidget(self.default_button)
         # Dead until there is a backup to restore FROM. A Revert with nothing
         # behind it is a press that can only explain itself, and the card's own
         # Revert already answers that case with a sentence.
@@ -1329,6 +1366,8 @@ class TuningPanel(QWidget):
         self.empty_label.setStyleSheet(f"color: {spec.text_muted};")
         self.file_note.setStyleSheet(f"color: {spec.text_muted};")
         self.shadow_warning.setStyleSheet(f"color: {spec.text_warning};")
+        self.locked_list.setStyleSheet(f"color: {spec.text_muted};")
+        self.locked_note.setStyleSheet(f"color: {spec.text_warning};")
         lines = 4 * self.editor.fontMetrics().lineSpacing()
         self.editor.setStyleSheet(
             f"background-color: {spec.bg_panel}; border: 1px solid {spec.accent_border}; "
@@ -1433,6 +1472,7 @@ class TuningPanel(QWidget):
         writable = not self.editor.isReadOnly() and not self._gone
         self.file_save_button.setEnabled(enabled and writable)
         self.file_revert_button.setEnabled(enabled and bool(self.backup_label.text()) and writable)
+        self.default_button.setEnabled(enabled and writable and bool(self._defaults))
 
     # ------------------------------------------------------------- the file
 
@@ -1568,13 +1608,17 @@ class TuningPanel(QWidget):
         read_only: bool,
         note: str | None,
         shadowed: Sequence[tuple[str, str]] = (),
+        locked: Mapping[str, str] | None = None,
+        defaults: Mapping[str, str] | None = None,
     ) -> None:
         """Show one file. `shadowed` is the `(key, AC_* row)` pairs the environment beats.
 
         Handed in rather than computed: which rows this install's compose
         carries is `composegen`'s answer and the view's to fetch, and a widget
         that imported the compose generator to find out would be a second place
-        for that question to be asked.
+        for that question to be asked. `locked` (T819) is the same shape: the
+        keys of a core conf Yu'lon sets and why, drawn under the editor, and
+        `defaults` the `.dist`'s line per key for the Default press.
         """
         same = self._text_file == self._current_file
         if same and self._editor_dirty and not self._reverting:
@@ -1603,6 +1647,15 @@ class TuningPanel(QWidget):
         # can silently fail to apply (item 16, round 2).
         self.shadow_warning.setText(shadow_warning(shadowed) if shadowed else "")
         self.shadow_warning.setVisible(bool(shadowed) and not read_only)
+        self._locked = dict(locked) if locked else {}
+        self._defaults = dict(defaults) if defaults else {}
+        self.locked_list.setText(locked_sentence(self._locked) if self._locked else "")
+        self.locked_list.setVisible(bool(self._locked))
+        self.locked_note.setText("")
+        self.locked_note.setVisible(False)
+        self.default_button.setEnabled(
+            self._actions_enabled and not read_only and bool(self._defaults)
+        )
         self.file_save_button.setEnabled(self._actions_enabled and not read_only)
         # A backup of the file you were looking at a moment ago is not a
         # backup of this one, so the name goes with the text it described --
@@ -1690,6 +1743,39 @@ class TuningPanel(QWidget):
                 return False
         self.file_save_pressed.emit(self.editor.toPlainText())
         return not self._editor_dirty
+
+    def _default_line_pressed(self) -> None:
+        """Put the `.dist` line for the cursor's key into the editor, and nothing on disk.
+
+        A locked line is not replaced: the lock's reason is said instead, and
+        the Save would have refused it anyway. A line with no key, or a key
+        the default file never carried, says that instead.
+        """
+        cursor = self.editor.textCursor()
+        block = cursor.block().text()
+        match = re.match(r"^\s*([^#\[=\s][^=]*?)\s*=", block)
+        key = match.group(1).strip() if match else ""
+        if not key:
+            self.locked_note.setText("This line carries no key to look up in the default file.")
+            self.locked_note.setVisible(True)
+            return
+        if key in self._locked:
+            self.locked_note.setText(f"{key}: {self._locked[key]}.")
+            self.locked_note.setVisible(True)
+            return
+        if key not in self._defaults:
+            self.locked_note.setText(f"{key} is not in the default file.")
+            self.locked_note.setVisible(True)
+            return
+        self.locked_note.setText("")
+        self.locked_note.setVisible(False)
+        was_blocked = self.editor.blockSignals(True)
+        cursor.beginEditBlock()
+        cursor.select(cursor.SelectionType.BlockUnderCursor)
+        cursor.removeSelectedText()
+        cursor.insertText(self._defaults[key])
+        cursor.endEditBlock()
+        self.editor.blockSignals(was_blocked)
 
     def _revert_file_pressed(self) -> None:
         """Revert file's press: the file it puts back replaces any typing, as asked."""
@@ -1847,6 +1933,7 @@ __all__ = [
     "control_kind",
     "is_narrow",
     "lifted_rule",
+    "locked_sentence",
     "shows_key_line",
     "split_sizes",
     "starting_value",

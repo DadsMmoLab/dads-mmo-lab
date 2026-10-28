@@ -72,12 +72,14 @@ AZEROTHCORE_CORE_FILES: tuple[str, ...] = (
     f"{AZEROTHCORE_ETC}/authserver.conf",
     f"{AZEROTHCORE_ETC}/modules/playerbots.conf",
 )
-"""WotLK's own CONF files. Was `controller_view.TUNING_CORE_FILES`; that name is now this tuple.
+"""The AzerothCore family's own CONF files. Was `controller_view.TUNING_CORE_FILES`.
 
 Here and not in the view so this module needs no Qt, and so the Tuning tab's
-read-only list and the reset's conf set are one tuple. The override is NOT in
-it: this tuple is also the raw editor's file list (`_tuning_files`), and the
-override is not a file that editor shows. `core_files()` adds it.
+file list and the reset's conf set are one tuple. Since T819 the Tuning tab
+lists them editable with locked keys rather than read-only (`yulon.core_conf`).
+The override is NOT in it: this tuple is also the raw editor's file list
+(`_tuning_files`), and the override is not a file that editor shows.
+`core_files()` adds it.
 """
 
 
@@ -126,18 +128,22 @@ def _conf_table(entry: CatalogEntry) -> ConfPatchTable | None:
 
 
 def read_only_confs(entry: CatalogEntry) -> tuple[str, ...]:
-    """The server's own confs the Tuning tab's raw editor lists READ-ONLY (T43, T179).
+    """The server's own confs the Tuning tab's raw editor lists READ-ONLY (T43, T179, T819).
 
-    WotLK's three, as since T43. A TrinityCore server's own confs from its install
-    table -- `worldserver.conf` and `authserver.conf` -- except its bot conf, whose
-    keys the Tuning tab's bot card writes (T179, spec §2: worldserver.conf is shown
-    on Tuning). Every other game is handed WotLK's paths exactly as before, which
-    its install never has, so its raw editor still lists its module confs only.
+    A TrinityCore server's own confs from its install table -- `worldserver.conf` and
+    `authserver.conf` -- except its bot conf, whose keys the Tuning tab's bot card writes
+    (T179, spec §2: worldserver.conf is shown on Tuning). Since T819 the AzerothCore
+    family's own three confs are editable with locked keys (`yulon.core_conf`), so they
+    are listed writable here; Centurion stays read-only, as its install patches the real
+    database password into its confs. Every other game is handed WotLK's paths exactly as
+    before, which its install never has, so its raw editor still lists its module confs only.
     """
     native_block = entry.install.native
     if native_block is not None and native_block.trinitycore is not None:
         table = native_block.trinitycore.conf
         return tuple(f"{ETC_DIR}/{name}" for name in table.files if name != table.playerbots_conf)
+    if native_block is not None and native_block.family == "azerothcore":
+        return ()
     return AZEROTHCORE_CORE_FILES
 
 

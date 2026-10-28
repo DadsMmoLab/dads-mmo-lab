@@ -14,6 +14,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ## Unreleased
 
 ### New
+- Edit **worldserver.conf** and **authserver.conf** on the Tuning tab; settings Yu'lon manages stay locked.
 - **Update the server to latest…** on a Tortoise server also updates TortoiseBots Manager in your game client.
 
 ### Fixed

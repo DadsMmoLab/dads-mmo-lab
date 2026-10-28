@@ -83,6 +83,7 @@ from yulon import (
     client_packs,
     commands,
     conf_dist,
+    core_conf,
     database_presence,
     dbreads,
     default_addons,
@@ -7741,7 +7742,26 @@ TUNING_CORE_FILE = (
     "This is the server's own configuration, not a module's. Yu'lon shows it read-only in "
     "this version: who owns core configuration is a bigger question than one module's conf."
 )
-"""Why `worldserver.conf` is listed but not editable here (T43's own follow-up)."""
+"""Why a TrinityCore server's `worldserver.conf` is listed but not editable here."""
+
+TUNING_CORE_EDITABLE = (
+    "This is the server's own configuration. The servers read it when they start, so press "
+    "Restart for a change to take effect. Lines Yu'lon sets are locked; the list is under "
+    "the editor."
+)
+"""What an editable AzerothCore core conf says under the editor (T819)."""
+
+TUNING_CORE_LOCKED = "Nothing was written. Yu'lon sets these lines, so they stay as they are:"
+"""The refusal when a core-conf Save touches a locked key (T819): the keys follow."""
+
+TUNING_CORE_CONFIRM = "Save these {n} changes to {name}? A backup is taken first.\n{lines}{more}"
+"""The one confirm before a core-conf Save writes (T819): the diff, then the backup."""
+
+TUNING_AUTH_RESTART = (
+    "The login server reads this file when it starts, so the change takes effect at the "
+    "next restart. The file itself is on your disk and the server reads it from there."
+)
+"""What a change to `authserver.conf` costs (T819): the restart sentence says login server."""
 
 
 @dataclass(frozen=True)
@@ -7878,12 +7898,12 @@ def _read_time_zone(route: server_time_zone.TimeZoneRoute, generation: int) -> T
 
 
 TUNING_CORE_FILES: tuple[str, ...] = reset_defaults.AZEROTHCORE_CORE_FILES
-"""The install's own conf files, listed read-only beside the module ones.
+"""The AzerothCore family's own conf files, listed beside the module ones.
 
 Named (in `reset_defaults`, since T94) and not discovered by a glob of
-`env/dist/etc`: a glob would also list every module conf a second time, and
-the point of the list is that these three are the ones this tab deliberately
-will not write.
+`env/dist/etc`: a glob would also list every module conf a second time. Since
+T819 the tab lists them editable with locked keys rather than read-only; the
+read-only list is `_tuning_read_only_files()`.
 """
 
 REBUILD_BOTS_LABEL = "Rebuild random bots…"
@@ -21718,7 +21738,7 @@ class ControllerView(QWidget):
         # `reset_defaults.read_only_confs()` is a decision about who owns core configuration,
         # and a second copy of it inside a widget is a second place for it to
         # drift (T44 item 13).
-        self.tuning_panel.set_files(self._tuning_files(), read_only=self._tuning_core_files())
+        self.tuning_panel.set_files(self._tuning_files(), read_only=self._tuning_read_only_files())
         self._set_tuning_revert_all()
         # T94: whether an undo has anything to put back, asked again of the
         # files -- off the GUI thread (final review): it lists up to five
@@ -22831,9 +22851,38 @@ class ControllerView(QWidget):
         return tuple(found)
 
     def _tuning_core_files(self) -> tuple[str, ...]:
-        """The server's own confs this tab lists read-only: `TUNING_CORE_FILES` on WotLK,
-        a TrinityCore server's own (T179), `reset_defaults.read_only_confs()`."""
+        """The server's own confs this tab lists: the family's three on AzerothCore (T819),
+        a TrinityCore server's own (T179), else `reset_defaults.read_only_confs()`."""
+        if core_conf.is_editable_core(self.entry):
+            return reset_defaults.core_files(self.entry)[:3]
         return reset_defaults.read_only_confs(self.entry)
+
+    def _tuning_read_only_files(self) -> tuple[str, ...]:
+        """The server's own confs this tab will not write: `reset_defaults.read_only_confs()`."""
+        return reset_defaults.read_only_confs(self.entry)
+
+    def _tuning_core_editable(self, file: str) -> bool:
+        """Whether this core conf opens editable: the family's own spelling (T819, T573 item 3).
+
+        On a case-blind disk a second spelling (`Worldserver.conf`) IS the
+        core's file, and a Save of it would write the core's. `is_one_of` says
+        core for both spellings; the exact match keeps the variant read-only.
+        """
+        server_dir = self.services.controller.server_dir
+        return (
+            tuning.is_one_of(file, self._tuning_core_files(), server_dir)
+            and file in self._tuning_core_files()
+            and core_conf.is_editable_core(self.entry)
+        )
+
+    def _tuning_core_denied(self, file: str) -> bool:
+        """Whether a Save or Revert of `file` is refused without writing (T43, T573, T819)."""
+        server_dir = self.services.controller.server_dir
+        if tuning.is_one_of(file, self._tuning_read_only_files(), server_dir):
+            return True
+        return tuning.is_one_of(
+            file, self._tuning_core_files(), server_dir
+        ) and not self._tuning_core_editable(file)
 
     def _tuning_spec(self, family: str, module_id: str, file: str) -> dict[str, ConfKey]:
         """This module's declared keys for one file, so a value can be type-checked.
@@ -23167,6 +23216,11 @@ class ControllerView(QWidget):
         core = tuning.is_one_of(
             file, self._tuning_core_files(), self.services.controller.server_dir
         )
+        read_only = tuning.is_one_of(
+            file, self._tuning_read_only_files(), self.services.controller.server_dir
+        )
+        editable_core = self._tuning_core_editable(file)
+        read_only = read_only or (core and not editable_core)
         try:
             # A conf that is a link out of the install is another file's text
             # and another file's Save (T573): shown empty and read-only.
@@ -23206,10 +23260,28 @@ class ControllerView(QWidget):
         # `tuning.write()` reads around. `tuning.save_text()` keeps every line
         # the player did not edit as it was (T573).
         self._tuning_raw = raw
-        note = TUNING_CORE_FILE if core else tuning.apply_sentence(tuning.file_rule(file))
+        if core and not editable_core:
+            note = TUNING_CORE_FILE
+        elif editable_core:
+            note = TUNING_CORE_EDITABLE
+        else:
+            note = tuning.apply_sentence(tuning.file_rule(file))
+        if editable_core:
+            # The `.dist` read stays on the GUI thread like the conf read: same
+            # 1 MB cap, and an unreadable one offers no defaults at all.
+            dist_text = self._core_dist_text(file)
+            self.tuning_panel.set_file_text(
+                core_conf.masked_view(raw),
+                read_only=False,
+                note=note,
+                shadowed=(),
+                locked=core_conf.locked(self.entry, server_dir, file, raw),
+                defaults=core_conf.default_lines(dist_text),
+            )
+            return
         self.tuning_panel.set_file_text(
             tuning.editor_view(raw),
-            read_only=core,
+            read_only=read_only,
             note=note,
             # Which of THIS file's keys the running containers override (T44
             # item 16, round 2). Asked of `composegen`, which is the module
@@ -23222,6 +23294,17 @@ class ControllerView(QWidget):
                 raw, composegen.shadowing_env(self.entry, self.services.controller.server_dir)
             ),
         )
+
+    def _core_dist_text(self, file: str) -> str:
+        """The `.dist` beside an editable core conf, or `""` when it cannot be read."""
+        try:
+            with open(self.services.controller.server_dir / f"{file}.dist", "rb") as handle:
+                blob = handle.read(tuning.MAX_EDIT_BYTES + 1)
+            if len(blob) > tuning.MAX_EDIT_BYTES:
+                return ""
+            return blob.decode("utf-8")
+        except (OSError, UnicodeDecodeError):
+            return ""
 
     @Slot()
     def reload_tuning_file(self) -> None:
@@ -23239,9 +23322,7 @@ class ControllerView(QWidget):
         if self._tuning_write_refused() or self._put_back_refused("Revert"):
             return
         file = self.tuning_panel.current_file()
-        if not file or tuning.is_one_of(
-            file, self._tuning_core_files(), self.services.controller.server_dir
-        ):
+        if not file or self._tuning_core_denied(file):
             return
         path = self.services.controller.server_dir / file
         # The backup the tab names, not merely the newest (T190): a card's Save
@@ -23261,10 +23342,15 @@ class ControllerView(QWidget):
                 return TuningWrite(str(exc), failed=str(exc))
             except OSError as exc:
                 return TuningWrite(TUNING_FILE_FAILED.format(file=file, exc=exc), failed=str(exc))
+            rule = (
+                TUNING_AUTH_RESTART
+                if file.rsplit("/", 1)[-1] == "authserver.conf"
+                else tuning.apply_sentence(tuning.file_rule(file))
+            )
             said = TUNING_REVERTED_FILE.format(
                 file=file,
                 backup=newest.name,
-                rule=tuning.apply_sentence(tuning.file_rule(file)),
+                rule=rule,
             )
             return TuningWrite(
                 f"{said}\n{note}" if note else said, owed=(file,), reopen=file, reload=True
@@ -23278,23 +23364,38 @@ class ControllerView(QWidget):
 
         The guard warns and never blocks (T43 point 4): it is a cheap pass, not
         a parser, and a refusal between a person and their own configuration
-        over a rule this shallow would be worse than the typo it caught.
+        over a rule this shallow would be worse than the typo it caught. An
+        editable core conf (T819) is refused before the job when it touches a
+        locked key, and asks once with the diff otherwise.
         """
         file = self.tuning_panel.current_file()
-        if not file or tuning.is_one_of(
-            file, self._tuning_core_files(), self.services.controller.server_dir
-        ):
+        if not file or self._tuning_core_denied(file):
             return
-        said = tuning.lint_sentence(tuning.lint(text))
-        if said is None:
-            # T371: an `int` key typed in the raw box is held to the card's own
-            # rule, as a warning on the same confirm and not a refusal.
-            said = tuning.value_sentence(tuning.int_problems(text, self._raw_file_keys(file)))
-        if said is not None:
+        server_dir = self.services.controller.server_dir
+        original = self._tuning_raw
+        editable_core = self._tuning_core_editable(file)
+        unmasked = core_conf.unmask(text, original) if editable_core else text
+        if editable_core:
+            locked = core_conf.locked(self.entry, server_dir, file, original, unmasked)
+            refused = core_conf.locked_edits(original, unmasked, locked)
+            if refused:
+                refused_lines = "\n".join(f"{k}: {locked[k]}" for k in refused)
+                report = TUNING_CORE_LOCKED + "\n" + refused_lines
+                self.tuning_report.setPlainText(report)
+                self.action_failed.emit(report)
+                return
+            changed = core_conf.changed_keys(original, unmasked)
+            if not changed:
+                self.tuning_report.setPlainText(
+                    TUNING_NOTHING_CHANGED.format(module=reset_defaults.label(file))
+                )
+                return
+            shown = "\n".join(f"{key}: {old} -> {new}" for key, old, new in changed[:12])
+            more = f"\nand {len(changed) - 12} more" if len(changed) > 12 else ""
             answer = QMessageBox.question(
                 self,
                 TUNING_LINT_CONFIRM_TITLE,
-                said,
+                TUNING_CORE_CONFIRM.format(n=len(changed), name=file, lines=shown, more=more),
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
             )
@@ -23302,31 +23403,55 @@ class ControllerView(QWidget):
             # plain int, so `is StandardButton.Yes` is always False (T33).
             if answer != QMessageBox.StandardButton.Yes:
                 return
+        else:
+            said = tuning.lint_sentence(tuning.lint(text))
+            if said is None:
+                # T371: an `int` key typed in the raw box is held to the card's own
+                # rule, as a warning on the same confirm and not a refusal.
+                said = tuning.value_sentence(tuning.int_problems(text, self._raw_file_keys(file)))
+            if said is not None:
+                answer = QMessageBox.question(
+                    self,
+                    TUNING_LINT_CONFIRM_TITLE,
+                    said,
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                # `==` and an int, not `is`: PySide6's static `question()` returns a
+                # plain int, so `is StandardButton.Yes` is always False (T33).
+                if answer != QMessageBox.StandardButton.Yes:
+                    return
         if self._tuning_write_refused():
             return
-        server_dir = self.services.controller.server_dir
         path = server_dir / file
-        original = self._tuning_raw
 
         def body() -> TuningWrite:
             try:
                 # Refuses a link out of the server folder, before any byte moves (T573).
                 made = tuning.backup(path, root=server_dir)
                 with open(path, "w", encoding="utf-8", newline="") as handle:
-                    handle.write(tuning.save_text(original, text))
+                    handle.write(tuning.save_text(original, unmasked))
             except tuning.TuningError as exc:
                 return TuningWrite(str(exc), failed=str(exc))
             except OSError as exc:
                 return TuningWrite(TUNING_FILE_FAILED.format(file=file, exc=exc), failed=str(exc))
+            rule = (
+                TUNING_AUTH_RESTART
+                if file.rsplit("/", 1)[-1] == "authserver.conf"
+                else tuning.apply_sentence(tuning.file_rule(file))
+            )
             return TuningWrite(
                 TUNING_FILE_SAVED.format(
                     file=file,
                     backup=made.name,
-                    rule=tuning.apply_sentence(tuning.file_rule(file)),
+                    rule=rule,
                 ),
                 backup=made.name,
                 owed=(file,),
                 reload=True,
+                # A core conf re-opens masked: the secret the editor never held
+                # must not be what it holds after the save (T819).
+                reopen=file if editable_core else "",
             )
 
         self._write_tuning("Save a setting file", body)
