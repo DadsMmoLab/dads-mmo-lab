@@ -643,6 +643,17 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
             if native_block is not None and native_block.family == "azerothcore"
             else {"bot_rndbot_delete"}
         )
+        # T822's "Repair the damaged table…": `REPAIR TABLE` is a MyISAM/Aria tool, so it is
+        # offered for the CMaNGOS family alone -- its `characters`/`realmd.account` tables are
+        # MyISAM, while AzerothCore (wow-wotlk and wow-unbound) and TrinityCore (Centurion)
+        # store theirs in InnoDB, where the press would only ever refuse. Read off the install
+        # family the wiring is written for, so a family that gains the press fails this until
+        # its tab offers it; absent on the reference too.
+        unrepairable = (
+            set()
+            if native_block is not None and native_block.family == "cmangos"
+            else {"table_repair"}
+        )
         # T804's "rebuild it the way the old script built it": decided by the DISTRO, not the
         # game -- it exists only for a WotLK folder inside a WSL distro, and this test builds
         # every tab with no distro (`script_built_rebuild_for_app`: None without one). So it
@@ -672,6 +683,7 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
             | unadoptable
             | unwindowed
             | undashboarded
+            | unrepairable
             | unpaired
             | unrebuilt
             | untipped
@@ -689,6 +701,7 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
                 | unadoptable
                 | unwindowed
                 | undashboarded
+                | unrepairable
                 | unrepaired
                 | unpaired
                 | unrebuilt

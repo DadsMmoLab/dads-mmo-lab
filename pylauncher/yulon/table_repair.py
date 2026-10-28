@@ -11,8 +11,9 @@ schemas belong to the caller, as `TableRepair`'s seams.
 
 **The ordering is the safety property.** The hold, then the engine read, then a
 backup with the damaged table LEFT OUT (a dump that reads it fails on the same
-error), then a copy of the table's own files, and only then `REPAIR TABLE`. A
-press that refuses at any of those steps has written nothing to the table.
+error), then a copy of the table's own files taken while a read lock holds that
+table still, and only then `REPAIR TABLE`. A press that refuses at any of those
+steps has written nothing to the table.
 
 **Never a table it was not asked about.** Every statement names one (schema,
 table) pair from `crashed_tables()`, and both halves have already passed
@@ -35,6 +36,7 @@ from pathlib import Path
 from typing import Protocol
 
 from yulon import docker
+from yulon.server_build_presses import MAINTENANCE_TAB
 
 logger = logging.getLogger(__name__)
 
@@ -239,13 +241,30 @@ def confirmation(tables: Sequence[CrashedTable]) -> str:
 
 
 COPY_FAILED_QUESTION = (
-    "Yu'lon could not copy the damaged table's files, so there is no extra copy of them. "
-    "Repair the table anyway? The backup is already saved, and a repair can lose rows it "
-    "cannot read."
+    "Yu'lon could not copy every damaged table's files, so there is no complete extra copy "
+    "of them. Repair the tables anyway? The backup leaves them out, so a repair can lose "
+    "rows nothing can bring back."
+)
+COPY_MAY_BE_INCONSISTENT_QUESTION = (
+    "Yu'lon could not hold the damaged tables still while it copied their files, so the "
+    "copy may be inconsistent. Repair the tables anyway? The backup leaves them out, so a "
+    "repair can lose rows nothing can bring back."
 )
 NOTHING_REPAIRED_BACKUP_KEPT = "Nothing was repaired; the backup is kept."
 BACKUP_FAILED = "Yu'lon could not take the backup, so nothing was repaired."
 REPAIR_FAILED = "The repair did not finish. The backup is kept."
+
+
+def _lock_statements(tables: Sequence[_Resolved]) -> tuple[str, ...]:
+    """The two ways to stop the server writing these tables, best first (T822).
+
+    `FLUSH TABLES … WITH READ LOCK` also flushes each table's own files, which is what makes
+    the copy a snapshot of the disk rather than of memory; it can be refused for a table it
+    cannot open, so a plain `LOCK TABLES … READ` is tried next. Both names are already
+    through `_IDENTIFIER` and back-quoted, so neither text can carry anything else.
+    """
+    names = ", ".join(one.sql_name for one in tables)
+    return (f"FLUSH TABLES {names} WITH READ LOCK;", f"LOCK TABLES {names} READ;")
 
 
 @dataclass(frozen=True)
@@ -269,13 +288,20 @@ class RepairReport:
 
 
 class RepairMysql(Protocol):
-    """The two halves of the database seam this press needs."""
+    """The halves of the database seam this press needs."""
 
     def query(self, sql: str) -> str:
         """Run one read and return its tab-separated rows, no header."""
 
     def execute(self, sql: str) -> None:
         """Run one statement. Raises on failure."""
+
+    def read_lock(self, *statements: str) -> AbstractContextManager[None]:
+        """Hold a table read lock from the first of `statements` the server grants.
+
+        One session keeps it until the block ends and is released on every path, including
+        an exception inside the block. Raises when it cannot be granted.
+        """
 
 
 class Backup(Protocol):
@@ -371,27 +397,15 @@ def repair(
             backups, refusal = _backed_up(resolved, schemas=schemas, backup=backup)
             if refusal is not None:
                 return refusal
-            copy_dir: Path | None
-            try:
-                datadir = _datadir(mysql)
-                if not datadir:
-                    raise ValueError("the database did not say where its files are")
-                copy_dir = copy_files(
-                    tuple(one.crashed for one in resolved),
-                    datadir,
-                    {one.sql_name: one.engine for one in resolved},
-                )
-            except Exception as exc:  # noqa: BLE001 - every copy failure is the same question
-                detail = _detail(exc)
-                logger.warning(f"could not copy the damaged table's files: {detail or exc}")
-                if not confirm_without_copy(COPY_FAILED_QUESTION):
-                    return RepairReport(
-                        sentence=NOTHING_REPAIRED_BACKUP_KEPT,
-                        detail=detail,
-                        backup=backups,
-                        refused=True,
-                    )
-                copy_dir = None
+            copy_dir, refusal = _copied_files(
+                resolved,
+                mysql=mysql,
+                copy_files=copy_files,
+                backup=backups,
+                confirm_without_copy=confirm_without_copy,
+            )
+            if refusal is not None:
+                return refusal
 
             repaired: list[CrashedTable] = []
             still: list[CrashedTable] = []
@@ -499,8 +513,8 @@ def _engines(
         if engine.strip().upper() not in REPAIRABLE:
             return (), RepairReport(
                 sentence=f"{db}.{name} is stored in a way that cannot be repaired here "
-                f"({engine or 'unknown'}); restore a backup on the Maintenance tab, or ask "
-                "for help.",
+                f"({engine or 'unknown'}); restore a backup on the {MAINTENANCE_TAB} tab, or "
+                "ask for help.",
                 refused=True,
             )
         one = _Resolved(db, name, engine)
@@ -550,6 +564,88 @@ def _backed_up(
                 )
             return reports, RepairReport(sentence=BACKUP_FAILED, detail=text, refused=True)
     return reports, None
+
+
+def _copied_files(
+    tables: Sequence[_Resolved],
+    *,
+    mysql: RepairMysql,
+    copy_files: _CopyFiles,
+    backup: object | None,
+    confirm_without_copy: Callable[[str], bool],
+) -> tuple[Path | None, RepairReport | None]:
+    """Copy the damaged files while the server cannot write those tables (T822).
+
+    A copy is only worth keeping while the table is still: `mysqld` keeps writing for as long
+    as players are connected, and a copy of a file taken between two of its writes is a
+    mixture of both. So a read lock is taken on ONE session first, held for exactly the copy,
+    and released in a `finally` on every path. The backup this press just took deliberately
+    leaves the damaged table out, so this copy is the only one that can still hold the rows a
+    repair may not be able to read.
+
+    A lock that cannot be taken does not stop the copy -- a copy that may be inconsistent is
+    still better than none, and the player can say No next -- but it is never silent: the
+    same question a failed copy asks is asked, and only a Yes repairs the table. The same
+    holds for the copy itself failing: No stops with the backup kept, Yes repairs without it.
+
+    Returns the folder, or `(None, a refusal)` when the player said No.
+    """
+    crashed = tuple(one.crashed for one in tables)
+    engines = {one.sql_name: one.engine for one in tables}
+    try:
+        datadir = _datadir(mysql)
+        if not datadir:
+            raise ValueError("the database did not say where its files are")
+    except Exception as exc:  # noqa: BLE001 - a read that failed is a copy that failed
+        refusal = _copy_failed(exc, backup=backup, confirm_without_copy=confirm_without_copy)
+        return None, refusal
+    lock = mysql.read_lock(*_lock_statements(tables))
+    held = True
+    lock_detail = ""
+    try:
+        lock.__enter__()
+    except Exception as exc:  # noqa: BLE001 - a lock that could not be taken is a warning
+        held = False
+        lock_detail = _detail(exc) or str(exc)
+        logger.warning(f"the damaged tables could not be held still for the copy: {lock_detail}")
+    copy_dir: Path | None = None
+    failure: Exception | None = None
+    try:
+        copy_dir = copy_files(crashed, datadir, engines)
+    except Exception as exc:  # noqa: BLE001 - every copy failure is the same question
+        failure = exc
+    finally:
+        if held:
+            try:
+                lock.__exit__(None, None, None)
+            except Exception as exc:  # noqa: BLE001 - the copy is out; releasing is best effort
+                logger.warning(f"the table lock could not be released: {_detail(exc) or str(exc)}")
+    if failure is not None:
+        return None, _copy_failed(failure, backup=backup, confirm_without_copy=confirm_without_copy)
+    if not held and not confirm_without_copy(COPY_MAY_BE_INCONSISTENT_QUESTION):
+        return None, RepairReport(
+            sentence=NOTHING_REPAIRED_BACKUP_KEPT,
+            detail=lock_detail,
+            backup=backup,
+            refused=True,
+        )
+    return copy_dir, None
+
+
+def _copy_failed(
+    exc: Exception, *, backup: object | None, confirm_without_copy: Callable[[str], bool]
+) -> RepairReport | None:
+    """Ask about a copy that could not be taken; None means repair without one."""
+    detail = _detail(exc) or str(exc)
+    logger.warning(f"could not copy the damaged tables' files: {detail}")
+    if confirm_without_copy(COPY_FAILED_QUESTION):
+        return None
+    return RepairReport(
+        sentence=NOTHING_REPAIRED_BACKUP_KEPT,
+        detail=detail,
+        backup=backup,
+        refused=True,
+    )
 
 
 def _datadir(mysql: RepairMysql) -> str:

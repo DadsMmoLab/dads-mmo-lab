@@ -3196,6 +3196,10 @@ def _copy_the_table_files(
     returned for the report. `docker cp`'s destination is a host path, so a server inside
     a WSL distro gets its distro spelling of it (T125): the CLI runs in that distro.
 
+    The caller (`table_repair.repair()`) holds a read lock on these tables around this call.
+    That is what makes the files a snapshot rather than a mixture of two writes: `mysqld`
+    keeps writing while players are connected, and nothing here can stop it on its own.
+
     Raises whatever `docker.copy_from_container()` raises for the first file it could not
     copy; nothing is repaired on that failure until the player says so.
     """
