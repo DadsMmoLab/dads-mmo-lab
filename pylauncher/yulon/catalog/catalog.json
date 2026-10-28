@@ -1240,7 +1240,8 @@
               "min_files": 500,
               "required": false,
               "success_codes": [1],
-              "cpu_cap": "half"
+              "cpu_cap": "half",
+              "offmesh_repo_path": "tools/mmap/offmesh.txt"
             },
             "conf": {
               "source_dir": "/opt/tortoise/etc",

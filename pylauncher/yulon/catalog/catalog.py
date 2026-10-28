@@ -686,6 +686,14 @@ class MmapPlan(_Strict):
             "generators already make themselves with --threads 2 in their argv."
         ),
     )
+    offmesh_repo_path: str | None = Field(
+        default=None,
+        description=(
+            "Checkout-relative path of the off-mesh file this generator reads (T811). Only the "
+            "entry whose image carries it names it: the update route diffs its bytes across the "
+            "move and rebuilds only the maps whose lines changed. TBC and Vanilla name none."
+        ),
+    )
     success_codes: tuple[int, ...] = Field(
         default=(0,),
         min_length=1,

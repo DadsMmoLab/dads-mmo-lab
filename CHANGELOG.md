@@ -31,6 +31,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - **Rebuild** works for a WotLK server the old Dad's MMO Lab script built inside WSL, once you agree to it.
 - When Docker setup genuinely fails, the advice now lists every failed step to run, in order, instead of only the first.
 - Tortoise updates no longer stop on upstream's three rewritten database migrations.
+- Updating a WoW Tortoise server now rebuilds only the movement maps whose areas changed, in minutes.
 
 ### Changed
 
