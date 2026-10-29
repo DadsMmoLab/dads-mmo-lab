@@ -970,12 +970,17 @@ def _record(
 
 
 def backups(client_dir: Path) -> list[str]:
-    """The versions whose backups are kept, newest name last."""
+    """The versions whose backups are kept, the most recently written journal last."""
     folder = client_dir / BACKUP_DIR
     try:
-        return sorted(p.name for p in folder.iterdir() if p.is_dir() and (p / JOURNAL).is_file())
+        found = [
+            ((p / JOURNAL).stat().st_mtime_ns, p.name)
+            for p in folder.iterdir()
+            if p.is_dir() and (p / JOURNAL).is_file()
+        ]
     except OSError:
         return []
+    return [name for _, name in sorted(found)]
 
 
 def rollback(client_dir: Path, version: str) -> list[str]:

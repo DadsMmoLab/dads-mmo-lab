@@ -189,7 +189,7 @@ from yulon.manifest_store import FAMILY_FILES, ManifestStore
 from yulon.networking import Mode, NetworkPlan, NetworkReport
 from yulon.said import SaidByYulon, split_details
 from yulon.support.redact import hide_account_passwords
-from yulon.ui import lines, single_instance
+from yulon.ui import client_update, lines, single_instance
 from yulon.ui.answers import said_yes
 from yulon.ui.catalog_view import DirPicker, _qt_dir_picker, offer_a_docker_group_restart
 from yulon.ui.client_update import ClientUpdateControl
@@ -13097,6 +13097,9 @@ class ControllerView(QWidget):
             self._jobs,
             tab,
         )
+        undo = self.play_menu.addAction(client_update.UNDO_LABEL)
+        undo.setToolTip("Put back the client files the last Update client replaced. Asks first.")
+        undo.triggered.connect(self.client_update.undo_pressed)
         self.client_update.check()
 
     def _say_play(self, text: str) -> None:

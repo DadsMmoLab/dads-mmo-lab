@@ -172,3 +172,39 @@ def test_a_first_update_keeps_differing_files_unless_the_player_says_replace(
     control.update_pressed()
     assert asked and asked[0][1] is True
     assert (client / "a.exe").read_bytes() == b"theirs"
+
+
+def test_undo_puts_back_what_the_last_update_replaced_after_a_yes(
+    qapp: object, tmp_path: Path
+) -> None:
+    site = _site({"a.exe": b"published"}, "v1")
+    control, client, _ = _control(tmp_path, site, {"a.exe": b"theirs"}, answer=Choice.REPLACE)
+    control.update_pressed()
+    assert (client / "a.exe").read_bytes() == b"published"
+    said: list[str] = []
+    control._confirm = lambda _p, _t, text: said.append(text) or False  # type: ignore[method-assign]
+    control.undo_pressed()
+    assert said and "v1" in said[0]
+    assert (client / "a.exe").read_bytes() == b"published"  # No: nothing undone
+    control._confirm = lambda *_a: True  # type: ignore[method-assign]
+    control.undo_pressed()
+    assert (client / "a.exe").read_bytes() == b"theirs"
+    assert control.label.text() == "The client update v1 was undone."
+    control.undo_pressed()
+    assert control.label.text() == client_update.NOTHING_TO_UNDO
+
+
+def test_the_play_menu_offers_undo_for_an_entry_that_publishes_its_client(
+    qapp: object, tmp_path: Path
+) -> None:
+    from yulon.ui.controller_view import ControllerServices, ControllerView
+
+    client = tmp_path / "client"
+    (client / "Data").mkdir(parents=True)
+    services = ControllerServices.for_entry(CATALOG.get("wow-coa"), tmp_path / "coa", client)
+    services.set_play_client_dir = lambda _p: None
+    view = ControllerView(CATALOG.get("wow-coa"), services, status_poll_ms=0, job_runner=run_inline)
+    undo = next(a for a in view.play_menu.actions() if a.text() == client_update.UNDO_LABEL)
+    undo.trigger()
+    assert view.client_update is not None
+    assert view.client_update.label.text() == client_update.NOTHING_TO_UNDO

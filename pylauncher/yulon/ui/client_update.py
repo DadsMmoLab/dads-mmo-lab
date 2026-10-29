@@ -26,7 +26,7 @@ from PySide6.QtWidgets import QLabel, QMessageBox, QPushButton, QWidget
 from yulon import coa_client
 from yulon.catalog.catalog import CatalogEntry
 from yulon.log import get_logger
-from yulon.ui.message_box import FittedMessageBox
+from yulon.ui.message_box import FittedMessageBox, ask_yes_no
 from yulon.ui.widgets.job import JobRunner, LineRelay
 
 logger = get_logger(__name__)
@@ -39,6 +39,8 @@ UPDATE_CLIENT_TIP = (
 )
 CHECKING = "Checking for a client update…"
 NO_CLIENT_FOLDER = "Choose your client folder first; then Update client can check it."
+UNDO_LABEL = "Undo the last client update…"
+NOTHING_TO_UNDO = "There is no client update to undo."
 
 
 class Choice(Enum):
@@ -104,6 +106,7 @@ class ClientUpdateControl(QObject):
         parent: QWidget,
         *,
         ask: Asker = ask_update,
+        confirm: Callable[[QWidget, str, str], bool] = ask_yes_no,
         opener: Any = None,
     ) -> None:
         super().__init__(parent)
@@ -117,6 +120,7 @@ class ClientUpdateControl(QObject):
         self._jobs = jobs
         self._parent = parent
         self._ask = ask
+        self._confirm = confirm
         self._opener = opener
         self._cancel = threading.Event()
         self.running = False
@@ -272,6 +276,40 @@ class ClientUpdateControl(QObject):
             return
         logger.warning(f"client update of {self._entry.id} failed: {exc!r}")
         self._end(f"The client update stopped: {exc}. Nothing more was changed.")
+
+    # -- undo -------------------------------------------------------------------------------
+
+    @Slot()
+    def undo_pressed(self) -> None:
+        """Put back what the most recent client update replaced, after a Yes (`rollback`)."""
+        client = self._client_dir()
+        if client is None or self.running:
+            return
+        versions = coa_client.backups(client)
+        if not versions:
+            self._say(NOTHING_TO_UNDO)
+            return
+        version = versions[-1]
+        if not self._confirm(
+            self._parent,
+            "Undo the client update",
+            f"Put back the files the client update {version} replaced, and remove the files "
+            "it added? Files you changed since are kept. Close the game first.",
+        ):
+            return
+        self._begin()
+        self._say(f"Undoing the client update {version}…")
+
+        def work() -> object:
+            left = coa_client.rollback(client, version)
+            if not left:
+                return f"The client update {version} was undone."
+            return (
+                f"The client update {version} was only partly undone: {left[0]}"
+                f"{f' ({len(left) - 1} more)' if len(left) > 1 else ''}. Its backup was kept."
+            )
+
+        self._jobs(work, self._applied, self._failed)
 
     @Slot(str)
     def _progress(self, text: str) -> None:
