@@ -1043,6 +1043,21 @@ def confirmation_details(report: AddReport) -> str:
     )
 
 
+def _client_launch_options(wine_dll_overrides: str | None, args: Sequence[str]) -> str:
+    """The client entry's Steam launch options: the DLL overrides before `%command%`, the
+    client's own arguments after it; empty when there is neither (8.8's entry as it was).
+
+    Both are catalog values whose patterns allow no space, quote or shell character
+    (`catalog.Client.wine_dll_overrides`, `catalog.LaunchArg`); `shlex.join` is a second
+    fence for the arguments, not the first.
+    """
+    if not wine_dll_overrides and not args:
+        return ""
+    head = f'WINEDLLOVERRIDES="{wine_dll_overrides}" ' if wine_dll_overrides else ""
+    tail = f" {shlex.join(args)}" if args else ""
+    return f"{head}%command%{tail}"
+
+
 @dataclass
 class SteamShortcuts:
     """This install's two Steam entries. One method, and every seam injectable.
@@ -1059,6 +1074,9 @@ class SteamShortcuts:
     """The entry's `client.exe_names`: which executable in the folder is the game (T812)."""
     wine_dll_overrides: str | None = None
     """The entry's `client.wine_dll_overrides`: the client's Steam launch options (T812)."""
+    launch_args: Callable[[], tuple[str, ...]] = tuple
+    """The arguments Play would add to the client NOW (CoA's `-hd 0`, T828), read when the
+    entry is written: Steam keeps the launch options it was given until the next add."""
     home: Path = field(default_factory=Path.home)
     is_running: Callable[[], bool] = steam_running
     now: Callable[[], datetime] = datetime.now
@@ -1090,11 +1108,7 @@ class SteamShortcuts:
             raise SteamRefusal(NO_PROTON.format(tools=steam_root / "compatibilitytools.d"))
 
         client_exe = client_executable(self.client_dir, names=self.exe_names)
-        launchopts = (
-            f'WINEDLLOVERRIDES="{self.wine_dll_overrides}" %command%'
-            if self.wine_dll_overrides
-            else ""
-        )
+        launchopts = _client_launch_options(self.wine_dll_overrides, self.launch_args())
         client_entry = new_entry(
             name=self.game,
             exe=str(client_exe),

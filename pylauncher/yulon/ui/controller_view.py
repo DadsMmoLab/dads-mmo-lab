@@ -105,6 +105,7 @@ from yulon import (
     docker_advice,
     forgetting,
     gaming_mode,
+    hd_patches,
     install_wiring,
     logsnap,
     module_moves,
@@ -3606,6 +3607,8 @@ def _steam_seam(
         client_dir=client_dir,
         exe_names=entry.client.exe_names,
         wine_dll_overrides=entry.client.wine_dll_overrides,
+        # T828: CoA's `-hd 0` when this install has its HD patches off, read at the press.
+        launch_args=partial(hd_patches.launch_args, entry.client, server_dir),
         # Steam Deck Gaming Mode: the Server tile starts the server through `yulon --server`
         # and stops it when the game closes, and a third tile stops it (`gaming_mode`).
         gaming=partial(_wow_gaming_scripts, entry, server_dir),
@@ -10006,7 +10009,11 @@ class ControllerView(QWidget):
                 self.play_cancel_button,
                 self.steam_button,
                 *(
-                    (self.client_update.button, self.client_update.cancel_button)
+                    (
+                        self.client_update.button,
+                        self.client_update.fix_button,
+                        self.client_update.cancel_button,
+                    )
                     if self.client_update is not None
                     else ()
                 ),
@@ -10014,9 +10021,12 @@ class ControllerView(QWidget):
             if b is not None
         ]
         play_column.addWidget(_bar(play, *play_presses))
+        if self.hd_patches_check is not None:
+            play_column.addWidget(self.hd_patches_check)
         play_column.addWidget(self.play_label)
         if self.client_update is not None:
             play_column.addWidget(self.client_update.label)
+            play_column.addWidget(self.client_update.kind_label)
         play_column.addWidget(self.steam_label)
         play_column.addWidget(self.steam_details)
         self._add_section(box, play, self.play_button is not None or self.steam_button is not None)
@@ -13600,6 +13610,7 @@ class ControllerView(QWidget):
         self._made: _MadePlayClient | None = None
         self.play_button: QPushButton | None = None
         self.client_update: ClientUpdateControl | None = None
+        self.hd_patches_check: QCheckBox | None = None
         self.launcher_button: QPushButton | None = None
         self.play_menu_button: QPushButton | None = None
         self.play_menu = QMenu(tab)
@@ -13662,6 +13673,7 @@ class ControllerView(QWidget):
         self.play_menu_button.setMenu(self.play_menu)
         self.play_menu_button.setVisible(has_play)
         self._build_client_update(tab)
+        self._build_hd_patches(tab)
         if not has_play and self.services.client_dir is None:
             # The button is hidden until there is a folder to make one from
             # (T181); the section says so, and where (T189).
@@ -13687,6 +13699,49 @@ class ControllerView(QWidget):
         undo.setToolTip("Put back the client files the last Update client replaced. Asks first.")
         undo.triggered.connect(self.client_update.undo_pressed)
         self.client_update.check()
+
+    def _build_hd_patches(self, tab: QWidget) -> None:
+        """T828: "Enable HD patches" under Play, for an entry whose client can switch them off.
+
+        Saved per install the moment it changes (`hd_patches.save`), read again at every
+        Play, so it applies to the next start and never holds Play. A save that fails puts
+        the box back and says why.
+        """
+        if self.entry.client.hd_patches is None:
+            return
+        server_dir = self.services.controller.server_dir
+        check = QCheckBox(hd_patches.LABEL, tab)
+        check.setToolTip(hd_patches.TIP)
+        check.setChecked(hd_patches.enabled(server_dir))
+        check.toggled.connect(self._hd_patches_toggled)
+        self.hd_patches_check = check
+
+    @Slot(bool)
+    def _hd_patches_toggled(self, on: bool) -> None:
+        check = self.hd_patches_check
+        if check is None:
+            return
+        server_dir = self.services.controller.server_dir
+        try:
+            hd_patches.save(server_dir, on)
+        except OSError as exc:
+            check.blockSignals(True)
+            check.setChecked(not on)
+            check.blockSignals(False)
+            self._say_play(
+                f"The HD patches choice could not be saved in {server_dir} "
+                f"({exc.strerror or exc}), so it is as it was. Check that you can write "
+                "to that folder, then try again."
+            )
+            return
+        said = (
+            "HD patches are on from the next time you start the game."
+            if on
+            else "HD patches are off from the next time you start the game."
+        )
+        if self.services.steam is not None:
+            said += " " + hd_patches.STEAM_KEEPS_OLD
+        self._say_play(said)
 
     def _say_play(self, text: str) -> None:
         self.play_label.setText(text)
@@ -15121,6 +15176,7 @@ class ControllerView(QWidget):
             config_dir=platform.config_dir(),
             exe_names=self.entry.client.exe_names,
             wine_dll_overrides=self.entry.client.wine_dll_overrides,
+            args=hd_patches.launch_args(self.entry.client, self.services.controller.server_dir),
         )
         try:
             play_launch.launch(spec)

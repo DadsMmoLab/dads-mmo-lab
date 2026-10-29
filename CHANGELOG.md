@@ -22,6 +22,8 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - **When stopping** on WotLK, Unbound and Conquest of Azeroth: wait for the bots' saves, or stop once players are saved.
 - Install a Conquest of Azeroth server (beta, Linux) from the Catalog with your own Ascension client. Switch realm type on the Server tab.
 - Keep your Conquest of Azeroth client current with **Update client** beside Play; files you changed are kept unless you say.
+- Turn Conquest of Azeroth's HD patches off or on with **Enable HD patches** under Play, as the official launcher does.
+- The Server tab warns when your Conquest of Azeroth client is the stock Ascension one; **Update client** makes it the CoA client.
 
 ### Fixed
 - The install's free-space check now measures Docker's containerd images too, so a full root disk stops it early.

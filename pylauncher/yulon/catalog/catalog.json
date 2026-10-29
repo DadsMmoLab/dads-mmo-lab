@@ -2976,10 +2976,11 @@
         "id": "wow-coa",
         "name": "WoW Conquest of Azeroth",
         "status": "beta",
-        "description": "Conquest of Azeroth (3.3.5a) on the Ascension CoA fork, with bots that quest, group and fight alongside you. You bring your own Ascension 3.3.5a client; Yu'lon never downloads it.",
+        "description": "Conquest of Azeroth (3.3.5a) on the Ascension CoA fork, with bots that quest, group and fight alongside you. You bring your own Ascension 3.3.5a client; use the CoA client files (Update client makes your Ascension copy one).",
         "notes": [
             "T812: the Conquest of Azeroth server. Core (Zyth45/azerothcore-wotlk-coa, mirrored as pjerra/azerothcore-wotlk-coa so an upstream 404 cannot break installs) @ coa-bots-2.8 98570f248b6095a23ef14bbbfac6731ac4c20d66; mod-playerbots (Zyth45, mirrored as pjerra/mod-playerbots-coa) v2.8 2b7a4f6547b2e4b35a4ec3a89374e41e5c6e5272 (on branch coa). The 30 CoA modules are in-tree. client_build.read_version reads Ascension.exe as 3.3.5 (12340), checked 2026-10-27 on the live client.",
-            "Health markers read off the pin: src/server/coa/AscensionCompat.cpp:9472 (Ascension compatibility) and src/server/coa/CoADungeonBossKit.cpp:154 (CoA dungeon boss kit rows)."
+            "Health markers read off the pin: src/server/coa/AscensionCompat.cpp:9472 (Ascension compatibility) and src/server/coa/CoADungeonBossKit.cpp:154 (CoA dungeon boss kit rows).",
+            "T827: use the CoA client files (Update client makes your Ascension copy one). The stock Ascension client logs in and is then disconnected at realm select (world log: malformed packet, cryptInitialized: true); the Server tab tells the two apart by Extensions.dll and Ascension.exe against the CoA manifest."
         ],
         "emulator": {
             "name": "AzerothCore (Ascension CoA fork) + SquidBots playerbots",
@@ -3280,9 +3281,15 @@
                 "manifest_url": "https://launcher-api.coa-development.org/downloads/client/latest.json",
                 "objects_url": "https://launcher-api.coa-development.org/downloads/client/objects/"
             },
+            "hd_patches": {
+                "args_when_off": [
+                    "-hd",
+                    "0"
+                ]
+            },
             "notes": [
                 "set realmlist 127.0.0.1:3726 (or the host's LAN/public IP and :3726 for other players); this server's login port is not WoW WotLK's",
-                "Bring your own Ascension 3.3.5a client (Ascension.exe + Data); Yu'lon never downloads it."
+                "Bring your own Ascension 3.3.5a client (Ascension.exe + Data) and use the CoA client files (Update client makes your Ascension copy one): the stock Ascension download is disconnected when you pick the realm."
             ]
         },
         "play": {
