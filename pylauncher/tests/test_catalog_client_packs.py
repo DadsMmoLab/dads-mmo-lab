@@ -189,6 +189,7 @@ def test_the_shipped_catalog_uses_the_new_fields_on_centurion_and_unbound_alone(
                 "realmlist_file",
                 "exe_names",
                 "wine_dll_overrides",
+                "update",
                 "notes",
             }, sorted(set(entry["client"]))
             continue
@@ -219,7 +220,8 @@ def test_the_shipped_catalog_uses_the_new_fields_on_centurion_and_unbound_alone(
             assert game.client.packs == ()
             assert game.client.exe_patch is None
             assert game.client.config_wtf is None
-            assert game.client.hosts() == frozenset()
+            # T825: the client update's manifest host is the only host the entry names.
+            assert game.client.hosts() == frozenset({"launcher-api.coa-development.org"})
             continue
         assert game.client.packs == ()
         assert game.client.exe_patch is None
