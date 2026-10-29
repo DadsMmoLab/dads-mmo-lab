@@ -27,7 +27,15 @@ from yulon.ui.controller_view import (
 )
 from yulon.ui.widgets.job import run_inline
 
-GAMES = ("wow-wotlk", "wow-tbc", "wow-vanilla", "wow-tortoise", "wow-centurion", "wow-unbound")
+GAMES = (
+    "wow-wotlk",
+    "wow-tbc",
+    "wow-vanilla",
+    "wow-tortoise",
+    "wow-centurion",
+    "wow-unbound",
+    "wow-coa",
+)
 
 DB_ASSERT_LINE = (
     "/src/src/shared/Database/DatabaseMysql.cpp:190: Error: Assertion in HandleMySQLError "

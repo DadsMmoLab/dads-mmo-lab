@@ -19,7 +19,9 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - **Update the server to latest…** on a Tortoise server also updates TortoiseBots Manager in your game client.
 - Updating a module now adds its new settings to your kept config file, leaving your own values alone.
 - Lumenveil graphics mod as an optional WotLK client extra, with an **Update Lumenveil** button.
-- **When stopping** on the WotLK and Unbound Server tab: wait for the bots' saves, or stop faster after players are saved.
+- **When stopping** on WotLK, Unbound and Conquest of Azeroth: wait for the bots' saves, or stop once players are saved.
+- Install a Conquest of Azeroth server (beta, Linux) from the Catalog with your own Ascension client. Switch realm type on the Server tab.
+- Keep your Conquest of Azeroth client current with **Update client** beside Play; files you changed are kept unless you say.
 
 ### Fixed
 - The install's free-space check now measures Docker's containerd images too, so a full root disk stops it early.
@@ -47,6 +49,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Packing or bringing in accounts during a restore or a server bring-in now says what the move cannot do, in its own words.
 - A refused Tuning restart or Repair now shows the update or Repair press its sentence names.
 - Spin boxes keep their number clear of the buttons with any font.
+- **Rebuild** and **Apply module SQL** on a Conquest of Azeroth server no longer stop on a "Duplicate filename" update.
 
 ### Changed
 - The newest WotLK, Unbound, TBC, Vanilla, Tortoise and Centurion servers are pinned (not tested live yet).

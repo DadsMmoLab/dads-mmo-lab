@@ -24,13 +24,15 @@ from __future__ import annotations
 
 import os
 import posixpath
+import queue
 import re
 import stat
 import tempfile
-from collections.abc import Generator, Iterator, Mapping, Sequence
+import threading
+from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import ClassVar
+from typing import ClassVar, cast
 
 from yulon import (
     ale_playerbots,
@@ -39,17 +41,19 @@ from yulon import (
     git,
     networking,
     party,
+    platform,
     server_build_presses,
 )
 from yulon.catalog import composegen, snapshot
-from yulon.catalog.catalog import AzerothCoreData, CatalogEntry, EmulatorSource
-from yulon.catalog.families import carried, scriptdeploy
+from yulon.catalog.catalog import AcClientExtract, AzerothCoreData, CatalogEntry, EmulatorSource
+from yulon.catalog.families import carried, extract, scriptdeploy, surgical
 from yulon.catalog.families.direction import moves_forward
 from yulon.catalog.installer import (
     ImportWindowStopped,
     InstallerError,
     InstallStopped,
     OneShotLeftRunning,
+    ReadyWaitStopped,
 )
 from yulon.catalog.native import (
     DOWNLOAD_CANCEL_NOTE,
@@ -65,8 +69,10 @@ from yulon.catalog.native import (
     StagedInstaller,
     _listed,
     _listing,
+    _put_all,
     build_cancel_note,
     download_left_sentence,
+    stop_abandoned_worker,
 )
 from yulon.log import get_logger
 from yulon.manifest import Db
@@ -474,6 +480,57 @@ SEEDED_WORLD_PORT = 8085
 world server listens on inside its container (`…:8085`). T552."""
 
 
+def _ignore_answer(_answer: object) -> None:
+    """`FnSql.run` is for statements whose answer nobody reads."""
+
+
+DOCKERIGNORE = ".dockerignore"
+DOCKERIGNORE_DATA_BLOCK: tuple[str, ...] = (
+    "# Yu'lon: `data/` holds the client data this install extracts (maps, vmaps,",
+    "# mmaps and the DBC files). It is several gigabytes after install and no",
+    "# build stage reads it, so it is left out of the build context; `data/sql`",
+    "# is the one folder the db-import image copies.",
+    "data/*",
+    "!data/sql",
+)
+"""The generated build context leaves the extracted game data out (T812 D9).
+
+The core checkout IS the build context and ships a `.dockerignore` with no
+`data/` line. After extraction that folder holds 6.6 GB (live proof,
+yulon-ubuntu2 2026-10-28), so every Rebuild uploaded it: BuildKit logged
+`transferring context: 2.02GB` and the build-context fingerprint gave no answer
+(over its 4 GiB cap), while the install's disk filled. `data/*` excludes the
+extracted folders and `!data/sql` keeps the base SQL and update files the
+db-import image's own `COPY data data` needs; nothing else in `data/` is read by
+a built stage (`apps/docker/Dockerfile` copies `apps`, `conf`, `deps`, `modules`,
+`src` and `data`).
+"""
+
+DOCKERIGNORE_DATA_MARKER = "`data/` holds the client data this install extracts"
+"""Its presence in `.dockerignore` means the block is already there (idempotent)."""
+
+
+def exclude_extracted_data(server_dir: Path) -> bool:
+    """Append `DOCKERIGNORE_DATA_BLOCK` to the checkout's `.dockerignore`; True if written.
+
+    Appended, never replaced: the file is the core's own and its lines decide
+    what else a build sends. Idempotent by the marker line, because a repair and
+    every update's put-back run `stage_generate_compose()` again. Raises
+    `OSError`/`UnicodeDecodeError` to the stage, which words it.
+    """
+    path = server_dir / DOCKERIGNORE
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        text = ""
+    if DOCKERIGNORE_DATA_MARKER in text:
+        return False
+    separator = "" if not text or text.endswith("\n") else "\n"
+    block = "\n".join((*DOCKERIGNORE_DATA_BLOCK, ""))
+    path.write_text(f"{text}{separator}{block}", encoding="utf-8")
+    return True
+
+
 class AzerothCoreInstaller(StagedInstaller):
     """Install one AzerothCore entry: clone, generate compose, build, fetch data, import, start."""
 
@@ -506,12 +563,62 @@ class AzerothCoreInstaller(StagedInstaller):
     `lua-and-sql` is never recorded, because it runs on every press like `up`.
     """
 
+    WORLD_BOOTSTRAP_STAGE: ClassVar[str] = "world-bootstrap"
+    """T812 C5: the CoA world's base data, loaded after `start-db`, before `import`.
+
+    The base data of `acore_world` is not an import of SQL updates but a
+    versioned baseline (`apps/coa-world/world_data.py` in the core checkout),
+    run by the compose one-shot the entry's `world_bootstrap_service` names.
+    Not in `STAGE_NAMES`: an entry without that service runs the historical
+    tuple, word for word, exactly as a patch-less entry skips `patch-sources`.
+    Not recorded: a resume must always run it again (cheap when the world is
+    already loaded: the service exits 0 at its done-marker) — the same reason
+    `client-data` re-asks its volume.
+    """
+
+    WORLD_BOOTSTRAP_DONE_TABLE: ClassVar[str] = "version"
+    """The table that script loads LAST, so its presence means the load finished.
+
+    `world_data.py` loads `updates`, `updates_include` and `version` last, and the
+    service's own skip rule reads `version` (`base.yml.tmpl`); the import gate
+    asks the same table when a partial database is only that loaded world
+    (`install_wiring.import_gate_for`).
+    """
+
+    EXTRACT_STAGE: ClassVar[str] = "extract-maps"
+    MMAPS_STAGE: ClassVar[str] = "mmaps"
+    """T812 C4a's two stages, in the tuple only for an entry with `client_extract`.
+
+    Not in `STAGE_NAMES` for the same reason as the T553 stages: an entry
+    without one (WotLK, Unbound) runs the historical tuple word for word.
+    """
+
     def stages(self) -> tuple[Stage, ...]:
         block = self._block()
         patch_stage = (Stage(self.PATCH_STAGE, self._patch_sources),) if block.patches else ()
         lua_stage = (
             (Stage(self.LUA_STAGE, self._lua_and_sql, recorded=False),)
             if block.lua_scripts or block.sql_checks
+            else ()
+        )
+        bootstrap_stage = (
+            (
+                Stage(
+                    self.WORLD_BOOTSTRAP_STAGE,
+                    self._world_bootstrap,
+                    recorded=False,
+                    cancel_note=IMPORT_STAGE_CANCEL_NOTE,
+                ),
+            )
+            if block.world_bootstrap_service
+            else ()
+        )
+        extract_stage = (
+            (
+                Stage(self.EXTRACT_STAGE, self._extract_maps),
+                Stage(self.MMAPS_STAGE, self._mmaps, recorded=False),
+            )
+            if block.client_extract is not None
             else ()
         )
         return (
@@ -525,7 +632,9 @@ class AzerothCoreInstaller(StagedInstaller):
             Stage("generate-compose", self.stage_generate_compose),
             Stage("build", self.stage_build, cancel_note=build_cancel_note()),
             Stage("client-data", self._client_data, cancel_note=DOWNLOAD_CANCEL_NOTE),
+            *extract_stage,
             Stage("start-db", self._start_db, recorded=False),
+            *bootstrap_stage,
             Stage("import", self._import, cancel_note=IMPORT_STAGE_CANCEL_NOTE),
             *lua_stage,
             Stage("up", self._up, recorded=False),
@@ -538,6 +647,29 @@ class AzerothCoreInstaller(StagedInstaller):
         if native is None or native.azerothcore is None:
             return AzerothCoreData()
         return native.azerothcore
+
+    def stage_generate_compose(self, ctx: StageContext) -> Iterator[str]:
+        """The spine's three compose files, plus leaving extracted data out of the build context.
+
+        Only an entry that extracts client data into `data/` has anything to
+        leave out (CoA's `client_extract`, T812 C4a); every other entry runs
+        the spine's body and returns. Runs here rather than in a stage of its
+        own because a Repair and an update's put-back already rewrite the
+        generated files through this method, and the ignore belongs with them.
+        """
+        yield from super().stage_generate_compose(ctx)
+        if self._block().client_extract is None:
+            return
+        try:
+            written = exclude_extracted_data(ctx.server_dir)
+        except (OSError, UnicodeDecodeError) as exc:
+            raise InstallerError(
+                f"The build context's {DOCKERIGNORE} could not be written in {ctx.server_dir} "
+                f"({exc}), so the next build would upload the extracted game data. Nothing else "
+                "was changed."
+            ) from exc
+        if written:
+            yield "The extracted game data is left out of the build context."
 
     def stage_build(self, ctx: StageContext) -> Iterator[str]:
         """The spine's compile, with mod-ale's Playerbots names bridged for it alone (T645).
@@ -658,6 +790,13 @@ class AzerothCoreInstaller(StagedInstaller):
         not ship adds nothing here and refuses where it is loaded.
         """
         found: dict[str, tuple[str, ...]] = dict(super().app_written_paths(server_dir))
+        if self._block().client_extract is not None and "." in found:
+            # `stage_generate_compose()` appends the build-context block to the
+            # checkout's own tracked .dockerignore (T812 D9), so a fetch's reset
+            # restores upstream's copy and the same stage writes it again. The
+            # update route's dirty-tree guard must read the modified file as
+            # this app's, or every CoA install refuses to update.
+            found["."] = (*found["."], DOCKERIGNORE)
         specs = self._block().patches
         if not specs:
             return found
@@ -911,8 +1050,7 @@ class AzerothCoreInstaller(StagedInstaller):
         elif was_up is None:
             yield DATABASE_MAYBE_STARTED
         yield (
-            "None of them was applied, so the tested commit's server can start on your "
-            "databases."
+            "None of them was applied, so the tested commit's server can start on your databases."
         )
         return None
 
@@ -1088,7 +1226,7 @@ class AzerothCoreInstaller(StagedInstaller):
             raise InstallerError(
                 updates_unread(
                     "your databases already have",
-                    f"Yu'lon could not start the database to " f"ask it: {exc}",
+                    f"Yu'lon could not start the database to ask it: {exc}",
                 )
             ) from exc
         password = self.resolve_secrets(server_dir).db_password
@@ -1380,6 +1518,516 @@ class AzerothCoreInstaller(StagedInstaller):
             raise
         yield "Server data is in place."
 
+    def _world_bootstrap(self, ctx: StageContext) -> Iterator[str]:
+        """Load the CoA world's base data, before the import applies updates over it.
+
+        `import` runs the db-import one-shot, whose updater applies only what its
+        `updates` tables do not hold: with no bootstrap first it would apply the
+        core's `updates/db_world` over a missing schema. The bootstrap is its own
+        `_client_data`-pattern one-shot rather than part of `import` because an
+        interrupted world bootstrap is dropped and loaded again, while an
+        interrupted import is refused or cleared by its own gate — one service,
+        one verdict. Done-marker: `world_data.py` loads `updates`,
+        `updates_include` and `version` LAST (`world_data.py: bootstrap()`), so a
+        world with tables but no `version` is an interrupted load and is
+        dropped, while one WITH `version` exits 0 in seconds and the stage ends.
+        `version` — not `updates`: a bare import also writes `updates` rows, so
+        only the table nothing else writes says the bootstrap ran.
+
+        `start-db` ran first and the import's probe answers afterwards, so the
+        import stage that follows still decides; this stage asks nothing of the
+        databases itself. Rebuild and update never run it: the world exists.
+        """
+        service = self._block().world_bootstrap_service
+        if not service:
+            yield "This server has no separate world bootstrap step."
+            return
+        # T539, as in `_client_data()`: a bootstrap a Stop or a closed Yu'lon
+        # left running is ended before another starts into the same database.
+        left = self._seams.end_one_shot(service, ctx.server_dir)
+        if left is not None:
+            raise OneShotLeftRunning(download_left_sentence(left, earlier=True))
+        yield f"Loading the CoA world's base data ({service})."
+        run = yield from self._pump(
+            lambda sink: self._seams.one_shot(
+                service, ctx.server_dir, sink=sink, cancel=ctx.cancel
+            ),
+            cancel=ctx.cancel,
+            stage="import",
+        )
+        if ctx.cancel is not None and ctx.cancel.is_set():
+            # Not read as a clean Stop until nothing of the bootstrap is still running.
+            left = self._seams.end_one_shot(service, ctx.server_dir)
+            if left is not None:
+                raise OneShotLeftRunning(download_left_sentence(left, earlier=False))
+        self._check_run(run, "the world bootstrap", ctx.cancel, IMPORT_STAGE_CANCEL_NOTE)
+        yield "The CoA world's base data is in place."
+
+    DATA_DIR = "data"
+    """`data/` under the server directory: what the extract stage fills and mmaps reads."""
+
+    def _data_dir(self, ctx: StageContext) -> Path:
+        """`data/` under the server directory -- refused if it resolves anywhere else.
+
+        `CmangosInstaller._data_dir`'s rule: `run_mmaps()` deletes `data/mmaps`
+        outright, so a `data/` that is a symlink into a client would carry that
+        delete there. One `resolve()` per stage; a link refused by name.
+        """
+        server_dir = ctx.server_dir
+        data_dir = server_dir / self.DATA_DIR
+        landing = data_dir.resolve()
+        if not landing.is_relative_to(server_dir.resolve()):
+            raise InstallerError(
+                f"{data_dir} leads to {landing}, which is outside this install's folder "
+                f"({server_dir}). This install writes extracted game data into that folder and "
+                "deletes a folder inside it when it regenerates movement maps, so a link pointing "
+                "elsewhere would let it overwrite and delete files that are not its own. "
+                "This stage ran nothing and removed nothing. Remove the link so "
+                f"{self.DATA_DIR} can be this install's own folder, or install this server "
+                "in the folder you want its data to live in."
+            )
+        data_dir.mkdir(parents=True, exist_ok=True)
+        return data_dir
+
+    def _image_ref(self, ctx: StageContext, service: str) -> str:
+        """The fully qualified image reference for `service` in `native.images`.
+
+        `CmangosInstaller._image_ref`'s body through `composegen.built_image_refs`.
+        """
+        prefix = self._native().image_prefix
+        refs = composegen.built_image_refs(
+            self.entry,
+            ctx.server_dir,
+            platform_id=self._seams.platform_id,
+            install_id=self._install_id(ctx.server_dir),
+        )
+        for ref in refs:
+            if ref.startswith(f"{prefix}{service}:"):
+                return ref
+        raise InstallerError(
+            f"{service} is not one of the images this install builds "
+            f"({', '.join(self._native().images)}). That is a bug in the app, not something "
+            "to fix on this machine."
+        )
+
+    def _user_args(self) -> tuple[str, ...]:
+        """`--user uid:gid` on Linux, nothing on Docker Desktop: `platform.py`'s one policy."""
+        ask = cast("Callable[[], platform.PlatformId]", self._seams.platform_id)
+        return tuple(platform.container_user_args(platform_id=ask))
+
+    def _stream(
+        self,
+        call: Callable[[docker.OutputSink], Iterator[str]],
+        *,
+        cancel: threading.Event | None,
+        stage: str,
+    ) -> Iterator[str]:
+        """A stage-kind generator that ALSO takes a sink: yield both streams live.
+
+        `CmangosInstaller._stream`'s bridge: one queue, one worker thread, the
+        sink's lines and the generator's own progress lines on it together.
+        """
+        queued: queue.Queue[str | None] = queue.Queue()
+        failure: list[BaseException] = []
+
+        def work() -> None:
+            try:
+                for line in call(lambda pushed: _put_all(queued, pushed, stage)):
+                    queued.put(line)
+            except BaseException as exc:  # noqa: BLE001 - re-raised on the caller's thread
+                failure.append(exc)
+            finally:
+                queued.put(None)
+
+        worker = threading.Thread(target=work, daemon=True, name="yulon-azerothcore-output")
+        worker.start()
+        try:
+            while True:
+                item = queued.get()
+                if item is None:
+                    break
+                yield item
+        except BaseException:
+            stop_abandoned_worker(worker, cancel, what="the AzerothCore stage output")
+            raise
+        worker.join()
+        if failure:
+            exc = failure[0]
+            if isinstance(exc, InstallerError):
+                raise exc
+            raise InstallerError(f"the step could not be run: {exc}") from exc
+
+    def _case_view(self, client_dir: Path, view: Path) -> Generator[str, None, Path]:
+        """The folder the tools read the client from: itself, or a view of it in `view`.
+
+        `CmangosInstaller._case_view`'s rule: the tools open archives by fixed
+        names, and a client named in another case on a case-sensitive disk gives
+        them nothing to read. The view is links under the names they open.
+        """
+        if not client_dir.is_dir():
+            return client_dir
+        try:
+            extract.remove_case_view(view)
+            if not extract.lay_case_view(client_dir, view):
+                return client_dir
+        except OSError as exc:
+            try:
+                extract.remove_case_view(view)
+            except OSError as left:
+                logger.warning(f"the links in {view} could not be removed: {left}")
+            try:
+                renames = extract.renamed_in_view(client_dir)
+            except OSError:
+                renames = []
+            named = ", ".join(f"{theirs} to {ours}" for theirs, ours in renames[:3])
+            more = f" and {len(renames) - 3} more" if len(renames) > 3 else ""
+            raise InstallerError(
+                f"Some of your client's files are named in another case than {self.entry.name}'s "
+                "map tools open, and Yu'lon could not make the links that let the tools read "
+                f"them in {view} ({exc}). Nothing was extracted. Free that folder, or rename the "
+                f"client's files ({named}{more}), then press Install again."
+            ) from exc
+        renames = extract.renamed_in_view(client_dir)
+        named = ", ".join(f"{theirs} as {ours}" for theirs, ours in renames[:3])
+        more = f" and {len(renames) - 3} more" if len(renames) > 3 else ""
+        yield (
+            "Some of your client's files are named in another case than the map tools open; "
+            f"they read them through links in {view} ({named}{more}). Your client is not changed."
+        )
+        return view
+
+    def _extract_maps(self, ctx: StageContext) -> Iterator[str]:
+        """Pull dbc/maps/vmaps out of the player's client, mounted read-only (T812 C4a).
+
+        `CmangosInstaller._extract`'s shape: the image ref is the `tools` entry
+        of `composegen.built_image_refs`, the client is `ctx.client_dir`, the
+        output the server's own `data/`, the plan the entry's
+        `client_extract.extract` plus one appended tool per surgical map (C4b:
+        `surgical.effective_plan()`). After the run, `extract.missing_map_data()`
+        of `required_maps` is the gate: a press that cannot start its world
+        must not record an extract that cannot run it.
+        """
+        plan_block = self._block().client_extract
+        if plan_block is None:
+            yield "This server has no separate client-extract step."
+            return
+        tools_bin = self._tools_bin(plan_block)
+        plan = surgical.effective_plan(self._block(), tools_bin)
+        client_dir = ctx.client_dir
+        if client_dir is None:
+            raise InstallerError(
+                f"{self.entry.name} needs the game client folder to extract its maps from, and "
+                "none was given. Pick the client folder and try again."
+            )
+        data_dir = self._data_dir(ctx)
+        image_ref = self._image_ref(ctx, plan_block.extract.image)
+        user_args = self._user_args()
+        yield f"Extracting server data from {client_dir} into {data_dir} (the client is read-only)."
+        view = ctx.server_dir / extract.CASE_VIEW_DIR
+        read_from = client_dir
+        try:
+            read_from = yield from self._case_view(client_dir, view)
+            yield from self._stream(
+                lambda sink: extract.run_plan(
+                    plan,
+                    image_ref=image_ref,
+                    client_dir=read_from,
+                    data_dir=data_dir,
+                    run_container=self._seams.run_container,
+                    user_args=user_args,
+                    sink=sink,
+                    cancel=ctx.cancel,
+                    required_file=plan_block.client.required_file,
+                    client_build=self.entry.client.build,
+                    selinux_enforcing=self._seams.ask_selinux,
+                    evidence_client_dir=client_dir,
+                    client_files=None if read_from == client_dir else client_dir,
+                ),
+                cancel=ctx.cancel,
+                stage="extract",
+            )
+        finally:
+            try:
+                extract.remove_case_view(view)
+            except OSError as exc:
+                logger.warning(f"the links in {view} could not be removed: {exc}")
+        self._check_cancel(ctx.cancel)
+        missing = extract.missing_map_data(data_dir, plan_block.required_maps)
+        if missing:
+            raise InstallerError(
+                "The map data the world server needs at start is not all there "
+                f"({'; '.join(missing)}). The extract stage made it from {client_dir}: check "
+                "that it is a complete Ascension 3.3.5a client. Nothing was started."
+            )
+        yield "Extraction finished."
+
+    def _mmaps(self, ctx: StageContext) -> Iterator[str]:
+        """Generate movement maps from the extracted maps, before the import (T812 C4a/C4b).
+
+        Never recorded, like `up`: a resume must always end with the movement
+        maps made, and `extract.run_mmaps()` skips itself when its record and
+        counts already vouch for the run. C4b lays `data/mmaps-config.yaml`
+        beside it first — `mmaps_generator` opens that name in its cwd
+        (`PathGenerator.cpp:169`), and the workdir here is `/out` = `data/`.
+        Copied from the checkout the install was built from (the core source),
+        refused by name when it is not there.
+        """
+        plan_block = self._block().client_extract
+        if plan_block is None:  # unreachable: the stage is only in the tuple with one
+            yield "This server has no separate movement-map step."
+            return
+        data_dir = self._data_dir(ctx)
+        self._lay_mmaps_config(ctx, plan_block, data_dir)
+        image_ref = self._image_ref(ctx, plan_block.extract.image)
+        user_args = self._user_args()
+        yield "Making movement maps for the bots"
+        yield from self._stream(
+            lambda sink: extract.run_mmaps(
+                plan_block.mmaps,
+                image_ref=image_ref,
+                data_dir=data_dir,
+                run_container=self._seams.run_container,
+                user_args=user_args,
+                sink=sink,
+                cancel=ctx.cancel,
+                progress_every=60.0,
+            ),
+            cancel=ctx.cancel,
+            stage="mmaps",
+        )
+        self._check_cancel(ctx.cancel)
+        yield "Map generation finished."
+
+    MMAPS_CONFIG_NAME = "mmaps-config.yaml"
+    """The name `mmaps_generator` opens in its cwd: beside the mmaps it writes."""
+
+    def _tools_bin(self, plan_block: AcClientExtract) -> str:
+        """The container-absolute folder of the extract tools (C4b surgical script).
+
+        Read off the first tool's argv, not written here: if the install prefix
+        ever moves, the catalog moves this with it and the script follows.
+        """
+        first = plan_block.extract.tools[0].argv[0]
+        return first.rpartition("/")[0] or "/"
+
+    def _lay_mmaps_config(
+        self, ctx: StageContext, plan_block: AcClientExtract, data_dir: Path
+    ) -> None:
+        source = ctx.server_dir / plan_block.mmaps_config
+        try:
+            text = source.read_bytes()
+        except OSError as err:
+            raise InstallerError(
+                f"{source} holds no {self.MMAPS_CONFIG_NAME}: the checkout this install was "
+                "built from has no mmaps config where the entry says it is "
+                f"({plan_block.mmaps_config}). Nothing was run."
+            ) from err
+        target = data_dir / self.MMAPS_CONFIG_NAME
+        target.write_bytes(text)
+
+    def start_refusal(self, server_dir: Path, *, rebuilding: bool = False) -> str | None:
+        """The spine's refusal, the realm-type gate, then the extract gate (T812 C3a, C4a).
+
+        The server must not start without the map data its start check would
+        refuse on: `extract.missing_map_data()` of the entry's `required_maps`
+        over the server's own `data/`. Asked in the start path so a `data/`
+        emptied after a finished extract still refuses with the map sentence.
+
+        The realm-type gate (C3a) is the spine's `family_start_refusal()`,
+        which `super()` already asks last: asked once, never twice.
+        """
+        refused = super().start_refusal(server_dir, rebuilding=rebuilding)
+        if refused is not None:
+            return refused
+        plan_block = self._block().client_extract
+        if plan_block is None:
+            return None
+        missing = extract.missing_map_data(server_dir / self.DATA_DIR, plan_block.required_maps)
+        if not missing:
+            return None
+        return (
+            "The map data the world server needs at start is not all there "
+            f"({'; '.join(missing)}). Press Install to extract it from your client first. "
+            "Nothing was started."
+        )
+
+    def family_start_refusal(self, server_dir: Path) -> str | None:
+        """The C3a realm-type gate, through the spine's family hook (T812 C3a).
+
+        `coa_realm.refusal()` over the engine's own SQL seams (the import
+        probe's client, `sql_query`): an unfinished switch refuses, a marker
+        naming another type than the folder's file refuses, and a pre-marker
+        install is marked with the file's type. The engine asks it where its
+        database is up (the install's `up`, a rebuild's start); a database
+        that cannot be asked refuses once a switch has been made here
+        (`coa_realm.UNREADABLE_START_REFUSAL`), and secrets that cannot be
+        read are such a database.
+        """
+        from yulon import coa_realm
+
+        if not coa_realm.has_realm_types(self.entry):
+            return None
+        try:
+            password = self.resolve_secrets(server_dir).db_password
+        except Exception as exc:  # noqa: BLE001 - unknown secrets: a database nobody can ask
+            logger.warning(f"the realm type gate could not read the secrets: {exc}")
+            return coa_realm.refusal(self.entry, server_dir, None)
+        spec = self.entry.container_spec()
+        client = self._native().db.client
+
+        def ask(statement: str) -> str:
+            return self._seams.sql_query(spec.db, client, password, None, statement)
+
+        sql = coa_realm.FnSql(run=lambda statement: _ignore_answer(ask(statement)), ask=ask)
+        return coa_realm.refusal(self.entry, server_dir, sql)
+
+    def _start_servers(self, ctx: StageContext) -> None:
+        """The ordered start for an entry that asks for it, else the spine's (T812).
+
+        For these entries `stage_ready` below only re-confirms: the waits
+        already happened here, with `ctx.cancel` ending them.
+        """
+        from yulon.catalog import ordered_start
+
+        if not ordered_start.ordered(self.entry):
+            super()._start_servers(ctx)
+            return
+        spec = self.entry.container_spec()
+        ordered_start.start(
+            spec,
+            ctx.server_dir,
+            entry=self.entry,
+            start_services=self._start_ordered_services,
+            wait_world=self._wait_ordered_world,
+            wait_auth=self._wait_ordered_world,
+            open_realm=lambda: self._open_ordered_realm(ctx),
+            cancel=ctx.cancel,
+            say=logger.info,
+        )
+
+    def _start_ordered_services(
+        self,
+        spec: docker.ContainerSpec,
+        server_dir: Path,
+        *,
+        services: Sequence[str] | None = None,
+        wsl_distro: str | None = None,
+        force_recreate: bool = False,
+    ) -> bool:
+        """`docker.start_staged` through the seams, naming the ordered subset."""
+        return self._seams.start(spec, server_dir, services=services)
+
+    def _wait_ordered_world(
+        self,
+        spec: docker.ContainerSpec,
+        ready: docker.ReadySpec,
+        *,
+        wsl_distro: str | None = None,
+    ) -> bool:
+        """One ordered wait through the seams.
+
+        A single `timeout_s` window, not the spine's quiet budget: a
+        slow-but-printing first boot past that total fails here where
+        `wait_for_ready()` would have kept waiting. CoA boot times are
+        unmeasured; if the live proof shows one past 30 min, this wait must
+        spend the quiet budget too (cold review D6).
+        """
+        return self._seams.wait_ready(spec, ready)
+
+    def _open_ordered_realm(self, ctx: StageContext) -> str | None:
+        """Open the realm row through the seams, read back; a sentence or None."""
+        from yulon import realm_flag
+
+        return realm_flag.open_realm(
+            self.entry,
+            self.entry.container_spec(),
+            ctx.server_dir,
+            wsl_distro=self._seams.distro,
+        )
+
+    def _recreate_servers(
+        self,
+        spec: docker.ContainerSpec,
+        server_dir: Path,
+        *,
+        control: docker.StopControl,
+        before_signal: Callable[[], None] | None = None,
+    ) -> bool:
+        """The ordered recreate for an entry that asks for it, else the spine's (T812)."""
+        from yulon.catalog import ordered_start
+
+        if not ordered_start.ordered(self.entry):
+            return super()._recreate_servers(
+                spec, server_dir, control=control, before_signal=before_signal
+            )
+        return self._recreate_ordered(
+            spec, server_dir, control=control, before_signal=before_signal
+        )
+
+    def _recreate_ordered(
+        self,
+        spec: docker.ContainerSpec,
+        server_dir: Path,
+        *,
+        control: docker.StopControl,
+        before_signal: Callable[[], None] | None = None,
+    ) -> bool:
+        """Replace db+world, wait the world, replace auth, open the realm."""
+        from yulon import realm_flag
+        from yulon.catalog import ordered_start
+
+        if before_signal is not None:
+            before_signal()
+        services = spec.compose_services()
+        by_container = dict(zip((spec.db, spec.auth, spec.world), services, strict=False))
+        auth_service = by_container.get(spec.auth, spec.auth)
+        others = [service for service in services if service != auth_service]
+        self._seams.recreate(spec, server_dir, control=control, services=others)
+        world_ready, auth_ready = ordered_start.ready_specs(self.entry)
+        self._wait_ordered_ready(
+            world_ready, control, spec, server_dir, ordered_start.WORLD_WAIT_STOPPED
+        )
+        self._seams.recreate(spec, server_dir, control=control, services=[auth_service])
+        self._wait_ordered_ready(
+            auth_ready, control, spec, server_dir, ordered_start.AUTH_WAIT_STOPPED
+        )
+        refused = realm_flag.open_realm(self.entry, spec, server_dir, wsl_distro=self._seams.distro)
+        if refused is not None:
+            logger.info(refused)
+        return True
+
+    def _wait_ordered_ready(
+        self,
+        ready: docker.ReadySpec,
+        control: docker.StopControl,
+        spec: docker.ContainerSpec,
+        server_dir: Path,
+        stopped: str,
+    ) -> None:
+        """One ordered recreate wait: Stop lets the load finish, then still stops (T158).
+
+        A rebuild never kills a loading world (the lead's ruling of
+        2026-10-05): a Stop during the wait is said and the wait goes on
+        without the cancel until the server is ready, crashes or runs out.
+        Then it still raises, because the player asked to stop.
+        """
+        from yulon.catalog import ordered_start
+
+        if self._seams.wait_ready(spec, replace(ready, cancel=control.abandon)):
+            return
+        if not control.abandon.is_set():
+            raise docker.DockerRefusal(
+                (
+                    ordered_start.WORLD_NEVER_READY
+                    if ready.auth is None
+                    else ordered_start.AUTH_NEVER_READY
+                ),
+                detail=docker.logs_command(spec.service_for(spec.world), server_dir),
+            )
+        logger.info(docker.STOP_WAITS_FOR_THE_LOAD)
+        self._seams.wait_ready(spec, ready)
+        raise ReadyWaitStopped(stopped)
+
     def _up(self, ctx: StageContext) -> Iterator[str]:
         """Write the catalog's module confs from their `.dist`, then the spine's `up` (T137).
 
@@ -1496,14 +2144,115 @@ class AzerothCoreInstaller(StagedInstaller):
 
         `_probe` may be absent only for an entry with no `db_import` service —
         preflight refuses the other combination — so "no probe" and "no
-        service" are the same skip, worded here and not in the spine (A7).
+        service" are the same skip, worded here and not in the spine (A7). A
+        realm-types entry's import then marks the plain databases with the
+        default type (T812 C3a): the marker travels with the data. While a
+        realm-type switch is unfinished the stage refuses before anything is
+        imported (`coa_realm.import_refusal()`): Install and "Repair the
+        database" both run this stage.
+
+        On a realm-types entry the import runs under the Server tab's
+        per-server hold (T812 C3b, `coa_switch.held_import`): a switch moving
+        the plain schemas refuses with its own sentence instead of racing this
+        import, and the guards are re-checked under it.
         """
+        from yulon import coa_switch
+        from yulon.catalog import native as native_mod
+
+        if not coa_switch.needs_hold(self.entry):
+            yield from self._import_inner(ctx)
+            return
+        yield from coa_switch.held_import(
+            coa_switch.install_hold(
+                lambda press: self.reserved(ctx.server_dir, press), native_mod.INSTALL_PRESS
+            ),
+            coa_switch.INSTALL_PRESS,
+            lambda: self._import_inner(ctx),
+        )
+
+    def _import_inner(self, ctx: StageContext) -> Iterator[str]:
+        """`_import()` past the hold; the guards re-checked under it (T812 C3b)."""
+        from yulon import coa_realm
+
+        refused = coa_realm.import_refusal(self.entry, ctx.server_dir)
+        if refused is not None:
+            raise InstallerError(refused)
         service = self.entry.containers.db_import
         probe, reset = self._gate_for(ctx.server_dir)
         if probe is None or not service:
             yield "This server has no separate database import step."
             return
         yield from self.stage_import(ctx, CallableGate(probe, reset), service)
+        yield from self._mark_realm_type(ctx)
+
+    def _mark_realm_type(self, ctx: StageContext) -> Iterator[str]:
+        """Mark the plain databases with the default realm type, once (T812 C3a).
+
+        Called after the install's `import`: the marker travels with the data,
+        and a fresh import (like a fresh switch's one) names the type it was
+        built for. A marker already there is left as it is (a repair import
+        over a switched set; the start gate judges it), and a marker that
+        cannot be read or written fails the stage.
+
+        On a realm-types entry this runs under the same hold as `_import`
+        (T812 C3b): it touches the same plain schemas a switch moves.
+        """
+        from yulon import coa_switch
+        from yulon.catalog import native as native_mod
+
+        if not coa_switch.needs_hold(self.entry):
+            yield from self._mark_realm_type_inner(ctx)
+            return
+        yield from coa_switch.held_import(
+            coa_switch.install_hold(
+                lambda press: self.reserved(ctx.server_dir, press), native_mod.INSTALL_PRESS
+            ),
+            coa_switch.INSTALL_PRESS,
+            lambda: self._mark_realm_type_inner(ctx),
+        )
+
+    def _mark_realm_type_inner(self, ctx: StageContext) -> Iterator[str]:
+        """`_mark_realm_type()` past the hold."""
+        from yulon import coa_realm
+
+        if not coa_realm.has_realm_types(self.entry):
+            return
+            yield  # unreachable: keeps this a generator on the no-types path
+        refused = coa_realm.import_refusal(self.entry, ctx.server_dir)
+        if refused is not None:
+            raise InstallerError(refused)
+        sql = coa_realm.FnSql(
+            run=lambda statement: _ignore_answer(
+                self._seams.sql_query(
+                    self.entry.container_spec().db,
+                    self._native().db.client,
+                    ctx.secrets.db_password,
+                    None,
+                    statement,
+                )
+            ),
+            ask=lambda statement: self._seams.sql_query(
+                self.entry.container_spec().db,
+                self._native().db.client,
+                ctx.secrets.db_password,
+                None,
+                statement,
+            ),
+        )
+        file_type = coa_realm.active(self.entry, ctx.server_dir).id
+        try:
+            held = coa_realm.read_marker(sql.query, self.entry)
+            if held is None:
+                coa_realm.ensure_marker(sql, self.entry, file_type)
+        except Exception as exc:  # noqa: BLE001 - every failure refuses, worded once
+            raise InstallerError(
+                f"The databases could not be marked as the {file_type} realm type ({exc}). "
+                "Press Install again to retry; the server was not started."
+            ) from exc
+        if held is not None:
+            yield f"The databases are already marked as the {held} realm type."
+            return
+        yield f"The databases are marked as the {file_type} realm type."
 
 
 def _sql_of(lines: Sequence[str]) -> tuple[str, ...]:

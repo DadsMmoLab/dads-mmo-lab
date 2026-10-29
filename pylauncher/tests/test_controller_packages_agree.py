@@ -24,7 +24,7 @@ from pathlib import Path
 import pytest
 
 from yulon import apply as apply_module
-from yulon import install_wiring, party, serverlock
+from yulon import coa_realm, install_wiring, party, serverlock
 from yulon.catalog import bot_dashboard, native
 from yulon.catalog.catalog import CatalogEntry
 from yulon.catalog.families import azerothcore, mmaps
@@ -184,6 +184,7 @@ def test_every_seam_builder_in_every_package_binds_the_declared_client(tmp_path:
         "wow-tortoise": (tortoise_accounts, tortoise_maintenance),
         "wow-wotlk": (wotlk_accounts, wotlk_maintenance),
         "wow-unbound": (wotlk_accounts, wotlk_maintenance),  # T554: WotLK's package, its own entry
+        "wow-coa": (wotlk_accounts, wotlk_maintenance),  # T812: WotLK's package, its own entry
         "wow-centurion": (centurion_accounts, centurion_maintenance),
     }
     catalog = load_catalog()
@@ -222,8 +223,8 @@ def test_every_seam_builder_in_every_package_binds_the_declared_client(tmp_path:
                     + repr(expected)
                 )
                 checked += 1
-    assert checked == 16, (  # T554: wow-unbound runs the WotLK package's two builders
-        str(checked) + " builders were exercised, not 16. An exact count, not a floor: the "
+    assert checked == 18, (  # T554/T812: unbound and coa run the WotLK package's two builders
+        str(checked) + " builders were exercised, not 18. An exact count, not a floor: the "
         "floor this replaced had slack of one, so a deleted builder still passed it."
     )
 
@@ -660,6 +661,12 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
         # is absent here for every game, the reference included; the one game it is offered
         # for, and the distro half, are driven in `test_script_built_rebuild.py`.
         undistroed = {"script_built_rebuild"}
+        # T812 C3b: the realm-type switch is CoA-only (realm types): only an
+        # entry that names `realm_types` gets one, read through the function
+        # the wiring reads, so a tree that gains the block fails this until
+        # its wiring lands. Centurion is the current prover: its fixture
+        # entry names none, so it must be absent there.
+        unswitched = set() if coa_realm.has_realm_types(entry) else {"realm_switch"}
         allowed = (
             undbrefused
             | unbotdeleted
@@ -689,8 +696,9 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
             | untipped
             | uncorrectable
             | unlocked
+            | unswitched
         )
-        if game in ("wow-wotlk", "wow-unbound"):  # T554: Unbound is the same package
+        if game in ("wow-wotlk", "wow-unbound", "wow-coa"):  # T554/T812: same package as WotLK
             reference = (
                 undbrefused
                 | undistroed
@@ -708,7 +716,12 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
                 | untipped
                 | uncorrectable
                 | unlocked
+                | unswitched
             )
+            if game == "wow-coa":
+                # T812: CoA pins its fork and carries a patch; no update control
+                # until a gate proves one (catalog `update_to_latest: false`).
+                reference = reference | unlatest
             assert (
                 set(absent) == reference
             ), f"wow-wotlk is the reference and is missing {sorted(set(absent) - reference)}"

@@ -7361,7 +7361,7 @@ class Seams:
     # return this seam's own fakes do not have to produce.
     start_db: Callable[..., object] = docker.start_database
     """Called with `because=`, which ends `start_database()`'s timeout sentence (T248)."""
-    start: Callable[[docker.ContainerSpec, Path], bool] = docker.start_staged
+    start: Callable[..., bool] = docker.start_staged
     recreate: Callable[..., bool] = docker.recreate_staged
     """`start` with `--force-recreate`, and the rebuild's only reason to exist as a seam.
 
@@ -7375,6 +7375,9 @@ class Seams:
     `Callable[...]` since T158: `stage_recreate()` passes `control=` (the load
     wait's `docker.StopControl`, carrying the rebuild's Cancel) and
     `before_signal=` (the moment past which something may have been touched).
+    T812 adds `services=`: the ordered start/recreate names the subset to
+    bring (db+world first, auth once the world said ready); None is all of
+    `compose_services()`, as today.
     """
     mark_realm_offline: Callable[..., object] = realm_flag.mark_offline
     """Set the realm row's offline bit before the world starts or is replaced (T577).
@@ -8235,7 +8238,8 @@ class StagedInstaller:
         (T197 fix round 2), which a Rebuild (`rebuilding`) may clear for itself.
         TrinityCore's adds a world update left unfinished
         (`trinitycore.world_update_start_refusal`). Then, but not for a Rebuild, an import
-        that never finished (`unfinished_import_refusal(strict=True)`, T739).
+        that never finished (`unfinished_import_refusal(strict=True)`, T739), then the
+        family's own (`family_start_refusal()`).
         """
         # T225 (live): with a stopped rebuild's build that may have landed since.
         # T739: an import that never finished. A Rebuild is no way out of one -- its importer
@@ -8246,7 +8250,10 @@ class StagedInstaller:
             # A Rebuild under the record is not refused: it holds (`_held_by_an_unfinished_
             # import()`), builds, and leaves the server stopped for Repair.
             return refused
-        return self.unfinished_import_refusal(server_dir, strict=True)
+        refused = self.unfinished_import_refusal(server_dir, strict=True)
+        if refused is not None:
+            return refused
+        return self.family_start_refusal(server_dir)
 
     def unfinished_import_refusal(self, server_dir: Path, *, strict: bool = False) -> str | None:
         """Why no world may start while this server's import record stands, or None (T739).
@@ -8318,11 +8325,33 @@ class StagedInstaller:
     def family_start_refusal(self, server_dir: Path) -> str | None:
         """The family's own reason no start may run, apart from `START_REFUSED_FILE` (T223).
 
-        None in the spine. TrinityCore's is a world update left unfinished. Asked by
-        the update route to decide whether a kept build's start is already refused
-        by its family, which then lets its own finish start it.
+        None in the spine. TrinityCore's is a world update left unfinished;
+        AzerothCore's is the realm-type gate (T812 C3a). Asked last by
+        `start_refusal()`.
         """
         return None
+
+    def family_finish_refusal(self, server_dir: Path) -> str | None:
+        """The family's refusal whose own finish press STARTS the kept build, or None (T223).
+
+        None in the spine. TrinityCore's is a world update left unfinished: "Finish
+        the world update" imports the kept build's tables and then starts it. A
+        family refusal with no such finish (AzerothCore's realm-type gate, T812 C3a)
+        is not one: forgetting the owed start for it would let the next Start run a
+        build that never started once its own refusal cleared.
+        """
+        return None
+
+    def owed_start_left_to_the_family(self, server_dir: Path) -> bool:
+        """Whether the untested-build refusal may be forgotten for the family's finish (T223).
+
+        Only when that refusal is the one recorded and the family's refusal is one
+        its own finish clears by starting (`family_finish_refusal()`).
+        """
+        return (
+            owed_start_refusal(server_dir) == UNTESTED_BUILD_REFUSAL
+            and self.family_finish_refusal(server_dir) is not None
+        )
 
     # -- the contract ----------------------------------------------------
 
@@ -9925,7 +9954,7 @@ class StagedInstaller:
             self._seams.mark_realm_offline(self.entry, spec, ctx.server_dir)
 
             def replace_them(say: docker.OutputSink) -> bool:
-                return self._seams.recreate(
+                return self._recreate_servers(
                     spec,
                     ctx.server_dir,
                     control=replace(control, say=say),
@@ -9966,6 +9995,28 @@ class StagedInstaller:
                     f"old build is still what is running: {exc}"
                 ) from exc
         yield "The containers were replaced."
+
+    def _recreate_servers(
+        self,
+        spec: docker.ContainerSpec,
+        server_dir: Path,
+        *,
+        control: docker.StopControl,
+        before_signal: Callable[[], None] | None = None,
+    ) -> bool:
+        """Replace this install's containers; the ordered start overrides it (T812).
+
+        The default is the `native.py:9894` call: `docker.recreate_staged`
+        over all three services. An entry with
+        `azerothcore.auth_after_world_ready` instead replaces db+world, waits
+        the world ready, replaces auth and opens the realm.
+        """
+        return self._seams.recreate(
+            spec,
+            server_dir,
+            control=control,
+            before_signal=before_signal,
+        )
 
     def _remove_the_old_servers(
         self, spec: docker.ContainerSpec, server_dir: Path
@@ -11336,10 +11387,7 @@ class StagedInstaller:
                     yield from work.keep()
                 except (InstallerError, OSError) as kept_failed:
                     also = f" {kept_failed}"
-                if (
-                    owed_start_refusal(server_dir) == UNTESTED_BUILD_REFUSAL
-                    and self.family_start_refusal(server_dir) is not None
-                ):
+                if self.owed_start_left_to_the_family(server_dir):
                     # T223 (lead ruling, option 1): the family's own record refuses
                     # Start, and T179's "Finish the world update" imports the kept
                     # build's tables and then starts it -- the owner-approved exit.
@@ -16243,9 +16291,19 @@ class StagedInstaller:
             self.entry, self.entry.container_spec(), ctx.server_dir, unless_world_up=True
         )
         try:
-            self._seams.start(self.entry.container_spec(), ctx.server_dir)
+            self._start_servers(ctx)
         except docker.DockerCommandError as exc:
             raise carry_detail(exc, InstallerError(f"The server would not start: {exc}")) from exc
+
+    def _start_servers(self, ctx: StageContext) -> None:
+        """Bring this install's servers up; the ordered start overrides it (T812).
+
+        The default is today's single `up`: `docker.start_staged` over all
+        three services. An entry with `azerothcore.auth_after_world_ready`
+        instead ups db+world, waits the world ready, ups auth and opens the
+        realm (`ordered_start.start`), with `ctx.cancel` ending the waits.
+        """
+        self._seams.start(self.entry.container_spec(), ctx.server_dir)
 
     def stage_ready(self, ctx: StageContext, *, stop_lets_it_load: bool = False) -> Iterator[str]:
         """Wait until the database is healthy and both servers have said they are up.

@@ -593,6 +593,7 @@ def test_every_tab_that_offers_an_uninstall_is_handed_this_installs_own_built_im
     # rule that has stopped covering anything.
     assert sorted(offered) == [
         "wow-centurion",
+        "wow-coa",
         "wow-unbound",
         "wow-vanilla",
         "wow-wotlk",

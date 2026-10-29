@@ -434,7 +434,7 @@ def _gather(entry_id: str, tmp_path: Path, asked: list[str]) -> preflight.Facts:
     )
 
 
-@pytest.mark.parametrize("entry_id", ["wow-wotlk", "wow-unbound"])
+@pytest.mark.parametrize("entry_id", ["wow-wotlk", "wow-unbound", "wow-coa"])
 def test_an_azerothcore_install_reads_the_version_and_the_offer(
     entry_id: str, tmp_path: Path
 ) -> None:

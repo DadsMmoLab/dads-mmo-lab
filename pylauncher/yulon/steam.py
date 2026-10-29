@@ -499,18 +499,25 @@ case-insensitively because the same folder shipped from Windows spells it
 """
 
 
-def client_executable(client_dir: Path) -> Path:
+def client_executable(client_dir: Path, names: Sequence[str] = _CLIENT_EXE_PREFERENCE) -> Path:
     """The game binary inside a client folder, or where it would be if absent.
 
-    Falling back to `WoW.exe` rather than refusing is deliberate and narrow: the
+    `names` are the entry's lower-case `client.exe_names`, matched case-insensitively
+    because the same folder shipped from Windows spells it `Wow.exe` (`Ascension.exe`
+    for Conquest of Azeroth). The default keeps 8.8's `WoW.exe` pick and fallback.
+
+    Falling back to the first name rather than refusing is deliberate and narrow: the
     folder is one the user picked and Yu'lon validated, and an entry pointing at
     the conventional name inside it is a thing they can see and correct. A
     folder Yu'lon was never given is a different case and refuses (`NO_CLIENT`).
     """
+    wanted = {name.lower() for name in names}
     for candidate in sorted(client_dir.glob("*")):
-        if candidate.is_file() and candidate.name.lower() in _CLIENT_EXE_PREFERENCE:
+        if candidate.is_file() and candidate.name.lower() in wanted:
             return candidate
-    return client_dir / "WoW.exe"
+    if tuple(names) == _CLIENT_EXE_PREFERENCE or not names:
+        return client_dir / "WoW.exe"
+    return client_dir / names[0]
 
 
 def launcher_command(
@@ -1048,6 +1055,10 @@ class SteamShortcuts:
     game: str
     server_dir: Path
     client_dir: Path | None
+    exe_names: tuple[str, ...] = ("wow.exe",)
+    """The entry's `client.exe_names`: which executable in the folder is the game (T812)."""
+    wine_dll_overrides: str | None = None
+    """The entry's `client.wine_dll_overrides`: the client's Steam launch options (T812)."""
     home: Path = field(default_factory=Path.home)
     is_running: Callable[[], bool] = steam_running
     now: Callable[[], datetime] = datetime.now
@@ -1078,11 +1089,17 @@ class SteamShortcuts:
         if tool is None:
             raise SteamRefusal(NO_PROTON.format(tools=steam_root / "compatibilitytools.d"))
 
-        client_exe = client_executable(self.client_dir)
+        client_exe = client_executable(self.client_dir, names=self.exe_names)
+        launchopts = (
+            f'WINEDLLOVERRIDES="{self.wine_dll_overrides}" %command%'
+            if self.wine_dll_overrides
+            else ""
+        )
         client_entry = new_entry(
             name=self.game,
             exe=str(client_exe),
             startdir=str(self.client_dir),
+            launchopts=launchopts,
         )
         scripts = self.gaming() if self.gaming is not None else None
         stop_entry: VdfMap | None = None

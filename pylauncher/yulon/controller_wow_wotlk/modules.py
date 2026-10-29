@@ -591,7 +591,7 @@ def apply_module_sql(
     """
     say: Callable[[str], None] = output if output is not None else logger.info
     plan = module_sql_plan(
-        server_dir, _module_manifests(user_game), docker.module_dir_names(server_dir)
+        server_dir, _module_manifests(user_game), importer_module_dirs(server_dir, user_game)
     )
     service = spec.import_service or "the importer"
     say(f"Modules {service} is allowed to update: {plan.allowed or 'none'}")
@@ -660,8 +660,39 @@ def importer_modules(server_dir: Path, *, user_game: str = GAME) -> str:
     updater has no ledger row for.
     """
     return module_sql_plan(
-        server_dir, _module_manifests(user_game), docker.module_dir_names(server_dir)
+        server_dir, _module_manifests(user_game), importer_module_dirs(server_dir, user_game)
     ).allowed
+
+
+def importer_module_dirs(server_dir: Path, user_game: str = GAME) -> list[str] | None:
+    """The module folders the app may hand the importer: those on disk less the core's own.
+
+    `docker.module_dir_names()` minus the entry's `core_sql_modules` (T812 D14). The CoA
+    core's importer prepends `mod-ascension,` to every `Updates.AllowedModules` it is
+    given (`src/tools/dbimport/Main.cpp:119-120` at 98570f24), and `UpdateFetcher` walks a
+    module's `data/sql/db-*` once per time the name appears, so handing it the folder again
+    made every file in it a "Duplicate filename" and the import aborted on the
+    first database it reached with any (`acore_characters`, measured on yulon-ubuntu2
+    2026-10-28). `None` stays `None`: an unreadable folder is still not a decision.
+
+    A catalog that cannot be read (or has no such entry) withholds nothing, which is the
+    behaviour from before: the press's own `before_run` then refuses in its own words
+    over the same catalog (T779), and a CoA import that did run would stop on the
+    duplicate and roll back, never part-apply a second copy.
+    """
+    names = docker.module_dir_names(server_dir)
+    if names is None:
+        return None
+    try:
+        native = load_catalog().get(user_game).install.native
+    except Exception as exc:  # boundary: an unreadable catalog must not turn a press into a crash
+        logger.warning(
+            f"could not read the catalog entry {user_game!r}, so no module is the core's own: {exc}"
+        )
+        return names
+    block = native.azerothcore if native is not None else None
+    core_own = set(block.core_sql_modules) if block is not None else set()
+    return [name for name in names if name not in core_own]
 
 
 def _module_manifests(user_game: str = GAME) -> tuple[Manifest, ...]:

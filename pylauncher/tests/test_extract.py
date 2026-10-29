@@ -2705,10 +2705,16 @@ def test_the_wipe_target_is_built_from_the_data_dir_and_a_constant_no_catalog_na
         # range and an int, each rendered as one option value before the image.
         "cpuset",
         "memory",
+        "progress_every",
+        "clock",
     }
     assert parameters["cpus"].annotation == "int | None"
     assert parameters["cpuset"].annotation == "str | None"
     assert parameters["memory"].annotation == "int | None"
+    # `progress_every`/`clock` are the C4b progress seam: neither names a folder
+    # or a client, so the wipe's audit holds with them — `progress_every` is a
+    # cadence and `clock` a time source. Both default off/None-checked, which
+    # `test_cmangos_mmaps_output_is_unchanged` pins from the other direction.
     assert "client" not in " ".join(parameters)
     folder = Path(extract.MMAPS_DIR)
     assert folder.parts == (extract.MMAPS_DIR,)

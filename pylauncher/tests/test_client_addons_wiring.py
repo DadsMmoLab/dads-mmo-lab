@@ -25,10 +25,11 @@ GAMES = [entry.id for entry in CATALOG.games if entry.client.addon_interface is 
 
 
 def test_every_game_yulon_runs_takes_add_ons() -> None:
-    """Not vacuous: the six games of the plan, each with its client's number."""
+    """Not vacuous: the shipped games, each with its client's number."""
     assert {game: CATALOG.get(game).client.addon_interface for game in GAMES} == {
         "wow-wotlk": 30300,
         "wow-unbound": 30300,
+        "wow-coa": 30300,
         "wow-centurion": 30300,
         "wow-tbc": 20400,
         "wow-vanilla": 11200,

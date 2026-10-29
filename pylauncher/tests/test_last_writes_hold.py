@@ -571,6 +571,12 @@ SEAMS: dict[str, tuple[str, str]] = {
         "tests.test_table_repair."
         "test_a_repair_while_another_yulon_holds_the_server_dumps_and_repairs_nothing",
     ),
+    # Fields of the Conquest of Azeroth entry (T812):
+    "realm_switch": (
+        "held",
+        "tests.test_coa_switch_hold."
+        "test_a_switch_while_another_yulon_holds_the_server_switches_nothing",
+    ),
 }
 
 OPEN_SEAMS = {"backup", "restore", "forget_interrupted", "database_alone"}

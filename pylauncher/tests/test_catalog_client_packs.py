@@ -176,12 +176,26 @@ def test_a_client_without_the_new_fields_names_no_host() -> None:
 
 def test_the_shipped_catalog_uses_the_new_fields_on_wotlk_centurion_and_unbound() -> None:
     """T809 W2: wow-wotlk and wow-unbound carry the Lumenveil ClientPack; Centurion does not.
-    WoW Unbound (T555) keeps its required addons pack beside it; every other entry behaves
-    exactly as before (its own tests: test_catalog_centurion, test_unbound_entry)."""
+    WoW Unbound (T555) keeps its required addons pack beside it; WoW Conquest of Azeroth (T812)
+    carries its own client fields and no packs; every other entry behaves exactly as before
+    (its own tests: test_catalog_centurion, test_unbound_entry, test_coa_entry)."""
     raw = json.loads(CATALOG_FILE.read_text(encoding="utf-8"))
     for entry in raw["games"]:
         if entry["id"] in ("wow-wotlk", "wow-centurion", "wow-unbound"):
             assert "packs" in entry["client"], entry["id"]
+            continue
+        if entry["id"] == "wow-coa":
+            assert set(entry["client"]) <= {
+                "version",
+                "build",
+                "required_build",
+                "addon_interface",
+                "realmlist_file",
+                "exe_names",
+                "wine_dll_overrides",
+                "update",
+                "notes",
+            }, sorted(set(entry["client"]))
             continue
         assert set(entry["client"]) <= {
             "version",
@@ -221,6 +235,15 @@ def test_the_shipped_catalog_uses_the_new_fields_on_wotlk_centurion_and_unbound(
                     "objects.githubusercontent.com",
                 }
             )
+            continue
+        if game.id == "wow-coa":
+            assert game.client.exe_names == ("ascension.exe",)
+            assert game.client.wine_dll_overrides == "divxtac=d"
+            assert game.client.packs == ()
+            assert game.client.exe_patch is None
+            assert game.client.config_wtf is None
+            # T825: the client update's manifest host is the only host the entry names.
+            assert game.client.hosts() == frozenset({"launcher-api.coa-development.org"})
             continue
         assert game.client.packs == ()
         assert game.client.exe_patch is None

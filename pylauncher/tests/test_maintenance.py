@@ -1514,6 +1514,8 @@ def test_every_game_hands_its_declared_client_to_the_dump_when_the_probe_cannot_
         "wow-wotlk": maintenance.mysql_for,
         # WoW Unbound (T554) runs the WotLK controller on a database of its own.
         "wow-unbound": maintenance.mysql_for,
+        # WoW CoA (T812) likewise: WotLK's package, its own entry and containers.
+        "wow-coa": maintenance.mysql_for,
         "wow-tbc": tbc.mysql_for,
         "wow-vanilla": vanilla.mysql_for,
         "wow-tortoise": tortoise.mysql_for,
