@@ -415,6 +415,21 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         hits=(".azerothcore",),
     ),
     Site(
+        "yulon.coa_client",
+        "map_data_sentence",
+        "whether a client update left the map data extracted from the old client (T825)",
+        {
+            "azerothcore": supported("`client_extract`, when the entry has one"),
+            "cmangos": not_applicable(
+                "no CMaNGOS entry publishes its client (`client.update`), so no update runs"
+            ),
+            "trinitycore": not_applicable(
+                "no TrinityCore entry publishes its client (`client.update`), so no update runs"
+            ),
+        },
+        hits=(".azerothcore", ".azerothcore"),
+    ),
+    Site(
         "yulon.catalog.preflight",
         "client_spec_of",
         "the client rules of an AzerothCore entry with client_extract (T812 C4a)",

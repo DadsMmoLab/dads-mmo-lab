@@ -1,0 +1,1047 @@
+"""Keeping the player's own Conquest of Azeroth client current (T825).
+
+The CoA project publishes its client as a manifest -- a JSON list of every file
+with its size and SHA-256 (`catalog.ClientUpdate.manifest_url`) -- and serves
+each file by that digest (`<objects_url><sha256>`). This module reads the
+manifest, compares the player's client folder against it, and brings the folder
+in step: only the files that differ, each one downloaded beside its target,
+proved by size and SHA-256, the old file moved into a backup, and the new one
+renamed into place. Nothing unproved ever wears a client file's name.
+
+**What is never written.** Logs (`*.log`), `realmlist.wtf`, the `WTF/`,
+`Cache/`, `Errors/` and `Logs/` folders and `Interface/AddOns/CoaBotUI/` (our
+own add-on's place). The player's own settings and graphics wrappers
+(`d3d8/d3d9/d3d10core/d3d11/dxgi.dll`, `dxvk.conf`, every `*.ini/*.conf/*.cfg/*.wtf`)
+are only created when missing, never replaced. A file Yu'lon recorded and the
+player has changed since is kept unless the player says replace; a Keep is
+remembered against the manifest's digest for that file, so the same update does
+not ask twice.
+
+**What is kept beside the client.** `STATE_FILE`: the manifest version the folder
+was brought to (None while an update is unfinished), what Yu'lon verified of
+each file, and the Keep choices; written LAST, so it never claims a version the
+files are not at. `BACKUP_DIR/<version>/`: every file an update replaced, plus a
+journal of what it replaced and added, which `rollback()` reads to put the
+folder back as it was.
+
+The state file is NOT `play_client.MARKER` (`.yulon-client.json`): that name
+marks a ready-to-play folder Yu'lon owns and may delete from, and the player's
+own client must never wear it.
+
+Network only through an `client_packs.Opener` (https only, the entry's hosts,
+the self-updater's stall watchdog), so tests pass a fake. No Qt here.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import errno
+import hashlib
+import json
+import os
+import re
+import shutil
+import sys
+from collections.abc import Callable, Collection, Iterable, Mapping
+from dataclasses import asdict, dataclass, field
+from pathlib import Path, PurePosixPath
+from typing import Any, Literal, TypeGuard
+from urllib.error import HTTPError
+from urllib.parse import urlsplit
+
+from yulon import client_names, client_packs
+from yulon.after_stop import StopTookEffect
+from yulon.log import get_logger
+from yulon.play_client import _is_link
+from yulon.selfupdate import fetch
+from yulon.update import _can_only_go_where_it_says, _Deadline
+
+logger = get_logger(__name__)
+
+MANIFEST_MAX_BYTES = 16 * 1024 * 1024
+"""The most of a manifest that is read: the CoA client's lists 201 files in 34 KB (2026-10-29)."""
+
+SUPPORTED_SCHEMAS = frozenset({1})
+"""Manifest `schema` values this build understands; any other is refused, never guessed at."""
+
+CHECK_SECONDS = 10.0
+"""How long the check at tab open may wait for the manifest before it says it could not check."""
+
+STALL_SECONDS = fetch.STALL_SECONDS
+CHUNK_BYTES = fetch.CHUNK_BYTES
+
+STATE_FILE = ".yulon-client-update.json"
+BACKUP_DIR = ".yulon-client-backup"
+JOURNAL = ".yulon-journal.json"
+"""In `BACKUP_DIR/<version>/`: what that update replaced and added, for `rollback()`."""
+PART_SUFFIX = ".yulon-part"
+_STATE_VERSION = 1
+
+_HEX64 = re.compile(r"^[0-9a-fA-F]{64}$")
+_VERSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+_FORBIDDEN_CHARS = frozenset('\\:<>"|?*')
+_WINDOWS_DEVICES = client_packs._WINDOWS_DEVICES
+
+_EXCLUDED_FOLDERS = frozenset({"wtf", "cache", "errors", "logs"})
+_EXCLUDED_NAMES = frozenset({"realmlist.wtf"})
+_EXCLUDED_SUFFIXES = frozenset({".log"})
+_EXCLUDED_TREES = (("interface", "addons", "coabotui"),)
+_PLAYER_NAMES = frozenset(
+    {"d3d8.dll", "d3d9.dll", "d3d10core.dll", "d3d11.dll", "dxgi.dll", "dxvk.conf"}
+)
+_PLAYER_SUFFIXES = frozenset({".ini", ".conf", ".cfg", ".wtf"})
+
+Action = Literal["ok", "add", "replace", "keep-edited", "skip-player-owned"]
+Kind = Literal["excluded", "player-owned", "normal"]
+Progress = Callable[[str], None]
+
+
+class ClientUpdateError(RuntimeError):
+    """A refusal worded for the player, naming what to do next."""
+
+
+class ManifestError(ClientUpdateError):
+    """The published manifest is not one Yu'lon can trust: nothing was changed."""
+
+
+class Cancelled(ClientUpdateError, StopTookEffect):
+    """The player pressed Cancel. Downloads in progress are kept, so the next try continues."""
+
+
+def _never() -> bool:
+    return False
+
+
+def _quiet(_text: str) -> None:
+    return None
+
+
+# --- The manifest ------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ManifestFile:
+    path: str
+    size: int
+    sha256: str
+
+
+@dataclass(frozen=True)
+class Manifest:
+    """A parsed manifest. `digest` is the SHA-256 of the bytes it was parsed from."""
+
+    schema: int
+    version: str
+    published_at: str | None
+    files: tuple[ManifestFile, ...]
+    digest: str
+
+    @property
+    def total_bytes(self) -> int:
+        return sum(item.size for item in self.files)
+
+
+def safe_rel(raw: object) -> PurePosixPath:
+    """A manifest path as a relative POSIX path that cannot leave the client folder, or refused.
+
+    Refused: anything not a string, empty, absolute (`/x`), a drive (`C:`) or a
+    stream (`a:b`), a backslash, NUL or another control character, a `.` or `..`
+    or empty component, a component ending in a dot or space (Windows drops them,
+    so two names would be one file), a Windows device name (`NUL.txt`), and
+    anything named like Yu'lon's own files (`.yulon-*`).
+    """
+    if not isinstance(raw, str) or not raw or len(raw) > 1024:
+        raise ManifestError(f"The client's file list names a path Yu'lon cannot use ({raw!r}).")
+    bad = (
+        raw.startswith("/")
+        or any(ch in _FORBIDDEN_CHARS or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in raw)
+        or raw.endswith("/")
+    )
+    parts = raw.split("/")
+    for part in parts:
+        if (
+            part in ("", ".", "..")
+            or part.endswith((".", " "))
+            or part.split(".")[0].strip().upper() in _WINDOWS_DEVICES
+            or ".yulon-" in part.casefold()
+        ):
+            bad = True
+    if bad:
+        raise ManifestError(
+            f"The client's file list names {raw!r}, a path outside the client folder or one "
+            "Windows cannot hold, so Yu'lon changed nothing. Try again later; if it stays, "
+            "tell the Conquest of Azeroth project."
+        )
+    return PurePosixPath(*parts)
+
+
+def classify(rel: PurePosixPath | str) -> Kind:
+    """Whether Yu'lon may write `rel`: never (`excluded`), only when missing, or freely."""
+    parts = tuple(part.casefold() for part in PurePosixPath(rel).parts)
+    name = parts[-1]
+    suffix = PurePosixPath(name).suffix
+    if (
+        parts[0] in _EXCLUDED_FOLDERS
+        or name in _EXCLUDED_NAMES
+        or suffix in _EXCLUDED_SUFFIXES
+        or any(parts[: len(tree)] == tree for tree in _EXCLUDED_TREES)
+    ):
+        return "excluded"
+    if name in _PLAYER_NAMES or suffix in _PLAYER_SUFFIXES:
+        return "player-owned"
+    return "normal"
+
+
+def _strict_int(value: object) -> TypeGuard[int]:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def parse_manifest(raw: bytes) -> Manifest:
+    """The manifest's bytes as a `Manifest`, every field checked, or `ManifestError`."""
+    if len(raw) > MANIFEST_MAX_BYTES:
+        raise ManifestError(
+            "The client's file list is larger than any Yu'lon accepts, so it was not read. "
+            "Try again later."
+        )
+    try:
+        data = json.loads(raw.decode("utf-8-sig"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise ManifestError(
+            f"The client's file list could not be read ({exc}). Try again later."
+        ) from exc
+    if not isinstance(data, dict):
+        raise ManifestError("The client's file list is not a list Yu'lon knows. Try again later.")
+    schema = data.get("schema")
+    if not _strict_int(schema) or schema not in SUPPORTED_SCHEMAS:
+        raise ManifestError(
+            f"The client's file list is in a form this Yu'lon does not know (schema {schema!r}). "
+            "Update Yu'lon, then try again."
+        )
+    version = data.get("version")
+    if not isinstance(version, str) or not _VERSION.match(version):
+        raise ManifestError(
+            f"The client's file list carries a version Yu'lon cannot use ({version!r}). Try "
+            "again later."
+        )
+    published = data.get("publishedAt")
+    if published is not None and not isinstance(published, str):
+        raise ManifestError("The client's file list carries a date Yu'lon cannot read.")
+    files = data.get("files")
+    if not isinstance(files, list):
+        raise ManifestError("The client's file list has no list of files. Try again later.")
+    parsed: list[ManifestFile] = []
+    seen: set[str] = set()
+    for item in files:
+        if not isinstance(item, dict):
+            raise ManifestError("The client's file list holds an entry that is not a file.")
+        rel = safe_rel(item.get("path"))
+        size, digest = item.get("size"), item.get("sha256")
+        if not _strict_int(size) or size < 0:
+            raise ManifestError(f"The client's file list gives {rel} no usable size.")
+        if not isinstance(digest, str) or not _HEX64.match(digest):
+            raise ManifestError(f"The client's file list gives {rel} no usable SHA-256.")
+        key = rel.as_posix().casefold()
+        if key in seen:
+            raise ManifestError(
+                f"The client's file list names {rel} twice (in some spelling), so Yu'lon "
+                "changed nothing."
+            )
+        seen.add(key)
+        parsed.append(ManifestFile(rel.as_posix(), size, digest.lower()))
+    return Manifest(
+        schema=schema,
+        version=version,
+        published_at=published,
+        files=tuple(parsed),
+        digest=hashlib.sha256(raw).hexdigest(),
+    )
+
+
+def _refuse_unlisted(url: str, hosts: frozenset[str]) -> None:
+    host = urlsplit(url).hostname
+    if host is None or host not in hosts or not _can_only_go_where_it_says(url, host):
+        raise ClientUpdateError(
+            f"The client update would be fetched from {host or url!r}, which is not a plain "
+            "https address this server names, so Yu'lon did not ask it."
+        )
+
+
+def _open(
+    opener: client_packs.Opener,
+    url: str,
+    watcher: _Deadline,
+    *,
+    headers: Mapping[str, str],
+    hosts: frozenset[str],
+) -> client_packs.Response:
+    """Open `url` with GET, every failure worded for the player."""
+    try:
+        response = opener(url, watcher, method="GET", headers=headers, hosts=hosts)
+    except HTTPError as exc:
+        raise ClientUpdateError(
+            f"The Conquest of Azeroth site answered HTTP {exc.code} for {url}. Try again later."
+        ) from exc
+    except fetch.UpdateError as exc:
+        raise ClientUpdateError(str(exc)) from exc
+    except AssertionError:
+        raise  # a test's refusal (conftest), never worded as "could not be reached"
+    except Exception as exc:
+        raise ClientUpdateError(
+            f"The Conquest of Azeroth site could not be reached ({exc}). Check the connection "
+            "and try again."
+        ) from exc
+    if not 200 <= response.status < 300:
+        client_packs._close(response)
+        raise ClientUpdateError(
+            f"The Conquest of Azeroth site answered HTTP {response.status} for {url}. Try "
+            "again later."
+        )
+    return response
+
+
+def _network(
+    url: str,
+    watcher: _Deadline,
+    *,
+    method: str,
+    headers: Mapping[str, str],
+    hosts: frozenset[str],
+) -> client_packs.Response:
+    """The real opener (`client_packs._open`). Looked up at call time, so a test can refuse it."""
+    return client_packs._open(url, watcher, method=method, headers=headers, hosts=hosts)
+
+
+def _opener(given: client_packs.Opener | None) -> client_packs.Opener:
+    return given if given is not None else _network
+
+
+def fetch_manifest(
+    url: str,
+    *,
+    hosts: frozenset[str],
+    opener: client_packs.Opener | None = None,
+    seconds: float = STALL_SECONDS,
+) -> Manifest:
+    """GET the manifest, read no more than `MANIFEST_MAX_BYTES` + 1, and parse it."""
+    _refuse_unlisted(url, hosts)
+    opener = _opener(opener)
+    data = bytearray()
+    with _Deadline(seconds) as watcher:
+        response = _open(opener, url, watcher, headers={}, hosts=hosts)
+        try:
+            while len(data) <= MANIFEST_MAX_BYTES:
+                try:
+                    chunk = response.read1(min(CHUNK_BYTES, MANIFEST_MAX_BYTES + 1 - len(data)))
+                except Exception as exc:
+                    raise ClientUpdateError(
+                        f"The client's file list stopped arriving ({exc}). Try again."
+                    ) from exc
+                if watcher.fired:
+                    raise ClientUpdateError("The client's file list did not arrive. Try again.")
+                if not chunk:
+                    break
+                data += chunk
+        finally:
+            client_packs._close(response)
+    return parse_manifest(bytes(data))
+
+
+# --- The state beside the client --------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class FileFact:
+    """What Yu'lon last verified of one client file: its size, mtime (ns) and SHA-256."""
+
+    size: int
+    mtime_ns: int
+    sha256: str
+
+
+@dataclass(frozen=True)
+class State:
+    """`STATE_FILE`'s content. `version` None: an update was started and not finished."""
+
+    version: str | None
+    manifest_sha256: str | None
+    files: Mapping[str, FileFact] = field(default_factory=dict)
+    kept: Mapping[str, str] = field(default_factory=dict)
+    """Path -> the manifest SHA-256 the player chose to keep their own file against."""
+
+
+def _state_dict(state: State) -> dict[str, Any]:
+    return {
+        "state_version": _STATE_VERSION,
+        "version": state.version,
+        "manifest_sha256": state.manifest_sha256,
+        "files": {rel: asdict(fact) for rel, fact in sorted(state.files.items())},
+        "kept": dict(sorted(state.kept.items())),
+    }
+
+
+def _state_from(raw: object) -> State | None:
+    if not isinstance(raw, dict) or raw.get("state_version") != _STATE_VERSION:
+        return None
+    version = raw.get("version")
+    digest = raw.get("manifest_sha256")
+    files_raw, kept_raw = raw.get("files"), raw.get("kept")
+    if not (version is None or isinstance(version, str)) or not isinstance(files_raw, dict):
+        return None
+    if not isinstance(kept_raw, dict):
+        return None
+    files: dict[str, FileFact] = {}
+    for rel, fact in files_raw.items():
+        if not isinstance(fact, dict):
+            return None
+        size, mtime, sha = fact.get("size"), fact.get("mtime_ns"), fact.get("sha256")
+        if not (_strict_int(size) and _strict_int(mtime) and isinstance(sha, str)):
+            return None
+        files[str(rel)] = FileFact(size, mtime, sha)
+    kept = {str(rel): str(sha) for rel, sha in kept_raw.items() if isinstance(sha, str)}
+    return State(version, digest if isinstance(digest, str) else None, files, kept)
+
+
+def read_state(client_dir: Path) -> State | None:
+    """The state file, or None: absent (never updated by Yu'lon), unreadable or malformed."""
+    path = client_dir / STATE_FILE
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        logger.warning(f"coa-client: {path} could not be read ({exc}); treating it as absent")
+        return None
+    try:
+        state = _state_from(json.loads(text))
+    except ValueError:
+        state = None
+    if state is None:
+        logger.warning(f"coa-client: {path} is not a state Yu'lon wrote; treating it as absent")
+    return state
+
+
+def write_state(client_dir: Path, state: State) -> None:
+    """Atomic: a temporary beside it, then `os.replace`."""
+    path = client_dir / STATE_FILE
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        tmp.write_text(json.dumps(_state_dict(state), indent=1) + "\n", encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+# --- The check the tab shows -----------------------------------------------------------------
+
+Status = Literal["current", "outdated", "unknown"]
+
+
+def status(client_dir: Path, manifest: Manifest) -> Status:
+    """The folder against the manifest by the recorded version alone: no file is read.
+
+    `unknown` for a folder Yu'lon never updated: its version cannot be told without
+    reading every file, which only Update client does. An update that did not
+    finish (version None) is `outdated`.
+    """
+    state = read_state(client_dir)
+    if state is None:
+        return "unknown"
+    return "current" if state.version == manifest.version else "outdated"
+
+
+CHECK_FAILED = "Could not check for a client update."
+
+
+def check_sentence(client_dir: Path, manifest: Manifest) -> tuple[Status, str]:
+    """The status and the plain sentence the Server tab shows beside Update client."""
+    found = status(client_dir, manifest)
+    if found == "current":
+        return found, f"Your client is up to date (version {manifest.version})."
+    if found == "outdated":
+        return found, (
+            f"A client update is available (version {manifest.version}). Update client "
+            "brings your client folder up to date; Play still works without it."
+        )
+    return found, (
+        f"Client version unknown: Yu'lon has not updated this client folder before. Update "
+        f"client checks every file against version {manifest.version} and lists what "
+        "differs before changing anything."
+    )
+
+
+# --- Planning ---------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class PlanItem:
+    path: str
+    action: Action
+    size: int
+    sha256: str
+    remembered: bool = False
+    """For `keep-edited`: the player already chose Keep against this manifest digest."""
+
+
+def _target(client_dir: Path, rel: PurePosixPath) -> Path:
+    """`rel` under `client_dir` as the disk spells it, refused if a link is on the way."""
+    spelled = client_names.on_disk(client_dir, rel)
+    here = client_dir
+    for part in spelled.parts:
+        here = here / part
+        if os.path.lexists(here) and _is_link(here):
+            raise ClientUpdateError(
+                f"{here} is a link, so Yu'lon will not write through it. Replace it with the "
+                "real file or folder, then try Update client again."
+            )
+    return here
+
+
+def _sha256(path: Path, cancelled: Callable[[], bool] = _never) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(CHUNK_BYTES):
+            if cancelled():
+                raise Cancelled("The client check was cancelled; nothing was changed.")
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _current_sha(
+    path: Path, st: os.stat_result, fact: FileFact | None, cancelled: Callable[[], bool]
+) -> str:
+    """The file's SHA-256, taken from the state when its size and mtime are what Yu'lon saw."""
+    if fact is not None and fact.size == st.st_size and fact.mtime_ns == st.st_mtime_ns:
+        return fact.sha256
+    return _sha256(path, cancelled)
+
+
+def plan(
+    client_dir: Path,
+    manifest: Manifest,
+    state: State | None,
+    *,
+    cancelled: Callable[[], bool] = _never,
+    progress: Progress = _quiet,
+) -> list[PlanItem]:
+    """What Update client would do to each manifest file; excluded files are not listed.
+
+    A differing file is `replace` when Yu'lon has no record of it (an old copy of
+    the client's own file: player-owned kinds never get here) or its record still
+    matches it; `keep-edited` when the player changed it since Yu'lon recorded it.
+    """
+    items: list[PlanItem] = []
+    files = state.files if state is not None else {}
+    kept = state.kept if state is not None else {}
+    total = len(manifest.files)
+    for index, entry in enumerate(manifest.files, start=1):
+        if cancelled():
+            raise Cancelled("The client check was cancelled; nothing was changed.")
+        rel = PurePosixPath(entry.path)
+        kind = classify(rel)
+        if kind == "excluded":
+            continue
+        target = _target(client_dir, rel)
+        progress(f"Checking client files: {index} of {total} ({entry.path})")
+        try:
+            st = target.stat()
+        except FileNotFoundError:
+            items.append(PlanItem(entry.path, "add", entry.size, entry.sha256))
+            continue
+        if not target.is_file():
+            raise ClientUpdateError(
+                f"{target} is a folder where the client update has a file. Move it away, then "
+                "try Update client again."
+            )
+        if kind == "player-owned":
+            items.append(PlanItem(entry.path, "skip-player-owned", entry.size, entry.sha256))
+            continue
+        fact = files.get(entry.path)
+        same = st.st_size == entry.size and (
+            _current_sha(target, st, fact, cancelled) == entry.sha256
+        )
+        if same:
+            items.append(PlanItem(entry.path, "ok", entry.size, entry.sha256))
+            continue
+        if kept.get(entry.path) == entry.sha256:
+            items.append(PlanItem(entry.path, "keep-edited", entry.size, entry.sha256, True))
+            continue
+        edited = fact is not None and _current_sha(target, st, fact, cancelled) != fact.sha256
+        action: Action = "keep-edited" if edited else "replace"
+        items.append(PlanItem(entry.path, action, entry.size, entry.sha256))
+    return items
+
+
+def size_text(size: int) -> str:
+    return client_packs._size_text(size)
+
+
+def summary(items: Iterable[PlanItem]) -> str:
+    """One plain sentence: how many files change and how much is downloaded."""
+    items = list(items)
+    write = [i for i in items if i.action in ("add", "replace")]
+    edited = [i for i in items if i.action == "keep-edited" and not i.remembered]
+    if not write and not edited:
+        return "Your client already matches the update; nothing needs downloading."
+    said = (
+        f"{len(write)} file{'s' if len(write) != 1 else ''} to download "
+        f"({size_text(sum(i.size for i in write))})."
+    )
+    if edited:
+        said += (
+            f" {len(edited)} file{'s' if len(edited) != 1 else ''} you changed "
+            f"({', '.join(i.path for i in edited[:3])}{', …' if len(edited) > 3 else ''}) "
+            "differ from the update."
+        )
+    return said
+
+
+# --- Applying ---------------------------------------------------------------------------------
+
+
+@dataclass
+class Outcome:
+    written: list[str] = field(default_factory=list)
+    kept: list[str] = field(default_factory=list)
+    failed: list[tuple[str, str]] = field(default_factory=list)
+    version_recorded: bool = False
+
+    def sentence(self, version: str) -> str:
+        if not self.failed:
+            return (
+                f"Your client is up to date (version {version}): {len(self.written)} file"
+                f"{'s' if len(self.written) != 1 else ''} updated, the old ones kept in "
+                f"{BACKUP_DIR}."
+            )
+        path, why = self.failed[0]
+        more = f" ({len(self.failed) - 1} more)" if len(self.failed) > 1 else ""
+        return (
+            f"The client update did not finish: {path}{more}: {why} The files that could not "
+            "be updated were left as they were."
+        )
+
+
+def _free_bytes(folder: Path) -> int:
+    return shutil.disk_usage(folder).free
+
+
+def _part_of(target: Path) -> Path:
+    return target.with_name(target.name + PART_SUFFIX)
+
+
+class _Mismatch(ClientUpdateError):
+    """The downloaded bytes are not the manifest's: the `.part` is deleted, the old file kept."""
+
+
+_CONTENT_RANGE = re.compile(r"^\s*bytes\s+(\d+)-(\d+)/(\d+|\*)\s*$")
+
+
+def _download(
+    url: str,
+    part: Path,
+    size: int,
+    *,
+    opener: client_packs.Opener,
+    hosts: frozenset[str],
+    cancelled: Callable[[], bool],
+    progress: Callable[[int], None],
+) -> None:
+    """Bring `part` to `size` bytes, resuming from what it holds (HTTP Range)."""
+    have = part.stat().st_size if part.is_file() else 0
+    if have > size:
+        part.unlink()
+        have = 0
+    if have == size:
+        return
+    headers = {"Range": f"bytes={have}-"} if have else {}
+    done = have
+    with _Deadline(STALL_SECONDS) as watcher:
+        response = _open(opener, url, watcher, headers=headers, hosts=hosts)
+        try:
+            if have and response.status == 206:
+                match = _CONTENT_RANGE.match(response.getheader("Content-Range") or "")
+                if match is None or int(match.group(1)) != have:
+                    part.unlink(missing_ok=True)
+                    raise ClientUpdateError(
+                        "The Conquest of Azeroth site answered a resumed download with another "
+                        "part of the file. Try again; it starts over."
+                    )
+                mode = "ab"
+            else:
+                done, mode = 0, "wb"
+            with part.open(mode) as handle:
+                while True:
+                    if cancelled():
+                        raise Cancelled(
+                            "The client update was cancelled; what arrived is kept and the "
+                            "next Update client continues from there."
+                        )
+                    try:
+                        chunk = response.read1(min(CHUNK_BYTES, size - done + 1))
+                    except Exception as exc:
+                        raise ClientUpdateError(
+                            f"the download stopped ({exc}); the next try continues from there."
+                        ) from exc
+                    if watcher.fired:
+                        raise ClientUpdateError(
+                            "the download sent nothing for a while; the next try continues "
+                            "from there."
+                        )
+                    if not chunk:
+                        break
+                    watcher.restart(STALL_SECONDS)
+                    handle.write(chunk)
+                    done += len(chunk)
+                    if done > size:
+                        break
+                    progress(len(chunk))
+        finally:
+            client_packs._close(response)
+    if done < size:
+        raise ClientUpdateError("the download stopped part-way; the next try continues from there.")
+
+
+def _prove(part: Path, entry: PlanItem, cancelled: Callable[[], bool]) -> None:
+    """The `.part` holds exactly the manifest's bytes, or it is deleted and `_Mismatch` raised."""
+    actual_size = part.stat().st_size
+    actual = _sha256(part, cancelled) if actual_size == entry.size else None
+    if actual != entry.sha256:
+        part.unlink(missing_ok=True)
+        raise _Mismatch(
+            f"the downloaded file does not match the update's size and SHA-256 "
+            f"({actual_size} bytes, expected {entry.size}), so the old file was kept. Try again."
+        )
+
+
+def _in_use(exc: OSError) -> bool:
+    """A Windows sharing violation, or a refusal there: the game (or a scanner) holds the file."""
+    return getattr(exc, "winerror", None) in (5, 32, 33) or (
+        sys.platform == "win32" and isinstance(exc, PermissionError)
+    )
+
+
+def _os_sentence(exc: OSError) -> str:
+    if _in_use(exc):
+        return (
+            "the file is in use. Close the game (and anything else using the client's files), "
+            "then press Update client again."
+        )
+    if exc.errno == errno.ENOSPC:
+        return "the drive is full. Free some space, then press Update client again."
+    return f"Yu'lon could not write it ({exc.strerror or exc}). Press Update client again."
+
+
+def _backup_root(client_dir: Path, version: str) -> Path:
+    if not _VERSION.match(version):
+        raise ManifestError(f"The update's version {version!r} cannot name a backup folder.")
+    return client_dir / BACKUP_DIR / version
+
+
+def _read_journal(root: Path) -> dict[str, Any] | None:
+    try:
+        raw = json.loads((root / JOURNAL).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as exc:
+        raise ClientUpdateError(
+            f"The backup record in {root} could not be read ({exc}), so Yu'lon changed nothing."
+        ) from exc
+    if not (
+        isinstance(raw, dict)
+        and isinstance(raw.get("replaced"), dict)
+        and isinstance(raw.get("added"), dict)
+    ):
+        raise ClientUpdateError(f"The backup record in {root} is not one Yu'lon wrote.")
+    return raw
+
+
+def _write_journal(root: Path, journal: Mapping[str, Any]) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / JOURNAL
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        tmp.write_text(json.dumps(journal, indent=1) + "\n", encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def _fresh(path: Path) -> Path:
+    """`path`, or `path.<n>` when a backup of the same file from an earlier try is there."""
+    if not os.path.lexists(path):
+        return path
+    number = 1
+    while os.path.lexists(path.with_name(f"{path.name}.{number}")):
+        number += 1
+    return path.with_name(f"{path.name}.{number}")
+
+
+def _put_in_place(
+    client_dir: Path,
+    root: Path,
+    journal: dict[str, Any],
+    item: PlanItem,
+    target: Path,
+    part: Path,
+) -> None:
+    """Back the old file up (journal first), then rename the proved `.part` onto `target`."""
+    if os.path.lexists(target):
+        if classify(item.path) == "player-owned":
+            part.unlink(missing_ok=True)
+            raise ClientUpdateError("it is yours to keep, so Yu'lon left it.")
+        backup = _fresh(root.joinpath(*PurePosixPath(item.path).parts))
+        backup.parent.mkdir(parents=True, exist_ok=True)
+        journal["replaced"].setdefault(item.path, backup.relative_to(root).as_posix())
+        _write_journal(root, journal)
+        os.replace(target, backup)
+        try:
+            os.replace(part, target)
+        except OSError:
+            os.replace(backup, target)
+            raise
+    else:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        journal["added"][item.path] = item.sha256
+        _write_journal(root, journal)
+        os.replace(part, target)
+
+
+def _fact(path: Path, sha256: str) -> FileFact:
+    st = path.stat()
+    return FileFact(st.st_size, st.st_mtime_ns, sha256)
+
+
+def apply(
+    client_dir: Path,
+    manifest: Manifest,
+    items: Collection[PlanItem],
+    *,
+    objects_url: str,
+    hosts: frozenset[str],
+    replace_edited: bool = False,
+    opener: client_packs.Opener | None = None,
+    progress: Progress = _quiet,
+    cancelled: Callable[[], bool] = _never,
+    free_bytes: Callable[[Path], int] = _free_bytes,
+) -> Outcome:
+    """Bring `client_dir` to `manifest` as `items` (from `plan()`) say. The state file LAST.
+
+    `replace_edited`: the player said Replace for the files they changed (each is
+    backed up like any other). A file whose download does not prove is left as
+    it was and reported; the rest go on. A Cancel keeps every `.part` for the
+    next try, records what was done, and raises `Cancelled`.
+    """
+    _refuse_unlisted(objects_url, hosts)
+    opener = _opener(opener)
+    root = _backup_root(client_dir, manifest.version)
+    previous = read_state(client_dir)
+    todo = [
+        item
+        for item in items
+        if item.action in ("add", "replace")
+        or (item.action == "keep-edited" and replace_edited and not item.remembered)
+    ]
+    for item in todo:
+        if classify(item.path) == "excluded":
+            raise ClientUpdateError(f"{item.path} is never written by Yu'lon; nothing changed.")
+        if classify(item.path) == "player-owned" and item.action != "add":
+            raise ClientUpdateError(f"{item.path} is yours to keep; nothing changed.")
+    targets = {item.path: _target(client_dir, PurePosixPath(item.path)) for item in todo}
+    needed = 0
+    for item in todo:
+        part = _part_of(targets[item.path])
+        have = part.stat().st_size if part.is_file() else 0
+        needed += max(item.size - have, 0)
+    free = free_bytes(client_dir)
+    if free < needed:
+        raise ClientUpdateError(
+            f"The client update needs {size_text(needed)} of free space in {client_dir}, and "
+            f"that drive has {size_text(free)}. Free some space and try again; nothing was "
+            "changed."
+        )
+    journal = _read_journal(root) or {
+        "version": manifest.version,
+        "previous_state": _state_dict(previous) if previous is not None else None,
+        "replaced": {},
+        "added": {},
+    }
+    outcome = Outcome()
+    total = max(sum(item.size for item in todo), 1)
+    got = 0
+
+    def moved(count: int) -> None:
+        nonlocal got
+        got += count
+        progress(f"Updating the client: {size_text(got)} of {size_text(total)}")
+
+    stop: Cancelled | None = None
+    for item in todo:
+        if cancelled():
+            stop = Cancelled(
+                "The client update was cancelled; what arrived is kept and the next Update "
+                "client continues from there."
+            )
+            break
+        target = targets[item.path]
+        part = _part_of(target)
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            _download(
+                objects_url + item.sha256,
+                part,
+                item.size,
+                opener=opener,
+                hosts=hosts,
+                cancelled=cancelled,
+                progress=moved,
+            )
+            _prove(part, item, cancelled)
+            _put_in_place(client_dir, root, journal, item, target, part)
+        except Cancelled as exc:
+            stop = exc
+            break
+        except ClientUpdateError as exc:
+            outcome.failed.append((item.path, str(exc)))
+            continue
+        except OSError as exc:
+            outcome.failed.append((item.path, _os_sentence(exc)))
+            continue
+        outcome.written.append(item.path)
+    _record(client_dir, manifest, items, previous, outcome, replace_edited, finished=stop is None)
+    if stop is not None:
+        raise stop
+    return outcome
+
+
+def _record(
+    client_dir: Path,
+    manifest: Manifest,
+    items: Collection[PlanItem],
+    previous: State | None,
+    outcome: Outcome,
+    replace_edited: bool,
+    *,
+    finished: bool,
+) -> None:
+    """Write the state file: what is now verified, the Keep choices, and the version if done."""
+    files = dict(previous.files) if previous is not None else {}
+    kept = dict(previous.kept) if previous is not None else {}
+    written = set(outcome.written)
+    failed = {path for path, _ in outcome.failed}
+    for item in items:
+        target = client_dir.joinpath(*client_names.on_disk(client_dir, item.path).parts)
+        if item.path in written or item.action == "ok":
+            with contextlib.suppress(OSError):
+                files[item.path] = _fact(target, item.sha256)
+            kept.pop(item.path, None)
+        elif item.action == "keep-edited" and (item.remembered or not replace_edited):
+            kept[item.path] = item.sha256
+            outcome.kept.append(item.path)
+    pending = [
+        i
+        for i in items
+        if i.path not in written
+        and (
+            i.action in ("add", "replace")
+            or (i.action == "keep-edited" and replace_edited and not i.remembered)
+        )
+    ]
+    done = finished and not failed and not pending
+    write_state(
+        client_dir,
+        State(
+            manifest.version if done else None,
+            manifest.digest,
+            files,
+            kept,
+        ),
+    )
+    outcome.version_recorded = done
+
+
+# --- Rolling back -----------------------------------------------------------------------------
+
+
+def backups(client_dir: Path) -> list[str]:
+    """The versions whose backups are kept, newest name last."""
+    folder = client_dir / BACKUP_DIR
+    try:
+        return sorted(p.name for p in folder.iterdir() if p.is_dir() and (p / JOURNAL).is_file())
+    except OSError:
+        return []
+
+
+def rollback(client_dir: Path, version: str) -> list[str]:
+    """Put the client back as it was before the update to `version`; return what is left over.
+
+    Every replaced file comes back from the backup; every file the update added
+    is removed while it still holds the update's bytes (one the player changed
+    since stays, and is named). The state file is restored last, and the backup
+    folder is removed only when everything came back.
+    """
+    root = _backup_root(client_dir, version)
+    journal = _read_journal(root)
+    if journal is None:
+        raise ClientUpdateError(f"There is no backup of the client update {version} to undo.")
+    left: list[str] = []
+    for rel_raw, sha in journal["added"].items():
+        rel = safe_rel(rel_raw)
+        target = _target(client_dir, rel)
+        try:
+            if target.is_file() and _sha256(target) == sha:
+                target.unlink()
+            elif os.path.lexists(target):
+                left.append(f"{rel} (changed since the update, so it was kept)")
+        except OSError as exc:
+            left.append(f"{rel} ({_os_sentence(exc)})")
+    for rel_raw, backup_raw in journal["replaced"].items():
+        rel = safe_rel(rel_raw)
+        backup = root.joinpath(*safe_rel(backup_raw).parts)
+        target = _target(client_dir, rel)
+        try:
+            os.replace(backup, target)
+        except OSError as exc:
+            left.append(f"{rel} ({_os_sentence(exc)})")
+    if left:
+        return left
+    previous = _state_from(journal.get("previous_state"))
+    if previous is None:
+        (client_dir / STATE_FILE).unlink(missing_ok=True)
+    else:
+        write_state(client_dir, previous)
+    shutil.rmtree(root, ignore_errors=True)
+    return []
+
+
+# --- After an update: the server's map data --------------------------------------------------
+
+
+def map_data_sentence(entry: Any, server_dir: Path, client_dir: Path) -> str | None:
+    """Say so when the server's map data was extracted from this client before it changed.
+
+    The extract stage's own evidence (`extract.read_evidence`), compared on the
+    client facts it records (the folder, and the required file's size and date)
+    against what the folder holds now. None: no evidence, another folder, or a match.
+    Never runs anything: re-extracting takes hours and is the player's call.
+    """
+    from yulon.catalog.families import extract
+
+    native = entry.install.native
+    block = native.azerothcore.client_extract if native and native.azerothcore else None
+    if block is None:
+        return None
+    evidence = extract.read_evidence(server_dir / "data")
+    if evidence is None:
+        return None
+    now = extract.expected_evidence(block.extract, client_dir, block.client.required_file)
+    if evidence.client_path != now.client_path:
+        return None
+    if now.client_facts_complete and extract._same_required_file(evidence, now):
+        return None
+    return (
+        f"The client update changed {block.client.required_file}, a file the server's map data "
+        "was extracted from, so the server's map data no longer matches your client. The "
+        "server keeps working with the map data it has; extract it again from the updated "
+        "client to use what the update changed."
+    )

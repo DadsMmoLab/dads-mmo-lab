@@ -1451,6 +1451,21 @@ def _no_unit_test_asks_github_for_a_release(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(apply_module, "_github_newest_release", refuse)
 
 
+@pytest.fixture(autouse=True)
+def _no_unit_test_asks_the_coa_client_site(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Update client's network reads go through `coa_client._network`; no test may (T825).
+
+    The Server tab of a Conquest of Azeroth server checks the client manifest when it
+    opens, so a view test that forgot a double would otherwise ask the real site.
+    """
+    from yulon import coa_client
+
+    def refuse(url: str, *_a: object, **_k: object) -> None:
+        raise AssertionError(f"a test asked the CoA client site for {url}; give it a double")
+
+    monkeypatch.setattr(coa_client, "_network", refuse)
+
+
 REAL_DATABASE_VOLUME = docker_module.database_volume
 """The real `docker.database_volume`, for the tests that ask Docker's double about the database."""
 

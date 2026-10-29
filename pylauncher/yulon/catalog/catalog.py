@@ -3212,6 +3212,34 @@ class ConfigWtf(_Strict):
         return self
 
 
+class ClientUpdate(_Strict):
+    """Where the makers publish the client, so Yu'lon can keep the player's copy current (T825).
+
+    `manifest_url` answers a JSON list of every client file with its size and
+    SHA-256; `objects_url` is the folder each file is fetched from by that
+    digest (`<objects_url><sha256>`). Both https, and their hosts join
+    `Client.hosts()`, the only hosts a client download may reach.
+    """
+
+    manifest_url: str = Field(description="The https URL of the client's file list (JSON).")
+    objects_url: str = Field(
+        description="The https folder a file is fetched from by its SHA-256; ends with `/`."
+    )
+
+    @field_validator("manifest_url")
+    @classmethod
+    def _manifest_is_https(cls, value: str) -> str:
+        return _https_url(value, "client update manifest_url")
+
+    @field_validator("objects_url")
+    @classmethod
+    def _objects_is_an_https_folder(cls, value: str) -> str:
+        _https_url(value, "client update objects_url")
+        if not value.endswith("/"):
+            raise ValueError(f"client update objects_url must end with '/', got {value!r}")
+        return value
+
+
 class Client(_Strict):
     """The client the USER supplies (README §3a) and how to point it at the server.
 
@@ -3283,6 +3311,13 @@ class Client(_Strict):
     packs: tuple[ClientPack, ...] = ()
     exe_patch: ExePatch | None = None
     config_wtf: ConfigWtf | None = None
+    update: ClientUpdate | None = Field(
+        default=None,
+        description=(
+            "Where the makers publish the client's files, for Update client on the Server "
+            "tab (T825). None: Yu'lon does not update this game's client."
+        ),
+    )
 
     @field_validator("exe_names")
     @classmethod
@@ -3361,6 +3396,8 @@ class Client(_Strict):
             urls += [pack.source.url, pack.source.version_url]
         if self.exe_patch is not None:
             urls += [source.url for source in self.exe_patch.clean_sources]
+        if self.update is not None:
+            urls += [self.update.manifest_url, self.update.objects_url]
         hosts = (urlsplit(url).hostname for url in urls if url is not None)
         return frozenset(host for host in hosts if host)
 
