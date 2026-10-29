@@ -9820,7 +9820,7 @@ class ControllerView(QWidget):
 
         Under Start/Stop/Restart, the presses it changes. Shown only for a game that offers it
         (`ContainerSpec.bot_saves_skippable`); for the rest every Stop waits for every save and
-        there is nothing to choose. The install's record is read off the GUI thread, and only
+        there is nothing to choose. The install's record is read (one small file, no job) only
         once WSL says the server's distro runs (`_waits_for_the_distro()`, T133: any read in a
         stopped distro boots it); until then the box shows the catalog's default and is greyed,
         so nothing can be written there either. A change is written at once
@@ -9856,26 +9856,15 @@ class ControllerView(QWidget):
         self._read_stop_choice()
 
     def _read_stop_choice(self) -> None:
-        """Read the install's "When stopping" record, off the GUI thread, once the distro runs."""
+        """Read the install's "When stopping" record once the distro runs, then enable the box.
+
+        One small file and no job, like the Tuning tab's rates rows and SQL-log offer: a job
+        queued while the tab is built would be one more answer for every press-ordering rule
+        to account for. Gated like every reading the tab takes by itself (T133).
+        """
         if self._waits_for_the_distro("stop choice", self._read_stop_choice):
             return
-        controller = self.services.controller
-        self._run(
-            lambda: not controller.skips_bot_saves(),
-            self._stop_choice_read,
-            self._stop_choice_unread,
-        )
-
-    @Slot(object)
-    def _stop_choice_read(self, waits: object) -> None:
-        self._show_stop_choice(bool(waits))
-        self.stop_choice_box.setEnabled(True)
-
-    @Slot(object)
-    def _stop_choice_unread(self, exc: object) -> None:
-        # `skips_bot_saves()` reads an unreadable record as the default, so this is a crash in
-        # the read itself: the box keeps the default it shows and can be changed.
-        logger.warning(f"could not read the Stop choice: {exc}")
+        self._show_stop_choice(not self.services.controller.skips_bot_saves())
         self.stop_choice_box.setEnabled(True)
 
     def _show_stop_choice(self, waits: bool) -> None:
