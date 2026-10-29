@@ -13,6 +13,7 @@ import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -750,3 +751,36 @@ def test_a_ready_to_play_copy_leaves_the_update_record_and_backups_out(tmp_path:
     assert coa_client.BACKUP_DIR not in names
     assert coa_client.STATE_FILE not in names
     assert "Ascension.exe" in names
+
+
+def test_a_legacy_journal_undo_that_stops_before_its_checkpoint_completes_next_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An early journal (string entries, no digests): the original's digest is taken from
+    the backup and saved BEFORE the move, so a lost checkpoint does not strand the Undo."""
+    client = _client(tmp_path, {"Ascension.exe": b"original"})
+    _update(client, _site({"Ascension.exe": b"original"}, "v1"))
+    _update(client, _site({"Ascension.exe": b"updated"}, "v2"))
+    root = client / coa_client.BACKUP_DIR / "v2"
+    journal = json.loads((root / coa_client.JOURNAL).read_text())
+    journal["replaced"] = {"Ascension.exe": "Ascension.exe"}  # the early, string form
+    journal.pop("undone", None)
+    (root / coa_client.JOURNAL).write_text(json.dumps(journal))
+    real = coa_client._write_journal
+    failed: list[bool] = []
+
+    def lose_the_checkpoint(client_dir: Path, root_: Path, journal_: dict[str, Any]) -> None:
+        if "replaced:Ascension.exe" in journal_.get("undone", {}) and not failed:
+            failed.append(True)
+            raise OSError(5, "simulated crash before the checkpoint")
+        real(client_dir, root_, journal_)
+
+    monkeypatch.setattr(coa_client, "_write_journal", lose_the_checkpoint)
+    first = coa_client.rollback(client, "v2")
+    assert failed and first.left
+    assert (client / "Ascension.exe").read_bytes() == b"original"
+    assert not (root / "Ascension.exe").exists()
+    second = coa_client.rollback(client, "v2")
+    assert second.left == []
+    assert (client / "Ascension.exe").read_bytes() == b"original"
+    assert coa_client.read_state(client).version == "v1"  # type: ignore[union-attr]

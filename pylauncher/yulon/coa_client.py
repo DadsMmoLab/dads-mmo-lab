@@ -843,6 +843,12 @@ def _no_link_below(client_dir: Path, path: Path) -> Path:
     in `BACKUP_DIR`, a version folder or anywhere under it would carry the journal and
     the player's original files outside the client folder. Asked again right before
     every journal write and every move, not only once per update.
+
+    The limit, accepted (T825 review round 2): backup containment is checked
+    immediately before each move; a process that races the folder between the
+    check and the move (same user, same client folder) is not defended against.
+    Closing that needs handle-relative no-follow moves (`dir_fd` + `O_NOFOLLOW`),
+    which Python offers on POSIX only, not on Windows.
     """
     here = client_dir
     for part in path.relative_to(client_dir).parts:
@@ -1218,6 +1224,12 @@ def rollback(client_dir: Path, version: str) -> Undone:
             ):
                 _aside(client_dir, root, rel, target)
                 result.kept_changed += 1
+            if original is None:
+                # An early journal never recorded the original's digest: record it from
+                # the backup BEFORE it moves, so an Undo that stops after the move and
+                # before its checkpoint can still tell the file was put back.
+                record["original"] = _sha256(backup)
+                _write_journal(client_dir, root, journal)
             _no_link_below(client_dir, backup)
             os.replace(backup, target)
             checkpoint(key)
