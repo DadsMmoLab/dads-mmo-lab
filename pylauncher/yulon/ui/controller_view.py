@@ -192,6 +192,7 @@ from yulon.support.redact import hide_account_passwords
 from yulon.ui import lines, single_instance
 from yulon.ui.answers import said_yes
 from yulon.ui.catalog_view import DirPicker, _qt_dir_picker, offer_a_docker_group_restart
+from yulon.ui.client_update import ClientUpdateControl
 from yulon.ui.folder_picker import pick_folder
 from yulon.ui.help_places import HELP_BUTTON, show_help_places
 from yulon.ui.icons import dadcraft_icon, get_tab_icon
@@ -9476,11 +9477,18 @@ class ControllerView(QWidget):
                 self.play_menu_button,
                 self.play_cancel_button,
                 self.steam_button,
+                *(
+                    (self.client_update.button, self.client_update.cancel_button)
+                    if self.client_update is not None
+                    else ()
+                ),
             )
             if b is not None
         ]
         play_column.addWidget(_bar(play, *play_presses))
         play_column.addWidget(self.play_label)
+        if self.client_update is not None:
+            play_column.addWidget(self.client_update.label)
         play_column.addWidget(self.steam_label)
         play_column.addWidget(self.steam_details)
         self._add_section(box, play, self.play_button is not None or self.steam_button is not None)
@@ -12959,6 +12967,7 @@ class ControllerView(QWidget):
         self.play_cancel_button.clicked.connect(self._cancel_play_download)
         self._made: _MadePlayClient | None = None
         self.play_button: QPushButton | None = None
+        self.client_update: ClientUpdateControl | None = None
         self.launcher_button: QPushButton | None = None
         self.play_menu_button: QPushButton | None = None
         self.play_menu = QMenu(tab)
@@ -13020,10 +13029,29 @@ class ControllerView(QWidget):
         self.play_menu_button.setToolTip("More for the ready-to-play client")
         self.play_menu_button.setMenu(self.play_menu)
         self.play_menu_button.setVisible(has_play)
+        self._build_client_update(tab)
         if not has_play and self.services.client_dir is None:
             # The button is hidden until there is a folder to make one from
             # (T181); the section says so, and where (T189).
             self.play_label.setText(PLAY_NEEDS_A_CLIENT_FOLDER)
+
+    def _build_client_update(self, tab: QWidget) -> None:
+        """T825: "Update client" beside Play, for an entry whose makers publish its client.
+
+        Its own job and Cancel, never the tab's busy lock: an update never holds Play.
+        Checked once now (the tab is rebuilt when the client folder changes), with a
+        short deadline; a failed check is a sentence, never a refusal.
+        """
+        if self.entry.client.update is None:
+            return
+        self.client_update = ClientUpdateControl(
+            self.entry,
+            self.services.controller.server_dir,
+            lambda: self.services.client_dir,
+            self._jobs,
+            tab,
+        )
+        self.client_update.check()
 
     def _say_play(self, text: str) -> None:
         self.play_label.setText(text)
