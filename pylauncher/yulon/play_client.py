@@ -72,10 +72,15 @@ and "Also remove them from your original client" was left unticked. Read by
 Play and Refresh so the original's copy is not named as left out (T181a).
 Goes with the folder: a ready-to-play client made again starts without one.
 """
-LEFT_OUT = frozenset({"cache", "wdb", "logs", "errors", "screenshots"})
+CLIENT_UPDATE_STATE = ".yulon-client-update.json"
+"""`coa_client`'s record in the player's own client (T825): not carried into a copy."""
+CLIENT_UPDATE_BACKUP = ".yulon-client-backup"
+"""`coa_client`'s backups of replaced client files (T825): old archives, never played."""
+LEFT_OUT = frozenset({"cache", "wdb", "logs", "errors", "screenshots", CLIENT_UPDATE_BACKUP})
 """Top-level folder names (lower-case) not carried over: WoW recreates them, and a
 stale cache from another server confuses the client. 3.3.5a keeps it in `Cache/`
-(`Cache/WDB`); Vanilla and Tortoise keep it at the top level as `WDB/`."""
+(`Cache/WDB`); Vanilla and Tortoise keep it at the top level as `WDB/`. And the
+client update's backups (T825): gigabytes of replaced archives no copy needs."""
 LINKED_SUFFIXES = frozenset({".mpq", ".dll"})
 PARTIAL_SUFFIX = ".yulon-partial"
 _PACK_SWAP_NAME = re.compile(r"(.+)\.yulon-pack-(?:tmp|old)(?:\.\d+)?", re.IGNORECASE)
@@ -426,6 +431,8 @@ def plan(original: Path, target: Path, *, server_dir: Path | None = None) -> Bui
             rel = rel_dir / name
             if rel == Path(MARKER):
                 continue  # a ready-to-play client used as the source: its marker is not ours
+            if rel == Path(CLIENT_UPDATE_STATE):
+                continue  # the update record of the player's own folder, not the copy's
             if _is_linked(name):
                 linked.append(rel)
                 shared += st.st_size

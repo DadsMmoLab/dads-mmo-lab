@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -431,16 +432,16 @@ def test_a_full_disk_refuses_before_anything_is_downloaded(tmp_path: Path) -> No
 
 def test_a_file_in_use_says_close_the_game(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     client = _client(tmp_path, {"Ascension.exe": b"old"})
-    real = coa_client.os.replace
+    real = os.replace
 
     def busy(src: object, dst: object) -> None:
         if str(src).endswith("Ascension.exe"):
             exc = PermissionError(13, "The process cannot access the file")
-            exc.winerror = 32  # type: ignore[attr-defined]
+            exc.winerror = 32  # type: ignore[attr-defined,unused-ignore]
             raise exc
-        real(src, dst)  # type: ignore[arg-type]
+        real(src, dst)  # type: ignore[arg-type,unused-ignore]
 
-    monkeypatch.setattr(coa_client.os, "replace", busy)
+    monkeypatch.setattr(os, "replace", busy)
     outcome = _update(client, _site({"Ascension.exe": b"new"}))
     assert "Close the game" in outcome.failed[0][1]
     assert (client / "Ascension.exe").read_bytes() == b"old"
@@ -474,13 +475,13 @@ def test_the_state_file_is_written_last(tmp_path: Path, monkeypatch: pytest.Monk
     """No file is put in place after the state that names the new version is written."""
     client = _client(tmp_path, {"a.exe": b"1", "Data/b.MPQ": b"1"})
     order: list[str] = []
-    real = coa_client.os.replace
+    real = os.replace
 
     def watch(src: object, dst: object) -> None:
         order.append(Path(str(dst)).name)
-        real(src, dst)  # type: ignore[arg-type]
+        real(src, dst)  # type: ignore[arg-type,unused-ignore]
 
-    monkeypatch.setattr(coa_client.os, "replace", watch)
+    monkeypatch.setattr(os, "replace", watch)
     _update(client, _site({"a.exe": b"2", "Data/b.MPQ": b"2", "Data/c.MPQ": b"3"}))
     assert order[-1] == coa_client.STATE_FILE
     assert order.count(coa_client.STATE_FILE) == 1
@@ -520,7 +521,10 @@ def test_a_changed_required_file_says_the_map_data_needs_extracting_again(tmp_pa
     from yulon.catalog.families import extract
 
     entry = next(e for e in load_catalog().games if e.id == "wow-coa")
-    block = entry.install.native.azerothcore.client_extract  # type: ignore[union-attr]
+    native = entry.install.native
+    assert native is not None and native.azerothcore is not None
+    block = native.azerothcore.client_extract
+    assert block is not None
     client = _client(tmp_path, {"Data/patch-WB2.MPQ": b"before"})
     server = tmp_path / "server"
     evidence = extract.expected_evidence(block.extract, client, block.client.required_file)
@@ -529,3 +533,16 @@ def test_a_changed_required_file_says_the_map_data_needs_extracting_again(tmp_pa
     (client / "Data/patch-WB2.MPQ").write_bytes(b"after the update")
     said = coa_client.map_data_sentence(entry, server, client)
     assert said is not None and "extract it again" in said
+
+
+def test_a_ready_to_play_copy_leaves_the_update_record_and_backups_out(tmp_path: Path) -> None:
+    from yulon import play_client
+
+    client = _client(tmp_path, {"Ascension.exe": b"old", "Data/patch-A.MPQ": b"a"})
+    _update(client, _site({"Ascension.exe": b"new", "Data/patch-A.MPQ": b"a"}))
+    assert (client / coa_client.BACKUP_DIR).is_dir() and (client / coa_client.STATE_FILE).is_file()
+    built = play_client.plan(client, tmp_path / "copy")
+    names = {p.parts[0] for p in (*built.linked, *built.copied)}
+    assert coa_client.BACKUP_DIR not in names
+    assert coa_client.STATE_FILE not in names
+    assert "Ascension.exe" in names

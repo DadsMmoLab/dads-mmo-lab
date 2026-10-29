@@ -49,7 +49,7 @@ from typing import Any, Literal, TypeGuard
 from urllib.error import HTTPError
 from urllib.parse import urlsplit
 
-from yulon import client_names, client_packs
+from yulon import client_names, client_packs, play_client
 from yulon.after_stop import StopTookEffect
 from yulon.log import get_logger
 from yulon.play_client import _is_link
@@ -70,8 +70,8 @@ CHECK_SECONDS = 10.0
 STALL_SECONDS = fetch.STALL_SECONDS
 CHUNK_BYTES = fetch.CHUNK_BYTES
 
-STATE_FILE = ".yulon-client-update.json"
-BACKUP_DIR = ".yulon-client-backup"
+STATE_FILE = play_client.CLIENT_UPDATE_STATE
+BACKUP_DIR = play_client.CLIENT_UPDATE_BACKUP
 JOURNAL = ".yulon-journal.json"
 """In `BACKUP_DIR/<version>/`: what that update replaced and added, for `rollback()`."""
 PART_SUFFIX = ".yulon-part"
@@ -724,11 +724,11 @@ def _os_sentence(exc: OSError) -> str:
     if _in_use(exc):
         return (
             "the file is in use. Close the game (and anything else using the client's files), "
-            "then press Update client again."
+            "then choose Update client again."
         )
     if exc.errno == errno.ENOSPC:
-        return "the drive is full. Free some space, then press Update client again."
-    return f"Yu'lon could not write it ({exc.strerror or exc}). Press Update client again."
+        return "the drive is full. Free some space, then choose Update client again."
+    return f"Yu'lon could not write it ({exc.strerror or exc}). Choose Update client again."
 
 
 def _backup_root(client_dir: Path, version: str) -> Path:

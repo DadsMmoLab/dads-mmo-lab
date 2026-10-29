@@ -3113,6 +3113,12 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "the player's own client is never chmodded and is left). Only in a folder whose step "
         "(a) marker was checked, never into a link, and never the player's own client"
     ),
+    ("coa_client.py", "backups"): (
+        "T825. Lists `.yulon-client-backup/` in the player's own client folder for the "
+        "versions whose backup journal is there, to name what an Undo could put back. It "
+        "decides no write: `rollback()` is given one version by name and reads that version's "
+        "journal itself"
+    ),
     ("launcher_reads.py", "_scandir"): (
         "T187. Lists a ready-to-play client, its `Interface` and its `AddOns` -- one folder "
         "each, never a walk -- for the NAMES the launcher window shows under Addons in this "
