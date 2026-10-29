@@ -31,7 +31,7 @@ import stat
 import tempfile
 import threading
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from typing import Any, Literal, Protocol
 
@@ -690,6 +690,9 @@ class ModuleToInstall:
     folder_files: tuple[move.FileMember, ...] = ()
     """A folder module's files, to be put in a staging folder and installed through the folder
     route. Its description is `manifest`; the route persists it itself, so `carried` is None."""
+    needs_named: tuple[tuple[str, str], ...] = ()
+    """`(id, name)` of each id in `manifest.requires`, named as this Yu'lon's catalog names it
+    (the id itself where it has no description), for the sentence when one is missing (T829)."""
 
 
 @dataclass(frozen=True)
@@ -918,7 +921,40 @@ def _module_plans(
                 carried=carried,
             )
         )
-    return plans, refusals
+    return _in_dependency_order([_with_needs_named(p, lookup) for p in plans]), refusals
+
+
+def _with_needs_named(planned: ModuleToInstall, lookup: ModuleLookup) -> ModuleToInstall:
+    named: list[tuple[str, str]] = []
+    for needed in planned.manifest.requires:
+        found = [m for m in (lookup.load(kind, needed) for kind in apply.CLONE_DIRS) if m]
+        named.append((needed, found[0].name if found else needed))
+    return replace(planned, needs_named=tuple(named))
+
+
+def _in_dependency_order(plans: Sequence[ModuleToInstall]) -> list[ModuleToInstall]:
+    """The plans with every module after the ones of this package it `requires` (T829).
+
+    The pack lists modules folder by folder (`ale_scripts/` before `modules/`), so an ale
+    script came before the Lua engine it needs, and the applier refused it on every press.
+    Otherwise the package's order is kept; a loop of requirements (none is shipped) keeps it.
+    """
+    pending = list(plans)
+    ordered: list[ModuleToInstall] = []
+    while pending:
+        placed = {p.manifest.id for p in ordered}
+        waiting = {p.manifest.id for p in pending}
+        ready = next(
+            (
+                p
+                for p in pending
+                if all(n in placed or n not in waiting for n in p.manifest.requires)
+            ),
+            pending[0],
+        )
+        ordered.append(ready)
+        pending.remove(ready)
+    return ordered
 
 
 def read_marker(server_dir: Path) -> dict[str, object] | None:
@@ -1133,6 +1169,16 @@ class MovedInServer:
     """The Modules tab's "Install from folder" route, for a module added from a folder."""
 
 
+def left_out_sentence(planned: ModuleToInstall, needed: str) -> str:
+    """The one sentence for a module a bring-in left out for want of `needed` (T829)."""
+    name = dict(planned.needs_named).get(needed, needed)
+    return (
+        f"!! {planned.manifest.name} was left out because it needs {name}, which the package "
+        f"does not hold; once this server runs, add {name} and then {planned.manifest.name} on "
+        "the Modules tab."
+    )
+
+
 def _module_key(planned: ModuleToInstall) -> str:
     return f"{planned.packed.type}/{planned.packed.id}"
 
@@ -1145,6 +1191,7 @@ class _Record:
         self.digest = digest
         self.done: list[str] = _strings(body.get("done"))
         self.modules_done: list[str] = _strings(body.get("modules_done"))
+        self.modules_left_out: list[str] = _strings(body.get("modules_left_out"))
         self.rebuild_needed = bool(body.get("rebuild_needed"))
         address = body.get("realm_address")
         self.realm_address: tuple[str, str | None] | None = None
@@ -1166,6 +1213,7 @@ class _Record:
             self.digest,
             self.done,
             modules_done=self.modules_done,
+            modules_left_out=self.modules_left_out,
             rebuild_needed=self.rebuild_needed,
             realm_address=list(self.realm_address) if self.realm_address else None,
         )
@@ -1202,6 +1250,11 @@ class _Record:
     def module_done(self, key: str) -> None:
         self.modules_done.append(key)
         self.save()
+
+    def left_out(self, sentence: str) -> None:
+        if sentence not in self.modules_left_out:
+            self.modules_left_out.append(sentence)
+            self.save()
 
     def need_rebuild(self) -> None:
         if not self.rebuild_needed:
@@ -1328,6 +1381,8 @@ class MovedInInstall:
         # A record left behind made "Use existing..." and Install refuse it for good.
         record.forget()
         yield from self._closing(server_dir)
+        # Last, where the player reads what the move did (T829).
+        yield from record.modules_left_out
 
     def _each_stage(
         self,
@@ -1437,6 +1492,14 @@ class MovedInInstall:
             manifest = planned.manifest
             if planned not in pending:
                 yield f"{manifest.name} is already installed."
+                continue
+            missing = apply.missing_requirements(manifest, apply.installed_modules(server_dir))
+            if missing:
+                # Nothing a press does can put the requirement in: the package does not hold it,
+                # or it would be installed above (`_in_dependency_order`). The rest goes in (T829).
+                sentence = left_out_sentence(planned, missing[0])
+                record.left_out(sentence)
+                yield sentence
                 continue
             if planned.carried is not None:
                 server.persist_manifest(planned.carried)

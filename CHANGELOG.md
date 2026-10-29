@@ -29,6 +29,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Change the realm name players see in the game's realm list on the Networking tab.
 
 ### Fixed
+- **Bring from another computer…** installs Lua scripts after the engine they need, and names any it had to leave out.
 - The install's free-space check now measures Docker's containerd images too, so a full root disk stops it early.
 - On a server inside WSL, each module row on the Modules tab shows its version again.
 - Removing a server now tells you where its kept backups went after its tab closes, instead of losing the message with the tab.

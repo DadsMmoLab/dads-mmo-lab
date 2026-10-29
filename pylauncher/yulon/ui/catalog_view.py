@@ -101,9 +101,11 @@ def _unfinished_move_in(server_dir: Path) -> bool:
 
 
 def _unfinished_move(server_dir: Path) -> str:
+    # `server_dir` is the folder just picked; the sentence says "this folder" (T829 wording).
+    del server_dir
     return (
-        f"{server_dir} is a server being brought from another computer, and that did not "
-        f"finish. Press {BRING_FROM_ANOTHER} with the same file and this folder to carry on."
+        f"A bring-in on this folder is not finished. Press {BRING_FROM_ANOTHER} again with the "
+        "same file and folder to carry on (nothing is lost)."
     )
 
 
