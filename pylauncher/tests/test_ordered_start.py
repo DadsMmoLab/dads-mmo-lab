@@ -382,3 +382,43 @@ def test_opening_the_realm_reads_its_row_in_the_auth_schema(monkeypatch, tmp_pat
     (tmp_path / ".db_password").write_text("pw", encoding="utf-8")
     assert realm_flag.open_realm(COA, _spec(COA), tmp_path) is None
     assert any(statement.lstrip().upper().startswith("SELECT") for _s, statement in asked)
+
+
+def _hangs_until_cancelled(spec, ready, **kwargs):  # type: ignore[no-untyped-def]
+    """An auth that never prints its line for this port: the live run's wrong realm row."""
+    assert ready.cancel is not None, "the auth wait is handed an event that can end it"
+    ready.cancel.wait(5.0)
+    return False
+
+
+def test_an_auth_that_never_says_ready_is_given_up_on_in_bounded_time(monkeypatch) -> None:
+    """T812 C8 D13: the live run waited 20+ minutes on a realm row naming another port.
+
+    Mutation: hand the auth wait the job's `cancel` instead of the deadline's event:
+    the wait runs out its own guard and the plain "within N minutes" sentence is lost.
+    """
+    import time
+
+    calls = _Calls()
+    monkeypatch.setattr(docker, "status", lambda **kw: ["coa-database", "coa-worldserver"])
+    began = time.monotonic()
+    with pytest.raises(docker.DockerRefusal, match="within 1 minutes") as caught:
+        _drive(calls, wait_auth=_hangs_until_cancelled, auth_limit=0.3)
+    assert time.monotonic() - began < 3.0
+    assert "realm row may name another address or port" in str(caught.value)
+    assert calls.opened == 0
+
+
+def test_a_stop_during_the_bounded_auth_wait_is_still_the_stop(monkeypatch) -> None:
+    from yulon.catalog.installer import ReadyWaitStopped
+
+    calls = _Calls()
+    monkeypatch.setattr(docker, "status", lambda **kw: ["coa-database", "coa-worldserver"])
+    cancel = threading.Event()
+
+    def stopped_while_waiting(spec, ready, **kwargs):  # type: ignore[no-untyped-def]
+        cancel.set()
+        return _hangs_until_cancelled(spec, ready)
+
+    with pytest.raises(ReadyWaitStopped, match="Stop was pressed"):
+        _drive(calls, wait_auth=stopped_while_waiting, cancel=cancel, auth_limit=60.0)

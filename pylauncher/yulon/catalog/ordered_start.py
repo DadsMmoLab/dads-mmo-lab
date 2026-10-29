@@ -21,6 +21,7 @@ call, word for word.
 from __future__ import annotations
 
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
@@ -41,6 +42,20 @@ WORLD_WAIT_STOPPED = (
     "Stop was pressed while the world server was still loading, so the login server was not "
     "started. The world is still loading, and the Server tab shows when it is up."
 )
+AUTH_READY_SECONDS = 300.0
+"""How long the login server may take to say it is ready once it was started (T812 C8 D13).
+
+The world is already up when auth starts, and auth prints its ready line within
+seconds; the quiet-budget wait the world uses never ran out on it, because the
+world keeps printing (the live run waited 20+ minutes for a realm row that named
+another port). Five minutes is generous for a start that takes seconds."""
+
+AUTH_NEVER_READY_IN_TIME = (
+    "The login server did not say it was ready within {minutes} minutes, so the realm was not "
+    "opened. Its realm row may name another address or port than this server's: open the "
+    "Network tab, or press Start again."
+)
+
 AUTH_WAIT_STOPPED = (
     "Stop was pressed while the login server was still starting, so the realm was not opened. "
     "Both servers are still coming up, and the Server tab shows when they are up."
@@ -86,6 +101,7 @@ def start(
     force_recreate: bool = False,
     cancel: threading.Event | None = None,
     say: OutputSink = logger.info,
+    auth_limit: float = AUTH_READY_SECONDS,
 ) -> bool:
     """Bring the install up; True once its servers are up and its realm opened.
 
@@ -136,9 +152,19 @@ def start(
             wsl_distro=wsl_distro,
             force_recreate=force_recreate,
         )
-    if not wait_auth(spec, replace(auth_ready, cancel=cancel), wsl_distro=wsl_distro):
+    bounded = _Deadline(cancel, auth_limit)
+    try:
+        heard = wait_auth(spec, replace(auth_ready, cancel=bounded.event), wsl_distro=wsl_distro)
+    finally:
+        bounded.close()
+    if not heard:
         if cancel is not None and cancel.is_set():
             raise ReadyWaitStopped(AUTH_WAIT_STOPPED)
+        if bounded.ran_out:
+            raise docker.DockerRefusal(
+                AUTH_NEVER_READY_IN_TIME.format(minutes=max(1, round(auth_limit / 60))),
+                detail=docker.logs_command(auth_service, server_dir),
+            )
         raise docker.DockerRefusal(
             AUTH_NEVER_READY,
             detail=docker.logs_command(auth_service, server_dir),
@@ -147,3 +173,34 @@ def start(
     if refused is not None:
         say(refused)
     return True
+
+
+class _Deadline:
+    """One event the auth wait is handed: set by the job's Stop OR when `limit` runs out.
+
+    The wait takes a single cancel event, so a small watcher sets this one when
+    either happens; `ran_out` says which. `close()` ends the watcher.
+    """
+
+    def __init__(self, cancel: threading.Event | None, limit: float) -> None:
+        self.event = threading.Event()
+        self.ran_out = False
+        self._done = threading.Event()
+        self._end = time.monotonic() + limit
+        self._cancel = cancel
+        self._watcher = threading.Thread(target=self._watch, daemon=True, name="yulon-auth-wait")
+        self._watcher.start()
+
+    def _watch(self) -> None:
+        while not self._done.wait(0.2):
+            if self._cancel is not None and self._cancel.is_set():
+                self.event.set()
+                return
+            if time.monotonic() >= self._end:
+                self.ran_out = True
+                self.event.set()
+                return
+
+    def close(self) -> None:
+        self._done.set()
+        self._watcher.join(timeout=1.0)

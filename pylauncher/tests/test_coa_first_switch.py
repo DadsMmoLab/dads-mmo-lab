@@ -31,6 +31,7 @@ import pytest
 
 from tests.test_coa_realm import (
     PLAIN,
+    SEEDED_ROW,
     FakeSql,
     coa,
     coa_schemas,
@@ -72,6 +73,7 @@ class _Docker:
         if self.returncode == 0:
             # The base tables only: the db-import writes no realm type marker.
             self.sql.tables["acore_auth"].extend(["account", "account_access", "realmlist"])
+            self.sql.rows[("acore_auth", "realmlist")] = [dict(SEEDED_ROW)]
             self.sql.tables["acore_characters"].append("characters")
             self.sql.tables["acore_playerbots"].append("playerbots_account_type")
             for schema in PLAIN:
@@ -409,3 +411,195 @@ def test_an_import_that_marks_the_fresh_set_breaks_the_switch(tmp_path: Path) ->
     with pytest.raises(coa_realm.RealmSwitchError):
         switch_lines(tmp_path, coa(), "hero", sql, run_import=marking)
     assert (tmp_path / coa_realm.SWITCH_MARKER_FILE).exists()
+
+
+# -- round 2 of the live proof: D10, D11, D13 --------------------------------------
+
+
+def _new_install(server_dir: Path, password: str = "coa-Zx81kQ2mPa") -> None:
+    """A folder the install made: its record says generated, its password file is there."""
+    import json
+
+    from yulon.catalog.catalog import INSTALL_RECORD, RECORD_GENERATED, RECORD_PASSWORD_KEY
+
+    (server_dir / INSTALL_RECORD).write_text(
+        json.dumps({RECORD_PASSWORD_KEY: RECORD_GENERATED}), encoding="utf-8"
+    )
+    (server_dir / ".db_password").write_text(password, encoding="utf-8")
+
+
+def test_the_switch_writes_the_override_of_a_new_install(tmp_path: Path) -> None:
+    """D10: the live run's last step raised "none was given to render its compose files with".
+
+    The fixture is what the live folder was: a NEW install, so no legacy password
+    stands in. Mutation: drop `db_password=` from `_write_realm_override()`'s render.
+    """
+    from yulon.catalog import composegen
+    from yulon.ui import controller_view
+
+    _new_install(tmp_path)
+    write_file(tmp_path, "coa")
+    controller_view._write_realm_override(coa(), tmp_path, coa_realm.switch_env_for(coa(), "hero"))
+    written = (tmp_path / composegen.OVERRIDE_FILE).read_text(encoding="utf-8")
+    assert "AC_CO_A_CLASS_MODEL" in written
+
+
+def test_a_new_install_whose_password_is_gone_refuses_in_a_sentence(tmp_path: Path) -> None:
+    from yulon.catalog import composegen
+    from yulon.ui import controller_view
+
+    _new_install(tmp_path)
+    (tmp_path / ".db_password").unlink()
+    with pytest.raises(coa_realm.RealmSwitchError, match="password could not be read"):
+        controller_view._write_realm_override(
+            coa(), tmp_path, coa_realm.switch_env_for(coa(), "hero")
+        )
+    assert not (tmp_path / composegen.OVERRIDE_FILE).exists()
+
+
+def test_the_switch_keeps_the_bot_count_the_player_set(tmp_path: Path) -> None:
+    """The regenerated override keeps the player's bot count, as every other writer does."""
+    import yaml
+
+    from yulon.catalog import composegen
+    from yulon.resources import installers_dir
+    from yulon.ui import controller_view
+
+    _new_install(tmp_path)
+    write_file(tmp_path, "coa")
+    first = composegen.render(
+        coa(),
+        tmp_path,
+        templates_root=installers_dir(),
+        world_env={"AC_AI_PLAYERBOT_MIN_RANDOM_BOTS": "7", "AC_AI_PLAYERBOT_MAX_RANDOM_BOTS": "7"},
+        db_password="coa-Zx81kQ2mPa",
+    )
+    composegen._replace_whole(tmp_path / composegen.OVERRIDE_FILE, first.override)
+    controller_view._write_realm_override(coa(), tmp_path, coa_realm.switch_env_for(coa(), "hero"))
+    services = yaml.safe_load((tmp_path / composegen.OVERRIDE_FILE).read_text(encoding="utf-8"))[
+        "services"
+    ]
+    world = next(service for name, service in services.items() if name.endswith("worldserver"))
+    env = world["environment"]
+    assert any(key.endswith("MIN_RANDOM_BOTS") and value == "7" for key, value in env.items())
+
+
+def test_a_switch_that_failed_after_its_marker_finishes_on_the_next_press(
+    tmp_path: Path,
+) -> None:
+    """D11: the live run's retry was refused ("The parked coa schemas are not empty").
+
+    The fake fails the override once, exactly where D10 failed live: after the
+    rename, the import, the accounts and the marker. Mutation: drop the
+    marker-equals-target return from `pre_check()`: the retry is refused.
+    """
+    sql = FakeSql()
+    coa_schemas(sql)
+    write_file(tmp_path, "coa")
+    fake = _Docker(sql)
+    events: list[str] = []
+    switch = _switch(tmp_path, sql, fake, events=events)
+    failures = ["the override would not write"]
+
+    def flaky(env: object) -> None:
+        if failures:
+            raise RuntimeError(failures.pop())
+        events.append("override")
+
+    switch._write_override = flaky  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="The server is stopped"):
+        list(switch.switch_to("hero"))
+    assert sql.marker == "hero" and file_type(tmp_path) == "coa"
+    assert "start" not in events
+    lines = list(switch.switch_to("hero"))
+    assert any("finishing it" in line for line in lines)
+    assert file_type(tmp_path) == "hero"
+    assert not (tmp_path / coa_realm.SWITCH_MARKER_FILE).exists()
+    assert events[-2:] == ["override", "start"]
+    assert fake.ran == [SERVICE], "finishing imports nothing again"
+    # And the finished switch can be undone, every table back.
+    list(_switch(tmp_path, sql, fake).switch_to("coa"))
+    assert file_type(tmp_path) == "coa" and sql.marker == "coa"
+
+
+def test_a_crash_note_for_another_target_over_a_switched_set_is_refused(tmp_path: Path) -> None:
+    """Only the switch's own half-done state is finished: a note naming wc over hero is not."""
+    sql = FakeSql()
+    coa_schemas(sql)
+    write_file(tmp_path, "coa")
+    switch = _switch(tmp_path, sql, _Docker(sql))
+    switch._write_override = lambda env: (_ for _ in ()).throw(RuntimeError("late"))  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError):
+        list(switch.switch_to("hero"))
+    write_crash(tmp_path, "wc", imported=True)
+    events: list[str] = []
+    with pytest.raises(coa_realm.RealmSwitchError):
+        list(_switch(tmp_path, sql, _Docker(sql), events=events).switch_to("hero"))
+    assert events == [], "refused before the Stop"
+
+
+def test_a_first_switch_carries_the_servers_address_and_port(tmp_path: Path) -> None:
+    """D13: the live run's hero row kept the import's 127.0.0.1:8085.
+
+    Mutation: drop `_carry_realm_address()` from the first switch's branch.
+    """
+    from tests.test_coa_realm import SERVER_ADDRESS
+
+    sql = FakeSql()
+    coa_schemas(sql)
+    write_file(tmp_path, "coa")
+    list(_switch(tmp_path, sql, _Docker(sql)).switch_to("hero"))
+    (row,) = sql.rows[("acore_auth", "realmlist")]
+    assert (row["address"], row["localAddress"], row["port"]) == (
+        SERVER_ADDRESS,
+        SERVER_ADDRESS,
+        coa().ports.world,
+    )
+    assert SEEDED_ROW["port"] != coa().ports.world, "the ground: the import seeds another port"
+
+
+def test_a_second_switch_carries_the_address_set_since_it_was_parked(tmp_path: Path) -> None:
+    """A parked type keeps the address of the day it was parked; the switch brings it up to date.
+
+    Mutation: drop the `else: _carry_realm_address()` branch of `switch()`.
+    """
+    sql = FakeSql()
+    coa_schemas(sql)
+    write_file(tmp_path, "coa")
+    list(_switch(tmp_path, sql, _Docker(sql)).switch_to("hero"))
+    lan = "192.168.1.20"
+    sql.rows[("acore_auth", "realmlist")][0].update(address=lan, localAddress=lan)
+    list(_switch(tmp_path, sql, _Docker(sql)).switch_to("coa"))
+    (row,) = sql.rows[("acore_auth", "realmlist")]
+    assert row["address"] == "192.168.1.20" and row["port"] == coa().ports.world
+
+
+def test_the_switchs_start_asks_the_tabs_realm_gate_and_port_keeper(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D13: the switch's Start was a bare Controller with no realm-port keeper.
+
+    Mutation: build `_start_for_realm_switch()`'s Controller without `before_servers`.
+    """
+    from yulon import controller as controller_module
+    from yulon.ui import controller_view
+
+    seen: list[object] = []
+    monkeypatch.setattr(
+        controller_module.Controller, "start", lambda self: seen.append(self.before_servers)
+    )
+    asked: list[str] = []
+    monkeypatch.setattr(
+        controller_view,
+        "_realm_port_keeper",
+        lambda *a, **k: (lambda: asked.append("port") or None),
+    )
+    controller_view._start_for_realm_switch(
+        coa(), tmp_path, controller_view.DockerSql("coa-database", "pw"), wsl_distro=None
+    )
+    (before,) = seen
+    assert callable(before)
+    monkeypatch.setattr(docker, "start_database", lambda *a, **k: True)
+    monkeypatch.setattr(coa_realm, "refusal", lambda *a, **k: None)
+    assert before() is None  # type: ignore[operator]
+    assert asked == ["port"]

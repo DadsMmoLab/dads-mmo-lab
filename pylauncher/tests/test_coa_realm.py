@@ -119,7 +119,11 @@ class FakeSql(coa_realm.SqlRunner):
                 self.marker_rows[schema] = value
             elif value not in held.split("\n"):
                 self.marker_rows[schema] = f"{held}\n{value}"
-        elif self._copy_account(statement) or self._copy_access(statement):
+        elif (
+            self._copy_account(statement)
+            or self._copy_access(statement)
+            or self._carry_realm(statement)
+        ):
             pass
         else:
             raise AssertionError(f"a statement the fake does not model: {statement}")
@@ -181,6 +185,25 @@ class FakeSql(coa_realm.SqlRunner):
                 raise RuntimeError(f"Duplicate entry '{new['username']}' for key 'idx_username'")
             new["id"] = max((int(str(other["id"])) for other in rows), default=0) + 1
             rows.append(new)
+        return True
+
+    def _carry_realm(self, statement: str) -> bool:
+        """The switch's realm-row carry (T812 C8 D13): address, LAN address and port."""
+        found = re.fullmatch(
+            r"UPDATE `(\w+)`\.`realmlist` t JOIN `(\w+)`\.`realmlist` s ON s\.id = t\.id "
+            r"SET t\.`address` = s\.`address`, t\.`localAddress` = s\.`localAddress`, "
+            r"t\.port = (\d+) WHERE t\.id = (\d+);",
+            statement,
+        )
+        if found is None:
+            return False
+        target, source, port, key = found.groups()
+        sources = [row for row in self._need(source, "realmlist") if str(row["id"]) == key]
+        for row in self._need(target, "realmlist"):
+            if str(row["id"]) == key and sources:
+                row["address"] = sources[0]["address"]
+                row["localAddress"] = sources[0]["localAddress"]
+                row["port"] = int(port)
         return True
 
     def _copy_access(self, statement: str) -> bool:
@@ -285,6 +308,24 @@ class FakeSql(coa_realm.SqlRunner):
                 and t["gmlevel"] == s["gmlevel"]
             ]
             return f"{len(same)}\n"
+        found = re.fullmatch(
+            r"SELECT COUNT\(\*\) FROM `(\w+)`\.`realmlist` t JOIN `(\w+)`\.`realmlist` s "
+            r"ON s\.id = t\.id AND s\.`address` <=> t\.`address` AND "
+            r"s\.`localAddress` <=> t\.`localAddress` WHERE t\.id = (\d+) AND t\.port = (\d+);",
+            statement,
+        )
+        if found is not None:
+            target, source, key, port = found.groups()
+            same = [
+                1
+                for t in self._need(target, "realmlist")
+                for s in self._need(source, "realmlist")
+                if str(t["id"]) == key == str(s["id"])
+                and t["address"] == s["address"]
+                and t["localAddress"] == s["localAddress"]
+                and str(t["port"]) == port
+            ]
+            return f"{len(same)}\n"
         raise AssertionError(f"a query the fake does not model: {statement}")
 
 
@@ -326,6 +367,19 @@ def seed_accounts(sql: FakeSql, schema: str, accounts: Mapping[str, int | None])
             access.append({"id": key, "gmlevel": gm, "RealmID": -1})
 
 
+SERVER_ADDRESS = "172.22.7.144"
+"""The address the Network tab gave the coa type's realm row (the live run's)."""
+
+SEEDED_ROW = {"id": 1, "address": "127.0.0.1", "localAddress": "127.0.0.1", "port": 8085}
+"""The realm row AzerothCore's import seeds: what a fresh type's row says (T812 C8 D13)."""
+
+
+def realm_row(sql: FakeSql, schema: str, *, address: str, port: int) -> None:
+    sql.rows[(schema, "realmlist")] = [
+        {"id": 1, "address": address, "localAddress": address, "port": port}
+    ]
+
+
 PLAYERS = {"Player1": 3, "rndbot7": None, "AHBOT": 2, "Player2": None}
 """The coa type's accounts: two players (one a GM), a bot and the auction house bot."""
 
@@ -345,6 +399,7 @@ def coa_schemas(sql: FakeSql, *, marker: str | None = "coa", parks: tuple[str, .
     if marker is not None:
         sql.marker_rows["acore_characters"] = marker
     seed_accounts(sql, "acore_auth", PLAYERS)
+    realm_row(sql, "acore_auth", address=SERVER_ADDRESS, port=8087)
     for schema in sql.tables:
         sql.schemata[schema] = ("utf8mb4", "utf8mb4_unicode_ci")
 
@@ -356,6 +411,8 @@ def parked_set(sql: FakeSql, type_id: str, *, marker: str | None = None) -> None
     sql.tables[f"acore_playerbots_{type_id}"] = ["playerbots_account_type"]
     sql.marker_rows[f"acore_characters_{type_id}"] = marker or type_id
     seed_accounts(sql, f"acore_auth_{type_id}", {f"{type_id.title()}1": None})
+    # Parked with the address of the day it was parked: a switch carries the current one.
+    realm_row(sql, f"acore_auth_{type_id}", address="10.0.0.9", port=8085)
     for schema in PLAIN:
         sql.schemata[f"{schema}_{type_id}"] = ("utf8mb4", "utf8mb4_unicode_ci")
 
@@ -372,6 +429,7 @@ def fresh_import(sql: FakeSql, context: coa_realm.SwitchImport) -> Iterator[str]
         raise coa_realm.RealmSwitchError(refused)
     sql._need_up()
     sql.tables["acore_auth"].extend(["account", "account_access", "realmlist"])
+    sql.rows[("acore_auth", "realmlist")] = [dict(SEEDED_ROW)]
     sql.tables["acore_characters"].append("characters")
     sql.tables["acore_playerbots"].append("playerbots_account_type")
     for schema in PLAIN:
@@ -668,6 +726,7 @@ def test_the_repair_clears_a_stale_crash_note(tmp_path: Path) -> None:
     entry = coa()
     sql = FakeSql()
     coa_schemas(sql, marker="hero")
+    parked_set(sql, "coa")  # renamed and verified: coa is parked whole under its own marker
     write_crash(tmp_path, "hero", imported=False)
     switch_lines(tmp_path, entry, "hero", sql)
     assert file_type(tmp_path) == "hero"
@@ -1067,11 +1126,14 @@ def test_a_marked_plain_set_under_a_crash_note_is_never_dropped(tmp_path: Path) 
     _killed_during_import(sql)
     sql.tables["acore_characters"] = ["characters", MARKER]
     sql.marker_rows["acore_characters"] = "hero"
+    # Committed: the import finished (its realm row is there) before the marker was written.
+    sql.tables["acore_auth"] = ["account", "account_access", "realmlist"]
+    sql.rows[("acore_auth", "realmlist")] = [dict(SEEDED_ROW)]
     write_file(tmp_path, "coa")
     write_crash(tmp_path, "hero", imported=True)
     lines = switch_lines(tmp_path, entry, "hero", sql, file=None)
     assert drops(sql) == [] and renames(sql) == []
-    assert any("no database was touched" in line for line in lines)
+    assert any("finishing it" in line for line in lines)
     assert file_type(tmp_path) == "hero"
 
 

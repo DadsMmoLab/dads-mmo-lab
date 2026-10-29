@@ -598,10 +598,21 @@ def switch(
     if marker is not None and marker != current:
         if target_id != marker:
             raise RealmSwitchError(mismatch_sentence(marker, current))
-        yield (
-            f"The databases already hold {marker} but the file said {current}; "
-            "the file and the override were rewritten, and no database was touched."
-        )
+        if crash is not None:
+            # T812 C8 D11: a switch that failed after its marker (the override, the file):
+            # its own half-done state, proven before it is finished, never refused.
+            _check_resumable(current, marker, crash)
+            _carry_realm_address(entry, sql, current)
+            _verify(sql, entry, current, marker)
+            yield (
+                f"The last switch to {marker} stopped after its databases were moved; "
+                "finishing it."
+            )
+        else:
+            yield (
+                f"The databases already hold {marker} but the file said {current}; "
+                "the file and the override were rewritten, and no database was touched."
+            )
         write_override(switch_env_for(entry, marker))
         write_active(server_dir, marker)
         _clear_crash(server_dir)
@@ -646,8 +657,11 @@ def switch(
         )
         yield from run_import(SwitchImport(server_dir=server_dir, target=target_id))
         set_realm_row(types[target_id].realm_name, str(entry.ports.world))
+        _carry_realm_address(entry, sql, current)
         yield from _copy_player_accounts(entry, sql, current, bot_prefix)
         ensure_marker(sql, entry, target_id)
+    else:
+        _carry_realm_address(entry, sql, current)
     _verify(sql, entry, current, target_id)
     # Published override, then file, then the crash marker cleared LAST: a press
     # killed between any two still finds the marker and finishes the publication.
@@ -694,6 +708,13 @@ def pre_check(
     marker = read_marker(sql.query, entry)
     if marker is not None and marker != current and target_id != marker:
         raise RealmSwitchError(mismatch_sentence(marker, current))
+    if marker is not None and marker != current:
+        # The repair, or (with a crash note) a switch that failed after its marker:
+        # nothing is renamed again, so the park guards below do not apply (T812 C8 D11).
+        if crash is not None:
+            _check_resumable(current, marker, crash)
+            _verify(sql, entry, current, marker)
+        return current
     if marker is None and not pending_recovery:
         _check_markable(entry, sql, current)
     if current == target_id:
@@ -1157,6 +1178,63 @@ def _copy_player_accounts(
         yield (
             f"Left {len(skipped)} accounts uncopied, whose names cannot be copied "
             f"by name ({', '.join(skipped[:5])}{'…' if len(skipped) > 5 else ''})."
+        )
+
+
+def _check_resumable(current: str, marker: str, crash: _Crash) -> None:
+    """Refuse a late-failed switch's state unless it is provably that switch's own (D11).
+
+    The plain set already reads as `marker` (it traveled with the rename, or the
+    first switch wrote it), so the crash note must name that same target and the
+    file's type as its source. `_verify()` then proves the rest: the target's
+    park is empty and the file's type is parked whole under its own marker.
+    """
+    if crash.target != marker or (crash.source is not None and crash.source != current):
+        raise RealmSwitchError(
+            f"The note of an unfinished switch names {crash.target} (from "
+            f"{crash.source or 'an unrecorded type'}), but the databases hold {marker} and this "
+            f"server is set to {current}, so nothing was switched."
+        )
+
+
+def _carry_realm_address(entry: CatalogEntry, sql: SqlRunner, source_id: str) -> None:
+    """The realm row's address and this server's world port, onto the type now plain (D13).
+
+    The address a client is told belongs to the server, not to a realm type: the
+    Network tab set it on the row of the type that was plain then. A fresh import
+    seeds `127.0.0.1:8085`, and a parked type keeps the address of the day it was
+    parked, so on every switch the row of the type moving in takes the address
+    (and LAN address) of the row just parked, and the world port this server
+    publishes. Read back before anything is marked or published.
+    """
+    _check_id(source_id)
+    auth = entry.databases.auth
+    source = f"{auth}_{source_id}"
+    realm = entry.realmlist
+    for name in (auth, source, realm.table, realm.address_column):
+        _check_name(name)
+    columns = [realm.address_column]
+    if realm.local_address_column:
+        _check_name(realm.local_address_column)
+        columns.append(realm.local_address_column)
+    port = int(entry.ports.world)
+    key = int(realm.realm_id)
+    sets = ", ".join(f"t.`{column}` = s.`{column}`" for column in columns)
+    same = " AND ".join(f"s.`{column}` <=> t.`{column}`" for column in columns)
+    sql.execute(
+        f"UPDATE `{auth}`.`{realm.table}` t JOIN `{source}`.`{realm.table}` s ON s.id = t.id "
+        f"SET {sets}, t.port = {port} WHERE t.id = {key};"
+    )
+    held = _one_int(
+        sql,
+        f"SELECT COUNT(*) FROM `{auth}`.`{realm.table}` t JOIN `{source}`.`{realm.table}` s "
+        f"ON s.id = t.id AND {same} WHERE t.id = {key} AND t.port = {port};",
+        "The realm row's address",
+    )
+    if held != 1:
+        raise RealmSwitchError(
+            f"The realm row of the new realm type did not take this server's address and world "
+            f"port {port}; nothing further was written. Press again to retry."
         )
 
 
