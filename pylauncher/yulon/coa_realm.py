@@ -1223,18 +1223,27 @@ def _carry_failed_sentence(target_id: str, current: str, port: int, why: str) ->
     )
 
 
-def _realm_cells(sql: SqlRunner, statement: str, width: int, what: str) -> list[list[str]] | None:
-    """The tab-separated rows `statement` answers, each `width` cells; None if unreadable."""
+def _realm_cells(
+    sql: SqlRunner, statement: str, key: int, width: int, what: str
+) -> list[list[str]] | None:
+    """The rows `statement` answers, each `width` cells after its leading id; None if unreadable.
+
+    `statement` selects `id` FIRST, so a row whose other cells are all empty
+    strings still prints a line (`1\t\t`) and is never read as no row (live
+    round 4: an emptied address read as a missing row, and the INSERT over it hit
+    `Duplicate entry '1'`). A line is split, never stripped: an empty cell is a
+    cell. Only a line whose first field is `key` is a row.
+    """
     try:
         text = sql.query(statement)
-    except Exception as exc:  # noqa: BLE001 - an unreadable row is the fallback's case
+    except Exception as exc:  # noqa: BLE001 - the caller decides what unreadable means
         logger.warning(f"{what} could not be read: {exc}")
         return None
-    rows = [line.split("\t") for line in text.splitlines() if line.strip()]
-    if any(len(row) != width for row in rows):
+    rows = [line.split("\t") for line in text.splitlines() if line != ""]
+    if any(len(row) != width + 1 or row[0].strip() != str(key) for row in rows):
         logger.warning(f"{what} reads {rows[:2]}, which is not a realm row")
         return None
-    return rows
+    return [row[1:] for row in rows]
 
 
 def _usable(value: str | None) -> str | None:
@@ -1282,13 +1291,19 @@ def _carry_realm_address(
     def read(schema: str, extra: str = "") -> list[list[str]] | None:
         return _realm_cells(
             sql,
-            f"SELECT {columns}{extra} FROM `{schema}`.`{realm.table}` WHERE id = {key};",
+            f"SELECT id, {columns}{extra} FROM `{schema}`.`{realm.table}` WHERE id = {key};",
+            key,
             width + (1 if extra else 0),
             f"The {schema} realm row",
         )
 
     parked = read(source)
     here = read(auth)
+    if here is None:
+        # Unreadable is not "no row": an INSERT over a row that is there refuses anyway.
+        raise RealmSwitchError(
+            _carry_failed_sentence(target_id, source_id, port, "its row could not be read")
+        )
     address = _usable(parked[0][0]) if parked else None
     local = _usable(parked[0][1]) if parked and lan else None
     if address is None:

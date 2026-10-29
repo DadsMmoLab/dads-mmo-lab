@@ -325,12 +325,12 @@ class FakeSql(coa_realm.SqlRunner):
             ]
             return f"{len(same)}\n"
         found = re.fullmatch(
-            r"SELECT `address`, `localAddress`(, port)? FROM `(\w+)`\.`realmlist` "
+            r"SELECT (id, )?`address`, `localAddress`(, port)? FROM `(\w+)`\.`realmlist` "
             r"WHERE id = (\d+);",
             statement,
         )
         if found is not None:
-            with_port, schema, key = found.groups()
+            with_id, with_port, schema, key = found.groups()
             if "realmlist" not in self.tables.get(schema, []):
                 raise RuntimeError(f"Table '{schema}.realmlist' doesn't exist")
 
@@ -339,7 +339,8 @@ class FakeSql(coa_realm.SqlRunner):
 
             return "".join(
                 "\t".join(
-                    [cell(row["address"]), cell(row["localAddress"])]
+                    ([cell(row["id"])] if with_id else [])
+                    + [cell(row["address"]), cell(row["localAddress"])]
                     + ([cell(row["port"])] if with_port else [])
                 )
                 + "\n"

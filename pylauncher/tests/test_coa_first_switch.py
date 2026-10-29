@@ -718,3 +718,64 @@ def test_a_first_switch_whose_carry_fails_is_undone_by_switching_back(tmp_path: 
     assert _tables(sql) == before
     assert sql.marker == "coa" and file_type(tmp_path) == "coa"
     assert events[-1] == "start"
+
+
+def _emptied_import(sql: FakeSql, fake: _Docker) -> None:
+    """The new type's row is there with its address cells emptied (a cleared Network field)."""
+    real = fake.one_shot
+
+    def emptied(service: str, folder: Path, sink: docker.OutputSink) -> docker.AttachedRun:
+        ran = real(service, folder, sink)
+        sql.rows[("acore_auth", "realmlist")][0].update(address="", localAddress="")
+        return ran
+
+    fake.one_shot = emptied  # type: ignore[method-assign]
+
+
+def test_a_row_with_empty_cells_is_updated_never_inserted_over(tmp_path: Path) -> None:
+    """Live round 4: `1062 Duplicate entry '1'` from an INSERT over a row of empty cells.
+
+    mysql --batch prints that row as `1\\t\\t` with its id first, and only tabs without
+    it. Mutation: select the address columns without `id` (or strip the line): the
+    row reads as missing and the INSERT refuses.
+    """
+    from tests.test_coa_realm import SERVER_ADDRESS
+
+    sql = FakeSql()
+    coa_schemas(sql)
+    write_file(tmp_path, "coa")
+    fake = _Docker(sql)
+    _emptied_import(sql, fake)
+    list(_switch(tmp_path, sql, fake).switch_to("hero"))
+    assert not any(s.startswith("INSERT INTO `acore_auth`.`realmlist`") for s in sql.executed)
+    (row,) = sql.rows[("acore_auth", "realmlist")]
+    assert (row["address"], row["localAddress"], row["port"]) == (
+        SERVER_ADDRESS,
+        SERVER_ADDRESS,
+        coa().ports.world,
+    )
+
+
+def test_empty_addresses_on_both_rows_fall_back_with_the_network_line(tmp_path: Path) -> None:
+    """An empty address is no address: the new row's own, then 127.0.0.1, and the line."""
+    sql = FakeSql()
+    coa_schemas(sql)
+    sql.rows[("acore_auth", "realmlist")][0].update(address="", localAddress="")
+    write_file(tmp_path, "coa")
+    fake = _Docker(sql)
+    _emptied_import(sql, fake)
+    lines = list(_switch(tmp_path, sql, fake).switch_to("hero"))
+    (row,) = sql.rows[("acore_auth", "realmlist")]
+    assert (row["address"], row["localAddress"]) == ("127.0.0.1", "127.0.0.1")
+    assert any("Set the realm address on the Network tab" in line for line in lines)
+    assert file_type(tmp_path) == "hero"
+
+
+def test_an_unreadable_new_row_refuses_instead_of_inserting(tmp_path: Path) -> None:
+    sql = FakeSql()
+    coa_schemas(sql)
+    write_file(tmp_path, "coa")
+    sql.fail_query_on = "FROM `acore_auth`.`realmlist` WHERE"
+    with pytest.raises(coa_realm.RealmSwitchError, match="its row could not be read"):
+        list(_switch(tmp_path, sql, _Docker(sql)).switch_to("hero"))
+    assert not any(s.startswith("INSERT INTO `acore_auth`.`realmlist`") for s in sql.executed)
