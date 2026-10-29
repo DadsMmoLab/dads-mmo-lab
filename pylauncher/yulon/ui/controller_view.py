@@ -9820,9 +9820,12 @@ class ControllerView(QWidget):
 
         Under Start/Stop/Restart, the presses it changes. Shown only for a game that offers it
         (`ContainerSpec.bot_saves_skippable`); for the rest every Stop waits for every save and
-        there is nothing to choose. Read from the install's record once, at build; a change is
-        written at once (`stop_choice.choose()`), and one that cannot be written is said and put
-        back, so the box never shows a choice the next Stop will not make.
+        there is nothing to choose. The install's record is read off the GUI thread, and only
+        once WSL says the server's distro runs (`_waits_for_the_distro()`, T133: any read in a
+        stopped distro boots it); until then the box shows the catalog's default and is greyed,
+        so nothing can be written there either. A change is written at once
+        (`stop_choice.choose()`), and one that cannot be written is said and put back, so the box
+        never shows a choice the next Stop will not make.
         """
         found = getattr(
             getattr(self.services.controller, "spec", None), "bot_saves_skippable", None
@@ -9847,11 +9850,37 @@ class ControllerView(QWidget):
         tip = stop_choice.choice_tip(skippable.seconds)
         self.stop_choice_label.setToolTip(tip)
         self.stop_choice_box.setToolTip(tip)
-        self._show_stop_choice(not self.services.controller.skips_bot_saves())
+        self._show_stop_choice(skippable.waits_by_default)
+        self.stop_choice_box.setEnabled(False)
         self.stop_choice_box.currentIndexChanged.connect(self._stop_choice_changed)
+        self._read_stop_choice()
+
+    def _read_stop_choice(self) -> None:
+        """Read the install's "When stopping" record, off the GUI thread, once the distro runs."""
+        if self._waits_for_the_distro("stop choice", self._read_stop_choice):
+            return
+        controller = self.services.controller
+        self._run(
+            lambda: not controller.skips_bot_saves(),
+            self._stop_choice_read,
+            self._stop_choice_unread,
+        )
+
+    @Slot(object)
+    def _stop_choice_read(self, waits: object) -> None:
+        self._show_stop_choice(bool(waits))
+        self.stop_choice_box.setEnabled(True)
+
+    @Slot(object)
+    def _stop_choice_unread(self, exc: object) -> None:
+        # `skips_bot_saves()` reads an unreadable record as the default, so this is a crash in
+        # the read itself: the box keeps the default it shows and can be changed.
+        logger.warning(f"could not read the Stop choice: {exc}")
+        self.stop_choice_box.setEnabled(True)
 
     def _show_stop_choice(self, waits: bool) -> None:
         """Put the box on `waits` without it counting as the player's change."""
+        self._stop_choice_waits = waits
         blocked = self.stop_choice_box.blockSignals(True)
         try:
             self.stop_choice_box.setCurrentIndex(0 if waits else 1)
@@ -9865,9 +9894,10 @@ class ControllerView(QWidget):
             stop_choice.choose(self.services.controller.server_dir, waits)
         except OSError as exc:
             logger.warning(f"could not keep the Stop choice: {exc}")
-            self._show_stop_choice(not self.services.controller.skips_bot_saves())
+            self._show_stop_choice(self._stop_choice_waits)
             self.stop_choice_note.setText(stop_choice.CHOICE_NOT_KEPT.format(why=exc))
             return
+        self._stop_choice_waits = waits
         self.stop_choice_note.setText(stop_choice.CHOICE_NOTE)
 
     def _server_presses(self) -> tuple[QAbstractButton, ...]:

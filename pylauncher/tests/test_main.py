@@ -2304,7 +2304,7 @@ def _removable_tab(
     view = _tab_for(window, server_dir)
     stops: list[int] = []
 
-    def stop() -> bool:
+    def stop(**_kw: object) -> bool:
         stops.append(1)
         return True
 
@@ -2413,7 +2413,7 @@ def test_a_server_the_last_poll_saw_stopped_is_still_stopped_before_it_is_forgot
     assert view.last_seen_running() is False
     remembered_at_the_stop: list[bool] = []
 
-    def stop_what_was_started_outside() -> bool:
+    def stop_what_was_started_outside(**_kw: object) -> bool:
         stops.append(1)
         remembered_at_the_stop.append(_remembered(window, "wow-tbc", server_dir))
         return True  # something was running, and is down now
@@ -2436,7 +2436,7 @@ def test_a_stop_that_finds_nothing_running_goes_on_to_forget(
     server_dir = tmp_path / "t95-nothing-to-stop"
     view, stops = _removable_tab(window, monkeypatch, server_dir)
 
-    def nothing_running() -> bool:
+    def nothing_running(**_kw: object) -> bool:
         stops.append(1)
         return False
 
@@ -2492,7 +2492,7 @@ def test_a_failed_stop_asks_again_and_no_keeps_everything(
     server_dir = tmp_path / "t95-stop-fails"
     view, _ = _removable_tab(window, monkeypatch, server_dir)
 
-    def refuse() -> bool:
+    def refuse(**_kw: object) -> bool:
         raise docker.DockerRefusal("Docker would not say which project owns tbc-mangosd")
 
     view.services.controller.stop = refuse
@@ -2516,7 +2516,7 @@ def test_a_failed_stop_overridden_by_a_second_yes_forgets_anyway(
     server_dir = tmp_path / "t95-stop-fails-yes"
     view, _ = _removable_tab(window, monkeypatch, server_dir)
 
-    def refuse() -> bool:
+    def refuse(**_kw: object) -> bool:
         raise docker.DockerCommandError("cannot stop")
 
     view.services.controller.stop = refuse
@@ -2542,7 +2542,7 @@ def test_a_job_started_during_the_stop_refuses_the_forget_after_it(
     server_dir = tmp_path / "t95-restore-in-the-gap"
     view, stops = _removable_tab(window, monkeypatch, server_dir)
 
-    def stop_while_a_restore_starts() -> bool:
+    def stop_while_a_restore_starts(**_kw: object) -> bool:
         stops.append(1)
         view._restore_running = True  # pressed on the Maintenance tab mid-stop
         return True
@@ -4581,7 +4581,7 @@ def test_a_join_that_fails_counts_even_when_nothing_else_holds_the_thread(qapp: 
         job_label = 'log panel "a thread nobody else holds"'
         running = True
 
-        def stop(self) -> None:
+        def stop(self, **_kw: object) -> None:
             pass
 
         def wait(self, _timeout_ms: int) -> bool:
@@ -4600,7 +4600,7 @@ def test_a_panel_that_finished_during_the_last_join_is_not_called_stuck(qapp: ob
         job_label = 'log panel "late but done"'
         running = False
 
-        def stop(self) -> None:
+        def stop(self, **_kw: object) -> None:
             pass
 
         def wait(self, _timeout_ms: int) -> bool:

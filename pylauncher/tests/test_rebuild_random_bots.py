@@ -1302,7 +1302,7 @@ def test_restart_world_says_which_half_failed() -> None:
         refuse_before_a_stop = refuse_start  # T377: the restart asks this, the database included
         restart = Controller.restart  # T761: the real composite, reserved first, over these steps
 
-        def stop(self) -> None:
+        def stop(self, **_kw: object) -> None:
             raise RuntimeError("no stop")
 
         def start(self) -> None:
@@ -1319,7 +1319,7 @@ def test_restart_world_says_which_half_failed() -> None:
         refuse_before_a_stop = refuse_start  # T377: the restart asks this, the database included
         restart = Controller.restart  # T761: the real composite, reserved first, over these steps
 
-        def stop(self) -> None:
+        def stop(self, **_kw: object) -> None:
             return None
 
         def start(self) -> None:

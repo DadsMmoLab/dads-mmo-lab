@@ -620,7 +620,7 @@ def wedged_controller(
     calls: list[str] = []
     controller = CenturionController(MIRRORED, server_dir)
     monkeypatch.setattr(controller, "port_conflicts", lambda: [])
-    monkeypatch.setattr(controller, "stop", lambda: calls.append("stop") or True)
+    monkeypatch.setattr(controller, "stop", lambda **_kw: calls.append("stop") or True)
     monkeypatch.setattr(controller, "remove", lambda: calls.append("remove") or True)
     monkeypatch.setattr(controller, "stop_conflicting", lambda: calls.append("stop-other") or [])
     monkeypatch.setattr(

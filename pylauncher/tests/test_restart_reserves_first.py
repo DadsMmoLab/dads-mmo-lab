@@ -133,7 +133,7 @@ class _Steps(Controller):
             raise RuntimeError(f"no {name}")
         return True
 
-    def stop(self) -> bool:
+    def stop(self, **_kw: object) -> bool:
         return self._step("stop")
 
     def remove(self) -> bool:

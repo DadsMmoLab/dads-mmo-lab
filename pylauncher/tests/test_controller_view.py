@@ -2219,7 +2219,7 @@ def test_a_stop_before_a_removal_that_was_refused_keeps_its_details(
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
     refusal = docker._stranger_refusal(((SPEC.world, "install-b"),), "ours", tmp_path)
 
-    def refuse() -> bool:
+    def refuse(**_kw: object) -> bool:
         raise refusal
 
     view.services.controller.stop = refuse  # type: ignore[method-assign]
@@ -7876,7 +7876,7 @@ def test_the_stop_before_a_removal_goes_through_the_controller_and_reports_to_th
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
     stops: list[int] = []
 
-    def stop() -> bool:
+    def stop(**_kw: object) -> bool:
         stops.append(1)
         return True
 
@@ -7901,7 +7901,7 @@ def test_a_stop_before_a_removal_leaves_no_stopping_words_behind_when_it_succeed
     and asked again, before the window is told, as the failed stop does.
     """
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
-    view.services.controller.stop = lambda: True  # type: ignore[method-assign]
+    view.services.controller.stop = lambda **_kw: True  # type: ignore[method-assign]
     ps.names = ""
     at_the_emit: list[tuple[str, str]] = []
     view.stopped_for_removal.connect(
@@ -7921,7 +7921,7 @@ def test_a_failed_stop_before_a_removal_says_why_here_and_to_the_window(
 ) -> None:
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
 
-    def refuse() -> bool:
+    def refuse(**_kw: object) -> bool:
         raise docker.DockerRefusal("Docker would not say which project owns ac-worldserver")
 
     view.services.controller.stop = refuse  # type: ignore[method-assign]
@@ -7951,7 +7951,7 @@ def test_a_stop_before_a_removal_says_so_and_that_a_loading_server_is_slow(
     """
     gate = _Gate()
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, job_runner=gate)
-    view.services.controller.stop = lambda: True  # type: ignore[method-assign]
+    view.services.controller.stop = lambda **_kw: True  # type: ignore[method-assign]
     gate.hold = True
 
     view.stop_for_removal()
@@ -8329,7 +8329,7 @@ def test_a_removal_is_refused_while_a_backup_runs(qapp: object, ps: _Ps, tmp_pat
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, job_runner=gate)
     assert _refusal_while_held(view, gate, view.back_up) == forgetting.BACKUP_RUNNING
 
-    def refuse() -> NoReturn:
+    def refuse(**_kw: object) -> NoReturn:
         raise OSError("disk full")
 
     view.services.backup = refuse
@@ -9655,7 +9655,7 @@ def test_a_confirmation_that_refuses_puts_the_sentence_where_the_user_is_and_sta
     route = services.updates
     assert route is not None
 
-    def refuse() -> str:
+    def refuse(**_kw: object) -> str:
         raise InstallerError("found no file matching src/x/*.sql under /srv")
 
     services.updates = native.UpdateRoute(confirmation=refuse, press=route.press)
@@ -14944,7 +14944,7 @@ def test_a_backup_that_fails_stops_the_update_in_dmls_own_words(
     )
     made = _FakeMaintenance()
 
-    def refuse() -> BackupReport:
+    def refuse(**_kw: object) -> BackupReport:
         raise MaintenanceError("the database container is not running")
 
     made.back_up = refuse  # type: ignore[method-assign]
@@ -14977,7 +14977,7 @@ def test_a_backup_before_an_update_keeps_the_databases_words_in_details_and_the_
     made = _FakeMaintenance()
     denied = "ERROR 1045 (28000): Access denied for user 'root'@'localhost'"
 
-    def refuse() -> BackupReport:
+    def refuse(**_kw: object) -> BackupReport:
         raise MaintenanceError("Yu'lon could not list this server's databases.", detail=denied)
 
     made.back_up = refuse  # type: ignore[method-assign]
@@ -15783,7 +15783,7 @@ class _FakeDatabase:
         self.running = True
         return True
 
-    def stop(self) -> None:
+    def stop(self, **_kw: object) -> None:
         self.stops += 1
         self.running = False
 
@@ -26139,7 +26139,7 @@ class _ClockTimer(QObject):
     def start(self) -> None:
         self.due = self._clock.now + self._interval
 
-    def stop(self) -> None:
+    def stop(self, **_kw: object) -> None:
         self.due = None
 
     def isActive(self) -> bool:  # noqa: N802 - QTimer's name
@@ -30064,7 +30064,7 @@ def test_a_start_yulon_refused_says_its_own_sentence_as_written(
     if "dml-arch" in str(refusal):
         view.services.controller.wsl_distro = "dml-arch"
 
-    def refuse() -> NoReturn:
+    def refuse(**_kw: object) -> NoReturn:
         raise refusal
 
     view.services.controller.start = refuse  # type: ignore[method-assign]

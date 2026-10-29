@@ -54,7 +54,7 @@ class FakeController:
             raise SingleServerError(self.fail_start)
         self.state = RUNNING
 
-    def stop(self) -> bool:
+    def stop(self, **_kw: object) -> bool:
         self.calls.append("stop")
         self.state = STOPPED
         return True

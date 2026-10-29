@@ -238,7 +238,7 @@ class _Pathfinding:
         self.now = mmaps.MmapsStatus(state="running", percent=0)
         return "Pathfinding data is being made."
 
-    def stop(self) -> str:
+    def stop(self, **_kw: object) -> str:
         self.stopped += 1
         self.now = mmaps.MmapsStatus(state="not-started")
         return "Stopped."
@@ -703,7 +703,7 @@ class _RealJob:
             user_args=("--user", "1000:1000"),
         )
 
-    def stop(self) -> str:
+    def stop(self, **_kw: object) -> str:
         return mmaps.stop_mmaps(self.server, MM_ENTRY, runner=self.docker, install_id=mm.INSTALL_ID)
 
 
