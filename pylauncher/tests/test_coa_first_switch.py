@@ -603,3 +603,118 @@ def test_the_switchs_start_asks_the_tabs_realm_gate_and_port_keeper(
     monkeypatch.setattr(coa_realm, "refusal", lambda *a, **k: None)
     assert before() is None  # type: ignore[operator]
     assert asked == ["port"]
+
+
+# -- cold review: a realm row the carry cannot set -------------------------------
+
+
+def test_a_parked_type_with_no_realm_row_still_gives_the_new_type_a_row(tmp_path: Path) -> None:
+    """No row to carry: the new row keeps its own address and gets this server's port.
+
+    Mutation: drop the fallback to the new row's own address in `_carry_realm_address()`.
+    """
+    sql = FakeSql()
+    coa_schemas(sql)
+    del sql.rows[("acore_auth", "realmlist")]  # the coa set has a realmlist table, no row
+    write_file(tmp_path, "coa")
+    lines = list(_switch(tmp_path, sql, _Docker(sql)).switch_to("hero"))
+    (row,) = sql.rows[("acore_auth", "realmlist")]
+    assert (row["address"], row["port"]) == (SEEDED_ROW["address"], coa().ports.world)
+    assert any("Set the realm address on the Network tab" in line for line in lines)
+    assert file_type(tmp_path) == "hero"
+
+
+@pytest.mark.parametrize(
+    ("address", "local", "want"),
+    [(None, None, ("127.0.0.1", "127.0.0.1")), ("172.22.7.144", None, ("172.22.7.144",) * 2)],
+)
+def test_null_cells_in_the_parked_row_are_never_carried(
+    tmp_path: Path, address: str | None, local: str | None, want: tuple[str, str]
+) -> None:
+    """A NULL address falls back; a NULL LAN address takes the address (mysql prints NULL)."""
+    sql = FakeSql()
+    coa_schemas(sql)
+    sql.rows[("acore_auth", "realmlist")][0].update(address=address, localAddress=local)
+    write_file(tmp_path, "coa")
+    list(_switch(tmp_path, sql, _Docker(sql)).switch_to("hero"))
+    (row,) = sql.rows[("acore_auth", "realmlist")]
+    assert (row["address"], row["localAddress"]) == want
+    assert row["port"] == coa().ports.world
+
+
+def test_a_new_type_with_no_realm_row_gets_one_inserted(tmp_path: Path) -> None:
+    """Mutation: drop the INSERT branch of `_carry_realm_address()`: the read-back refuses."""
+    from tests.test_coa_realm import SERVER_ADDRESS
+
+    sql = FakeSql()
+    coa_schemas(sql)
+    write_file(tmp_path, "coa")
+    fake = _Docker(sql)
+    real = fake.one_shot
+
+    def rowless(service: str, folder: Path, sink: docker.OutputSink) -> docker.AttachedRun:
+        ran = real(service, folder, sink)
+        sql.rows[("acore_auth", "realmlist")] = []
+        return ran
+
+    fake.one_shot = rowless  # type: ignore[method-assign]
+    list(_switch(tmp_path, sql, fake).switch_to("hero"))
+    (row,) = sql.rows[("acore_auth", "realmlist")]
+    assert row["name"] == "CoA Free Pick"
+    assert (row["address"], row["port"]) == (SERVER_ADDRESS, coa().ports.world)
+
+
+def _carry_refused(sql: FakeSql) -> None:
+    sql.fail_on = "UPDATE `acore_auth`.`realmlist`"
+
+
+def test_a_carry_that_cannot_succeed_is_undone_by_switching_back(tmp_path: Path) -> None:
+    """Cold review: carry fails -> retry fails -> switch back puts every table back and starts.
+
+    A second switch (hero parked), so the plain marker travels with the rename and
+    the retry takes the finishing branch. Mutation: drop the `_undo_late()` branch
+    of `switch()` (or of `pre_check()`): the switch back is refused as a mismatch.
+    """
+    sql = FakeSql()
+    coa_schemas(sql)
+    write_file(tmp_path, "coa")
+    list(_switch(tmp_path, sql, _Docker(sql)).switch_to("hero"))
+    list(_switch(tmp_path, sql, _Docker(sql)).switch_to("coa"))
+    before = copy.deepcopy(_tables(sql))
+    accounts = copy.deepcopy(sql.rows)
+    _carry_refused(sql)
+    for _attempt in range(2):
+        events: list[str] = []
+        with pytest.raises(coa_realm.RealmSwitchError) as caught:
+            list(_switch(tmp_path, sql, _Docker(sql), events=events).switch_to("hero"))
+        said = str(caught.value)
+        assert "The server is stopped and still set to coa" in said
+        assert "to coa to put the coa realm type back" in said
+        assert "start" not in events
+    sql.fail_on = ""
+    events = []
+    lines = list(_switch(tmp_path, sql, _Docker(sql), events=events).switch_to("coa"))
+    assert any("was put back" in line for line in lines)
+    assert _tables(sql) == before
+    assert sql.rows == accounts
+    assert sql.marker == "coa" and file_type(tmp_path) == "coa"
+    assert not (tmp_path / coa_realm.SWITCH_MARKER_FILE).exists()
+    assert events[-1] == "start"
+
+
+def test_a_first_switch_whose_carry_fails_is_undone_by_switching_back(tmp_path: Path) -> None:
+    sql = FakeSql()
+    coa_schemas(sql)
+    write_file(tmp_path, "coa")
+    before = copy.deepcopy(_tables(sql))
+    _carry_refused(sql)
+    with pytest.raises(coa_realm.RealmSwitchError, match="still set to coa"):
+        list(_switch(tmp_path, sql, _Docker(sql)).switch_to("hero"))
+    with pytest.raises(coa_realm.RealmSwitchError, match="still set to coa"):
+        list(_switch(tmp_path, sql, _Docker(sql)).switch_to("hero"))
+    sql.fail_on = ""
+    events: list[str] = []
+    list(_switch(tmp_path, sql, _Docker(sql), events=events).switch_to("coa"))
+    assert _tables(sql) == before
+    assert sql.marker == "coa" and file_type(tmp_path) == "coa"
+    assert events[-1] == "start"
