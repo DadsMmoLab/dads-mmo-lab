@@ -51,7 +51,7 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
 
-from yulon import client_names, container_end, docker, platform, rmtree
+from yulon import client_names, container_end, docker, platform, rmtree, server_build_presses
 from yulon.after_stop import TrueAfterStop
 from yulon.catalog.catalog import ExtractPlan, ExtractTool, MmapPlan, RetrySpec
 from yulon.catalog.installer import InstallerError, InstallStopped
@@ -2589,7 +2589,9 @@ def _restore_backup_sha(data_dir: Path, text: str | None) -> None:
         raise InstallerError(
             "The movement maps were put back, but the record of the off-mesh file they were "
             f"built from could not be written ({exc}), so the next press would take them for "
-            "current. Press Update again once the server folder is writable."
+            "current. Press "
+            f"{server_build_presses.under_server_build(server_build_presses.UPDATE_TO_LATEST)} "
+            "again once the server folder is writable."
         ) from exc
 
 

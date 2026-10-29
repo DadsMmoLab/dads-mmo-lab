@@ -17288,6 +17288,13 @@ def _listing(folder: Path, *, ignoring: Collection[str] = ()) -> list[str]:
     rather than routing them through here: they need `Path`s and the raw error,
     and this function exists to hand back names and a refusal.
 
+    T811's backup listings in the same file are the same shape: they list this
+    run's own `mmaps.t811-backup/` and the `mmaps/` it fills, so what they decide
+    is which of the app's own files go back or go, never whether a folder is
+    somebody else's to write into. `put_maps_back()`, `put_map_back()`,
+    `_map_file_names()` and `_backup_names()` each answer their own sentence
+    about the movement maps, and `_drop_backup_root_if_empty()` logs.
+
     The narrow claim is pinned by enumeration rather than by assertion:
     `test_every_folder_listing_in_the_package_is_accounted_for` lists every
     directory listing under `yulon/` in eight spellings — `iterdir`, `scandir`,

@@ -2593,6 +2593,43 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "models the index places; its `except OSError` logs and answers None, which is 'no "
         "check ran' and warns about nothing - nothing is written on the strength of it"
     ),
+    ("catalog/families/extract.py", "_map_file_names"): (
+        "T811. Lists the server's own `mmaps/` -- the output this app's extractor filled -- "
+        "for the files one map owns, before a rebuild moves them aside. It decides no write "
+        "permission: it decides which files `set_map_aside()` renames into this run's backup "
+        "folder, and only the names `owns_file()` claims (the map's `.mmap` and its four-digit "
+        "tiles). A folder that is not there has no files; any other OSError reaches "
+        "`set_map_aside()`'s own sentence, which says the map was not rebuilt and nothing was "
+        "changed"
+    ),
+    ("catalog/families/extract.py", "_backup_names"): (
+        "T811. Lists one map's folder INSIDE this run's own `mmaps.t811-backup/` when "
+        "`BACKUP_NAMES` is missing, to learn what a crashed press had moved before it wrote the "
+        "list. It decides a DELETE, and it says whether it could trust the list: "
+        "`put_map_back()` removes nothing when it cannot, because a folder made before the "
+        "first rename moved nothing and every file under `mmaps/` is then the old one. An "
+        "OSError here is `put_map_back()`'s refusal, and the files stay in the backup"
+    ),
+    ("catalog/families/extract.py", "put_map_back"): (
+        "T811. Lists the server's own `mmaps/` to find the rejected build's files -- names "
+        "`owns_file()` claims, not on `BACKUP_NAMES`, and not folders -- and removes them "
+        "before the old ones go back over them. It decides that DELETE and no other write, and "
+        "a folder whose list was lost removes nothing. An OSError is the refusal this function "
+        "raises, with what is left named"
+    ),
+    ("catalog/families/extract.py", "_drop_backup_root_if_empty"): (
+        "T811. Lists this run's own `mmaps.t811-backup/` to see whether only `offmesh.sha` is "
+        "left, which is when that folder is removed. It decides that one DELETE of a folder "
+        "this same run made, and an OSError answers 'not empty', so the folder stays for the "
+        "next press"
+    ),
+    ("catalog/families/extract.py", "put_maps_back"): (
+        "T811. Lists this run's own `mmaps.t811-backup/` for the map folders a crashed press "
+        "left, to put each back before the off-mesh file is compared at all. It decides no "
+        "write of its own: it names what `put_map_back()` puts back, and that function's own "
+        "rules bound each one. A folder that is not there is the ordinary empty answer; any "
+        "other OSError is this function's own refusal, raised before a map is touched"
+    ),
     ("catalog/build_context.py", "_sorted_entries"): (
         "T224. Lists the build context, the server folder, the way Docker's own walk "
         "filters it, to fingerprint the files a finished build was made from. It decides no "
