@@ -32661,3 +32661,15 @@ def test_the_start_step_wired_for_a_game_applies_a_saved_name(
     assert reason is None
     assert started == ["database"]
     assert written == [realm_name.name_sql(entry, "Saved Realm")]
+
+
+def test_every_azerothcore_factory_takes_a_safety_copy_before_repair_clears_an_import(
+    tmp_path: Path,
+) -> None:
+    """T678 review round 3's copy before Repair clears an unfinished first import; T812 C3b's
+    rewrite of the WotLK controller dropped it and nothing failed. Mutation: drop
+    `safety_copy=` from `_for_wotlk()`'s Controller."""
+    for game in ("wow-wotlk", "wow-unbound", "wow-coa"):
+        entry = load_catalog().get(game)
+        services = ControllerServices.for_entry(entry, tmp_path / game)
+        assert services.controller.safety_copy is not None, game

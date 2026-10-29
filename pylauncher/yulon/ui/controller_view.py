@@ -4558,6 +4558,18 @@ def _for_wotlk(
                     _realm_type_gate(entry, spec, server_dir, sql, wsl_distro=wsl_distro),
                     _realm_port_keeper(entry, spec, server_dir, sql, wsl_distro=wsl_distro),
                 ),
+                # T678 review round 3: a copy before Repair clears an unfinished first import.
+                safety_copy=lambda: wotlk_maintenance.safety_copy_sentence(
+                    wotlk_maintenance.backup(
+                        server_dir,
+                        mysql,
+                        game=wotlk_maintenance.game_of(entry),
+                        label="before-repair",
+                        spec=spec,
+                        core_databases=entry.core_databases(),
+                        wsl_distro=wsl_distro,
+                    )
+                ),
             ),
             entry,
             server_dir,
