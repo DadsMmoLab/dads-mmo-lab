@@ -54,6 +54,7 @@ from yulon import (
     play_client,
     play_launch,
     purge,
+    realm_name,
     reset_defaults,
     runner,
     server_time_zone,
@@ -32404,3 +32405,173 @@ def test_play_never_reports_a_regenerated_output_as_left_alone(
     assert (
         "lampdata.bin" not in said
     ), "a setup output setup regenerated is not 'left alone because you changed it'"
+
+
+# -- T808: the realm name on the Networking tab ------------------------------
+
+
+def _name_services(
+    ps: _Ps, tmp_path: Path, saved: list[str], *, shown: str = "Seeded Realm"
+) -> ControllerServices:
+    services = _services(ps, tmp_path, [])
+    services.realm_name_current = lambda: realm_name.NameState(shown, True)
+
+    def save(name: str) -> realm_name.SaveResult:
+        saved.append(name)
+        return realm_name.SaveResult(
+            f"The realm is now called '{name}'.", ok=True, remembered=True, applied=True
+        )
+
+    services.realm_name_save = save
+    return services
+
+
+def test_the_networking_tab_has_no_realm_name_control_without_a_realm_name_seam(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+
+    assert view.realm_name_row.isHidden()
+    assert view.realm_name_report.isHidden()
+
+
+def test_the_networking_tab_shows_the_realm_name_control_when_the_seam_exists(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    view = ControllerView(WOTLK, _name_services(ps, tmp_path, []), status_poll_ms=0)
+
+    assert not view.realm_name_row.isHidden()
+    assert view.realm_name_button.text() == "Save name"
+
+
+def test_the_realm_name_field_is_filled_from_the_server_but_never_over_what_is_typed(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    view = ControllerView(WOTLK, _name_services(ps, tmp_path, []), status_poll_ms=0)
+
+    view.refresh_realm_name()
+    assert view.realm_name_edit.text() == "Seeded Realm"
+
+    view.realm_name_edit.textEdited.emit("Mine")
+    view.realm_name_edit.setText("Mine")
+    view.refresh_realm_name()
+    assert view.realm_name_edit.text() == "Mine"
+
+
+def test_pressing_save_name_sends_the_trimmed_name_to_the_seam_and_shows_its_sentence(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    saved: list[str] = []
+    view = ControllerView(WOTLK, _name_services(ps, tmp_path, saved), status_poll_ms=0)
+
+    view.realm_name_edit.setText("  Jerra's Realm  ")
+    view.realm_name_button.click()
+
+    assert saved == ["Jerra's Realm"]
+    assert "Jerra's Realm" in view.realm_name_report.text()
+    assert view.realm_name_button.isEnabled()
+
+
+def test_a_refused_realm_name_is_said_on_the_tab_and_never_reaches_the_seam(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    saved: list[str] = []
+    view = ControllerView(WOTLK, _name_services(ps, tmp_path, saved), status_poll_ms=0)
+
+    for bad, said in (("", "empty"), ("x" * 33, "at most 32"), ("a\nb", "control")):
+        view.realm_name_edit.setText(bad)
+        view.save_realm_name()
+        assert said in view.realm_name_report.text(), (bad, view.realm_name_report.text())
+
+    assert saved == []
+
+
+def test_a_held_server_says_so_instead_of_changing_the_realm_name(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    services = _name_services(ps, tmp_path, [])
+
+    def held(name: str) -> realm_name.SaveResult:
+        raise docker.ServerHeldError("Another Yu'lon is working on this server.")
+
+    services.realm_name_save = held
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    view.realm_name_edit.setText("Whatever")
+    view.save_realm_name()
+
+    assert "Another Yu'lon" in view.realm_name_report.text()
+    assert view.realm_name_button.isEnabled()
+
+
+def test_with_no_known_database_password_save_name_is_grey_and_says_the_real_reason(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T785's refusal, not "applied the next time the server starts": that start asks with the
+    same unknown password. The saved name is still shown, and the refusal is not replaced by
+    the reading's note. Mutation: leave the button out of `_grey_for_the_database()`, or show
+    `result.note` over the refusal."""
+    from yulon.ui.widgets.reasons import reason_of
+
+    saved: list[str] = []
+    services = _name_services(ps, tmp_path, saved)
+    refusal = "This server's .db_password is missing, so Yu'lon cannot know it and tried none."
+    services.db_refusal = refusal
+    services.realm_name_current = lambda: realm_name.NameState(
+        "Kept Realm",
+        False,
+        "The database did not answer, so this is the name saved for this server.",
+    )
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    assert not view.realm_name_button.isEnabled()
+    assert reason_of(view.realm_name_button) == refusal
+    view.refresh_realm_name()
+    assert view.realm_name_edit.text() == "Kept Realm"
+    assert view.realm_name_report.text() == refusal
+
+    view.realm_name_edit.setText("Other Realm")
+    view.save_realm_name()  # a press by another road than the grey button
+    assert saved == []
+    assert view.realm_name_report.text() == refusal
+    assert not view.realm_name_button.isEnabled()
+
+
+def test_every_game_with_a_realm_row_gets_the_realm_name_seams_and_a_start_step(
+    tmp_path: Path,
+) -> None:
+    """Every factory wires both seams (`_assemble()`) and the start step (`_keeping_the_realm_name`
+    on the controller it builds). Mutation: drop the helper from one factory's controller."""
+    for entry in _every_game():
+        services = ControllerServices.for_entry(entry, tmp_path / entry.id)
+        assert services.realm_name_save is not None, entry.id
+        assert services.realm_name_current is not None, entry.id
+        assert services.controller.before_servers is not None, entry.id
+
+
+def test_the_start_step_wired_for_a_game_applies_a_saved_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server = tmp_path / "tortoise"
+    realm_name.record_name(server, "Saved Realm")
+    started: list[str] = []
+    monkeypatch.setattr(
+        controller_view_module.docker,
+        "start_database",
+        lambda *a, **k: started.append("database"),
+    )
+    written: list[str] = []
+    monkeypatch.setattr(
+        controller_view_module.DockerSql,
+        "run_statement",
+        lambda self, db, statement: written.append(statement),
+    )
+    entry = load_catalog().get("wow-tortoise")
+    services = ControllerServices.for_entry(entry, server)
+
+    assert services.controller.before_servers is not None
+    reason = services.controller.before_servers()
+
+    assert reason is None
+    assert started == ["database"]
+    assert written == [realm_name.name_sql(entry, "Saved Realm")]

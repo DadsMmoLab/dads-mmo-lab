@@ -35,7 +35,7 @@ from tests.support_native import (
     install,
     lay_patch_sources,
 )
-from yulon import docker, install_wiring, networking, platform, resources, runner
+from yulon import docker, install_wiring, networking, platform, realm_name, resources, runner
 from yulon.apply import ApplyError
 from yulon.catalog import composegen, native, preflight
 from yulon.catalog.catalog import CatalogEntry, ReadyMarkers, load_catalog
@@ -4687,3 +4687,81 @@ def test_a_recorded_address_this_computer_still_holds_gets_no_warning(
     said = _advertising(rec, server, lan_ip=lambda: "192.168.1.25")
     assert not [line for line in said if line.startswith("Warning:")], said
     assert _statements(rec) == [networking.realmlist_sql(ENTRY, "100.64.0.10", "100.64.0.10")]
+
+
+# -- T808: the realm name the owner chose survives the install's own seed ------
+
+
+def _name_statements(rec: Recorder) -> list[str]:
+    return [s for s in _statements(rec) if " SET name=" in s]
+
+
+def test_a_saved_realm_name_is_written_by_the_closing_step_after_the_address(
+    tmp_path: Path,
+) -> None:
+    """The import seeds the catalog's own name; the closing step must put the owner's back.
+
+    Mutation: dropping `_apply_realm_name()` from `run()` leaves `_statements` holding only the
+    address update, and this fails. Asserted against `realm_name.name_sql()`'s own output.
+    """
+    server = tmp_path / "wow"
+    server.mkdir()
+    assert realm_name.record_name(server, "Jerra's Realm") == ""
+    rec = Recorder()
+
+    said = _advertising(rec, server, lan_ip=lambda: "100.64.0.10")
+
+    assert _statements(rec) == [
+        networking.realmlist_sql(ENTRY, "100.64.0.10", "100.64.0.10"),
+        realm_name.name_sql(ENTRY, "Jerra's Realm"),
+    ]
+    assert [line for line in said if "Jerra's Realm" in line], said
+    assert said[-1].startswith(f"{ENTRY.name} is installed"), said[-1]
+
+
+def test_no_saved_realm_name_means_no_name_statement_and_no_extra_line(tmp_path: Path) -> None:
+    rec = Recorder()
+
+    said = _advertising(rec, tmp_path / "wow", lan_ip=lambda: "100.64.0.10")
+
+    assert _name_statements(rec) == []
+    assert not [line for line in said if "realm list" in line]
+
+
+def test_a_saved_realm_name_is_applied_even_when_the_loopback_was_chosen(tmp_path: Path) -> None:
+    """The address choice and the name choice are separate records; one must not eat the other."""
+    server = tmp_path / "wow"
+    server.mkdir()
+    networking.record_network_intent(server, "loopback")
+    realm_name.record_name(server, "Quiet Realm")
+    rec = Recorder(realm_row=f"{native.INSTALL_REALM_HOST}\t{native.INSTALL_REALM_HOST}\n")
+
+    _advertising(rec, server, lan_ip=lambda: "10.1.2.3")
+
+    assert _statements(rec) == [realm_name.name_sql(ENTRY, "Quiet Realm")]
+
+
+def test_a_realm_name_the_database_refuses_is_said_and_the_install_still_finishes(
+    tmp_path: Path,
+) -> None:
+    server = tmp_path / "wow"
+    server.mkdir()
+    realm_name.record_name(server, "Refused Realm")
+    rec = Recorder(failing_sql=" SET name=")
+
+    said = _advertising(rec, server, lan_ip=lambda: "100.64.0.10")
+
+    line = next(line for line in said if "Refused Realm" in line)
+    assert "could not be set" in line and "Save name" in line, line
+    assert said[-1].startswith(f"{ENTRY.name} is installed"), said[-1]
+
+
+def test_a_damaged_realm_name_record_sends_nothing(tmp_path: Path) -> None:
+    server = tmp_path / "wow"
+    server.mkdir()
+    (server / realm_name.REALM_NAME_FILE).write_text('{"name": "' + "x" * 40 + '"}', "utf-8")
+    rec = Recorder()
+
+    _advertising(rec, server, lan_ip=lambda: "100.64.0.10")
+
+    assert _name_statements(rec) == []

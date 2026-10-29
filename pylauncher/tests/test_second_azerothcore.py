@@ -723,13 +723,28 @@ def test_a_conflict_that_appears_between_the_two_looks_still_gets_the_step_after
     assert calls == ["before_servers", "stop", "before_servers", "servers"]
 
 
-def test_a_wotlk_start_has_no_port_step() -> None:
+def test_a_wotlk_start_has_no_port_step(monkeypatch: pytest.MonkeyPatch) -> None:
+    """WotLK (8085) starts as it did before T552: no database start, no realm-row statement.
+
+    Since T808 every game's start step also re-applies a SAVED realm name, so the step is
+    there; with no name saved it must do nothing at all, and the port UPDATE never runs.
+    """
+    from yulon import docker
     from yulon.ui import controller_view
 
+    asked: list[str] = []
+    monkeypatch.setattr(docker, "start_database", lambda *_a, **_k: asked.append("database"))
+    monkeypatch.setattr(
+        controller_view.DockerSql, "run_statement", lambda _s, _db, sql: asked.append(sql)
+    )
+    monkeypatch.setattr(controller_view.DockerSql, "query", lambda _s, _db, sql: asked.append(sql))
     services = controller_view._for_wotlk(
         load_catalog().get("wow-wotlk"), Path("/nonexistent/srv"), None, None
     )
-    assert services.controller.before_servers is None
+    step = services.controller.before_servers
+    assert step is not None
+    assert step() is None
+    assert asked == []
 
 
 @pytest.mark.parametrize("row", ["8085\n", "", "8086\n8086\n"])

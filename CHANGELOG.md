@@ -26,6 +26,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - The Server tab warns when your Conquest of Azeroth client is the stock Ascension one; **Update client** makes it the CoA client.
 - The Catalog's Installed button now opens that server's tab.
 - New Launcher button (the play icon in the top bar): play on a friend's server with a ready-to-play client, without installing a server.
+- Change the realm name players see in the game's realm list on the Networking tab.
 
 ### Fixed
 - The install's free-space check now measures Docker's containerd images too, so a full root disk stops it early.
