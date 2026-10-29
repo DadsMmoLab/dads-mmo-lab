@@ -1999,7 +1999,11 @@ def _fix_ups(
             # An UPDATE that matched no row exits 0 too: kept only when the row says it.
             reads = _row_realm_name(world)
             if reads == manifest.realm_name:
-                notes.extend(_keep_the_imported_realm_name(world.server_dir, manifest.realm_name))
+                # Not on a realm-type entry (CoA): its realm type decides the name (T812).
+                if not realm_name.follows_realm_type(world.entry):
+                    notes.extend(
+                        _keep_the_imported_realm_name(world.server_dir, manifest.realm_name)
+                    )
             else:
                 said = "could not be read back" if reads is None else f"reads '{reads}'"
                 notes.append(

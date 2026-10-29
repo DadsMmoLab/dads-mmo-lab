@@ -15,11 +15,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from tests.support_native import ABSENT, ENTRY, IMPORTED, Recorder, engine, install
 from tests.test_repair_a_missing_database import _reads
 from tests.test_update_to_latest import _press
 from tests.test_update_to_latest import _ready as _ready_to_update
-from yulon import realm_name
+from yulon import realm_name, resources
 from yulon.catalog.installer import InstallOptions
 from yulon.manifest import Db
 
@@ -173,3 +175,33 @@ def test_a_name_the_row_does_not_take_is_caught_by_the_read_back(tmp_path: Path)
 
     line = next(line for line in said if CHOSEN in line)
     assert f"the realm row reads '{SEEDED}'" in line, line
+
+
+def test_a_coa_install_never_reads_or_applies_a_saved_name_after_an_import(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T808 x T812: the post-import step stands aside on a realm-type entry; the realm switch
+    writes a CoA realm's name. Mutation: drop the `follows_realm_type` return in
+    `_apply_realm_name()` and the saved name is read (and an UPDATE sent)."""
+    from types import SimpleNamespace
+
+    from yulon.catalog.catalog import load_catalog
+    from yulon.catalog.families.azerothcore import AzerothCoreInstaller
+
+    coa = load_catalog().get("wow-coa")
+    server_dir = tmp_path / "coa"
+    assert realm_name.record_name(server_dir, CHOSEN) == ""
+    rec = Recorder(images=True)
+    read: list[Path] = []
+    monkeypatch.setattr(realm_name, "read_saved_name", lambda d: read.append(d) or CHOSEN)
+    installer = AzerothCoreInstaller(
+        coa,
+        installers_root=resources.installers_dir(),
+        import_probe=rec.probe,
+        reset_unfinished=rec.reset,
+        seams=rec.seams(),
+    )
+
+    said = list(installer._apply_realm_name(SimpleNamespace(server_dir=server_dir), "Done"))
+
+    assert said == [] and read == [] and _name_statements(rec) == []

@@ -32543,10 +32543,96 @@ def test_every_game_with_a_realm_row_gets_the_realm_name_seams_and_a_start_step(
     """Every factory wires both seams (`_assemble()`) and the start step (`_keeping_the_realm_name`
     on the controller it builds). Mutation: drop the helper from one factory's controller."""
     for entry in _every_game():
+        if realm_name.follows_realm_type(entry):
+            continue  # CoA: the realm type decides the name (the tests below)
         services = ControllerServices.for_entry(entry, tmp_path / entry.id)
         assert services.realm_name_save is not None, entry.id
         assert services.realm_name_current is not None, entry.id
         assert services.controller.before_servers is not None, entry.id
+
+
+# -- T808 x T812: the realm type decides a CoA realm's name --------------------
+
+
+def test_only_the_realm_type_entry_follows_its_realm_type() -> None:
+    """The exemption is CoA's alone; every other game keeps the T808 control."""
+    follows = {e.id for e in _every_game() if realm_name.follows_realm_type(e)}
+
+    assert follows == {"wow-coa"}
+
+
+def test_a_coa_server_gets_no_realm_name_seams_and_no_name_start_step(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A saved name in a CoA folder is never applied by Start: only the realm-type gate and the
+    port keeper run. Mutation: drop the `follows_realm_type` returns in BOTH
+    `_keeping_the_realm_name` and `keep_at_start` (either one alone holds), or wire the seams
+    in `_assemble()` for every entry."""
+    server = tmp_path / "coa"
+    assert realm_name.record_name(server, "Saved Realm") == ""
+    entry = load_catalog().get("wow-coa")
+    written: list[str] = []
+    monkeypatch.setattr(
+        controller_view_module.DockerSql,
+        "run_statement",
+        lambda self, db, statement: written.append(statement),
+    )
+    monkeypatch.setattr(controller_view_module.DockerSql, "query", lambda self, db, statement: "")
+    monkeypatch.setattr(controller_view_module.docker, "start_database", lambda *a, **k: None)
+    read: list[Path] = []
+    real_read = realm_name.read_saved_name
+    monkeypatch.setattr(realm_name, "read_saved_name", lambda d: read.append(d) or real_read(d))
+    monkeypatch.setattr(controller_view_module, "_realm_type_gate", lambda *a, **k: None)
+    monkeypatch.setattr(controller_view_module, "_realm_port_keeper", lambda *a, **k: lambda: None)
+
+    services = ControllerServices.for_entry(entry, server)
+
+    assert services.realm_name_save is None
+    assert services.realm_name_current is None
+    if services.controller.before_servers is not None:
+        services.controller.before_servers()
+    assert read == []
+    assert not any(b"Saved Realm".hex().upper() in s for s in written), written
+
+
+def test_keep_at_start_never_reads_or_applies_a_saved_name_on_coa(tmp_path: Path) -> None:
+    entry = load_catalog().get("wow-coa")
+    assert realm_name.record_name(tmp_path, "Saved Realm") == ""
+    sent: list[str] = []
+    up: list[str] = []
+
+    class _Sql:
+        def run_statement(self, db: object, statement: str) -> None:
+            sent.append(statement)
+
+        def query(self, db: object, statement: str) -> str:
+            return ""
+
+    keep = realm_name.keep_at_start(entry, tmp_path, _Sql(), lambda: up.append("db"), None)
+
+    assert keep() is None
+    assert sent == [] and up == []
+    result = realm_name.RealmNames(entry, tmp_path, _Sql()).save("Other")
+    assert not result.ok and result.text == realm_name.FOLLOWS_REALM_TYPE
+    assert sent == []
+    assert realm_name.read_saved_name(tmp_path) == "Saved Realm", "nothing rewrote the record"
+
+
+def test_the_networking_tab_says_a_coa_name_follows_the_realm_type(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """No field and no Save name on CoA, one plain line; WotLK keeps the control.
+    Mutation: drop `follows_type` in the tab builder (the line stays hidden)."""
+    coa = load_catalog().get("wow-coa")
+    view = ControllerView(coa, _services(ps, tmp_path, []), status_poll_ms=0)
+
+    assert view.realm_name_row.isHidden()
+    assert not view.realm_name_report.isHidden()
+    assert view.realm_name_report.text() == "The realm name follows the realm type."
+
+    other = ControllerView(WOTLK, _name_services(ps, tmp_path, []), status_poll_ms=0)
+    assert not other.realm_name_row.isHidden()
+    assert other.realm_name_report.text() != "The realm name follows the realm type."
 
 
 def test_the_start_step_wired_for_a_game_applies_a_saved_name(

@@ -1069,6 +1069,22 @@ def test_the_old_realm_name_brought_in_becomes_this_servers_saved_choice(tmp_pat
     assert not [n for n in result.notes if "realm" in n.lower()], result.notes
 
 
+def test_an_old_realm_name_brought_into_a_realm_type_server_is_never_kept_as_its_choice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T808 x T812: on a realm-type entry (CoA) the realm type decides the name, so a move never
+    writes the T808 record there. Mutation: drop the `follows_realm_type` check in `_fix_ups()`."""
+    from yulon import realm_name
+
+    box, _package, plan = ready(tmp_path)
+    monkeypatch.setattr(realm_name, "follows_realm_type", lambda entry: True)
+    move_flows.run_import(
+        box.world, plan, confirm=None, use_old_realm_name=True, stop_allowed=False
+    )
+    assert box.db.realm == "Source Realm"
+    assert not (box.world.server_dir / realm_name.REALM_NAME_FILE).exists()
+
+
 def test_keeping_this_servers_realm_name_keeps_its_saved_choice(tmp_path: Path) -> None:
     from yulon import realm_name
 

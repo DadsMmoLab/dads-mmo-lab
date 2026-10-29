@@ -3742,6 +3742,7 @@ def _assemble(
     """
     spec = entry.container_spec()
     names = realm_name.RealmNames(entry, server_dir, sql)
+    follows_type = realm_name.follows_realm_type(entry)
     saves_first = spec.save_first is not None or spec.bot_saves_skippable is not None
     if saves_first and channel_setup is not None:
         # T496: where the console needs a terminal this host cannot open (Windows), the save
@@ -3768,11 +3769,16 @@ def _assemble(
             lambda plan: networking.apply(plan, sql=sql, server_dir=server_dir),
         ),
         # T808: the realm name; the write goes under the same hold as the network apply.
-        realm_name_current=names.current,
-        realm_name_save=_under_the_hold(
-            _server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
-            "Change the realm name",
-            names.save,
+        # None on a realm-type entry (CoA): there the realm type's switch writes the name.
+        realm_name_current=None if follows_type else names.current,
+        realm_name_save=(
+            None
+            if follows_type
+            else _under_the_hold(
+                _server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
+                "Change the realm name",
+                names.save,
+            )
         ),
         # T610: the account row is written under the server's cross-process hold, in the shared
         # half so that every game's factory gets it (five of them pass their own writer).
@@ -4250,7 +4256,12 @@ def _keeping_the_realm_name(
     Start re-applies the owner's; the step the controller already had (the realm
     port keeper, T552) goes first and its refusal stands, and the name never
     refuses a start (`realm_name.keep_at_start()`).
+
+    A realm-type entry (CoA) keeps its controller unchanged: its realm type decides
+    the name, and the switch writes it (`realm_name.follows_realm_type()`).
     """
+    if realm_name.follows_realm_type(entry):
+        return controller
     spec = entry.container_spec()
     controller.before_servers = realm_name.keep_at_start(
         entry,
@@ -9044,6 +9055,8 @@ REALM_NAME_PLACEHOLDER = "Up to 32 characters"
 REALM_NAME_SAVING = "Saving the realm name…"
 REALM_NAME_NOT_READ = "The realm name could not be read from this server."
 REALM_NAME_NOT_SAVED = "The realm name could not be saved. Nothing was changed."
+REALM_NAME_FOLLOWS_TYPE = realm_name.FOLLOWS_REALM_TYPE
+"""The Networking tab's line, in place of the control, on a realm-type entry (CoA, T812)."""
 
 _PAGES_THAT_FIT_THEMSELVES = frozenset({"Tuning"})
 """Sub-tabs `_add_panel_tab` leaves out of a `ScrollPage` (T191).
@@ -20021,7 +20034,9 @@ class ControllerView(QWidget):
         self.module_sql_button.setToolTip(refusal)
         # T808: the realm name is a row in the login database; the saved name is still shown.
         set_enabled_why(self.realm_name_button, refusal)
-        self.realm_name_report.setText(refusal)
+        if self.services.realm_name_save is not None:
+            # A realm-type entry's line ("follows the realm type") is not a database press.
+            self.realm_name_report.setText(refusal)
 
     def _installed_clones(self) -> Mapping[str, frozenset[str]] | None:
         """What is in this install's clone folders per family, or `None` for no reader.
@@ -25117,7 +25132,12 @@ class ControllerView(QWidget):
         self.realm_name_button.clicked.connect(self.save_realm_name)
         has_name = self.services.realm_name_save is not None
         self.realm_name_row.setVisible(has_name)
-        self.realm_name_report.setVisible(has_name)
+        # A realm-type entry (CoA) has a realm row, but its realm type decides the name
+        # (`realm_name.follows_realm_type()`): no control, one plain line instead.
+        follows_type = not has_name and realm_name.follows_realm_type(self.entry)
+        if follows_type:
+            self.realm_name_report.setText(REALM_NAME_FOLLOWS_TYPE)
+        self.realm_name_report.setVisible(has_name or follows_type)
         box.addWidget(self.realm_name_row)
         box.addWidget(self.realm_name_report)
         box.addWidget(self.network_text, 1)

@@ -120,10 +120,13 @@ def client_without_a_server(entry: CatalogEntry) -> bool:
 
     Packs, the Wow.exe patch and `config_wtf` are fetched and laid by the
     server's own tab, keyed by the server folder (T181 b/c); an entry with any
-    of them is not offered here.
+    of them is not offered here. An optional pack that is off by default (WotLK's
+    Lumenveil extra) does not count: the client is complete without it, and a
+    client made here simply has none.
     """
     client = entry.client
-    return not (client.packs or client.exe_patch is not None or client.config_wtf is not None)
+    needed_packs = [pack for pack in client.packs if not (pack.optional and not pack.default)]
+    return not (needed_packs or client.exe_patch is not None or client.config_wtf is not None)
 
 
 # -- the worker bodies (module level: nothing here touches GUI state) ------------
@@ -298,6 +301,11 @@ def _play_work(
             f"The realmlist in {server.play_folder} could not be written ({exc}), so nothing "
             "was started. Check that you can write to that folder, then press Play again."
         ) from exc
+    # The client's own launch rule, as the Server tab's Play (`ControllerView._launch`): a
+    # CoA client starts Ascension.exe with its DLL override (T828). HD patches stay at their
+    # default, on: `-hd 0` comes only from an install's own saved choice
+    # (`hd_patches.launch_args()`), and a friend entry owns no install and no record
+    # (`identity` is never read). Every other game's catalog values are the defaults.
     spec = play_launch.launch_spec(
         server.play_folder,
         game=server.game,
@@ -305,6 +313,8 @@ def _play_work(
         os_name=os_name,
         home=home,
         config_dir=config_dir,
+        exe_names=entry.client.exe_names,
+        wine_dll_overrides=entry.client.wine_dll_overrides,
         which=which,
     )
     launch(spec)

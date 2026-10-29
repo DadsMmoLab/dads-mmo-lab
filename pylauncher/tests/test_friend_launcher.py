@@ -103,15 +103,22 @@ def _type(window: FriendLauncher, tmp_path: Path, *, realm: str = "192.168.50.49
 def test_only_games_whose_client_is_complete_without_a_server_are_offered(
     tmp_path: Path,
 ) -> None:
-    """WotLK, TBC, Vanilla and Tortoise are pure copies; Centurion and Unbound are not.
+    """WotLK, TBC, Vanilla, Tortoise and CoA are pure copies; Centurion and Unbound are not.
 
     Their packs and Wow.exe patch are fetched and laid by the server's own tab,
     keyed by the server folder — a friend launcher has no server folder, so a
-    client made here could never receive them.
+    client made here could never receive them. WotLK's only pack is the optional Lumenveil
+    extra, off by default, so WotLK is offered (mutation: count every pack and WotLK drops out).
     """
     window = _window(tmp_path)
     offered = [window.game_pick.itemData(i) for i in range(window.game_pick.count())]
-    assert set(offered) == {"wow-wotlk", "wow-tbc", "wow-vanilla", "wow-tortoise"}, offered
+    assert set(offered) == {
+        "wow-wotlk",
+        "wow-tbc",
+        "wow-vanilla",
+        "wow-tortoise",
+        "wow-coa",
+    }, offered
 
 
 # -- the typed realm --------------------------------------------------------------
@@ -310,6 +317,40 @@ def test_play_starts_the_saved_client_against_the_typed_realm(tmp_path: Path) ->
         encoding="utf-8"
     )
     assert "set realmlist 192.168.50.49" in realm_line
+
+
+def _coa_window(tmp_path: Path, launched: _Recorder) -> FriendLauncher:
+    """A friend entry for a CoA realm over an Ascension client (Ascension.exe, no Wow.exe)."""
+    client = tmp_path / "Ascension"
+    (client / "Data").mkdir(parents=True)
+    (client / "Data" / "patch.mpq").write_bytes(b"MPQ" * 1000)
+    (client / "Ascension.exe").write_bytes(b"MZ")
+    window = _window(tmp_path, launched=launched)
+    window.game_pick.setCurrentIndex(window.game_pick.findData("wow-coa"))
+    window.name_field.setText("Coa friend")
+    window.realm_field.setText("192.168.50.49:3726")
+    window.client_field.setText(str(client))
+    window.make_client()
+    window.saved_list.setCurrentRow(0)
+    return window
+
+
+def test_play_of_a_coa_friend_entry_starts_ascension_with_the_coa_launch_rule(
+    tmp_path: Path,
+) -> None:
+    """T807 x T828: the Server tab's Play rule (Ascension.exe, its DLL override) and HD patches
+    at their default, on, so no `-hd 0`: a friend entry owns no install and no saved HD choice.
+    Mutation: drop `exe_names=` from `_play_work()` and Play looks for Wow.exe and refuses."""
+    launched = _Recorder()
+    window = _coa_window(tmp_path, launched)
+
+    window.play_selected()
+
+    assert len(launched.calls) == 1, _SAYS.calls
+    (spec,), _kwargs = launched.calls[0]
+    assert spec.argv[0].endswith("Ascension.exe"), spec.argv
+    assert "-hd" not in spec.argv
+    assert spec.env.get("WINEDLLOVERRIDES", "divxtac=d") == "divxtac=d"
 
 
 def test_play_keeps_a_typed_port_on_the_realm_line(tmp_path: Path) -> None:

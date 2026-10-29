@@ -22,6 +22,9 @@ does not undo it.
 
 **Applies to** every `CatalogEntry`, because every WoW core's realm row has a
 `name` column. A `SingleEntry` (DDON, DFO) has no realm row and gets no seam.
+A realm-type entry (Conquest of Azeroth) is left out too: its realm type decides the
+name ('CoA Free Pick', ...) and the realm switch writes it, so a saved name here would
+fight the switch (`follows_realm_type()`).
 """
 
 from __future__ import annotations
@@ -34,6 +37,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from yulon import coa_realm
 from yulon.catalog.catalog import CatalogEntry, DbPasswordUnknown
 from yulon.log import get_logger
 from yulon.manifest import Db
@@ -59,6 +63,20 @@ _DUPLICATE = re.compile(r"\bERROR 1062\b")
 
 class RealmNameError(ValueError):
     """A name that cannot be a realm name; the message is a sentence for the player."""
+
+
+FOLLOWS_REALM_TYPE = "The realm name follows the realm type."
+"""Why a realm-type entry's name is not changed here; the Networking tab says the same."""
+
+
+def follows_realm_type(entry: CatalogEntry) -> bool:
+    """Whether the realm type decides this entry's realm name (CoA), so nothing here may set it.
+
+    Such an entry gets no Networking-tab control, no start step and no post-import step,
+    and a saved record in its folder is never read: the realm switch writes the name of
+    the type it switches to (`coa_realm.realm_name_update()`).
+    """
+    return coa_realm.has_realm_types(entry)
 
 
 def check(name: str) -> str:
@@ -289,6 +307,8 @@ class RealmNames:
         fail the same way at every start, so it is said and not kept. Any other
         failure to apply still keeps the choice for the next start.
         """
+        if follows_realm_type(self.entry):
+            return SaveResult(FOLLOWS_REALM_TYPE, ok=False)
         try:
             cleaned = check(name)
             statement = name_sql(self.entry, cleaned)
@@ -362,13 +382,19 @@ def keep_at_start(
     refusal is passed on untouched. With no saved name this does nothing at all,
     not even start the database. A failure is logged and swallowed: a realm name
     is not worth a server that will not start.
+
+    On a realm-type entry (`follows_realm_type()`) only `previous` runs: the record
+    is never read and no statement is sent.
     """
+    follows = follows_realm_type(entry)
 
     def keep() -> str | None:
         if previous is not None:
             refusal = previous()
             if refusal:
                 return refusal
+        if follows:
+            return None
         saved = read_saved_name(server_dir)
         if saved is None:
             return None

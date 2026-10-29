@@ -16865,7 +16865,12 @@ class StagedInstaller:
         Nothing saved means nothing is sent and nothing is said. The row is read back:
         an UPDATE that matched nothing also exits 0. Like `_advertise_realm()`, it can
         never fail the press: a refusal is a sentence, which starts with `done`.
+
+        Not on a realm-type entry (CoA): its realm type decides the name and the switch
+        writes it, so the record is never read there (`realm_name.follows_realm_type()`).
         """
+        if realm_name.follows_realm_type(self.entry):
+            return
         saved = realm_name.read_saved_name(ctx.server_dir)
         if saved is None:
             return
