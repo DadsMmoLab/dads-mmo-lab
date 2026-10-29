@@ -76,6 +76,11 @@ CHUNK_BYTES = fetch.CHUNK_BYTES
 STATE_FILE = play_client.CLIENT_UPDATE_STATE
 BACKUP_DIR = play_client.CLIENT_UPDATE_BACKUP
 JOURNAL = ".yulon-journal.json"
+CONFLICTS = ".yulon-conflicts"
+"""In `BACKUP_DIR/<version>/`: files the player changed after that update, moved aside by Undo.
+
+A `.yulon-` name, which `safe_rel` refuses in any manifest path, so no client file
+backed up beside it can ever wear it."""
 """In `BACKUP_DIR/<version>/`: what that update replaced and added, for `rollback()`."""
 PART_SUFFIX = ".yulon-part"
 _STATE_VERSION = 1
@@ -831,10 +836,29 @@ def _os_sentence(exc: OSError) -> str:
     return f"Yu'lon could not write it ({exc.strerror or exc}). Choose Update client again."
 
 
+def _no_link_below(client_dir: Path, path: Path) -> Path:
+    """`path`, refused when any existing part of it below `client_dir` is a link.
+
+    A symlink, junction or other name-surrogate reparse point (`play_client._is_link`)
+    in `BACKUP_DIR`, a version folder or anywhere under it would carry the journal and
+    the player's original files outside the client folder. Asked again right before
+    every journal write and every move, not only once per update.
+    """
+    here = client_dir
+    for part in path.relative_to(client_dir).parts:
+        here = here / part
+        if os.path.lexists(here) and _is_link(here):
+            raise ClientUpdateError(
+                f"{here} is a link, so Yu'lon will not keep backups through it. Replace it "
+                "with a real folder (or remove it), then try again."
+            )
+    return path
+
+
 def _backup_root(client_dir: Path, version: str) -> Path:
     if not _VERSION.match(version):
         raise ManifestError(f"The update's version {version!r} cannot name a backup folder.")
-    return client_dir / BACKUP_DIR / version
+    return _no_link_below(client_dir, client_dir / BACKUP_DIR / version)
 
 
 def _read_journal(root: Path) -> dict[str, Any] | None:
@@ -852,12 +876,23 @@ def _read_journal(root: Path) -> dict[str, Any] | None:
         and isinstance(raw.get("added"), dict)
     ):
         raise ClientUpdateError(f"The backup record in {root} is not one Yu'lon wrote.")
+    for rel, record in list(raw["replaced"].items()):
+        if isinstance(record, str):  # an early journal: only the backup's place
+            raw["replaced"][rel] = {"backup": record, "original": None, "installed": None}
+        elif not (isinstance(record, dict) and isinstance(record.get("backup"), str)):
+            raise ClientUpdateError(f"The backup record in {root} is not one Yu'lon wrote.")
+    undone = raw.setdefault("undone", {})
+    if not isinstance(undone, dict):
+        raise ClientUpdateError(f"The backup record in {root} is not one Yu'lon wrote.")
     return raw
 
 
-def _write_journal(root: Path, journal: Mapping[str, Any]) -> None:
+def _write_journal(client_dir: Path, root: Path, journal: Mapping[str, Any]) -> None:
+    """Atomic rewrite of the journal, its folder checked for links first (every time)."""
+    _no_link_below(client_dir, root)
     root.mkdir(parents=True, exist_ok=True)
-    path = root / JOURNAL
+    _no_link_below(client_dir, root)
+    path = _no_link_below(client_dir, root / JOURNAL)
     tmp = path.with_name(path.name + ".tmp")
     try:
         tmp.write_text(json.dumps(journal, indent=1) + "\n", encoding="utf-8")
@@ -891,9 +926,18 @@ def _put_in_place(
             part.unlink(missing_ok=True)
             raise ClientUpdateError("it is yours to keep, so Yu'lon left it.")
         backup = _fresh(root.joinpath(*PurePosixPath(item.path).parts))
+        _no_link_below(client_dir, backup)
         backup.parent.mkdir(parents=True, exist_ok=True)
-        journal["replaced"].setdefault(item.path, backup.relative_to(root).as_posix())
-        _write_journal(root, journal)
+        journal["replaced"].setdefault(
+            item.path,
+            {
+                "backup": backup.relative_to(root).as_posix(),
+                "original": _sha256(target),
+                "installed": item.sha256,
+            },
+        )
+        _write_journal(client_dir, root, journal)
+        _no_link_below(client_dir, backup)
         os.replace(target, backup)
         try:
             os.replace(part, target)
@@ -903,7 +947,7 @@ def _put_in_place(
     else:
         target.parent.mkdir(parents=True, exist_ok=True)
         journal["added"][item.path] = item.sha256
-        _write_journal(root, journal)
+        _write_journal(client_dir, root, journal)
         os.replace(part, target)
 
 
@@ -1077,46 +1121,125 @@ def backups(client_dir: Path) -> list[str]:
     return [name for _, name in sorted(found)]
 
 
-def rollback(client_dir: Path, version: str) -> list[str]:
-    """Put the client back as it was before the update to `version`; return what is left over.
+@dataclass
+class Undone:
+    """What `rollback()` did: what is still to put back, and the player's files moved aside."""
 
-    Every replaced file comes back from the backup; every file the update added
-    is removed while it still holds the update's bytes (one the player changed
-    since stays, and is named). The state file is restored last, and the backup
-    folder is removed only when everything came back.
+    version: str
+    left: list[str] = field(default_factory=list)
+    kept_changed: int = 0
+    conflicts_dir: Path | None = None
+
+    def sentence(self) -> str:
+        kept = ""
+        if self.kept_changed:
+            many = self.kept_changed != 1
+            kept = (
+                f" {self.kept_changed} file{'s' if many else ''} you changed after the update "
+                f"{'were' if many else 'was'} kept in {self.conflicts_dir}."
+            )
+        if not self.left:
+            return f"The client update {self.version} was undone.{kept}"
+        more = f" ({len(self.left) - 1} more)" if len(self.left) > 1 else ""
+        return (
+            f"The client update {self.version} was only partly undone: {self.left[0]}{more}. "
+            f"Its backup was kept; Undo again continues from there.{kept}"
+        )
+
+
+def _aside(client_dir: Path, root: Path, rel: PurePosixPath, target: Path) -> Path:
+    """Move the player's current `target` into `<root>/CONFLICTS/<rel>` (a fresh name)."""
+    place = _fresh(root.joinpath(CONFLICTS, *rel.parts))
+    _no_link_below(client_dir, place)
+    place.parent.mkdir(parents=True, exist_ok=True)
+    _no_link_below(client_dir, place)
+    os.replace(target, place)
+    return place
+
+
+def rollback(client_dir: Path, version: str) -> Undone:
+    """Put the client back as it was before the update to `version`.
+
+    Each file is one step, checkpointed in the journal (`undone`) as soon as it is
+    done, so an Undo stopped by a locked file continues where it stopped. A file the
+    update replaced comes back from the backup; if the player changed it after the
+    update (it no longer holds the update's digest) their file is moved to
+    `CONFLICTS` first. A file the update added is removed, or moved there when the
+    player changed it. A step whose backup is gone counts as done only when the
+    file already holds the ORIGINAL digest the journal recorded. The state file and
+    the backup folder are put back and removed only when every step is done; the
+    `CONFLICTS` folder is never removed.
     """
     root = _backup_root(client_dir, version)
     journal = _read_journal(root)
     if journal is None:
         raise ClientUpdateError(f"There is no backup of the client update {version} to undo.")
-    left: list[str] = []
+    undone: dict[str, Any] = journal["undone"]
+    result = Undone(version, conflicts_dir=root / CONFLICTS)
+
+    def checkpoint(key: str) -> None:
+        undone[key] = True
+        _write_journal(client_dir, root, journal)
+
     for rel_raw, sha in journal["added"].items():
+        key = f"added:{rel_raw}"
+        if key in undone:
+            continue
         rel = safe_rel(rel_raw)
-        target = _target(client_dir, rel)
         try:
-            if target.is_file() and _sha256(target) == sha:
+            target = _target(client_dir, rel)
+            if not os.path.lexists(target):
+                pass
+            elif target.is_file() and _sha256(target) == sha:
                 target.unlink()
-            elif os.path.lexists(target):
-                left.append(f"{rel} (changed since the update, so it was kept)")
+            else:
+                _aside(client_dir, root, rel, target)
+                result.kept_changed += 1
+            checkpoint(key)
         except OSError as exc:
-            left.append(f"{rel} ({_os_sentence(exc)})")
-    for rel_raw, backup_raw in journal["replaced"].items():
+            result.left.append(f"{rel} ({_os_sentence(exc)})")
+    for rel_raw, record in journal["replaced"].items():
+        key = f"replaced:{rel_raw}"
+        if key in undone:
+            continue
         rel = safe_rel(rel_raw)
-        backup = root.joinpath(*safe_rel(backup_raw).parts)
-        target = _target(client_dir, rel)
         try:
+            backup = _no_link_below(client_dir, root.joinpath(*safe_rel(record["backup"]).parts))
+            target = _target(client_dir, rel)
+            original, installed = record.get("original"), record.get("installed")
+            if not os.path.lexists(backup):
+                if original is not None and target.is_file() and _sha256(target) == original:
+                    checkpoint(key)  # put back by an Undo that stopped before its checkpoint
+                else:
+                    result.left.append(f"{rel} (its backup is missing, so it was not put back)")
+                continue
+            if os.path.lexists(target) and (
+                installed is None or not target.is_file() or _sha256(target) != installed
+            ):
+                _aside(client_dir, root, rel, target)
+                result.kept_changed += 1
+            _no_link_below(client_dir, backup)
             os.replace(backup, target)
+            checkpoint(key)
         except OSError as exc:
-            left.append(f"{rel} ({_os_sentence(exc)})")
-    if left:
-        return left
+            result.left.append(f"{rel} ({_os_sentence(exc)})")
+    if result.left:
+        return result
     previous = _state_from(journal.get("previous_state"))
     if previous is None:
         (client_dir / STATE_FILE).unlink(missing_ok=True)
     else:
         write_state(client_dir, previous)
-    shutil.rmtree(root, ignore_errors=True)
-    return []
+    for child in list(root.iterdir()):
+        if child.name == CONFLICTS:
+            continue
+        if child.is_dir() and not _is_link(child):
+            shutil.rmtree(child, ignore_errors=True)
+        else:
+            child.unlink(missing_ok=True)
+    with contextlib.suppress(OSError):
+        root.rmdir()  # only when nothing was kept aside
+    return result
 
 
 # --- After an update: the server's map data --------------------------------------------------

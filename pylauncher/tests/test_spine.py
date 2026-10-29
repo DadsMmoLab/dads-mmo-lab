@@ -3182,6 +3182,12 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "decides no write: `rollback()` is given one version by name and reads that version's "
         "journal itself"
     ),
+    ("coa_client.py", "rollback"): (
+        "T825 review. Lists ONE version's backup folder (`.yulon-client-backup/<version>/`) "
+        "in the player's client, only after every Undo step is checkpointed done, to remove "
+        "what is in it except `.yulon-conflicts` (the player's files moved aside). A link "
+        "there is removed as a name, never followed; the folder's path was checked for links"
+    ),
     ("launcher_reads.py", "_scandir"): (
         "T187. Lists a ready-to-play client, its `Interface` and its `AddOns` -- one folder "
         "each, never a walk -- for the NAMES the launcher window shows under Addons in this "

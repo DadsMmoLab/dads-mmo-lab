@@ -392,7 +392,7 @@ class ClientUpdateControl(QObject):
             self._parent,
             "Undo the client update",
             f"Put back the files the client update {version} replaced, and remove the files "
-            "it added? Files you changed since are kept. Close the game first.",
+            "it added? Files you changed since are moved aside, not lost. Close the game first.",
         ):
             return
         self._begin()
@@ -400,16 +400,8 @@ class ClientUpdateControl(QObject):
         manifest = self._manifest
 
         def work() -> object:
-            left = coa_client.rollback(client, version)
-            if not left:
-                return _Said(
-                    f"The client update {version} was undone.", _kind_now(client, manifest)
-                )
-            return _Said(
-                f"The client update {version} was only partly undone: {left[0]}"
-                f"{f' ({len(left) - 1} more)' if len(left) > 1 else ''}. Its backup was kept.",
-                _kind_now(client, manifest),
-            )
+            undone = coa_client.rollback(client, version)
+            return _Said(undone.sentence(), _kind_now(client, manifest))
 
         self._jobs(work, self._applied, self._failed)
 

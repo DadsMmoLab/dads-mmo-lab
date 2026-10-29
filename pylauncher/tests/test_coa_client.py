@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -495,7 +496,8 @@ def test_rollback_restores_replaced_files_removes_added_ones_and_the_state(
     before = (client / coa_client.STATE_FILE).read_text()
     _update(client, _site({"Ascension.exe": b"v2", "Data/new.MPQ": b"n"}, "v2"))
     assert coa_client.backups(client) == ["v2"]
-    assert coa_client.rollback(client, "v2") == []
+    undone = coa_client.rollback(client, "v2")
+    assert undone.left == [] and undone.kept_changed == 0
     assert (client / "Ascension.exe").read_bytes() == b"v1"
     assert not (client / "Data/new.MPQ").exists()
     assert json.loads((client / coa_client.STATE_FILE).read_text()) == json.loads(before)
@@ -503,12 +505,172 @@ def test_rollback_restores_replaced_files_removes_added_ones_and_the_state(
 
 
 def test_rollback_keeps_an_added_file_the_player_changed_since(tmp_path: Path) -> None:
+    """Kept, moved aside into the conflicts folder (T825 review), so the Undo can finish."""
     client = _client(tmp_path, {})
     _update(client, _site({"Data/new.MPQ": b"n"}, "v2"))
     (client / "Data/new.MPQ").write_bytes(b"changed")
-    left = coa_client.rollback(client, "v2")
-    assert left and "changed" in left[0]
-    assert (client / "Data/new.MPQ").read_bytes() == b"changed"
+    undone = coa_client.rollback(client, "v2")
+    assert undone.left == [] and undone.kept_changed == 1
+    conflicts = client / coa_client.BACKUP_DIR / "v2" / coa_client.CONFLICTS
+    assert (conflicts / "Data/new.MPQ").read_bytes() == b"changed"
+    assert not (client / "Data/new.MPQ").exists()
+    assert "1 file you changed after the update was kept in" in undone.sentence()
+
+
+def _replace_journal(client: Path, version: str) -> dict[str, object]:
+    root = client / coa_client.BACKUP_DIR / version
+    return json.loads((root / coa_client.JOURNAL).read_text())  # type: ignore[no-any-return]
+
+
+def test_a_backup_folder_that_is_a_link_is_refused(tmp_path: Path) -> None:
+    client = _client(tmp_path, {"Ascension.exe": b"old"})
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (client / coa_client.BACKUP_DIR).symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ClientUpdateError, match="link"):
+        _update(client, _site({"Ascension.exe": b"new"}), replace_edited=True)
+    assert list(outside.iterdir()) == []
+    assert (client / "Ascension.exe").read_bytes() == b"old"
+
+
+def test_a_version_folder_that_is_a_link_is_refused_before_any_move(tmp_path: Path) -> None:
+    client = _client(tmp_path, {"Ascension.exe": b"old"})
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (client / coa_client.BACKUP_DIR).mkdir()
+    (client / coa_client.BACKUP_DIR / "2026-10-28-01").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ClientUpdateError, match="link"):
+        _update(client, _site({"Ascension.exe": b"new"}), replace_edited=True)
+    assert list(outside.iterdir()) == []
+    assert (client / "Ascension.exe").read_bytes() == b"old"
+
+
+def test_a_link_planted_under_the_version_folder_mid_update_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Checked again right before each journal write and move, not only at the start."""
+    client = _client(tmp_path, {"a.exe": b"1", "Data/b.MPQ": b"1"})
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    real = coa_client._write_journal
+    planted: list[bool] = []
+
+    def plant(client_dir: Path, root: Path, journal: dict[str, dict[str, object]]) -> None:
+        real(client_dir, root, journal)
+        if not planted and "Data/b.MPQ" in journal["replaced"]:
+            # After the checks before the journal write: swap the real folder for a link.
+            (root / "Data").rmdir()
+            (root / "Data").symlink_to(outside, target_is_directory=True)
+            planted.append(True)
+
+    monkeypatch.setattr(coa_client, "_write_journal", plant)
+    outcome = _update(client, _site({"a.exe": b"2", "Data/b.MPQ": b"2"}), replace_edited=True)
+    assert planted
+    assert list(outside.iterdir()) == []
+    assert (client / "Data/b.MPQ").read_bytes() == b"1"
+    assert any("link" in why for _, why in outcome.failed)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="a junction exists only on Windows")
+def test_a_backup_folder_that_is_a_junction_is_refused(tmp_path: Path) -> None:
+    """Windows only: `play_client._is_link` reads a junction by its reparse tag."""
+    import subprocess
+
+    client = _client(tmp_path, {"Ascension.exe": b"old"})
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(client / coa_client.BACKUP_DIR), str(outside)],
+        check=True,
+    )
+    with pytest.raises(ClientUpdateError, match="link"):
+        _update(client, _site({"Ascension.exe": b"new"}), replace_edited=True)
+    assert list(outside.iterdir()) == []
+
+
+def test_undo_keeps_an_edit_made_after_the_update_and_still_restores_the_original(
+    tmp_path: Path,
+) -> None:
+    client = _client(tmp_path, {"Ascension.exe": b"original"})
+    _update(client, _site({"Ascension.exe": b"updated"}, "v2"), replace_edited=True)
+    (client / "Ascension.exe").write_bytes(b"edited after")
+    undone = coa_client.rollback(client, "v2")
+    assert undone.left == [] and undone.kept_changed == 1
+    assert (client / "Ascension.exe").read_bytes() == b"original"
+    conflicts = client / coa_client.BACKUP_DIR / "v2" / coa_client.CONFLICTS
+    assert (conflicts / "Ascension.exe").read_bytes() == b"edited after"
+    assert "1 file you changed after the update was kept in" in undone.sentence()
+
+
+def test_the_journal_records_the_original_and_installed_digests(tmp_path: Path) -> None:
+    client = _client(tmp_path, {"Ascension.exe": b"original"})
+    _update(client, _site({"Ascension.exe": b"updated"}, "v2"), replace_edited=True)
+    record = _replace_journal(client, "v2")["replaced"]["Ascension.exe"]  # type: ignore[index]
+    assert record == {
+        "backup": "Ascension.exe",
+        "original": _sha(b"original"),
+        "installed": _sha(b"updated"),
+    }
+
+
+def test_an_undo_stopped_by_a_locked_file_continues_on_the_next_undo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    files = {"a.exe": b"a1", "Data/b.MPQ": b"b1", "Data/c.MPQ": b"c1"}
+    client = _client(tmp_path, files)
+    _update(client, _site(files, "v1"))
+    before = (client / coa_client.STATE_FILE).read_text()
+    _update(client, _site({"a.exe": b"a2", "Data/b.MPQ": b"b2", "Data/c.MPQ": b"c2"}, "v2"))
+    real = os.replace
+    failed: list[str] = []
+
+    def locked_once(src: object, dst: object) -> None:
+        if str(dst).endswith("b.MPQ") and coa_client.BACKUP_DIR in str(src) and not failed:
+            failed.append(str(dst))
+            exc = PermissionError(13, "The process cannot access the file")
+            exc.winerror = 32  # type: ignore[attr-defined,unused-ignore]
+            raise exc
+        real(src, dst)  # type: ignore[arg-type,unused-ignore]
+
+    monkeypatch.setattr(os, "replace", locked_once)
+    first = coa_client.rollback(client, "v2")
+    assert failed and len(first.left) == 1 and "Data/b.MPQ" in first.left[0]
+    assert "Close the game" in first.left[0]
+    assert (client / "a.exe").read_bytes() == b"a1"
+    assert (client / "Data/c.MPQ").read_bytes() == b"c1"
+    assert (client / "Data/b.MPQ").read_bytes() == b"b2"
+    assert "partly undone" in first.sentence()
+    # Each finished step is checkpointed in the journal at once.
+    assert set(_replace_journal(client, "v2")["undone"]) == {  # type: ignore[arg-type]
+        "replaced:a.exe",
+        "replaced:Data/c.MPQ",
+    }
+    # Not consumed: the state is still the update's, the backup still there.
+    assert (client / coa_client.BACKUP_DIR / "v2" / "Data/b.MPQ").read_bytes() == b"b1"
+    second = coa_client.rollback(client, "v2")
+    assert second.left == [] and second.kept_changed == 0
+    assert {rel: (client / rel).read_bytes() for rel in files} == files
+    assert json.loads((client / coa_client.STATE_FILE).read_text()) == json.loads(before)
+    assert not (client / coa_client.BACKUP_DIR / "v2").exists()
+
+
+def test_a_restore_whose_checkpoint_was_lost_is_done_only_if_it_holds_the_original(
+    tmp_path: Path,
+) -> None:
+    client = _client(tmp_path, {"Data/b.MPQ": b"b1"})
+    _update(client, _site({"Data/b.MPQ": b"b1"}, "v1"))
+    _update(client, _site({"Data/b.MPQ": b"b2"}, "v2"))
+    root = client / coa_client.BACKUP_DIR / "v2"
+    # A crash after the move and before the checkpoint: backup gone, original in place.
+    os.replace(root / "Data/b.MPQ", client / "Data/b.MPQ")
+    assert coa_client.rollback(client, "v2").left == []
+    # The same, but the file is NOT the original: never counted as put back.
+    _update(client, _site({"Data/b.MPQ": b"b3"}, "v3"))
+    root = client / coa_client.BACKUP_DIR / "v3"
+    (root / "Data/b.MPQ").unlink()
+    undone = coa_client.rollback(client, "v3")
+    assert undone.left and "backup is missing" in undone.left[0]
+    assert (root / coa_client.JOURNAL).is_file()
 
 
 def test_the_state_file_is_written_last(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
