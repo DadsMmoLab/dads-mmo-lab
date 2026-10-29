@@ -143,12 +143,16 @@ class Db:
         # The realm row's name, as MariaDB would store it from either literal (T808).
         hexed = re.search(r"SET name=_utf8mb4 X'([0-9A-F]*)'", sql)
         quoted = re.search(r"SET `name` = '((?:[^']|'')*)'", sql)
+        # The realm switch's own UPDATE (`coa_realm.realm_name_update()`), quotes refused there.
+        plain = re.search(r"SET name='([^'\\\"]*)' WHERE id=", sql)
         if hexed is not None:
             value = bytes.fromhex(hexed.group(1)).decode("utf-8")
         elif quoted is not None:
             value = quoted.group(1).replace("''", "'")
             if not self.no_backslash_escapes:
                 value = re.sub(r"\\(.)", r"\1", value)
+        elif plain is not None:
+            value = plain.group(1)
         else:
             return
         if self.realm_row:
@@ -1069,20 +1073,54 @@ def test_the_old_realm_name_brought_in_becomes_this_servers_saved_choice(tmp_pat
     assert not [n for n in result.notes if "realm" in n.lower()], result.notes
 
 
-def test_an_old_realm_name_brought_into_a_realm_type_server_is_never_kept_as_its_choice(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """T808 x T812: on a realm-type entry (CoA) the realm type decides the name, so a move never
-    writes the T808 record there. Mutation: drop the `follows_realm_type` check in `_fix_ups()`."""
-    from yulon import realm_name
+def _coa_ready(tmp_path: Path, active: str | None) -> tuple[Box, move_flows.ImportPlan]:
+    from yulon import coa_realm
 
-    box, _package, plan = ready(tmp_path)
-    monkeypatch.setattr(realm_name, "follows_realm_type", lambda entry: True)
+    package = packed(tmp_path, game_id="wow-coa")
+    box = target(tmp_path, game_id="wow-coa", running_now=("coa-database",))
+    if active is not None:
+        coa_realm.write_active(box.world.server_dir, active)
+    plan = move_flows.plan_import(box.world, package)
+    assert plan.allowed, plan.refusals
+    box.db.realm = "Left By The Load"
+    return box, plan
+
+
+@pytest.mark.parametrize("use_old", [True, False])
+def test_a_move_into_a_coa_server_leaves_the_realm_row_with_the_active_types_name(
+    tmp_path: Path, use_old: bool
+) -> None:
+    """T808 x T812: on CoA the realm type decides the name. "Use the old realm name" writes
+    nothing of the old name and no saved-name record; the ACTIVE type's name (read from the
+    marker) is put in the row either way. Mutation: send CoA down the old-name branch, or
+    drop `_keep_the_realm_types_name()`, and the row says 'Source Realm' / the load's name."""
+    from yulon import coa_realm, realm_name
+
+    types = coa_realm.types_of(entry("wow-coa"))
+    chosen = next(t for t in types if t.id != coa_realm._default_id(entry("wow-coa")))
+    box, plan = _coa_ready(tmp_path, chosen.id)
+
+    result = move_flows.run_import(
+        box.world, plan, confirm=None, use_old_realm_name=use_old, stop_allowed=False
+    )
+
+    assert box.db.realm == chosen.realm_name
+    sent = "\n".join(box.db.executed)
+    assert b"Source Realm".hex().upper() not in sent and "Source Realm" not in sent
+    assert not (box.world.server_dir / realm_name.REALM_NAME_FILE).exists()
+    said = " ".join(result.notes)
+    assert ("was not brought in" in said) is use_old, result.notes
+    assert "could not be set" not in said, result.notes
+
+
+def test_a_coa_server_with_no_type_marker_gets_the_default_types_name(tmp_path: Path) -> None:
+    from yulon import coa_realm
+
+    box, plan = _coa_ready(tmp_path, None)
     move_flows.run_import(
         box.world, plan, confirm=None, use_old_realm_name=True, stop_allowed=False
     )
-    assert box.db.realm == "Source Realm"
-    assert not (box.world.server_dir / realm_name.REALM_NAME_FILE).exists()
+    assert box.db.realm == coa_realm.active(entry("wow-coa"), box.world.server_dir).realm_name
 
 
 def test_keeping_this_servers_realm_name_keeps_its_saved_choice(tmp_path: Path) -> None:

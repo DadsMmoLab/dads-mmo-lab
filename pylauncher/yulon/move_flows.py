@@ -1989,7 +1989,12 @@ def _fix_ups(
         session_sql,
         "The stored session keys could not be cleared; they are harmless and expire.",
     )
-    if use_old_realm_name and manifest.realm_name:
+    if realm_name.follows_realm_type(world.entry):
+        # T808 x T812: a realm-type entry's (CoA's) name is its ACTIVE realm type's, which
+        # the switch writes; the old name is never brought in, and the type's name is put
+        # back over whatever the load left in the row, as the switch would.
+        notes.extend(_keep_the_realm_types_name(world, manifest, use_old_realm_name))
+    elif use_old_realm_name and manifest.realm_name:
         failed = len(notes)
         run(
             realm_name_sql(world.entry, manifest.realm_name),
@@ -1999,11 +2004,7 @@ def _fix_ups(
             # An UPDATE that matched no row exits 0 too: kept only when the row says it.
             reads = _row_realm_name(world)
             if reads == manifest.realm_name:
-                # Not on a realm-type entry (CoA): its realm type decides the name (T812).
-                if not realm_name.follows_realm_type(world.entry):
-                    notes.extend(
-                        _keep_the_imported_realm_name(world.server_dir, manifest.realm_name)
-                    )
+                notes.extend(_keep_the_imported_realm_name(world.server_dir, manifest.realm_name))
             else:
                 said = "could not be read back" if reads is None else f"reads '{reads}'"
                 notes.append(
@@ -2164,6 +2165,43 @@ def _tail_failure_sentence(
         f"({'; '.join(names)}). {_tail_copies_sentence()} The package is unchanged: "
         f"bring it in again after that restore. {_NOT_IN}"
     )
+
+
+def _keep_the_realm_types_name(
+    world: MoveWorld, manifest: Manifest, use_old_realm_name: bool
+) -> tuple[str, ...]:
+    """Write the active realm type's own name into a CoA realm row after a load (T808 x T812).
+
+    The name is the one the realm switch writes (`coa_realm.realm_name_update()` with the
+    active type's `realm_name`, the type read from this server's marker), and the row is read
+    back. Returns notes, never raises: the load stands either way.
+    """
+    from yulon import coa_realm
+
+    notes: list[str] = []
+    if use_old_realm_name and manifest.realm_name:
+        notes.append(
+            f"The old realm name '{manifest.realm_name}' was not brought in: on this server "
+            "the realm name follows the realm type."
+        )
+    try:
+        name = coa_realm.active(world.entry, world.server_dir).realm_name
+        world.mysql.execute(coa_realm.realm_name_update(world.entry, name))
+    except Exception as exc:  # noqa: BLE001 - the load is done; say what is still to do
+        logger.warning(f"after the move: the realm type's name could not be written: {exc}")
+        notes.append(
+            "The realm name could not be set to the realm type's; switching the realm type "
+            "on the Server tab writes it again."
+        )
+        return tuple(notes)
+    reads = _row_realm_name(world)
+    if reads != name:
+        said = "could not be read back" if reads is None else f"reads '{reads}'"
+        notes.append(
+            f"The realm name could not be set to the realm type's ('{name}'): the realm row "
+            f"{said}. Switching the realm type on the Server tab writes it again."
+        )
+    return tuple(notes)
 
 
 def _keep_the_imported_realm_name(server_dir: Path, name: str) -> tuple[str, ...]:
