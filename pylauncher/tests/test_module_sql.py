@@ -41,3 +41,24 @@ def test_the_module_route_runs_this_games_own_importer(monkeypatch: pytest.Monke
     assert seen["server_dir"] == Path("/tmp/wow")
     assert seen["kwargs"]["output"] is not None
     assert run.returncode == 0
+
+
+def test_the_coa_press_does_not_hand_the_importer_its_cores_own_folder(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """T812 D14: the CoA importer adds `mod-ascension` itself; a second one aborts it."""
+    seen: dict[str, Any] = {}
+
+    def fake(spec: docker.ContainerSpec, server_dir: Path, **kwargs: Any) -> object:
+        seen["modules"] = kwargs["modules"]
+        return docker.AttachedRun(0, ("done",))
+
+    for name in ("mod-ah-bot-plus", "mod-ascension", "mod-playerbots"):
+        (tmp_path / "modules" / name).mkdir(parents=True)
+    monkeypatch.setattr(docker, "apply_module_sql", fake)
+    said: list[str] = []
+    modules.apply_module_sql(
+        tmp_path, spec=docker_ctl.SPEC, output=said.append, ledger=None, user_game="wow-coa"
+    )
+
+    assert seen["modules"] == "mod-ah-bot-plus,mod-playerbots"

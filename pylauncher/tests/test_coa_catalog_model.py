@@ -151,6 +151,13 @@ def test_realm_type_ids_must_be_unique() -> None:
         AzerothCoreData.model_validate({"realm_types": [REALM, REALM], "default_realm_type": "coa"})
 
 
+@pytest.mark.parametrize("name", ["", ".git", "a/b", "a\\b", "mod-a,mod-b"])
+def test_a_core_sql_module_must_be_one_plain_folder_name(name: str) -> None:
+    """T812 D14: a comma would split into two names; a path names no folder of `modules/`."""
+    with pytest.raises(ValidationError, match="core_sql_modules names a folder"):
+        AzerothCoreData.model_validate({"core_sql_modules": [name]})
+
+
 def test_a_default_realm_type_that_is_not_listed_is_refused() -> None:
     with pytest.raises(ValidationError, match="not one of this.*realm types"):
         AzerothCoreData.model_validate({"realm_types": [REALM], "default_realm_type": "hero"})

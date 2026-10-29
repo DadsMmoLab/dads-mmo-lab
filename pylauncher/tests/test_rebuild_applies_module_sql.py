@@ -166,6 +166,55 @@ def test_the_app_hands_a_rebuild_the_modules_tabs_own_split(tmp_path: Path, game
     assert allowed(server_dir) == "mod-city-bots,mod-playerbots"
 
 
+def test_a_coa_rebuild_never_names_the_folder_its_core_imports_by_itself(tmp_path: Path) -> None:
+    """T812 D14: the CoA importer prepends `mod-ascension,`; naming it again aborts the import.
+
+    Live on yulon-ubuntu2, 2026-10-28: the Rebuild's db-import logged `Loading modules:
+    mod-ah-bot-plus,mod-ascension,...` and stopped on `Duplicate filename
+    ".../mod-ascension/data/sql/db-characters/2026_09_16_00_ascension_personal_bank.sql"`,
+    because the fork's `dbimport/Main.cpp:119-120` had put `mod-ascension,` in front of it.
+    """
+    from yulon import install_wiring
+    from yulon.catalog.catalog import load_catalog
+
+    server_dir = tmp_path / "srv"
+    for name in ("mod-ah-bot-plus", "mod-ascension", "mod-playerbots"):
+        (server_dir / "modules" / name).mkdir(parents=True)
+    made = install_wiring.installer_for_app(load_catalog().get("wow-coa"))
+    allowed = made._importer_modules  # type: ignore[attr-defined]
+
+    assert allowed is not None
+    assert allowed(server_dir) == "mod-ah-bot-plus,mod-playerbots"
+
+
+def test_a_coa_install_whose_only_module_is_the_cores_own_leaves_the_compiled_list(
+    tmp_path: Path,
+) -> None:
+    """Nothing left to hand is `all`, never `""`: the core still adds its own folder."""
+    from yulon.controller_wow_wotlk import modules
+
+    (tmp_path / "modules" / "mod-ascension").mkdir(parents=True)
+
+    assert modules.importer_modules(tmp_path, user_game="wow-coa") == docker.ALL_MODULES
+
+
+def test_only_the_entry_that_declares_a_core_folder_withholds_it(tmp_path: Path) -> None:
+    """A WotLK folder of the same name is a module like any other: the list is per entry."""
+    from yulon.catalog.catalog import load_catalog
+    from yulon.controller_wow_wotlk import modules
+
+    for name in ("mod-ascension", "mod-playerbots"):
+        (tmp_path / "modules" / name).mkdir(parents=True)
+
+    assert modules.importer_module_dirs(tmp_path, "wow-wotlk") == [
+        "mod-ascension",
+        "mod-playerbots",
+    ]
+    native = load_catalog().get("wow-coa").install.native
+    assert native is not None and native.azerothcore is not None
+    assert native.azerothcore.core_sql_modules == ("mod-ascension",)
+
+
 def test_a_game_with_no_importer_is_handed_no_module_list() -> None:
     from tests.test_families_cmangos import ENTRY as TBC
     from yulon import install_wiring

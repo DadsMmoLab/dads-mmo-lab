@@ -627,6 +627,29 @@ class AzerothCoreData(_Strict):
             "row from the world (T812). False: both servers start as before."
         ),
     )
+    core_sql_modules: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "Folders under `modules/` whose `data/sql/` the core's own importer always applies, "
+            "so Yu'lon never names them in `AC_UPDATES_ALLOWED_MODULES` (T812 D14). The CoA "
+            "fork's `src/tools/dbimport/Main.cpp:119-120` (pin 98570f24) prepends "
+            "`COA_DATABASE_MODULE_LIST` (`mod-ascension,`) to whatever list it is given, and "
+            "`UpdateFetcher.cpp` walks a folder once per time its module is named, so a second "
+            "`mod-ascension` made the importer abort on `Duplicate filename`. Empty: "
+            "every module folder is the app's to hand over, as before."
+        ),
+    )
+
+    @field_validator("core_sql_modules")
+    @classmethod
+    def _core_sql_modules_are_folder_names(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        for name in value:
+            if not name or name.startswith(".") or "/" in name or "\\" in name or "," in name:
+                raise ValueError(
+                    "core_sql_modules names a folder directly under modules/ (no separator, "
+                    f"comma or leading dot), got {name!r}"
+                )
+        return value
 
     @model_validator(mode="after")
     def _realm_type_ids_are_unique(self) -> AzerothCoreData:

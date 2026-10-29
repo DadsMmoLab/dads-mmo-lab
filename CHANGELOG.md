@@ -29,6 +29,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Pressing **Update the server to latest…** during a backup or move names that job and says once what was not started.
 - A refused Tuning restart or Repair now shows the update or Repair press its sentence names.
 - Spin boxes keep their number clear of the buttons with any font.
+- **Rebuild** and **Apply module SQL** on a Conquest of Azeroth server no longer stop on a "Duplicate filename" update.
 
 ### Changed
 

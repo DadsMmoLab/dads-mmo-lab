@@ -878,6 +878,23 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         },
         scanned=False,
     ),
+    Site(
+        "yulon.controller_wow_wotlk.modules",
+        "importer_module_dirs",
+        "the module folders handed to the importer, less the ones the core's own importer "
+        "always applies (core_sql_modules, T812 D14)",
+        {
+            "azerothcore": supported(
+                "an entry that lists core_sql_modules never hands those folders over; every "
+                "other entry hands every folder on disk, as before"
+            ),
+            "cmangos": not_applicable("CMaNGOS has no module importer (no import_service)"),
+            "trinitycore": not_applicable(
+                "TrinityCore has no module importer (CmangosInstaller's, inherited)"
+            ),
+        },
+        hits=(".azerothcore",),
+    ),
     # -- account schemes (Accounts.scheme; the AzerothCore arm names a family) -------
     Site(
         "yulon.controller_wow_wotlk.accounts",

@@ -2865,6 +2865,9 @@
                         ]
                     },
                     "world_bootstrap_service": "coa-world-bootstrap",
+                    "core_sql_modules": [
+                        "mod-ascension"
+                    ],
                     "realm_types": [
                         {
                             "id": "coa",
