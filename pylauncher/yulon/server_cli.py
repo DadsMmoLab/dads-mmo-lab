@@ -128,7 +128,7 @@ def run(
             say("running" if status.all_running else "stopped")
             return EXIT_OK if status.world else EXIT_NOT_UP
         if verb == "stop":
-            stopped = controller.stop()
+            stopped = controller.stop(by_choice=True)
             say(f"{name} stopped." if stopped is not False else f"{name} was not running.")
             return EXIT_OK
         return _start(controller, services, name, say=say, tick=tick)

@@ -19,6 +19,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - **Update the server to latest…** on a Tortoise server also updates TortoiseBots Manager in your game client.
 - Updating a module now adds its new settings to your kept config file, leaving your own values alone.
 - Lumenveil graphics mod as an optional WotLK client extra, with an **Update Lumenveil** button.
+- **When stopping** on the WotLK and Unbound Server tab: wait for the bots' saves, or stop faster after players are saved.
 
 ### Fixed
 - The install's free-space check now measures Docker's containerd images too, so a full root disk stops it early.

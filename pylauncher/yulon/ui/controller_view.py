@@ -125,6 +125,7 @@ from yulon import (
     server_time_zone,
     serverlock,
     sql_log_offer,
+    stop_choice,
     table_repair,
     teardown,
     tuning,
@@ -3549,9 +3550,11 @@ def _assemble(
     function object in all four packages.
     """
     spec = entry.container_spec()
-    if spec.save_first is not None and channel_setup is not None:
+    saves_first = spec.save_first is not None or spec.bot_saves_skippable is not None
+    if saves_first and channel_setup is not None:
         # T496: where the console needs a terminal this host cannot open (Windows), the save
         # a Stop asks for first goes through this install's command channel, on every route.
+        # T826: so does the players' save of a Stop that does not wait for the bots.
         live_channel = getattr(channel_setup, "live_channel", None)
         if callable(live_channel):
             docker.save_through_channel(spec.world, server_dir, live_channel)
@@ -9490,6 +9493,7 @@ class ControllerView(QWidget):
         self.restart_button.setToolTip(RESTART_TIP)
         self.refresh_button = QPushButton("Refresh", tab)
         self.refresh_button.setIcon(dadcraft_icon("refresh", COLOR_TEXT_GOLD, 14))
+        self._build_stop_choice(tab)
         # T695: the Danger zone's one removal press. It opens the dialog with
         # the three routes; Repair stays its own press because it repairs.
         self.remove_server_button = QPushButton(REMOVE_THIS_SERVER, tab)
@@ -9697,6 +9701,8 @@ class ControllerView(QWidget):
                 realm, self.start_button, self.stop_button, self.restart_button, self.refresh_button
             )
         )
+        realm_column.addWidget(_bar(realm, self.stop_choice_label, self.stop_choice_box))
+        realm_column.addWidget(self.stop_choice_note)
         realm_column.addWidget(self.server_reasons)
         # The refusal, then the offers it makes: read in that order.
         realm_column.addWidget(self.problem_label)
@@ -9808,6 +9814,61 @@ class ControllerView(QWidget):
         for press in self._server_presses():
             self.server_reasons.watch(press)
         self._add_panel_tab(tab, "server", "Server")
+
+    def _build_stop_choice(self, tab: QWidget) -> None:
+        """T826: whether this server's Stop waits for the bots to be saved, kept per install.
+
+        Under Start/Stop/Restart, the presses it changes. Shown only for a game that offers it
+        (`ContainerSpec.bot_saves_skippable`); for the rest every Stop waits for every save and
+        there is nothing to choose. Read from the install's record once, at build; a change is
+        written at once (`stop_choice.choose()`), and one that cannot be written is said and put
+        back, so the box never shows a choice the next Stop will not make.
+        """
+        found = getattr(
+            getattr(self.services.controller, "spec", None), "bot_saves_skippable", None
+        )
+        skippable = found if isinstance(found, docker.BotSavesSkippable) else None
+        self.stop_choice_label = QLabel(stop_choice.CHOICE_TITLE, tab)
+        self.stop_choice_box = QComboBox(tab)
+        self.stop_choice_box.addItem(stop_choice.WAIT_LABEL, True)
+        self.stop_choice_box.addItem(stop_choice.NO_WAIT_LABEL, False)
+        self.stop_choice_box.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        self.stop_choice_box.setMinimumContentsLength(24)
+        self.stop_choice_note = QLabel(stop_choice.CHOICE_NOTE, tab)
+        self.stop_choice_note.setWordWrap(True)
+        self.stop_choice_note.setStyleSheet(f"color: {COLOR_TEXT_MUTED};")
+        offered = skippable is not None
+        for widget in (self.stop_choice_label, self.stop_choice_box, self.stop_choice_note):
+            widget.setVisible(offered)
+        if skippable is None:
+            return
+        tip = stop_choice.choice_tip(skippable.seconds)
+        self.stop_choice_label.setToolTip(tip)
+        self.stop_choice_box.setToolTip(tip)
+        self._show_stop_choice(not self.services.controller.skips_bot_saves())
+        self.stop_choice_box.currentIndexChanged.connect(self._stop_choice_changed)
+
+    def _show_stop_choice(self, waits: bool) -> None:
+        """Put the box on `waits` without it counting as the player's change."""
+        blocked = self.stop_choice_box.blockSignals(True)
+        try:
+            self.stop_choice_box.setCurrentIndex(0 if waits else 1)
+        finally:
+            self.stop_choice_box.blockSignals(blocked)
+
+    def _stop_choice_changed(self, index: int) -> None:
+        """The player picked how this server's Stop treats the bots' saves: keep it (T826)."""
+        waits = bool(self.stop_choice_box.itemData(index))
+        try:
+            stop_choice.choose(self.services.controller.server_dir, waits)
+        except OSError as exc:
+            logger.warning(f"could not keep the Stop choice: {exc}")
+            self._show_stop_choice(not self.services.controller.skips_bot_saves())
+            self.stop_choice_note.setText(stop_choice.CHOICE_NOT_KEPT.format(why=exc))
+            return
+        self.stop_choice_note.setText(stop_choice.CHOICE_NOTE)
 
     def _server_presses(self) -> tuple[QAbstractButton, ...]:
         """The Server tab's presses a job of ours greys, in the order the tab draws them."""
@@ -11555,7 +11616,12 @@ class ControllerView(QWidget):
         self._set_busy(True, "Stop")
         self.status_label.setText("Stopping…")
         self._hold_badge("stopping")
-        self._run(self.services.controller.stop, self._stop_done, self._stop_failed)
+        # T826: the player's Stop, so the install's "When stopping" choice reaches it.
+        self._run(
+            lambda: self.services.controller.stop(by_choice=True),
+            self._stop_done,
+            self._stop_failed,
+        )
 
     def _stop_over_a_running_load_agreed(self) -> bool:
         """False when a restore load from the last session still writes and the player keeps it.
@@ -11613,7 +11679,7 @@ class ControllerView(QWidget):
         """The worker half of "Stop anyway": end the holder's reservation, then Stop as always."""
         if docker.end_reservation(holder, wsl_distro=self.services.controller.wsl_distro):
             try:
-                return self.services.controller.stop()
+                return self.services.controller.stop(by_choice=True)
             except docker.ServerReserved as newcomer:
                 # Another Yu'lon took the server between the removal and this Stop (Codex
                 # review): the confirmed Stop is not asked about twice, and still stops.
@@ -11624,7 +11690,7 @@ class ControllerView(QWidget):
         # "Stop always stops": the Stop the player confirmed runs without a reservation of
         # its own, for this one Stop only.
         with docker.stopping_regardless():
-            return self.services.controller.stop()
+            return self.services.controller.stop(by_choice=True)
 
     def _offer_to_clear_a_leftover(self, exc: object) -> None:
         """T568: a refusal naming this user's own leftover reservation offers [Clear it].
@@ -23260,7 +23326,8 @@ class ControllerView(QWidget):
         with docker.lifecycle(
             controller.server_dir, spec=controller.spec, wsl_distro=controller.wsl_distro
         ):
-            was_up = controller.stop()
+            # T826: a Restart the player pressed, so the "When stopping" choice reaches it.
+            was_up = controller.stop(by_choice=True)
             if stopped is None:
                 controller.start()
                 return was_up

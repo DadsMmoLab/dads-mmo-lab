@@ -1892,7 +1892,7 @@ def test_quitting_over_a_stop_still_joins_it_so_the_stop_finishes(
     gate = threading.Event()
     finished: list[float] = []
 
-    def slow_stop() -> bool:
+    def slow_stop(*, by_choice: bool = False) -> bool:
         gate.wait(60)
         finished.append(time.monotonic())
         return True

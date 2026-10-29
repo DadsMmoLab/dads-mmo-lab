@@ -196,6 +196,20 @@ class SaveFirst:
 
 
 @dataclass(frozen=True)
+class BotSavesSkippable:
+    """A Stop that writes every player's save and then does not wait for the bots' (T826).
+
+    Built by `CatalogEntry.container_spec()` from the entry's `stop_without_bot_saves`.
+    `save` is typed at the console before the signal and its queue waited for until empty;
+    the world then gets `seconds` to close before it alone is killed.
+    """
+
+    save: SaveFirst
+    seconds: float = 20.0
+    waits_by_default: bool = True
+
+
+@dataclass(frozen=True)
 class ContainerSpec:
     """How one server install is addressed: its containers, services and ports.
 
@@ -233,6 +247,13 @@ class ContainerSpec:
     container's PID 1 and installs its SIGTERM handler only once the world has
     loaded. Every stop of such a world first goes through
     `wait_for_the_world_to_load()`.
+    """
+
+    bot_saves_skippable: BotSavesSkippable | None = None
+    """How a Stop that does not wait for the bots' saves is done, or None: it always waits (T826).
+
+    Set by `CatalogEntry.container_spec()` from the entry's `stop_without_bot_saves`: the
+    AzerothCore games. Used only by a stop whose `StopControl.skip_bot_saves` is set.
     """
 
     save_first: SaveFirst | None = None
@@ -4353,6 +4374,36 @@ whose traffic cannot be read at all, which is never taken for silence.
 _SAVE_POLL_SECONDS = 2.0
 """How long a stop pauses between two looks at a world that is saving (T384)."""
 
+PLAYERS_SAVE_CEILING_SECONDS = 180
+"""The longest a Stop that does not wait for the bots waits for every player's save (T826).
+
+Before the signal, `saveall` (every character, bots included) and then the character queue
+until it is empty. Measured on yulon-ubuntu2 (WotLK, 500 bots, 2026-09-10, `party.py`'s
+`LEVEL_SLEEP`): a row written by `saveall` agreed 1.4 to 8.2 s after it came back. A queue
+that is not empty by this time falls back to the full wait (`PLAYERS_SAVE_UNSEEN`), so this
+bounds only how long the fast Stop tries before it becomes the safe one."""
+
+PLAYERS_SAVE_UNSEEN = (
+    "Yu'lon could not see every player's save written, so this Stop waits for all the saves, "
+    "the bots' too, after all."
+)
+"""Said when a Stop that was not to wait for the bots falls back to the full wait (T826)."""
+
+WORLD_STOPPED_WITHOUT_BOT_SAVES = (
+    "Every player was saved. The world server was stopped without waiting for the rest of the "
+    "bots' saves, as this server is set to do, so bots may have lost their latest changes."
+)
+"""Said when the world was killed at `BotSavesSkippable.seconds` after its signal (T826)."""
+
+
+def world_closing_without_bot_saves(seconds: float) -> str:
+    """Said once the world is signalled in a Stop that does not wait for the bots (T826)."""
+    return (
+        "Every player is saved. The world server is closing; Yu'lon gives it "
+        f"{int(seconds)} seconds and then stops it without waiting for the bots' saves."
+    )
+
+
 WORLD_SAVING = (
     "Saving characters: the world server is writing every character to its database before it "
     "closes. That usually takes under a minute and can take several on a busy disk. Yu'lon "
@@ -4635,6 +4686,17 @@ class StopControl:
     on it returned in 11.9-20.2 s, at the cycle's own crash, never at SIGKILL).
     """
 
+    skip_bot_saves: bool = False
+    """The player's "do not wait for the bots to be saved" for THIS stop (T826).
+
+    Off for every stop but the ones the player's choice reaches: `Controller.stop(by_choice=
+    True)` sets it on a copy of its control (`dataclasses.replace`, so the events are shared)
+    when the install's choice says so. Every other stop -- a backup's, an update's or a
+    rebuild's, a move's, a removal's, a realm switch's -- builds or keeps a control without it,
+    so it waits for every save whatever the choice. Read only for a spec with
+    `bot_saves_skippable`; see `save_then_stop_the_world()`.
+    """
+
     def forced(self) -> bool:
         """Has anyone asked for the stop regardless?"""
         return self.anyway.is_set() or any(event.is_set() for event in self.also_anyway)
@@ -4791,13 +4853,15 @@ def _type_at_the_world(
     window: float,
     wsl_distro: str | None,
     answer_marker: str | None = None,
+    save: SaveFirst | None = None,
 ) -> Any | None:
     """One console line to this world; its `ConsoleReply`, or None when it could not be typed.
 
     Where this host cannot type at the console at all (T496), the line goes through the
-    install's command channel instead (`_ask_the_channel()`).
+    install's command channel instead (`_ask_the_channel()`). `save` is the save whose console
+    this is, `spec.save_first` unless given (T826 passes `bot_saves_skippable.save`).
     """
-    save = spec.save_first
+    save = save or spec.save_first
     assert save is not None
     if not _console_reaches(wsl_distro):
         return _ask_the_channel(spec, command, wsl_distro)
@@ -4816,20 +4880,42 @@ def _type_at_the_world(
         return None
 
 
-def _queue_length(spec: ContainerSpec, wsl_distro: str | None) -> int | None:
+def _queue_length(
+    spec: ContainerSpec, wsl_distro: str | None, save: SaveFirst | None = None
+) -> int | None:
     """The world's character save queue as its `queue_command` reports it, or None (T410)."""
-    save = spec.save_first
+    save = save or spec.save_first
     assert save is not None
-    reply = _type_at_the_world(spec, save.queue_command, _QUEUE_LOOK_WINDOW_SECONDS, wsl_distro)
+    reply = _type_at_the_world(
+        spec, save.queue_command, _QUEUE_LOOK_WINDOW_SECONDS, wsl_distro, save=save
+    )
     if reply is None:
         return None
     return save.queue_length("\n".join(getattr(reply, "lines", ())))
 
 
+SaveOutcome = Literal["written", "asked", "not_asked", "unfinished"]
+"""How the save asked for before a signal ended (T826): `written` -- the queue was seen empty
+after it; `asked` -- the console answered and there is no queue to read; `not_asked` -- it did
+not answer; `unfinished` -- the queue's wait ran out."""
+
+
 def _save_everyone_first(
-    spec: ContainerSpec, control: StopControl, say: Callable[..., None], wsl_distro: str | None
-) -> bool:
+    spec: ContainerSpec,
+    control: StopControl,
+    say: Callable[..., None],
+    wsl_distro: str | None,
+    *,
+    save: SaveFirst | None = None,
+    say_failures: bool = True,
+    ceiling: float = WORLD_SAVE_CEILING_SECONDS,
+) -> SaveOutcome:
     """Have a running world whose own close loses saves save everyone, and wait for it (T410, T411).
+
+    T826: also the players' save of a Stop that does not wait for the bots' saves, with
+    `save` (`BotSavesSkippable.save`), `ceiling` its shorter bound and `say_failures` False:
+    there a save not seen written is no loss -- the stop falls back to the full wait, and says
+    so itself -- so neither `SAVE_FIRST_NOT_ASKED` nor `SAVE_FIRST_UNFINISHED` is said.
 
     Before the signal, while the world still runs and its database is up. Typed at
     the console (`SaveFirst.command`, `saveall`), which needs no credential. For a
@@ -4869,17 +4955,20 @@ def _save_everyone_first(
     still running, which is what every handler of that type says -- after
     `SaveFirst.if_given_up` is typed, so what `first` closed is open again.
 
-    Returns whether the save was asked for and, for a queue core, seen through: False after
-    `SAVE_FIRST_NOT_ASKED` (`SAVE_FIRST_NOT_ASKED_HERE` where the console needs a terminal this
-    host cannot open, T496) or `SAVE_FIRST_UNFINISHED`, so the close is not then said to have
-    saved every character.
+    Returns how it ended (`SaveOutcome`): `not_asked` after `SAVE_FIRST_NOT_ASKED`
+    (`SAVE_FIRST_NOT_ASKED_HERE` where the console needs a terminal this host cannot open, T496)
+    and `unfinished` after `SAVE_FIRST_UNFINISHED`, so the close is not then said to have saved
+    every character; `written` only when the queue was seen empty.
     """
-    save = spec.save_first
+    save = save or spec.save_first
     assert save is not None
     not_asked = SAVE_FIRST_NOT_ASKED if _console_reaches(wsl_distro) else SAVE_FIRST_NOT_ASKED_HERE
     say(SAVE_FIRST_ASKING)
     for line in save.first:
-        if _type_at_the_world(spec, line, _QUEUE_LOOK_WINDOW_SECONDS, wsl_distro) is None:
+        if (
+            _type_at_the_world(spec, line, _QUEUE_LOOK_WINDOW_SECONDS, wsl_distro, save=save)
+            is None
+        ):
             logger.warning(f"{spec.world} was not told {line!r} before its save; saving anyway")
     window = (
         _SAVE_COMMAND_WINDOW_SECONDS
@@ -4892,12 +4981,13 @@ def _save_everyone_first(
         window,
         wsl_distro,
         answer_marker=None if save.prompt_precedes_answer else _SAVE_ANSWER,
+        save=save,
     )
     answered = reply is not None and bool(getattr(reply, "prompted", False))
     if not save.queue_command:
-        if not answered:
+        if not answered and say_failures:
             say(not_asked, warn=True)
-        return answered
+        return "asked" if answered else "not_asked"
     started = _save_clock()
     last_shrunk = started
     before: int | None = None
@@ -4905,13 +4995,18 @@ def _save_everyone_first(
     while True:
         if control.abandon.is_set():
             for line in save.if_given_up:
-                if _type_at_the_world(spec, line, _QUEUE_LOOK_WINDOW_SECONDS, wsl_distro) is None:
+                if (
+                    _type_at_the_world(
+                        spec, line, _QUEUE_LOOK_WINDOW_SECONDS, wsl_distro, save=save
+                    )
+                    is None
+                ):
                     logger.warning(f"{spec.world} was left running without {line!r}")
             raise SaveFirstAbandoned(
                 f"The stop was not sent: it was given up while {spec.world} was writing its "
                 "saves, so the world was left running."
             )
-        length = _queue_length(spec, wsl_distro) if reply is not None else None
+        length = _queue_length(spec, wsl_distro, save) if reply is not None else None
         now = _save_clock()
         if not looked:
             looked = True
@@ -4920,24 +5015,23 @@ def _save_everyone_first(
                 # wait for: said by the reply alone, and the stop goes on.
                 if answered:
                     logger.info(f"{spec.world}'s save queue could not be read; not waited on")
-                else:
+                    return "asked"
+                if say_failures:
                     say(not_asked, warn=True)
-                return answered
+                return "not_asked"
             if length > 0:
                 say(SAVE_FIRST_QUEUED.format(count=length))
         if length == 0:
             say(SAVE_FIRST_WRITTEN)
-            return True
+            return "written"
         if length is not None:
             if before is not None and length < before:
                 last_shrunk = now
             before = length
-        if (
-            now - started >= WORLD_SAVE_CEILING_SECONDS
-            or now - last_shrunk >= WORLD_SAVE_STALL_SECONDS
-        ):
-            say(SAVE_FIRST_UNFINISHED, warn=True)
-            return False
+        if now - started >= ceiling or now - last_shrunk >= WORLD_SAVE_STALL_SECONDS:
+            if say_failures:
+                say(SAVE_FIRST_UNFINISHED, warn=True)
+            return "unfinished"
         control.abandon.wait(_SAVE_POLL_SECONDS)
 
 
@@ -4974,6 +5068,14 @@ def save_then_stop_the_world(
     console while it still runs, and for Centurion waited for until that save queue is
     written (`_save_everyone_first()`, T410/T411). Only then is it signalled.
 
+    T826: with `control.skip_bot_saves` on a spec with `bot_saves_skippable`, the world is first
+    told to save everyone and its character queue waited for until EMPTY (at most
+    `PLAYERS_SAVE_CEILING_SECONDS`), so every player's save is written before the signal --
+    AzerothCore queues the players' own logout saves behind every bot's. Only when that was
+    seen is the wait after the signal cut at `bot_saves_skippable.seconds`: the world alone is
+    killed (`WORLD_STOPPED_WITHOUT_BOT_SAVES`) and the caller stops the database as always.
+    A save not seen written says `PLAYERS_SAVE_UNSEEN` and the stop waits as it always did.
+
     Each look is a bounded `docker inspect`, then -- while it runs -- a bounded read of its
     `/proc/net/dev`. Once the players are gone the world's only traffic is its database, so
     bytes still moving mean it is still saving. It ends on the first of:
@@ -5009,10 +5111,33 @@ def save_then_stop_the_world(
             before_signal()
         return
     saved_first = True
+    # T826: the player's "do not wait for the bots' saves", for a game that offers it. Every
+    # player is saved and SEEN written first; only then is the wait after the signal cut short.
+    skippable = spec.bot_saves_skippable if control.skip_bot_saves else None
+    cut_after: float | None = None
     if spec.save_first is not None:
         state = container_state(world, timeout=_LOAD_LOOK_TIMEOUT, wsl_distro=wsl_distro)
         if state.settled:
-            saved_first = _save_everyone_first(spec, control, say, wsl_distro)
+            saved_first = _save_everyone_first(spec, control, say, wsl_distro) in (
+                "written",
+                "asked",
+            )
+    elif skippable is not None:
+        state = container_state(world, timeout=_LOAD_LOOK_TIMEOUT, wsl_distro=wsl_distro)
+        if state.settled:
+            outcome = _save_everyone_first(
+                spec,
+                control,
+                say,
+                wsl_distro,
+                save=skippable.save,
+                say_failures=False,
+                ceiling=PLAYERS_SAVE_CEILING_SECONDS,
+            )
+            if outcome == "written":
+                cut_after = skippable.seconds
+            else:
+                say(PLAYERS_SAVE_UNSEEN)
     if before_signal is not None:
         before_signal()
     proc = _docker(["kill", "-s", "TERM", world], timeout=_LOAD_LOOK_TIMEOUT, wsl_distro=wsl_distro)
@@ -5060,7 +5185,11 @@ def save_then_stop_the_world(
             run = state.started_at
             if not saying:
                 saying = True
-                say(WORLD_SAVING)
+                say(
+                    WORLD_SAVING
+                    if cut_after is None
+                    else world_closing_without_bot_saves(cut_after)
+                )
             look = exec_output(
                 world, ["cat", "/proc/net/dev"], timeout=_LOAD_LOOK_TIMEOUT, wsl_distro=wsl_distro
             )
@@ -5069,6 +5198,15 @@ def save_then_stop_the_world(
                 # Moved, or could not be read: neither is silence.
                 last_moved = now
                 moved = count if count is not None else moved
+        if cut_after is not None and now - started >= cut_after:
+            # T826: every player's save was seen written before the signal; the bots' are what
+            # is still queued. The world alone is killed; the database is stopped as always.
+            say(WORLD_STOPPED_WITHOUT_BOT_SAVES)
+            try:
+                kill_container(world, wsl_distro=wsl_distro)
+            except DockerCommandError as exc:
+                logger.warning(f"could not kill {world}: {exc}")
+            return
         verdict = ""
         if now - started >= WORLD_SAVE_CEILING_SECONDS:
             verdict = WORLD_SAVE_TOO_LONG

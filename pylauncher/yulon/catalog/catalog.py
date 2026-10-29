@@ -31,7 +31,7 @@ from pydantic import (
 )
 
 from yulon import server_build_presses
-from yulon.docker import ContainerSpec, SaveFirst
+from yulon.docker import BotSavesSkippable, ContainerSpec, SaveFirst
 from yulon.manifest import ALLOWED_REPO_HOSTS, Db, Source, check_repo
 from yulon.platform import PlatformId
 
@@ -1881,6 +1881,66 @@ class SaveBeforeStop(_Strict):
         return self
 
 
+class StopWithoutBotSaves(_Strict):
+    """How this world's Stop may skip waiting for the bots' saves, when the player says so (T826).
+
+    The live reason: a CoA Stop sat 2 to 25 minutes on `Waiting for N queries to finish`. Read
+    at the CoA core (`playerbots-references/azerothcore-wotlk-coa`): on a signal AzerothCore runs
+    the scripts' `OnShutdown()` FIRST -- playerbots logs out every bot there ("Logging out all
+    bots..."), each a logout save -- and only then `KickAll()`s the real players, so their own
+    logout saves queue BEHIND every bot's. Cutting that wait short could lose them. So the save
+    of every player is asked for and SEEN WRITTEN while the world still runs: `command`
+    (`saveall`), then `queue_command` until the character queue is empty (`server debug` prints
+    `CharacterDatabase queue size: N`, `cs_server.cpp:246` there). Only then is the world
+    signalled, given `seconds` to close, and killed if it has not -- the world alone; the
+    database is stopped as always. A save that cannot be seen written falls back to the full
+    wait. Present only for a core whose signal is where its long wait is: never beside
+    `save_before_stop` (that close drops what is queued, so its whole wait is the save Yu'lon
+    asks for first), and not for a core with no console line that reads its queue.
+    """
+
+    command: str = Field(
+        default="saveall",
+        pattern=r"^[^\r\n]+$",
+        description="The console line that saves every player in the world, typed first.",
+    )
+    queue_command: str = Field(
+        min_length=1,
+        pattern=r"^[^\r\n]+$",
+        description="The console line whose answer holds the character save queue's length.",
+    )
+    queue_pattern: str = Field(
+        min_length=1,
+        description="A regular expression with ONE group, the length, found in that answer.",
+    )
+    seconds: int = Field(
+        default=20,
+        ge=5,
+        le=300,
+        description=(
+            "How long the world gets to close after its signal, once every player's save is "
+            "seen written, before it is stopped without the rest of the bots' saves."
+        ),
+    )
+    waits_by_default: bool = Field(
+        default=True,
+        description=(
+            "The choice an install has before the player makes one: True waits for every save "
+            "(the safe, slower Stop)."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _a_pattern_of_one_group(self) -> StopWithoutBotSaves:
+        try:
+            groups = re.compile(self.queue_pattern).groups
+        except re.error as exc:
+            raise ValueError(f"queue_pattern is not a regular expression: {exc}") from exc
+        if groups != 1:
+            raise ValueError("queue_pattern needs exactly one group: the queue's length")
+        return self
+
+
 class NativeInstall(_Strict):
     """What the native install engine needs that is a fact about THIS game (roadmap 6.2, 7.1).
 
@@ -1979,6 +2039,13 @@ class NativeInstall(_Strict):
             "close loses saves (T410, T411; `SaveBeforeStop`). None: the signal saves everyone."
         ),
     )
+    stop_without_bot_saves: StopWithoutBotSaves | None = Field(
+        default=None,
+        description=(
+            "Whether this game offers a Stop that does not wait for the bots' saves, and how "
+            "(T826, `StopWithoutBotSaves`). None: every Stop waits for every save."
+        ),
+    )
     azerothcore: AzerothCoreData | None = Field(
         default=None, description="Present exactly when `family` is azerothcore (7.3 validates)."
     )
@@ -2037,6 +2104,12 @@ class NativeInstall(_Strict):
             "cmangos": self.cmangos,
             "trinitycore": self.trinitycore,
         }
+        if self.stop_without_bot_saves is not None and self.save_before_stop is not None:
+            raise ValueError(
+                "stop_without_bot_saves is for a world that saves on its signal; one with "
+                "save_before_stop drops what is queued when it closes, so its Stop cannot skip "
+                "the save it asks for first"
+            )
         present = sorted(name for name, block in blocks.items() if block is not None)
         if present != [self.family]:
             raise ValueError(
@@ -3963,6 +4036,26 @@ class CatalogEntry(_Strict):
                 self.install.native is not None and self.install.native.stop_waits_for_world_load
             ),
             save_first=self._save_first(),
+            bot_saves_skippable=self._bot_saves_skippable(),
+        )
+
+    def _bot_saves_skippable(self) -> BotSavesSkippable | None:
+        """The entry's `stop_without_bot_saves` with its console's prompt, for the stop (T826)."""
+        native = self.install.native
+        if native is None or native.stop_without_bot_saves is None:
+            return None
+        fast = native.stop_without_bot_saves
+        console = self.console
+        return BotSavesSkippable(
+            save=SaveFirst(
+                command=fast.command,
+                queue_command=fast.queue_command,
+                queue_pattern=fast.queue_pattern,
+                prompt=console.prompt,
+                prompt_precedes_answer=console.prompt_precedes_answer,
+            ),
+            seconds=float(fast.seconds),
+            waits_by_default=fast.waits_by_default,
         )
 
     def _save_first(self) -> SaveFirst | None:

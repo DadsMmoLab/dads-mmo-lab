@@ -1288,7 +1288,7 @@ def test_a_save_queue_that_ran_out_does_not_end_in_saved_every_character(
     assert said[-1] == docker.WORLD_CLOSED
 
 
-@pytest.mark.parametrize("game", ["wow-tortoise", "wow-centurion"])
+@pytest.mark.parametrize("game", ["wow-tortoise", "wow-centurion", "wow-wotlk", "wow-unbound"])
 def test_the_real_wiring_hands_the_stop_this_installs_command_channel(
     tmp_path: Path, game: str
 ) -> None:
@@ -1307,10 +1307,13 @@ def test_the_real_wiring_hands_the_stop_this_installs_command_channel(
     assert registered == {docker._folder_key(str(server_dir)): setup.live_channel}  # type: ignore[attr-defined]
 
 
-def test_a_game_that_does_not_save_first_registers_no_channel(tmp_path: Path) -> None:
+@pytest.mark.parametrize("game", ["wow-vanilla", "wow-tbc"])
+def test_a_game_that_does_not_save_first_registers_no_channel(tmp_path: Path, game: str) -> None:
+    """T826: WotLK and Unbound register theirs now, for the players' save of a Stop that does
+    not wait for the bots (the parametrized test above); the CMaNGOS games ask nothing first."""
     from yulon.ui.controller_view import ControllerServices
 
-    entry = CATALOG.get("wow-wotlk")
+    entry = CATALOG.get(game)
     server_dir = tmp_path / "server"
     server_dir.mkdir()
     ControllerServices.for_entry(entry, server_dir, client_dir=None)

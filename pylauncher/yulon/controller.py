@@ -32,6 +32,7 @@ from yulon import (
     playerbots_rename,
     seeded_accounts,
     server_build_gone,
+    stop_choice,
     wsl,
 )
 from yulon.catalog import composegen, installer, native, preflight, time_zone, world_data
@@ -1071,8 +1072,14 @@ class Controller:
             self.start(asked_before_the_servers=asked and not stopped)
             return stopped
 
-    def stop(self) -> bool:
+    def stop(self, *, by_choice: bool = False) -> bool:
         """Stop the install, keeping its containers so the next start is staged.
+
+        `by_choice` (T826) lets the player's "When stopping" choice reach this stop
+        (`stop_choice.waits_for_bot_saves()`): True only for the Stops the player presses --
+        the Server tab's Stop and Restart, `--server stop`. Every other caller (a move, a
+        realm switch, the Tortoise bot restarts, anything new) keeps the default, so its stop
+        waits for every save whatever the choice says.
 
         Uses `docker.stop_staged()`, which keeps the containers so the next
         start reuses them instead of recreating them.
@@ -1103,10 +1110,32 @@ class Controller:
         self._save_evidence()
         self._fresh_stop()
         stopped = docker.stop_staged(
-            self.spec, self.server_dir, wsl_distro=self.wsl_distro, control=self.stop_control
+            self.spec,
+            self.server_dir,
+            wsl_distro=self.wsl_distro,
+            control=self._control_for(by_choice),
         )
         self._let_the_distro_go(stopped)
         return stopped
+
+    def skips_bot_saves(self) -> bool:
+        """Does the player's choice say this server's Stop does not wait for the bots (T826)?
+
+        False for a game that does not offer it, and for a choice that cannot be read and a
+        catalog default that waits.
+        """
+        skippable = self.spec.bot_saves_skippable
+        if skippable is None:
+            return False
+        return not stop_choice.waits_for_bot_saves(
+            self.server_dir, default=skippable.waits_by_default
+        )
+
+    def _control_for(self, by_choice: bool) -> docker.StopControl | None:
+        """`stop_control`, with the player's "do not wait for the bots" when it reaches here."""
+        if not (by_choice and self.skips_bot_saves()):
+            return self.stop_control
+        return dataclasses.replace(self.stop_control or docker.StopControl(), skip_bot_saves=True)
 
     def remove(self) -> bool:
         """Stop the install and remove its containers, keeping every volume.

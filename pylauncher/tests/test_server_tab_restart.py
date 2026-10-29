@@ -180,7 +180,7 @@ def test_a_stop_that_breaks_says_the_server_did_not_stop(
     from yulon.controller import Controller
     from yulon.ui.controller_view import STOP_FAILED_BROKE
 
-    def broke(_self: Controller) -> bool:
+    def broke(_self: Controller, *, by_choice: bool = False) -> bool:
         raise RuntimeError("compose exploded")
 
     monkeypatch.setattr(Controller, "stop", broke)
