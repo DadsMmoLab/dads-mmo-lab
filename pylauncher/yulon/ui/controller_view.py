@@ -1966,7 +1966,10 @@ def _realm_switch(
         ),
         run_import=lambda context: coa_switch.switch_import(entry, server_dir, context, seams),
         check_import=lambda: coa_switch.check_switch_import(server_dir, seams),
-        set_realm_row=lambda name, port: sql.run_statement(
+        # The name only: the row's address and world port are the engine's to carry from
+        # the type just parked (`coa_realm._carry_realm_address`, T812 C8 D13), and the
+        # switch's Start asks the tab's realm-port keeper again.
+        set_realm_row=lambda name, _port: sql.run_statement(
             "auth", coa_realm.realm_name_update(entry, name)
         ),
         write_override=lambda env: _write_realm_override(entry, server_dir, env),
@@ -1974,7 +1977,7 @@ def _realm_switch(
         start_db=lambda: docker.start_database(
             spec, server_dir, because="nothing was switched", wsl_distro=wsl_distro
         ),
-        start=lambda: _start_for_realm_switch(entry, server_dir, wsl_distro=wsl_distro),
+        start=lambda: _start_for_realm_switch(entry, server_dir, sql, wsl_distro=wsl_distro),
         bot_prefix=bot_prefix,
     )
 
@@ -1992,13 +1995,26 @@ def _stop_for_realm_switch(
 
 
 def _start_for_realm_switch(
-    entry: CatalogEntry, server_dir: Path, *, wsl_distro: str | None
+    entry: CatalogEntry, server_dir: Path, sql: DockerSql, *, wsl_distro: str | None
 ) -> None:
-    """Start for a realm-type switch: the existing Start, ordered for CoA (T812 C3b)."""
+    """Start for a realm-type switch: the tab's own Start, ordered for CoA (T812 C3b).
+
+    With the tab's `before_servers` (T812 C8 D13): the realm-type gate and the
+    realm-port keeper, as the Server tab's Start asks them. A bare Controller
+    asked neither, so a fresh type's row kept the import's 8085 and the auth wait
+    looked for this server's port forever.
+    """
     from yulon import controller as _controller_module
 
+    spec = entry.container_spec()
     controller = _controller_module.Controller(
-        entry.container_spec(), server_dir, wsl_distro=wsl_distro
+        spec,
+        server_dir,
+        wsl_distro=wsl_distro,
+        before_servers=_before_the_servers(
+            _realm_type_gate(entry, spec, server_dir, sql, wsl_distro=wsl_distro),
+            _realm_port_keeper(entry, spec, server_dir, sql, wsl_distro=wsl_distro),
+        ),
     )
     controller.start()
 
@@ -2033,17 +2049,47 @@ def _realm_import_seams(
 def _write_realm_override(entry: CatalogEntry, server_dir: Path, env: Mapping[str, str]) -> None:
     """Rewrite the compose override for the switch's target type (T812 C3b).
 
-    The render every writer goes through (`composegen.render`), so the bot-count
-    carry-over and the channel's enable still win; then the file's own writer
-    (`_replace_whole`), whole or left as it was.
+    The render every writer goes through (`composegen.render`), with what every
+    other regeneration hands it (T812 C8 D10, the live run: "generates its
+    database password per install, and none was given"): the folder's own
+    password (`db_password`, as `channel_setup.enable()` and the reset read it),
+    the bind label the installed override already carries (else the host's
+    answer, `channel_setup.install_bind_label`), the channel's enable while a
+    press is live, and the bot-count carry-over (`bot_count.world_env`). Then the
+    file's own writer (`_replace_whole`), whole or left as it was.
     """
-    from yulon.catalog import composegen
+    from yulon import channel_setup, coa_realm
+    from yulon.catalog import bot_count, composegen
     from yulon.resources import installers_dir
 
+    password = entry.install.db_password(server_dir)
+    if password is None:
+        raise coa_realm.RealmSwitchError(
+            "This server's database password could not be read, so the new realm type's "
+            "settings were not written. Press Switch realm type again once it can be read."
+        )
+    target = server_dir / composegen.OVERRIDE_FILE
+    label: str | None = None
+    if target.is_file() and composegen.is_ours(target):
+        try:
+            label = composegen.bind_label_of(target.read_text(encoding="utf-8"))
+        except composegen.MixedBindLabels:
+            label = None
+    if label is None:
+        label = channel_setup.install_bind_label(server_dir)
+    base = dict(env)
+    operations = entry.operations
+    if operations is not None and composegen.channel_world_env(entry, server_dir) is not None:
+        base.update(operations.enable_env)
     plan = composegen.render(
-        entry, server_dir, templates_root=installers_dir(), world_env=dict(env)
+        entry,
+        server_dir,
+        templates_root=installers_dir(),
+        world_env=bot_count.world_env(entry, server_dir, base),
+        db_password=password,
+        bind_label=label,
     )
-    composegen._replace_whole(server_dir / composegen.OVERRIDE_FILE, plan.override)
+    composegen._replace_whole(target, plan.override)
 
 
 @dataclass
