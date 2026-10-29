@@ -16,6 +16,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ### New
 - Install a Conquest of Azeroth server (beta, Linux) from the Catalog with your own Ascension client. Switch realm type on the Server tab.
 - Keep your Conquest of Azeroth client current with **Update client** beside Play; files you changed are kept unless you say.
+- Turn Conquest of Azeroth's HD patches off or on with **Enable HD patches** under Play, as the official launcher does.
 
 ### Fixed
 - When Docker cannot fetch the git image, the Modules tab now shows Docker's reason instead of an unhelpful line.

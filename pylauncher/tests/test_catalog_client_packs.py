@@ -190,6 +190,7 @@ def test_the_shipped_catalog_uses_the_new_fields_on_centurion_and_unbound_alone(
                 "exe_names",
                 "wine_dll_overrides",
                 "update",
+                "hd_patches",
                 "notes",
             }, sorted(set(entry["client"]))
             continue
@@ -205,6 +206,8 @@ def test_the_shipped_catalog_uses_the_new_fields_on_centurion_and_unbound_alone(
                 "notes",
             }
     for game in load_catalog().games:
+        # T828: the HD patches choice is CoA's alone.
+        assert (game.client.hd_patches is not None) == (game.id == "wow-coa"), game.id
         if game.id == "wow-centurion":
             assert game.client.packs and game.client.exe_patch and game.client.config_wtf
             assert game.client.hosts() == frozenset({"centurionpvp.com", "wow.baerthe.com"})
@@ -222,6 +225,9 @@ def test_the_shipped_catalog_uses_the_new_fields_on_centurion_and_unbound_alone(
             assert game.client.config_wtf is None
             # T825: the client update's manifest host is the only host the entry names.
             assert game.client.hosts() == frozenset({"launcher-api.coa-development.org"})
+            # T828: the CoA launcher's "Enable HD patches" off is exactly `-hd 0`.
+            assert game.client.hd_patches is not None
+            assert game.client.hd_patches.args_when_off == ("-hd", "0")
             continue
         assert game.client.packs == ()
         assert game.client.exe_patch is None

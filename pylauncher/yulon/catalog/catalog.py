@@ -3263,6 +3263,25 @@ class ClientUpdate(_Strict):
         return value
 
 
+LaunchArg = Annotated[str, Field(pattern=r"^[A-Za-z0-9_.=+-]+$")]
+"""One argument Play passes to the client: letters, digits and `_.=+-`, no space, quote or
+shell character, so it reads the same in an argv, a Steam launch option and a script."""
+
+
+class HdPatches(_Strict):
+    """The client's own HD patches, which its executable switches off on its command line (T828).
+
+    Read from the Conquest of Azeroth launcher (v0.7.6): its saved "Enable HD patches"
+    (default on) starts the game with no arguments, and when off starts `<exe> -hd 0`.
+    Yu'lon offers the same choice per install, on by default.
+    """
+
+    args_when_off: tuple[LaunchArg, ...] = Field(
+        min_length=1,
+        description="The arguments the client is started with when the player turns HD off.",
+    )
+
+
 class Client(_Strict):
     """The client the USER supplies (README §3a) and how to point it at the server.
 
@@ -3339,6 +3358,13 @@ class Client(_Strict):
         description=(
             "Where the makers publish the client's files, for Update client on the Server "
             "tab (T825). None: Yu'lon does not update this game's client."
+        ),
+    )
+    hd_patches: HdPatches | None = Field(
+        default=None,
+        description=(
+            "The client's built-in HD patches and how to start it with them off, for "
+            "Enable HD patches on the Server tab (T828). None: no such choice."
         ),
     )
 

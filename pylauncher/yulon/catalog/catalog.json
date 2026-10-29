@@ -3038,6 +3038,12 @@
                 "manifest_url": "https://launcher-api.coa-development.org/downloads/client/latest.json",
                 "objects_url": "https://launcher-api.coa-development.org/downloads/client/objects/"
             },
+            "hd_patches": {
+                "args_when_off": [
+                    "-hd",
+                    "0"
+                ]
+            },
             "notes": [
                 "set realmlist 127.0.0.1:3726 (or the host's LAN/public IP and :3726 for other players); this server's login port is not WoW WotLK's",
                 "Bring your own Ascension 3.3.5a client (Ascension.exe + Data); Yu'lon never downloads it."

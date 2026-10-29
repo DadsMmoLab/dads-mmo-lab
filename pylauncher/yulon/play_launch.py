@@ -114,6 +114,7 @@ def launch_spec(
     config_dir: Path,
     exe_names: Sequence[str] = ("wow.exe",),
     wine_dll_overrides: str | None = None,
+    args: Sequence[str] = (),
     which: Callable[[str], str | None] = shutil.which,
 ) -> LaunchSpec:
     """How to start the ready-to-play client in `play_dir` on `os_name`, or a refusal.
@@ -124,7 +125,8 @@ def launch_spec(
     The binary is checked first, on every OS: a runner handed a path that is not
     there starts, fails, and says so in a log nobody reads, while the player
     watches nothing happen. `exe_names` is the entry's `client.exe_names`, so a
-    Conquest of Azeroth client starts `Ascension.exe` and not `Wow.exe`.
+    Conquest of Azeroth client starts `Ascension.exe` and not `Wow.exe`. `args` follow
+    the executable on every OS (CoA's `-hd 0` when its HD patches are off, T828).
     """
     exe = steam.client_executable(play_dir, names=exe_names)
     if not exe.is_file():
@@ -134,6 +136,7 @@ def launch_spec(
     extra_env = {"WINEDLLOVERRIDES": wine_dll_overrides} if wine_dll_overrides else {}
     return program_launch_spec(
         exe,
+        args,
         game=game,
         server_dir=server_dir,
         os_name=os_name,
