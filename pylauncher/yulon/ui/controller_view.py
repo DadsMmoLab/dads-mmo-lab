@@ -10110,9 +10110,10 @@ class ControllerView(QWidget):
         there is nothing to choose. The install's record is read (one small file, no job) only
         once WSL says the server's distro runs (`_waits_for_the_distro()`, T133: any read in a
         stopped distro boots it); until then the box shows the catalog's default and is greyed,
-        so nothing can be written there either. A change is written at once
-        (`stop_choice.choose()`), and one that cannot be written is said and put back, so the box
-        never shows a choice the next Stop will not make.
+        and it is greyed again whenever WSL stops saying the distro runs
+        (`_stop_choice_offline()`), so nothing can be written there either. A change is written
+        off the GUI thread (`_stop_choice_changed()`), and one that cannot be written is said and
+        put back, so the box never shows a choice the next Stop will not make.
         """
         found = getattr(
             getattr(self.services.controller, "spec", None), "bot_saves_skippable", None
@@ -10130,6 +10131,9 @@ class ControllerView(QWidget):
         self.stop_choice_note.setWordWrap(True)
         self.stop_choice_note.setStyleSheet(f"color: {COLOR_TEXT_MUTED};")
         offered = skippable is not None
+        self._stop_choice_offered = offered
+        self._stop_choice_writing = False
+        self._stop_choice_waits = True
         for widget in (self.stop_choice_label, self.stop_choice_box, self.stop_choice_note):
             widget.setVisible(offered)
         if skippable is None:
@@ -10149,10 +10153,19 @@ class ControllerView(QWidget):
         queued while the tab is built would be one more answer for every press-ordering rule
         to account for. Gated like every reading the tab takes by itself (T133).
         """
+        if self._stop_choice_writing:
+            return  # the write's own answer settles the box
         if self._waits_for_the_distro("stop choice", self._read_stop_choice):
             return
         self._show_stop_choice(not self.services.controller.skips_bot_saves())
         self.stop_choice_box.setEnabled(True)
+
+    def _stop_choice_offline(self) -> None:
+        """WSL no longer says the distro runs: grey the box and read it again once it does."""
+        if not self._stop_choice_offered or self._stop_choice_writing:
+            return
+        self.stop_choice_box.setEnabled(False)
+        self._waits_for_the_distro("stop choice", self._read_stop_choice)
 
     def _show_stop_choice(self, waits: bool) -> None:
         """Put the box on `waits` without it counting as the player's change."""
@@ -10164,17 +10177,58 @@ class ControllerView(QWidget):
             self.stop_choice_box.blockSignals(blocked)
 
     def _stop_choice_changed(self, index: int) -> None:
-        """The player picked how this server's Stop treats the bots' saves: keep it (T826)."""
+        """The player picked how this server's Stop treats the bots' saves: keep it (T826).
+
+        Written off the GUI thread, and only while WSL says the distro runs: a write under
+        `\\\\wsl.localhost` on the GUI thread would start a stopped distro and freeze the
+        window (T133). The worker asks WSL again right before it writes (`_world_reading()`),
+        because the tab's answer can be a poll old. The box is greyed until the answer lands.
+        """
         waits = bool(self.stop_choice_box.itemData(index))
-        try:
-            stop_choice.choose(self.services.controller.server_dir, waits)
-        except OSError as exc:
-            logger.warning(f"could not keep the Stop choice: {exc}")
-            self._show_stop_choice(self._stop_choice_waits)
-            self.stop_choice_note.setText(stop_choice.CHOICE_NOT_KEPT.format(why=exc))
+        if self._distro != "running":
+            self._stop_choice_not_kept(stop_choice.CHOICE_NOT_NOW)
+            self._stop_choice_offline()
             return
-        self._stop_choice_waits = waits
+        server_dir = self.services.controller.server_dir
+
+        def write() -> object:
+            stop_choice.choose(server_dir, waits)
+            return waits
+
+        self._stop_choice_writing = True
+        self.stop_choice_box.setEnabled(False)
+        self._run(self._world_reading(write), self._stop_choice_kept, self._stop_choice_failed)
+
+    @Slot(object)
+    def _stop_choice_kept(self, waits: object) -> None:
+        self._stop_choice_writing = False
+        if waits is None:
+            # The worker found the distro no longer running and wrote nothing.
+            self._stop_choice_not_kept(stop_choice.CHOICE_NOT_NOW)
+            self._stop_choice_offline()
+            return
+        self._stop_choice_waits = bool(waits)
         self.stop_choice_note.setText(stop_choice.CHOICE_NOTE)
+        self._stop_choice_settle()
+
+    @Slot(object)
+    def _stop_choice_failed(self, exc: object) -> None:
+        self._stop_choice_writing = False
+        logger.warning(f"could not keep the Stop choice: {exc}")
+        self._stop_choice_not_kept(stop_choice.CHOICE_NOT_KEPT.format(why=exc))
+        self._stop_choice_settle()
+
+    def _stop_choice_not_kept(self, why: str) -> None:
+        """Put the box back on the last choice that was kept, and say why in plain words."""
+        self._show_stop_choice(self._stop_choice_waits)
+        self.stop_choice_note.setText(why)
+
+    def _stop_choice_settle(self) -> None:
+        """After a write: the box is pressable again only while the distro is known to run."""
+        if self._distro == "running":
+            self.stop_choice_box.setEnabled(True)
+        else:
+            self._stop_choice_offline()
 
     def _server_presses(self) -> tuple[QAbstractButton, ...]:
         """The Server tab's presses a job of ours greys, in the order the tab draws them."""
@@ -10443,6 +10497,8 @@ class ControllerView(QWidget):
             # distro no longer runs, and it sat above "world down" and the
             # stopped line (T133 live gate). The next one waits for `running`.
             self._clear_the_verdict()
+            # T826: no write to the distro's folder while WSL does not say it runs.
+            self._stop_choice_offline()
             return
         waiting = list(self._waiting_on_distro.values())
         self._waiting_on_distro.clear()
