@@ -53,7 +53,7 @@ def test_the_entry_is_in_the_catalog_as_a_beta_server_of_its_own() -> None:
     assert (entry.name, entry.status) == ("WoW Conquest of Azeroth", "beta")
     assert entry.install.default_server_dir == "yulon-coa"
     assert "Ascension 3.3.5a client" in entry.description
-    assert "never downloads" in entry.description
+    assert "Update client makes your Ascension copy one" in entry.description
     assert entry.manifest_game() == "wow-wotlk"
     assert entry.has_manifests
 

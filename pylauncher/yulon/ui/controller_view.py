@@ -9527,7 +9527,11 @@ class ControllerView(QWidget):
                 self.play_cancel_button,
                 self.steam_button,
                 *(
-                    (self.client_update.button, self.client_update.cancel_button)
+                    (
+                        self.client_update.button,
+                        self.client_update.fix_button,
+                        self.client_update.cancel_button,
+                    )
                     if self.client_update is not None
                     else ()
                 ),
@@ -9540,6 +9544,7 @@ class ControllerView(QWidget):
         play_column.addWidget(self.play_label)
         if self.client_update is not None:
             play_column.addWidget(self.client_update.label)
+            play_column.addWidget(self.client_update.kind_label)
         play_column.addWidget(self.steam_label)
         play_column.addWidget(self.steam_details)
         self._add_section(box, play, self.play_button is not None or self.steam_button is not None)

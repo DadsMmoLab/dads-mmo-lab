@@ -44,6 +44,7 @@ import os
 import re
 import shutil
 import sys
+import threading
 from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import asdict, dataclass, field
 from pathlib import Path, PurePosixPath
@@ -470,6 +471,99 @@ def check_sentence(client_dir: Path, manifest: Manifest) -> tuple[Status, str]:
         f"client checks every file against version {manifest.version} and lists what "
         "differs before changing anything."
     )
+
+
+# --- Which client this is (T827) --------------------------------------------------------------
+
+KEY_FILES = ("Extensions.dll", "Ascension.exe")
+"""The files that tell the CoA client from the stock Ascension download (T827).
+
+A stock Ascension client logs in to a CoA server and is then disconnected at
+realm select (`malformed packet ... cryptInitialized: true`): the CoA builds of
+these two files change the world socket's header cipher, the stock ones do not.
+Both are small (7 MB), so reading them is quick; the 46 GB of MPQs are never read
+here. The owner's working client keeps the stock copies beside them as
+`*.ORIGINAL`; that is not used as evidence, the manifest's digests are.
+"""
+
+ClientKind = Literal["coa", "stock", "unknown"]
+
+KIND_COA = "Client files: the Conquest of Azeroth client."
+STOCK_WARNING = (
+    "This client is the stock Ascension download. Conquest of Azeroth needs the CoA client "
+    "files, otherwise you are disconnected when you pick the realm. Choose Update client."
+)
+
+_KEY_SHA: dict[tuple[str, int, int], str] = {}
+_KEY_SHA_LOCK = threading.Lock()
+
+
+def _key_sha(path: Path, st: os.stat_result) -> str:
+    """`path`'s SHA-256, remembered by path, size and mtime so a recheck reads nothing."""
+    key = (os.fspath(path), st.st_size, st.st_mtime_ns)
+    with _KEY_SHA_LOCK:
+        known = _KEY_SHA.get(key)
+    if known is not None:
+        return known
+    digest = _sha256(path)
+    with _KEY_SHA_LOCK:
+        _KEY_SHA[key] = digest
+    return digest
+
+
+def client_kind(client_dir: Path, manifest: Manifest | None, state: State | None) -> ClientKind:
+    """Whether `client_dir` holds the CoA client files (`KEY_FILES`), the stock ones, or unknown.
+
+    `coa`: every key file the manifest lists (or, with no manifest, every one Yu'lon
+    recorded) is in the folder and equals the manifest's entry or what Yu'lon
+    recorded when it verified that file (an older CoA version is still the CoA
+    client). `stock`: with a manifest in hand, a key file is missing or equals
+    neither -- the stock Ascension download, or a changed one. `unknown`: no key
+    file is there, the folder cannot be read, or there is no manifest and nothing
+    recorded to compare with. Reads only the key files, and hashes one only when
+    its size equals what it is compared with. Blocking: never on the GUI thread.
+    """
+    listed = {item.path.casefold(): item for item in manifest.files} if manifest else {}
+    facts = {rel.casefold(): fact for rel, fact in (state.files if state else {}).items()}
+    present = 0
+    every_match = True
+    for name in KEY_FILES:
+        entry, fact = listed.get(name.casefold()), facts.get(name.casefold())
+        if entry is None and fact is None:
+            continue  # nothing to compare this one with
+        try:
+            target = _target(client_dir, PurePosixPath(name))
+            st = target.stat()
+            if not target.is_file():
+                return "unknown"
+            present += 1
+            same_as_recorded = fact is not None and (
+                (fact.size, fact.mtime_ns) == (st.st_size, st.st_mtime_ns)
+                or (fact.size == st.st_size and _key_sha(target, st) == fact.sha256)
+            )
+            same_as_published = (
+                entry is not None
+                and entry.size == st.st_size
+                and _key_sha(target, st) == entry.sha256
+            )
+        except FileNotFoundError:
+            every_match = False
+            continue
+        except (OSError, ClientUpdateError) as exc:
+            logger.info(f"coa-client: could not read {name} in {client_dir} ({exc})")
+            return "unknown"
+        if not (same_as_recorded or same_as_published):
+            every_match = False
+    if present == 0:
+        return "unknown"
+    if every_match:
+        return "coa"
+    return "stock" if manifest is not None else "unknown"
+
+
+def kind_sentence(kind: ClientKind) -> str:
+    """The line the Server tab shows for `kind`; empty for `unknown` (nothing to say)."""
+    return {"coa": KIND_COA, "stock": STOCK_WARNING}.get(kind, "")
 
 
 # --- Planning ---------------------------------------------------------------------------------

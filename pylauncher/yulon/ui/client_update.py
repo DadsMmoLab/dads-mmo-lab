@@ -9,13 +9,18 @@ The check at tab open reads only the manifest and the folder's recorded version
 (`coa_client.status`), with a short deadline. Update client then reads every
 file (`plan`), says in one sentence what it would download, asks (with the
 Keep/Replace choice when the player changed files), and applies.
+
+T827: the check also reads the two key client files (`coa_client.client_kind`,
+off the GUI thread like the rest) and, for the stock Ascension download, shows
+`coa_client.STOCK_WARNING` with `FIX_LABEL`: the same update, asked once, with the
+existing replace choice. Play is never held by any of it.
 """
 
 from __future__ import annotations
 
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -41,6 +46,11 @@ CHECKING = "Checking for a client update…"
 NO_CLIENT_FOLDER = "Choose your client folder first; then Update client can check it."
 UNDO_LABEL = "Undo the last client update…"
 NOTHING_TO_UNDO = "There is no client update to undo."
+FIX_LABEL = "Update client and replace the changed files"
+FIX_TIP = (
+    "Make this client the Conquest of Azeroth client: download the CoA client files and "
+    "replace the ones that differ, each kept in a backup. Asks once first."
+)
 
 
 class Choice(Enum):
@@ -94,6 +104,24 @@ class _Planned:
     client_dir: Path
 
 
+@dataclass(frozen=True)
+class _Said:
+    """A job's sentence, and what it found the folder to be (`coa_client.client_kind`)."""
+
+    text: str
+    kind: coa_client.ClientKind
+    manifest: coa_client.Manifest | None = None
+
+
+def _kind_now(client: Path, manifest: coa_client.Manifest | None) -> coa_client.ClientKind:
+    """`client_kind` for the folder as it is now; a failure reads as `unknown`, never raises."""
+    try:
+        return coa_client.client_kind(client, manifest, coa_client.read_state(client))
+    except Exception as exc:  # noqa: BLE001 - a read for a status line
+        logger.info(f"could not tell which client {client} is: {exc}")
+        return "unknown"
+
+
 class ClientUpdateControl(QObject):
     """The press, its Cancel and its line. `button`/`cancel_button`/`label` go in the Play box."""
 
@@ -124,6 +152,9 @@ class ClientUpdateControl(QObject):
         self._opener = opener
         self._cancel = threading.Event()
         self.running = False
+        self.kind: coa_client.ClientKind = "unknown"
+        self._manifest: coa_client.Manifest | None = None
+        self._replacing = False
         self._relay = LineRelay(self)
         self._relay.line.connect(self._progress)
         self.button = QPushButton(UPDATE_CLIENT_LABEL, parent)
@@ -139,6 +170,13 @@ class ClientUpdateControl(QObject):
         self.label = QLabel("", parent)
         self.label.setWordWrap(True)
         self.label.setVisible(False)
+        self.kind_label = QLabel("", parent)
+        self.kind_label.setWordWrap(True)
+        self.kind_label.setVisible(False)
+        self.fix_button = QPushButton(FIX_LABEL, parent)
+        self.fix_button.setToolTip(FIX_TIP)
+        self.fix_button.setVisible(False)
+        self.fix_button.clicked.connect(self.fix_pressed)
         self.refresh_visibility()
 
     def refresh_visibility(self) -> None:
@@ -147,6 +185,22 @@ class ClientUpdateControl(QObject):
     def _say(self, text: str) -> None:
         self.label.setText(text)
         self.label.setVisible(bool(text))
+
+    def _show_kind(self, kind: coa_client.ClientKind) -> None:
+        """The status line for `kind`, and the fix press only for the stock client."""
+        self.kind = kind
+        said = coa_client.kind_sentence(kind)
+        self.kind_label.setText(said)
+        self.kind_label.setVisible(bool(said))
+        self.fix_button.setVisible(kind == "stock")
+
+    def _took(self, said: object) -> str:
+        if isinstance(said, _Said):
+            if said.manifest is not None:
+                self._manifest = said.manifest
+            self._show_kind(said.kind)
+            return said.text
+        return str(said)
 
     # -- the check --------------------------------------------------------------------------
 
@@ -165,25 +219,35 @@ class ClientUpdateControl(QObject):
                 opener=self._opener,
                 seconds=coa_client.CHECK_SECONDS,
             )
-            return coa_client.check_sentence(client, manifest)[1]
+            said = coa_client.check_sentence(client, manifest)[1]
+            return _Said(said, _kind_now(client, manifest), manifest)
 
         self._jobs(work, self._checked, self._check_failed)
 
     @Slot(object)
     def _checked(self, said: object) -> None:
         if not self.running:
-            self._say(str(said))
+            self._say(self._took(said))
 
     @Slot(object)
     def _check_failed(self, exc: object) -> None:
         logger.info(f"client update check for {self._entry.id} failed: {exc}")
         if not self.running:
             self._say(coa_client.CHECK_FAILED)
+            self._show_kind("unknown")
 
     # -- the update -------------------------------------------------------------------------
 
     @Slot()
+    def fix_pressed(self) -> None:
+        """T827: Update client with the replace choice made, asked once (`_confirm`)."""
+        self._start_update(replacing=True)
+
+    @Slot()
     def update_pressed(self) -> None:
+        self._start_update(replacing=False)
+
+    def _start_update(self, *, replacing: bool) -> None:
         client = self._client_dir()
         if client is None:
             self._say(NO_CLIENT_FOLDER)
@@ -191,6 +255,7 @@ class ClientUpdateControl(QObject):
         if self.running:
             return
         self._begin()
+        self._replacing = replacing
         say = self._relay.emit_line
         cancel = self._cancel
 
@@ -208,18 +273,25 @@ class ClientUpdateControl(QObject):
         self.running = True
         self._cancel.clear()
         self.button.setEnabled(False)
+        self.fix_button.setEnabled(False)
         self.cancel_button.setVisible(True)
         self._say("Checking your client files against the update…")
 
     def _end(self, text: str) -> None:
         self.running = False
+        self._replacing = False
         self.button.setEnabled(True)
+        self.fix_button.setEnabled(True)
         self.cancel_button.setVisible(False)
         self._say(text)
 
     @Slot(object)
     def _planned(self, planned: object) -> None:
         assert isinstance(planned, _Planned)
+        self._manifest = planned.manifest
+        if self._replacing:
+            self._confirm_replace(planned)
+            return
         items = planned.items
         writes = [i for i in items if i.action in ("add", "replace")]
         edited = [i for i in items if i.action == "keep-edited" and not i.remembered]
@@ -237,6 +309,31 @@ class ClientUpdateControl(QObject):
             self._end("The client update was not started; nothing was changed.")
             return
         self._apply(planned, replace_edited=choice is Choice.REPLACE)
+
+    def _confirm_replace(self, planned: _Planned) -> None:
+        """The stock client's fix: one Yes/No, then the update with the replace choice.
+
+        A Keep the player chose earlier for a key file (`coa_client.KEY_FILES`) is set
+        aside for this press, because keeping the stock copy is what disconnects them;
+        their other Keep choices stand.
+        """
+        keys = {name.casefold() for name in coa_client.KEY_FILES}
+        items = [
+            replace(i, remembered=False) if i.remembered and i.path.casefold() in keys else i
+            for i in planned.items
+        ]
+        planned = _Planned(planned.manifest, items, planned.client_dir)
+        text = (
+            f"{coa_client.summary(items)}\n\nThis makes your client folder "
+            f"{planned.client_dir} the Conquest of Azeroth client: the files that differ from "
+            f"it are replaced, and every replaced file is kept in {coa_client.BACKUP_DIR} there "
+            "(Undo puts them back). Your settings, add-ons and graphics files are never "
+            "replaced. Close the game first.\n\nUpdate the client and replace the changed files?"
+        )
+        if not self._confirm(self._parent, FIX_LABEL, text):
+            self._end("The client update was not started; nothing was changed.")
+            return
+        self._apply(planned, replace_edited=True)
 
     def _apply(self, planned: _Planned, *, replace_edited: bool) -> None:
         say = self._relay.emit_line
@@ -261,13 +358,14 @@ class ClientUpdateControl(QObject):
             except Exception as exc:  # noqa: BLE001 - a read; the update itself is done
                 logger.warning(f"could not compare the map data with the client: {exc}")
                 after = None
-            return f"{said}\n\n{after}" if after else said
+            text = f"{said}\n\n{after}" if after else said
+            return _Said(text, _kind_now(planned.client_dir, planned.manifest))
 
         self._jobs(work, self._applied, self._failed)
 
     @Slot(object)
     def _applied(self, said: object) -> None:
-        self._end(str(said))
+        self._end(self._took(said))
 
     @Slot(object)
     def _failed(self, exc: object) -> None:
@@ -299,14 +397,18 @@ class ClientUpdateControl(QObject):
             return
         self._begin()
         self._say(f"Undoing the client update {version}…")
+        manifest = self._manifest
 
         def work() -> object:
             left = coa_client.rollback(client, version)
             if not left:
-                return f"The client update {version} was undone."
-            return (
+                return _Said(
+                    f"The client update {version} was undone.", _kind_now(client, manifest)
+                )
+            return _Said(
                 f"The client update {version} was only partly undone: {left[0]}"
-                f"{f' ({len(left) - 1} more)' if len(left) > 1 else ''}. Its backup was kept."
+                f"{f' ({len(left) - 1} more)' if len(left) > 1 else ''}. Its backup was kept.",
+                _kind_now(client, manifest),
             )
 
         self._jobs(work, self._applied, self._failed)
