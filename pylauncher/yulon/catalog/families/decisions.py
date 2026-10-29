@@ -723,16 +723,21 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
     Site(
         "yulon.install_wiring",
         "import_gate_for",
-        "the one-shot import probe/reset pair (keyed on import_service)",
+        "the one-shot import probe/reset pair (keyed on import_service), and the world a "
+        "bootstrap loaded reading as absent rather than partial (T812 D3)",
         {
-            "azerothcore": supported(),
+            "azerothcore": supported(
+                "an entry that names a world_bootstrap_service is asked whether the bootstrap's "
+                "own load is the whole of what is there; every other entry keeps the probe's "
+                "answer (T812 D3)"
+            ),
             "cmangos": not_applicable("CMaNGOS's import is the engine's marker-gated SQL plan"),
             "trinitycore": not_applicable(
                 "TrinityCore's import is the engine's marker-gated SQL plan (CmangosInstaller's, "
                 "inherited)"
             ),
         },
-        scanned=False,
+        hits=(".azerothcore", ".azerothcore"),
     ),
     Site(
         "yulon.install_wiring",

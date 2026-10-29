@@ -595,8 +595,8 @@ class AzerothCoreInstaller(StagedInstaller):
         except (OSError, UnicodeDecodeError) as exc:
             raise InstallerError(
                 f"The build context's {DOCKERIGNORE} could not be written in {ctx.server_dir} "
-                f"({exc}), so a Rebuild would upload the extracted game data. Nothing else was "
-                "changed."
+                f"({exc}), so the next build would upload the extracted game data. Nothing else "
+                "was changed."
             ) from exc
         if written:
             yield "The extracted game data is left out of the build context."
