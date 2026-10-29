@@ -3013,6 +3013,10 @@
             },
             "native": {
                 "family": "azerothcore",
+                "stop_without_bot_saves": {
+                    "queue_command": "server debug",
+                    "queue_pattern": "CharacterDatabase queue size: (\\d+)"
+                },
                 "update_to_latest": false,
                 "templates": "wow-coa/native",
                 "images": [

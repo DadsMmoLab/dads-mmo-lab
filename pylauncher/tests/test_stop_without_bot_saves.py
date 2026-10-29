@@ -100,10 +100,12 @@ SECONDS = 20.0
 
 
 def test_the_azerothcore_games_offer_it_and_the_rest_do_not() -> None:
-    """AzerothCore's long wait is after the signal and its queue can be read: offered. CMaNGOS
-    has no console line that reads its queue, so a cut could not prove the players written;
-    Centurion's whole wait is the save it asks for first, because its close drops the queue."""
-    for game in ("wow-wotlk", "wow-unbound"):
+    """AzerothCore's long wait is after the signal and its queue can be read: offered, on
+    Conquest of Azeroth too (its core is AzerothCore with the same `server debug` line, and its
+    live Stop is where the 2929-query wait was seen). CMaNGOS has no console line that reads its
+    queue, so a cut could not prove the players written; Centurion's whole wait is the save it
+    asks for first, because its close drops the queue."""
+    for game in ("wow-wotlk", "wow-unbound", "wow-coa"):
         skippable = CATALOG.get(game).container_spec().bot_saves_skippable
         assert skippable is not None, game
         assert skippable.save.command == "saveall"
@@ -323,13 +325,33 @@ def test_a_stop_not_pressed_by_the_player_waits_whatever_the_choice(
     assert said == [docker.WORLD_SAVING, docker.WORLD_SAVED]
 
 
+def test_the_coa_realm_switch_stop_waits_whatever_the_choice(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The realm switch's own Stop (T812 C3b) on Conquest of Azeroth, which offers the choice:
+    it reloads the characters schema under the next realm, so it never reads the choice and
+    waits for every save. Driven through the switch's real stop, not a stand-in."""
+    from yulon.ui import controller_view
+
+    fake = _install(monkeypatch, "wow-coa", LONG)
+    console = _console(monkeypatch, fake, [0])
+    _not_waiting(tmp_path)
+    assert Controller(fake.spec, tmp_path).skips_bot_saves() is True
+    controller_view._stop_for_realm_switch(CATALOG.get("wow-coa"), tmp_path, wsl_distro=None)
+    assert fake.termed_at is not None, "the switch's stop never signalled the world"
+    assert "SIGKILL" not in fake.events
+    assert console.looks == 0
+
+
+@pytest.mark.parametrize("game", ["wow-wotlk", "wow-coa"])
 @pytest.mark.parametrize("route", ["remove", "restart", "rebuild"])
 def test_the_routes_that_need_the_database_whole_wait_whatever_the_choice(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, route: str
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, route: str, game: str
 ) -> None:
     """A removal, the controller's own restart (the Tortoise bot rebuild's), and the stop of a
-    rebuild or update (`stop_servers_staged`) never read the choice."""
-    fake = _install(monkeypatch, "wow-wotlk", LONG)
+    rebuild or update (`stop_servers_staged`) never read the choice; on Conquest of Azeroth
+    too, whose uninstall and Rebuild run these same stops."""
+    fake = _install(monkeypatch, game, LONG)
     console = _console(monkeypatch, fake, [0])
     _not_waiting(tmp_path)
     controller = Controller(fake.spec, tmp_path)
