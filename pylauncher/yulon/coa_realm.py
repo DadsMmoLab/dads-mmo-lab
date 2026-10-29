@@ -596,13 +596,17 @@ def switch(
         crash = _read_crash(server_dir)
     marker = read_marker(sql.query, entry)
     if marker is not None and marker != current:
+        if crash is not None and target_id == current:
+            # The way out of a half-done switch its retry cannot finish (cold review).
+            yield from _undo_late(entry, sql, server_dir, current, marker, crash, write_override)
+            return
         if target_id != marker:
             raise RealmSwitchError(mismatch_sentence(marker, current))
         if crash is not None:
             # T812 C8 D11: a switch that failed after its marker (the override, the file):
             # its own half-done state, proven before it is finished, never refused.
             _check_resumable(current, marker, crash)
-            _carry_realm_address(entry, sql, current)
+            yield from _carry_realm_address(entry, sql, current, marker)
             _verify(sql, entry, current, marker)
             yield (
                 f"The last switch to {marker} stopped after its databases were moved; "
@@ -657,11 +661,11 @@ def switch(
         )
         yield from run_import(SwitchImport(server_dir=server_dir, target=target_id))
         set_realm_row(types[target_id].realm_name, str(entry.ports.world))
-        _carry_realm_address(entry, sql, current)
+        yield from _carry_realm_address(entry, sql, current, target_id)
         yield from _copy_player_accounts(entry, sql, current, bot_prefix)
         ensure_marker(sql, entry, target_id)
     else:
-        _carry_realm_address(entry, sql, current)
+        yield from _carry_realm_address(entry, sql, current, target_id)
     _verify(sql, entry, current, target_id)
     # Published override, then file, then the crash marker cleared LAST: a press
     # killed between any two still finds the marker and finishes the publication.
@@ -706,6 +710,11 @@ def pre_check(
             entry, sql, server_dir, current, target_id, crash
         )
     marker = read_marker(sql.query, entry)
+    if marker is not None and marker != current and crash is not None and target_id == current:
+        # The undo of a half-done switch (`_undo_late`): its own state, read only here.
+        _check_resumable(current, marker, crash)
+        _verify(sql, entry, current, marker)
+        return current
     if marker is not None and marker != current and target_id != marker:
         raise RealmSwitchError(mismatch_sentence(marker, current))
     if marker is not None and marker != current:
@@ -1197,7 +1206,47 @@ def _check_resumable(current: str, marker: str, crash: _Crash) -> None:
         )
 
 
-def _carry_realm_address(entry: CatalogEntry, sql: SqlRunner, source_id: str) -> None:
+_ADDRESS = re.compile(r"[A-Za-z0-9.:-]{1,255}")
+"""What a realm row address may be before it is spliced into SQL (`networking._sql_literal`)."""
+
+FALLBACK_ADDRESS = "127.0.0.1"
+"""The address a realm row gets when neither the parked row nor the new one names a usable one."""
+
+
+def _carry_failed_sentence(target_id: str, current: str, port: int, why: str) -> str:
+    """The refusal when the new type's realm row cannot be set: the state, and the ways out."""
+    return (
+        f"The {target_id} realm type's realm row could not be given this server's address and "
+        f"world port {port} ({why}). The server is stopped and still set to {current}. Press "
+        f"Switch realm type to {target_id} again to retry, or to {current} to put the {current} "
+        "realm type back."
+    )
+
+
+def _realm_cells(sql: SqlRunner, statement: str, width: int, what: str) -> list[list[str]] | None:
+    """The tab-separated rows `statement` answers, each `width` cells; None if unreadable."""
+    try:
+        text = sql.query(statement)
+    except Exception as exc:  # noqa: BLE001 - an unreadable row is the fallback's case
+        logger.warning(f"{what} could not be read: {exc}")
+        return None
+    rows = [line.split("\t") for line in text.splitlines() if line.strip()]
+    if any(len(row) != width for row in rows):
+        logger.warning(f"{what} reads {rows[:2]}, which is not a realm row")
+        return None
+    return rows
+
+
+def _usable(value: str | None) -> str | None:
+    """An address cell that can be written back: not NULL, not empty, a plain address token."""
+    if value is None or value == "NULL" or not _ADDRESS.fullmatch(value):
+        return None
+    return value
+
+
+def _carry_realm_address(
+    entry: CatalogEntry, sql: SqlRunner, source_id: str, target_id: str
+) -> Iterator[str]:
     """The realm row's address and this server's world port, onto the type now plain (D13).
 
     The address a client is told belongs to the server, not to a realm type: the
@@ -1205,37 +1254,116 @@ def _carry_realm_address(entry: CatalogEntry, sql: SqlRunner, source_id: str) ->
     seeds `127.0.0.1:8085`, and a parked type keeps the address of the day it was
     parked, so on every switch the row of the type moving in takes the address
     (and LAN address) of the row just parked, and the world port this server
-    publishes. Read back before anything is marked or published.
+    publishes.
+
+    Robust to the rows it finds (cold review): a parked row that is missing, NULL
+    or not an address falls back to the new row's own address, then to
+    `FALLBACK_ADDRESS`, and says so; a missing LAN address takes the address; a
+    new type with no realm row gets one INSERTed with the type's realm name. The
+    values are written as literals and read back exactly. A row that still cannot
+    be set refuses with the server's state and both ways out: the retry, or the
+    switch back to the file's type, which `_undo_late()` makes possible.
     """
     _check_id(source_id)
+    _check_id(target_id)
     auth = entry.databases.auth
     source = f"{auth}_{source_id}"
     realm = entry.realmlist
     for name in (auth, source, realm.table, realm.address_column):
         _check_name(name)
-    columns = [realm.address_column]
-    if realm.local_address_column:
-        _check_name(realm.local_address_column)
-        columns.append(realm.local_address_column)
+    lan = realm.local_address_column
+    if lan:
+        _check_name(lan)
     port = int(entry.ports.world)
     key = int(realm.realm_id)
-    sets = ", ".join(f"t.`{column}` = s.`{column}`" for column in columns)
-    same = " AND ".join(f"s.`{column}` <=> t.`{column}`" for column in columns)
-    sql.execute(
-        f"UPDATE `{auth}`.`{realm.table}` t JOIN `{source}`.`{realm.table}` s ON s.id = t.id "
-        f"SET {sets}, t.port = {port} WHERE t.id = {key};"
-    )
-    held = _one_int(
-        sql,
-        f"SELECT COUNT(*) FROM `{auth}`.`{realm.table}` t JOIN `{source}`.`{realm.table}` s "
-        f"ON s.id = t.id AND {same} WHERE t.id = {key} AND t.port = {port};",
-        "The realm row's address",
-    )
-    if held != 1:
-        raise RealmSwitchError(
-            f"The realm row of the new realm type did not take this server's address and world "
-            f"port {port}; nothing further was written. Press again to retry."
+    columns = f"`{realm.address_column}`" + (f", `{lan}`" if lan else "")
+    width = 2 if lan else 1
+
+    def read(schema: str, extra: str = "") -> list[list[str]] | None:
+        return _realm_cells(
+            sql,
+            f"SELECT {columns}{extra} FROM `{schema}`.`{realm.table}` WHERE id = {key};",
+            width + (1 if extra else 0),
+            f"The {schema} realm row",
         )
+
+    parked = read(source)
+    here = read(auth)
+    address = _usable(parked[0][0]) if parked else None
+    local = _usable(parked[0][1]) if parked and lan else None
+    if address is None:
+        address = (_usable(here[0][0]) if here else None) or FALLBACK_ADDRESS
+        yield (
+            f"The {source_id} realm row named no address to carry over, so the {target_id} "
+            f"realm row says {address}. Set the realm address on the Network tab if players "
+            "connect from another computer."
+        )
+    local = local or address
+    sets = f"`{realm.address_column}` = '{address}'" + (f", `{lan}` = '{local}'" if lan else "")
+    try:
+        if here:
+            sql.execute(
+                f"UPDATE `{auth}`.`{realm.table}` SET {sets}, port = {port} WHERE id = {key};"
+            )
+        else:
+            name = _types(entry)[target_id].realm_name
+            if any(mark in name for mark in ("'", '"', "\\")):
+                raise RealmSwitchError(f"the realm name {name!r} cannot be written")
+            values = f"'{address}'" + (f", '{local}'" if lan else "")
+            sql.execute(
+                f"INSERT INTO `{auth}`.`{realm.table}` (id, name, {columns}, port) "
+                f"VALUES ({key}, '{name}', {values}, {port});"
+            )
+    except Exception as exc:  # noqa: BLE001 - worded once, with the way out
+        raise RealmSwitchError(
+            _carry_failed_sentence(target_id, source_id, port, f"the database refused: {exc}")
+        ) from exc
+    back = read(auth, ", port")
+    want = [address, *([local] if lan else []), str(port)]
+    if back != [want]:
+        raise RealmSwitchError(
+            _carry_failed_sentence(
+                target_id, source_id, port, f"the row reads {back[:1] if back else 'nothing'}"
+            )
+        )
+
+
+def _undo_late(
+    entry: CatalogEntry,
+    sql: SqlRunner,
+    server_dir: Path,
+    current: str,
+    marker: str,
+    crash: _Crash,
+    write_override: Callable[[Mapping[str, str]], None],
+) -> Iterator[str]:
+    """Put the file's type back after a switch to `marker` failed after its rename.
+
+    The way out of a half-done switch that its own retry cannot finish (a realm
+    row that will not take its address, cold review): only for the switch's own
+    state (`_check_resumable`, `_verify`), it is a normal switch back, ONE rename
+    both ways, so the `marker` set is parked whole under its own marker and the
+    file's type is plain again. The file never changed; the override is written
+    for the file's type again and the crash note cleared last.
+    """
+    _check_resumable(current, marker, crash)
+    _verify(sql, entry, current, marker)
+    back = _parked(entry, marker)
+    for schema, source in zip(back, _plain(entry), strict=True):
+        _create_park_like(sql, source, schema)
+    home = _parked(entry, current)
+    yield from _rename_both_ways(
+        entry, sql, marker, current, back, home, _tables_in(sql.query, home)
+    )
+    for schema in home:
+        _drop_if_empty(sql, schema)
+    _verify(sql, entry, marker, current)
+    write_override(switch_env_for(entry, current))
+    _clear_crash(server_dir)
+    yield (
+        f"The unfinished switch to {marker} was put back: the server is on the {current} "
+        f"realm type again, and the {marker} databases are kept for the next switch."
+    )
 
 
 def _verify(sql: SqlRunner, entry: CatalogEntry, current: str, target_id: str) -> None:

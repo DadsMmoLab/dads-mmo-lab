@@ -188,22 +188,38 @@ class FakeSql(coa_realm.SqlRunner):
         return True
 
     def _carry_realm(self, statement: str) -> bool:
-        """The switch's realm-row carry (T812 C8 D13): address, LAN address and port."""
+        """The switch's realm-row writes (T812 C8 D13): the UPDATE, or the INSERT of a new row."""
         found = re.fullmatch(
-            r"UPDATE `(\w+)`\.`realmlist` t JOIN `(\w+)`\.`realmlist` s ON s\.id = t\.id "
-            r"SET t\.`address` = s\.`address`, t\.`localAddress` = s\.`localAddress`, "
-            r"t\.port = (\d+) WHERE t\.id = (\d+);",
+            r"UPDATE `(\w+)`\.`realmlist` SET `address` = '([^']*)', `localAddress` = '([^']*)', "
+            r"port = (\d+) WHERE id = (\d+);",
+            statement,
+        )
+        if found is not None:
+            schema, address, local, port, key = found.groups()
+            for row in self._need(schema, "realmlist"):
+                if str(row["id"]) == key:
+                    row.update(address=address, localAddress=local, port=int(port))
+            return True
+        found = re.fullmatch(
+            r"INSERT INTO `(\w+)`\.`realmlist` \(id, name, `address`, `localAddress`, port\) "
+            r"VALUES \((\d+), '([^']*)', '([^']*)', '([^']*)', (\d+)\);",
             statement,
         )
         if found is None:
             return False
-        target, source, port, key = found.groups()
-        sources = [row for row in self._need(source, "realmlist") if str(row["id"]) == key]
-        for row in self._need(target, "realmlist"):
-            if str(row["id"]) == key and sources:
-                row["address"] = sources[0]["address"]
-                row["localAddress"] = sources[0]["localAddress"]
-                row["port"] = int(port)
+        schema, key, name, address, local, port = found.groups()
+        rows = self._need(schema, "realmlist")
+        if any(str(row["id"]) == key for row in rows):
+            raise RuntimeError("Duplicate entry for key 'PRIMARY'")
+        rows.append(
+            {
+                "id": int(key),
+                "name": name,
+                "address": address,
+                "localAddress": local,
+                "port": int(port),
+            }
+        )
         return True
 
     def _copy_access(self, statement: str) -> bool:
@@ -309,23 +325,27 @@ class FakeSql(coa_realm.SqlRunner):
             ]
             return f"{len(same)}\n"
         found = re.fullmatch(
-            r"SELECT COUNT\(\*\) FROM `(\w+)`\.`realmlist` t JOIN `(\w+)`\.`realmlist` s "
-            r"ON s\.id = t\.id AND s\.`address` <=> t\.`address` AND "
-            r"s\.`localAddress` <=> t\.`localAddress` WHERE t\.id = (\d+) AND t\.port = (\d+);",
+            r"SELECT `address`, `localAddress`(, port)? FROM `(\w+)`\.`realmlist` "
+            r"WHERE id = (\d+);",
             statement,
         )
         if found is not None:
-            target, source, key, port = found.groups()
-            same = [
-                1
-                for t in self._need(target, "realmlist")
-                for s in self._need(source, "realmlist")
-                if str(t["id"]) == key == str(s["id"])
-                and t["address"] == s["address"]
-                and t["localAddress"] == s["localAddress"]
-                and str(t["port"]) == port
-            ]
-            return f"{len(same)}\n"
+            with_port, schema, key = found.groups()
+            if "realmlist" not in self.tables.get(schema, []):
+                raise RuntimeError(f"Table '{schema}.realmlist' doesn't exist")
+
+            def cell(value: object) -> str:
+                return "NULL" if value is None else str(value)  # mysql --batch prints NULL
+
+            return "".join(
+                "\t".join(
+                    [cell(row["address"]), cell(row["localAddress"])]
+                    + ([cell(row["port"])] if with_port else [])
+                )
+                + "\n"
+                for row in self.rows.get((schema, "realmlist"), [])
+                if str(row["id"]) == key
+            )
         raise AssertionError(f"a query the fake does not model: {statement}")
 
 
