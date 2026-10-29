@@ -259,7 +259,7 @@ def test_only_differing_files_are_downloaded_and_each_replaced_one_is_backed_up(
     site = _site(
         {"Ascension.exe": b"new", "Data/patch-A.MPQ": b"same", "Data/patch-WB3.MPQ": b"added"}
     )
-    outcome = _update(client, site)
+    outcome = _update(client, site, replace_edited=True)
     assert sorted(outcome.written) == ["Ascension.exe", "Data/patch-WB3.MPQ"]
     assert (client / "Ascension.exe").read_bytes() == b"new"
     assert (client / "Data/patch-WB3.MPQ").read_bytes() == b"added"
@@ -340,6 +340,45 @@ def test_apply_refuses_an_excluded_path_even_when_a_plan_names_it(tmp_path: Path
     assert (client / "WTF/Config.wtf").read_bytes() == b"mine"
 
 
+def test_a_differing_file_yulon_has_no_record_of_is_kept(tmp_path: Path) -> None:
+    """Owner's decision (T825): on a first update a differing file stays the player's."""
+    client = _client(tmp_path, {"Data/patch-A.MPQ": b"old"})
+    site = _site({"Data/patch-A.MPQ": b"published", "Data/new.MPQ": b"n"})
+    manifest = coa_client.fetch_manifest(MANIFEST_URL, hosts=HOSTS, opener=site)
+    items = coa_client.plan(client, manifest, None)
+    assert _actions(items) == {"Data/patch-A.MPQ": "keep-edited", "Data/new.MPQ": "add"}
+    said = coa_client.summary(items)
+    assert said.startswith("1 file to download")
+    assert "1 file (Data/patch-A.MPQ) differs from the published one" in said
+    assert "kept unless you choose to replace it" in said
+    outcome = _update(client, site)
+    assert (client / "Data/patch-A.MPQ").read_bytes() == b"old"
+    assert outcome.written == ["Data/new.MPQ"] and outcome.kept == ["Data/patch-A.MPQ"]
+    assert OBJECTS + _sha(b"published") not in [u for u, _ in site.object_gets()]
+
+
+def test_the_replace_choice_replaces_an_unrecorded_file_and_backs_it_up(tmp_path: Path) -> None:
+    client = _client(tmp_path, {"Data/patch-A.MPQ": b"old"})
+    outcome = _update(client, _site({"Data/patch-A.MPQ": b"published"}, "v1"), replace_edited=True)
+    assert outcome.written == ["Data/patch-A.MPQ"]
+    assert (client / "Data/patch-A.MPQ").read_bytes() == b"published"
+    assert (client / coa_client.BACKUP_DIR / "v1" / "Data/patch-A.MPQ").read_bytes() == b"old"
+
+
+def test_a_recorded_file_the_player_did_not_change_is_replaced_without_asking(
+    tmp_path: Path,
+) -> None:
+    client = _client(tmp_path, {"Data/patch-A.MPQ": b"v1"})
+    _update(client, _site({"Data/patch-A.MPQ": b"v1"}, "v1"))
+    site = _site({"Data/patch-A.MPQ": b"v2"}, "v2")
+    manifest = coa_client.fetch_manifest(MANIFEST_URL, hosts=HOSTS, opener=site)
+    items = coa_client.plan(client, manifest, coa_client.read_state(client))
+    assert _actions(items) == {"Data/patch-A.MPQ": "replace"}
+    _update(client, site)
+    assert (client / "Data/patch-A.MPQ").read_bytes() == b"v2"
+    assert (client / coa_client.BACKUP_DIR / "v2" / "Data/patch-A.MPQ").read_bytes() == b"v1"
+
+
 def test_a_file_the_player_edited_since_the_last_update_is_kept(tmp_path: Path) -> None:
     client = _client(tmp_path, {"Data/patch-A.MPQ": b"v1"})
     _update(client, _site({"Data/patch-A.MPQ": b"v1"}, "v1"))
@@ -378,7 +417,7 @@ def test_a_hash_mismatch_keeps_the_old_file_and_is_reported(tmp_path: Path) -> N
     client = _client(tmp_path, {"Ascension.exe": b"old", "Data/a.MPQ": b"a1"})
     site = _site({"Ascension.exe": b"new", "Data/a.MPQ": b"a2"})
     site.files[OBJECTS + _sha(b"new")] = b"bad"  # same size, wrong bytes
-    outcome = _update(client, site)
+    outcome = _update(client, site, replace_edited=True)
     assert (client / "Ascension.exe").read_bytes() == b"old"
     assert not (client / ("Ascension.exe" + coa_client.PART_SUFFIX)).exists()
     assert [path for path, _ in outcome.failed] == ["Ascension.exe"]
@@ -392,11 +431,11 @@ def test_a_cut_download_resumes_from_what_arrived(tmp_path: Path) -> None:
     client = _client(tmp_path, {"Data/a.MPQ": b"old"})
     site = _site({"Data/a.MPQ": big})
     site.cut_next[OBJECTS + _sha(big)] = 5000
-    first = _update(client, site)
+    first = _update(client, site, replace_edited=True)
     assert first.failed and (client / "Data/a.MPQ").read_bytes() == b"old"
     part = client / ("Data/a.MPQ" + coa_client.PART_SUFFIX)
     assert part.stat().st_size == 5000
-    second = _update(client, site)
+    second = _update(client, site, replace_edited=True)
     assert second.written == ["Data/a.MPQ"] and not second.failed
     assert (client / "Data/a.MPQ").read_bytes() == big
     assert site.object_gets()[-1][1] == {"Range": "bytes=5000-"}
@@ -406,7 +445,7 @@ def test_cancel_keeps_the_part_and_records_no_version(tmp_path: Path) -> None:
     client = _client(tmp_path, {"Data/a.MPQ": b"old"})
     site = _site({"Data/a.MPQ": b"new"})
     with pytest.raises(coa_client.Cancelled):
-        _update(client, site, cancelled=lambda: True)
+        _update(client, site, cancelled=lambda: True, replace_edited=True)
     assert (client / "Data/a.MPQ").read_bytes() == b"old"
     assert coa_client.read_state(client).version is None  # type: ignore[union-attr]
 
@@ -423,6 +462,7 @@ def test_a_full_disk_refuses_before_anything_is_downloaded(tmp_path: Path) -> No
             items,
             objects_url=OBJECTS,
             hosts=HOSTS,
+            replace_edited=True,
             opener=site,
             free_bytes=lambda _p: 3,
         )
@@ -442,7 +482,7 @@ def test_a_file_in_use_says_close_the_game(tmp_path: Path, monkeypatch: pytest.M
         real(src, dst)  # type: ignore[arg-type,unused-ignore]
 
     monkeypatch.setattr(os, "replace", busy)
-    outcome = _update(client, _site({"Ascension.exe": b"new"}))
+    outcome = _update(client, _site({"Ascension.exe": b"new"}), replace_edited=True)
     assert "Close the game" in outcome.failed[0][1]
     assert (client / "Ascension.exe").read_bytes() == b"old"
 
@@ -482,7 +522,9 @@ def test_the_state_file_is_written_last(tmp_path: Path, monkeypatch: pytest.Monk
         real(src, dst)  # type: ignore[arg-type,unused-ignore]
 
     monkeypatch.setattr(os, "replace", watch)
-    _update(client, _site({"a.exe": b"2", "Data/b.MPQ": b"2", "Data/c.MPQ": b"3"}))
+    _update(
+        client, _site({"a.exe": b"2", "Data/b.MPQ": b"2", "Data/c.MPQ": b"3"}), replace_edited=True
+    )
     assert order[-1] == coa_client.STATE_FILE
     assert order.count(coa_client.STATE_FILE) == 1
     assert {"a.exe", "b.MPQ", "c.MPQ"} <= set(order[:-1])
@@ -539,7 +581,7 @@ def test_a_ready_to_play_copy_leaves_the_update_record_and_backups_out(tmp_path:
     from yulon import play_client
 
     client = _client(tmp_path, {"Ascension.exe": b"old", "Data/patch-A.MPQ": b"a"})
-    _update(client, _site({"Ascension.exe": b"new", "Data/patch-A.MPQ": b"a"}))
+    _update(client, _site({"Ascension.exe": b"new", "Data/patch-A.MPQ": b"a"}), replace_edited=True)
     assert (client / coa_client.BACKUP_DIR).is_dir() and (client / coa_client.STATE_FILE).is_file()
     built = play_client.plan(client, tmp_path / "copy")
     names = {p.parts[0] for p in (*built.linked, *built.copied)}

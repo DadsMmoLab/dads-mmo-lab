@@ -12,8 +12,10 @@ renamed into place. Nothing unproved ever wears a client file's name.
 `Cache/`, `Errors/` and `Logs/` folders and `Interface/AddOns/CoaBotUI/` (our
 own add-on's place). The player's own settings and graphics wrappers
 (`d3d8/d3d9/d3d10core/d3d11/dxgi.dll`, `dxvk.conf`, every `*.ini/*.conf/*.cfg/*.wtf`)
-are only created when missing, never replaced. A file Yu'lon recorded and the
-player has changed since is kept unless the player says replace; a Keep is
+are only created when missing, never replaced. A differing file is replaced only
+when Yu'lon recorded it and the player has not changed it since; any other (every
+file on a first update, or one the player changed) is kept unless the player
+chooses to replace it (the owner's decision, T825). A Keep is
 remembered against the manifest's digest for that file, so the same update does
 not ask twice.
 
@@ -526,9 +528,10 @@ def plan(
 ) -> list[PlanItem]:
     """What Update client would do to each manifest file; excluded files are not listed.
 
-    A differing file is `replace` when Yu'lon has no record of it (an old copy of
-    the client's own file: player-owned kinds never get here) or its record still
-    matches it; `keep-edited` when the player changed it since Yu'lon recorded it.
+    A differing file is `replace` only when Yu'lon recorded it and it still holds
+    what was recorded (the player did not touch it). One Yu'lon has no record of
+    (every file on a first update) or the player changed since is `keep-edited`:
+    kept unless the player chooses to replace it (owner's decision, T825).
     """
     items: list[PlanItem] = []
     files = state.files if state is not None else {}
@@ -566,7 +569,7 @@ def plan(
         if kept.get(entry.path) == entry.sha256:
             items.append(PlanItem(entry.path, "keep-edited", entry.size, entry.sha256, True))
             continue
-        edited = fact is not None and _current_sha(target, st, fact, cancelled) != fact.sha256
+        edited = fact is None or _current_sha(target, st, fact, cancelled) != fact.sha256
         action: Action = "keep-edited" if edited else "replace"
         items.append(PlanItem(entry.path, action, entry.size, entry.sha256))
     return items
@@ -588,10 +591,13 @@ def summary(items: Iterable[PlanItem]) -> str:
         f"({size_text(sum(i.size for i in write))})."
     )
     if edited:
+        one = len(edited) == 1
         said += (
-            f" {len(edited)} file{'s' if len(edited) != 1 else ''} you changed "
+            f" {len(edited)} file{'' if one else 's'} "
             f"({', '.join(i.path for i in edited[:3])}{', …' if len(edited) > 3 else ''}) "
-            "differ from the update."
+            f"differ{'s' if one else ''} from the published one{'' if one else 's'}; "
+            f"{'it is' if one else 'they are'} kept unless you choose to replace "
+            f"{'it' if one else 'them'} ({size_text(sum(i.size for i in edited))} more)."
         )
     return said
 

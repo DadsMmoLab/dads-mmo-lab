@@ -91,7 +91,7 @@ def test_update_asks_with_the_summary_then_brings_the_client_up_to_date(
     qapp: object, tmp_path: Path
 ) -> None:
     site = _site({"a.exe": b"new", "Data/b.MPQ": b"same"})
-    control, client, asked = _control(tmp_path, site, {"a.exe": b"old", "Data/b.MPQ": b"same"})
+    control, client, asked = _control(tmp_path, site, {"Data/b.MPQ": b"same"})
     control.update_pressed()
     assert len(asked) == 1
     assert asked[0][0].startswith("1 file to download")
@@ -122,7 +122,7 @@ def test_edited_files_offer_replace_and_replace_replaces_them(qapp: object, tmp_
         tmp_path, _site({"Data/b.MPQ": b"v2"}, "v2"), {}, answer=Choice.REPLACE, client=client
     )
     control2.update_pressed()
-    assert asked2 and asked2[0][1] is True and "you changed" in asked2[0][0]
+    assert asked2 and asked2[0][1] is True and "kept unless you choose to replace" in asked2[0][0]
     assert (client / "Data/b.MPQ").read_bytes() == b"v2"
 
 
@@ -162,3 +162,13 @@ def test_update_client_sits_beside_play_only_for_an_entry_that_publishes_its_cli
         assert view.play_button is not None and view.play_button.isEnabled()
     else:
         assert view.client_update is None
+
+
+def test_a_first_update_keeps_differing_files_unless_the_player_says_replace(
+    qapp: object, tmp_path: Path
+) -> None:
+    site = _site({"a.exe": b"published"})
+    control, client, asked = _control(tmp_path, site, {"a.exe": b"theirs"})
+    control.update_pressed()
+    assert asked and asked[0][1] is True
+    assert (client / "a.exe").read_bytes() == b"theirs"
