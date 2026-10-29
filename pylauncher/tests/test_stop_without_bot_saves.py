@@ -448,6 +448,9 @@ def test_the_server_tab_offers_the_choice_under_stop_and_keeps_what_is_picked(
     ]
     assert box.currentIndex() == 0, "the safe Stop is not the default"
     assert "backup" in box.toolTip() and "20 seconds" in box.toolTip()
+    # Cold review: the players are saved first; a few seconds of play after it can be lost.
+    assert "every player's save is written" not in box.toolTip()
+    assert "few seconds of play" in box.toolTip()
     box.setCurrentIndex(1)
     assert stop_choice.waits_for_bot_saves(tmp_path) is False
     assert _view(ps, tmp_path).stop_choice_box.currentIndex() == 1  # type: ignore[attr-defined]

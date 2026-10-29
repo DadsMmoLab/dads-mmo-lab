@@ -41,16 +41,21 @@ CHOICE_NOTE = (
 )
 """The line under the choice, for a screen with no hover (a Steam Deck)."""
 CHOICE_NOT_KEPT = "Yu'lon could not keep this choice ({why}), so the Stop stays as it was."
+CHOICE_NOT_NOW = (
+    "Yu'lon did not keep this choice: the WSL system this server lives in is not running, and "
+    "Yu'lon does not start it for a setting. Start the server, then choose again."
+)
 
 
 def choice_tip(seconds: float) -> str:
     """What the choice does, for its tooltip and its line on the tab."""
     return (
-        "Players are always saved first, either way. Not waiting stops the server "
-        f"{int(seconds)} seconds after every player's save is written, so bots may lose what "
-        "they did since their last save. A backup, an update or rebuild, a realm switch, a move "
-        "and a removal always wait for every save, whatever this says, because they need the "
-        "database complete."
+        "Players are always saved first, either way. Not waiting stops the server about "
+        f"{int(seconds)} seconds after the players are saved, so bots may lose what they did "
+        "since their last save, and the few seconds of play between that save and the stop can "
+        "be lost too. A backup, an update or rebuild, a realm switch, a move and a removal "
+        "always wait for every save, whatever this says, because they need the database "
+        "complete."
     )
 
 

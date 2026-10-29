@@ -4442,8 +4442,9 @@ PLAYERS_SAVE_UNSEEN = (
 """Said when a Stop that was not to wait for the bots falls back to the full wait (T826)."""
 
 WORLD_STOPPED_WITHOUT_BOT_SAVES = (
-    "Every player was saved. The world server was stopped without waiting for the rest of the "
-    "bots' saves, as this server is set to do, so bots may have lost their latest changes."
+    "The players were saved first. The world server was stopped without waiting for the rest "
+    "of the bots' saves, as this server is set to do, so bots may have lost their latest "
+    "changes."
 )
 """Said when the world was killed at `BotSavesSkippable.seconds` after its signal (T826)."""
 
@@ -4451,7 +4452,7 @@ WORLD_STOPPED_WITHOUT_BOT_SAVES = (
 def world_closing_without_bot_saves(seconds: float) -> str:
     """Said once the world is signalled in a Stop that does not wait for the bots (T826)."""
     return (
-        "Every player is saved. The world server is closing; Yu'lon gives it "
+        "The players are saved. The world server is closing; Yu'lon gives it "
         f"{int(seconds)} seconds and then stops it without waiting for the bots' saves."
     )
 
