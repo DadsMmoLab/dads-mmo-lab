@@ -77,11 +77,25 @@ def engine(
     )
 
 
-def coa_client(tmp_path: Path) -> Path:
-    """A client tree passing the CoA ClientSpec: Data/, the WB2 marker, enough MPQs, a locale."""
+WB1_LAYOUTS = ("disabled", "enabled", "both", "none")
+"""How a fake client keeps map 936's archive (T836): the owner's old copy (`.DISABLED` only),
+the CoA launcher's (`patch-WB1.MPQ` only), an old copy after Update client (both), neither."""
+
+
+def coa_client(tmp_path: Path, wb1: str = "disabled") -> Path:
+    """A client tree passing the CoA ClientSpec: Data/, the WB2 marker, enough MPQs, a locale.
+
+    `wb1` is one of `WB1_LAYOUTS`. The default is the layout the T812 tests were
+    written against; the launcher's own layout is "enabled".
+    """
+    assert wb1 in WB1_LAYOUTS, wb1
     client = tmp_path / "client"
     (client / "Data" / "enUS").mkdir(parents=True)
     (client / "Data" / "patch-WB2.MPQ").write_bytes(b"MPQ\x1a")
+    if wb1 in ("disabled", "both"):
+        (client / "Data" / "patch-WB1.MPQ.DISABLED").write_bytes(b"MPQ\x1a")
+    if wb1 in ("enabled", "both"):
+        (client / "Data" / "patch-WB1.MPQ").write_bytes(b"MPQ\x1a")
     for name in ("common", "expansion", "lichking", "patch", "patch-2", "patch-3"):
         (client / "Data" / f"{name}.MPQ").write_bytes(b"MPQ\x1a")
     (client / "Data" / "enUS" / "locale-enUS.MPQ").write_bytes(b"MPQ\x1a")
@@ -158,7 +172,7 @@ def test_a_resume_with_evidence_skips_the_extract(tmp_path: Path) -> None:
     block_data = block()
     assert block_data is not None
     effective = surgical.effective_plan(
-        AzerothCoreData(client_extract=block_data), "/azerothcore/env/dist/bin"
+        AzerothCoreData(client_extract=block_data), "/azerothcore/env/dist/bin", client
     )
     assert first == len(effective.tools), "a skip is only observable once something ran"
     list(eng._extract_maps(context(server_dir, client)))
@@ -211,7 +225,7 @@ def test_the_extract_stage_names_the_tools_image(tmp_path: Path) -> None:
     block_data = block()
     assert block_data is not None
     plan = surgical.effective_plan(
-        AzerothCoreData(client_extract=block_data), "/azerothcore/env/dist/bin"
+        AzerothCoreData(client_extract=block_data), "/azerothcore/env/dist/bin", client
     )
     assert [run.argv for run in rec.container_runs] == [tool.argv for tool in plan.tools]
     for run in rec.container_runs:
@@ -275,3 +289,109 @@ def test_an_unbound_client_is_not_judged_by_wb2(tmp_path: Path) -> None:
     entry = load_catalog().get(UNBOUND_ID)
     spec = preflight.client_spec_for(entry)
     assert spec is None, "Unbound has no client_extract and no built client block"
+
+
+# -- T836: the two client layouts of map 936's archive ------------------------
+
+
+def _argv0s(rec: Recorder) -> list[str]:
+    return [run.argv[0] for run in rec.container_runs]
+
+
+@pytest.mark.parametrize("wb1", ["enabled", "both"])
+def test_a_client_that_loads_wb1_gets_no_side_run(tmp_path: Path, wb1: str) -> None:
+    """The launcher's client (and an old copy after Update client) loads `patch-WB1.MPQ`: the
+    main run makes 936, so only the catalog's three tools run and no `bash` side run."""
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    client = coa_client(tmp_path, wb1)
+    rec = coa_produce(Recorder())
+    lay_evidence_maps(server_dir / "data", (0, 1, 530, 571, 936, 937))
+    said = list(engine(rec)._extract_maps(context(server_dir, client)))
+    block_data = block()
+    assert [run.argv for run in rec.container_runs] == [
+        tool.argv for tool in block_data.extract.tools
+    ]
+    assert "bash" not in _argv0s(rec)
+    assert any("Data/patch-WB1.MPQ, which the client loads" in line for line in said), said
+
+
+def test_an_old_client_still_carves_936_out_of_the_disabled_archive(tmp_path: Path) -> None:
+    """The owner's layout (`.DISABLED` only) keeps the T812 side run as the fourth tool."""
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    client = coa_client(tmp_path, "disabled")
+    rec = coa_produce(Recorder())
+    lay_evidence_maps(server_dir / "data", (0, 1, 530, 571, 936, 937))
+    said = list(engine(rec)._extract_maps(context(server_dir, client)))
+    assert len(rec.container_runs) == len(block().extract.tools) + 1
+    assert rec.container_runs[-1].argv[0] == "bash"
+    assert any("switched off" in line for line in said), said
+
+
+def test_a_client_with_neither_archive_is_refused_before_any_run(tmp_path: Path) -> None:
+    """No `patch-WB1.MPQ` and no `.DISABLED`: refused by name, nothing extracted."""
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    client = coa_client(tmp_path, "none")
+    rec = coa_produce(Recorder())
+    with pytest.raises(InstallerError, match=r"no Data/patch-WB1\.MPQ.*Update client"):
+        list(engine(rec)._extract_maps(context(server_dir, client)))
+    assert rec.container_runs == []
+
+
+def test_a_dangling_wb1_link_is_no_archive(tmp_path: Path) -> None:
+    """`patch-WB1.MPQ` as a link to nothing is not a loaded archive: refused without the
+    `.DISABLED`, a side run with it."""
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    client = coa_client(tmp_path, "none")
+    (client / "Data" / "patch-WB1.MPQ").symlink_to(tmp_path / "gone.MPQ")
+    rec = coa_produce(Recorder())
+    with pytest.raises(InstallerError, match="Update client"):
+        list(engine(rec)._extract_maps(context(server_dir, client)))
+    (client / "Data" / "patch-WB1.MPQ.DISABLED").write_bytes(b"MPQ\x1a")
+    lay_evidence_maps(server_dir / "data", (0, 1, 530, 571, 936, 937))
+    list(engine(rec)._extract_maps(context(server_dir, client)))
+    assert rec.container_runs[-1].argv[0] == "bash"
+
+
+def test_a_client_that_switches_wb1_on_extracts_everything_again(tmp_path: Path) -> None:
+    """Update client after an install lays `patch-WB1.MPQ`: the plan changes with the layout,
+    so the evidence of the old extraction no longer vouches for it and every tool runs again."""
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    client = coa_client(tmp_path, "disabled")
+    rec = coa_produce(Recorder())
+    lay_evidence_maps(server_dir / "data", (0, 1, 530, 571, 936, 937))
+    eng = engine(rec)
+    list(eng._extract_maps(context(server_dir, client)))
+    first = len(rec.container_runs)
+    list(eng._extract_maps(context(server_dir, client)))
+    assert len(rec.container_runs) == first, "same layout: the evidence vouches, nothing re-ran"
+    (client / "Data" / "patch-WB1.MPQ").write_bytes(b"MPQ\x1a")
+    said = list(eng._extract_maps(context(server_dir, client)))
+    again = rec.container_runs[first:]
+    assert [run.argv for run in again] == [tool.argv for tool in block().extract.tools]
+    assert any("extracting everything again" in line for line in said), said
+
+
+def test_the_scratch_an_earlier_side_run_left_is_removed_and_the_client_kept(
+    tmp_path: Path,
+) -> None:
+    """v0.9.20 left `data/.yulon-surgical-936` (links into the client plus output) when the side
+    run died on the launcher's client: the stage removes it without following a link."""
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    client = coa_client(tmp_path, "enabled")
+    left = server_dir / "data" / f"{surgical.SURGICAL_DIR}936"
+    (left / "view" / "Data").mkdir(parents=True)
+    (left / "view" / "Data" / "patch-WB2.MPQ").symlink_to(client / "Data" / "patch-WB2.MPQ")
+    (left / "out" / "maps").mkdir(parents=True)
+    (left / "out" / "maps" / "0000000.map").write_bytes(b"map")
+    rec = coa_produce(Recorder())
+    lay_evidence_maps(server_dir / "data", (0, 1, 530, 571, 936, 937))
+    said = list(engine(rec)._extract_maps(context(server_dir, client)))
+    assert not left.exists()
+    assert (client / "Data" / "patch-WB2.MPQ").read_bytes() == b"MPQ\x1a"
+    assert any("Removed the scratch" in line for line in said), said

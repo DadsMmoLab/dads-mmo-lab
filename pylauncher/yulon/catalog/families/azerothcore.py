@@ -1702,8 +1702,9 @@ class AzerothCoreInstaller(StagedInstaller):
         `CmangosInstaller._extract`'s shape: the image ref is the `tools` entry
         of `composegen.built_image_refs`, the client is `ctx.client_dir`, the
         output the server's own `data/`, the plan the entry's
-        `client_extract.extract` plus one appended tool per surgical map (C4b:
-        `surgical.effective_plan()`). After the run, `extract.missing_map_data()`
+        `client_extract.extract` plus one appended tool per surgical map the
+        client keeps switched off (C4b, T836: `surgical.effective_plan()`). After
+        the run, `extract.missing_map_data()`
         of `required_maps` is the gate: a press that cannot start its world
         must not record an extract that cannot run it.
         """
@@ -1712,14 +1713,36 @@ class AzerothCoreInstaller(StagedInstaller):
             yield "This server has no separate client-extract step."
             return
         tools_bin = self._tools_bin(plan_block)
-        plan = surgical.effective_plan(self._block(), tools_bin)
         client_dir = ctx.client_dir
         if client_dir is None:
             raise InstallerError(
                 f"{self.entry.name} needs the game client folder to extract its maps from, and "
                 "none was given. Pick the client folder and try again."
             )
+        # T836: the preflight row again, here, because a resume can reach this
+        # stage with a client that changed since; and the layout it found is
+        # the plan's, so the log says which one the extraction read.
+        for row in surgical.archive_checks(self.entry, client_dir):
+            if row.verdict == "refuse":
+                raise InstallerError(row.sentence())
+            yield f"{row.detail[:1].upper()}{row.detail[1:]}."
+        plan = surgical.effective_plan(self._block(), tools_bin, client_dir)
         data_dir = self._data_dir(ctx)
+        # T836: v0.9.20's side run died on the launcher's client before its own
+        # cleanup and left its scratch (1.9 GB, a farm of links into the client
+        # plus extractor output) in `data/`; a client in that layout never runs
+        # the side run again, so nothing else would ever remove it. Removed the
+        # way the case view is: links unlinked, never followed into the client.
+        for spec in plan_block.surgical_maps:
+            left = data_dir / f"{surgical.SURGICAL_DIR}{spec.map_id}"
+            try:
+                if extract.remove_case_view(left):
+                    yield (
+                        f"Removed the scratch an earlier map {spec.map_id} extraction left in "
+                        f"{left}."
+                    )
+            except OSError as exc:
+                logger.warning(f"the scratch in {left} could not be removed: {exc}")
         image_ref = self._image_ref(ctx, plan_block.extract.image)
         user_args = self._user_args()
         yield f"Extracting server data from {client_dir} into {data_dir} (the client is read-only)."

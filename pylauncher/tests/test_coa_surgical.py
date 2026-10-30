@@ -23,7 +23,13 @@ from tests.support_bash import bash_available
 from tests.support_native import Recorder
 from tests.test_coa_extract import block, coa_client, context, engine, lay_evidence_maps
 from yulon import docker
-from yulon.catalog.catalog import AcSurgicalMap, ExtractPlan, ExtractTool, MmapPlan
+from yulon.catalog.catalog import (
+    AcSurgicalMap,
+    CatalogEntry,
+    ExtractPlan,
+    ExtractTool,
+    MmapPlan,
+)
 from yulon.catalog.families import extract, surgical
 from yulon.catalog.installer import InstallerError
 
@@ -44,9 +50,9 @@ def ac_block():  # type: ignore[no-untyped-def]
     return AzerothCoreData(client_extract=block())
 
 
-def plan936() -> ExtractPlan:
-    """The catalog plan plus the one appended surgical tool, at the tools image's bin."""
-    return surgical.effective_plan(ac_block(), "/azerothcore/env/dist/bin")
+def plan936(client: Path) -> ExtractPlan:
+    """The catalog plan for `client`, at the tools image's bin (T836: layout-dependent)."""
+    return surgical.effective_plan(ac_block(), "/azerothcore/env/dist/bin", client)
 
 
 def _fake_tools(binds: Path, marker: Path) -> None:
@@ -174,12 +180,13 @@ def test_the_script_copies_only_the_named_map_and_vmo(tmp_path: Path) -> None:
         "936_43_44.vmtile",
         "Ns_Inquisitorial_Dungeon.wmo.vmo",
     ]
+    assert not (out / f"{surgical.SURGICAL_DIR}936").exists(), "the scratch is removed"
 
 
-def test_the_script_never_links_the_disabled_archive_into_the_main_client() -> None:
+def test_the_script_never_links_the_disabled_archive_into_the_main_client(tmp_path: Path) -> None:
     """WB1 stays OUT of the main run: tools 0-2 keep their catalog argv, only the appended one
     is bash."""
-    plan = plan936()
+    plan = plan936(coa_client(tmp_path, "disabled"))
     catalog_argv = [tool.argv for tool in block().extract.tools]
     assert [tool.argv for tool in plan.tools[: len(catalog_argv)]] == catalog_argv
     (appended,) = plan.tools[len(catalog_argv) :]
@@ -200,7 +207,91 @@ def test_too_few_936_maps_fails_the_tool(tmp_path: Path) -> None:
     (out / "vmaps").mkdir(parents=True)
     proc = _run_script(tmp_path, surgical.script(spec936(), "/x/bin"), client, out, thin=True)
     assert proc.returncode == surgical.FAILED_EXIT, (proc.returncode, proc.stdout, proc.stderr)
-    assert "at least 9 expected" in proc.stdout + proc.stderr
+    assert "yulon: map 936: 2 files, at least 9 expected" in proc.stdout + proc.stderr
+    # T836: the count is read in the scratch before anything is copied or the vmaps run.
+    assert list((out / "maps").iterdir()) == []
+    assert "fake vmap_extractor" not in (tmp_path / "marker.txt").read_text(encoding="utf-8")
+    assert not (out / f"{surgical.SURGICAL_DIR}936").exists(), "the trap removes the scratch"
+
+
+@needs_bash
+@pytest.mark.parametrize("dangling", [False, True])
+def test_a_missing_archive_stops_the_script_before_any_tool(tmp_path: Path, dangling: bool) -> None:
+    """T836: the launcher's layout has no `.DISABLED` (or a link to nothing under that name):
+    the script says so and exits `FAILED_EXIT` before the farm or any extractor."""
+    client = tmp_path / "client"
+    (client / "Data").mkdir(parents=True)
+    (client / "Data" / "patch-WB1.MPQ").write_bytes(b"MPQ\x1a")
+    if dangling:
+        (client / "Data" / "patch-WB1.MPQ.DISABLED").symlink_to(tmp_path / "gone.MPQ")
+    out = tmp_path / "out"
+    (out / "maps").mkdir(parents=True)
+    proc = _run_script(tmp_path, surgical.script(spec936(), "/x/bin"), client, out)
+    assert proc.returncode == surgical.FAILED_EXIT, (proc.returncode, proc.stdout, proc.stderr)
+    assert "patch-WB1.MPQ.DISABLED is missing or empty" in proc.stdout
+    assert (tmp_path / "marker.txt").read_text(encoding="utf-8") == ""
+    assert not (out / f"{surgical.SURGICAL_DIR}936").exists()
+
+
+# -- T836: which layout the plan and the preflight see ------------------------
+
+
+@pytest.mark.parametrize(
+    ("wb1", "found"),
+    [("disabled", "disabled"), ("enabled", "enabled"), ("both", "enabled"), ("none", "missing")],
+)
+def test_layout_reads_both_names(tmp_path: Path, wb1: str, found: str) -> None:
+    """`patch-WB1.MPQ` wins when present; the `.DISABLED` alone is the old layout."""
+    assert surgical.layout(spec936(), coa_client(tmp_path, wb1)) == found
+
+
+def test_layout_finds_the_loaded_archive_in_any_case(tmp_path: Path) -> None:
+    """The extractors' lettered scan folds case, so `patch-wb1.mpq` is the loaded archive."""
+    client = coa_client(tmp_path, "none")
+    (client / "Data" / "patch-wb1.mpq").write_bytes(b"MPQ\x1a")
+    assert surgical.layout(spec936(), client) == "enabled"
+
+
+def test_an_empty_wb1_is_no_archive(tmp_path: Path) -> None:
+    """A zero-byte `patch-WB1.MPQ` (an aborted download) is not a loaded archive."""
+    client = coa_client(tmp_path, "disabled")
+    (client / "Data" / "patch-WB1.MPQ").write_bytes(b"")
+    assert surgical.layout(spec936(), client) == "disabled"
+
+
+@pytest.mark.parametrize(("wb1", "tools"), [("enabled", 3), ("both", 3), ("disabled", 4)])
+def test_the_plan_appends_the_side_run_only_for_the_old_layout(
+    tmp_path: Path, wb1: str, tools: int
+) -> None:
+    """The plan follows the layout: no side run when the client loads WB1 itself."""
+    plan = plan936(coa_client(tmp_path, wb1))
+    assert len(plan.tools) == tools
+    assert ("bash" in [tool.argv[0] for tool in plan.tools]) is (tools == 4)
+
+
+def _coa_entry() -> CatalogEntry:
+    from tests.test_coa_extract import coa
+
+    return coa()
+
+
+@pytest.mark.parametrize(
+    ("wb1", "verdict"), [("enabled", "pass"), ("disabled", "pass"), ("none", "refuse")]
+)
+def test_archive_checks_refuse_only_a_client_with_neither_name(
+    tmp_path: Path, wb1: str, verdict: str
+) -> None:
+    """The preflight row: a pass naming the layout, or a refusal naming the archive and the fix."""
+    (row,) = surgical.archive_checks(_coa_entry(), coa_client(tmp_path, wb1))
+    assert row.verdict == verdict
+    if verdict == "refuse":
+        assert "no Data/patch-WB1.MPQ" in row.sentence()
+        assert "Update client" in row.sentence()
+
+
+def test_archive_checks_leave_a_folder_without_data_to_the_folder_rules(tmp_path: Path) -> None:
+    """No `Data/` at all: the folder rules refuse it in their words; no second refusal."""
+    assert surgical.archive_checks(_coa_entry(), tmp_path) == ()
 
 
 # -- the mmaps stage ---------------------------------------------------------
@@ -344,3 +435,34 @@ def test_mmaps_stage_lays_the_config_and_says_progress(tmp_path: Path) -> None:
     said = _drive_mmaps(rec, server_dir, client)
     assert (server_dir / "data" / "mmaps-config.yaml").is_file()
     assert any("Making movement maps for the bots" in line for line in said), said
+
+
+@pytest.mark.parametrize(("wb1", "verdict"), [("enabled", "pass"), ("none", "refuse")])
+def test_the_preflight_carries_the_archive_row(tmp_path: Path, wb1: str, verdict: str) -> None:
+    """`gather()` adds the row after the folder rules: a client with neither name is refused
+    before anything is built or extracted."""
+    from yulon import platform as platform_module
+    from yulon.catalog import preflight
+
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    got = preflight.gather(
+        _coa_entry(),
+        server_dir,
+        client_dir=coa_client(tmp_path, wb1),
+        client_validate=lambda _dir, _spec: (),
+        platform_id=lambda: "linux",
+        docker_ready=lambda: False,
+        compose_ready=lambda: True,
+        compose_version=lambda: None,
+        vm_resources=lambda: None,
+        data_root=lambda: None,
+        disk_free=lambda _p: 100 * preflight.GIB,
+        dir_problem=lambda _p: None,
+        probe_port=lambda host, port: platform_module.PortProbe(host, port, "unknown", ""),
+        selinux=lambda: None,
+        fs_type=lambda _p: None,
+        in_wsl=lambda: False,
+    )
+    rows = [row for row in got.client_checks if row.name == surgical.ARCHIVE_CHECK]
+    assert [row.verdict for row in rows] == [verdict], got.client_checks

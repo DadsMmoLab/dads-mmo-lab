@@ -441,6 +441,19 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         hits=(".azerothcore", ".azerothcore"),
     ),
     Site(
+        "yulon.catalog.families.surgical",
+        "archive_checks",
+        "whether the client holds a surgical map's archive under either name (T836)",
+        {
+            "azerothcore": supported("`client_extract.surgical_maps`, when the entry has them"),
+            "cmangos": not_applicable("no CMaNGOS entry carves a map out of a disabled archive"),
+            "trinitycore": not_applicable(
+                "no TrinityCore entry carves a map out of a disabled archive"
+            ),
+        },
+        hits=(".azerothcore",),
+    ),
+    Site(
         "yulon.catalog.preflight",
         "client_spec_of",
         "the client rules of an AzerothCore entry with client_extract (T812 C4a)",
