@@ -140,6 +140,26 @@ def test_compiler_crash_matches_core_dump_naming_the_compiler() -> None:
     assert docker.compiler_crashed(tail)
 
 
+def test_compiler_crash_matches_gcc_core_dump_and_exit_139() -> None:
+    """Codex round 2: `gcc` in the core-dump form, and gcc/cc1plus exiting 139."""
+    for line in (
+        "#18 95.2 gcc: Segmentation fault (core dumped)",
+        "#18 95.2 cc1: Segmentation fault (core dumped)",
+        "#18 95.2 gcc: error: cc1plus exited with exit code 139",
+        "#18 95.2 c++: fatal error: cc1plus: exit status 139",
+    ):
+        assert docker.compiler_crashed((line,)), line
+
+
+def test_compiler_crash_ignores_exit_1_and_a_bare_139() -> None:
+    for line in (
+        "#18 95.2 gcc: error: cc1plus exited with exit code 1",
+        "#18 95.2 make: *** [all] Error 139",
+        "#18 95.2 ninja: build stopped: subcommand failed. exit code 139",
+    ):
+        assert not docker.compiler_crashed((line,)), line
+
+
 def test_compiler_crash_ignores_a_bare_dump_naming_nothing() -> None:
     tail = ("#18 95.2 make: Segmentation fault (core dumped)",)
     assert not docker.compiler_crashed(tail)

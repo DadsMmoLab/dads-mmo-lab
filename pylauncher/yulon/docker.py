@@ -7064,7 +7064,8 @@ _COMPILER_CRASHED = re.compile(
     r"|(?:g\+\+|gcc|c\+\+|cc1plus|cc1)(?:: fatal error)?"
     r": killed signal terminated program cc1plus"
     r"|cc1plus: (?:fatal )?error: .*segmentation fault"
-    r"|(?:clang|cc1plus|g\+\+)[^\n]*segmentation fault\s*\(core dumped\)",
+    r"|(?:clang|cc1plus|cc1|gcc|g\+\+)[^\n]*segmentation fault\s*\(core dumped\)"
+    r"|(?:gcc|g\+\+|c\+\+|cc1plus|cc1|clang(?:\+\+)?)\b[^\n]*exit (?:code|status):? 139\b",
     re.IGNORECASE,
 )
 """The compiler itself crashed instead of reporting a compile error (T842).
