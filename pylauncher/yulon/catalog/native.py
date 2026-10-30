@@ -2769,6 +2769,7 @@ BUILD_DATA_DAMAGED = (
     "the computer's memory. Restart the computer, then clear Docker's build cache by running "
     "this in a terminal:\n"
     "docker builder prune -a\n"
+    "The next build then starts from nothing, so it takes as long as the first one did. "
     "Then run it again. If it fails like this again, test the computer's memory."
 )
 """T842: what a build that ends on `failed to extract layer ... crc32 mismatch` is told."""

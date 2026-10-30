@@ -7038,31 +7038,47 @@ def builder_connection_lost(tail: Sequence[str]) -> bool:
 
 
 _BUILD_DATA_DAMAGED = re.compile(
-    r"failed to (?:solve|extract)[^\n]*failed to extract layer"
-    r"|failed to extract layer[^\n]*crc32 mismatch"
+    r"failed to extract layer[^\n]*(?:crc32 mismatch|checksum mismatch|corrupted)",
+    re.IGNORECASE,
 )
 """Docker's stored copy of a finished build step is damaged (T842).
 
-Measured on a player's own Docker Desktop 29.9.2 log: `#25 ERROR: failed to
-extract layer sha256:1ea9...: exit status 1: unpigz: skipping: <stdin>:
-corrupted -- crc32 mismatch` and then the un-prefixed `failed to solve:
-failed to extract layer sha256:...: exit status 1: unpigz: skipping: <stdin>:
-corrupted -- crc32 mismatch`. Only the un-prefixed form counts: a step line
-starting `#<n>` is skipped, like T202, because what a step prints is that
-program's, not Docker's word on its storage. A registry `unexpected EOF` on a
-pull has no `failed to extract layer` and matches none.
+Measured on a player's own Docker Desktop 29.9.2 log: the un-prefixed
+`failed to solve: failed to extract layer sha256:...: exit status 1: unpigz:
+skipping: <stdin>: corrupted -- crc32 mismatch`. A match needs BOTH
+`failed to extract layer` AND a corruption word (`crc32 mismatch`, `checksum
+mismatch`, `corrupted`) on the same line: a bare extract failure is anyone's
+(`no space left on device`, `permission denied`, a truncated stream's
+`unexpected end of file`), and only corruption points at Docker's storage or
+the computer's memory. Only the un-prefixed form counts: a step line starting
+`#<n>` is skipped, like T202, because what a step prints is that program's,
+not Docker's word on its storage. A registry `unexpected EOF` on a pull has
+no `failed to extract layer` and matches none.
 """
 
 _COMPILER_CRASHED = re.compile(
-    r"(?:clang\+\+: fatal error: clang frontend command failed with exit code 139"
-    r"|(?:g|clang|c)\+\+: internal compiler error: Segmentation fault)"
+    r"clang(?:\+\+)?: (?:fatal )?error: clang frontend command failed with exit code 139"
+    r"|clang(?:\+\+)?: (?:fatal )?error: clang frontend command failed due to signal"
+    r"|clang(?:\+\+)?: error: unable to execute command: segmentation fault"
+    r"|(?:g\+\+|gcc|c\+\+|cc|cc1plus|cc1): internal compiler error: segmentation fault"
+    r"|(?:g\+\+|gcc|c\+\+|cc1plus|cc1)(?:: fatal error)?"
+    r": killed signal terminated program cc1plus"
+    r"|cc1plus: (?:fatal )?error: .*segmentation fault"
+    r"|(?:clang|cc1plus|g\+\+)[^\n]*segmentation fault\s*\(core dumped\)",
+    re.IGNORECASE,
 )
 """The compiler itself crashed instead of reporting a compile error (T842).
 
 These words ARE a step's own output (`#18 110.6 clang++: fatal error: ...`),
 so step lines are read here, not skipped: the `#<n> <secs>` prefix is
-stripped first. Only exit code 139 and a segmentation fault count: a frontend
-failure with exit code 1, or an `error: no member named ...`, is a mistake in
+stripped first, and the match is case-insensitive. It covers clang's frontend
+failing with exit code 139 or `due to signal`, clang being unable to run a
+command that segfaults, gcc's `internal compiler error: Segmentation fault`,
+the OOM killer's `Killed signal terminated program cc1plus` (the memory ran
+short, which the sentence already says), a `cc1plus: ... error: ...
+Segmentation fault`, and a bare `Segmentation fault (core dumped)` on a line
+that also names the compiler. A frontend failure with exit code 1, an
+`error: no member named ...`, or a linker's `ld returned 1` is a mistake in
 the code, not a crash.
 """
 
@@ -7082,9 +7098,15 @@ def compiler_crashed(tail: Sequence[str]) -> bool:
 
     Step lines ARE read here: the crash line is the step's own output. The
     `#<n> <secs>` BuildKit prefix (`#18 110.6 `, `#9 ERROR: `) is stripped
-    first, so it never stands in the way of the match.
+    first, so it never stands in the way of the match. Only the last crash
+    line counts, and only inside the last 60 lines of the tail: a crash from
+    a step that was later retried does not decide the message.
     """
-    return any(_COMPILER_CRASHED.search(_STEP_OUTPUT.sub("", line)) for line in tail)
+    last = -1
+    for index, line in enumerate(tail):
+        if _COMPILER_CRASHED.search(_STEP_OUTPUT.sub("", line)):
+            last = index
+    return last >= 0 and len(tail) - 1 - last < 60
 
 
 def _build_log_elsewhere(said: list[str]) -> str:

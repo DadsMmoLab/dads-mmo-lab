@@ -52,6 +52,32 @@ def test_damaged_data_needs_the_extract_layer_words() -> None:
     assert not docker.build_data_damaged(tail)
 
 
+def test_damaged_data_ignores_a_full_disk() -> None:
+    """`no space left on device` is anyone's failure, not damaged storage."""
+    tail = (
+        "failed to solve: failed to extract layer sha256:1ea9abc: write "
+        "/var/lib/docker/overlay2/abc/diff/x: no space left on device",
+    )
+    assert not docker.build_data_damaged(tail)
+
+
+def test_damaged_data_ignores_permission_denied() -> None:
+    tail = (
+        "failed to solve: failed to extract layer sha256:1ea9abc: write "
+        "/var/lib/docker/overlay2/abc/diff/x: permission denied",
+    )
+    assert not docker.build_data_damaged(tail)
+
+
+def test_damaged_data_ignores_a_truncated_stream() -> None:
+    """`unexpected end of file` from unpigz is a short stream, not corruption."""
+    tail = (
+        "failed to solve: failed to extract layer sha256:1ea9abc: exit status 1: unpigz: "
+        "skipping: <stdin>: unexpected end of file",
+    )
+    assert not docker.build_data_damaged(tail)
+
+
 def test_damaged_data_is_not_the_lost_builder() -> None:
     from tests.test_build_stall import A7_TAIL, M910Q_TAIL
 
@@ -77,6 +103,63 @@ GCC_TAIL = (
 
 def test_compiler_crash_matches_exit_code_139() -> None:
     assert docker.compiler_crashed(COMPILER_TAIL)
+
+
+def test_compiler_crash_matches_due_to_signal() -> None:
+    tail = (
+        "#18 110.6 clang: fatal error: clang frontend command failed due to signal "
+        "(use -v to see invocation)",
+    )
+    assert docker.compiler_crashed(tail)
+
+
+def test_compiler_crash_matches_unable_to_execute() -> None:
+    tail = ("#18 110.6 clang++: error: unable to execute command: Segmentation fault",)
+    assert docker.compiler_crashed(tail)
+
+
+def test_compiler_crash_matches_gcc_and_cc() -> None:
+    for tool in ("g++", "gcc", "c++", "cc", "cc1plus", "cc1"):
+        tail = (f"#18 95.2 {tool}: internal compiler error: Segmentation fault",)
+        assert docker.compiler_crashed(tail), tool
+
+
+def test_compiler_crash_matches_the_oom_killer() -> None:
+    """`Killed ... cc1plus` is the OOM killer: the memory ran short, which the sentence says."""
+    tail = ("#18 95.2 g++: Killed signal terminated program cc1plus",)
+    assert docker.compiler_crashed(tail)
+
+
+def test_compiler_crash_matches_cc1plus_segfault() -> None:
+    tail = ("#18 95.2 cc1plus: error: Segmentation fault in std::vector<int>",)
+    assert docker.compiler_crashed(tail)
+
+
+def test_compiler_crash_matches_core_dump_naming_the_compiler() -> None:
+    tail = ("#18 95.2 g++: Segmentation fault (core dumped)",)
+    assert docker.compiler_crashed(tail)
+
+
+def test_compiler_crash_ignores_a_bare_dump_naming_nothing() -> None:
+    tail = ("#18 95.2 make: Segmentation fault (core dumped)",)
+    assert not docker.compiler_crashed(tail)
+
+
+def test_compiler_crash_ignores_a_linker_failure() -> None:
+    tail = ("#18 95.2 collect2: error: ld returned 1 exit status",)
+    assert not docker.compiler_crashed(tail)
+
+
+def test_compiler_crash_ignores_an_old_crash_above_a_retry() -> None:
+    """A crash line followed by >60 lines ending in a compile error does not decide."""
+    filler = tuple(f"#18 {number}.0 compiling part{number}.cpp" for number in range(61))
+    tail = (
+        "#18 95.2 g++: internal compiler error: Segmentation fault (program cc1plus)",
+        *filler,
+        "#18 156.6 src/Foo.cpp:3:1: error: no member named 'foo' in 'Bar'",
+        '#18 ERROR: process "/bin/sh -c make" did not complete successfully: exit code: 2',
+    )
+    assert not docker.compiler_crashed(tail)
 
 
 def test_compiler_crash_matches_segfault() -> None:
@@ -152,4 +235,5 @@ def test_damaged_data_beats_the_generic_tail(tmp_path: Path) -> None:
 
 def test_the_build_sentence_constants_say_what_to_do() -> None:
     assert "docker builder prune -a" in native.BUILD_DATA_DAMAGED
+    assert "starts from nothing" in native.BUILD_DATA_DAMAGED
     assert "memory" in native.COMPILER_CRASHED
