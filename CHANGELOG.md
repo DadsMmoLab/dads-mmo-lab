@@ -16,6 +16,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ### New
 
 ### Fixed
+- Start is no longer refused by a leftover reservation from a Stop that ran while Docker was slow.
 
 ### Changed
 

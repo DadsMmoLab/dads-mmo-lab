@@ -9991,7 +9991,8 @@ def _server_claim(
 
     Re-entrant in this process: a nested take (Update -> its own Rebuild, a press's own stop
     and recreate) shares the one container, its press label and its `lost` event; the last
-    exit releases it. A reservation found in place is never removed here, whoever's.
+    exit releases it. A reservation found in place is never removed here, whoever's; only a
+    container this Yu'lon began and never started (Created, its process gone) is (T831).
 
     Yields a `ClaimHeld`; its `lost` is set by a watcher if the container ends before the
     press lets it go (Docker restarted, `docker rm -f` from elsewhere).
@@ -10113,6 +10114,32 @@ def _let_go(
         lock.release()
 
 
+def _left_unstarted_here(name: str, facts: _ClaimFacts, holder: ServerHolder) -> bool:
+    """Whether the reservation `name` is one this Yu'lon began and never started (T831).
+
+    A Stop gives Docker five seconds to make its reservation and then goes on without it; a
+    daemon that finishes the make later leaves the container Created, with no CLI to start it,
+    and `--rm` never removes a container that did not run. A live reservation is always
+    running, so a Created one is nobody's hold -- but only ours, on this computer, from a
+    process that is gone (or from this process, which is not taking it) is removed.
+    """
+    if facts.status != "created":
+        return False
+    if facts.owner != owner_id():
+        return False
+    if holder.host != socket.gethostname() or not holder.pid.isdigit():
+        return False
+    if int(holder.pid) == os.getpid():
+        with _CLAIMS_LOCK:
+            held = name in _CLAIMS_HELD
+        self_free = not held and name not in _RESERVATIONS
+    else:
+        self_free = holder.live_here() is False
+    if not self_free:
+        return False
+    return holder.container == facts.container
+
+
 def _new_reservation(
     name: str,
     press: str,
@@ -10158,6 +10185,7 @@ def _new_reservation(
             )
     chain = _reservation_images(spec, images, wsl_distro, budget_end, avoid_images)
     waited_for_a_dying_one = False
+    cleared_a_leftover = False
     while True:
         try:
             image = next(chain, None)
@@ -10201,6 +10229,46 @@ def _new_reservation(
                 raise ServerReservationUnavailable(
                     forgetting.server_reservation_unavailable(label, str(silent))
                 ) from silent
+            if (
+                facts is not None
+                and facts.status == "created"
+                and facts.owner == owner_id()
+                and not claimed.here
+                and not cleared_a_leftover
+            ):
+                cleared_a_leftover = True
+                try:
+                    left = _server_holder(
+                        name,
+                        here=False,
+                        ours=True,
+                        known=True,
+                        wsl_distro=wsl_distro,
+                        timeout=_ask_budget(budget_end, _CLAIM_ASK_TIMEOUT),
+                    )
+                    if _left_unstarted_here(name, facts, left):
+                        logger.info(
+                            f"removing {name}: a reservation this Yu'lon began and never started"
+                            f" (Created), left by process {left.pid}"
+                        )
+                        if _remove_claim(
+                            facts.container,
+                            timeout=_ask_budget(budget_end, _CLAIM_ASK_TIMEOUT),
+                            wsl_distro=wsl_distro,
+                        ) and _wait_gone(
+                            name,
+                            wsl_distro,
+                            None if budget_end is None else max(0.0, budget_end - time.monotonic()),
+                            container=facts.container,
+                        ):
+                            chain = _reservation_images(
+                                spec, images, wsl_distro, budget_end, avoid_images
+                            )
+                            continue
+                except ClaimDockerSilent as silent:
+                    raise ServerReservationUnavailable(
+                        forgetting.server_reservation_unavailable(label, str(silent))
+                    ) from silent
             if (
                 facts is not None
                 and facts.status not in ("running", "created")
