@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.support_selfupdate import a_stand_in
 from yulon.selfupdate import layout
 from yulon.selfupdate.detect import Install, InstallKind
 
@@ -31,39 +32,6 @@ def _appimage(root: Path) -> Install:
     target = root / "Yulon-v0.8.66-Public-x86_64.AppImage"
     target.write_bytes(b"the running build")
     return Install(InstallKind.APPIMAGE, target, "", True)
-
-
-def _a_stand_in(exe: Path) -> subprocess.Popen[bytes]:
-    """A live process whose `/proc/<pid>/exe` really is `exe`, or a skip.
-
-    A copy of `sleep` and not of the interpreter: a Python copied out of its
-    prefix cannot find its standard library and exits in milliseconds, which
-    made these a race against a process that was already gone.
-
-    **`sleep` is not always a program** (round 5, N6): on a busybox box it is an
-    applet, and a copy of busybox invoked under another name looks for an
-    applet of THAT name and exits at once. A shell script cannot stand in
-    either — `/proc/<pid>/exe` would be the interpreter, not the copy. So the
-    copy is started and watched: if it is not alive a moment later, this box
-    cannot answer the question and the test says so instead of failing.
-    """
-    import shutil
-
-    sleep = shutil.which("sleep")
-    if sleep is None:
-        pytest.skip("this box has no `sleep` to stand in for the app")
-    shutil.copy2(sleep, exe)
-    child = subprocess.Popen([str(exe), "30"])
-    deadline = time.monotonic() + 1.0
-    while time.monotonic() < deadline:
-        if child.poll() is not None:
-            pytest.skip(f"a copy of {sleep} does not run under another name (busybox?)")
-        if layout.pid_is_this_app(child.pid, exe) is True:
-            return child
-        time.sleep(0.02)
-    child.kill()
-    child.wait(timeout=30)
-    pytest.skip("a copied `sleep` could not be identified through /proc on this box")
 
 
 def _marker(**kw: object) -> layout.Marker:
@@ -264,7 +232,7 @@ def test_a_staging_directory_another_copy_of_the_app_made_is_not(tmp_path: Path)
     assert install.target is not None
     exe = install.target / install.executable
     exe.unlink()
-    alive = _a_stand_in(exe)
+    alive = a_stand_in(exe)
     try:
         layout.write_marker(install, layout.NEW_NAME, _marker(pid=alive.pid))
         deadline = time.monotonic() + 10
@@ -378,7 +346,7 @@ def test_another_process_running_the_same_executable_is_found(tmp_path: Path) ->
     what is asserted is the `/proc/<pid>/exe` read and not a fake.
     """
     exe = tmp_path / "yulon"
-    other = _a_stand_in(exe)
+    other = a_stand_in(exe)
     try:
         deadline = time.monotonic() + 10
         found: list[int] = []

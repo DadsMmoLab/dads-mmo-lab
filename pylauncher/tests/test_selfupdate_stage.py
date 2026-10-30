@@ -22,6 +22,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.support_selfupdate import a_stand_in
 from yulon.selfupdate import layout
 from yulon.selfupdate import stage as stage_module
 from yulon.selfupdate.detect import Install, InstallKind
@@ -151,20 +152,15 @@ def test_preparing_refuses_while_another_copy_is_updating(tmp_path: Path) -> Non
     marker naming one that had become somebody's text editor refused every
     future update with no way out.
     """
-    import shutil
 
     install = _install(tmp_path)
     assert install.target is not None
     exe = install.target / install.executable
     exe.unlink()
-    # **A copy of `sleep`, not of the interpreter**: an interpreter copied out
-    # of its prefix cannot find its standard library and dies in a few
-    # milliseconds, which made this a race against a process that was already
-    # gone by the time `prepare()` asked.
-    sleep = shutil.which("sleep")
-    assert sleep is not None, "the precondition: this box has `sleep`"
-    shutil.copy2(sleep, exe)
-    alive = subprocess.Popen([str(exe), "30"])
+    # Not a copied interpreter, nor `sleep` (uutils on Ubuntu 26.04): either
+    # died at once under the app's name, and this became a race against a
+    # process already gone by the time `prepare()` asked. See the support module.
+    alive = a_stand_in(exe)
     try:
         layout.write_marker(
             install,

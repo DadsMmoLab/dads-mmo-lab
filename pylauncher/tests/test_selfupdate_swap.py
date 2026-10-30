@@ -1167,6 +1167,14 @@ def test_only_one_of_two_helpers_on_one_pid_swaps(tmp_path: Path) -> None:
     the first's NEW executable into a backup that then held only bookkeeping —
     so the old executable was gone entirely. `mkdir` of the lock is atomic:
     one takes it, the other exits 73 having moved nothing.
+
+    **The app stays up until one helper has finished** (Ubuntu 26.04 CI,
+    2026-10-30): a `sleep 0.6` app let a helper that started late on a loaded
+    runner find the winner already done and the lock gone, take it, and exit 74
+    on a staging folder that was no longer there — `[0, 74]`, a race in the
+    test and not a second swap. The loser can only finish while the winner is
+    still waiting on the app, so the app is ended after that, or after the
+    deadline when no helper stands aside (the regression this test is for).
     """
     install = _plain(tmp_path)
     target = install.target
@@ -1177,7 +1185,7 @@ def test_only_one_of_two_helpers_on_one_pid_swaps(tmp_path: Path) -> None:
     _a_launcher(target / "yulon", "old", witness)
     _staged_folder(install, label="new", witness=witness)
 
-    app = subprocess.Popen(["sleep", "0.6"])
+    app = subprocess.Popen(["sleep", "30"])
     plans = [
         _a_ready_plan(
             install,
@@ -1191,6 +1199,11 @@ def test_only_one_of_two_helpers_on_one_pid_swaps(tmp_path: Path) -> None:
     ]
     helpers = [subprocess.Popen(p.argv, stdin=subprocess.DEVNULL) for p in plans]
     try:
+        deadline = time.monotonic() + HELPER_DEADLINE
+        while time.monotonic() < deadline and all(h.poll() is None for h in helpers):
+            time.sleep(0.02)
+        # Reaped as well as killed: `kill -0` succeeds on a zombie.
+        app.kill()
         app.wait(timeout=HELPER_DEADLINE)
         codes = [h.wait(timeout=HELPER_DEADLINE) for h in helpers]
     finally:
