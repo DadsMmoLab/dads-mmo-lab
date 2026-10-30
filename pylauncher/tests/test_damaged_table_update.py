@@ -83,7 +83,9 @@ def test_a_dump_that_failed_for_another_reason_names_nothing() -> None:
 
 
 def test_the_sentence_names_the_table_and_the_press() -> None:
-    assert table_repair.damaged_refusal((HONOR,)) == THE_SENTENCE
+    assert (
+        table_repair.damaged_refusal((HONOR,), repairable=("tw_char", "tw_logon")) == THE_SENTENCE
+    )
 
 
 # -- the copy the update takes (the real `backup()`) -----------------------------

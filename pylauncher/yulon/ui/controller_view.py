@@ -19269,7 +19269,11 @@ class ControllerView(QWidget):
         if damaged and isinstance(exc, wotlk_maintenance.MaintenanceError):
             # T839: the table is named and the Repair press offered, not "did not finish".
             said = table_repair.damaged_refusal(
-                damaged, what="the backup", again="back up again", ended="is incomplete"
+                damaged,
+                repairable=self._repair_schemas(),
+                what="the backup",
+                again="back up again",
+                ended="is incomplete",
             )
             exc = wotlk_maintenance.MaintenanceError(said, detail=f"{exc}\n{exc.detail}".strip())
         self._maintenance_failed(exc, MAINTENANCE_BACKUP_FAILED)
@@ -22351,7 +22355,7 @@ class ControllerView(QWidget):
         damaged = self._damaged_backup(exc)
         if damaged:
             # T839: the table is named and the Repair press offered.
-            message = table_repair.damaged_refusal(damaged)
+            message = table_repair.damaged_refusal(damaged, repairable=self._repair_schemas())
             detail = f"{exc}\n{detail}".strip()
             self._offer_the_repair(damaged)
         self._backup_before_update = False
@@ -22625,10 +22629,20 @@ class ControllerView(QWidget):
 
     def _offer_the_repair(self, tables: Sequence[table_repair.CrashedTable]) -> None:
         """Keep tables a refusal named for the Repair press, and show it (T839)."""
-        if self.services.table_repair is None or not tables:
+        seam = self.services.table_repair
+        if seam is None:
+            return
+        # T839: only a table the press covers; a world table was pointed at a backup.
+        tables = table_repair.repairable_only(tables, seam.schemas)
+        if not tables:
             return
         self._repair_extra = table_repair.merge_tables(self._repair_extra, tables)
         self._refresh_repair_banner()
+
+    def _repair_schemas(self) -> tuple[str, ...]:
+        """The schemas the Repair press covers; () where there is no press."""
+        seam = self.services.table_repair
+        return tuple(seam.schemas) if seam is not None else ()
 
     def _damaged_backup(self, exc: object) -> tuple[table_repair.CrashedTable, ...]:
         """The crashed tables a failed backup's dump named (T839); () where there is no press."""

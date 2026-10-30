@@ -601,13 +601,24 @@ def test_no_player_sentence_names_a_command_or_looks_like_a_note() -> None:
         table_repair.REPAIR_HOLD_REASON,
         controller_view_module.REPAIR_BROKE,
         # T839: the refusals of a press a damaged table stopped.
-        table_repair.damaged_refusal(tables),
-        table_repair.damaged_refusal((*tables, CrashedTable("tw_world", "creature"))),
+        table_repair.damaged_refusal(tables, repairable=TORTISE_SCHEMAS),
         table_repair.damaged_refusal(
-            tables, what="the backup", again="back up again", ended="is incomplete"
+            (*tables, CrashedTable("tw_world", "creature")), repairable=TORTISE_SCHEMAS
+        ),
+        table_repair.damaged_refusal(
+            (CrashedTable("tw_world", "creature"),), repairable=TORTISE_SCHEMAS
+        ),
+        table_repair.damaged_refusal(
+            tables,
+            repairable=TORTISE_SCHEMAS,
+            what="the backup",
+            again="back up again",
+            ended="is incomplete",
         ),
         *(
-            table_repair.damaged_refusal(tables, what=what, again=again, nothing_changed=False)
+            table_repair.damaged_refusal(
+                tables, repairable=TORTISE_SCHEMAS, what=what, again=again, nothing_changed=False
+            )
             for what, again in (
                 native.damaged_press_words(),
                 native.damaged_press_words(rebuild=True),
@@ -1202,6 +1213,46 @@ def test_a_damaged_table_found_before_any_verdict_still_shows_the_banner(
     assert view.repair_banner_button.isEnabled()  # type: ignore[attr-defined]
 
 
+WORLD = CrashedTable("tw_world", "creature")
+
+
+def test_the_press_never_repairs_a_table_outside_its_schemas(tmp_path: Path) -> None:
+    """Mutation: drop `repairable_only()` from `repair()` (T839 review)."""
+    mysql = _Mysql(engines="tw_world\tcreature\tMyISAM\n")
+    report = table_repair.repair(
+        (WORLD,),
+        schemas=TORTISE_SCHEMAS,
+        mysql=mysql,
+        hold=contextlib.nullcontext,
+        backup=_Backup(),
+        copy_files=_Copy(tmp_path),
+        confirm_without_copy=lambda _text: True,
+    )
+    assert report.refused
+    assert mysql.writes() == []
+
+
+def test_a_damaged_world_table_is_pointed_at_a_backup_not_the_press() -> None:
+    said = table_repair.damaged_refusal((WORLD, HONOR), repairable=TORTISE_SCHEMAS)
+    assert "cannot fix tw_world" in said
+    assert "on the server card for tw_char.character_honor_cp" in said
+    alone = table_repair.damaged_refusal((WORLD,), repairable=TORTISE_SCHEMAS)
+    assert "Repair the damaged table" not in alone and "cannot fix tw_world" in alone
+
+
+def test_a_refused_backup_never_offers_the_press_a_world_table(
+    qapp: object, ps: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mutation: drop the `repairable_only()` filter in `_offer_the_repair()`."""
+    _shown(monkeypatch)
+    view = _view(ps, tmp_path, None)
+    view.services.table_repair = _route(tmp_path)  # type: ignore[attr-defined]
+    view.last_verdict = None  # type: ignore[attr-defined]
+    view._offer_the_repair((WORLD,))  # type: ignore[attr-defined]
+    assert view._repair_extra == ()  # type: ignore[attr-defined]
+    assert view.repair_banner.isHidden()  # type: ignore[attr-defined]
+
+
 def test_an_update_that_failed_for_another_reason_shows_no_banner(
     qapp: object, ps: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1270,7 +1321,7 @@ def test_the_backup_before_an_update_says_the_table_and_offers_the_press(
     view.last_verdict = _up_verdict()  # type: ignore[attr-defined]
     view._backup_before_update_failed(_dump_failed())  # type: ignore[attr-defined]
     report = view.maintenance_report.toPlainText()  # type: ignore[attr-defined]
-    assert report == table_repair.damaged_refusal((HONOR,)), report
+    assert report == table_repair.damaged_refusal((HONOR,), repairable=TORTISE_SCHEMAS), report
     assert not view.repair_banner.isHidden()  # type: ignore[attr-defined]
 
 

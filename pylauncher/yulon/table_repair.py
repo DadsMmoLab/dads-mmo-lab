@@ -224,6 +224,13 @@ def damaged_in(exc: BaseException | None) -> tuple[CrashedTable, ...]:
     return ()
 
 
+def repairable_only(
+    tables: Sequence[CrashedTable], schemas: Sequence[str]
+) -> tuple[CrashedTable, ...]:
+    """The tables the Repair press may touch: those in its own `schemas` (T822, T839)."""
+    return tuple(table for table in tables if table.db in schemas)
+
+
 def damaged_in_dump(text: str, database: str, schemas: Sequence[str]) -> tuple[CrashedTable, ...]:
     """The tables a failed dump of `database` names as crashed (T839).
 
@@ -243,21 +250,37 @@ def damaged_in_dump(text: str, database: str, schemas: Sequence[str]) -> tuple[C
 def damaged_refusal(
     tables: Sequence[CrashedTable],
     *,
+    repairable: Sequence[str],
     what: str = "the update",
     again: str = "update again",
     nothing_changed: bool = True,
     ended: str = "did not start",
 ) -> str:
-    """The plain sentence for a press a damaged table stopped (T839); names every table."""
+    """The plain sentence for a press a damaged table stopped (T839); names every table.
+
+    Only a table in `repairable` (the Repair press's own schemas) is sent to that press;
+    any other -- the world database's -- is pointed at a backup instead.
+    """
     names = ", ".join(table.qualified for table in tables)
     if len(tables) == 1:
         lead = f"Table {names} is damaged (a crash left it half-written)"
     else:
         lead = f"Tables {names} are damaged (a crash left them half-written)"
-    said = (
-        f"{lead}, so a complete copy of your databases cannot be made and {what} {ended}."
-        f" Use {repair_button_label(tables)} on the server card, then {again}."
-    )
+    said = f"{lead}, so a complete copy of your databases cannot be made and {what} {ended}."
+    fixable = repairable_only(tables, repairable)
+    other = [table for table in tables if table not in fixable]
+    if other:
+        dbs = ", ".join(dict.fromkeys(table.db for table in other))
+        said += (
+            f" Repair on the server card cannot fix {dbs}: restore it from a backup on the"
+            " Maintenance tab, or ask for help."
+        )
+        if fixable:
+            fixed = ", ".join(table.qualified for table in fixable)
+            said += f" Use {repair_button_label(fixable)} on the server card for {fixed}."
+        said += f" Then {again}."
+    else:
+        said += f" Use {repair_button_label(tables)} on the server card, then {again}."
     return f"{said} Nothing was changed." if nothing_changed else said
 
 
@@ -529,7 +552,8 @@ def repair(
     cannot be taken and an engine this MariaDB cannot repair refuse before the
     first write.
     """
-    wanted = _validated(tables)
+    # T839: a name outside `schemas` (the world database's) is dropped, never repaired.
+    wanted = _validated(repairable_only(tables, schemas))
     if not wanted:
         return RepairReport(
             sentence="Yu'lon cannot tell which table to repair; nothing was changed.",

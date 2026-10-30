@@ -12150,11 +12150,19 @@ class StagedInstaller:
                 # rollback's own sentence says what it put back, so no "Nothing was changed".
                 what, again = damaged_press_words(rebuild=copy.rebuild, to_pin=copy.to_pin)
                 said = table_repair.damaged_refusal(
-                    damaged, what=what, again=again, nothing_changed=False
+                    damaged,
+                    repairable=self._repairable_schemas(),
+                    what=what,
+                    again=again,
+                    nothing_changed=False,
                 )
                 raise table_repair.mark_damaged(InstallerError(said), damaged) from exc
             raise InstallerError(copy_not_taken(copy.names, str(exc))) from exc
         yield copy_taken_line(copy.taken)
+
+    def _repairable_schemas(self) -> tuple[str, ...]:
+        """The schemas the server card's Repair press covers (T822): characters and auth."""
+        return (self.entry.databases.characters, self.entry.databases.auth)
 
     def _refuse_a_damaged_table(
         self, server_dir: Path, names: Sequence[str], *, to_pin: bool
@@ -12171,7 +12179,9 @@ class StagedInstaller:
             return
         if damaged:
             what, again = damaged_press_words(to_pin=to_pin)
-            said = table_repair.damaged_refusal(damaged, what=what, again=again)
+            said = table_repair.damaged_refusal(
+                damaged, repairable=self._repairable_schemas(), what=what, again=again
+            )
             raise table_repair.mark_damaged(InstallerError(said), damaged)
         yield damaged_checked_line(names)
 
