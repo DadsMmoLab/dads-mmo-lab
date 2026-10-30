@@ -294,9 +294,11 @@ class MaintenanceError(RuntimeError):
     screen can fold it under Details and the log can keep it (T194 R1).
     """
 
-    def __init__(self, message: str, *, detail: str = "") -> None:
+    def __init__(self, message: str, *, detail: str = "", database: str = "") -> None:
         super().__init__(message)
         self.detail = detail
+        # T839: the one database a failed dump was of, when it was one; else "".
+        self.database = database
 
 
 # ------------------------------------------------------------------- seams
@@ -1094,6 +1096,8 @@ def backup(
                 f"{exc} — the backup is INCOMPLETE. Written and verified so far: {finished}. "
                 f"Not backed up: {', '.join(wanted[len(done) :])}.",
                 detail=exc.detail,
+                # T839: which dump failed, so a crashed table it names is placed in it.
+                database=database,
             ) from exc
     report = BackupReport(
         directory=directory,

@@ -95,6 +95,7 @@ from yulon import (
     server_build_gone,
     server_build_presses,
     serverlock,
+    table_repair,
     update_failure,
 )
 from yulon.after_stop import PutBackAfterStop, TrueAfterStop, withdraw_stop
@@ -3611,6 +3612,23 @@ def copy_taken_line(copy: snapshot.Snapshot) -> str:
     )
 
 
+def damaged_press_words(*, rebuild: bool = False, to_pin: bool = False) -> tuple[str, str]:
+    """What `table_repair.damaged_refusal()` says did not start, and what to press again (T839)."""
+    if rebuild:
+        return "the rebuild", "rebuild again"
+    if to_pin:
+        return (
+            "the return to the tested commit",
+            f"press {server_build_presses.RETURN_TO_PIN} again",
+        )
+    return "the update", "update again"
+
+
+def damaged_checked_line(names: Sequence[str]) -> str:
+    """Said once the pre-build check found no damaged table (T839)."""
+    return f"Checked {_listed(names)} for a table a crash left damaged: there is none."
+
+
 def copy_not_taken(names: Sequence[str], reason: str) -> str:
     """The failure sentence when the copy could not be taken: the new build was not started."""
     return (
@@ -4832,6 +4850,8 @@ class _UpdateCopy:
     """The Rebuild's importer was started (T706 round 2): the database may have changed."""
     started: bool = False
     """The Rebuild's window was done, so the new build was started next (T706 round 2)."""
+    to_pin: bool = False
+    """T839: "Return to the tested pin…"'s copy, for the damaged-table sentence's words."""
 
 
 REPAIR_FILES_LABEL = "Repair server files…"
@@ -11156,6 +11176,11 @@ class StagedInstaller:
         yield RETURN_TO_PIN_OPENING_NOTE if to_pin else UPDATE_TO_LATEST_OPENING_NOTE
         if self._snapshot is not None and self.snapshot_databases():
             yield copy_opening_line(self.snapshot_databases())
+            # T839: a table a crash left damaged fails the copy after the whole build;
+            # asked now, before the first fetch, so the press refuses in seconds.
+            yield from self._refuse_a_damaged_table(
+                server_dir, self.snapshot_databases(), to_pin=to_pin
+            )
         for said in targets.values():
             yield said.line
         self._check_cancel(cancel)
@@ -11260,6 +11285,7 @@ class StagedInstaller:
             copy = _UpdateCopy(
                 names=self.snapshot_databases() if self._snapshot is not None else (),
                 not_copied=self.snapshot_left_out(),
+                to_pin=to_pin,
             )
             family = self.servers_down_work(server_dir, changes, press=press)
 
@@ -12118,8 +12144,46 @@ class StagedInstaller:
             copy.taken = self._snapshot.take(server_dir, copy.names)
         except (InstallerError, OSError) as exc:
             copy.take_failed = True
+            damaged = table_repair.damaged_in(exc)
+            if damaged:
+                # T839: the backstop when the check before the build could not run. The
+                # rollback's own sentence says what it put back, so no "Nothing was changed".
+                what, again = damaged_press_words(rebuild=copy.rebuild, to_pin=copy.to_pin)
+                said = table_repair.damaged_refusal(
+                    damaged,
+                    repairable=self._repairable_schemas(),
+                    what=what,
+                    again=again,
+                    nothing_changed=False,
+                )
+                raise table_repair.mark_damaged(InstallerError(said), damaged) from exc
             raise InstallerError(copy_not_taken(copy.names, str(exc))) from exc
         yield copy_taken_line(copy.taken)
+
+    def _repairable_schemas(self) -> tuple[str, ...]:
+        """The schemas the server card's Repair press covers (T822): characters and auth."""
+        return (self.entry.databases.characters, self.entry.databases.auth)
+
+    def _refuse_a_damaged_table(
+        self, server_dir: Path, names: Sequence[str], *, to_pin: bool
+    ) -> Iterator[str]:
+        """Refuse before the first fetch when the copy would fail on a damaged table (T839).
+
+        The check is the snapshot's (read-only, bounded); None means it did not run, and the
+        copy's own failure after the build stays the backstop (`_take_copy()`).
+        """
+        if self._snapshot is None:
+            return
+        damaged = self._snapshot.damaged_tables(server_dir, names)
+        if damaged is None:
+            return
+        if damaged:
+            what, again = damaged_press_words(to_pin=to_pin)
+            said = table_repair.damaged_refusal(
+                damaged, repairable=self._repairable_schemas(), what=what, again=again
+            )
+            raise table_repair.mark_damaged(InstallerError(said), damaged)
+        yield damaged_checked_line(names)
 
     def _put_copy_back(self, server_dir: Path, copy: _UpdateCopy) -> Iterator[str]:
         """Put the copy back in the rollback's window: after the sources, before the old build.

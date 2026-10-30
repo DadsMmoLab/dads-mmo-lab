@@ -37,6 +37,7 @@ from yulon.catalog.catalog import CatalogEntry, load_catalog
 from yulon.catalog.families import extract, patch, scriptdeploy
 from yulon.catalog.families.azerothcore import AzerothCoreInstaller
 from yulon.catalog.installer import InstallOptions
+from yulon.table_repair import CrashedTable
 
 ENTRY = load_catalog().get("wow-wotlk")
 TBC = load_catalog().get("wow-tbc")
@@ -1277,6 +1278,9 @@ class FakeSnapshot:
     put_back_error: Exception | None = None
     taken: list[snapshot.Snapshot] = field(default_factory=list)
     put_back_calls: list[snapshot.Snapshot] = field(default_factory=list)
+    damaged: tuple[CrashedTable, ...] | None = None
+    """T839: what the pre-build check answers; None is "not checked", as off CMaNGOS."""
+    damage_checks: list[tuple[str, ...]] = field(default_factory=list)
 
     def take(self, server_dir: Path, databases: Sequence[str]) -> snapshot.Snapshot:
         self.rec.calls.append(f"snapshot:{','.join(databases)}")
@@ -1301,6 +1305,13 @@ class FakeSnapshot:
             for name in copy.databases
         )
         return snapshot.PutBack(restored=copy.databases, safety=safety)
+
+    def damaged_tables(
+        self, server_dir: Path, databases: Sequence[str]
+    ) -> tuple[CrashedTable, ...] | None:
+        """Recorded apart from `rec.calls`, so every spine pinned before T839 still holds."""
+        self.damage_checks.append(tuple(databases))
+        return self.damaged
 
     def prune(self, server_dir: Path, copy: snapshot.Snapshot) -> tuple[Path, ...]:
         """The real forgetting (`snapshot.prune_older()`), on the files a test laid (T633)."""

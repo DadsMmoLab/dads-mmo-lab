@@ -16,6 +16,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ### New
 
 ### Fixed
+- An update or backup stopped by a damaged database table now names it and offers **Repair the damaged table…**.
 
 ### Changed
 
