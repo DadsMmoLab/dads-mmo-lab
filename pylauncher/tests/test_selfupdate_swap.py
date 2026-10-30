@@ -25,6 +25,7 @@ import subprocess
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -73,6 +74,46 @@ def _until(condition: Callable[[], bool], what: str) -> None:
             return
         time.sleep(0.02)
     raise AssertionError(f"{what} did not happen within {HELPER_DEADLINE}s")
+
+
+def _until_one_has_finished(helpers: list[Any]) -> None:
+    """Wait, to the deadline, for any one helper to exit. Not an assertion.
+
+    For the two-helper tests: the loser can only stand aside (73) while the
+    winner is still waiting on the app, so the app is kept up until this
+    returns. When no helper ever stands aside — the regression those tests are
+    for — this gives up at the deadline and the exit codes say what happened.
+    """
+    deadline = time.monotonic() + HELPER_DEADLINE
+    while time.monotonic() < deadline and all(h.poll() is None for h in helpers):
+        time.sleep(0.02)
+
+
+def _end(app: subprocess.Popen[bytes]) -> None:
+    """End the stand-in app NOW, and reap it: `kill -0` succeeds on a zombie.
+
+    **The app ends when the test says, not on a timer** (Ubuntu 26.04 CI,
+    2026-10-30). A `sleep 0.6` app raced the helpers it was meant to hold: on a
+    loaded runner a helper started after it had gone, and a test that tampers
+    with the lock or the stamp "while the helper waits" found the helper had
+    never waited.
+    """
+    app.kill()
+    app.wait(timeout=HELPER_DEADLINE)
+
+
+def _helper_log(install: Install) -> str:
+    """What the helpers wrote to their log, for a failure message.
+
+    `[74, 74]` came once from CI (py3.11, 2026-10-30) and from nowhere else in
+    some hundreds of loaded runs here, and the codes alone do not say which
+    check each helper failed; the log does.
+    """
+    log = layout.work_dir(install, layout.OLD_NAME) / layout.HELPER_LOG
+    try:
+        return log.read_text(encoding="utf-8")
+    except OSError as exc:
+        return f"(no helper log: {exc})"
 
 
 def _hash_tree(root: Path, *, ignoring: set[str]) -> str:
@@ -1199,12 +1240,8 @@ def test_only_one_of_two_helpers_on_one_pid_swaps(tmp_path: Path) -> None:
     ]
     helpers = [subprocess.Popen(p.argv, stdin=subprocess.DEVNULL) for p in plans]
     try:
-        deadline = time.monotonic() + HELPER_DEADLINE
-        while time.monotonic() < deadline and all(h.poll() is None for h in helpers):
-            time.sleep(0.02)
-        # Reaped as well as killed: `kill -0` succeeds on a zombie.
-        app.kill()
-        app.wait(timeout=HELPER_DEADLINE)
+        _until_one_has_finished(helpers)
+        _end(app)
         codes = [h.wait(timeout=HELPER_DEADLINE) for h in helpers]
     finally:
         for child in [app, *helpers]:
@@ -1212,7 +1249,7 @@ def test_only_one_of_two_helpers_on_one_pid_swaps(tmp_path: Path) -> None:
                 child.kill()
                 child.wait()
 
-    assert sorted(codes) == [0, 73], f"both helpers acted: {codes}"
+    assert sorted(codes) == [0, 73], f"both helpers acted: {codes}\n{_helper_log(install)}"
     _until(lambda: witness.exists(), "the winner relaunched")
     assert witness.read_text(encoding="utf-8") == "new", "the loser swapped too"
     assert (target / "_internal" / "lib").read_text(encoding="utf-8") == "new lib"
@@ -1584,21 +1621,26 @@ def test_a_swap_leaves_no_helper_script_behind(tmp_path: Path) -> None:
 
 @posix_only
 def test_only_one_of_two_appimage_helpers_swaps(tmp_path: Path) -> None:
-    """The AppImage script is a second implementation and was never held to this."""
+    """The AppImage script is a second implementation and was never held to this.
+
+    The app stays up until one helper has stood aside, for the reason in
+    `test_only_one_of_two_helpers_on_one_pid_swaps`.
+    """
     from yulon.selfupdate.swap import _spawn_detached
 
     witness = tmp_path / "launched"
     install, target = _an_appimage(tmp_path, witness)
     staged = layout.work_dir(install, layout.NEW_NAME)
 
-    app = subprocess.Popen(["sleep", "0.6"])
+    app = subprocess.Popen(["sleep", "30"])
     plans = [
         _a_ready_plan(install, staged, pid=app.pid, script_dir=tmp_path, platform_id="linux")
         for _ in range(2)
     ]
     helpers = [_spawn_detached(p.argv) for p in plans]
     try:
-        app.wait(timeout=HELPER_DEADLINE)
+        _until_one_has_finished(helpers)
+        _end(app)
         codes = [h.wait(timeout=HELPER_DEADLINE) for h in helpers]
     finally:
         for child in [app, *helpers]:
@@ -1606,7 +1648,7 @@ def test_only_one_of_two_appimage_helpers_swaps(tmp_path: Path) -> None:
                 child.kill()
                 child.wait()
 
-    assert sorted(codes) == [0, 73], f"both helpers acted: {codes}"
+    assert sorted(codes) == [0, 73], f"both helpers acted: {codes}\n{_helper_log(install)}"
     _until(lambda: witness.exists(), "the winner relaunched")
     assert witness.read_text(encoding="utf-8") == "new", "the loser swapped too"
     old = layout.work_dir(install, layout.OLD_NAME)
@@ -1655,13 +1697,13 @@ def test_an_appimage_helper_that_loses_the_lock_mid_wait_moves_nothing(tmp_path:
     staged = layout.work_dir(install, layout.NEW_NAME)
     before = target.read_text(encoding="utf-8")
 
-    app = subprocess.Popen(["sleep", "0.5"])
+    app = subprocess.Popen(["sleep", "30"])
     plan = _a_ready_plan(install, staged, pid=app.pid, script_dir=tmp_path, platform_id="linux")
     helper = subprocess.Popen(plan.argv, stdin=subprocess.DEVNULL)
     try:
         _until(layout.helper_stamp(install).exists, "the helper reported in")
         (layout.helper_lock(install) / "owner").write_text("0000111122223333", "utf-8")
-        app.wait(timeout=HELPER_DEADLINE)
+        _end(app)
         code = helper.wait(timeout=HELPER_DEADLINE)
     finally:
         for child in (app, helper):
@@ -1680,7 +1722,7 @@ def test_a_folder_helper_whose_stamp_was_overwritten_moves_nothing(tmp_path: Pat
     install, target, witness = _ready_to_swap(tmp_path)
     before = _hash_tree(target, ignoring={layout.NEW_NAME, layout.OLD_NAME})
 
-    app = subprocess.Popen(["sleep", "0.5"])
+    app = subprocess.Popen(["sleep", "30"])
     plan = _a_ready_plan(
         install,
         layout.work_dir(install, layout.NEW_NAME),
@@ -1693,7 +1735,7 @@ def test_a_folder_helper_whose_stamp_was_overwritten_moves_nothing(tmp_path: Pat
     try:
         _until(layout.helper_stamp(install).exists, "the helper reported in")
         layout.helper_stamp(install).write_text("4444555566667777", encoding="utf-8")
-        app.wait(timeout=HELPER_DEADLINE)
+        _end(app)
         code = helper.wait(timeout=HELPER_DEADLINE)
     finally:
         for child in (app, helper):
