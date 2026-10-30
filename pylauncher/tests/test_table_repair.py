@@ -1324,6 +1324,29 @@ def test_a_damaged_backup_still_names_the_dumps_it_kept(
     assert "Nothing was changed" not in report
 
 
+def test_a_damaged_backup_before_an_update_names_the_dumps_it_kept(
+    qapp: object, ps: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mutation: say "Nothing was changed" in `_backup_before_update_failed()` (T839 review)."""
+    from yulon.controller_wow_wotlk.maintenance import MaintenanceError
+
+    _shown(monkeypatch)
+    view = _view(ps, tmp_path, None)
+    view.services.table_repair = _route(tmp_path)  # type: ignore[attr-defined]
+    view.last_verdict = _up_verdict()  # type: ignore[attr-defined]
+    exc = MaintenanceError(
+        "The backup of tw_char did not finish. — the backup is INCOMPLETE. Written and "
+        "verified so far: 20261030_tw_logon.sql. Not backed up: tw_char, tw_world.",
+        detail=DUMP_1194,
+        database="tw_char",
+    )
+    view._backup_before_update_failed(exc)  # type: ignore[attr-defined]
+    report = view.maintenance_report.toPlainText()  # type: ignore[attr-defined]
+    assert "the update did not start" in report, report
+    assert report.endswith("Not backed up: tw_char, tw_world."), report
+    assert "Nothing was changed" not in report
+
+
 def test_a_backup_that_failed_for_another_reason_keeps_its_own_words(
     qapp: object, ps: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1346,7 +1369,9 @@ def test_the_backup_before_an_update_says_the_table_and_offers_the_press(
     view.last_verdict = _up_verdict()  # type: ignore[attr-defined]
     view._backup_before_update_failed(_dump_failed())  # type: ignore[attr-defined]
     report = view.maintenance_report.toPlainText()  # type: ignore[attr-defined]
-    assert report == table_repair.damaged_refusal((HONOR,), repairable=TORTISE_SCHEMAS), report
+    assert report == table_repair.damaged_refusal(
+        (HONOR,), repairable=TORTISE_SCHEMAS, nothing_changed=False
+    ), report
     assert not view.repair_banner.isHidden()  # type: ignore[attr-defined]
 
 

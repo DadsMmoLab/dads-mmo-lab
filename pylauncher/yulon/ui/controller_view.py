@@ -22373,7 +22373,7 @@ class ControllerView(QWidget):
         if damaged:
             # T839: the table is named and the Repair press offered.
             message = table_repair.damaged_refusal(
-                damaged, repairable=self._repair_schemas()
+                damaged, repairable=self._repair_schemas(), nothing_changed=False
             ) + _dumps_kept(exc)
             detail = f"{exc}\n{detail}".strip()
             self._offer_the_repair(damaged)
