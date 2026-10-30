@@ -16,6 +16,7 @@ import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -449,7 +450,38 @@ def test_no_setting_and_no_environment_variable_names_the_repository(
 # -- the watchdog that makes the bound true ----------------------------------
 
 
-def test_a_deadline_that_is_ticked_does_not_fire_and_one_that_is_not_does() -> None:
+class _HandTimer:
+    """A `threading.Timer` that runs only when the test says, for `_Deadline`.
+
+    Every one made is kept, so a test can fire a timer that was cancelled and
+    see that cancelling it meant something.
+    """
+
+    made: list[_HandTimer] = []
+
+    def __init__(self, seconds: float, function: Any) -> None:
+        self.seconds = seconds
+        self.function = function
+        self.started = False
+        self.cancelled = False
+        self.daemon = False
+        _HandTimer.made.append(self)
+
+    def start(self) -> None:
+        self.started = True
+
+    def cancel(self) -> None:
+        self.cancelled = True
+
+    def fire(self) -> None:
+        """What the real timer would do on expiry: nothing once cancelled."""
+        if self.started and not self.cancelled:
+            self.function()
+
+
+def test_a_deadline_that_is_ticked_does_not_fire_and_one_that_is_not_does(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A download may take as long as it takes; a SILENT connection may not.
 
     `_Deadline` (plan 2's, shared rather than written again) is a one-shot
@@ -458,24 +490,49 @@ def test_a_deadline_that_is_ticked_does_not_fire_and_one_that_is_not_does() -> N
     `restart()` that did nothing would leave every download bounded at one
     stall interval, which looks like a flaky network rather than like a bug.
 
-    Measured on this dev box: the ticking loop below takes 0.11 s, and the
-    bound asserted on it is 0.05 s of quiet per tick with 10 ticks — a full
-    second of clock for work measured at a tenth of that.
+    **The clock is the test's** (2026-10-30). Real 0.01 s sleeps inside a real
+    0.05 s timer missed on a loaded CI runner: one late wake-up and the ticked
+    deadline fired. Here every timer `_Deadline` makes is a `_HandTimer`, and
+    the test expires them itself — every superseded one, then the live one.
     """
+    import yulon.update as update_module
+
+    _HandTimer.made = []
+    monkeypatch.setattr(update_module.threading, "Timer", _HandTimer)
+
     ticked = _Deadline(0.05)
     with ticked:
         for _ in range(10):
-            time.sleep(0.01)
             assert ticked.restart(0.05) is True
+        assert len(_HandTimer.made) == 11, "a restart did not start a new clock"
+        *superseded, live = _HandTimer.made
+        for old in superseded:
+            old.fire()
         assert not ticked.fired, "a connection that kept sending was cut off"
+        assert live.started and not live.cancelled and live.seconds == 0.05
+        live.fire()
+        assert ticked.fired, "the clock a tick started was not the one that bounds it"
 
+    _HandTimer.made = []
     starved = _Deadline(0.05)
     with starved:
-        deadline = time.monotonic() + 5.0
+        (only,) = _HandTimer.made
+        only.fire()
+        assert starved.fired, "a connection that sent nothing was never cut off"
+    assert starved.restart(0.05) is False, "a fired deadline cannot be restarted"
+
+
+def test_a_real_deadline_nobody_ticks_fires_on_its_own() -> None:
+    """The half the hand-run clock cannot show: a REAL timer really expires.
+
+    A tiny deadline and a generous wait, so a loaded box only makes it slower.
+    """
+    starved = _Deadline(0.05)
+    with starved:
+        deadline = time.monotonic() + 10.0
         while not starved.fired and time.monotonic() < deadline:
             time.sleep(0.01)
         assert starved.fired, "a connection that sent nothing was never cut off"
-    assert starved.restart(0.05) is False, "a fired deadline cannot be restarted"
 
 
 def test_a_checksum_file_with_a_byte_order_mark_still_reads() -> None:
