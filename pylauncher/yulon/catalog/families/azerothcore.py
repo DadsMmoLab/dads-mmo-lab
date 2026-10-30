@@ -1745,6 +1745,14 @@ class AzerothCoreInstaller(StagedInstaller):
                 logger.warning(f"the scratch in {left} could not be removed: {exc}")
         image_ref = self._image_ref(ctx, plan_block.extract.image)
         user_args = self._user_args()
+        # T840: on Docker Desktop `data/` is a bind into a Windows or macOS
+        # folder where small-file writes are ~10x slower than in the container's
+        # own layer, so there each tool writes inside its container and only the
+        # finished folders are copied into `data/`. Linux passes nothing and
+        # keeps today's argv, mounts, workdir and env byte for byte. The switch
+        # is decided here, not in the catalog: the evidence hashes the plan, and
+        # a new field would make every install everywhere extract again.
+        scratch_off_bind = self._seams.platform_id() in ("windows", "macos")
         yield f"Extracting server data from {client_dir} into {data_dir} (the client is read-only)."
         view = ctx.server_dir / extract.CASE_VIEW_DIR
         read_from = client_dir
@@ -1765,6 +1773,7 @@ class AzerothCoreInstaller(StagedInstaller):
                     selinux_enforcing=self._seams.ask_selinux,
                     evidence_client_dir=client_dir,
                     client_files=None if read_from == client_dir else client_dir,
+                    scratch_off_bind=scratch_off_bind,
                 ),
                 cancel=ctx.cancel,
                 stage="extract",

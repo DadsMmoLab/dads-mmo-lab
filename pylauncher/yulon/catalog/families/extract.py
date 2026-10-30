@@ -977,6 +977,138 @@ Three details are load-bearing and each of them is a wrong sentence avoided:
 """
 
 
+SCRATCH_MOUNT = "/tmp/yulon-scratch"
+"""Where a tool writes when `data/` is a bind into a Windows or macOS folder (T840).
+
+The container's own writable layer, not a mount: `--rm` takes it away with the
+container, and small-file writes cost a fraction of what they cost through
+Docker Desktop's bind (measured: `vmap4_extractor` ~8 h on the bind vs 48 min
+here). Only the finished folders are copied to `/out`.
+
+Under `/tmp`, and not at `/scratch`, because on Docker Desktop
+`platform.container_user_args()` answers `[]` (the bind maps ownership to the
+logged-in user), so the tools run as the image's own USER — uid 1000, `acore`,
+measured — and Docker creates a missing WORKDIR as root 0755. `docker run -w
+/scratch` therefore laid `/scratch` as root, and `acore` could neither create
+the links nor `Buildings/` in it; without `-w`, the script's own `mkdir -p
+/scratch` in `/` failed the same way. `/tmp` is in every image, mode 1777, so
+the workdir is `/tmp` (`SCRATCH_WORKDIR`) and the script makes its folder
+inside it as the same user that runs the tool.
+"""
+
+SCRATCH_WORKDIR = "/tmp"
+"""The container's workdir under `scratch`: already there, and writable by its USER.
+
+Not `SCRATCH_MOUNT`: Docker creates a missing workdir as root before the tool
+starts, and the tool then cannot write into a folder it does not own.
+"""
+
+SCRATCH_FAILED_RETURNCODE = 93
+"""What `SCRATCH_SCRIPT` exits with when the scratch folder could not be made.
+
+Read together with `SCRATCH_FAILED_MARKER` and never alone, exactly like
+`STAGE_FAILED_RETURNCODE`: 93 is an ordinary status a tool may exit with, and
+the words could appear in a tool's log, while neither half on its own means the
+tool never started.
+"""
+
+SCRATCH_FAILED_MARKER = "yulon: the scratch folder inside the container could not be made"
+"""The words `SCRATCH_SCRIPT` prints on that path; the other half of the signal."""
+
+COPY_FAILED_RETURNCODE = 94
+"""What `SCRATCH_SCRIPT` exits with when a finished tool's output could not be copied out.
+
+Only used when the tool itself succeeded: a failed tool's own status is the one
+`_conclude()` needs, so the copy failure is said in the log and the status
+stays the tool's.
+"""
+
+COPY_FAILED_MARKER = "yulon: the tool's output could not be copied into data/:"
+"""The words `SCRATCH_SCRIPT` prints per folder it could not copy; the folder follows it."""
+
+SCRATCH_SCRIPT = (
+    "mkdir -p /tmp/yulon-scratch && cd /tmp/yulon-scratch || "
+    '{ echo "yulon: the scratch folder inside the container could not be made"; exit 93; }; '
+    "for entry in /out/*; do "
+    'name=${entry#/out/}; case " $YULON_OUT_DIRS " in *" $name "*) continue;; esac; '
+    '[ -e "$entry" ] && ln -s "$entry" "$name"; '
+    "done; "
+    'for name in $YULON_OUT_DIRS; do mkdir -p "$name"; done; '
+    '"$@"; status=$?; '
+    '[ "$status" -eq 0 ] || exit "$status"; '
+    "for name in $YULON_OUT_DIRS; do "
+    '[ -n "$(ls -A "$name" 2>/dev/null)" ] || continue; '
+    'rm -rf "/out/.yulon-copy-$name"; '
+    'cp -r --update=none "$name/." "/out/.yulon-copy-$name/" || '
+    '{ rm -rf "/out/.yulon-copy-$name"; '
+    'echo "yulon: the tool\'s output could not be copied into data/: $name"; '
+    "status=94; continue; }; "
+    'rm -rf "/out/$name" && mv "/out/.yulon-copy-$name" "/out/$name" || '
+    '{ rm -rf "/out/.yulon-copy-$name"; '
+    'echo "yulon: the tool\'s output could not be copied into data/: $name"; '
+    "status=94; }; "
+    "done; "
+    "exit $status"
+)
+"""The off-the-bind wrapper: the tool writes in scratch, then its folders are copied to `/out`.
+
+Data, not code — no catalog field names it and no evidence hash covers it (T840
+decision 1): `plan_hash()` hashes `plan.model_dump()`, so a new field would make
+every existing install on every platform extract everything again. The family
+decides from the platform and passes `tool_run(scratch=True)`.
+
+Six details are load-bearing:
+
+* **The scratch folder is made by the tool's own user.** See `SCRATCH_MOUNT`:
+  Docker Desktop runs the image's USER, and a workdir Docker had to create
+  would be root-owned. The script makes the folder itself — `mkdir` then `cd` —
+  and gives up with `SCRATCH_FAILED_RETURNCODE` before `"$@"` if it cannot.
+* **The link loop.** A tool that reads an earlier tool's output (`vmap assemble`
+  reads `Buildings`) opens it by a relative name in its cwd, and the cwd is
+  now the scratch folder, which starts empty. Every entry of `/out` that the
+  tool does NOT itself produce is linked in under its own name, so the earlier
+  output is read through the bind and nothing is copied in. The `case` skip is
+  what keeps a STALE `vmaps/` from an earlier run from being linked where this
+  run is about to write: without it the tool would write through the link
+  straight into `/out`, and the copy-back would then meet a dangling link.
+* **The produces folders are made in scratch before the tool runs.** Not every
+  tool creates its own output folder: CMaNGOS's `vmap_assembler Buildings vmaps`
+  opens `vmaps/000.vmtree` for writing and fails on a missing `vmaps/`
+  (`make_out_dirs()`'s docstring, measured 2026-09-02). `run_plan()` makes them
+  under `data/` before each tool for that reason, and that does nothing for the
+  scratch path — so the script makes them here, right after the link loop
+  (which already skips those names, so a stale `/out/vmaps` is never linked).
+* **The copy-back only runs when the tool succeeded.** A failed tool's partial
+  output is discarded with the container and `/out` is not touched: whatever is
+  in the old folder was never vouched for (a re-run costs only the time), but a
+  crash must not replace it with a half extraction. A tool's own failing status
+  is the one `_conclude()` reports.
+* **The copy is staged, then moved into place.** Each non-empty folder is copied
+  to `/out/.yulon-copy-<name>` first (`rm -rf` of a leftover from a killed run
+  first), and only a complete copy is moved over the old folder. Any failure in
+  that chain removes the staging folder (best effort), prints the marker with
+  the folder's name, sets `COPY_FAILED_RETURNCODE` and continues with the next
+  folder — the old `/out/<name>` is still there when the copy never finished.
+  `mv` of a folder inside one bind is a rename, so it cannot half-fail.
+* **`--update=none`** (GNU coreutils >= 9.3; the tools image is Ubuntu 24.04 =
+  9.4, verified on 9.4: exit 0, the existing file is kept) makes a case twin
+  on a case-insensitive bind a skip rather than a failure, and the staging
+  folder is fresh, so it costs nothing today and keeps the answer if it ever
+  is not. S1 measured no twin pair with differing content, so keeping the
+  existing file is the right answer there.
+
+An EMPTY produces folder is skipped (`ls -A`), so a tool that writes straight
+to `/out` (`map_extractor -o /out`) leaves its scratch `maps/ dbc/ Cameras/`
+empty and its real `/out` folders are never touched: it already wrote them, in
+the one place it was told to.
+
+`$status` is the tool's for the whole run: saved before the copy loop, so a
+failed copy cannot turn a crashed extraction into a success, and the loop's
+own check reads the saved value rather than whatever the last command left in
+`$?`.
+"""
+
+
 def _staged_argv(argv: Sequence[str]) -> tuple[str, ...]:
     """The tool's own argv with `/client` paths pointed at the farm instead.
 
@@ -1005,6 +1137,7 @@ def tool_run(
     user_args: Sequence[str],
     security_args: Sequence[str] = (),
     client_files: Path | None = None,
+    scratch: bool = False,
 ) -> docker.ContainerRun:
     """The `docker run` for one tool, built by field so a test can assert it by field.
 
@@ -1019,31 +1152,56 @@ def tool_run(
     tool's output folders in the environment so the script knows what to copy
     back. Neither changes a mount — the client is `:ro` in both modes.
 
+    `scratch` is the T840 switch, passed in and never read from the plan: it
+    wraps the tool in `SCRATCH_SCRIPT`, moves the cwd to `SCRATCH_WORKDIR`
+    (`/tmp`, where the script can make a folder its own user can write) and
+    names the output folders in the environment, for a `data/` that is a bind
+    into a Windows or macOS folder through Docker Desktop, where small-file
+    writes are ~10x slower. Linux never passes it, so argv, mounts, workdir and
+    env stay byte-identical there. It is not a catalog field on purpose: the
+    evidence hashes `plan.model_dump()`, and a new field would make every
+    existing install on every platform extract everything again.
+
     `user_args` and `security_args` both arrive already spelled, from
     `platform.container_user_args()` and `container_security_args()`. Neither is
     asked for here: this builds a description and asks the machine nothing, so a
     test gets the same spec on every host it runs on.
 
     Raises:
-        InstallerError: the plan stages the client and one of this tool's output
-            folders is named with whitespace. `for name in $YULON_OUT_DIRS`
-            splits on it, so the folder would be looked for under two names that
-            do not exist, nothing would be copied back, and the count gate would
-            report the user's client as incomplete for a mistake in our catalog.
+        InstallerError: the plan stages the client and `scratch` is asked for
+            too (both wrappers rewrite the same argv, and no catalog entry does
+            both); or one of this tool's output folders is named with
+            whitespace. `for name in $YULON_OUT_DIRS` splits on it, so the
+            folder would be looked for under two names that do not exist,
+            nothing would be copied back, and the count gate would report the
+            user's client as incomplete for a mistake in our catalog.
     """
+    if scratch and plan.stage_client:
+        raise InstallerError(
+            f"{tool.name}: this plan both stages the client and runs off the bind; the catalog "
+            "must pick one."
+        )
     argv: tuple[str, ...] = tuple(tool.argv)
     workdir = OUT_MOUNT
     env: dict[str, str] = {}
-    if plan.stage_client:
+    if plan.stage_client or scratch:
         loose = sorted(name for name in tool.produces if any(ch.isspace() for ch in name))
         if loose:
+            script = "staging script" if plan.stage_client else "scratch script"
+            does = (
+                "stages the client" if plan.stage_client else "runs its tool inside the container"
+            )
             raise InstallerError(
-                f"{tool.name} stages the client, and its output folders {loose} are named with "
-                "whitespace, which the staging script splits on — the catalog must name them "
+                f"{tool.name} {does}, and its output folders {loose} are named with "
+                f"whitespace, which the {script} splits on — the catalog must name them "
                 "without it."
             )
-        argv = ("sh", "-c", STAGE_SCRIPT, "sh", *_staged_argv(tool.argv))
-        workdir = STAGE_MOUNT
+        if plan.stage_client:
+            argv = ("sh", "-c", STAGE_SCRIPT, "sh", *_staged_argv(tool.argv))
+            workdir = STAGE_MOUNT
+        else:
+            argv = ("sh", "-c", SCRATCH_SCRIPT, "sh", *tool.argv)
+            workdir = SCRATCH_WORKDIR
         env = {"YULON_OUT_DIRS": " ".join(tool.produces)}
     return docker.ContainerRun(
         image=image_ref,
@@ -1162,6 +1320,32 @@ def _stage_failed(run: docker.AttachedRun) -> bool:
     )
 
 
+def _scratch_failed(run: docker.AttachedRun) -> bool:
+    """Did `SCRATCH_SCRIPT` give up before the tool ran? Both halves, never one."""
+    return run.returncode == SCRATCH_FAILED_RETURNCODE and any(
+        SCRATCH_FAILED_MARKER in line for line in run.tail
+    )
+
+
+def _copy_failed_folders(run: docker.AttachedRun) -> list[str]:
+    """The output folders the scratch wrapper named as not copied into `data/`, in order.
+
+    Both halves again: 94 is an ordinary status a tool may exit with, so it is
+    only the wrapper's copy failure when its marker is there too — and when the
+    TOOL failed first the wrapper keeps the tool's status, which means a marker
+    beside a non-94 status is said as part of the tool's own failure, not here.
+    """
+    if run.returncode != COPY_FAILED_RETURNCODE:
+        return []
+    folders: list[str] = []
+    for line in run.tail:
+        _, marker, rest = line.partition(COPY_FAILED_MARKER)
+        name = rest.strip()
+        if marker and name:
+            folders.append(name)
+    return folders
+
+
 class ContainerLeftRunning(InstallerError, TrueAfterStop):
     """A stopped tool whose container Docker would not remove (T303, Codex adversarial review).
 
@@ -1204,6 +1388,7 @@ def run_plan(
     evidence_salt: str = "",
     client_named: str | None = None,
     client_files: Path | None = None,
+    scratch_off_bind: bool = False,
 ) -> Iterator[str]:
     """Run every tool the evidence does not vouch for, recording each as it finishes.
 
@@ -1273,6 +1458,15 @@ def run_plan(
       be built is reported as "the tool never ran" rather than as a status the
       tool never produced.
 
+    `scratch_off_bind` is the T840 switch, for a `data/` that is a bind into a
+    Windows or macOS folder: every tool is wrapped in `SCRATCH_SCRIPT` instead,
+    writes in the container's own layer, and has its finished folders copied
+    into `data/` — which is still the place this function's evidence, counts and
+    retry read afterwards. It is a keyword and not a catalog field because the
+    evidence hashes the plan, and a new field would make every install, on every
+    platform, extract everything again. Said once, before the first tool that
+    actually runs, and never on Linux (whose callers do not pass it).
+
     `selinux_enforcing` is the seam for the one question here that is asked of
     the machine. It is resolved at call time rather than bound as a default, so
     a test that patches `platform.selinux_enforcing` is actually seen — the trap
@@ -1282,7 +1476,8 @@ def run_plan(
 
     Raises:
         InstallerError: a tool failed, was cancelled, could not be started at
-            all, or exited 0 with too few files.
+            all, its output could not be copied into `data/` (with
+            `scratch_off_bind`), or it exited 0 with too few files.
     """
     data_dir.mkdir(parents=True, exist_ok=True)
     run_container = _quiet(run_container)  # no progress bar in the log or last words (T263)
@@ -1357,8 +1552,10 @@ def run_plan(
             user_args=user_args,
             security_args=security_args,
             client_files=client_files,
+            scratch=scratch_off_bind,
         )
 
+    said_scratch = False
     retried = False
     for tool in plan.tools:
         if tool_satisfied(tool, data_dir, current, expected):
@@ -1372,6 +1569,16 @@ def run_plan(
             raise InstallStopped(
                 f"Stop was pressed before {tool.name} started, so it was not run. "
                 f"{EXTRACT_CANCEL_NOTE}"
+            )
+        if scratch_off_bind and not said_scratch:
+            # T840: said once, before the first tool that actually runs, so a
+            # press whose every tool is skipped says nothing about a wrapper
+            # none of them used.
+            said_scratch = True
+            yield (
+                "Docker Desktop writes slowly into a Windows or macOS folder, so each tool "
+                "writes inside its container and the result is copied into data/ when it "
+                "finishes."
             )
         make_out_dirs(tool.produces, data_dir)
         yield f"{tool.name}: running {' '.join(tool.argv)}"
@@ -1463,6 +1670,7 @@ def run_plan(
                     cancel,
                     client_build,
                     staged=plan.stage_client,
+                    scratch=scratch_off_bind,
                     retried=True,
                     client_named=client_named,
                 )
@@ -1476,6 +1684,7 @@ def run_plan(
             cancel,
             client_build,
             staged=plan.stage_client,
+            scratch=scratch_off_bind,
             client_named=client_named,
         )
         yield f"{tool.name}: done ({_counts_text(seen)})"
@@ -1490,12 +1699,13 @@ def _conclude(
     client_build: int | None,
     *,
     staged: bool = False,
+    scratch: bool = False,
     retried: bool = False,
     client_named: str | None = None,
 ) -> tuple[Evidence, dict[str, int]]:
     """Turn one tool's exit into a record, or into the refusal that explains it.
 
-    Five endings, kept five, because the sentence differs for each and four of
+    Seven endings, kept seven, because the sentence differs for each and six of
     them are not "the extraction failed":
 
     1. **Stopped.** `CANCELLED_RETURNCODE`, or a cancel token that was set while
@@ -1513,12 +1723,21 @@ def _conclude(
        tool produced. Both halves of the signal are demanded, and only for a plan
        that actually stages — a tool is free to exit 91 on its own and to print
        whatever it likes while doing it.
-    4. **Failed.** Its exit status and its last words, which is all we know —
+    4. **The scratch folder could not be made.** `scratch` only: `SCRATCH_SCRIPT`
+       gave up before `"$@"`, so, as above, the tool never ran (T840). Unlike the
+       farm this is not the user's client failing but the container's own layer,
+       and the sentence says so.
+    5. **The output could not be copied out.** `scratch` only: the tool finished,
+       the copy back into `data/` did not — the marker names each folder, and
+       the refusal adds the one cause worth naming (a full disk). Only reached
+       when the tool itself succeeded: a failed tool's own status is the one that
+       says what happened.
+    6. **Failed.** Its exit status and its last words, which is all we know —
        plus, when this attempt WAS the one retry the recipe asks for, that fact.
        "vmap extract failed (exit 139)" is equally true of the first crash and
        of the second, and a user who reads it after a second attempt they were
        not told about goes looking for a first one the message never mentions.
-    5. **Finished and fell short.** Exit 0 with too few files: an incomplete
+    7. **Finished and fell short.** Exit 0 with too few files: an incomplete
        client, the wrong expansion, a `data/` emptied by hand — or a folder
        nobody could list, which `file_count()` deliberately walks to "too few"
        so nothing is ever skipped on evidence nobody read. That is right, and it
@@ -1526,7 +1745,7 @@ def _conclude(
        than accusing the user's client of a permissions problem in our own
        output folder.
 
-    Only the fifth counts the folders, and it counts them once: the numbers in
+    Only the last counts the folders, and it counts them once: the numbers in
     the refusal are the numbers the gate read, and so are the ones in the
     caller's "done" line.
     """
@@ -1542,6 +1761,18 @@ def _conclude(
         raise InstallerError(
             f"{tool.name} never ran: the staged copy of the client could not be built inside "
             f"the container, so no client was read. {docker.last_words(run.tail)}"
+        )
+    if scratch and _scratch_failed(run):
+        raise InstallerError(
+            f"{tool.name} never ran: the scratch folder inside the container could not be made, "
+            f"so no client was read. {docker.last_words(run.tail)}"
+        )
+    copies = _copy_failed_folders(run) if scratch else []
+    if copies:
+        named = ", ".join(f"data/{name}" for name in copies)
+        raise InstallerError(
+            f"{tool.name} finished, but its output could not be copied into {named} "
+            f"(disk full?). {docker.last_words(run.tail)}"
         )
     if run.returncode != 0:
         after = ", and that was already the one retry the plan's recipe asks for" if retried else ""
