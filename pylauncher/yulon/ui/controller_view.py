@@ -22606,10 +22606,8 @@ class ControllerView(QWidget):
         seam = self.services.table_repair
         verdict = self.last_verdict
         # T839: and the tables a refused backup or update named, while the line stands.
-        tables = (
-            table_repair.merge_tables(verdict.crashed, self._repair_extra)
-            if verdict is not None
-            else ()
+        tables = table_repair.merge_tables(
+            verdict.crashed if verdict is not None else (), self._repair_extra
         )
         if seam is None or not tables:
             self.repair_banner.setVisible(False)

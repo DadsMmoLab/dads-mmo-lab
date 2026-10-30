@@ -1186,6 +1186,22 @@ def test_an_update_that_stopped_on_a_damaged_table_shows_the_repair_banner(
     assert view._rebuild_damaged == ()  # type: ignore[attr-defined]
 
 
+def test_a_damaged_table_found_before_any_verdict_still_shows_the_banner(
+    qapp: object, ps: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mutation: drop `_repair_extra` from the banner when there is no verdict yet."""
+    _shown(monkeypatch)
+    view = _view(ps, tmp_path, None)
+    view.services.table_repair = _route(tmp_path)  # type: ignore[attr-defined]
+    view.last_verdict = None  # type: ignore[attr-defined]
+    view._refresh_repair_banner()  # type: ignore[attr-defined]
+    assert view.repair_banner.isHidden()  # type: ignore[attr-defined]
+
+    view._offer_the_repair((HONOR,))  # type: ignore[attr-defined]
+    assert not view.repair_banner.isHidden()  # type: ignore[attr-defined]
+    assert view.repair_banner_button.isEnabled()  # type: ignore[attr-defined]
+
+
 def test_an_update_that_failed_for_another_reason_shows_no_banner(
     qapp: object, ps: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
