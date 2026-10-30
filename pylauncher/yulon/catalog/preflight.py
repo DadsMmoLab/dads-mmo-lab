@@ -510,6 +510,16 @@ def gather(
             if wrong_build is not None:
                 client_checks = (*client_checks, wrong_build)
                 refused = wrong_build.verdict == "refuse"
+        if not refused and client_dir is not None:
+            # T836: a map carved out of an archive the client may keep under either name
+            # (CoA's 936: `patch-WB1.MPQ` in the launcher's client, `.DISABLED` in older
+            # copies). Under neither, the extraction cannot make it: refused here, before
+            # anything is built or extracted, rather than by a tool hours later.
+            from yulon.catalog.families import surgical
+
+            archive_rows = surgical.archive_checks(entry, client_dir)
+            client_checks = (*client_checks, *archive_rows)
+            refused = any(row.verdict == "refuse" for row in archive_rows)
         if ready and client_dir is not None and not refused:
             client_bind = probe(client_dir)
     return Facts(
