@@ -175,3 +175,26 @@ def test_a_stop_clears_it_too_within_its_budget(
     ) as held:
         assert held.name == name
         assert name in fake_containers(fake_docker)
+
+
+def test_a_leftover_replaced_between_the_two_looks_is_never_removed(
+    fake_docker: Path, server: Path, monkeypatch: pytest.MonkeyPatch  # noqa: F811
+) -> None:
+    """Mutation this catches: dropping the same-container check in `_left_unstarted_here()`."""
+    import dataclasses
+
+    name = _name(server)
+    _left_created(
+        fake_docker, name, owner=docker.owner_id(), pid=_dead_pid(), host=socket.gethostname()
+    )
+    real = docker._server_holder
+
+    def a_newer_one(*args: object, **kwargs: object) -> docker.ServerHolder:
+        found = real(*args, **kwargs)  # type: ignore[arg-type]
+        return dataclasses.replace(found, container="a-newer-container-id")
+
+    monkeypatch.setattr(docker, "_server_holder", a_newer_one)
+    with pytest.raises(docker.ServerReserved):
+        with docker.server_claim(server, press="Start", images=[IMAGE]):
+            pytest.fail("went ahead")
+    assert not any(line.startswith("rm -f") for line in fake_calls(fake_docker))
