@@ -751,7 +751,15 @@ def _download(
     cancelled: Callable[[], bool],
     progress: Callable[[int], None],
 ) -> None:
-    """Bring `part` to `size` bytes, resuming from what it holds (HTTP Range)."""
+    """Bring `part` to `size` bytes, resuming from what it holds (HTTP Range).
+
+    A file the manifest lists with size 0 has nothing to fetch: `part` is made
+    empty here, without asking the site, and `_prove` checks its digest like any
+    other (T838: before, nothing was made and the file stayed missing forever).
+    """
+    if size == 0:
+        part.open("wb").close()
+        return
     have = part.stat().st_size if part.is_file() else 0
     if have > size:
         part.unlink()

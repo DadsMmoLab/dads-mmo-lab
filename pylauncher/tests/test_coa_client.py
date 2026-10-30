@@ -784,3 +784,164 @@ def test_a_legacy_journal_undo_that_stops_before_its_checkpoint_completes_next_t
     assert second.left == []
     assert (client / "Ascension.exe").read_bytes() == b"original"
     assert coa_client.read_state(client).version == "v1"  # type: ignore[union-attr]
+
+
+# --- zero-byte files (T838) --------------------------------------------------------------------
+
+EMPTY_SHA = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+EMPTY = {
+    "Data/Content/TransmogrificationItemData.json": b"",
+    "HD_Patches_Description.txt": b"",
+}
+
+
+def test_the_empty_file_digest_is_the_one_the_manifest_carries() -> None:
+    assert _sha(b"") == EMPTY_SHA
+
+
+def test_a_zero_byte_file_is_created_through_the_journal_without_asking_the_site(
+    tmp_path: Path,
+) -> None:
+    """The CoA manifest 2026-10-29-01 lists four empty files; each must end up on disk."""
+    client = _client(tmp_path, {"Ascension.exe": b"old"})
+    site = _site({"Ascension.exe": b"new", **EMPTY})
+    outcome = _update(client, site, replace_edited=True)
+    assert outcome.failed == []
+    assert sorted(outcome.written) == sorted(["Ascension.exe", *EMPTY])
+    for rel in EMPTY:
+        assert (client / rel).is_file() and (client / rel).read_bytes() == b""
+        assert not (client / (rel + coa_client.PART_SUFFIX)).exists()
+    assert [u for u, _ in site.object_gets()] == [OBJECTS + _sha(b"new")]
+    journal = _replace_journal(client, "2026-10-28-01")
+    assert journal["added"] == {rel: EMPTY_SHA for rel in EMPTY}
+    assert outcome.version_recorded
+    state = coa_client.read_state(client)
+    assert state is not None and state.version == "2026-10-28-01"
+    assert all(state.files[rel].size == 0 and state.files[rel].sha256 == EMPTY_SHA for rel in EMPTY)
+
+
+def test_a_second_update_finds_the_empty_files_ok_and_writes_nothing(tmp_path: Path) -> None:
+    client = _client(tmp_path, {})
+    site = _site({"Ascension.exe": b"new", **EMPTY})
+    _update(client, site)
+    manifest = coa_client.fetch_manifest(MANIFEST_URL, hosts=HOSTS, opener=site)
+    items = coa_client.plan(client, manifest, coa_client.read_state(client))
+    assert set(_actions(items).values()) == {"ok"}
+    assert coa_client.summary(items).startswith("Your client already matches")
+    site.requests.clear()
+    again = _update(client, site)
+    assert again.written == [] and again.failed == [] and again.version_recorded
+    assert site.object_gets() == []
+
+
+def test_an_empty_file_already_there_with_no_record_is_ok_on_a_first_update(
+    tmp_path: Path,
+) -> None:
+    client = _client(tmp_path, dict(EMPTY))
+    manifest = coa_client.parse_manifest(_manifest(EMPTY))
+    assert set(_actions(coa_client.plan(client, manifest, None)).values()) == {"ok"}
+
+
+def test_rollback_removes_an_added_empty_file_and_keeps_one_the_player_filled(
+    tmp_path: Path,
+) -> None:
+    client = _client(tmp_path, {})
+    _update(client, _site(dict(EMPTY), "v2"))
+    filled = "HD_Patches_Description.txt"
+    (client / filled).write_bytes(b"my notes")
+    undone = coa_client.rollback(client, "v2")
+    assert undone.left == [] and undone.kept_changed == 1
+    assert not (client / "Data/Content/TransmogrificationItemData.json").exists()
+    assert not (client / filled).exists()
+    conflicts = client / coa_client.BACKUP_DIR / "v2" / coa_client.CONFLICTS
+    assert (conflicts / filled).read_bytes() == b"my notes"
+    assert not (client / coa_client.STATE_FILE).exists()
+
+
+def test_a_zero_byte_entry_with_another_digest_is_refused_and_nothing_is_left(
+    tmp_path: Path,
+) -> None:
+    """No bytes can match a size-0 entry whose SHA-256 is not the empty file's."""
+    client = _client(tmp_path, {})
+    site = _site({"Ascension.exe": b"new"})
+    site.files[MANIFEST_URL] = json.dumps(
+        {
+            "schema": 1,
+            "version": "v2",
+            "files": [
+                {"path": "Ascension.exe", "size": 3, "sha256": _sha(b"new")},
+                {"path": "Data/odd.json", "size": 0, "sha256": "a" * 64},
+            ],
+        }
+    ).encode()
+    outcome = _update(client, site)
+    assert outcome.written == ["Ascension.exe"]
+    assert [path for path, _ in outcome.failed] == ["Data/odd.json"]
+    assert "does not match" in outcome.failed[0][1]
+    assert not (client / "Data/odd.json").exists()
+    assert not (client / ("Data/odd.json" + coa_client.PART_SUFFIX)).exists()
+    assert not outcome.version_recorded
+    assert site.object_gets() == [(OBJECTS + _sha(b"new"), {})]
+
+
+def test_a_non_empty_file_where_the_update_has_an_empty_one_is_kept_unless_replaced(
+    tmp_path: Path,
+) -> None:
+    rel = "HD_Patches_Description.txt"
+    client = _client(tmp_path, {rel: b"something"})
+    site = _site({rel: b""})
+    kept = _update(client, site)
+    assert kept.written == [] and kept.kept == [rel]
+    assert (client / rel).read_bytes() == b"something"
+    (tmp_path / "other").mkdir()
+    other = _client(tmp_path / "other", {rel: b"something"})
+    replaced = _update(other, site, replace_edited=True)
+    assert replaced.written == [rel] and replaced.version_recorded
+    assert (other / rel).read_bytes() == b""
+    backup = other / coa_client.BACKUP_DIR / "2026-10-28-01" / rel
+    assert backup.read_bytes() == b"something"
+
+
+def test_an_empty_file_yulon_recorded_and_the_update_now_fills_is_replaced(
+    tmp_path: Path,
+) -> None:
+    rel = "HD_Patches_Description.txt"
+    client = _client(tmp_path, {})
+    _update(client, _site({rel: b""}, "v1"))
+    manifest = coa_client.parse_manifest(_manifest({rel: b"filled"}, "v2"))
+    items = coa_client.plan(client, manifest, coa_client.read_state(client))
+    assert _actions(items) == {rel: "replace"}
+    _update(client, _site({rel: b"filled"}, "v2"))
+    assert (client / rel).read_bytes() == b"filled"
+    assert (client / coa_client.BACKUP_DIR / "v2" / rel).read_bytes() == b""
+
+
+@pytest.mark.parametrize(
+    "path", ["NUL.json", "Data/Content/x.json.", "Data/Content/x.json ", "a:b.json", "Data\\x.json"]
+)
+def test_a_zero_byte_entry_at_a_path_windows_cannot_hold_is_refused(path: str) -> None:
+    raw = json.dumps(
+        {"schema": 1, "version": "v1", "files": [{"path": path, "size": 0, "sha256": EMPTY_SHA}]}
+    ).encode()
+    with pytest.raises(ManifestError):
+        coa_client.parse_manifest(raw)
+
+
+def test_an_empty_file_on_disk_in_another_case_is_ok_and_no_second_spelling_is_made(
+    tmp_path: Path,
+) -> None:
+    client = _client(tmp_path, {"data/content/transmogrificationitemdata.json": b""})
+    outcome = _update(client, _site({"Data/Content/TransmogrificationItemData.json": b""}))
+    assert outcome.written == [] and outcome.version_recorded
+    assert os.listdir(client / "data" / "content") == ["transmogrificationitemdata.json"]
+    assert sorted(os.listdir(client)) == sorted(["data", coa_client.STATE_FILE])
+
+
+def test_an_empty_file_is_not_written_through_a_linked_folder(tmp_path: Path) -> None:
+    client = _client(tmp_path, {})
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (client / "Data").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ClientUpdateError, match="link"):
+        _update(client, _site({"Data/Content/TransmogrificationItemData.json": b""}))
+    assert list(outside.iterdir()) == []
