@@ -284,6 +284,93 @@ def damaged_refusal(
     return f"{said} Nothing was changed." if nothing_changed else said
 
 
+def resolve_bare(found: Crashed, schemas: Sequence[str], query: Callable[[str], str]) -> Crashed:
+    """`found` with every bare table name resolved to the ONE schema of `schemas` holding it.
+
+    A world's own log names the table only (`Table 'characters' is marked as crashed`), and
+    at load time the world reads all three of its databases, so the statement's first schema
+    -- the provisional answer `crashed_tables()` gives -- is a guess that is wrong more often
+    than right. One read of `information_schema` over `schemas` says which database really
+    holds it, and only that answer is shown.
+
+    A name no schema holds, a name two schemas hold, and a read that failed all drop the
+    table and make the answer `unnamed`: the card then says Yu'lon cannot tell which table,
+    which is true, instead of naming one it would repair blind.
+    """
+    wanted = tuple(name for name in schemas if _IDENTIFIER.fullmatch(name))
+    bare = [table for table in found.tables if table.bare]
+    if not bare:
+        return found
+    names = ", ".join(f"'{name}'" for name in dict.fromkeys(table.table for table in bare))
+    if not wanted:
+        return Crashed(tuple(table for table in found.tables if not table.bare), unnamed=True)
+    known = ", ".join(f"'{name}'" for name in wanted)
+    statement = (
+        "SELECT TABLE_SCHEMA, TABLE_NAME FROM information_schema.TABLES "
+        f"WHERE TABLE_NAME IN ({names}) AND TABLE_SCHEMA IN ({known});"
+    )
+    try:
+        raw = query(statement)
+    except Exception as exc:  # noqa: BLE001 - a read that failed is an answer, not a crash
+        logger.warning(f"could not tell which database holds the damaged table: {exc}")
+        return Crashed(tuple(table for table in found.tables if not table.bare), unnamed=True)
+    holders: dict[str, set[str]] = {}
+    for line in raw.splitlines():
+        fields = line.split("\t")
+        if len(fields) < 2:
+            continue
+        db, held = fields[0].strip(), fields[1].strip()
+        if db in wanted and _IDENTIFIER.fullmatch(db) and _IDENTIFIER.fullmatch(held):
+            holders.setdefault(held, set()).add(db)
+    result: list[CrashedTable] = []
+    dropped = False
+    for table in found.tables:
+        if not table.bare:
+            result.append(table)
+            continue
+        dbs = holders.get(table.table, set())
+        if len(dbs) == 1:
+            result.append(CrashedTable(next(iter(dbs)), table.table))
+        else:
+            dropped = True
+    return Crashed(merge_tables((), result), unnamed=found.unnamed or dropped)
+
+
+def damaged_at_start(crashed: Crashed, *, repairable: Sequence[str]) -> str:
+    """The realm line's words for a world that dies at start on a damaged table (T823).
+
+    One part of the realm line, joined with " · " by `dashboard.line()`, so it starts
+    lower-case. A table the Repair press covers is sent to it; any other -- the world
+    database's -- is pointed at a backup, the same rule a refused update follows (T839).
+    """
+    opening = "the world server stops while it starts because"
+    if not crashed.tables:
+        return (
+            f"{opening} a database table is damaged, most likely from the computer stopping "
+            "suddenly; Yu'lon cannot tell which one, so press Save logs for support… and ask "
+            "for help"
+        )
+    names = ", ".join(table.qualified for table in crashed.tables)
+    if len(crashed.tables) == 1:
+        lead = f"{opening} a database table is damaged ({names})"
+    else:
+        lead = f"{opening} database tables are damaged ({names})"
+    said = f"{lead}, most likely from the computer stopping suddenly"
+    fixable = repairable_only(crashed.tables, repairable)
+    other = [table for table in crashed.tables if table not in fixable]
+    if not other:
+        return f"{said}; use {repair_button_label(fixable)} on the server card"
+    dbs = ", ".join(dict.fromkeys(table.db for table in other))
+    said += (
+        f"; Repair on the server card cannot fix {dbs}, so restore it from a backup on the"
+        f" {MAINTENANCE_TAB} tab, or ask for help"
+    )
+    if fixable:
+        fixed = ", ".join(table.qualified for table in fixable)
+        said += f"; use {repair_button_label(fixable)} on the server card for {fixed}"
+    return said
+
+
 CHECK_SECONDS = 60
 """How long the pre-check's `CHECK TABLE` may run before the server aborts it (T839)."""
 
