@@ -17,6 +17,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 
 ### Fixed
 - Bringing in a packed server no longer refuses a bot database update that was released out of date order.
+- A world server that keeps restarting on a damaged table now names it and offers Repair or a backup.
 
 ### Changed
 

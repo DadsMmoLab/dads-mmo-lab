@@ -626,6 +626,15 @@ def test_no_player_sentence_names_a_command_or_looks_like_a_note() -> None:
             )
         ),
         native.damaged_checked_line(("tw_logon", "tw_char", "tw_world")),
+        # T823: the realm line's words for a world that dies at start on a damaged table.
+        table_repair.damaged_at_start(Crashed(unnamed=True), repairable=TORTISE_SCHEMAS),
+        table_repair.damaged_at_start(Crashed(tables), repairable=TORTISE_SCHEMAS),
+        table_repair.damaged_at_start(
+            Crashed((CrashedTable("tw_world", "creature"),)), repairable=TORTISE_SCHEMAS
+        ),
+        table_repair.damaged_at_start(
+            Crashed((*tables, CrashedTable("tw_world", "creature"))), repairable=TORTISE_SCHEMAS
+        ),
     ]
     for text in texts:
         assert command_faults(text) == [], text

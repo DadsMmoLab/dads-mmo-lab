@@ -22628,11 +22628,18 @@ class ControllerView(QWidget):
             return
         seam = self.services.table_repair
         verdict = self.last_verdict
+        if seam is None:
+            self.repair_banner.setVisible(False)
+            return
+        # T823: a looping world's log can name a world table; that one is pointed at a backup.
         # T839: and the tables a refused backup or update named, while the line stands.
         tables = table_repair.merge_tables(
-            verdict.crashed if verdict is not None else (), self._repair_extra
+            table_repair.repairable_only(
+                verdict.crashed if verdict is not None else (), seam.schemas
+            ),
+            self._repair_extra,
         )
-        if seam is None or not tables:
+        if not tables:
             self.repair_banner.setVisible(False)
             return
         self.repair_banner_label.setText(table_repair.repair_banner_text(tables))
@@ -22683,7 +22690,10 @@ class ControllerView(QWidget):
         if seam is None:
             return False
         tables = table_repair.merge_tables(
-            verdict.crashed if verdict is not None else (), self._repair_extra
+            table_repair.repairable_only(
+                verdict.crashed if verdict is not None else (), seam.schemas
+            ),
+            self._repair_extra,
         )
         if not tables:
             return False
