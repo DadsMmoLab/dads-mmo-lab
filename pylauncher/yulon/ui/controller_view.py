@@ -275,6 +275,21 @@ def _clock() -> str:
     return time.strftime("%H:%M")
 
 
+DUMPS_KEPT_LEAD = "Written and verified so far:"
+"""Where `maintenance.backup()`'s INCOMPLETE refusal lists the dumps it kept (T839 review)."""
+
+
+def _dumps_kept(exc: object) -> str:
+    """The kept/missing dump inventory of a failed backup, as one trailing sentence; "" if none.
+
+    A damaged table replaces the refusal's sentence, but the dumps that finished stay on
+    disk, and the player must still be told which ones.
+    """
+    said = str(exc)
+    at = said.find(DUMPS_KEPT_LEAD)
+    return f" {said[at:].strip()}" if at >= 0 else ""
+
+
 class _DockerSilent(NamedTuple):
     """A poll's Docker failure, handed back as an answer instead of raised (T194 fix round 1)."""
 
@@ -19273,8 +19288,10 @@ class ControllerView(QWidget):
                 repairable=self._repair_schemas(),
                 what="the backup",
                 again="back up again",
+                nothing_changed=False,
                 ended="is incomplete",
             )
+            said += _dumps_kept(exc)
             exc = wotlk_maintenance.MaintenanceError(said, detail=f"{exc}\n{exc.detail}".strip())
         self._maintenance_failed(exc, MAINTENANCE_BACKUP_FAILED)
         self._offer_the_repair(damaged)
@@ -22355,7 +22372,9 @@ class ControllerView(QWidget):
         damaged = self._damaged_backup(exc)
         if damaged:
             # T839: the table is named and the Repair press offered.
-            message = table_repair.damaged_refusal(damaged, repairable=self._repair_schemas())
+            message = table_repair.damaged_refusal(
+                damaged, repairable=self._repair_schemas()
+            ) + _dumps_kept(exc)
             detail = f"{exc}\n{detail}".strip()
             self._offer_the_repair(damaged)
         self._backup_before_update = False
