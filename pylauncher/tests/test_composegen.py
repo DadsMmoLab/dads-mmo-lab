@@ -2703,6 +2703,17 @@ def test_the_centurion_macos_render_is_the_linux_snapshot(folder: str) -> None:
         assert text == (root / name).read_text(encoding="utf-8"), f"macos {folder}: {name}"
 
 
+def test_the_centurion_windows_render_reproduces_its_committed_snapshot_byte_for_byte() -> None:
+    """T835 moves the sync script to `shared/` and teaches `_world_data_tokens` a family that is
+    not TrinityCore; a byte moved here would offer every Windows Centurion a Repair, so the
+    files were written before either change (`support_rendered.CENTURION_WINDOWS`)."""
+    texts = support_rendered.centurion_rendered("", platform_id="windows")
+    root = support_rendered.CENTURION_SNAPSHOT_ROOT / support_rendered.CENTURION_WINDOWS
+    assert set(texts) == {path.name for path in root.iterdir() if path.is_file()}
+    for name, text in texts.items():
+        assert text == (root / name).read_text(encoding="utf-8"), name
+
+
 # -- T219: on Windows the world server reads its map data from a volume ---------------------
 
 

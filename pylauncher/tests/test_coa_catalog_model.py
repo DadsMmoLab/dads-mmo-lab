@@ -11,6 +11,7 @@ loads, so a red names exactly the rule that let it through.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 from typing import Any
 
@@ -25,8 +26,10 @@ from yulon.catalog.catalog import (
     AzerothCoreData,
     Client,
     NativeInstall,
+    load_catalog,
     parse_catalog,
 )
+from yulon.catalog.families import extract
 
 REALM: dict[str, Any] = {
     "id": "coa",
@@ -310,3 +313,25 @@ def test_an_ascension_client_loads() -> None:
         wine_dll_overrides="divxtac=d",
     )
     assert client.exe_names == ("ascension.exe",)
+
+
+# -- T835: the world-data fields sit outside the extraction hashes -----------------------
+
+
+def test_the_world_data_fields_leave_the_coa_extraction_hash_alone() -> None:
+    """The extraction evidence hashes the `ExtractPlan` and the mmaps record its argv alone.
+
+    A field added inside `client_extract` would change that digest and make every Linux CoA
+    install extract its client again. `AzerothCoreData.world_data_dirs`/`world_data_gb` sit
+    on the outer block, outside both, which is why these three values are pinned here: they
+    were measured at 2f7e89ae, before T835.
+    """
+    block = load_catalog().get("wow-coa").install.native.azerothcore  # type: ignore[union-attr]
+    assert block is not None and block.client_extract is not None
+    ce = block.client_extract
+    assert extract.plan_hash(ce.extract) == "a8a967884300bd3e"
+    canonical = json.dumps(ce.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
+    assert hashlib.sha256(canonical.encode("utf-8")).hexdigest() == (
+        "951c5d424fc45d2aeaf963c9ba95248aacf32c4cd408d5fe8434e3bc49d8d18e"
+    )
+    assert extract.argv_hash(ce.mmaps.argv) == "e7a3c2f660b5f20b"
