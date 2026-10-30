@@ -9312,6 +9312,9 @@ class ControllerView(QWidget):
         self._repair_extra: tuple[table_repair.CrashedTable, ...] = ()
         self._repair_copy_question = ""
         self._repair_copy_answer = False
+        # T839: the damaged tables a rebuild-panel press stopped on, set on its worker and
+        # taken by `_rebuild_finished()` on the GUI thread.
+        self._rebuild_damaged: tuple[table_repair.CrashedTable, ...] = ()
         # T382: the Tuning restart's wait for the world, which no button waits on.
         self._world_wait: threading.Event | None = None
         self._world_wait_number = 0
@@ -19262,7 +19265,15 @@ class ControllerView(QWidget):
     def _backup_failed(self, exc: object) -> None:
         self._backup_running = False
         self._retain_after_backup = False
+        damaged = self._damaged_backup(exc)
+        if damaged and isinstance(exc, wotlk_maintenance.MaintenanceError):
+            # T839: the table is named and the Repair press offered, not "did not finish".
+            said = table_repair.damaged_refusal(
+                damaged, what="the backup", again="back up again", ended="is incomplete"
+            )
+            exc = wotlk_maintenance.MaintenanceError(said, detail=f"{exc}\n{exc.detail}".strip())
         self._maintenance_failed(exc, MAINTENANCE_BACKUP_FAILED)
+        self._offer_the_repair(damaged)
         self._settle_shelf_buttons()
 
     def _give_back_the_backup_button(self) -> None:
@@ -22337,6 +22348,12 @@ class ControllerView(QWidget):
         message = f"Backup failed — the update was not started: {exc}"
         # What the database said rides on `detail` (T194 R1): folded, and logged.
         detail = getattr(exc, "detail", "")
+        damaged = self._damaged_backup(exc)
+        if damaged:
+            # T839: the table is named and the Repair press offered.
+            message = table_repair.damaged_refusal(damaged)
+            detail = f"{exc}\n{detail}".strip()
+            self._offer_the_repair(damaged)
         self._backup_before_update = False
         self._give_back_the_backup_button()
         self._set_update_buttons()
@@ -22588,7 +22605,12 @@ class ControllerView(QWidget):
             return
         seam = self.services.table_repair
         verdict = self.last_verdict
-        tables = verdict.crashed if verdict is not None else ()
+        # T839: and the tables a refused backup or update named, while the line stands.
+        tables = (
+            table_repair.merge_tables(verdict.crashed, self._repair_extra)
+            if verdict is not None
+            else ()
+        )
         if seam is None or not tables:
             self.repair_banner.setVisible(False)
             return
@@ -22602,6 +22624,20 @@ class ControllerView(QWidget):
             set_enabled_why(self.repair_banner_button, "Something else is running")
         else:
             set_enabled_why(self.repair_banner_button, None)
+
+    def _offer_the_repair(self, tables: Sequence[table_repair.CrashedTable]) -> None:
+        """Keep tables a refusal named for the Repair press, and show it (T839)."""
+        if self.services.table_repair is None or not tables:
+            return
+        self._repair_extra = table_repair.merge_tables(self._repair_extra, tables)
+        self._refresh_repair_banner()
+
+    def _damaged_backup(self, exc: object) -> tuple[table_repair.CrashedTable, ...]:
+        """The crashed tables a failed backup's dump named (T839); () where there is no press."""
+        seam = self.services.table_repair
+        if seam is None or not isinstance(exc, wotlk_maintenance.MaintenanceError):
+            return ()
+        return table_repair.damaged_in_dump(f"{exc}\n{exc.detail}", exc.database, seam.schemas)
 
     @Slot()
     def repair_damaged_tables(self) -> bool:
@@ -22872,7 +22908,18 @@ class ControllerView(QWidget):
         Runs on the panel's worker thread, so what it notices goes through
         `_rebuild_wait_relay`. Only the wait's own sentences are relayed; a
         compile's thousands of lines are not.
+
+        T839: a press that stopped on a damaged table leaves the tables for
+        `_rebuild_finished()`, which offers T822's Repair press for them.
         """
+        self._rebuild_damaged = ()
+        try:
+            yield from self._relay_load_wait(lines)
+        except Exception as exc:
+            self._rebuild_damaged = table_repair.damaged_in(exc)
+            raise
+
+    def _relay_load_wait(self, lines: Iterator[str]) -> Iterator[str]:
         for line in lines:
             if line in docker.LOAD_WAIT_LINES or line in (
                 docker.WORLD_FINISHED_LOADING,
@@ -22909,6 +22956,9 @@ class ControllerView(QWidget):
         report.
         """
         self._set_busy(False)
+        damaged, self._rebuild_damaged = self._rebuild_damaged, ()
+        if not ok and damaged:
+            self._offer_the_repair(damaged)
         if self._database_repair_running:
             self._database_repair_running = False
             # T423: the import puts the database back as the server files have

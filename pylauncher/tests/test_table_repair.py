@@ -30,6 +30,7 @@ from tests.support_player_text import command_faults, text_faults
 from tests.test_controller_view import _Ps
 from tests.test_plan_corrections import _view
 from yulon import dashboard, dbreads, docker, platform, runner, table_repair
+from yulon.catalog import native
 from yulon.catalog.catalog import load_catalog
 from yulon.table_repair import Crashed, CrashedTable, TableRepair
 from yulon.ui import controller_view as controller_view_module
@@ -599,6 +600,21 @@ def test_no_player_sentence_names_a_command_or_looks_like_a_note() -> None:
         table_repair.REPAIR_FAILED,
         table_repair.REPAIR_HOLD_REASON,
         controller_view_module.REPAIR_BROKE,
+        # T839: the refusals of a press a damaged table stopped.
+        table_repair.damaged_refusal(tables),
+        table_repair.damaged_refusal((*tables, CrashedTable("tw_world", "creature"))),
+        table_repair.damaged_refusal(
+            tables, what="the backup", again="back up again", ended="is incomplete"
+        ),
+        *(
+            table_repair.damaged_refusal(tables, what=what, again=again, nothing_changed=False)
+            for what, again in (
+                native.damaged_press_words(),
+                native.damaged_press_words(rebuild=True),
+                native.damaged_press_words(to_pin=True),
+            )
+        ),
+        native.damaged_checked_line(("tw_logon", "tw_char", "tw_world")),
     ]
     for text in texts:
         assert command_faults(text) == [], text
@@ -1128,3 +1144,127 @@ def test_the_banner_button_waits_while_the_rebuild_log_runs(
     view._refresh_repair_banner()  # type: ignore[attr-defined]
     assert not view.repair_banner_button.isEnabled()  # type: ignore[attr-defined]
     assert view.repair_banner_button.toolTip() == "Something else is running"  # type: ignore[attr-defined]
+
+
+# -- T839: a refused update or backup offers the press ------------------------
+
+
+HONOR = CrashedTable("tw_char", "character_honor_cp")
+DUMP_1194 = (
+    "mysqldump: Got error: 1194: \"Table 'character_honor_cp' is marked as crashed and "
+    'should be repaired" when using LOCK TABLES'
+)
+
+
+def _up_verdict() -> dashboard.Verdict:
+    """A server that answers: its population read never saw the crashed table."""
+    return dashboard.Verdict("up")
+
+
+def test_an_update_that_stopped_on_a_damaged_table_shows_the_repair_banner(
+    qapp: object, ps: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mutation: drop the `damaged_in()` catch in `_watch_for_load_wait()`."""
+    from yulon.catalog.installer import InstallerError
+
+    _shown(monkeypatch)
+    view = _view(ps, tmp_path, None)
+    view.services.table_repair = _route(tmp_path)  # type: ignore[attr-defined]
+    view.last_verdict = _up_verdict()  # type: ignore[attr-defined]
+    view._refresh_repair_banner()  # type: ignore[attr-defined]
+    assert view.repair_banner.isHidden()  # type: ignore[attr-defined]
+
+    def press() -> Iterator[str]:
+        yield "Moving WoW Tortoise's sources"
+        raise table_repair.mark_damaged(InstallerError("damaged"), (HONOR,))
+
+    with pytest.raises(InstallerError):
+        list(view._watch_for_load_wait(press()))  # type: ignore[attr-defined]
+    view._rebuild_finished(False, "damaged")  # type: ignore[attr-defined]
+    assert not view.repair_banner.isHidden()  # type: ignore[attr-defined]
+    assert view._repair_extra == (HONOR,)  # type: ignore[attr-defined]
+    assert view._rebuild_damaged == ()  # type: ignore[attr-defined]
+
+
+def test_an_update_that_failed_for_another_reason_shows_no_banner(
+    qapp: object, ps: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yulon.catalog.installer import InstallerError
+
+    _shown(monkeypatch)
+    view = _view(ps, tmp_path, None)
+    view.services.table_repair = _route(tmp_path)  # type: ignore[attr-defined]
+    view.last_verdict = _up_verdict()  # type: ignore[attr-defined]
+
+    def press() -> Iterator[str]:
+        yield "Moving"
+        raise InstallerError("disk full")
+
+    with pytest.raises(InstallerError):
+        list(view._watch_for_load_wait(press()))  # type: ignore[attr-defined]
+    view._rebuild_finished(False, "disk full")  # type: ignore[attr-defined]
+    assert view.repair_banner.isHidden()  # type: ignore[attr-defined]
+
+
+def _dump_failed(said: str = DUMP_1194) -> Exception:
+    from yulon.controller_wow_wotlk.maintenance import MaintenanceError
+
+    return MaintenanceError(
+        "The backup of tw_char did not finish. — the backup is INCOMPLETE.",
+        detail=said,
+        database="tw_char",
+    )
+
+
+def test_a_backup_that_stops_on_a_crashed_table_names_it_and_offers_the_press(
+    qapp: object, ps: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mutation: drop the `_damaged_backup()` branch in `_backup_failed()`."""
+    _shown(monkeypatch)
+    view = _view(ps, tmp_path, None)
+    view.services.table_repair = _route(tmp_path)  # type: ignore[attr-defined]
+    view.last_verdict = _up_verdict()  # type: ignore[attr-defined]
+    view._backup_failed(_dump_failed())  # type: ignore[attr-defined]
+    report = view.maintenance_report.toPlainText()  # type: ignore[attr-defined]
+    assert report.startswith("Table tw_char.character_honor_cp is damaged"), report
+    assert "the backup is incomplete. Use Repair the damaged table…" in report
+    assert "then back up again" in report
+    assert not view.repair_banner.isHidden()  # type: ignore[attr-defined]
+
+
+def test_a_backup_that_failed_for_another_reason_keeps_its_own_words(
+    qapp: object, ps: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _shown(monkeypatch)
+    view = _view(ps, tmp_path, None)
+    view.services.table_repair = _route(tmp_path)  # type: ignore[attr-defined]
+    view.last_verdict = _up_verdict()  # type: ignore[attr-defined]
+    view._backup_failed(_dump_failed("Lost connection"))  # type: ignore[attr-defined]
+    report = view.maintenance_report.toPlainText()  # type: ignore[attr-defined]
+    assert report.startswith("The backup of tw_char did not finish."), report
+    assert view.repair_banner.isHidden()  # type: ignore[attr-defined]
+
+
+def test_the_backup_before_an_update_says_the_table_and_offers_the_press(
+    qapp: object, ps: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _shown(monkeypatch)
+    view = _view(ps, tmp_path, None)
+    view.services.table_repair = _route(tmp_path)  # type: ignore[attr-defined]
+    view.last_verdict = _up_verdict()  # type: ignore[attr-defined]
+    view._backup_before_update_failed(_dump_failed())  # type: ignore[attr-defined]
+    report = view.maintenance_report.toPlainText()  # type: ignore[attr-defined]
+    assert report == table_repair.damaged_refusal((HONOR,)), report
+    assert not view.repair_banner.isHidden()  # type: ignore[attr-defined]
+
+
+def test_without_a_repair_press_a_crashed_backup_keeps_its_old_words(
+    qapp: object, ps: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AzerothCore and TrinityCore: no press to send the player to, so no new sentence."""
+    _shown(monkeypatch)
+    view = _view(ps, tmp_path, None)
+    view.last_verdict = _up_verdict()  # type: ignore[attr-defined]
+    view._backup_before_update_failed(_dump_failed())  # type: ignore[attr-defined]
+    report = view.maintenance_report.toPlainText()  # type: ignore[attr-defined]
+    assert report.startswith("Backup failed — the update was not started"), report

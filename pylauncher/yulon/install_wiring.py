@@ -31,7 +31,7 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
 
-from yulon import docker, module_moves, platform, server_build_presses, wsl
+from yulon import docker, module_moves, platform, server_build_presses, table_repair, wsl
 from yulon.after_stop import TrueAfterStop, stop_took_effect
 from yulon.catalog import script_built, upstream
 
@@ -284,9 +284,13 @@ class _MaintenanceSnapshot:
     here, and `restore()` refuses while either runs.
     """
 
-    def __init__(self, entry: CatalogEntry, *, wsl_distro: str | None) -> None:
+    def __init__(
+        self, entry: CatalogEntry, *, wsl_distro: str | None, checks_damage: bool = False
+    ) -> None:
         self.entry = entry
         self.wsl_distro = wsl_distro
+        self.checks_damage = checks_damage
+        """T839: a crashed MyISAM table is looked for and named (the CMaNGOS family only)."""
 
     def _mysql(self, server_dir: Path) -> wotlk_maintenance.DockerMysql:
         from yulon.controller_wow_wotlk import maintenance
@@ -340,13 +344,52 @@ class _MaintenanceSnapshot:
             docker.MaintenanceLeaseTaken,
             OSError,
         ) as exc:
-            raise InstallerError(str(exc)) from exc
+            refused = InstallerError(str(exc))
+            damaged = self._damaged_in_the_dump(exc, databases)
+            if damaged:
+                raise table_repair.mark_damaged(refused, damaged) from exc
+            raise refused from exc
         return Snapshot(
             directory=report.directory,
             files=tuple(dump.path for dump in report.dumps),
             databases=report.databases,
             size_bytes=report.total_bytes,
         )
+
+    def _damaged_in_the_dump(
+        self, exc: Exception, databases: Sequence[str]
+    ) -> tuple[table_repair.CrashedTable, ...]:
+        """The crashed tables a failed dump named (T839); () off the CMaNGOS family."""
+        if not self.checks_damage:
+            return ()
+        text = f"{exc}\n{getattr(exc, 'detail', '')}"
+        return table_repair.damaged_in_dump(text, getattr(exc, "database", ""), databases)
+
+    def damaged_tables(
+        self, server_dir: Path, databases: Sequence[str]
+    ) -> tuple[table_repair.CrashedTable, ...] | None:
+        """Which MyISAM/Aria tables of `databases` are damaged, asked before the build (T839).
+
+        Read-only and bounded (`table_repair.find_damaged()`). None -- not checked -- off the
+        CMaNGOS family, when the database is not running (it is not started for this), and
+        when the check could not run: the copy's own failure is still the backstop then.
+        """
+        from yulon.controller_wow_wotlk import maintenance
+
+        if not self.checks_damage:
+            return None
+        spec = self.entry.container_spec()
+        try:
+            if spec.db not in set(docker.status(wsl_distro=self.wsl_distro)):
+                logger.info(f"{spec.db} is not running; the copy checks for a damaged table")
+                return None
+            mysql = self._mysql(server_dir)
+            return table_repair.find_damaged(mysql.query, databases)
+        except (maintenance.MaintenanceError, docker.DockerCommandError, OSError) as exc:
+            detail = getattr(exc, "detail", "")
+            names = ", ".join(databases)
+            logger.warning(f"could not check {names} for a damaged table: {exc} {detail}")
+            return None
 
     def put_back(self, server_dir: Path, snapshot: Snapshot) -> PutBack:
         from yulon.controller_wow_wotlk import maintenance
@@ -435,7 +478,11 @@ def database_snapshot_for(
     """
     if entry.install.native is None:
         return None
-    return _MaintenanceSnapshot(entry, wsl_distro=wsl_distro)
+    # T839: the CMaNGOS family keeps MyISAM tables a crash can mark, and offers T822's
+    # Repair press; every other family's copy is what it was.
+    return _MaintenanceSnapshot(
+        entry, wsl_distro=wsl_distro, checks_damage=entry.install.native.family == "cmangos"
+    )
 
 
 def single_installer_for_app(

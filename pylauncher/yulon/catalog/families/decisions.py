@@ -796,6 +796,23 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
     ),
     Site(
         "yulon.install_wiring",
+        "database_snapshot_for",
+        "the update copy names a crashed MyISAM table and checks for one before the build "
+        "(T839), for T822's Repair the damaged table… press",
+        {
+            "azerothcore": not_available(
+                "its tables are InnoDB, which a crash does not leave marked as crashed, and it "
+                "has no Repair the damaged table… press (T822); its copy is as it was"
+            ),
+            "cmangos": supported(),
+            "trinitycore": not_available(
+                "it has no Repair the damaged table… press (T822); its copy is as it was"
+            ),
+        },
+        hits=("'cmangos'",),
+    ),
+    Site(
+        "yulon.install_wiring",
         "repair_confs_for_app",
         "Repair server files: missing module confs (T137, via confs_from_dist)",
         {
