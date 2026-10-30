@@ -26,6 +26,9 @@ neither name is refused before anything is extracted (`archive_checks()`).
 
 from __future__ import annotations
 
+import hashlib
+import json
+import os
 from pathlib import Path
 from typing import Literal
 
@@ -38,6 +41,9 @@ from yulon.catalog.catalog import (
     ExtractTool,
 )
 from yulon.catalog.preflight import Check
+from yulon.log import get_logger
+
+logger = get_logger(__name__)
 
 TOOL_PREFIX = "map "
 """The appended tool's name: `map <id> from <archive>`, so the log says what it did."""
@@ -47,6 +53,15 @@ SURGICAL_DIR = ".yulon-surgical-"
 
 FAILED_EXIT = 3
 """The script's status when the archive is not there or fewer than `min_maps` maps came out."""
+
+SIDECAR_NAME = ".yulon-wb1.json"
+"""Beside the extracted data: the size and date of the map archive the last extraction read.
+
+`map_data_sentence()` is asked every time the client tab is drawn, so it must not read ~2 GB;
+it compares these two facts with the archive that is there now (T837)."""
+
+SHA_CHUNK = 8 * 1024 * 1024
+"""How much of an archive `archive_identity()` reads at a time: the whole file, streamed."""
 
 ARCHIVE_CHECK = "map archive"
 """The preflight row naming which archive a surgical map is read from (T836)."""
@@ -81,6 +96,109 @@ def layout(spec: AcSurgicalMap, client_dir: Path) -> Layout:
     if _real_archive(client_dir / spec.archive):
         return "disabled"
     return "missing"
+
+
+def selected_archive(spec: AcSurgicalMap, client_dir: Path) -> Path | None:
+    """The file the layout selects for `spec`: the one an extraction actually reads (T837)."""
+    found = layout(spec, client_dir)
+    if found == "enabled":
+        return client_names.find(client_dir, spec.link_as)
+    if found == "disabled":
+        return client_dir / spec.archive
+    return None
+
+
+def _sha256_file(path: Path) -> str:
+    """The whole file's sha256, streamed in `SHA_CHUNK` reads: ~2 GB is never held in memory."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(SHA_CHUNK), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def archive_identity(block: AzerothCoreData, client_dir: Path) -> str:
+    """What a changed map archive must change: the bytes the extraction reads (T837).
+
+    The evidence identified a client by `required_file` (`Data/patch-WB2.MPQ`)
+    and the plan, and `effective_plan()` differs only by layout — so the
+    Update client replacing `Data/patch-WB1.MPQ` (or its `.DISABLED` twin) in
+    place changed neither, every tool was skipped, and stale terrain and map
+    936 stayed. The bytes are hashed rather than size and date for exactly
+    that case: a replacement keeps both. The cost (~2 GB, 10-20 s) is paid
+    only by the extract stage, which runs when a press asks it to.
+
+    One `<map_id>:<layout>:<sha256>` per surgical map, sorted by id, joined by
+    `;`; a layout that finds no archive says `missing` in place of the hash,
+    and an archive that could not be read says `unreadable` — neither is a
+    hash, so either forces the extraction rather than vouching for it.
+    """
+    plan = block.client_extract
+    assert plan is not None
+    parts: list[str] = []
+    for spec in sorted(plan.surgical_maps, key=lambda one: one.map_id):
+        found = layout(spec, client_dir)
+        chosen = selected_archive(spec, client_dir)
+        if chosen is None:
+            digest = "missing"
+        else:
+            try:
+                digest = _sha256_file(chosen)
+            except OSError as exc:
+                logger.warning(
+                    f"could not read the map archive {chosen} ({exc}), so this run cannot say "
+                    "which bytes the extraction read; it is extracted again"
+                )
+                digest = "unreadable"
+        parts.append(f"{spec.map_id}:{found}:{digest}")
+    return ";".join(parts)
+
+
+def write_sidecar(block: AzerothCoreData, client_dir: Path, data_dir: Path) -> None:
+    """Record the map archive a finished extraction read, for `map_data_sentence()` (T837).
+
+    Size and date, never the hash: the UI asks that question every time the
+    client tab is drawn and must not read ~2 GB. The entry has one surgical map
+    archive; a second would need a key of its own here. A sidecar that cannot be
+    written is logged, not fatal — the extraction it describes has succeeded.
+    """
+    plan = block.client_extract
+    assert plan is not None
+    if not plan.surgical_maps:
+        return
+    chosen = selected_archive(min(plan.surgical_maps, key=lambda one: one.map_id), client_dir)
+    if chosen is None:
+        return
+    try:
+        stat = chosen.stat()
+        name = chosen.relative_to(client_dir).as_posix()
+    except (OSError, ValueError) as exc:
+        logger.warning(f"could not record the map archive {chosen}: {exc}")
+        return
+    payload = {"name": name, "size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
+    data_dir.mkdir(parents=True, exist_ok=True)
+    path = data_dir / SIDECAR_NAME
+    tmp = path.with_name(path.name + ".yulon-new")
+    try:
+        tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8", newline="\n")
+        os.replace(tmp, path)  # atomic on POSIX and on Windows
+    except OSError as exc:
+        tmp.unlink(missing_ok=True)
+        logger.warning(f"could not record the map archive {chosen} in {path}: {exc}")
+
+
+def read_sidecar(data_dir: Path) -> tuple[str, int, int] | None:
+    """`write_sidecar()`'s facts, or None when absent, unreadable or not the three of them."""
+    try:
+        raw = json.loads((data_dir / SIDECAR_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    name, size, mtime_ns = raw.get("name"), raw.get("size"), raw.get("mtime_ns")
+    if not isinstance(name, str) or not isinstance(size, int) or not isinstance(mtime_ns, int):
+        return None
+    return name, size, mtime_ns
 
 
 def archive_checks(entry: CatalogEntry, client_dir: Path) -> tuple[Check, ...]:

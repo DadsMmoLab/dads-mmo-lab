@@ -17,6 +17,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 
 ### Fixed
 - Bringing in a packed server no longer refuses a bot database update that was released out of date order.
+- A Conquest of Azeroth server notices a changed map archive and extracts its map data again (once, after this update).
 
 ### Changed
 
