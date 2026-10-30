@@ -2902,6 +2902,109 @@ def test_a_playerbots_only_tail_needs_no_one_shot(
     assert "next Start" in result.text()
 
 
+def test_a_bot_ledger_gap_of_released_hash_equal_files_is_a_tail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(docker, "importer_sees_modules", lambda *a, **k: True)
+    bots = _tail_names("bots", 36)
+    gap = bots[:30] + bots[31:]
+    here = {
+        "acore_auth": _tail_names("auth", 5),
+        "acore_characters": ("2024_01_a", "2024_01_b"),
+        "acore_playerbots": bots,
+    }
+    box, package = _tail_box(tmp_path, dict(here, acore_playerbots=gap), here)
+    from dataclasses import replace
+
+    seen: list[str] = []
+    box.world = replace(
+        box.world, apply_updates=lambda sink: seen.append("ran") or docker.AttachedRun(0, ())
+    )
+    plan = move_flows.plan_import(box.world, package)
+    assert plan.allowed, plan.refusals
+    assert plan.updates_to_apply == {"acore_playerbots": (bots[30],)}
+    result = move_flows.run_import(
+        box.world, plan, confirm=None, use_old_realm_name=False, stop_allowed=False
+    )
+    assert seen == []
+    assert "next Start" in result.text()
+    assert "acore_playerbots (1)" in result.text()
+
+
+def test_a_core_ledger_gap_is_still_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(docker, "importer_sees_modules", lambda *a, **k: True)
+    auth = _tail_names("auth", 23)
+    chars = ("2024_01_a", "2024_01_b")
+    box, package = _tail_box(
+        tmp_path,
+        {"acore_auth": auth[:10] + auth[11:], "acore_characters": chars},
+        {"acore_auth": auth, "acore_characters": chars},
+    )
+    plan = move_flows.plan_import(box.world, package)
+    assert not plan.allowed
+    assert "The file is behind this server" in " ".join(plan.refusals)
+
+
+def test_a_bot_ledger_gap_whose_file_differs_on_disk_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(docker, "importer_sees_modules", lambda *a, **k: True)
+    bots = _tail_names("bots", 36)
+    here = {
+        "acore_auth": _tail_names("auth", 5),
+        "acore_characters": ("2024_01_a", "2024_01_b"),
+        "acore_playerbots": bots,
+    }
+    box, package = _tail_box(tmp_path, dict(here, acore_playerbots=bots[:30] + bots[31:]), here)
+    move.tail_update_path(box.server_dir, "acore_playerbots", bots[30]).write_bytes(b"changed")
+    plan = move_flows.plan_import(box.world, package)
+    assert not plan.allowed
+    assert "The file is behind this server" in " ".join(plan.refusals)
+
+
+def test_a_bot_ledger_gap_whose_file_is_missing_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(docker, "importer_sees_modules", lambda *a, **k: True)
+    bots = _tail_names("bots", 36)
+    here = {
+        "acore_auth": _tail_names("auth", 5),
+        "acore_characters": ("2024_01_a", "2024_01_b"),
+        "acore_playerbots": bots,
+    }
+    box, package = _tail_box(tmp_path, dict(here, acore_playerbots=bots[:30] + bots[31:]), here)
+    move.tail_update_path(box.server_dir, "acore_playerbots", bots[30]).unlink()
+    plan = move_flows.plan_import(box.world, package)
+    assert not plan.allowed
+    assert "The file is behind this server" in " ".join(plan.refusals)
+
+
+def test_a_bot_ledger_gap_with_an_archived_row_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(docker, "importer_sees_modules", lambda *a, **k: True)
+    bots = _tail_names("bots", 36)
+    here = {
+        "acore_auth": _tail_names("auth", 5),
+        "acore_characters": ("2024_01_a", "2024_01_b"),
+        "acore_playerbots": bots,
+    }
+    box, package = _tail_box(tmp_path, dict(here, acore_playerbots=bots[:30] + bots[31:]), here)
+    box.db.tail_rows["acore_playerbots"] = tuple(
+        (
+            n,
+            hashlib.sha1(n.encode()).hexdigest().upper(),
+            "ARCHIVED" if n == bots[30] else "RELEASED",
+        )
+        for n in bots
+    )
+    plan = move_flows.plan_import(box.world, package)
+    assert not plan.allowed
+    assert "The file is behind this server" in " ".join(plan.refusals)
+
+
 # ------------------------------------- T802 round 2: marker states and one-shot scope
 
 
