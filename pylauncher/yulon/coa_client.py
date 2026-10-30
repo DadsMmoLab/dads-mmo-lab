@@ -48,7 +48,7 @@ import threading
 from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import asdict, dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Any, Literal, TypeGuard
+from typing import Any, BinaryIO, Literal, TypeGuard
 from urllib.error import HTTPError
 from urllib.parse import urlsplit
 
@@ -741,6 +741,19 @@ class _Mismatch(ClientUpdateError):
 _CONTENT_RANGE = re.compile(r"^\s*bytes\s+(\d+)-(\d+)/(\d+|\*)\s*$")
 
 
+def _open_part(part: Path, *, append: bool) -> BinaryIO:
+    """`part` opened for writing, never through a link where the OS can refuse one.
+
+    `O_NOFOLLOW` (POSIX) makes a link planted after `_download`'s check fail the
+    open instead of writing to what it points at; Windows has no such flag, so
+    there the check before the open is what stands.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    flags |= os.O_APPEND if append else os.O_TRUNC
+    fd = os.open(part, flags, 0o666)
+    return os.fdopen(fd, "ab" if append else "wb")
+
+
 def _download(
     url: str,
     part: Path,
@@ -757,8 +770,14 @@ def _download(
     empty here, without asking the site, and `_prove` checks its digest like any
     other (T838: before, nothing was made and the file stayed missing forever).
     """
+    if os.path.lexists(part) and _is_link(part):
+        # Left for the player: neither the link nor what it points at is touched.
+        raise ClientUpdateError(
+            f"a link is in the way at {part.name}; nothing was written. Remove it, then "
+            "choose Update client again."
+        )
     if size == 0:
-        part.open("wb").close()
+        _open_part(part, append=False).close()
         return
     have = part.stat().st_size if part.is_file() else 0
     if have > size:
@@ -782,7 +801,7 @@ def _download(
                 mode = "ab"
             else:
                 done, mode = 0, "wb"
-            with part.open(mode) as handle:
+            with _open_part(part, append=mode == "ab") as handle:
                 while True:
                     if cancelled():
                         raise Cancelled(

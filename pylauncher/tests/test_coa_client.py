@@ -945,3 +945,67 @@ def test_an_empty_file_is_not_written_through_a_linked_folder(tmp_path: Path) ->
     with pytest.raises(ClientUpdateError, match="link"):
         _update(client, _site({"Data/Content/TransmogrificationItemData.json": b""}))
     assert list(outside.iterdir()) == []
+
+
+def _can_symlink(tmp_path: Path) -> bool:
+    probe = tmp_path / "probe-link"
+    try:
+        probe.symlink_to(tmp_path / "probe-target")
+    except (OSError, NotImplementedError):
+        return False
+    probe.unlink()
+    return True
+
+
+@pytest.mark.parametrize(
+    ("rel", "data", "partial"),
+    [
+        ("HD_Patches_Description.txt", b"", False),  # a zero-byte entry
+        ("Data/patch-B.MPQ", b"new-bytes", True),  # a normal entry, resuming
+    ],
+)
+def test_a_part_file_that_is_a_link_is_refused_and_what_it_points_at_is_untouched(
+    tmp_path: Path, rel: str, data: bytes, partial: bool
+) -> None:
+    if not _can_symlink(tmp_path):
+        pytest.skip("this system cannot make a symlink without elevation")
+    outside = tmp_path / "outside.txt"
+    outside.write_bytes(b"new" if partial else b"not a client file")
+    before = outside.read_bytes()
+    client = _client(tmp_path, {})
+    part = client / (rel + coa_client.PART_SUFFIX)
+    part.parent.mkdir(parents=True, exist_ok=True)
+    part.symlink_to(outside)
+    site = _site({rel: data, "Ascension.exe": b"exe"})
+    outcome = _update(client, site)
+    assert [path for path, _ in outcome.failed] == [rel]
+    assert "a link is in the way" in outcome.failed[0][1]
+    assert outside.read_bytes() == before
+    assert part.is_symlink()  # left for the player
+    assert not (client / rel).exists()
+    assert outcome.written == ["Ascension.exe"]
+    assert not outcome.version_recorded
+    assert site.object_gets() == [(OBJECTS + _sha(b"exe"), {})]
+
+
+@pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW"), reason="no O_NOFOLLOW on this platform")
+def test_a_link_planted_as_the_part_after_the_check_is_not_written_through(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The open itself refuses to follow a link (POSIX), not only the check before it."""
+    outside = tmp_path / "outside.txt"
+    outside.write_bytes(b"keep me")
+    part = tmp_path / ("x.json" + coa_client.PART_SUFFIX)
+    part.symlink_to(outside)
+    monkeypatch.setattr(coa_client, "_is_link", lambda _p: False)
+    with pytest.raises(OSError):
+        coa_client._download(
+            OBJECTS + EMPTY_SHA,
+            part,
+            0,
+            opener=_Site({}),
+            hosts=HOSTS,
+            cancelled=lambda: False,
+            progress=lambda _n: None,
+        )
+    assert outside.read_bytes() == b"keep me"
