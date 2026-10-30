@@ -2796,10 +2796,11 @@ def test_a_windows_trinitycore_entry_without_world_data_folders_keeps_the_bind()
     assert "world-data" not in texts["windows"]
 
 
-@pytest.mark.parametrize("game", ["wow-wotlk", *support_rendered.CMANGOS_GAMES])
+@pytest.mark.parametrize("game", ["wow-wotlk", "wow-unbound", *support_rendered.CMANGOS_GAMES])
 def test_no_other_game_gets_the_world_data_volume_on_windows(game: str) -> None:
-    """Decision 2: the TrinityCore family only. CMaNGOS binds `./data` the same way and keeps
-    it until measured; WotLK already keeps its client data in a volume of its own."""
+    """Decision 2: the TrinityCore and AzerothCore families only. CMaNGOS binds `./data` the
+    same way and keeps it until measured; WotLK and Unbound name no `world_data_dirs`, and
+    keep their client data in a volume of their own."""
     entry = load_catalog().get(game)
     plan = composegen.render(
         entry,
