@@ -102,17 +102,35 @@ def test_on_linux_every_coa_tool_spec_is_exactly_todays(tmp_path: Path) -> None:
 
 
 def test_the_scratch_spec_wraps_the_tool_and_names_its_output_folders(tmp_path: Path) -> None:
-    """`sh -c SCRATCH_SCRIPT sh <tool argv>`, cwd `/scratch`, and the same mounts as before."""
+    """`sh -c SCRATCH_SCRIPT sh <tool argv>`, cwd `/tmp`, and the same mounts as before."""
     plan = coa_plan()
     for tool in plan.tools:
         plain = spec_for(plan, tool, tmp_path)
         scratched = spec_for(plan, tool, tmp_path, scratch=True)
         assert scratched.argv == ("sh", "-c", extract.SCRATCH_SCRIPT, "sh", *tool.argv)
-        assert scratched.workdir == extract.SCRATCH_MOUNT
+        assert scratched.workdir == "/tmp"
+        assert scratched.workdir == extract.SCRATCH_WORKDIR
         assert dict(scratched.env) == {"YULON_OUT_DIRS": " ".join(tool.produces)}
         assert (
             scratched.mounts == plain.mounts
         ), "the client stays read-only; nothing new is mounted"
+
+
+def test_the_scratch_folder_is_under_tmp_where_the_images_user_can_make_it() -> None:
+    """`-w /scratch` lays `/scratch` as root, and the tool runs as uid 1000 `acore`.
+
+    Measured on Docker Desktop: `platform.container_user_args()` answers `[]`
+    there, so `docker run` starts the image's own USER. A workdir Docker has to
+    create is root-owned 0755 and the tool can neither link nor `mkdir` in it;
+    `/tmp` is in every image, mode 1777, so the workdir is `/tmp` and the
+    script makes its own folder inside it.
+    """
+    assert extract.SCRATCH_MOUNT == "/tmp/yulon-scratch"
+    assert extract.SCRATCH_WORKDIR == "/tmp"
+    assert extract.SCRATCH_MOUNT.startswith("/tmp/"), "the workdir's 1777 is what makes it writable"
+    assert extract.SCRATCH_SCRIPT.startswith(
+        f"mkdir -p {extract.SCRATCH_MOUNT} && cd {extract.SCRATCH_MOUNT} ||"
+    ), "the folder is made by the user the tool runs as, not by Docker as root"
 
 
 def test_a_plan_that_both_stages_the_client_and_runs_off_the_bind_is_refused(
@@ -143,28 +161,44 @@ OUT_DIRS = "YULON_OUT_DIRS"
 def scratched_script(out: Path, scratch: Path) -> str:
     """`SCRATCH_SCRIPT` with its two container paths pointed at this test's folders.
 
-    `/out` and `/scratch` are the only paths the script spells, and they are the
-    same two names on every host, so two string replacements are the whole
-    rewrite.
+    `/out` and the scratch mount are the only paths the script spells, and they
+    are the same names on every host, so two string replacements are the whole
+    rewrite. The mount goes first: it lives under `/tmp`, and the `/out`
+    replacement must not reach into it.
     """
-    return extract.SCRATCH_SCRIPT.replace("/scratch", str(scratch)).replace("/out", str(out))
+    return extract.SCRATCH_SCRIPT.replace(extract.SCRATCH_MOUNT, str(scratch)).replace(
+        extract.OUT_MOUNT, str(out)
+    )
 
 
 def run_scratched(
-    tmp_path: Path, out: Path, body: str, out_dirs: str, *args: str
+    tmp_path: Path,
+    out: Path,
+    body: str,
+    out_dirs: str,
+    *args: str,
+    path_prefix: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run the real script in a tmp dir, with `body` as the tool's own sh script."""
     tool = tmp_path / "tool.sh"
     tool.write_text("#!/bin/sh\n" + body, encoding="utf-8")
+    env = {**os.environ, OUT_DIRS: out_dirs}
+    if path_prefix is not None:
+        env["PATH"] = f"{path_prefix}:{env['PATH']}"
     return subprocess.run(
         ("sh", "-c", scratched_script(out, tmp_path / "scratch"), "sh", "sh", str(tool), *args),
-        env={**os.environ, OUT_DIRS: out_dirs},
+        env=env,
         cwd=tmp_path,
         capture_output=True,
         text=True,
         timeout=120,
         check=False,
     )
+
+
+def staging(out: Path) -> list[str]:
+    """Every copy staging folder left in `/out`: none is the answer after any run."""
+    return sorted(p.name for p in out.iterdir() if p.name.startswith(".yulon-copy-"))
 
 
 def test_a_scratched_tool_writes_into_the_scratch_folder_and_its_output_is_copied_out(
@@ -176,41 +210,55 @@ def test_a_scratched_tool_writes_into_the_scratch_folder_and_its_output_is_copie
     result = run_scratched(
         tmp_path,
         out,
-        'mkdir -p Buildings && for f in f1 f2 f3; do echo x > "Buildings/$f"; done\n',
+        'for f in f1 f2 f3; do echo x > "Buildings/$f"; done\n',
         "Buildings",
     )
     assert result.returncode == 0, result.stderr
     assert sorted(path.name for path in (out / "Buildings").iterdir()) == ["f1", "f2", "f3"]
     assert not (out / "Buildings" / "Buildings").exists(), "copied by content, never nested"
+    assert staging(out) == [], "the complete copy was moved, not left behind"
 
 
 def test_a_scratched_tool_reads_an_earlier_tools_output_through_a_link(tmp_path: Path) -> None:
-    """`vmap assemble` reads `Buildings` from cwd: it is a link to `/out/Buildings`."""
+    """`vmap assemble` reads `Buildings` from cwd: it is a link to `/out/Buildings`.
+
+    And it does NOT create `vmaps/` itself — the shipped assembler fails on a
+    missing output folder (`make_out_dirs()` measured it, 2026-09-02) — so the
+    script must have made it in scratch before `"$@"`.
+    """
     out = tmp_path / "out"
     (out / "Buildings").mkdir(parents=True)
     (out / "Buildings" / "f1").write_bytes(b"x")
     result = run_scratched(
         tmp_path,
         out,
-        "test -f Buildings/f1 || exit 7\nmkdir -p vmaps\necho v > vmaps/v1\n",
+        "test -f Buildings/f1 || exit 7\necho v > vmaps/v1\n",
         "vmaps",
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert (out / "vmaps" / "v1").is_file()
     assert [path.name for path in (out / "Buildings").iterdir()] == ["f1"], "untouched"
+    assert staging(out) == []
 
 
-def test_a_scratched_tool_that_fails_still_has_its_output_copied(tmp_path: Path) -> None:
-    """A crash after an hour of work must not throw the work away; the status stays the tool's."""
+def test_a_tool_that_fails_leaves_the_old_folder_alone(tmp_path: Path) -> None:
+    """A failed tool's partial output never replaces `/out/<name>`: no copy at all.
+
+    The old folder is never vouched for (the evidence did not accept it), so
+    losing it would cost only a re-run -- but a crash must not put a half
+    extraction in its place. The scratch is discarded with the container.
+    """
     out = tmp_path / "out"
-    out.mkdir()
-    result = run_scratched(tmp_path, out, "mkdir -p vmaps\necho v > vmaps/v1\nexit 3\n", "vmaps")
+    (out / "vmaps").mkdir(parents=True)
+    (out / "vmaps" / "old").write_bytes(b"o")
+    result = run_scratched(tmp_path, out, "echo new > vmaps/new\nexit 3\n", "vmaps")
     assert result.returncode == 3
-    assert (out / "vmaps" / "v1").is_file()
+    assert sorted(path.name for path in (out / "vmaps").iterdir()) == ["old"]
+    assert staging(out) == []
 
 
 def test_a_tool_that_writes_straight_to_out_is_left_alone_by_the_copy_loop(tmp_path: Path) -> None:
-    """`map_extractor -o /out` leaves nothing in scratch, so nothing is copied over it."""
+    """`map_extractor -o /out` leaves its scratch folders empty, so nothing is copied over it."""
     out = tmp_path / "out"
     (out / "maps").mkdir(parents=True)
     (out / "maps" / "keep").write_bytes(b"k")
@@ -222,6 +270,10 @@ def test_a_tool_that_writes_straight_to_out_is_left_alone_by_the_copy_loop(tmp_p
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert sorted(path.name for path in (out / "maps").iterdir()) == ["keep", "straight"]
+    scratch_maps = tmp_path / "scratch" / "maps"
+    assert scratch_maps.is_dir(), "the produces folder was made in scratch before the tool ran"
+    assert list(scratch_maps.iterdir()) == [], "and it stayed empty, so it was skipped"
+    assert staging(out) == []
 
 
 def test_an_old_folder_is_replaced_by_the_tools_output_not_merged(tmp_path: Path) -> None:
@@ -229,79 +281,94 @@ def test_an_old_folder_is_replaced_by_the_tools_output_not_merged(tmp_path: Path
     out = tmp_path / "out"
     (out / "vmaps").mkdir(parents=True)
     (out / "vmaps" / "stale").write_bytes(b"old")
-    result = run_scratched(tmp_path, out, "mkdir -p vmaps\necho v > vmaps/new\n", "vmaps")
+    result = run_scratched(tmp_path, out, "echo v > vmaps/new\n", "vmaps")
     assert result.returncode == 0, result.stdout + result.stderr
     assert sorted(path.name for path in (out / "vmaps").iterdir()) == ["new"]
+    assert staging(out) == []
 
 
-def test_a_copy_that_cannot_be_made_is_exit_94_and_named(tmp_path: Path) -> None:
-    """The folder is gone (disk full, permissions): say which one, and do not report success."""
+def failing_cp(folder: Path, *, only: str | None = None) -> Path:
+    """A `cp` on PATH that lays a partial staging copy and fails.
+
+    `only` limits the failure to the staging folder whose name contains it, so
+    a run with several output folders can be seen to carry on past the one
+    that failed.
+    """
+    folder.mkdir()
+    guard = "" if only is None else f'case "$4" in *{only}*) ;; *) exec /bin/cp "$@";; esac\n'
+    (folder / "cp").write_text(
+        "#!/bin/sh\n" + guard + 'mkdir -p "$4" && echo partial > "$4/partial"\nexit 1\n',
+        encoding="utf-8",
+    )
+    (folder / "cp").chmod(0o755)
+    return folder
+
+
+def test_a_copy_that_cannot_be_made_is_exit_94_named_and_leaves_the_old_folder(
+    tmp_path: Path,
+) -> None:
+    """Disk full or permissions: say which folder, keep the old one, and do not claim success."""
     out = tmp_path / "out"
     (out / "vmaps").mkdir(parents=True)
     (out / "vmaps" / "old").write_bytes(b"o")
     result = run_scratched(
         tmp_path,
         out,
-        'mkdir -p vmaps\necho n > vmaps/new\nchmod a-w "$1"\n',
+        "echo n > vmaps/new\n",
         "vmaps",
-        str(out),
+        path_prefix=failing_cp(tmp_path / "bin"),
     )
-    try:
-        assert result.returncode == 94, result.stdout + result.stderr
-        assert extract.COPY_FAILED_MARKER in result.stdout
-        assert "vmaps" in result.stdout
-    finally:
-        os.chmod(out, 0o755)
+    assert result.returncode == 94, result.stdout + result.stderr
+    assert f"{extract.COPY_FAILED_MARKER} vmaps" in result.stdout
+    assert sorted(path.name for path in (out / "vmaps").iterdir()) == ["old"]
+    assert staging(out) == [], "the partial staging copy was removed, best effort"
 
 
-def test_a_tool_that_failed_first_keeps_its_own_status_over_a_failed_copy(tmp_path: Path) -> None:
-    """The copy's 94 must never replace a status the tool itself produced."""
+def test_one_failed_copy_does_not_stop_the_folders_after_it(tmp_path: Path) -> None:
+    """Do not stop half way through the list silently: the next folder is still copied."""
     out = tmp_path / "out"
     (out / "vmaps").mkdir(parents=True)
+    (out / "vmaps" / "old").write_bytes(b"o")
     result = run_scratched(
         tmp_path,
         out,
-        'mkdir -p vmaps\necho n > vmaps/new\nchmod a-w "$1"\nexit 3\n',
-        "vmaps",
-        str(out),
+        "echo m > maps/m1\necho v > vmaps/v1\n",
+        "maps vmaps",
+        path_prefix=failing_cp(tmp_path / "bin", only=".yulon-copy-vmaps"),
     )
-    try:
-        assert result.returncode == 3
-        assert extract.COPY_FAILED_MARKER in result.stdout
-    finally:
-        os.chmod(out, 0o755)
+    assert result.returncode == 94, result.stdout + result.stderr
+    assert f"{extract.COPY_FAILED_MARKER} vmaps" in result.stdout
+    assert sorted(path.name for path in (out / "maps").iterdir()) == ["m1"]
+    assert sorted(path.name for path in (out / "vmaps").iterdir()) == ["old"]
+    assert staging(out) == []
 
 
-def test_a_destination_already_holding_that_name_is_a_skip_and_not_a_failure(
+def test_a_staging_folder_a_killed_run_left_is_removed_and_the_run_succeeds(
     tmp_path: Path,
 ) -> None:
-    """The case-twin on a case-insensitive bind: `--update=none` keeps the existing file.
-
-    The CONTENT half of this is what `--update=none` (GNU coreutils 9.3+, the
-    tools image is Ubuntu 24.04) buys, measured on 9.4: exit 0, existing file
-    kept. It is not asserted here because a `cp` without the option also exits 0
-    on Linux — it simply overwrites — and the failure it prevents exists only
-    on a case-insensitive filesystem, which no test on this machine has. The
-    twin case is proven live, not here; what this pins is that an existing
-    destination is never a failed copy.
-    """
+    """A leftover `/out/.yulon-copy-<name>` must not be copied from and must not survive."""
     out = tmp_path / "out"
-    (out / "vmaps").mkdir(parents=True)
-    (out / "vmaps" / "twin").write_bytes(b"old")
-    result = run_scratched(tmp_path, out, "mkdir -p vmaps\necho new > vmaps/twin\n", "vmaps")
+    (out / ".yulon-copy-vmaps").mkdir(parents=True)
+    (out / ".yulon-copy-vmaps" / "junk").write_bytes(b"j")
+    result = run_scratched(tmp_path, out, "echo v > vmaps/v1\n", "vmaps")
     assert result.returncode == 0, result.stdout + result.stderr
-    assert (out / "vmaps" / "twin").is_file()
+    assert sorted(path.name for path in (out / "vmaps").iterdir()) == ["v1"]
+    assert staging(out) == []
 
 
 def test_the_script_is_its_own_home_for_its_paths_and_constants() -> None:
     """One home per name: a script that hard-coded a third spelling would drift silently."""
-    assert extract.SCRATCH_MOUNT == "/scratch"
+    assert extract.SCRATCH_MOUNT == "/tmp/yulon-scratch"
+    assert extract.SCRATCH_WORKDIR == "/tmp"
     assert f"mkdir -p {extract.SCRATCH_MOUNT} && cd {extract.SCRATCH_MOUNT} ||" in (
         extract.SCRATCH_SCRIPT
     )
     assert f"{extract.OUT_MOUNT}/*" in extract.SCRATCH_SCRIPT
+    assert 'for name in $YULON_OUT_DIRS; do mkdir -p "$name"; done;' in extract.SCRATCH_SCRIPT
     assert '"$@"; status=$?;' in extract.SCRATCH_SCRIPT
+    assert '[ "$status" -eq 0 ] || exit "$status";' in extract.SCRATCH_SCRIPT
     assert extract.SCRATCH_SCRIPT.endswith("exit $status")
+    assert '"/out/.yulon-copy-$name"' in extract.SCRATCH_SCRIPT
     assert extract.SCRATCH_FAILED_MARKER in extract.SCRATCH_SCRIPT
     assert f"exit {extract.SCRATCH_FAILED_RETURNCODE}" in extract.SCRATCH_SCRIPT
     assert extract.COPY_FAILED_MARKER in extract.SCRATCH_SCRIPT
@@ -519,7 +586,7 @@ def test_on_docker_desktop_every_coa_tool_runs_in_the_containers_own_layer(
     assert len(rec.container_runs) == len(tools)
     for run, tool in zip(rec.container_runs, tools, strict=True):
         assert run.argv == ("sh", "-c", extract.SCRATCH_SCRIPT, "sh", *tool.argv)
-        assert run.workdir == extract.SCRATCH_MOUNT
+        assert run.workdir == "/tmp"
         assert dict(run.env) == {"YULON_OUT_DIRS": " ".join(tool.produces)}
     assert SCRATCH_SENTENCE in said
 
@@ -533,7 +600,7 @@ def test_on_macos_every_coa_tool_runs_in_the_containers_own_layer(tmp_path: Path
     rec = coa_produce(Recorder())
     list(ac_engine(rec, entry)._extract_maps(ac_context(server_dir, client_dir, entry)))
     assert rec.container_runs
-    assert all(run.workdir == extract.SCRATCH_MOUNT for run in rec.container_runs)
+    assert all(run.workdir == extract.SCRATCH_WORKDIR for run in rec.container_runs)
 
 
 def test_on_linux_the_coa_tools_are_the_argv_they_always_were(tmp_path: Path) -> None:

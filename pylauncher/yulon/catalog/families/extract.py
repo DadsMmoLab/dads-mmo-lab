@@ -977,13 +977,30 @@ Three details are load-bearing and each of them is a wrong sentence avoided:
 """
 
 
-SCRATCH_MOUNT = "/scratch"
+SCRATCH_MOUNT = "/tmp/yulon-scratch"
 """Where a tool writes when `data/` is a bind into a Windows or macOS folder (T840).
 
 The container's own writable layer, not a mount: `--rm` takes it away with the
 container, and small-file writes cost a fraction of what they cost through
 Docker Desktop's bind (measured: `vmap4_extractor` ~8 h on the bind vs 48 min
 here). Only the finished folders are copied to `/out`.
+
+Under `/tmp`, and not at `/scratch`, because on Docker Desktop
+`platform.container_user_args()` answers `[]` (the bind maps ownership to the
+logged-in user), so the tools run as the image's own USER — uid 1000, `acore`,
+measured — and Docker creates a missing WORKDIR as root 0755. `docker run -w
+/scratch` therefore laid `/scratch` as root, and `acore` could neither create
+the links nor `Buildings/` in it; without `-w`, the script's own `mkdir -p
+/scratch` in `/` failed the same way. `/tmp` is in every image, mode 1777, so
+the workdir is `/tmp` (`SCRATCH_WORKDIR`) and the script makes its folder
+inside it as the same user that runs the tool.
+"""
+
+SCRATCH_WORKDIR = "/tmp"
+"""The container's workdir under `scratch`: already there, and writable by its USER.
+
+Not `SCRATCH_MOUNT`: Docker creates a missing workdir as root before the tool
+starts, and the tool then cannot write into a folder it does not own.
 """
 
 SCRATCH_FAILED_RETURNCODE = 93
@@ -1010,57 +1027,85 @@ COPY_FAILED_MARKER = "yulon: the tool's output could not be copied into data/:"
 """The words `SCRATCH_SCRIPT` prints per folder it could not copy; the folder follows it."""
 
 SCRATCH_SCRIPT = (
-    "mkdir -p /scratch && cd /scratch || "
+    "mkdir -p /tmp/yulon-scratch && cd /tmp/yulon-scratch || "
     '{ echo "yulon: the scratch folder inside the container could not be made"; exit 93; }; '
     "for entry in /out/*; do "
     'name=${entry#/out/}; case " $YULON_OUT_DIRS " in *" $name "*) continue;; esac; '
     '[ -e "$entry" ] && ln -s "$entry" "$name"; '
     "done; "
+    'for name in $YULON_OUT_DIRS; do mkdir -p "$name"; done; '
     '"$@"; status=$?; '
+    '[ "$status" -eq 0 ] || exit "$status"; '
     "for name in $YULON_OUT_DIRS; do "
-    'if [ -e "$name" ]; then '
-    'rm -rf "/out/$name" && mkdir -p "/out/$name" && '
-    'cp -r --update=none "$name/." "/out/$name/" || '
-    '{ echo "yulon: the tool\'s output could not be copied into data/: $name"; '
-    "[ $status -eq 0 ] && status=94; }; "
-    "fi; "
+    '[ -n "$(ls -A "$name" 2>/dev/null)" ] || continue; '
+    'rm -rf "/out/.yulon-copy-$name"; '
+    'cp -r --update=none "$name/." "/out/.yulon-copy-$name/" || '
+    '{ rm -rf "/out/.yulon-copy-$name"; '
+    'echo "yulon: the tool\'s output could not be copied into data/: $name"; '
+    "status=94; continue; }; "
+    'rm -rf "/out/$name" && mv "/out/.yulon-copy-$name" "/out/$name" || '
+    '{ rm -rf "/out/.yulon-copy-$name"; '
+    'echo "yulon: the tool\'s output could not be copied into data/: $name"; '
+    "status=94; }; "
     "done; "
     "exit $status"
 )
-"""The off-the-bind wrapper: the tool writes in `/scratch`, then its folders are copied to `/out`.
+"""The off-the-bind wrapper: the tool writes in scratch, then its folders are copied to `/out`.
 
 Data, not code — no catalog field names it and no evidence hash covers it (T840
 decision 1): `plan_hash()` hashes `plan.model_dump()`, so a new field would make
 every existing install on every platform extract everything again. The family
 decides from the platform and passes `tool_run(scratch=True)`.
 
-Four details are load-bearing:
+Six details are load-bearing:
 
+* **The scratch folder is made by the tool's own user.** See `SCRATCH_MOUNT`:
+  Docker Desktop runs the image's USER, and a workdir Docker had to create
+  would be root-owned. The script makes the folder itself — `mkdir` then `cd` —
+  and gives up with `SCRATCH_FAILED_RETURNCODE` before `"$@"` if it cannot.
 * **The link loop.** A tool that reads an earlier tool's output (`vmap assemble`
   reads `Buildings`) opens it by a relative name in its cwd, and the cwd is
-  now `/scratch`, which starts empty. Every entry of `/out` that the tool does
-  NOT itself produce is linked in under its own name, so the earlier output is
-  read through the bind and nothing is copied in. The `case` skip is what keeps
-  a STALE `vmaps/` from an earlier run from being linked where this run is
-  about to write: without it the tool would write through the link straight
-  into `/out`, and the copy-back would then meet a dangling link.
-* **The copy-back is `rm -rf` first.** The tool re-ran in full, so its folder
-  in `/out` is replaced, not merged: a half copy left by a killed run must not
-  survive under a complete one.
+  now the scratch folder, which starts empty. Every entry of `/out` that the
+  tool does NOT itself produce is linked in under its own name, so the earlier
+  output is read through the bind and nothing is copied in. The `case` skip is
+  what keeps a STALE `vmaps/` from an earlier run from being linked where this
+  run is about to write: without it the tool would write through the link
+  straight into `/out`, and the copy-back would then meet a dangling link.
+* **The produces folders are made in scratch before the tool runs.** Not every
+  tool creates its own output folder: CMaNGOS's `vmap_assembler Buildings vmaps`
+  opens `vmaps/000.vmtree` for writing and fails on a missing `vmaps/`
+  (`make_out_dirs()`'s docstring, measured 2026-09-02). `run_plan()` makes them
+  under `data/` before each tool for that reason, and that does nothing for the
+  scratch path — so the script makes them here, right after the link loop
+  (which already skips those names, so a stale `/out/vmaps` is never linked).
+* **The copy-back only runs when the tool succeeded.** A failed tool's partial
+  output is discarded with the container and `/out` is not touched: whatever is
+  in the old folder was never vouched for (a re-run costs only the time), but a
+  crash must not replace it with a half extraction. A tool's own failing status
+  is the one `_conclude()` reports.
+* **The copy is staged, then moved into place.** Each non-empty folder is copied
+  to `/out/.yulon-copy-<name>` first (`rm -rf` of a leftover from a killed run
+  first), and only a complete copy is moved over the old folder. Any failure in
+  that chain removes the staging folder (best effort), prints the marker with
+  the folder's name, sets `COPY_FAILED_RETURNCODE` and continues with the next
+  folder — the old `/out/<name>` is still there when the copy never finished.
+  `mv` of a folder inside one bind is a rename, so it cannot half-fail.
 * **`--update=none`** (GNU coreutils >= 9.3; the tools image is Ubuntu 24.04 =
   9.4, verified on 9.4: exit 0, the existing file is kept) makes a case twin
-  on a case-insensitive bind a skip rather than a failure. S1 measured no twin
-  pair with differing content, so keeping the existing file is the right
-  answer there.
-* **`$status` is the tool's.** Saved before the copy loop, so a failed copy
-  cannot turn a crashed extraction into a success and a `[ -e ]` that found
-  nothing cannot turn a clean one into a failure. When the copy itself fails,
-  the marker names the folder and only a tool that had succeeded is raised to
-  `COPY_FAILED_RETURNCODE`.
+  on a case-insensitive bind a skip rather than a failure, and the staging
+  folder is fresh, so it costs nothing today and keeps the answer if it ever
+  is not. S1 measured no twin pair with differing content, so keeping the
+  existing file is the right answer there.
 
-A tool that writes straight to `/out` (`map_extractor -o /out`) leaves nothing
-under `/scratch/<name>`, so its folders are not touched by the copy loop: it
-already wrote them, in the one place it was told to.
+An EMPTY produces folder is skipped (`ls -A`), so a tool that writes straight
+to `/out` (`map_extractor -o /out`) leaves its scratch `maps/ dbc/ Cameras/`
+empty and its real `/out` folders are never touched: it already wrote them, in
+the one place it was told to.
+
+`$status` is the tool's for the whole run: saved before the copy loop, so a
+failed copy cannot turn a crashed extraction into a success, and the loop's
+own check reads the saved value rather than whatever the last command left in
+`$?`.
 """
 
 
@@ -1108,14 +1153,14 @@ def tool_run(
     back. Neither changes a mount — the client is `:ro` in both modes.
 
     `scratch` is the T840 switch, passed in and never read from the plan: it
-    wraps the tool in `SCRATCH_SCRIPT`, moves the cwd to `/scratch` inside the
-    container's own layer and names the output folders in the environment, for
-    a `data/` that is a bind into a Windows or macOS folder through Docker
-    Desktop, where small-file writes are ~10x slower. Linux never passes it,
-    so argv, mounts, workdir and env stay byte-identical there. It is not a
-    catalog field on purpose: the evidence hashes `plan.model_dump()`, and a
-    new field would make every existing install on every platform extract
-    everything again.
+    wraps the tool in `SCRATCH_SCRIPT`, moves the cwd to `SCRATCH_WORKDIR`
+    (`/tmp`, where the script can make a folder its own user can write) and
+    names the output folders in the environment, for a `data/` that is a bind
+    into a Windows or macOS folder through Docker Desktop, where small-file
+    writes are ~10x slower. Linux never passes it, so argv, mounts, workdir and
+    env stay byte-identical there. It is not a catalog field on purpose: the
+    evidence hashes `plan.model_dump()`, and a new field would make every
+    existing install on every platform extract everything again.
 
     `user_args` and `security_args` both arrive already spelled, from
     `platform.container_user_args()` and `container_security_args()`. Neither is
@@ -1156,7 +1201,7 @@ def tool_run(
             workdir = STAGE_MOUNT
         else:
             argv = ("sh", "-c", SCRATCH_SCRIPT, "sh", *tool.argv)
-            workdir = SCRATCH_MOUNT
+            workdir = SCRATCH_WORKDIR
         env = {"YULON_OUT_DIRS": " ".join(tool.produces)}
     return docker.ContainerRun(
         image=image_ref,
