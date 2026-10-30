@@ -41,6 +41,11 @@ def script(spec: AcSurgicalMap, tools_bin: str) -> str:
     starts clean and `data/` keeps no scratch (the count check is the gate,
     and it reads only what was copied).
 
+    `$w/out` is made here, before the extractor runs: the real `map_extractor`
+    creates `out/maps` but not `out` itself and stops with "Could not create
+    directory ... check your permissions" (three Linux Mint installs, v0.9.19;
+    the stub in the test used to `mkdir -p` the parent and hid it).
+
     Layout inside `$w`: `view/` is the farm (`cp -rs /client/.` — links only,
     nothing copied; the disabled archive arrives as `ln -sfn`), `map_extractor`
     writes `out/`, and `vmap4_extractor`/`vmap4_assembler` run with cwd `$w` so
@@ -73,7 +78,7 @@ def script(spec: AcSurgicalMap, tools_bin: str) -> str:
         "set -eu\n"
         f'w="/out/{SURGICAL_DIR}{map_id}"\n'
         'rm -rf "$w"\n'
-        'mkdir -p "$w/view"\n'
+        'mkdir -p "$w/view" "$w/out"\n'
         'cp -rs /client/. "$w/view/"\n'
         f'ln -sfn "/client/{spec.archive}" "$w/view/{spec.link_as}"\n'
         'cd "$w"\n'

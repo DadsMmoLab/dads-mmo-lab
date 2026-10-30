@@ -55,14 +55,17 @@ def _fake_tools(binds: Path, marker: Path) -> None:
     The doubles write the 936 files the script copies plus 000 decoys the
     script must NOT copy: a fake that wrote only 936 files would pass the
     assertion without exercising the filter. Layout mirrors the real tools:
-    `map_extractor -o <dir>` writes `maps/`, the vmap pair writes `vmaps/`
-    under the cwd the script chose.
+    `map_extractor -o <dir>` writes `maps/` inside a `<dir>` that must already
+    exist (the real tool stops with 'Could not create directory' otherwise: T834),
+    the vmap pair writes `vmaps/` under the cwd the script chose.
     """
     (binds / "map_extractor").write_text(
         "#!/usr/bin/env bash\n"
         'echo "fake map_extractor $*" >> "$FAKE_MARKER"\n'
         'out=""; prev=""\n'
         'for a in "$@"; do if [ "$prev" = "-o" ]; then out="$a"; fi; prev="$a"; done\n'
+        '[ -d "$out" ] || { echo "Fatal Error: Could not create directory $out/maps/ '
+        'check your permissions"; exit 1; }\n'
         'mkdir -p "$out/maps"\n'
         'if [ "${FAKE_THIN:-0}" = "1" ]; then\n'
         '  touch "$out/maps/9364341.map" "$out/maps/9364342.map" "$out/maps/0000000.map"\n'

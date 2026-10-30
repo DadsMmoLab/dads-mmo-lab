@@ -36,6 +36,7 @@ CHANGELOG = REPO / "CHANGELOG.md"
 PINNED: dict[str, tuple[int, str]] = {
     "v0.9.18-Public": (144, "0cf1d7722469427f4989aaaac82142779df4a9e8ad5fedc93480245a8e517618"),
     "v0.9.19-Public": (43, "eb8c606acffe5b589cd28e7371420c1fb02dab01edcaaa6d3645b8e1b79ce80b"),
+    "v0.9.20-Public": (1, "fc6c3d998f9c43720082afc1c592f0bb0215af08d375fe7dd3708950fcd4c23a"),
     "v0.9.16-Public": (63, "016f3fde6ed8e5c28a75e752be18268b313800690c1668959e699684ca791ca7"),
     "v0.9.15-Public": (68, "2416ef743ecedb20dfc9344274d69cc4bd23b5feb983a5e899f4d456647af26b"),
     "v0.9.14-Public": (5, "fe4bbd2f1356ab73845c8d87ad124f7cb7d7ab47ff235fa8170e7c6bc9d1b27a"),
