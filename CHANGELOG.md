@@ -16,9 +16,13 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ### New
 
 ### Fixed
-- The Conquest of Azeroth install works with a client from the CoA launcher or **Update client**, and its terrain matches it.
 
 ### Changed
+
+## v0.9.21-Public — 2026-10-30
+
+### Fixed
+- The Conquest of Azeroth install works with a client from the CoA launcher or **Update client**, and its terrain matches it.
 
 ## v0.9.20-Public — 2026-10-30
 
