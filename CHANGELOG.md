@@ -16,7 +16,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ### New
 
 ### Fixed
-- A Tortoise update stopped by a damaged database table now names it and offers **Repair the damaged table…** before it builds.
+- An update or backup stopped by a damaged database table (Tortoise, TBC, Vanilla) now names it and offers **Repair the damaged table…** before it builds; a damaged world table is pointed at a backup.
 
 ### Changed
 
