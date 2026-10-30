@@ -731,7 +731,10 @@ def tail_updates(
         server_rows = _tail_rows_of_server(world, schema)
         if file_rows is None or server_rows is None:
             return None
-        tail = move.appliable_tail(file_rows, server_rows)
+        # T833: a gap only in the bot database's ledger; each name is still proved on disk below.
+        tail = move.appliable_tail(
+            file_rows, server_rows, gap_allowed=schema == move.MODULE_TAIL_SCHEMA
+        )
         if not tail:
             return None
         by_name = {name: sha1 for name, sha1, _ in server_rows}

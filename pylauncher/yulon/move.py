@@ -1073,7 +1073,9 @@ Tail = tuple[str, ...]
 """The update names the target already ran that the file lacks, per schema, sorted."""
 
 
-def appliable_tail(file_rows: Sequence[TailRow], server_rows: Sequence[TailRow]) -> Tail | None:
+def appliable_tail(
+    file_rows: Sequence[TailRow], server_rows: Sequence[TailRow], *, gap_allowed: bool = False
+) -> Tail | None:
     """The tail names the target ran but the file lacks, or None (T802).
 
     Both sides are `(name, sha1, state)` rows read off the `updates` ledger of one
@@ -1081,7 +1083,10 @@ def appliable_tail(file_rows: Sequence[TailRow], server_rows: Sequence[TailRow])
     name the file holds the server holds too with the same sha1 (or both say the
     row is ARCHIVED), and the server holds at least one name more. Every missing
     name sorts after the file's newest name (a gap in the middle is another merge
-    order and is refused), and every missing row is RELEASED on the server (no
+    order and is refused), unless `gap_allowed` (T833: the bot database, where upstream
+    merges a file dated before one already released; the target's own updater applied
+    it out of order and recorded it RELEASED, and the caller still proves each missing
+    file's bytes on disk), and every missing row is RELEASED on the server (no
     ARCHIVED backfill from a very old file). Module rows must match exactly; a
     row that is not a core state on one side and is on the other is a mismatch.
     """
@@ -1111,10 +1116,11 @@ def appliable_tail(file_rows: Sequence[TailRow], server_rows: Sequence[TailRow])
         for name in set(server_core) - set(file_core)
     ):
         return None
-    newest = max(file_core)
     missing = sorted(set(server_core) - set(file_core))
-    if not all(name > newest for name in missing):
-        return None
+    if not gap_allowed:
+        newest = max(file_core)
+        if not all(name > newest for name in missing):
+            return None
     return tuple(missing)
 
 
@@ -1123,6 +1129,10 @@ CORE_UPDATE_DIR = "data/sql/updates"
 
 MODULE_UPDATES_DIR = "modules/mod-playerbots/data/sql/playerbots/updates"
 """Where mod-playerbots' released updates live in a server folder."""
+
+MODULE_TAIL_SCHEMA = "acore_playerbots"
+"""The one module schema an import's tail can touch (T802), and the one whose tail
+may hold a gap (T833)."""
 
 
 def tail_update_path(server_dir: Path, schema: str, name: str) -> Path:
@@ -1134,7 +1144,7 @@ def tail_update_path(server_dir: Path, schema: str, name: str) -> Path:
     The playerbots schema is the only module one an import touches; no other
     module row can reach the tail (module rows must match exactly above).
     """
-    if schema == "acore_playerbots":
+    if schema == MODULE_TAIL_SCHEMA:
         return server_dir / MODULE_UPDATES_DIR / f"{name}"
     return server_dir / CORE_UPDATE_DIR / f"db_{schema.removeprefix('acore_')}" / f"{name}"
 

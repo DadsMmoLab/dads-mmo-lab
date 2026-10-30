@@ -787,21 +787,39 @@ def test_a_shared_name_with_another_hash_has_no_tail() -> None:
     assert move.appliable_tail(file, here) is None
 
 
-def test_a_gap_before_the_newest_has_no_tail() -> None:
+def test_a_gap_before_the_newest_has_no_tail_in_a_core_schema() -> None:
+    """T833 accepts a gap only with `gap_allowed` (the bot database)."""
     file = _rows((NAMES[0], NAMES[2], NAMES[3], NAMES[4]))
     assert move.appliable_tail(file, _rows(NAMES)) is None
 
 
-def test_an_archived_missing_row_has_no_tail() -> None:
-    file = _rows(NAMES[:4])
-    here = _rows(NAMES[:4]) + [_row(NAMES[4], "ARCHIVED")]
-    assert move.appliable_tail(file, here) is None
+def test_a_gap_is_a_tail_when_the_schema_allows_it() -> None:
+    file = _rows((NAMES[0], NAMES[2], NAMES[3], NAMES[4]))
+    assert move.appliable_tail(file, _rows(NAMES), gap_allowed=True) == (NAMES[1],)
 
 
-def test_module_rows_must_match() -> None:
-    file = _rows(NAMES[:4]) + [("mod_a.sql", "A" * 40, "MODULE")]
-    here = _rows(NAMES) + [("mod_a.sql", "B" * 40, "MODULE")]
-    assert move.appliable_tail(file, here) is None
+def test_a_gap_and_a_tail_after_the_newest_come_back_sorted() -> None:
+    file = _rows((NAMES[0], NAMES[2], NAMES[3]))
+    assert move.appliable_tail(file, _rows(NAMES), gap_allowed=True) == (NAMES[1], NAMES[4])
+
+
+def test_an_allowed_gap_still_refuses_an_archived_missing_row() -> None:
+    file = _rows((NAMES[0], NAMES[2], NAMES[3], NAMES[4]))
+    here = _rows((NAMES[0], NAMES[2], NAMES[3], NAMES[4])) + [_row(NAMES[1], "ARCHIVED")]
+    assert move.appliable_tail(file, here, gap_allowed=True) is None
+
+
+def test_an_allowed_gap_still_refuses_a_shared_name_with_another_hash() -> None:
+    file = _rows((NAMES[0], NAMES[2], NAMES[3], NAMES[4]))
+    here = _rows(NAMES)
+    name, _, state = here[0]
+    here[0] = (name, "B" * 40, state)
+    assert move.appliable_tail(file, here, gap_allowed=True) is None
+
+
+def test_an_allowed_gap_still_refuses_a_name_only_the_file_has() -> None:
+    file = _rows((NAMES[0], NAMES[2], NAMES[3], NAMES[4])) + [_row("only_file.sql")]
+    assert move.appliable_tail(file, _rows(NAMES), gap_allowed=True) is None
 
 
 def test_tail_file_paths_point_at_the_checkout(tmp_path: Path) -> None:
