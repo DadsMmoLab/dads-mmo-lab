@@ -265,8 +265,14 @@ def test_an_azerothcore_loop_reads_nothing_new(tmp_path: Path) -> None:
 def test_a_world_table_on_the_verdict_never_shows_the_banner(
     qapp: object, ps: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Mutation: drop `repairable_only` in `_refresh_repair_banner`."""
+    """Mutation: drop `repairable_only` in `_refresh_repair_banner` or `repair_damaged_tables`."""
     _shown(monkeypatch)
+    asked: list[str] = []
+    monkeypatch.setattr(
+        controller_view_module,
+        "ask_yes_no",
+        lambda _parent, _title, text: asked.append(text) or True,
+    )
     view = _view(ps, tmp_path, None)
     view.services.table_repair = _route(tmp_path)  # type: ignore[attr-defined]
     view.last_verdict = dashboard.Verdict(  # type: ignore[attr-defined]
@@ -277,6 +283,7 @@ def test_a_world_table_on_the_verdict_never_shows_the_banner(
 
     assert view.repair_banner.isHidden()  # type: ignore[attr-defined]
     assert view.repair_damaged_tables() is False  # type: ignore[attr-defined]
+    assert asked == []
 
 
 def test_a_characters_table_from_a_loop_shows_the_banner(
