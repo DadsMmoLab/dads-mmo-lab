@@ -220,6 +220,7 @@ jobs:
               tests/test_single_instance.py
               tests/test_wsl.py
               tests/test_support_machine.py
+              tests/test_coa_windows_client.py
               --deselect tests/test_platform.py::test_wsl_integration_with_one_profile_whose_settings_cannot_be_read_is_unchecked
               --deselect tests/test_selfupdate_detect.py::test_the_real_probe_says_no_for_a_folder_nobody_may_write
               --deselect tests/test_selfupdate_detect.py::test_the_fixed_firejail_mount_counts_as_a_runtime_mount
