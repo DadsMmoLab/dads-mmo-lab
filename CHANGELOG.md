@@ -16,7 +16,6 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ### New
 
 ### Fixed
-- Self-update no longer risks two copies of Yu'lon swapping the install at once on Ubuntu 25.10+ and 26.04.
 
 ### Changed
 
@@ -24,6 +23,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 
 ### Fixed
 - The Conquest of Azeroth install works with a client from the CoA launcher or **Update client**, and its terrain matches it.
+- Self-update no longer risks two copies of Yu'lon swapping the install at once on Ubuntu 25.10+ and 26.04.
 
 ## v0.9.20-Public — 2026-10-30
 
