@@ -222,6 +222,11 @@ STATE_VERSION = 1
 MOVE_IN_FILE = ".yulon-move-in.json"
 """A server being built from another computer's package records its steps here (T601 level 2)."""
 
+RESET_FILE = ".yulon-start-over.json"
+"""`move_server.RESET_FILE` (pinned equal by a test): a folder whose unfinished bring-in is being
+started over with a plain install (T830). It lasts until the folder is clean, just before the
+plain install starts."""
+
 OUR_OWN_FILES = (
     STATE_FILE,
     networking.INTENT_FILE,
@@ -229,6 +234,7 @@ OUR_OWN_FILES = (
     realm_name.REALM_NAME_FILE,
     docker.FOLDER_ID_FILE,
     MOVE_IN_FILE,
+    RESET_FILE,
 )
 """Every file this app writes into a server directory as its OWN bookkeeping.
 
@@ -246,7 +252,9 @@ which is a folder this app had written every byte of being refused by its own
 guard. A tuple with a name, so the next file this app learns to write is added
 in one place rather than in the five call sites that ask the question. The third
 is T104's record of the answers a player gave a module's questions. The fourth is T601's
-move-in record, written before the install of a server brought from another computer.
+move-in record, written before the install of a server brought from another computer. The last
+is T830's record of a start over of such a folder, which a crash can leave in a folder whose
+reset was done.
 """
 
 OPENING_NOTE = (

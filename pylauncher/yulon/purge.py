@@ -587,6 +587,7 @@ class Uninstaller:
         stop_background_jobs: Callable[[], None] | None = None,
         take_back_client_files: Callable[[], tuple[list[str], list[str]]] | None = None,
         hold_server: Callable[[str], AbstractContextManager[object]] | None = None,
+        restore_refusal: Callable[[Path], str | None] | None = None,
     ) -> None:
         self.game = game
         self.server_dir = server_dir
@@ -599,6 +600,9 @@ class Uninstaller:
         self._logs_dir = logs_dir
         self._claim = claim if claim is not None else _default_claim
         self._reason_of = reason_of if reason_of is not None else _default_reason
+        # T830: a start over clears an unfinished restore with the rest, so it asks only whether
+        # a load still writes; every other uninstall refuses an unfinished one (T715).
+        self._restore_refusal = restore_refusal if restore_refusal is not None else _restore_refusal
         self._project_of = project_of if project_of is not None else self._real_project
         self._census = census if census is not None else self._real_census
         self._containers_of = containers_of if containers_of is not None else self._real_containers
@@ -825,7 +829,7 @@ class Uninstaller:
         """
         if (linked := _junction_refusal(self.server_dir)) is not None:
             return None, linked
-        if (restoring := _restore_refusal(self.server_dir)) is not None:
+        if (restoring := self._restore_refusal(self.server_dir)) is not None:
             return None, restoring
         ownership = self._claim(self.server_dir)
         refusal = refusal_for(

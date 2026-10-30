@@ -270,3 +270,107 @@ def test_attaching_an_unfinished_move_sends_the_player_to_bring_in(
     )
     assert built.attach_existing(WOTLK) is False
     assert shown and BRING_FROM_ANOTHER in shown[0]
+
+
+# ============================================================ T830: start over
+
+
+class StartingOver(Mover):
+    """A `MoveIn` whose start over is wired: the engine it builds, and what it was given."""
+
+    def __init__(self, tmp_path: Path) -> None:
+        super().__init__(tmp_path)
+        self.made: list[tuple[object, ...]] = []
+
+    def start_over(
+        self, entry: object, server_dir: Path, client_dir: object, plain: object, expected: object
+    ) -> _FakeInstaller:
+        engine = _FakeInstaller(WOTLK, ["reset", "installed"])
+        self.made.append((entry, server_dir, client_dir, plain, expected, engine))
+        return engine
+
+    def move_in(self) -> MoveIn:
+        return MoveIn(plan=self.plan, installer=self.installer, start_over=self.start_over)  # type: ignore[arg-type]
+
+
+def _unfinished_folder(tmp_path: Path) -> Path:
+    folder = tmp_path / WOTLK.install.default_server_dir
+    folder.mkdir()
+    move_server.write_marker(folder, "f" * 64, ["revs", "answers"])
+    return folder
+
+
+def test_install_into_an_unfinished_move_asks_to_start_over_and_runs_it(
+    qapp: object, tmp_path: Path
+) -> None:
+    """T830: the one question, then the start over as a first install, in the folder asked about.
+
+    Mutation: `start_install()` runs the plain engine after the question -> the start over is
+    never made and the plain install runs on what the bring-in left.
+    """
+    from yulon import start_over
+
+    folder = _unfinished_folder(tmp_path)
+    mover = StartingOver(tmp_path)
+    built, asked = view(tmp_path, mover)
+    assert built.start_install(WOTLK) is True
+    wait_for_panel(built._log)
+    assert asked == [(start_over.QUESTION_TITLE, start_over.QUESTION)]
+    assert len(mover.made) == 1
+    entry, server_dir, _client, plain, expected, engine = mover.made[0]
+    assert entry is WOTLK and server_dir == folder
+    assert expected == move_server.read_marker(folder)
+    assert isinstance(plain, _FakeInstaller) and plain.ran_with == []
+    assert [opts.first_install for opts in engine.ran_with] == [True]  # type: ignore[attr-defined]
+
+
+def test_a_no_to_starting_over_changes_nothing(qapp: object, tmp_path: Path) -> None:
+    folder = _unfinished_folder(tmp_path)
+    record = (folder / move_server.MOVE_IN_FILE).read_bytes()
+    mover = StartingOver(tmp_path)
+    built, asked = view(tmp_path, mover, yes=False)
+    assert built.start_install(WOTLK) is False
+    assert len(asked) == 1 and mover.made == []
+    assert (folder / move_server.MOVE_IN_FILE).read_bytes() == record
+
+
+def test_a_start_over_that_stopped_is_finished_from_install(qapp: object, tmp_path: Path) -> None:
+    """Only the reset's record is left (its last step before the plain install): Install asks
+    to finish it, never runs the plain engine bare over it."""
+    from yulon import start_over
+    from yulon.catalog import native
+
+    folder = tmp_path / WOTLK.install.default_server_dir
+    folder.mkdir()
+    (folder / native.RESET_FILE).write_text('{"package": "x"}', encoding="utf-8")
+    mover = StartingOver(tmp_path)
+    built, asked = view(tmp_path, mover)
+    assert built.start_install(WOTLK) is True
+    wait_for_panel(built._log)
+    assert asked == [(start_over.FINISH_TITLE, start_over.FINISH_QUESTION)]
+    assert [m[4] for m in mover.made] == [None]
+
+
+def test_attaching_a_folder_being_started_over_is_refused(
+    qapp: object, tmp_path: Path, monkeypatch: object
+) -> None:
+    import yulon.ui.catalog_view as cv
+    from yulon.catalog import native
+
+    shown: list[str] = []
+    monkeypatch.setattr(cv, "show_information", lambda _p, _t, text: shown.append(text))  # type: ignore[attr-defined]
+    folder = tmp_path / "resetting"
+    folder.mkdir()
+    (folder / native.RESET_FILE).write_text("{}", encoding="utf-8")
+    (folder / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+    built = CatalogView(
+        CATALOG,
+        lambda e: _FakeInstaller(e, []),
+        LogPanel(),
+        pick_dir=lambda _p, _t, _s: folder,
+        home=tmp_path,
+        move_in=StartingOver(tmp_path).move_in(),
+        platform_id=lambda: "linux",
+    )
+    assert built.attach_existing(WOTLK) is False
+    assert shown == [move_server.START_OVER_UNFINISHED]

@@ -163,6 +163,22 @@ MOVE_IN_WRITES_ALONE = (
     "databases while they are being put in. Wait for that to finish, then try again. Nothing "
     "was changed."
 )
+# T830: the same three while "Start over with a plain install" takes its copy of the databases a
+# bring-in left, with the database started on its own for it.
+START_OVER_HOLDS_THE_SERVER = (
+    "An unfinished bring-in on this server is being started over, and a copy of its databases "
+    "is being taken first. Wait for that to finish, then try again. Nothing was started or "
+    "stopped."
+)
+START_OVER_HOLDS_A_MOVE = (
+    "An unfinished bring-in on this server is being started over, and a copy of its databases "
+    "is being taken first. Wait for that to finish, then try again. Nothing was packed or "
+    "brought in."
+)
+START_OVER_HOLDS_THE_DATABASES = (
+    "An unfinished bring-in on this server is being started over, and a copy of its databases "
+    "is being taken first. Wait for that to finish, then try again."
+)
 MOVE_RUNNING = (
     "Accounts and characters are being packed or brought in on this server's "
     f"{MAINTENANCE_TAB} tab, and removing the server now would leave its databases "

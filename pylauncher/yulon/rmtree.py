@@ -19,7 +19,7 @@ from __future__ import annotations
 import os
 import shutil
 import stat
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from pathlib import Path
 
 from yulon import links
@@ -209,6 +209,34 @@ def remove_tree_last(path: Path, last: Sequence[str]) -> None:
     for name in (*(e.name for e in rest), *last):
         _remove_one(path / name)
     remove_tree(path)
+
+
+def empty_tree_last(path: Path, last: Sequence[str], *, keep: Collection[str]) -> None:
+    """`remove_tree_last(path, last)` that leaves `path` itself and its top-level `keep` names.
+
+    T830: a start over empties a server folder and keeps the folder, its id file and the two
+    records it is still working from. A root that is a link, or not a folder, is refused: it
+    would otherwise be walked through.
+
+    Raises:
+        TreeRemovalError: the folder could not be listed, or something in it could not go.
+    """
+    if _is_link(os.fspath(path)) or not path.is_dir():
+        raise LinkRootRefused(
+            f"{path} is not a folder this app may empty (a link, or not a folder at all); "
+            "nothing was changed."
+        )
+    try:
+        with os.scandir(path) as listing:
+            entries = [e for e in listing if e.name not in last and e.name not in keep]
+        folders = [e for e in entries if not _is_link(e.path) and e.is_dir(follow_symlinks=False)]
+    except OSError as exc:
+        raise TreeRemovalError(_undeletable(path, exc)) from exc
+    rest = [e for e in entries if e not in folders]
+    for entry in folders:
+        remove_tree(Path(entry.path))
+    for name in (*(e.name for e in rest), *(n for n in last if n not in keep)):
+        _remove_one(path / name)
 
 
 def _remove_one(path: Path) -> None:

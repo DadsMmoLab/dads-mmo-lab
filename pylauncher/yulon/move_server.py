@@ -639,6 +639,136 @@ folder and finish, and what tells that folder from somebody's server, which is n
 STEPS = ("revs", "answers", "modules", "rebuild", "confs", "data")
 """The steps after the install, in order; each is recorded in `MOVE_IN_FILE` when it is done."""
 
+RESET_FILE = ".yulon-start-over.json"  # == native.RESET_FILE (one of its OUR_OWN_FILES)
+"""In a folder a bring-in did not finish: "Start over with a plain install" is under way (T830).
+
+Written by `start_over` before it changes anything and removed as its last step before the plain
+install, so a reset that stopped part-way is carried on by the next Install press and is never
+read as a bring-in to carry on (`folder_refusal`) or as a finished plain install.
+"""
+
+START_OVER_UNFINISHED = (
+    "Starting this folder over with a plain install did not finish. Press Install on this tile "
+    "to finish it, or pick another folder."
+)
+STARTING_OVER_NOW = (
+    "This folder is being started over with a plain install right now. Wait for that to finish. "
+    "Nothing was started."
+)
+BRINGING_IN_NOW = (
+    "A bring-in on this folder is running right now. Wait for it to end, then try again. "
+    "Nothing was changed."
+)
+
+_PRESSING_LOCK = threading.Lock()
+_BRINGING_IN: dict[str, int] = {}
+"""The whole-server bring-ins of THIS process running now, per folder (T830)."""
+_STARTING_OVER: set[str] = set()
+"""The folders a "Start over with a plain install" of THIS process is resetting now (T830)."""
+
+
+def _folder_key(server_dir: Path | str) -> str:
+    """One spelling per folder, by string arithmetic only (`docker._server_key`'s rule)."""
+    return os.path.normcase(os.path.abspath(os.fspath(server_dir)))
+
+
+@contextlib.contextmanager
+def bringing_in(server_dir: Path) -> Iterator[None]:
+    """Count a bring-in of this process on `server_dir`; refused while a start over resets it.
+
+    Atomic in this process, where the Docker reservation is shared rather than refused
+    (`docker.server_claim()` is re-entrant): the one thing that keeps a bring-in and a start
+    over of the same folder from running at once in one Yu'lon (T830). Two bring-ins are not
+    told apart here; their own hold check does that (`move_held_reason`).
+    """
+    key = _folder_key(server_dir)
+    with _PRESSING_LOCK:
+        if key in _STARTING_OVER:
+            raise MoveError(STARTING_OVER_NOW)
+        _BRINGING_IN[key] = _BRINGING_IN.get(key, 0) + 1
+    try:
+        yield
+    finally:
+        with _PRESSING_LOCK:
+            _BRINGING_IN[key] -= 1
+            if not _BRINGING_IN[key]:
+                del _BRINGING_IN[key]
+
+
+@contextlib.contextmanager
+def starting_over(server_dir: Path) -> Iterator[None]:
+    """Mark `server_dir` as being reset by this process; refused while anything else presses it."""
+    key = _folder_key(server_dir)
+    with _PRESSING_LOCK:
+        if key in _STARTING_OVER:
+            raise MoveError(STARTING_OVER_NOW)
+        if _BRINGING_IN.get(key):
+            raise MoveError(BRINGING_IN_NOW)
+        _STARTING_OVER.add(key)
+    try:
+        yield
+    finally:
+        with _PRESSING_LOCK:
+            _STARTING_OVER.discard(key)
+
+
+def brought_in_here(server_dir: Path) -> bool:
+    """A bring-in of THIS process is running on `server_dir` now."""
+    with _PRESSING_LOCK:
+        return bool(_BRINGING_IN.get(_folder_key(server_dir)))
+
+
+def this_press() -> dict[str, object]:
+    """Who is pressing: this process, on this computer, as a move-in record names it (T830)."""
+    from yulon.controller_wow_wotlk import maintenance
+
+    pid = os.getpid()
+    return {
+        "pid": pid,
+        "host": maintenance.this_host(),
+        "token": maintenance.process_identity(pid)[0],
+    }
+
+
+def press_running(pressing: object, server_dir: Path) -> str | None:
+    """Why the bring-in a move-in record names may still be running, or None when it is not.
+
+    A record names its press while it runs (`_Record.pressing`) and drops it when it ends; one
+    a crash left names a process that is gone. Another computer's press cannot be looked at, so
+    it counts as running: the way out is a Bring-in pressed here, which ends by dropping it.
+    """
+    from yulon.controller_wow_wotlk import maintenance
+
+    if not isinstance(pressing, Mapping):
+        return None
+    pid, host, token = pressing.get("pid"), pressing.get("host"), pressing.get("token")
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return None
+    if host != maintenance.this_host():
+        return (
+            f"A bring-in on this folder may still be running on {host or 'another computer'}. "
+            "Wait for it to end, or press Bring from another computer… on this computer with the "
+            "same file and folder to take it over. Nothing was changed."
+        )
+    if pid == os.getpid():
+        # This process: its own count knows, and a pid this process holds is no one else's.
+        return BRINGING_IN_NOW if brought_in_here(server_dir) else None
+    if not maintenance._load_process_alive(pid):
+        return None
+    now = maintenance.process_identity(pid)[0]
+    if isinstance(token, str) and token and now and now != token:
+        return None  # a live process, but not the one that pressed
+    return (
+        "A bring-in on this folder is running in another Yu'lon on this computer. Wait for it "
+        "to end, then try again. Nothing was changed."
+    )
+
+
+def start_over_under_way(server_dir: Path) -> bool:
+    """`RESET_FILE` is in `server_dir`: a start over began there and has not finished (T830)."""
+    return os.path.lexists(server_dir / RESET_FILE)
+
+
 KIND_CHARACTERS = (
     "This file holds accounts and characters only, not a whole server. Install the game from "
     "the Catalog first, then bring them in on its "
@@ -1014,6 +1144,9 @@ def folder_refusal(server_dir: Path, digest: str) -> tuple[str | None, bool]:
         return None, False
     if not server_dir.is_dir():
         return not_empty(server_dir), False
+    if start_over_under_way(server_dir):
+        # T830: a reset may have removed part of what this record says is done.
+        return START_OVER_UNFINISHED, False
     marker = read_marker(server_dir)
     if marker is not None and marker.get("package") == digest and not move_in_finished(marker):
         return None, True
@@ -1193,6 +1326,9 @@ class _Record:
         self.modules_done: list[str] = _strings(body.get("modules_done"))
         self.modules_left_out: list[str] = _strings(body.get("modules_left_out"))
         self.rebuild_needed = bool(body.get("rebuild_needed"))
+        self.pressing: dict[str, object] | None = None
+        """`this_press()` while a press runs on this record, saved with it (T830): what tells a
+        start over in another Yu'lon that this bring-in is still working on the folder."""
         address = body.get("realm_address")
         self.realm_address: tuple[str, str | None] | None = None
         if isinstance(address, list) and len(address) == 2 and isinstance(address[0], str):
@@ -1216,7 +1352,21 @@ class _Record:
             modules_left_out=self.modules_left_out,
             rebuild_needed=self.rebuild_needed,
             realm_address=list(self.realm_address) if self.realm_address else None,
+            **({"pressing": self.pressing} if self.pressing else {}),
         )
+
+    def unpress(self) -> None:
+        """The press has ended: save the record without its name, if the record is still there.
+
+        Never raises: the press's own outcome is the news, and a name left behind is one a later
+        look reads as ended (`press_running()`: its process is gone).
+        """
+        self.pressing = None
+        try:
+            if (self.server_dir / MOVE_IN_FILE).exists():
+                self.save()
+        except OSError as exc:
+            logger.warning(f"the move-in record could not be saved without its press: {exc}")
 
     def keep(self) -> None:
         """Put the record back if something cleared the folder (the core's clone does)."""
@@ -1336,13 +1486,39 @@ class MovedInInstall:
         held = move_held_reason(server_dir)
         if held is not None:
             raise MoveError(held)
-        record = _Record.read(server_dir, digest)
+        # T830: counted in this process for the whole press, and named in the record while it
+        # runs, so a "Start over with a plain install" of this folder (this Yu'lon's or
+        # another's) is refused instead of resetting under it.
+        with bringing_in(server_dir):
+            record = _Record.read(server_dir, digest)
+            record.pressing = this_press()
+            try:
+                yield from self._pressed(options, server_dir, package, record, cancel, ask)
+            finally:
+                record.unpress()
+
+    def _pressed(
+        self,
+        options: Any,
+        server_dir: Path,
+        package: move.Package,
+        record: _Record,
+        cancel: threading.Event | None,
+        ask: Any,
+    ) -> Iterator[str]:
+        """`run()` once the folder and the hold have been asked, with the record in hand."""
+        manifest = self.plan.manifest
+        assert manifest is not None
         yield f"Bringing a {manifest.game.name} server from another computer into {server_dir}"
         # The record goes in BEFORE the install, so an install that fails or is stopped part-way
         # (a compile error, the ready wait) leaves a folder this same file carries on in, never
         # one "already holding a server". The core's clone into the server folder itself clears
         # the folder, so the record is put back after every line the install says.
         record.save()
+        if start_over_under_way(server_dir):
+            # T830: a start over that began after `folder_refusal()` above. This press's name is
+            # in the record now, so whichever of the two looks second sees the other.
+            raise MoveError(f"{START_OVER_UNFINISHED} Nothing was started.")
         if record.load_cut_off():
             # T681 (lifecycle L19): the last press stopped inside the data step, so the databases
             # are half-replaced. The install finished on an earlier press (every step runs after

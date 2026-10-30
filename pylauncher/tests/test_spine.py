@@ -2737,6 +2737,12 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "from, T682). It decides no write on its own; a link at the top is unlinked, never "
         "entered, and a root that is a link is `remove_tree()`'s to refuse"
     ),
+    ("rmtree.py", "empty_tree_last"): (
+        "lists the top of a server folder a start over is emptying (T830) only to ORDER the "
+        "deletion as `remove_tree_last()` does and to leave the names the caller keeps (the "
+        "folder id and the two records). Whether the folder may be emptied was decided before "
+        "(the Uninstall's own refusals); a root that is a link, or not a folder, is refused"
+    ),
     ("rmtree.py", "_empty_stoppably"): (
         "walks the tree a press is deleting (the old map data, the pathfinding tiles) so it "
         "can ask the claim's `stop()` before each unlink and rmdir. It IS a write, and it is "
