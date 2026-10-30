@@ -16,13 +16,13 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ### New
 
 ### Fixed
-- An update or backup stopped by a damaged database table now names it and offers **Repair the damaged table…**.
 
 ### Changed
 
 ## v0.9.22-Public — 2026-10-30
 
 ### Fixed
+- An update or backup stopped by a damaged database table now names it and offers **Repair the damaged table…**.
 - **Update client** now finishes on the Conquest of Azeroth client files; it used to stop on four empty files and never record the update.
 
 ## v0.9.21-Public — 2026-10-30
