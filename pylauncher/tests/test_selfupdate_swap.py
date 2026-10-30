@@ -1867,6 +1867,63 @@ def test_no_helper_can_claim_into_the_middle_of_the_apps_lock_cleanup(
         _end(app)
 
 
+@posix_only
+@pytest.mark.parametrize("kind", ["folder", "appimage"])
+def test_a_helper_that_cannot_write_its_pid_gives_the_lock_back_and_does_nothing(
+    tmp_path: Path, kind: str
+) -> None:
+    """**Codex, round 2** (2026-10-30, HIGH): the pid write is part of the claim.
+
+    It used to be unchecked. A lock with an owner and no pid reads as pid 0,
+    which `clear_stale_lock` removes after thirty seconds — under a helper that
+    may wait six minutes, so a retry could replace staging or let a second
+    helper in. `printf` is a shell builtin, so the failure is made in the
+    filesystem: a `mkdir` that makes the lock folder with a dangling `pid`
+    symlink already in it, so the write cannot land.
+    """
+    real_mkdir = shutil.which("mkdir")
+    assert real_mkdir is not None
+    fake = tmp_path / "fake-bin"
+    fake.mkdir()
+    (fake / "mkdir").write_text(
+        "#!/bin/sh\n"
+        f'"{real_mkdir}" "$@" || exit $?\n'
+        'for a in "$@"; do\n'
+        f'  case "$a" in */{layout.HELPER_LOCK}) ln -s "{tmp_path}/nowhere/pid" "$a/pid" ;; esac\n'
+        "done\n",
+        encoding="utf-8",
+    )
+    (fake / "mkdir").chmod(0o755)
+    env = {**os.environ, "PATH": f"{fake}{os.pathsep}{os.environ.get('PATH', '')}"}
+
+    install, extra = _one_install(tmp_path, kind)
+    target = install.target
+    assert target is not None
+    before = (
+        target.read_text(encoding="utf-8")
+        if target.is_file()
+        else _hash_tree(target, ignoring={layout.NEW_NAME, layout.OLD_NAME})
+    )
+    app = subprocess.Popen(["sleep", "60"])
+    try:
+        plans = _plans_on(install, extra, app.pid, tmp_path, 2)
+        (helper,) = _start(plans[:1], env=env)
+        assert helper.wait(timeout=HELPER_DEADLINE) == 64, _helper_log(install)
+        assert app.poll() is None, "the helper waited for the app to go"
+        assert not layout.helper_stamp(install).exists(), "it stamped a claim it did not finish"
+        assert "started pid=" not in _helper_log(install)
+        assert not layout.helper_lock(install).exists(), "the half-made claim was left behind"
+        after = (
+            target.read_text(encoding="utf-8")
+            if target.is_file()
+            else _hash_tree(target, ignoring={layout.NEW_NAME, layout.OLD_NAME})
+        )
+        assert after == before, "it swapped"
+        assert _a_claim_attempt(install, plans[1]) == "claimed", _helper_log(install)
+    finally:
+        _end(app)
+
+
 CLAIM_RACERS = 16
 CLAIM_ROUNDS = 5
 

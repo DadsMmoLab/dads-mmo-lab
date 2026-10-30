@@ -188,7 +188,10 @@ done
 #    the folder is the winner's.
 if mkdir -- "$lock" 2>/dev/null && ( set -C; printf %s "$nonce" > "$lock/owner" ) 2>/dev/null; then
   have_lock=1
-  printf %s "$$" > "$lock/pid"
+  # The pid is part of the claim: a lock naming no pid is one the app clears as
+  # stale after thirty seconds, under a helper that may wait six minutes. A
+  # write that fails ends the helper here, and its EXIT trap removes the claim.
+  printf %s "$$" > "$lock/pid" || exit 64
 else
   echo "another helper holds the lock; standing aside" >> "$log"
   exit 73
@@ -383,7 +386,10 @@ case "$target" in /*) ;; *) exit 64 ;; esac
 # (uutils `mkdir` let two racing helpers both make the folder).
 if mkdir -- "$lock" 2>/dev/null && ( set -C; printf %s "$nonce" > "$lock/owner" ) 2>/dev/null; then
   have_lock=1
-  printf %s "$$" > "$lock/pid"
+  # The pid is part of the claim: a lock naming no pid is one the app clears as
+  # stale after thirty seconds, under a helper that may wait six minutes. A
+  # write that fails ends the helper here, and its EXIT trap removes the claim.
+  printf %s "$$" > "$lock/pid" || exit 64
 else
   echo "another helper holds the lock; standing aside" >> "$log"
   exit 73
