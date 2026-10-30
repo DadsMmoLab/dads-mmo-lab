@@ -79,10 +79,11 @@ Two helpers on one install produced a mixed-version install with no backup
 the second moved the first's new executable into a backup that then held only
 bookkeeping — so the old executable was gone.
 
-**The atomic part is the exclusive create of `owner` inside it** (POSIX, since
-2026-10-30), not `mkdir`: uutils `mkdir` on Ubuntu 25.10+ looks and then
-creates, and told two racing helpers both that they had made the folder. The
-Windows helper still claims with the folder, whose creation it does itself.
+A claim is `mkdir` of this folder AND, on POSIX since 2026-10-30, the
+exclusive create of `owner` inside it: uutils `mkdir` on Ubuntu 25.10+ looks
+and then creates, and told two racing helpers both that they had made the
+folder. While the folder exists nobody can claim, which is what keeps a claim
+out of the middle of a cleanup. The Windows helper claims with the folder.
 """
 
 STAND_DOWN = "stand-down"
@@ -368,15 +369,7 @@ def stand_down_path(install: Install) -> Path:
 
 
 def helper_lock(install: Install) -> Path:
-    """The lock's folder, `<.yulon-old>/helper.lock`; its `owner` file IS the lock.
-
-    **The folder alone was the lock until Ubuntu 26.04** (2026-10-30): its
-    `mkdir` is uutils coreutils, which is not atomic, and two racing helpers
-    were both told they had made it. The POSIX helpers now claim with an
-    exclusive create of `owner` (`set -C`), so a folder with no owner in it is
-    a claim not yet made — or one a helper died in the middle of — and never
-    a live holder's. The Windows helper still claims with the folder itself.
-    """
+    """The lock's folder, `<.yulon-old>/helper.lock`: see `HELPER_LOCK`."""
     return work_dir(install, OLD_NAME) / HELPER_LOCK
 
 
@@ -437,8 +430,7 @@ def release_lock_of(install: Install, nonce: str) -> bool:
         return False
     lock = helper_lock(install)
     try:
-        # `pid` before `owner`: once `owner` is gone another helper may claim
-        # the lock and write its own pid, which must survive this.
+        # pid, owner, then the folder; nobody can claim until the folder is gone.
         for name in ("pid", "owner"):
             (lock / name).unlink(missing_ok=True)
         lock.rmdir()
@@ -455,11 +447,9 @@ STALE_LOCK_SECONDS = 30.0
 """How old an owner-less lock must be before it is treated as rubbish.
 
 A lock is a folder, then the exclusive create of its owner file, then a pid
-write. A helper that died between them leaves a folder naming nobody. Until
-2026-10-30 that folder WAS the lock, and without this the same staged plan got
-exit 73 on every press for ever while the message kept saying "press Update
-now again" (round 6). A helper can claim such a folder itself now; this is
-what lets the app's own `make_way` stop waiting on it. Thirty seconds is a
+write. A helper that died between them leaves a folder naming nobody, and
+without this the same staged plan got exit 73 on every press for ever while the
+message kept saying "press Update now again" (round 6). Thirty seconds is a
 thousand times the gap it covers.
 """
 
@@ -504,9 +494,9 @@ def clear_stale_lock(install: Install) -> bool:
         if age < STALE_LOCK_SECONDS:
             return False
         logger.info(f"self-update: the helper lock names nobody and is {age:.0f}s old")
-    # Piece by piece and never `rmtree`: the moment the stale `owner` is gone a
-    # new helper may claim the lock, and a tree removal could then delete ITS
-    # owner file. Here the new claim survives and the `rmdir` fails instead.
+    # Piece by piece, never `rmtree`: only the two files this app knows, then
+    # the folder. Nobody can claim while the folder exists; anything else found
+    # in it makes the `rmdir` fail, and then the lock is left alone.
     try:
         for name in ("pid", "owner"):
             (lock / name).unlink(missing_ok=True)

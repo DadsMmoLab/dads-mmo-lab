@@ -1757,19 +1757,114 @@ def test_a_mkdir_that_says_yes_twice_still_lets_only_one_helper_in(
 
 
 @posix_only
-def test_a_lock_folder_with_no_owner_in_it_is_claimed(tmp_path: Path) -> None:
-    """The folder is no longer the lock: an owner-less one is a claim nobody made.
+def test_a_lock_folder_with_no_owner_in_it_still_blocks(tmp_path: Path) -> None:
+    """A folder naming nobody is a lock, until the app's staleness rule clears it.
 
-    A helper killed between making the folder and creating `owner` leaves one,
-    and before the owner-file claim every later helper got 73 until the app's
-    thirty-second staleness rule cleared it.
+    A helper killed between making the folder and creating `owner` leaves one.
+    The claim needs the folder to be made, not merely `owner`, so a cleanup that
+    has removed `owner` but not yet the folder can never be claimed into.
     """
     install, extra = _one_install(tmp_path, "folder")
     plans = _plans_on(install, extra, _a_dead_pid(), tmp_path, 1)
     layout.helper_lock(install).mkdir()
     (helper,) = _start(plans)
-    assert helper.wait(timeout=HELPER_DEADLINE) == 0, _helper_log(install)
-    assert _helper_log(install).count("started pid=") == 1
+    assert helper.wait(timeout=HELPER_DEADLINE) == 73, _helper_log(install)
+    assert "started pid=" not in _helper_log(install)
+
+
+def _a_claim_attempt(install: Install, plan: SwapPlan) -> str:
+    """Start one real helper NOW and say whether it took the lock: "claimed" or its code.
+
+    The app it waits for is alive, so a helper that claims stays in its wait;
+    it is stood down and reaped here, and its lock goes with it.
+    """
+    before = _helper_log(install).count("started pid=")
+    (helper,) = _start([plan])
+    try:
+        deadline = time.monotonic() + HELPER_DEADLINE
+        while time.monotonic() < deadline:
+            if helper.poll() is not None:
+                return str(helper.returncode)
+            if _helper_log(install).count("started pid=") > before:
+                layout.tell_to_stop(install, plan.nonce)
+                helper.wait(timeout=HELPER_DEADLINE)
+                return "claimed"
+            time.sleep(0.01)
+        return "neither"  # pragma: no cover - only on a failing run
+    finally:
+        if helper.poll() is None:  # pragma: no cover - only on a failing run
+            helper.kill()
+            helper.wait()
+
+
+@posix_only
+@pytest.mark.parametrize("cleanup", ["release_lock_of", "clear_stale_lock"])
+def test_no_helper_can_claim_into_the_middle_of_the_apps_lock_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cleanup: str
+) -> None:
+    """**Codex, adversarial review of the owner-file claim** (2026-10-30, CRITICAL).
+
+    With the claim made by `owner` alone, a replacement could claim the moment
+    `owner` was gone while the folder still stood — and the app's cleanup,
+    which had already validated the OLD holder, then unlinked the replacement's
+    fresh `pid`/`owner`, leaving two helpers able to reach the first move. So
+    the claim needs `mkdir` of the folder as well. Here a real replacement
+    helper tries to claim at every step of both cleanups — before and after
+    each unlink, and before the `rmdir` — and must stand aside every time; once
+    the folder is gone, a fresh claim must work.
+    """
+    install, extra = _one_install(tmp_path, "folder")
+    app = subprocess.Popen(["sleep", "60"])
+    try:
+        plans = iter(_plans_on(install, extra, app.pid, tmp_path, 8))
+        lock = layout.helper_lock(install)
+        lock.mkdir()
+        old_nonce = "00112233aabbccdd"
+        (lock / "owner").write_text(old_nonce, encoding="utf-8")
+        (lock / "pid").write_text(str(_a_dead_pid()), encoding="utf-8")
+
+        attempts: list[tuple[str, str]] = []
+        real_unlink, real_rmdir = os.unlink, os.rmdir
+
+        def inside(path: object) -> bool:
+            return str(path).startswith(str(lock))
+
+        def unlink(path: Any, *args: Any, **kw: Any) -> None:
+            if inside(path):
+                attempts.append(
+                    (f"before unlink {Path(path).name}", _a_claim_attempt(install, next(plans)))
+                )
+            real_unlink(path, *args, **kw)
+            if inside(path):
+                attempts.append(
+                    (f"after unlink {Path(path).name}", _a_claim_attempt(install, next(plans)))
+                )
+
+        def rmdir(path: Any, *args: Any, **kw: Any) -> None:
+            if inside(path):
+                attempts.append(("before rmdir", _a_claim_attempt(install, next(plans))))
+            real_rmdir(path, *args, **kw)
+
+        monkeypatch.setattr(os, "unlink", unlink)
+        monkeypatch.setattr(os, "rmdir", rmdir)
+        if cleanup == "release_lock_of":
+            assert layout.release_lock_of(install, old_nonce) is True
+        else:
+            assert layout.clear_stale_lock(install) is True
+        monkeypatch.undo()
+
+        assert [where for where, _ in attempts] == [
+            "before unlink pid",
+            "after unlink pid",
+            "before unlink owner",
+            "after unlink owner",
+            "before rmdir",
+        ]
+        assert all(result == "73" for _, result in attempts), attempts
+        assert not lock.exists()
+        assert _a_claim_attempt(install, next(plans)) == "claimed", _helper_log(install)
+    finally:
+        _end(app)
 
 
 CLAIM_RACERS = 16
