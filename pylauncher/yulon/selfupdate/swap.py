@@ -112,7 +112,10 @@ cleanup() {{
   # removing it then unlocked an install another helper was working on, and
   # both came away having moved nothing (round 5, M2).
   if [ "$have_lock" -eq 1 ] && [ "$(cat "$lock/owner" 2>/dev/null)" = "$nonce" ]; then
-    rm -f -- "$lock/owner" "$lock/pid" 2>/dev/null
+    # pid before owner: once the owner file is gone another helper may claim
+    # the lock and write ITS pid, which must not then be removed here.
+    rm -f -- "$lock/pid" 2>/dev/null
+    rm -f -- "$lock/owner" 2>/dev/null
     rmdir -- "$lock" 2>/dev/null
   fi
   rm -f -- "$0"
@@ -169,12 +172,20 @@ for e in "$@"; do
 done
 
 # ---- become THE helper, atomically ----------------------------------------
-# `mkdir` creates or fails; there is no window between looking and taking. Two
-# helpers on one install produced a mixed-version install with no backup at all
-# (round 4, 6 runs of 6).
-if mkdir -- "$lock" 2>/dev/null; then
+# Two helpers on one install produced a mixed-version install with no backup at
+# all (round 4, 6 runs of 6), so exactly one may get past here.
+#
+# **The claim is the owner file, created exclusively** (Ubuntu 26.04, 2026-10-30).
+# This used to be `mkdir` of the lock, trusted to fail when it already existed.
+# On Ubuntu 25.10+ `mkdir` is uutils coreutils, which looks (`statx`) and then
+# creates, and of two racing it answered "made it" to BOTH in 252 runs of 2000
+# on a 26.04 runner. `set -C` makes the shell itself open the file O_EXCL,
+# which the kernel decides and no `mkdir` program can get wrong; the subshell
+# keeps noclobber off for every other write. `mkdir -p` only makes sure the
+# folder is there, and its answer is not the question.
+mkdir -p -- "$lock" 2>/dev/null
+if ( set -C; printf %s "$nonce" > "$lock/owner" ) 2>/dev/null; then
   have_lock=1
-  printf %s "$nonce" > "$lock/owner"
   printf %s "$$" > "$lock/pid"
 else
   echo "another helper holds the lock; standing aside" >> "$log"
@@ -295,7 +306,8 @@ measured all three holes on this very script):
 
 * a **nonce** it is given and writes into its stamp, so a stamp left by an
   earlier attempt cannot make the app close for a helper that never started;
-* a **lock** — `mkdir` of `<.yulon-old>/helper.lock`, which is atomic — so two
+* a **lock** — the exclusive create (`set -C`) of `<.yulon-old>/helper.lock/owner`,
+  never `mkdir`'s answer (uutils `mkdir` is not atomic) — so two
   helpers on one install cannot both swap. That produced a mixed-version
   install with NO backup: both exited 0, both relaunched, and the second moved
   the first's new executable into a backup holding only bookkeeping;
@@ -335,7 +347,10 @@ cleanup() {{
   # removing it then unlocked an install another helper was working on, and
   # both came away having moved nothing (round 5, M2).
   if [ "$have_lock" -eq 1 ] && [ "$(cat "$lock/owner" 2>/dev/null)" = "$nonce" ]; then
-    rm -f -- "$lock/owner" "$lock/pid" 2>/dev/null
+    # pid before owner: once the owner file is gone another helper may claim
+    # the lock and write ITS pid, which must not then be removed here.
+    rm -f -- "$lock/pid" 2>/dev/null
+    rm -f -- "$lock/owner" 2>/dev/null
     rmdir -- "$lock" 2>/dev/null
   fi
   rm -f -- "$0"
@@ -363,9 +378,11 @@ case "$target" in /*) ;; *) exit 64 ;; esac
 [ -f "$old/$marker" ] || exit 64
 [ -f "$new/$entry" ] || exit 64
 
-if mkdir -- "$lock" 2>/dev/null; then
+# The claim is the exclusive create of the owner file, not `mkdir`'s answer:
+# see the folder helper (uutils `mkdir` let two racing helpers both in).
+mkdir -p -- "$lock" 2>/dev/null
+if ( set -C; printf %s "$nonce" > "$lock/owner" ) 2>/dev/null; then
   have_lock=1
-  printf %s "$nonce" > "$lock/owner"
   printf %s "$$" > "$lock/pid"
 else
   echo "another helper holds the lock; standing aside" >> "$log"

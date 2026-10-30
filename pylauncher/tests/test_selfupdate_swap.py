@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import shutil
 import stat
 import subprocess
 import time
@@ -1653,6 +1654,162 @@ def test_only_one_of_two_appimage_helpers_swaps(tmp_path: Path) -> None:
     assert witness.read_text(encoding="utf-8") == "new", "the loser swapped too"
     old = layout.work_dir(install, layout.OLD_NAME)
     assert "old" in (old / layout.APPIMAGE_ENTRY).read_text(encoding="utf-8")
+
+
+# -- the claim is the owner file, not `mkdir` (Ubuntu 26.04, 2026-10-30) ------
+
+
+def _one_install(tmp_path: Path, kind: str) -> tuple[Install, dict[str, Any]]:
+    """A ready install of either helper's kind, and the `plan_swap` keywords for it."""
+    if kind == "appimage":
+        install, _ = _an_appimage(tmp_path, tmp_path / "launched")
+        return install, {}
+    install, _, _ = _ready_to_swap(tmp_path)
+    return install, {"entries": ("yulon", "_internal")}
+
+
+def _plans_on(
+    install: Install, extra: dict[str, Any], app_pid: int, script_dir: Path, n: int
+) -> list[SwapPlan]:
+    """`n` armed plans for one install and one app, ALL made before any helper starts.
+
+    Planning stands down any live helper it finds (`make_way`), so a plan made
+    while one runs would end it: the race is only real when every plan exists
+    first.
+    """
+    staged = layout.work_dir(install, layout.NEW_NAME)
+    return [
+        _a_ready_plan(
+            install, staged, pid=app_pid, script_dir=script_dir, platform_id="linux", **extra
+        )
+        for _ in range(n)
+    ]
+
+
+def _start(plans: list[SwapPlan], **popen: Any) -> list[subprocess.Popen[bytes]]:
+    """Start one real helper per plan, as close together as possible."""
+    return [subprocess.Popen(p.argv, stdin=subprocess.DEVNULL, **popen) for p in plans]
+
+
+def _stand_down_the_holder(install: Install, helpers: list[subprocess.Popen[bytes]]) -> list[int]:
+    """Stand the lock's holder down, let every helper finish, and return their codes."""
+    try:
+        holder = layout.lock_holder(install)
+        if holder is not None and holder.nonce:
+            layout.tell_to_stop(install, holder.nonce)
+        return [h.wait(timeout=HELPER_DEADLINE) for h in helpers]
+    finally:
+        for h in helpers:
+            if h.poll() is None:  # pragma: no cover - only on a failing run
+                h.kill()
+                h.wait()
+
+
+def _a_mkdir_that_always_says_yes(tmp_path: Path) -> dict[str, str]:
+    """An environment whose `mkdir` makes the folder and answers 0 even when it was there.
+
+    uutils `mkdir`'s race (it looks, then creates) made certain: whatever the
+    helpers decide must not rest on that answer.
+    """
+    real_mkdir = shutil.which("mkdir")
+    assert real_mkdir is not None
+    fake = tmp_path / "fake-bin"
+    fake.mkdir(exist_ok=True)
+    (fake / "mkdir").write_text(
+        f'#!/bin/sh\n"{real_mkdir}" -p "$@" 2>/dev/null\nexit 0\n', encoding="utf-8"
+    )
+    (fake / "mkdir").chmod(0o755)
+    return {**os.environ, "PATH": f"{fake}{os.pathsep}{os.environ.get('PATH', '')}"}
+
+
+@posix_only
+@pytest.mark.parametrize("kind", ["folder", "appimage"])
+def test_a_mkdir_that_says_yes_twice_still_lets_only_one_helper_in(
+    tmp_path: Path, kind: str
+) -> None:
+    """**uutils `mkdir` is not atomic** (measured on an ubuntu-26.04 runner, 2026-10-30).
+
+    It looks (`statx`) and then creates, and of two racing it told BOTH they
+    had made the folder in 252 runs of 2000. The helpers trusted that answer
+    as their lock, so two of them got past it: `[0, 74]` and `[74, 74]` on CI,
+    where only the later owner/stamp re-check stood between that and the
+    round-4 double swap. Here `mkdir` is a stand-in that says yes every time,
+    which is that race made certain: the second helper must still stand aside.
+    """
+    env = _a_mkdir_that_always_says_yes(tmp_path)
+
+    install, extra = _one_install(tmp_path, kind)
+    app = subprocess.Popen(["sleep", "30"])
+    try:
+        plans = _plans_on(install, extra, app.pid, tmp_path, 2)
+        first = _start(plans[:1], env=env)
+        _until(layout.helper_stamp(install).exists, "the first helper reported in")
+        second = _start(plans[1:], env=env)
+        assert (
+            second[0].wait(timeout=HELPER_DEADLINE) == 73
+        ), f"the second helper got in too\n{_helper_log(install)}"
+        assert first[0].poll() is None, "the first helper lost a lock it had taken"
+        codes = _stand_down_the_holder(install, first + second)
+    finally:
+        _end(app)
+    assert sorted(codes) == [73, 74], f"{codes}\n{_helper_log(install)}"
+    assert _helper_log(install).count("started pid=") == 1, _helper_log(install)
+
+
+@posix_only
+def test_a_lock_folder_with_no_owner_in_it_is_claimed(tmp_path: Path) -> None:
+    """The folder is no longer the lock: an owner-less one is a claim nobody made.
+
+    A helper killed between making the folder and creating `owner` leaves one,
+    and before the owner-file claim every later helper got 73 until the app's
+    thirty-second staleness rule cleared it.
+    """
+    install, extra = _one_install(tmp_path, "folder")
+    plans = _plans_on(install, extra, _a_dead_pid(), tmp_path, 1)
+    layout.helper_lock(install).mkdir()
+    (helper,) = _start(plans)
+    assert helper.wait(timeout=HELPER_DEADLINE) == 0, _helper_log(install)
+    assert _helper_log(install).count("started pid=") == 1
+
+
+CLAIM_RACERS = 16
+CLAIM_ROUNDS = 5
+
+
+@posix_only
+@pytest.mark.parametrize("mkdir", ["this box's", "always yes"])
+@pytest.mark.parametrize("kind", ["folder", "appimage"])
+def test_of_sixteen_helpers_started_at_once_exactly_one_takes_the_lock(
+    tmp_path: Path, kind: str, mkdir: str
+) -> None:
+    """Sixteen real helpers on one install, five times over: one winner each time.
+
+    The app stays alive, so nothing is ever swapped: every loser must exit 73
+    and exactly one helper must be left waiting on the app, holding the lock.
+    It is then stood down, which empties the lock for the next round. Run with
+    this box's own `mkdir` (a race on uutils) and with one that always says yes.
+    """
+    env = _a_mkdir_that_always_says_yes(tmp_path) if mkdir == "always yes" else None
+    install, extra = _one_install(tmp_path, kind)
+    app = subprocess.Popen(["sleep", "60"])
+    try:
+        for round_no in range(CLAIM_ROUNDS):
+            helpers = _start(_plans_on(install, extra, app.pid, tmp_path, CLAIM_RACERS), env=env)
+            deadline = time.monotonic() + HELPER_DEADLINE
+            while time.monotonic() < deadline:
+                if sum(h.poll() is not None for h in helpers) >= CLAIM_RACERS - 1:
+                    break
+                time.sleep(0.02)
+            waiting = [h for h in helpers if h.poll() is None]
+            lost = [h.returncode for h in helpers if h.poll() is not None]
+            log = _helper_log(install)
+            codes = _stand_down_the_holder(install, helpers)
+            assert len(waiting) == 1, f"round {round_no}: {len(waiting)} still in\n{log}"
+            assert lost == [73] * (CLAIM_RACERS - 1), f"round {round_no}: {lost}\n{log}"
+            assert sorted(codes) == [73] * (CLAIM_RACERS - 1) + [74], codes
+            assert layout.lock_holder(install) is None, "the stood-down winner kept its lock"
+    finally:
+        _end(app)
 
 
 @posix_only
