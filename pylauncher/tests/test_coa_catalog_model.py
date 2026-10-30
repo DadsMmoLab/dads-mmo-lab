@@ -318,6 +318,63 @@ def test_an_ascension_client_loads() -> None:
 # -- T835: the world-data fields sit outside the extraction hashes -----------------------
 
 
+def test_world_data_folders_load_with_client_extract_and_their_size() -> None:
+    """T835: the folders a Windows CoA world reads from its volume, and the room they take."""
+    block = NativeInstall.model_validate(
+        _native(world_data_dirs=["dbc", "maps", "Cameras"], world_data_gb=2.5)
+    ).azerothcore
+    assert block is not None
+    assert block.world_data_dirs == ("dbc", "maps", "Cameras")
+    assert block.world_data_gb == 2.5
+
+
+def test_world_data_folders_without_client_extract_are_refused() -> None:
+    """WotLK and Unbound name none: without an extract stage there is no `data/` to copy."""
+    with pytest.raises(ValidationError, match="needs client_extract"):
+        NativeInstall.model_validate(
+            _native(client_extract=None, world_data_dirs=["dbc"], world_data_gb=1.0)
+        )
+
+
+def test_world_data_folders_without_their_size_are_refused() -> None:
+    with pytest.raises(ValidationError, match="world_data_gb must say how much room"):
+        NativeInstall.model_validate(_native(world_data_dirs=["dbc"], world_data_gb=None))
+
+
+def test_a_world_data_size_without_folders_is_refused() -> None:
+    with pytest.raises(ValidationError, match="needs world_data_dirs"):
+        NativeInstall.model_validate(_native(world_data_gb=2.5))
+
+
+def test_a_coa_world_data_folder_named_twice_is_refused() -> None:
+    """A folder is copied once; two lines for it would be two copies and one fingerprint line."""
+    with pytest.raises(ValidationError, match=r"world_data_dirs names \['maps'\] more than once"):
+        NativeInstall.model_validate(
+            _native(world_data_dirs=["dbc", "maps", "maps"], world_data_gb=2.5)
+        )
+
+
+@pytest.mark.parametrize("name", ["../maps", "a/b", ""])
+def test_a_world_data_folder_must_be_a_plain_name(name: str) -> None:
+    """The name goes into `data/<name>` and into the sync script's own word list."""
+    with pytest.raises(ValidationError, match="world_data_dirs"):
+        NativeInstall.model_validate(_native(world_data_dirs=[name], world_data_gb=2.5))
+
+
+def test_the_shipped_coa_names_its_five_world_folders_and_their_room() -> None:
+    """Read off the CoA pin: `World.cpp`'s DataDir plus `dbc/`, `maps/`, `vmaps`, `mmaps`,
+    `Cameras`."""
+    catalog = load_catalog()
+    coa = catalog.get("wow-coa").install.native.azerothcore  # type: ignore[union-attr]
+    assert coa is not None
+    assert coa.world_data_dirs == ("dbc", "maps", "vmaps", "mmaps", "Cameras")
+    assert coa.world_data_gb == 6.5
+    for game in ("wow-wotlk", "wow-unbound"):
+        block = catalog.get(game).install.native.azerothcore  # type: ignore[union-attr]
+        assert block is not None and block.world_data_dirs == ()
+        assert block.world_data_gb is None
+
+
 def test_the_world_data_fields_leave_the_coa_extraction_hash_alone() -> None:
     """The extraction evidence hashes the `ExtractPlan` and the mmaps record its argv alone.
 
