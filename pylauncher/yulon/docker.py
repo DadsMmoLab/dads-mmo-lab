@@ -7037,6 +7037,56 @@ def builder_connection_lost(tail: Sequence[str]) -> bool:
     return any(_BUILDER_GONE.search(line) and not _STEP_OUTPUT.match(line) for line in tail)
 
 
+_BUILD_DATA_DAMAGED = re.compile(
+    r"failed to (?:solve|extract)[^\n]*failed to extract layer"
+    r"|failed to extract layer[^\n]*crc32 mismatch"
+)
+"""Docker's stored copy of a finished build step is damaged (T842).
+
+Measured on a player's own Docker Desktop 29.9.2 log: `#25 ERROR: failed to
+extract layer sha256:1ea9...: exit status 1: unpigz: skipping: <stdin>:
+corrupted -- crc32 mismatch` and then the un-prefixed `failed to solve:
+failed to extract layer sha256:...: exit status 1: unpigz: skipping: <stdin>:
+corrupted -- crc32 mismatch`. Only the un-prefixed form counts: a step line
+starting `#<n>` is skipped, like T202, because what a step prints is that
+program's, not Docker's word on its storage. A registry `unexpected EOF` on a
+pull has no `failed to extract layer` and matches none.
+"""
+
+_COMPILER_CRASHED = re.compile(
+    r"(?:clang\+\+: fatal error: clang frontend command failed with exit code 139"
+    r"|(?:g|clang|c)\+\+: internal compiler error: Segmentation fault)"
+)
+"""The compiler itself crashed instead of reporting a compile error (T842).
+
+These words ARE a step's own output (`#18 110.6 clang++: fatal error: ...`),
+so step lines are read here, not skipped: the `#<n> <secs>` prefix is
+stripped first. Only exit code 139 and a segmentation fault count: a frontend
+failure with exit code 1, or an `error: no member named ...`, is a mistake in
+the code, not a crash.
+"""
+
+
+def build_data_damaged(tail: Sequence[str]) -> bool:
+    """Did this build end because Docker's stored layer copy is damaged? (T842)
+
+    The whole tail is read: the line is the last one Docker prints, but blank
+    lines may follow it. A step's own output lines are skipped, like T202:
+    what a RUN step prints is that program's, not Docker's word on its storage.
+    """
+    return any(_BUILD_DATA_DAMAGED.search(line) and not _STEP_OUTPUT.match(line) for line in tail)
+
+
+def compiler_crashed(tail: Sequence[str]) -> bool:
+    """Did this build end because the compiler itself crashed? (T842)
+
+    Step lines ARE read here: the crash line is the step's own output. The
+    `#<n> <secs>` BuildKit prefix (`#18 110.6 `, `#9 ERROR: `) is stripped
+    first, so it never stands in the way of the match.
+    """
+    return any(_COMPILER_CRASHED.search(_STEP_OUTPUT.sub("", line)) for line in tail)
+
+
 def _build_log_elsewhere(said: list[str]) -> str:
     """The URL Docker Desktop printed instead of the build's output, or `""`.
 

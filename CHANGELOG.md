@@ -16,6 +16,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ### New
 
 ### Fixed
+- A build that fails on damaged Docker data or a crashing compiler now says what to do instead of quoting Docker's last line.
 
 ### Changed
 

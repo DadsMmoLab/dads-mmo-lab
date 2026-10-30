@@ -175,8 +175,9 @@ EXCEPTIONS: dict[tuple[str, str], tuple[str, frozenset[str]]] = {
         frozenset({"chcon -Rt container_file_t <server folder>"}),
     ),
     ("yulon/catalog/native.py", "_check_run"): (
-        f"BUILDER_LOST: reading Docker's memory and restarting WSL: {_TYPED}",
-        frozenset({"docker info", "wsl --shutdown"}),
+        f"BUILDER_LOST and BUILD_DATA_DAMAGED: Docker's memory, restarting WSL, "
+        f"clearing the build cache: {_TYPED}",
+        frozenset({"docker info", "wsl --shutdown", "docker builder prune -a"}),
     ),
     ("yulon/catalog/native.py", "build_stalled_notice"): (
         f"a stalled build's notice on the build log: checking Docker answers: {_TYPED}",

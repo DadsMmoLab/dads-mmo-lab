@@ -2763,6 +2763,25 @@ again" rather than "press Install": the same stage serves Rebuild. Windows
 first and in full because that is where it was seen, and because the Resources
 pane there has no memory control on the WSL 2 engine (review, 2026-10-04).
 """
+BUILD_DATA_DAMAGED = (
+    "because Docker's stored copy of a finished build step is damaged (a checksum did not "
+    "match). That is not something the build did wrong: it points at Docker's storage or at "
+    "the computer's memory. Restart the computer, then clear Docker's build cache by running "
+    "this in a terminal:\n"
+    "docker builder prune -a\n"
+    "Then run it again. If it fails like this again, test the computer's memory."
+)
+"""T842: what a build that ends on `failed to extract layer ... crc32 mismatch` is told."""
+
+COMPILER_CRASHED = (
+    "because the compiler itself crashed (a segmentation fault), which a mistake in the code "
+    "does not cause. It usually means the computer's memory is unstable or ran short: close "
+    "other programs and run it again. If it crashes again on a different file, test the "
+    "computer's memory (for example turn off XMP/EXPO overclocking in the BIOS, or run a "
+    "memory test)."
+)
+"""T842: what a build that ends on the compiler dying with exit code 139 is told."""
+
 
 BUILD_QUIET_NOTICE_SECONDS = 10 * 60
 """How long a build may print nothing before the player is told so (T202).
@@ -17162,6 +17181,18 @@ class StagedInstaller:
             # player nothing (a raw gRPC line, left-truncated).
             raise InstallerError(
                 f"{what} failed (exit {run.returncode}) {BUILDER_LOST} Its last words were: "
+                f"{docker.last_words(run.tail, from_build=from_build)}"
+            )
+        if run.returncode != 0 and from_build and docker.build_data_damaged(run.tail):
+            # T842: said in words before the quote: Docker's storage or the memory, not the build.
+            raise InstallerError(
+                f"{what} failed (exit {run.returncode}) {BUILD_DATA_DAMAGED} Its last words were: "
+                f"{docker.last_words(run.tail, from_build=from_build)}"
+            )
+        if run.returncode != 0 and from_build and docker.compiler_crashed(run.tail):
+            # T842: said in words before the quote: a crashed compiler, not a compile error.
+            raise InstallerError(
+                f"{what} failed (exit {run.returncode}) {COMPILER_CRASHED} Its last words were: "
                 f"{docker.last_words(run.tail, from_build=from_build)}"
             )
         if run.returncode != 0:
