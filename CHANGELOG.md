@@ -19,6 +19,11 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 
 ### Changed
 
+## v0.9.20-Public — 2026-10-30
+
+### Fixed
+- The Conquest of Azeroth install no longer stops at the map step with "Could not create directory … check your permissions".
+
 ## v0.9.19-Public — 2026-10-30
 
 ### New
