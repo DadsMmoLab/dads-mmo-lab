@@ -84,6 +84,27 @@ def _refused_clean(rec: Recorder, server_dir: Path) -> None:
     assert not _built(rec), rec.calls
 
 
+def _made_without_allowlist(rec: Recorder) -> native.StagedInstaller:
+    """An engine over TORTOISE with no re-runnable modules: the pre-T813 baseline.
+
+    The shipped entry now lists TortoiseBots (T813), so a test pinning the
+    refusal itself drives an entry without the listing; the T813 file pins what
+    the listing does.
+    """
+    from tests.support_native import FakeSnapshot
+    from tests.test_families_cmangos import engine as tbc_engine
+
+    assert TORTOISE.install.native is not None and TORTOISE.install.native.cmangos is not None
+    data = TORTOISE.install.native.cmangos.model_copy(update={"rerunnable_modules": ()})
+    native_block = TORTOISE.install.native.model_copy(update={"cmangos": data})
+    plain = TORTOISE.model_copy(
+        update={"install": TORTOISE.install.model_copy(update={"native": native_block})}
+    )
+    made = tbc_engine(rec, entry=plain, world_running=lambda container: False)
+    made._snapshot = FakeSnapshot(rec)  # type: ignore[attr-defined]
+    return made
+
+
 # -- the refusal ----------------------------------------------------------------------------
 
 
@@ -120,7 +141,8 @@ def test_update_to_latest_remembers_the_refused_commit(tmp_path: Path) -> None:
 
 @PRESSES
 def test_a_module_migration_is_named_with_its_module(tmp_path: Path, to_pin: bool) -> None:
-    rec, server_dir, made = _ready(tmp_path)
+    rec, server_dir, _made = _ready(tmp_path)
+    made = _made_without_allowlist(rec)
     bots = server_dir / BOTS.dest
     rec.byte_trees[(bots, OLD, BOTS_WORLD)] = {BOTS_NAME: RAN}
     rec.byte_trees[(bots, _target(to_pin, bots=True), BOTS_WORLD)] = {BOTS_NAME: EDITED}
@@ -368,7 +390,8 @@ def test_both_refused_sources_are_remembered(tmp_path: Path) -> None:
     """The core and TortoiseBots both change a migration: neither commit is offered again."""
     from tests.test_return_newer_migrations import BOTS_CMAKE, CMAKE
 
-    rec, server_dir, made = _ready(tmp_path)
+    rec, server_dir, _made = _ready(tmp_path)
+    made = _made_without_allowlist(rec)
     _core_changed(rec, server_dir, False)
     bots = server_dir / BOTS.dest
     rec.byte_trees[(bots, OLD, BOTS_WORLD)] = {BOTS_NAME: RAN}

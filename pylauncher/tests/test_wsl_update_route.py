@@ -346,6 +346,25 @@ def test_every_seam_that_can_name_a_daemon_names_the_distro() -> None:
     assert unbound == [], f"these seams would ask Windows' own Docker: {unbound}"
 
 
+def test_the_mmaps_cpu_cap_asks_the_distros_docker_for_its_size(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T801: the cap is half what the ENGINE reports, so inside WSL that is the distro's Docker.
+
+    Left unbound, `Seams.engine_size` asked Windows' own Docker Desktop (a different VM, a
+    different CPU count) and capped the map generator by the wrong machine.
+    """
+    asked: list[str | None] = []
+
+    def fake(argv: list[str], *a: object, wsl_distro: str | None = None, **k: object) -> object:
+        asked.append(wsl_distro)
+        return subprocess.CompletedProcess(argv, 0, "8 17179869184\n", "")
+
+    monkeypatch.setattr(docker, "_docker", fake)
+    assert native.Seams.in_wsl(DISTRO).engine_size() == (8, 17179869184)
+    assert asked == [DISTRO]
+
+
 def test_the_wsl_seams_name_their_distro_and_the_local_ones_none() -> None:
     assert native.Seams.in_wsl(DISTRO).distro == DISTRO
     assert native.Seams().distro is None

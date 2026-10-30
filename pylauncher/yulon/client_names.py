@@ -107,9 +107,10 @@ def retail_archive(name: str) -> str | None:
 
     Every archive name the CMaNGOS tools open -- read in their pinned sources
     (`contrib/extractor/System.cpp` and `contrib/vmap_extractor/vmapextract/
-    vmapexport.cpp` at mangos-tbc 75f9ae68 and mangos-classic 8ec338a1,
-    `tools/extractor/System.cpp` and `tools/vmap_extractor/vmapextract/
-    vmapexport.cpp` at tortoise-wow 187af788) -- is a lower-case stem whose
+    vmapexport.cpp` at mangos-tbc 75f9ae68 and mangos-classic 8ec338a1, unchanged at the
+    T824 pins 37767e95 and 57312491; `tools/extractor/System.cpp` and
+    `tools/vmap_extractor/vmapextract/vmapexport.cpp` at tortoise-wow 187af788, unchanged at
+    33d0131a) -- is a lower-case stem whose
     dash-separated locale part is spelled `enUS`, then `.MPQ`: `common.MPQ`,
     `patch-2.MPQ`, `locale-enUS.MPQ`, `expansion-locale-enUS.MPQ`,
     `patch-enUS-2.MPQ`, `dbc.MPQ`.

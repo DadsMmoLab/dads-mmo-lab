@@ -74,7 +74,7 @@ stdin is EOF, and the live Centurion press exited 255 (T241).
 VMAP_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "cmangos-vmap-8ec338a1"
 """`contrib/vmap_extractor/vmapextract/` of `mangos-classic` at `8ec338a1`; see `test_patch.py`."""
 
-TORTOISE_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "tortoise-10393426"
+TORTOISE_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "tortoise-33d0131a"
 """`AutoUpdater.cpp` of tortoise-wow at the pin, laid by its full path (T600)."""
 
 
@@ -278,6 +278,16 @@ class Recorder:
     container_runs: list[docker.ContainerRun] = field(default_factory=list)
     """Every `docker run` the engine asked for, as the typed spec — asserted by field."""
 
+    engine_size: tuple[int, int] | None = None
+    """What `docker.engine_size()` answers for the mmaps CPU cap (T801), pinned by the test.
+
+    Bound like T64's six, not left to the default: the default shells out to
+    `docker info`, and a test that fell through to it would assert whatever box
+    the suite ran on — exactly what "tests must not read the host machine" is
+    about. `None` by default is a Docker that would not say, which the cap
+    treats as "two".
+    """
+
     copied: list[tuple[str, str, Path]] = field(default_factory=list)
     sql_calls: list[str] = field(default_factory=list)
     """The first line of every stream fed to `exec_stdin`, plus every `sql_query` statement.
@@ -370,6 +380,13 @@ class Recorder:
     query_answer: str = "20000\n"
     realm_port: str = "8085\n"
     """What the realm row's port reads back as (T552); a second server's install asks it."""
+    realm_name: str = "AzerothCore"
+    """What the realm row's `name` column holds (T808). An UPDATE through `exec_stdin` that sets
+    it changes it; `reseed_realm_name` sets it back."""
+    reseeds_realm_name: bool = False
+    """True: every importer run (a one-shot service, or the `recreate` a Rebuild's new build starts
+    with, whose importer runs again) seeds `realm_name` back to the catalog's, as an import does to
+    a real realm row."""
     realm_row: str = "127.0.0.1\t127.0.0.1\n"
     """What the realm query answers. A FRESH install holds loopback.
 
@@ -856,7 +873,15 @@ class Recorder:
             return subprocess.CompletedProcess(
                 list(argv), 1, "", "ERROR 1064 (42000) at line 1: You have an error in your SQL"
             )
+        named = re.search(r" SET name=_utf8mb4 X'([0-9A-F]*)'", text)
+        if named:
+            self.realm_name = bytes.fromhex(named.group(1)).decode("utf-8")
         return subprocess.CompletedProcess(list(argv), 0, "", "")
+
+    def reseed_realm_name(self) -> None:
+        """What an import does to the row's name, when `reseeds_realm_name` says it does."""
+        if self.reseeds_realm_name:
+            self.realm_name = "AzerothCore"
 
     def sql_query(
         self,
@@ -873,6 +898,8 @@ class Recorder:
         self.sql_secrets.append(password)
         self.distros.append(wsl_distro)
         # The realm row is answered separately; see `realm_row` and `realm_port`.
+        if statement.startswith("SELECT HEX(CONVERT(name USING utf8mb4))"):
+            return self.realm_name.encode("utf-8").hex().upper() + "\n"
         if "SELECT port FROM" in statement and "realmlist" in statement:
             return self.realm_port
         if "realmlist" in statement:
@@ -960,6 +987,7 @@ class Recorder:
             allowed_modules: str | None = None,
         ) -> docker.AttachedRun:
             self.calls.append(f"one-shot:{service}")
+            self.reseed_realm_name()
             self.one_shot_modules.append(allowed_modules)
             if callable(sink):
                 sink(f"{service} said something")
@@ -1069,6 +1097,7 @@ class Recorder:
             fs_type=lambda path: "ext4",
             keep_awake=lambda: nullcontext(),
             run_container=self.run_container,
+            engine_size=lambda: self.engine_size,
             # T543: no claim container; a test about the claim binds `docker.folder_claim`.
             folder_claim=lambda folder, image, cancel=None: nullcontext(True),
             copy_from_image=self.copy_from_image,
@@ -1222,6 +1251,7 @@ class Recorder:
         if before_signal is not None:
             before_signal()
         self.calls.append("recreate")
+        self.reseed_realm_name()
         return True
 
 

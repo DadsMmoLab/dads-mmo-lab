@@ -206,7 +206,7 @@ def test_the_copy_named_is_the_newest_complete_one_from_before_the_updates(
         message
     )
     assert "without starting the server in between" in message
-    assert "Do not press Clean up… on Maintenance before restoring" in message
+    assert "Do not press Clean up… on the Backups & updates tab before restoring" in message
 
 
 def test_with_no_copy_from_before_it_says_the_way_back_is_closed(tmp_path: Path) -> None:

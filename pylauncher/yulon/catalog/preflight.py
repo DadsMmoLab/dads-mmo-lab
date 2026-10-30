@@ -164,6 +164,17 @@ class Facts:
     vm: platform.VmResources | None = None
     data_root: Path | None = None
     data_root_free: int | None = None
+    containerd_root: Path | None = None
+    """Where Docker 29's containerd image store writes, when the daemon named it.
+
+    A second disk, not a second spelling of `data_root`: `data-root` moves
+    `/var/lib/docker`, while the containerd store stays in
+    `/var/lib/containerd` on the root disk (measured on yulon-ubuntu2,
+    2026-10-28). None when the daemon has no containerd store, is Docker
+    Desktop's (measured on its own VM disk), or did not answer.
+    """
+    containerd_free: int | None = None
+    """Free space where `containerd_root` writes; None is "not measured", not 0."""
     server_dir_free: int | None = None
     same_volume: bool | None = None
     dir_problem: str | None = None
@@ -343,6 +354,7 @@ def gather(
     compose_offer: Callable[[], bool] = platform.compose_update_offered,
     vm_resources: Callable[[], platform.VmResources | None] = platform.vm_resources,
     data_root: Callable[[], Path | None] = platform.docker_desktop_data_root,
+    containerd_root: Callable[[], Path | None] | None = None,
     disk_free: Callable[[Path], int | None] | None = None,
     dir_problem: Callable[[Path], str | None] = platform.server_dir_problem,
     bind_mount_ok: Callable[[Path], bool | None] | None = None,
@@ -388,6 +400,15 @@ def gather(
     facts_vm = vm_resources() if ready else None
     root = data_root() if ready else None
     root_free = free(root) if root is not None else None
+    # Docker 29's containerd image store writes a second disk, and `data-root`
+    # does not move it. Asked only where there is a data root to compare with
+    # (Linux, daemon answered): with no data root the row is already unchecked,
+    # and a containerd reading alone would be a different answer, not today's.
+    ask_containerd = (
+        containerd_root if containerd_root is not None else platform.docker_containerd_root
+    )
+    ctr_root = ask_containerd() if ready and here == "linux" and root is not None else None
+    ctr_free = free(ctr_root) if ctr_root is not None else None
     dir_free = free(server_dir)
     probe = bind_mount_ok if bind_mount_ok is not None else _default_bind_probe
     conflicts = (
@@ -485,7 +506,7 @@ def gather(
             # before anything is compiled or extracted. A wrong one refuses like any other.
             from yulon.catalog.families import clientdir
 
-            wrong_build = clientdir.build_check(client_dir, entry.client)
+            wrong_build = clientdir.build_check(client_dir, entry.client, entry.client.exe_names)
             if wrong_build is not None:
                 client_checks = (*client_checks, wrong_build)
                 refused = wrong_build.verdict == "refuse"
@@ -502,6 +523,8 @@ def gather(
         vm=facts_vm,
         data_root=root,
         data_root_free=root_free,
+        containerd_root=ctr_root,
+        containerd_free=ctr_free,
         server_dir_free=dir_free,
         same_volume=_same_volume(root, server_dir, here),
         dir_problem=dir_problem(server_dir),
@@ -521,7 +544,7 @@ def _default_bind_probe(server_dir: Path) -> bool | None:
 
 
 def client_spec_for(entry: CatalogEntry) -> ClientSpec | None:
-    """The entry's client rules, if its family block has any; AzerothCore's has none.
+    """The entry's client rules, if its family block has any.
 
     The one place that decides whether this install reads a client at all, so
     `gather()` and `evaluate()` cannot come to different conclusions about it.
@@ -535,7 +558,24 @@ def client_spec_for(entry: CatalogEntry) -> ClientSpec | None:
     """
     native = entry.install.native
     built = None if native is None else composegen.built_here(native)
-    return None if built is None else built.client
+    if built is not None:
+        return built.client
+    return client_spec_of(native)
+
+
+def client_spec_of(native: NativeInstall | None) -> ClientSpec | None:
+    """The client rules of an AzerothCore `client_extract` block, or None (T812 C4a).
+
+    `client_spec_for()`'s answer for the family `built_here()` does not
+    cover: an AzerothCore entry with `client_extract` extracts from the
+    player's client under its own block's rules. A CMaNGOS or TrinityCore
+    entry never reaches here with a block (its `built.client` answered
+    above), and neither does an AzerothCore entry without `client_extract`.
+    """
+    block = native.azerothcore if native is not None else None
+    if block is not None and block.client_extract is not None:
+        return block.client_extract.client
+    return None
 
 
 def _default_client_validate(free: Callable[[Path], int | None]) -> ClientValidate:
@@ -931,16 +971,19 @@ def evaluate(
             _one_volume_space_check(facts, refuse_root, warn_root, spent, reused_bytes, held_bytes)
         )
     else:
+        disk_free, disk_named, disk_containerd = _docker_disk_reading(facts)
         checks.append(
             _space_check(
                 "Docker's disk",
-                facts.data_root_free,
+                disk_free,
                 refuse_root,
                 warn_root,
                 facts,
                 spent,
                 reused_bytes,
                 held_bytes,
+                named=disk_named,
+                short_containerd=disk_containerd,
             )
         )
         checks.append(
@@ -1455,6 +1498,45 @@ is what a caller looking for the data-root row matches on.
 """
 
 
+def _containerd_disk_phrase(root: Path) -> str:
+    """The short disk, in words: a path and what fills it, never a command to run."""
+    return f"the disk at {root} (Docker's containerd image store lives there)"
+
+
+def _docker_disk_reading(facts: Facts) -> tuple[int | None, str | None, bool]:
+    """The free space that can stop the build, the disk to name, and whose it is.
+
+    Docker 29 with the containerd image store writes TWO disks: `data-root`
+    holds the classic image store, while containerd's layers and build cache
+    stay in `/var/lib/containerd` on the root disk. Measuring only the data
+    root reported 135 GB free on yulon-ubuntu2 (2026-10-28) while the root disk
+    had 0 B and the first build died with "no space left on device".
+
+    The smaller reading wins, because that is the one that can refuse. The
+    path is named ONLY when a containerd reading was actually taken: with no
+    containerd store (or an unreadable root) the row keeps today's sentence,
+    byte for byte. A tie stays with the data root, so a machine where both
+    answers were taken at the same moment does not rename its row.
+    """
+    containerd_known = facts.containerd_root is not None and facts.containerd_free is not None
+    readings: list[tuple[int, str | None, bool]] = []
+    if facts.data_root_free is not None:
+        named = (
+            f"the disk at {facts.data_root}"
+            if containerd_known and facts.data_root is not None
+            else None
+        )
+        readings.append((facts.data_root_free, named, False))
+    if facts.containerd_root is not None and facts.containerd_free is not None:
+        readings.append(
+            (facts.containerd_free, _containerd_disk_phrase(facts.containerd_root), True)
+        )
+    if not readings:
+        return None, None, False
+    free, named, is_containerd = min(readings, key=lambda reading: (reading[0], reading[2]))
+    return free, named, is_containerd
+
+
 def _one_volume_space_check(
     facts: Facts,
     refuse_gb: float,
@@ -1480,16 +1562,48 @@ def _one_volume_space_check(
     a reading that was not taken, not a zero — only both missing makes the row
     unchecked.
 
+    The containerd image store is a third reading when the daemon named one:
+    it can sit on a disk of its own even when the data root and the folder
+    share a volume, and a build that fills it stops just as dead. The same
+    rule applies — the smallest reading is the one reported.
+
     macOS never gets here (`evaluate()` sends it down the two-row path) because
     there the two rows are not duplicates: "Docker's disk" is the host volume
     holding a sparse VM image behind its own cap, so an ample reading there is
     `unchecked` while the same number for the server folder is a genuine pass.
     Collapsing them would quietly promote the first to the second.
     """
-    readings = [free for free in (facts.data_root_free, facts.server_dir_free) if free is not None]
-    free = min(readings) if readings else None
+    containerd_known = facts.containerd_root is not None and facts.containerd_free is not None
+    # On one volume the folder's reading is the same drive as the data root's,
+    # so the data root's path names whichever of the two is the smaller one.
+    shared_named = (
+        f"the disk at {facts.data_root}"
+        if containerd_known and facts.data_root is not None
+        else None
+    )
+    readings: list[tuple[int, str | None, bool]] = []
+    for free in (facts.data_root_free, facts.server_dir_free):
+        if free is not None:
+            readings.append((free, shared_named, False))
+    if facts.containerd_root is not None and facts.containerd_free is not None:
+        readings.append(
+            (facts.containerd_free, _containerd_disk_phrase(facts.containerd_root), True)
+        )
+    if readings:
+        free_, named, short_containerd = min(readings, key=lambda reading: (reading[0], reading[2]))
+    else:
+        free_, named, short_containerd = None, None, False
     return _space_check(
-        ONE_VOLUME_SPACE, free, refuse_gb, warn_gb, facts, spent, reused_bytes, held_bytes
+        ONE_VOLUME_SPACE,
+        free_,
+        refuse_gb,
+        warn_gb,
+        facts,
+        spent,
+        reused_bytes,
+        held_bytes,
+        named=named,
+        short_containerd=short_containerd,
     )
 
 
@@ -1502,11 +1616,19 @@ def _space_check(
     spent: Spent = NOTHING_SPENT,
     reused_bytes: int = 0,
     held_bytes: int = 0,
+    named: str | None = None,
+    short_containerd: bool = False,
 ) -> Check:
     """One free-space row. `reused_bytes` and `held_bytes` are what lowered its floor (T203).
 
     The build cache the resumed build reuses, and what the server folder
     already holds of the folder's share.
+
+    `named` is the disk to name in the sentence when two were measured and one
+    is short; `short_containerd` says the named one is Docker's containerd
+    image store, which moves by a different setting than the data root. Both
+    default to the old single-disk sentence, so a machine without a containerd
+    store reads exactly as it did.
     """
     # On macOS, "Docker's disk" is the HOST volume holding the sparse VM image,
     # and host free space is an upper bound on what the VM can still grow into —
@@ -1526,6 +1648,7 @@ def _space_check(
             f"Make sure there is at least {warn_gb:.0f} GB free before starting a long build.",
         )
     gigabytes = free / GIB
+    where = f" on {named}" if named else ""
     if spent.build:
         note = BUILD_SPENT_NOTE
     elif facts.same_volume:
@@ -1541,17 +1664,17 @@ def _space_check(
         return Check(
             f"free space on {what}",
             "refuse",
-            f"{have} GB free, and the install needs {need} GB{note}",
-            _space_remedy(what, facts),
+            f"{have} GB free{where}, and the install needs {need} GB{note}",
+            _space_remedy(what, facts, short_containerd),
         )
     if gigabytes < warn_gb:
         have, want = _short_of(gigabytes, warn_gb)
         return Check(
             f"free space on {what}",
             "warn",
-            f"{have} GB free; {want} GB is the comfortable figure{note}",
+            f"{have} GB free{where}; {want} GB is the comfortable figure{note}",
         )
-    return Check(f"free space on {what}", "pass", f"{gigabytes:.0f} GB free")
+    return Check(f"free space on {what}", "pass", f"{gigabytes:.0f} GB free{where}")
 
 
 FOLDER_SPACE_REMEDY = "Free some space, or install to a drive that has room, then try again."
@@ -1608,8 +1731,32 @@ def _docker_disk_remedy(facts: Facts) -> str:
     )
 
 
-def _space_remedy(what: str, facts: Facts) -> str:
+def _containerd_disk_remedy(facts: Facts) -> str:
+    """What to do when containerd's store is the short disk, not the data root.
+
+    `data-root` does not move it (Docker 29 keeps `data-root`'s classic store
+    and the containerd store apart), so the data-root sentence would send a
+    user round the same circle the 2026-09-12 remedy did. Containerd's own
+    config names its root, and no command is needed to free space on it.
+    """
+    where = f" in {facts.containerd_root}" if facts.containerd_root is not None else ""
+    return (
+        "This is Docker's own disk, not the install folder — moving the install will not "
+        f"help. Docker's containerd image store keeps its layers{where} on a disk that "
+        '"data-root" does not move; free space there, or move containerd\'s root to '
+        "another drive in its own config, then try again."
+    )
+
+
+def _space_remedy(what: str, facts: Facts, short_containerd: bool = False) -> str:
     """The remedy for one free-space row. Which drive is short decides which advice is true."""
+    if short_containerd:
+        if what == ONE_VOLUME_SPACE:
+            return (
+                "Free space on it, install to a drive that has room, or move Docker's "
+                "containerd images off it, then try again."
+            )
+        return _containerd_disk_remedy(facts)
     if what == "the server folder":
         return FOLDER_SPACE_REMEDY
     if what == "Docker's disk":

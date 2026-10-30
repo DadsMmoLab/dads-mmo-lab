@@ -499,18 +499,25 @@ case-insensitively because the same folder shipped from Windows spells it
 """
 
 
-def client_executable(client_dir: Path) -> Path:
+def client_executable(client_dir: Path, names: Sequence[str] = _CLIENT_EXE_PREFERENCE) -> Path:
     """The game binary inside a client folder, or where it would be if absent.
 
-    Falling back to `WoW.exe` rather than refusing is deliberate and narrow: the
+    `names` are the entry's lower-case `client.exe_names`, matched case-insensitively
+    because the same folder shipped from Windows spells it `Wow.exe` (`Ascension.exe`
+    for Conquest of Azeroth). The default keeps 8.8's `WoW.exe` pick and fallback.
+
+    Falling back to the first name rather than refusing is deliberate and narrow: the
     folder is one the user picked and Yu'lon validated, and an entry pointing at
     the conventional name inside it is a thing they can see and correct. A
     folder Yu'lon was never given is a different case and refuses (`NO_CLIENT`).
     """
+    wanted = {name.lower() for name in names}
     for candidate in sorted(client_dir.glob("*")):
-        if candidate.is_file() and candidate.name.lower() in _CLIENT_EXE_PREFERENCE:
+        if candidate.is_file() and candidate.name.lower() in wanted:
             return candidate
-    return client_dir / "WoW.exe"
+    if tuple(names) == _CLIENT_EXE_PREFERENCE or not names:
+        return client_dir / "WoW.exe"
+    return client_dir / names[0]
 
 
 def launcher_command(
@@ -1036,6 +1043,21 @@ def confirmation_details(report: AddReport) -> str:
     )
 
 
+def _client_launch_options(wine_dll_overrides: str | None, args: Sequence[str]) -> str:
+    """The client entry's Steam launch options: the DLL overrides before `%command%`, the
+    client's own arguments after it; empty when there is neither (8.8's entry as it was).
+
+    Both are catalog values whose patterns allow no space, quote or shell character
+    (`catalog.Client.wine_dll_overrides`, `catalog.LaunchArg`); `shlex.join` is a second
+    fence for the arguments, not the first.
+    """
+    if not wine_dll_overrides and not args:
+        return ""
+    head = f'WINEDLLOVERRIDES="{wine_dll_overrides}" ' if wine_dll_overrides else ""
+    tail = f" {shlex.join(args)}" if args else ""
+    return f"{head}%command%{tail}"
+
+
 @dataclass
 class SteamShortcuts:
     """This install's two Steam entries. One method, and every seam injectable.
@@ -1048,6 +1070,13 @@ class SteamShortcuts:
     game: str
     server_dir: Path
     client_dir: Path | None
+    exe_names: tuple[str, ...] = ("wow.exe",)
+    """The entry's `client.exe_names`: which executable in the folder is the game (T812)."""
+    wine_dll_overrides: str | None = None
+    """The entry's `client.wine_dll_overrides`: the client's Steam launch options (T812)."""
+    launch_args: Callable[[], tuple[str, ...]] = tuple
+    """The arguments Play would add to the client NOW (CoA's `-hd 0`, T828), read when the
+    entry is written: Steam keeps the launch options it was given until the next add."""
     home: Path = field(default_factory=Path.home)
     is_running: Callable[[], bool] = steam_running
     now: Callable[[], datetime] = datetime.now
@@ -1078,11 +1107,13 @@ class SteamShortcuts:
         if tool is None:
             raise SteamRefusal(NO_PROTON.format(tools=steam_root / "compatibilitytools.d"))
 
-        client_exe = client_executable(self.client_dir)
+        client_exe = client_executable(self.client_dir, names=self.exe_names)
+        launchopts = _client_launch_options(self.wine_dll_overrides, self.launch_args())
         client_entry = new_entry(
             name=self.game,
             exe=str(client_exe),
             startdir=str(self.client_dir),
+            launchopts=launchopts,
         )
         scripts = self.gaming() if self.gaming is not None else None
         stop_entry: VdfMap | None = None

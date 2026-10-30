@@ -22,27 +22,23 @@ failures are recorded (`.notes/phase8-reads/hypeer.md`, from `botid.rs`):
   (`botid.rs:33-38`). So a prefix that cannot be read is refused rather than
   defaulted or blanked.
 
-## What is NOT resolved here, and is named rather than assumed
+## The environment layer (AzerothCore)
 
 On AzerothCore an environment variable beats both the conf file and the compiled
 default, **including for a key that is absent from the file**, and the naming
 rule is generic rather than per-key: every ini key `X` is looked up as
 `"AC_" + upper_snake(X)`, so `AiPlayerbot.RandomBotAccountPrefix` is
-`AC_AI_PLAYERBOT_RANDOM_BOT_ACCOUNT_PREFIX`. That is measured, not derived —
-`Config.cpp:435-438` for the name, `:370-374` and `:391-394` for the transform,
-`:540-552` for env winning at read time — and the proof the rule is generic is
-that the catalog already relies on it for `AiPlayerbot.MinRandomBots`. It is all
-recorded in `.notes/phase8-reads/azerothcore.md:119-124`.
+`AC_AI_PLAYERBOT_RANDOM_BOT_ACCOUNT_PREFIX` (`AC_PLAYERBOTS_…` for a module past
+the T657 rename). That is measured, not derived — `Config.cpp:435-438` for the
+name, `:370-374` and `:391-394` for the transform, `:540-552` for env winning at
+read time — recorded in `.notes/phase8-reads/azerothcore.md:119-124`.
 
-**This module does not read that layer yet**, and that is a real gap rather than
-an unknown one. It was written here as "unmeasured" until 2026-09-06, which was
-wrong about the evidence: the answer was already in the phase's own read.
-
-What the gap costs is bounded. Yu'lon's generated override sets no prefix key,
-so on an install this app made, the conf-or-default answer is the one in force.
-An install where somebody set that variable by hand produces a marker that reads
-fine and matches nothing — which `population()` reports as a **warning** rather
-than as zero, so it surfaces as a question instead of a wrong number.
+Since T805's review `resolve_marker()` reads that layer, in the order the server
+does: the world service's `environment:` in the compose files (the override over
+the base, as compose merges them), then the conf, then the module default. A
+setting it cannot read for certain -- a list-form entry, an `env_file:` it
+cannot follow, a `${…}` it cannot resolve, two different values -- is a refusal
+rather than a guess, because the Bots tab's delete writes by this prefix.
 """
 
 from __future__ import annotations
@@ -53,7 +49,8 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-from yulon import playerbots_keys
+from yulon import playerbots_keys, table_repair
+from yulon.catalog import compose_env, composegen
 from yulon.catalog.catalog import BotMarker, CatalogEntry
 from yulon.log import get_logger
 from yulon.manifest import Db
@@ -69,6 +66,27 @@ needs (an account name) does not include a quote, a percent sign or a
 backslash. Anything else is answered with "I will not use this" rather than with
 an escaping rule that has to be right on four cores and two SQL modes.
 """
+
+
+PREFIX_ESCAPE = "!"
+"""The LIKE escape for a prefix match: `botlist.ESCAPE`'s reasoning (a backslash means nothing
+under `NO_BACKSLASH_ESCAPES`), and a character `_SAFE_PREFIX` never lets into a prefix."""
+
+
+def prefix_match(column: str, prefix: str) -> str:
+    """SQL true when `column` STARTS WITH `prefix`, case-insensitively, and nothing more.
+
+    A bare `LIKE 'RNDBOT_%'` is not that: `_` is LIKE's one-character wildcard and
+    `_SAFE_PREFIX` allows it, so `RNDBOT_` would also match `RNDBOTX…` -- and the Bots
+    tab's delete writes by this test. The wildcards (and the escape itself) are escaped
+    and the escape is named, so every reader and the delete ask the one literal question.
+    The prefix has passed `_SAFE_PREFIX` (no quote, no backslash) before it gets here.
+    """
+    escaped = "".join(
+        PREFIX_ESCAPE + char if char in ("%", "_", PREFIX_ESCAPE) else char
+        for char in prefix.upper()
+    )
+    return f"UPPER({column}) LIKE '{escaped}%' ESCAPE '{PREFIX_ESCAPE}'"
 
 
 @runtime_checkable
@@ -96,7 +114,8 @@ class Marker:
 
     prefix: str
     source: str
-    """`conf` when the install's own file set it, `default` when the module's did.
+    """`env` when the world container's environment set it (AzerothCore), `conf` when the
+    install's own file did, `default` when the module's did.
 
     Reported to the user rather than kept: "no bots found, prefix `rndbot` from
     the module default" and "…from playerbots.conf" send a person to two
@@ -126,6 +145,10 @@ class Population:
     characters: int | None = None
     problem: str = ""
     warning: str = ""
+    crashed: tuple[table_repair.CrashedTable, ...] = ()
+    """The damaged tables a read failure named (T822); empty on every other failure."""
+    crash_unnamed: bool = False
+    """A storage-engine crash error that named no table this app may repair (T822)."""
 
 
 def resolve_marker(entry: CatalogEntry, server_dir: Path) -> MarkerAnswer:
@@ -144,6 +167,12 @@ def resolve_marker(entry: CatalogEntry, server_dir: Path) -> MarkerAnswer:
         # A tree with no prefix setting (T179: Centurion's fixed bot accounts):
         # the catalog's prefix is the marker, and nothing on disk can change it.
         return _checked(Marker(bots.account_prefix, "default"), bots)
+    # T805 review: the environment beats the conf and the default on AzerothCore.
+    from_env = _env_prefix(entry, server_dir, bots.prefix_conf_key)
+    if from_env.problem:
+        return MarkerAnswer(problem=from_env.problem)
+    if from_env.value is not None:
+        return _checked(Marker(from_env.value, "env"), bots)
     conf = server_dir / bots.prefix_conf_file
     try:
         text = conf.read_text(encoding="utf-8", errors="replace")
@@ -191,6 +220,174 @@ def resolve_marker(entry: CatalogEntry, server_dir: Path) -> MarkerAnswer:
     return _checked(Marker(values[0], "conf"), bots)
 
 
+@dataclass(frozen=True)
+class _EnvAnswer:
+    """The prefix the world's environment sets, None when it sets none, or why it is unknown."""
+
+    value: str | None = None
+    problem: str = ""
+
+
+_INTERPOLATION = re.compile(
+    r"\$\{(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?:(?P<op>:?-)(?P<default>[^}]*))?\}"
+)
+
+
+def _env_prefix(entry: CatalogEntry, server_dir: Path, conf_key: str) -> _EnvAnswer:
+    """The prefix the world container's environment sets, read as compose builds it.
+
+    AzerothCore only (`install.native.family`): no other core reads `AC_*`. The
+    world service's `environment:` in `docker-compose.yml` and then
+    `docker-compose.override.yml` -- compose merges the override's keys over the base's,
+    so the override's value wins -- under both of mod-playerbots' spellings (T657),
+    and any `env_file:` of that service. A mention of the name anywhere else in a
+    compose file (a list-form entry, another service's block) is a refusal: this
+    reader cannot say what compose makes of it, and a wrong answer here is a delete
+    by the wrong prefix.
+    """
+    native = entry.install.native
+    if native is None or native.family != "azerothcore":
+        return _EnvAnswer()
+    names = playerbots_keys.reading_order(composegen.env_name_for(conf_key), None, of_env=True)
+    service = entry.container_spec().world
+    dotenv = _dotenv(server_dir / composegen.DOTENV_FILE)
+    found: str | None = None
+    for file in (composegen.BASE_FILE, composegen.OVERRIDE_FILE):
+        path = server_dir / file
+        try:
+            text = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            continue
+        except (OSError, UnicodeDecodeError) as exc:
+            return _EnvAnswer(problem=f"could not read {path} for {names[0]}: {exc}")
+        lines = text.split("\n")
+        at = compose_env.env_lines(lines, service)
+        spots = sorted(i for name in names for i in at.get(name, []))
+        mentioned = sorted(
+            i
+            for i, line in enumerate(lines)
+            if not compose_env.says_nothing(line) and any(name in line for name in names)
+        )
+        if spots != mentioned:
+            return _EnvAnswer(
+                problem=(
+                    f"{names[0]} is named in {file} in a form Yu'lon cannot read for certain "
+                    "(outside the world service's `KEY: value` environment lines), so the bot "
+                    "account prefix this server runs with is not known"
+                )
+            )
+        values = {compose_env.env_value(lines[i]) for i in spots}
+        for env_file in _env_files(lines, service):
+            resolved = _interpolated(env_file, dotenv)
+            if resolved is None:
+                return _EnvAnswer(
+                    problem=f"the world's env_file {env_file!r} in {file} cannot be resolved, "
+                    f"so whether it sets {names[0]} is not known"
+                )
+            try:
+                env_text = (server_dir / resolved).read_text(encoding="utf-8")
+            except FileNotFoundError:
+                continue
+            except (OSError, UnicodeDecodeError) as exc:
+                return _EnvAnswer(problem=f"could not read {resolved} for {names[0]}: {exc}")
+            values |= {v for k, v in _dotenv_text(env_text).items() if k in names}
+        resolved_values = {_interpolated(v, dotenv) for v in values}
+        if None in resolved_values:
+            return _EnvAnswer(
+                problem=f"{names[0]} in {file} uses a `$` substitution Yu'lon cannot resolve"
+            )
+        if len(resolved_values) > 1:
+            return _EnvAnswer(
+                problem=(
+                    f"{names[0]} is set more than once for the world in {file}, to "
+                    f"{' and '.join(repr(v) for v in sorted(str(v) for v in resolved_values))}; "
+                    "which one the server takes is not something this can decide"
+                )
+            )
+        if resolved_values:
+            found = resolved_values.pop()
+    if found is not None and not found:
+        return _EnvAnswer(
+            problem=(
+                f"{names[0]} is blank in the world's environment. An empty prefix matches every "
+                "account, so nothing is counted until it is set."
+            )
+        )
+    return _EnvAnswer(value=found)
+
+
+def _env_files(lines: list[str], service: str) -> list[str]:
+    """The `env_file:` entries of `service` (a scalar or a list of plain paths)."""
+    found: list[str] = []
+    service_at: int | None = None
+    key_at: int | None = None
+    for raw in lines:
+        line = raw.rstrip("\r")
+        if compose_env.says_nothing(line):
+            continue
+        depth = compose_env.indent(line)
+        bare = line.strip()
+        if service_at is not None and depth <= service_at:
+            service_at = None
+        if service_at is None:
+            if bare == f"{service}:":
+                service_at = depth
+            key_at = None
+            continue
+        if key_at is not None and depth > key_at and bare.startswith("-"):
+            found.append(bare[1:].strip().strip("\"'"))
+            continue
+        key_at = None
+        if bare.startswith("env_file:"):
+            value = bare[len("env_file:") :].strip()
+            if value:
+                found.append(value.strip("\"'"))
+            else:
+                key_at = depth
+    return found
+
+
+def _dotenv(path: Path) -> dict[str, str]:
+    """`.env`'s `KEY=value` lines, the values compose substitutes; empty when there is none."""
+    try:
+        return _dotenv_text(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError):
+        return {}
+
+
+def _dotenv_text(text: str) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        out[key.strip().removeprefix("export ").strip()] = value.strip().strip("\"'")
+    return out
+
+
+def _interpolated(value: str, dotenv: dict[str, str]) -> str | None:
+    """`value` with compose's `${NAME}`, `${NAME:-x}` and `${NAME-x}` resolved, else None.
+
+    Read from `.env` only: Yu'lon runs compose with no variable of its own for these, and
+    a `$` form other than those three is not guessed at.
+    """
+
+    def one(match: re.Match[str]) -> str:
+        name, op, default = match.group("name"), match.group("op"), match.group("default")
+        if name in dotenv and not (op == ":-" and dotenv[name] == ""):
+            return dotenv[name]
+        if op is None:
+            raise KeyError(name)
+        return default or ""
+
+    try:
+        out = _INTERPOLATION.sub(one, value)
+    except KeyError:
+        return None
+    return None if "$" in out else out
+
+
 def _checked(marker: Marker, bots: BotMarker) -> MarkerAnswer:
     """Refuse a prefix that cannot be put inside a SQL string as it stands."""
     if not _SAFE_PREFIX.match(marker.prefix):
@@ -228,6 +425,7 @@ def bot_clause(entry: CatalogEntry, marker: Marker) -> str:
 
     Written against the characters table's account column, so it composes into
     any query over `characters` as `(<clause>)` or `NOT (<clause>)`.
+
     """
     ops = entry.observability
     if ops is None:  # pragma: no cover - resolve_marker refuses first
@@ -236,7 +434,7 @@ def bot_clause(entry: CatalogEntry, marker: Marker) -> str:
     account = ops.characters.account
     arms = [
         f"{account} IN (SELECT id FROM {schemas['auth']}.account "
-        f"WHERE UPPER(username) LIKE '{marker.prefix.upper()}%')"
+        f"WHERE {prefix_match('username', marker.prefix)})"
     ]
     registry = ops.bots.registry
     if registry is not None and registry.database in schemas:
@@ -326,6 +524,18 @@ def population(
                         "Save logs for support… and ask for help."
                     )
                 return Population(problem=f"could not read the server's characters: {exc}")
+        crashed = table_repair.crashed_tables(
+            text, (entry.databases.characters, entry.databases.auth)
+        )
+        if crashed.tables or crashed.unnamed:
+            # T822: a crash left a table damaged. The program's own words are the log's;
+            # the card says what happened in plain words and offers the repair.
+            logger.warning(f"a database table is damaged: {text}")
+            return Population(
+                problem=table_repair.damaged_sentence(crashed),
+                crashed=crashed.tables,
+                crash_unnamed=crashed.unnamed,
+            )
         say = logger.info if early else logger.warning
         say(f"could not count this server's population: {exc}")
         return Population(problem=f"could not read the server's characters: {exc}")

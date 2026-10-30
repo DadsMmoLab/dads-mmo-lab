@@ -57,6 +57,11 @@ EXPECTED: dict[str, list[tuple[str, str]]] = {
         ("mod-playerbots", "https://github.com/mod-playerbots/mod-playerbots/issues"),
         ("Yu'lon", YULON_ISSUES),
     ],
+    "wow-coa": [
+        ("Zyth45/azerothcore-wotlk-coa", "https://github.com/Zyth45/azerothcore-wotlk-coa/issues"),
+        ("Zyth45/mod-playerbots", "https://github.com/Zyth45/mod-playerbots/issues"),
+        ("Yu'lon", YULON_ISSUES),
+    ],
     "wow-wotlk": [
         ("AzerothCore", "https://github.com/azerothcore/azerothcore-wotlk/issues"),
         ("mod-playerbots", "https://github.com/mod-playerbots/mod-playerbots/issues"),

@@ -16,10 +16,59 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ### New
 
 ### Fixed
-- When Docker cannot fetch the git image, the Modules tab now shows Docker's reason instead of an unhelpful line.
-- Docker setup now asks for your password on Ubuntu 25.10+ and Kubuntu (sudo-rs) instead of failing every step.
 
 ### Changed
+
+## v0.9.19-Public — 2026-10-30
+
+### New
+- The server card offers **Repair the damaged table…** when a crash left a database table damaged.
+- Edit **worldserver.conf** and **authserver.conf** on the Tuning tab; settings Yu'lon manages stay locked.
+- **Update the server to latest…** on a Tortoise server also updates TortoiseBots Manager in your game client.
+- Updating a module now adds its new settings to your kept config file, leaving your own values alone.
+- Lumenveil graphics mod as an optional WotLK client extra, with an **Update Lumenveil** button.
+- **When stopping** on WotLK, Unbound and Conquest of Azeroth: wait for the bots' saves, or stop once players are saved.
+- Install a Conquest of Azeroth server (beta, Linux) from the Catalog with your own Ascension client. Switch realm type on the Server tab.
+- Keep your Conquest of Azeroth client current with **Update client** beside Play; files you changed are kept unless you say.
+- Turn Conquest of Azeroth's HD patches off or on with **Enable HD patches** under Play, as the official launcher does.
+- The Server tab warns when your Conquest of Azeroth client is the stock Ascension one; **Update client** makes it the CoA client.
+- The Catalog's Installed button now opens that server's tab.
+- New Launcher button (the play icon in the top bar): play on a friend's server with a ready-to-play client, without installing a server.
+- Change the realm name players see in the game's realm list on the Networking tab.
+
+### Fixed
+- **Bring from another computer…** installs Lua scripts after the engine they need, and names any it had to leave out.
+- The install's free-space check now measures Docker's containerd images too, so a full root disk stops it early.
+- On a server inside WSL, each module row on the Modules tab shows its version again.
+- Removing a server now tells you where its kept backups went after its tab closes, instead of losing the message with the tab.
+- A failed build in a module you just installed now says the module is new and your server still runs its old build.
+- **Rebuild the server…** now warns when a new module may not build on a server that is off the tested commits.
+- On Bazzite and other image-based Fedora systems without Docker, the install now says how to get Docker.
+- A refused import now says which server is behind and what to do, instead of pointing at a button that refuses.
+- An import whose update step did not finish now says to restore the first copies and try again, instead of looking done.
+- Bringing in accounts now refuses before loading anything when the server has other database updates waiting.
+- LAN mode now advertises the wired network's address instead of a VPN adapter's, so other computers can connect.
+- Installing WoW Tortoise no longer runs every CPU core flat out while making movement maps, which could restart some PCs.
+- On WoW Tortoise, an account with a GM level no longer logs in invisible in GM mode with new characters on GM Island.
+- When Docker cannot fetch the git image, the Modules tab now shows Docker's reason instead of an unhelpful line.
+- Docker setup now asks for your password on Ubuntu 25.10+ and Kubuntu (sudo-rs) instead of failing every step.
+- **Return to the tested pin** no longer refuses because Windows changed a server file's permissions and nothing else.
+- **Rebuild** works for a WotLK server the old Dad's MMO Lab script built inside WSL, once you agree to it.
+- When Docker setup genuinely fails, the advice now lists every failed step to run, in order, instead of only the first.
+- Tortoise updates no longer stop on upstream's three rewritten database migrations.
+- Updating a WoW Tortoise server now rebuilds only the movement maps whose areas changed, in minutes.
+- A Tuning tab raw file Save that is interrupted now leaves the conf as it was instead of truncated.
+- Pressing **Update the server to latest…** during a backup or move names that job and says once what was not started.
+- Packing or bringing in accounts during a restore or a server bring-in now says what the move cannot do, in its own words.
+- A refused Tuning restart or Repair now shows the update or Repair press its sentence names.
+- Spin boxes keep their number clear of the buttons with any font.
+- **Rebuild** and **Apply module SQL** on a Conquest of Azeroth server no longer stop on a "Duplicate filename" update.
+
+### Changed
+- The newest WotLK, Unbound, TBC, Vanilla, Tortoise and Centurion servers are pinned (not tested live yet).
+- The Danger zone now has one **Remove this server…** press offering off the list, uninstall, or containers.
+- Server updates live in a **Server version** section on the Backups & updates tab instead of a Modules menu.
+- The Maintenance tab is now **Backups & updates**, saying what you find on it.
 
 ## v0.9.18-Public — 2026-10-17
 

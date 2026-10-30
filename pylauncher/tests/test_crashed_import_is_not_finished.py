@@ -571,7 +571,7 @@ def test_characters_under_the_record_are_never_cleared(
             SPEC, tmp_path, probe, reset=reset, safety_copy=lambda: copies.append("x") or "COPY"
         )
     said = str(refused.value)
-    assert "characters" in said and "Maintenance" in said, said
+    assert "characters" in said and "Backups & updates" in said, said
     assert server.dropped == [] and copies == []
     assert IMPORT_UP_ARGV not in calls
 

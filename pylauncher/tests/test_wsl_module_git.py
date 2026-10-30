@@ -27,7 +27,10 @@ from pathlib import Path
 import pytest
 
 from yulon import apply, git, platform, runner
+from yulon.catalog.catalog import load_catalog
 from yulon.controller_wow_wotlk import modules as wotlk_modules
+from yulon.ui import controller_view as view_module
+from yulon.ui.controller_view import ControllerServices
 
 DISTRO = "Ubuntu"
 SERVER = "\\\\wsl.localhost\\Ubuntu\\home\\pk\\wow-unbound"
@@ -176,3 +179,88 @@ def test_a_failed_distro_update_is_not_handed_to_host_git(
     with pytest.raises(git.GitError, match="unable to access"):
         list(seam.clone_lines(spec))
     assert box.host == [], box.host
+
+
+def test_a_wsl_servers_module_rows_show_their_version(box: _Box) -> None:
+    """T774: the per-module version seam is host git, which Git for Windows refuses over
+    `\\\\wsl.localhost`, so every row's version is blank. Both tab factories must read
+    through `apply.module_git(server_dir)` -- the distro's git inside WSL, host git
+    elsewhere -- so a refused host git still leaves a version on the row.
+
+    Mutation: wire either site back to `RunnerGit().head_version` and the seam
+    answers None where the fixture's host git refuses.
+    """
+    catalog = load_catalog()
+    for game in ("wow-wotlk", "wow-tortoise"):
+        entry = catalog.get(game)
+        services = ControllerServices.for_entry(entry, Path(SERVER))
+        assert services.module_version is not None
+        clone = Path(SERVER) / "modules" / "mod-arac"
+        assert services.module_version(clone) is not None, "the distro's git answered nothing"
+        assert git.RunnerGit().head_version(clone) is None, "host git stopped refusing"
+
+
+def test_a_wsl_version_read_runs_off_the_gui_thread(qapp: object, box: _Box) -> None:
+    """T774 trap: `_fill_next_version` reads versions on the GUI thread, and a
+    `ContainerGit` call is `wsl.exe ... docker run alpine/git` per module -- seconds per
+    row, freezing the window. A WSL server's reads must go through `self._run()` (one at
+    a time, same `_filling_versions` gate, same `_closed` check in the done slot) while
+    host-git servers keep the inline walk. The seam records `threading.current_thread()`.
+
+    Mutation: run the distro fill inline and the seam answers from the GUI thread.
+    """
+    from tests.conftest import pump_until
+
+    server_dir = Path(SERVER)
+    assert platform.wsl_location(server_dir) is not None
+    entry = load_catalog().get("wow-wotlk")
+    services = ControllerServices.for_entry(entry, server_dir)
+    assert services.module_version is not None
+
+    real_version = services.module_version
+    ran_on: list[threading.Thread] = []
+
+    def recording(path: Path) -> str | None:
+        ran_on.append(threading.current_thread())
+        return real_version(path)
+
+    object.__setattr__(services, "installed_modules", lambda: {"module": frozenset({"mod-arac"})})
+    object.__setattr__(services, "module_version", recording)
+    here = threading.current_thread()
+    view = view_module.ControllerView(entry, services, status_poll_ms=0)
+    pump_until(lambda: not view._filling_versions, "the version fill never finished")
+
+    assert ran_on, "the walk never ran its read"
+    assert all(thread is not here for thread in ran_on), "a WSL version read ran on the GUI thread"
+
+
+def test_a_wsl_version_answer_after_close_touches_nothing(qapp: object, box: _Box) -> None:
+    """T213 for the T774 job: the WSL done slot checks `_closed` like the tick does.
+
+    A read that was already out when `shutdown()` ran answers to a tab that is
+    going away; without the check it draws on deleted widgets (`set_version` on
+    a deleted label) exactly the way the old late tick did.
+
+    Mutation: drop the `_closed` check from `_version_read` and the fill below
+    stays up while the label is drawn on a closed tab.
+    """
+    from tests.conftest import process_events, pump_until
+
+    server_dir = Path(SERVER)
+    entry = load_catalog().get("wow-wotlk")
+    services = ControllerServices.for_entry(entry, server_dir)
+    assert services.module_version is not None
+    object.__setattr__(services, "installed_modules", lambda: {"module": frozenset({"mod-arac"})})
+    view = view_module.ControllerView(entry, services, status_poll_ms=0)
+    pump_until(lambda: not view._filling_versions, "the version fill never finished")
+    before = view.modules_panel.row("mod-arac").version_label.text()
+    assert before != ""
+
+    view.shutdown()
+    view._version_read(("module", "mod-arac", "MUTATED · 2026-10-12"))
+    process_events(100)
+
+    assert not view._filling_versions, "a stopped walk still claims to be running"
+    assert (
+        view.modules_panel.row("mod-arac").version_label.text() == before
+    ), "a WSL answer after close drew on a closed tab"

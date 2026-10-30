@@ -638,7 +638,7 @@ def test_the_tortoise_stop_holds_the_realm_offline_while_it_runs(
     seen: list[bool] = []
     monkeypatch.setattr(realm_flag, "mark_offline", lambda *_a, **_k: seen.append(True))
     monkeypatch.setattr(
-        "yulon.controller.Controller.stop", lambda _self: seen.append(realm_flag.held(SPEC))
+        "yulon.controller.Controller.stop", lambda _self, **_kw: seen.append(realm_flag.held(SPEC))
     )
     TortoiseController(tmp_path).stop()
     assert seen == [True, True]

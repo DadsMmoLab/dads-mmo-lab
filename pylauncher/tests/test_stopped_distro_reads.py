@@ -756,3 +756,92 @@ def test_a_local_install_still_reads_its_generated_password_when_the_tab_is_buil
     read = controller_view_module._db_password(_entry("wow-tbc"), tmp_path)
     (tmp_path / ".db_password").unlink()
     assert read == "local-0123456789"
+
+
+# -- T826: the Server tab's "When stopping" choice ---------------------------------------------
+
+
+def _record(disk: _DistroDisk) -> Path:
+    from yulon import stop_choice
+
+    return Path(disk.root) / stop_choice.RECORD_FILE
+
+
+def test_the_stop_choice_cannot_be_changed_while_the_distro_is_stopped(
+    qapp: object, disk: _DistroDisk
+) -> None:
+    """Greyed while stopped, and a change that gets through anyway writes nothing there."""
+    from yulon import stop_choice
+
+    view = _open_the_tab(_entry("wow-wotlk"), Path(disk.root))
+    try:
+        assert not view.stop_choice_box.isEnabled(), "pressable on a stopped distro"
+        held: list[object] = []
+        view._jobs = lambda *job: held.append(job)  # type: ignore[method-assign,assignment]
+        view.stop_choice_box.setCurrentIndex(1)
+        assert held == [], "a write was queued for a stopped distro"
+        assert disk.touched == [], "\n".join(disk.touched)
+        assert view.stop_choice_box.currentIndex() == 0, "the box shows a choice not kept"
+        assert view.stop_choice_note.text() == stop_choice.CHOICE_NOT_NOW
+        disk.stopped = False
+        assert not _record(disk).exists()
+    finally:
+        disk.stopped = False
+        view.shutdown()
+
+
+def test_the_stop_choice_is_greyed_again_when_the_distro_stops(
+    qapp: object, disk: _DistroDisk
+) -> None:
+    """The review's case: seen running, then a Stop lets the distro idle out."""
+    view = _open_the_tab(_entry("wow-wotlk"), Path(disk.root))
+    try:
+        disk.stopped = False
+        _poll(view)
+        assert view.stop_choice_box.isEnabled(), "never pressable once the distro ran"
+        disk.stopped = True
+        _poll(view)
+        assert not view.stop_choice_box.isEnabled(), "still pressable on a stopped distro"
+        view.stop_choice_box.setCurrentIndex(1)
+        assert disk.touched == [], "\n".join(disk.touched)
+        disk.stopped = False
+        assert not _record(disk).exists()
+        _poll(view)
+        assert view.stop_choice_box.isEnabled(), "not pressable again once it runs"
+    finally:
+        disk.stopped = False
+        view.shutdown()
+
+
+def test_a_stop_choice_is_written_off_the_gui_thread_and_only_while_the_distro_runs(
+    qapp: object, disk: _DistroDisk
+) -> None:
+    from yulon import stop_choice
+
+    view = _open_the_tab(_entry("wow-wotlk"), Path(disk.root))
+    try:
+        disk.stopped = False
+        _poll(view)
+        held: list[tuple[Any, Any, Any]] = []
+        view._jobs = lambda work, done, failed: held.append((work, done, failed))  # type: ignore[method-assign,assignment]
+        view.stop_choice_box.setCurrentIndex(1)
+        assert not _record(disk).exists(), "written on the GUI thread"
+        assert len(held) == 1 and not view.stop_choice_box.isEnabled()
+        work, done, _failed = held.pop()
+        done(work())
+        assert stop_choice.waits_for_bot_saves(Path(disk.root)) is False
+        assert view.stop_choice_box.isEnabled() and view.stop_choice_box.currentIndex() == 1
+
+        # The distro stops between the press and the worker: the worker writes nothing.
+        view.stop_choice_box.setCurrentIndex(0)
+        work, done, _failed = held.pop()
+        disk.stopped = True
+        done(work())
+        assert disk.touched == [], "\n".join(disk.touched)
+        assert view.stop_choice_box.currentIndex() == 1, "the box shows a choice not kept"
+        assert view.stop_choice_note.text() == stop_choice.CHOICE_NOT_NOW
+        disk.stopped = False
+        assert stop_choice.waits_for_bot_saves(Path(disk.root)) is False
+    finally:
+        disk.stopped = False
+        view.shutdown()

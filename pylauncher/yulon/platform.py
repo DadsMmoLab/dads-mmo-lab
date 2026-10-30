@@ -25,12 +25,12 @@ import tempfile
 import threading
 import time
 import urllib.request
-from collections.abc import Callable, Collection, Iterable, Iterator, Mapping
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from ipaddress import IPv4Address, IPv4Network
 from pathlib import Path, PureWindowsPath
-from typing import Any, Literal, NamedTuple, Protocol
+from typing import Any, Literal, NamedTuple, Protocol, TypeVar
 
 from yulon import runner
 from yulon.log import get_logger
@@ -170,6 +170,17 @@ def in_wsl() -> bool:
             return "microsoft" in fh.read().lower()
     except OSError:
         return False
+
+
+OSTREE_BOOTED_PATH = "/run/ostree-booted"
+"""Exists on a system booted from an ostree image (Bazzite, Silverblue, Kinoite).
+
+A test points it elsewhere."""
+
+
+def is_image_based() -> bool:
+    """True on an image-based Fedora system (rpm-ostree), where dnf cannot install Docker."""
+    return Path(OSTREE_BOOTED_PATH).exists()
 
 
 def is_steamos() -> bool:
@@ -615,15 +626,84 @@ def portproxy_commands(listen_address: str, ports: Iterable[int]) -> list[list[s
     ]
 
 
-def detect_lan_ip() -> str | None:
-    """The host's LAN IPv4 — the address other players on the same network use.
+_DEFAULT_ROUTE_WINDOWS_QUERY = (
+    "Get-NetIPConfiguration | Where-Object { $_.IPv4DefaultGateway -ne $null } | "
+    "ForEach-Object { $_.InterfaceAlias + '|' + $_.IPv4Address.IPAddress }"
+)
+"""The (interface|address) pairs of every adapter Windows gives a default gateway (T800).
 
-    Uses the routing table (a connected UDP socket to a public address; no
-    packet is sent). Inside WSL that answers with the 172.x guest address,
-    which the guide says never to use, so WSL asks the Windows side instead.
+One PowerShell read, and a read only. A full-tunnel VPN (WireGuard's, Tailscale's)
+holds a default gateway too, so the pairs are filtered for VPN/virtual names before
+any of them is preferred; see `_detect_excluded()`."""
+
+
+def _parse_ip_route_default(text: str) -> tuple[str, ...]:
+    """The `dev` interface of every default route line of `ip -4 route show default`."""
+    names: list[str] = []
+    for line in text.splitlines():
+        parts = line.split()
+        for i, part in enumerate(parts[:-1]):
+            if part == "dev":
+                names.append(parts[i + 1])
+                break
+    return tuple(names)
+
+
+def _parse_route_get_default(text: str) -> str | None:
+    """macOS `route -n get default`'s `interface:` value, or None."""
+    for line in text.splitlines():
+        key, sep, value = line.partition(":")
+        if sep and key.strip() == "interface":
+            return value.strip() or None
+    return None
+
+
+def _route_pairs(do: RunCmd, where: PlatformId) -> tuple[tuple[str, str], ...]:
+    """(interface, address) for the adapter(s) holding the default route (T800).
+
+    An empty answer means the OS would not say (the command could not run, or there is no
+    default route) — never that the routes were read and hold nothing.
     """
-    if in_wsl():
-        return _windows_lan_ip_from_wsl()
+    if where == "windows":
+        pairs = _listing(
+            do,
+            ["powershell.exe", "-NoProfile", "-Command", _DEFAULT_ROUTE_WINDOWS_QUERY],
+            _parse_powershell_addresses,
+        )
+        return pairs or ()
+    if where == "macos":
+        name = _route_get_default_macos(do)
+        if not name:
+            return ()
+        pairs = _listing(do, ["ifconfig"], _parse_ifconfig)
+        return () if pairs is None else tuple(p for p in pairs if p[0] == name)
+    devs = _listing(do, ["ip", "-4", "route", "show", "default"], _parse_ip_route_default)
+    if not devs:
+        return ()
+    pairs = _listing(do, ["ip", "-4", "-o", "addr", "show"], _parse_ip_addr)
+    if pairs is None:
+        return ()
+    return tuple((interface, address) for interface, address in pairs if interface in devs)
+
+
+def _route_get_default_macos(do: RunCmd) -> str | None:
+    """The interface macOS's routing table sends the default route to, or None."""
+    try:
+        proc = do(["route", "-n", "get", "default"])
+    except OSError:
+        return None
+    if proc.returncode != 0:
+        return None
+    return _parse_route_get_default(proc.stdout)
+
+
+def _socket_lan_ip() -> str | None:
+    """The address a connected UDP socket to a public address answers (no packet is sent).
+
+    The routing table's own choice, with no adapter name attached — so a VPN that is the
+    default route cannot be told apart from the wired one. `detect_lan_ip()` keeps this as
+    its last answer, exactly as it answered before T800; a test stands in for it.
+    """
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
             sock.connect(("1.1.1.1", 53))
@@ -634,19 +714,81 @@ def detect_lan_ip() -> str | None:
     return None if ip.startswith("127.") else ip
 
 
-def _windows_lan_ip_from_wsl() -> str | None:
-    """Ask Windows (via powershell.exe) for the IPv4 of the adapter with a default gateway."""
-    proc = runner.run(
-        [
-            "powershell.exe",
-            "-NoProfile",
-            "-Command",
-            "(Get-NetIPConfiguration | Where-Object {$_.IPv4DefaultGateway -ne $null} "
-            "| Select-Object -First 1).IPv4Address.IPAddress",
-        ]
+def _real_route_candidates(do: RunCmd, where: PlatformId) -> tuple[tuple[str, str], ...]:
+    """The default-route pairs that a LAN player could dial (`_plain_lan_address`)."""
+    return tuple(
+        (interface, address)
+        for interface, address in _route_pairs(do, where)
+        if _plain_lan_address(interface, address)
     )
-    ip = proc.stdout.strip().splitlines()[0].strip() if proc.stdout.strip() else ""
-    return ip or None
+
+
+def _one_address(pairs: Iterable[tuple[str, str]]) -> str | None:
+    """The one address the pairs share, or None when they hold none, two or more."""
+    addresses = {address for _, address in pairs}
+    return addresses.pop() if len(addresses) == 1 else None
+
+
+def detect_lan_ip(
+    run: RunCmd | None = None, *, system: PlatformId | None = None, wsl: bool | None = None
+) -> str | None:
+    """The host's LAN IPv4 — the address other players on the same network use (T800).
+
+    Three answers, best first. The adapter that holds the default route, when it is not a
+    VPN's or a virtual one (a full-tunnel VPN holds the default route too, and a connected
+    UDP socket cannot tell its address from the wired one — that is how a Tailscale or
+    WireGuard 10.x/100.x address was advertised to a LAN that could not reach it). Then the
+    one address left once every VPN/virtual, loopback and link-local one is set aside, when
+    it is exactly one. Then the routing table's own choice, as always: a connected UDP
+    socket to a public address, no packet sent.
+
+    Inside WSL that socket answers with the 172.x guest address, which the guide says never
+    to use, so WSL asks the Windows side instead. The `system`/`wsl` keywords pin what
+    `detect()`/`in_wsl()` would answer, so a test reads no host of its own.
+    """
+    where = detect() if system is None else system
+    if in_wsl() if wsl is None else wsl:
+        return _windows_lan_ip_from_wsl(run)
+    do: RunCmd = run if run is not None else (lambda argv: runner.run(argv, timeout=8.0))
+    found = _one_address(_real_route_candidates(do, where))
+    if found is not None:
+        return found
+    listing = local_ipv4_listing(do, system=where, wsl=False)
+    found = _one_address(
+        tuple(
+            (a.interface, a.address)
+            for a in listing.addresses
+            if not a.vpn and not _detect_excluded(a.interface)
+        )
+    )
+    if found is not None:
+        return found
+    return _socket_lan_ip()
+
+
+def _windows_lan_ip_from_wsl(run: RunCmd | None = None) -> str | None:
+    """Ask Windows (via powershell.exe) for the IPv4 of the adapter with a default gateway.
+
+    Every default-gateway adapter's (interface|address) is read in one go, and a VPN's or a
+    virtual one is passed over when that leaves exactly one real address (T800). When it
+    does not — no real one, or two real ones — the FIRST default-gateway adapter's address
+    wins, which is what this asked before T800; under WSL the UDP socket is no fallback
+    (it answers the VM's 172.x guest address, which the guide says never to use).
+    """
+    do: RunCmd = run if run is not None else (lambda argv: runner.run(argv, timeout=8.0))
+    pairs = _listing(
+        do,
+        ["powershell.exe", "-NoProfile", "-Command", _DEFAULT_ROUTE_WINDOWS_QUERY],
+        _parse_powershell_addresses,
+    )
+    if not pairs:
+        return None
+    found = _one_address(
+        (interface, address)
+        for interface, address in pairs
+        if _plain_lan_address(interface, address)
+    )
+    return found if found is not None else pairs[0][1]
 
 
 ADDRESS_LISTING_QUERY = (
@@ -696,6 +838,45 @@ def _vpn_like(interface: str, address: IPv4Address) -> bool:
         or any(part in name for part in _VPN_NAME_PARTS)
         or name.startswith(_VPN_NAME_PREFIXES)
     )
+
+
+_LAN_EXCLUDED_NAME_PARTS = _VPN_NAME_PARTS + (
+    "wintun",
+    "hyper-v",
+    "hyperv",
+    "vmware",
+    "vmnet",
+    "virtualbox",
+    "wsl",
+)
+_LAN_EXCLUDED_NAME_PREFIXES = _VPN_NAME_PREFIXES + _CONTAINER_BRIDGE_PREFIXES
+"""Names LAN detection may not prefer (T800): the VPN adapters' names, plus the
+virtual ones — Wintun, Hyper-V, VMware (and its VMnet adapters), VirtualBox,
+Docker's bridges, WSL's switch. Deliberately NOT the tag `_vpn_like()` puts on
+the player's choice list, which keeps a Hyper-V EXTERNAL switch
+(`vEthernet (External)`) as the real LAN it measured to be (T674 round 3): an
+exclusion that broad would only push those machines to the same UDP-socket
+answer they get today, so it would fix nothing and relabel a working choice."""
+
+
+def _detect_excluded(interface: str) -> bool:
+    """Whether `interface`'s name is a VPN's or a virtual adapter's, so no LAN player reaches it."""
+    name = interface.casefold()
+    return name.startswith(_LAN_EXCLUDED_NAME_PREFIXES) or any(
+        part in name for part in _LAN_EXCLUDED_NAME_PARTS
+    )
+
+
+def _plain_lan_address(interface: str, address: str) -> bool:
+    """Whether (interface, address) is a candidate a LAN player could dial: real IPv4, no
+    loopback, no link-local (169.254/16, T800), no VPN or virtual adapter."""
+    try:
+        ip = IPv4Address(address)
+    except ValueError:
+        return False
+    if ip.is_loopback or ip.is_link_local or ip.is_unspecified:
+        return False
+    return not _detect_excluded(interface)
 
 
 def _parse_ip_addr(text: str) -> tuple[tuple[str, str], ...]:
@@ -769,9 +950,10 @@ def _parse_powershell_addresses(text: str) -> tuple[tuple[str, str], ...]:
 
 
 _PairParser = Callable[[str], tuple[tuple[str, str], ...]]
+_T = TypeVar("_T")
 
 
-def _listing(do: RunCmd, argv: list[str], parse: _PairParser) -> tuple[tuple[str, str], ...] | None:
+def _listing(do: RunCmd, argv: list[str], parse: Callable[[str], _T]) -> _T | None:
     """What one listing command says, or None if it cannot be run or exits non-zero.
 
     None and () are different answers (T674 round 3): an empty listing was read and holds
@@ -807,9 +989,10 @@ def local_ipv4_addresses(
 ) -> tuple[LocalAddress, ...]:
     """Every usable IPv4 address this computer holds, with the interface that holds it (T674).
 
-    Not what `detect_lan_ip()` answers. That is the address of the default route, and a Tailscale
-    or other VPN interface is never the default route, so the address a friend on that network has
-    to type exists only in this listing. Under WSL it is the Windows adapters, which a server in
+    Not what `detect_lan_ip()` answers. That is the address of the adapter holding the default
+    route — a full-tunnel VPN holds that route too (T800), which is why `detect_lan_ip()` now
+    reads the adapters' names — so the address a friend on that network has to type exists only
+    in this listing. Under WSL it is the Windows adapters, which a server in
     WSL is reached on through the Windows forwarder, plus the VM's VPN interfaces (`LocalSide`);
     the VM's NAT eth0 is left out. The choice list and `networking.holds_here()` both read this
     listing under WSL, so the guard accepts what is offered, and refuses the VM's eth0. Loopback and
@@ -2327,6 +2510,13 @@ DOCKER_OTHER_ENGINE_STEP = (
     "another copy over it. Start Docker (or fix it), then press Install again."
 )
 
+DOCKER_IMAGE_BASED_STEP = (
+    "This is an image-based system (rpm-ostree, such as Bazzite) and it has no Docker. It has "
+    "Podman, which Yu'lon does not use, and the usual Docker setup does not apply here, so "
+    "nothing was run. Bazzite-DX ships Docker already (switch to it with ujust). Otherwise "
+    "layer Docker with rpm-ostree, reboot, then start Yu'lon again and press Install."
+)
+
 DOCKER_NO_ASKER_STEP = (
     "Yu'lon needs your yes before it runs anything as root, and there was nobody to ask. "
     "To do it yourself, run these in a terminal, then press Install again:\n{commands}"
@@ -2456,32 +2646,49 @@ def _step_command(step: str) -> str:
     return step.split(":", 1)[0].strip()
 
 
-def docker_setup_remedy(step: str, *, steamos: bool) -> str:
-    """Plain words for why `step` — the FIRST failed step — stopped, and what to run.
+def docker_setup_remedy(steps: str | Sequence[str], *, steamos: bool) -> str:
+    """Plain words for why the failed steps stopped, and what to run.
 
-    `step` is one entry of `ProvisionReport.skipped`, which `_run_steps()`
+    `steps` is one or more entries of `ProvisionReport.skipped`, which `_run_steps()`
     writes as `"<command>: <why>"`. Everything before the first colon is the
     command as it was shown; commands here are argv lists of package managers
     and never contain one.
 
     Only the pacman keyring gets a named cause, because it is the only one this
-    project has a real capture of (T57) and a source for. Every other first
-    failure is reported as itself with its own command to run in a terminal,
-    which is honest and is still an enormous improvement on advice for a step
-    three links further down the chain.
+    project has a real capture of (T57) and a source for. Every other failure
+    is reported as itself with its own command to run in a terminal, which is
+    honest and is still an enormous improvement on advice for a step three
+    links further down the chain. When several steps failed, every one is
+    named in order, so running just the first no longer leaves the chain
+    broken (follow-up to T799: the first command ran clean and the next one
+    failed the same way, which read as the fix not working).
     """
-    command = _step_command(step)
-    if command.startswith("pacman ") and any(w in step.lower() for w in _KEYRING_WORDS):
+    first = steps if isinstance(steps, str) else steps[0]
+    command = _step_command(first)
+    if command.startswith("pacman ") and any(w in first.lower() for w in _KEYRING_WORDS):
         cause = (
             _PACMAN_KEYRING_CAUSE
             + (_STEAMOS_READONLY_CAUSE if steamos else "")
             + _PACMAN_KEYRING_FIX
         )
         return DOCKER_SETUP_FIRST_FAILURE_STEP.format(cause=cause)
+    if isinstance(steps, str):
+        steps = [steps]
+    commands = [_step_command(s) for s in steps]
+    if len(commands) == 1:
+        cause = (
+            f"{commands[0]} did not run, and the steps after it needed what it would have "
+            "installed. Run it in a terminal and it will say what stopped it, "
+            "then press Install again:\n"
+            f"sudo {commands[0]}"
+        )
+        return DOCKER_SETUP_FIRST_FAILURE_STEP.format(cause=cause)
+    run = "\n".join(f"sudo {command}" for command in commands)
     cause = (
-        f"{command} did not run, and the steps after it needed what it would have installed. "
-        "Run it in a terminal and it will say what stopped it, then press Install again:\n"
-        f"sudo {command}"
+        f"{commands[0]} did not run, and the steps after it needed what it would have "
+        "installed. Run these in a terminal, in order — each one says what stopped it — "
+        "then press Install again:\n"
+        f"{run}"
     )
     return DOCKER_SETUP_FIRST_FAILURE_STEP.format(cause=cause)
 
@@ -4113,6 +4320,11 @@ def _ensure_docker_linux(
             ask,
         )
 
+    if on_board == "none" and is_image_based():
+        # No dnf install and no usermod here (T796): the root filesystem is an image, and
+        # the advice for a Docker service on a normal Fedora is wrong. Say so, run nothing.
+        return ProvisionReport("linux", manual_steps=(DOCKER_IMAGE_BASED_STEP,))
+
     steamos = is_steamos()
     pm = linux_package_manager(which)
     if on_board in ("service", "snap"):
@@ -4235,7 +4447,7 @@ def _ensure_docker_linux(
                 # that step and gives the command, and it is the right advice
                 # there. Adding the generic remedy too would print the same
                 # `usermod` twice in one message.
-                manual.insert(0, docker_setup_remedy(failed[0], steamos=steamos))
+                manual.insert(0, docker_setup_remedy(failed, steamos=steamos))
         if password:
             # Not `failed`, which is now the list of real failures above: this
             # is the other half of the split, and reusing that name would make
@@ -5747,6 +5959,98 @@ def _through_wsl_mount(location: PureWindowsPath) -> Path | None:
     if len(drive) == 2 and drive[1] == ":" and drive[0].isalpha():
         return _WSL_MOUNT_ROOT.joinpath(drive[0].lower(), *location.parts[1:])
     return None
+
+
+_CONTAINERD_ROOT = Path("/var/lib/containerd")
+"""Where a Linux daemon's containerd image store writes.
+
+Docker 29 with the containerd image store keeps its layers and build cache
+here, NOT under `DockerRootDir`: `data-root` moves `/var/lib/docker`, and the
+containerd store stays on the root disk. Measured on yulon-ubuntu2 on
+2026-10-28 — `DockerRootDir` was `/mnt/coa/docker` on a 135 GB disk, this
+directory was on the root disk with 0 B free, and the first build died with
+"no space left on device" while preflight reported 135 GB free.
+
+`docker info` does not report containerd's own configured `root`
+(`/etc/containerd/config.toml` may move it), so this is the path used, and a
+daemon that keeps it elsewhere is not something this can tell. A path that is
+not a directory here is "could not tell", and the caller keeps the data-root
+answer.
+"""
+
+_CONTAINERD_SNAPSHOTTER = "io.containerd.snapshotter.v1"
+"""The snapshotter name that says the image store is containerd's."""
+
+
+def _containerd_image_store(info: dict[str, object]) -> bool:
+    """Did this daemon say it uses the containerd image store?
+
+    Docker 29's containerd store reports `Driver=overlayfs` (the classic
+    overlay2 store reports `overlay2`) and/or a `DriverStatus` pair
+    `["driver-type", "io.containerd.snapshotter.v1"]`. Either is enough; a
+    daemon whose answer says neither is read exactly as it was before this
+    existed.
+    """
+    driver = info.get("Driver")
+    if isinstance(driver, str) and driver.strip() in ("overlayfs", _CONTAINERD_SNAPSHOTTER):
+        return True
+    status = info.get("DriverStatus")
+    if not isinstance(status, list):
+        return False
+    for entry in status:
+        if isinstance(entry, (list, tuple)) and len(entry) >= 2:
+            key, value = entry[0], entry[1]
+        elif isinstance(entry, str):
+            key, _, value = entry.partition(":")
+        else:
+            continue
+        if (
+            isinstance(key, str)
+            and key.strip().lower() in ("driver-type", "driver type")
+            and isinstance(value, str)
+            and _CONTAINERD_SNAPSHOTTER in value
+        ):
+            return True
+    return False
+
+
+def docker_containerd_root(run: RunCmd | None = None) -> Path | None:
+    """The disk the containerd image store writes, or None when this daemon has none.
+
+    Linux only: the caller asks it only when `detect()` answered "linux". On
+    Docker Desktop (including its WSL integration) the store is inside the
+    VM's own disk, which `_windows_data_root()`/`_desktop_wsl_vhdx()` already
+    measure, so this answers None there.
+
+    None is also the answer for overlay2 (no containerd store), for a daemon
+    that did not answer, and for a containerd root that is not a readable
+    directory — every one of those keeps today's answer, which is the data
+    root's free space. It never falls back to `DockerRootDir` with a *number*
+    for containerd: a path that cannot be read is not a zero.
+    """
+    info = docker_info(run)
+    if info is None:
+        return None
+    operating_system = info.get("OperatingSystem")
+    if (
+        isinstance(operating_system, str)
+        and operating_system.strip() == _DOCKER_DESKTOP_OPERATING_SYSTEM
+    ):
+        return None
+    root = info.get("DockerRootDir")
+    if not isinstance(root, str) or not root.strip():
+        logger.info(f"docker info reported DockerRootDir={root!r}; no data root to fall back on")
+        return None
+    if not _containerd_image_store(info):
+        return None
+    try:
+        if not _CONTAINERD_ROOT.is_dir():
+            logger.info(f"{_CONTAINERD_ROOT} is not a directory; keeping the data-root answer")
+            return None
+    except OSError as exc:
+        logger.info(f"could not look at {_CONTAINERD_ROOT}: {exc}")
+        return None
+    return _CONTAINERD_ROOT
 
 
 def _linux_data_root(run: RunCmd | None) -> Path | None:

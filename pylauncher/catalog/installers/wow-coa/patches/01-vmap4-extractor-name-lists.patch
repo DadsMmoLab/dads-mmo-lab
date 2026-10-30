@@ -1,0 +1,41 @@
+diff --git a/src/tools/vmap4_extractor/adtfile.cpp b/src/tools/vmap4_extractor/adtfile.cpp
+index 2d4d31458..97a3eb59f 100644
+--- a/src/tools/vmap4_extractor/adtfile.cpp
++++ b/src/tools/vmap4_extractor/adtfile.cpp
+@@ -116,8 +116,9 @@ bool ADTFile::init(uint32 map_num, uint32 tileX, uint32 tileY)
+         {
+             if (size)
+             {
+-                char* buf = new char[size];
++                char* buf = new char[size + 1];
+                 _file.read(buf, size);
++                buf[size] = 0;
+                 char* p = buf;
+                 while (p < buf + size)
+                 {
+@@ -139,8 +140,9 @@ bool ADTFile::init(uint32 map_num, uint32 tileX, uint32 tileY)
+         {
+             if (size)
+             {
+-                char* buf = new char[size];
++                char* buf = new char[size + 1];
+                 _file.read(buf, size);
++                buf[size] = 0;
+                 char* p = buf;
+                 while (p < buf + size)
+                 {
+diff --git a/src/tools/vmap4_extractor/wdtfile.cpp b/src/tools/vmap4_extractor/wdtfile.cpp
+index 59955d157..f72099dc7 100644
+--- a/src/tools/vmap4_extractor/wdtfile.cpp
++++ b/src/tools/vmap4_extractor/wdtfile.cpp
+@@ -73,8 +73,9 @@ bool WDTFile::init(uint32 mapId)
+             // global map objects
+             if (size)
+             {
+-                char* buf = new char[size];
++                char* buf = new char[size + 1];
+                 _file.read(buf, size);
++                buf[size] = 0;
+                 char* p = buf;
+                 while (p < buf + size)
+                 {

@@ -155,6 +155,7 @@ def context(
     *,
     completed: Iterable[str] = (),
     cancel: threading.Event | None = None,
+    entry: CatalogEntry = ENTRY,
 ) -> native.StageContext:
     """A `StageContext` for calling one stage body directly.
 
@@ -166,7 +167,7 @@ def context(
         server_dir=server_dir,
         client_dir=client_dir,
         state=native.InstallState(
-            game_id=ENTRY.id,
+            game_id=entry.id,
             install_id=composegen.install_id(server_dir, platform_id=lambda: "linux"),
             family="cmangos",
             completed=tuple(completed),
@@ -2242,9 +2243,9 @@ def test_a_press_on_an_install_built_before_the_patch_refuses_and_says_what_to_p
 
 def test_the_refusal_names_an_action_the_server_tab_actually_offers() -> None:
     """A remedy sentence naming a button that is not there is worse than no sentence."""
-    from yulon.ui import controller_view
+    from yulon.ui.widgets import remove_dialog
 
-    assert cmangos.REBUILD_ACTION == controller_view.REMOVE_IDLE
+    assert cmangos.REBUILD_ACTION == remove_dialog.REMOVE_CONTAINERS_LABEL
 
 
 def finished_extraction(rec: Recorder, server_dir: Path, client: Path) -> Path:
@@ -3142,7 +3143,7 @@ def test_the_scan_sees_a_volume_deleting_action_the_wording_check_is_blind_to() 
 
     Run 2026-09-01 (K.3 review, and again here): with a real volume-deleting
     action present in `controller_view`, `"volume, which is kept" in source`
-    is still true, because that substring belongs to the REMOVE_IDLE warning
+    is still true, because that substring belongs to the containers warning
     and an ADDED action removes nothing. A test whose name promised to go red
     the day the Server tab grew such an action was therefore green with the
     action sitting in the file. Only the scan reacts to it.
@@ -3689,6 +3690,134 @@ def test_mmaps_refuses_before_any_extraction(tmp_path: Path) -> None:
     with pytest.raises(InstallerError, match="no extraction evidence"):
         list(engine(rec)._mmaps(context(server_dir)))
     assert rec.container_runs == []
+
+
+# --- T801: Tortoise's MoveMapGen has no --threads option and starts a worker per
+# --- core, so its container is capped with Docker's --cpus instead. The cap comes
+# --- through the `engine_size` seam: a test that fell through to the real
+# --- `docker info` would assert whatever box the suite ran on.
+
+
+TORTOISE = installable(load_catalog().get("wow-tortoise"))
+VANILLA = installable(load_catalog().get("wow-vanilla"))
+assert TORTOISE.install.native is not None
+assert TORTOISE.install.native.cmangos is not None
+TORTOISE_MMAPS_ARGV = TORTOISE.install.native.cmangos.mmaps.argv
+GiB = 1024 * 1024 * 1024
+
+
+def tortoise_client(tmp_path: Path) -> Path:
+    """A client passing Tortoise's ClientSpec: `Data/dbc.MPQ`, the Vanilla expansion's file."""
+    client = tmp_path / "client"
+    (client / "Data").mkdir(parents=True)
+    (client / "Data" / "dbc.MPQ").write_bytes(b"MPQ\x1a")
+    return client
+
+
+def _tortoise_mmaps(rec: Recorder, tmp_path: Path, **overrides: object) -> tuple[list[str], object]:
+    """Drive Tortoise's extract then mmaps once; return (stage lines, the generator's run)."""
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    eng = engine(rec, entry=TORTOISE, **overrides)
+    rec.success_returncodes = (0, 1)
+    list(eng._extract(context(server_dir, tortoise_client(tmp_path), entry=TORTOISE)))
+    extracted = len(rec.container_runs)
+    # The Tortoise fork's generator ends `return silent ? 1 : finish(..., 1)`:
+    # a COMPLETE build exits 1 (MmapPlan.success_codes), and the double must
+    # both return that status and accept it as "the tool wrote its output".
+    rec.run_result = docker.AttachedRun(1, ("ran",))
+    said = list(eng._mmaps(context(server_dir, entry=TORTOISE)))
+    run = rec.container_runs[extracted]
+    assert run.argv == TORTOISE_MMAPS_ARGV, run.argv
+    return said, run
+
+
+def test_tortoise_mmaps_capped_to_half_engine_cpus(tmp_path: Path) -> None:
+    """16 CPUs / 64 GiB: half the cores is 8, half the memory is 32 — cores bind."""
+    rec = Recorder()
+    rec.engine_size = (16, 64 * GiB)
+    said, run = _tortoise_mmaps(rec, tmp_path)
+    assert run.cpus == 8
+    # The cores are pinned too (the first 8), and the RAM is ceilinged at half the
+    # engine's: `--cpus` alone bounds only CPU time, not what the workers allocate.
+    assert run.cpuset == "0-7"
+    assert run.memory == 32 * GiB
+    assert "mmaps: limited to 8 CPUs (cores 0-7) and 32.0 GiB of memory" in said
+
+
+def test_tortoise_mmaps_cap_bounded_by_memory(tmp_path: Path) -> None:
+    """16 CPUs / 8 GiB: half the cores is 8, half the memory is 4 — the memory binds.
+
+    A movement-map worker is ~2 GB, so a many-core box with little RAM must be
+    bounded by the memory: an uncapped 16 workers on an 8 GiB engine is the
+    hard-reboot shape T801 reports.
+    """
+    rec = Recorder()
+    rec.engine_size = (16, 8 * GiB)
+    said, run = _tortoise_mmaps(rec, tmp_path)
+    assert run.cpus == 4
+    assert run.cpuset == "0-3"
+    assert run.memory == 4 * GiB
+    assert "mmaps: limited to 4 CPUs (cores 0-3) and 4.0 GiB of memory" in said
+
+
+def test_tortoise_mmaps_cap_floor_is_one(tmp_path: Path) -> None:
+    """1 CPU / 1 GiB: both halves floor at zero, and a cap of zero is not a cap."""
+    rec = Recorder()
+    rec.engine_size = (1, 1 * GiB)
+    said, run = _tortoise_mmaps(rec, tmp_path)
+    assert run.cpus == 1
+    assert run.cpuset == "0", "one core is core 0, not an empty range"
+    assert run.memory == GiB // 2
+    assert "mmaps: limited to 1 CPUs (cores 0) and 0.5 GiB of memory" in said
+
+
+def test_tortoise_mmaps_cap_falls_back_to_two_when_engine_unknown(tmp_path: Path) -> None:
+    """An engine that would not say gets the number the CMaNGOS generators spell themselves."""
+    rec = Recorder()
+    rec.engine_size = None
+    said, run = _tortoise_mmaps(rec, tmp_path)
+    assert run.cpus == 2
+    # No pin and no RAM ceiling sized against an engine nobody measured.
+    assert run.cpuset is None and run.memory is None
+    assert "mmaps: limited to 2 CPUs" in said
+
+
+def test_tbc_vanilla_mmaps_keep_threads_2_and_no_cpus_flag(tmp_path: Path) -> None:
+    """The CMaNGOS entries cap THEMSELVES with `--threads 2` and take no `--cpus` from us.
+
+    `cpu_cap` stays None on both: capping their containers too would be a second
+    cap on top of the one the generator already makes for itself.
+    """
+    for entry in (ENTRY, VANILLA):
+        native_cmangos = entry.install.native.cmangos
+        assert native_cmangos is not None
+        assert native_cmangos.mmaps.cpu_cap is None
+        argv = native_cmangos.mmaps.argv
+        i = argv.index("--threads")
+        assert argv[i + 1] == "2", argv
+        assert argv.count("--threads") == 1
+    rec = Recorder()
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    eng = engine(rec)
+    list(eng._extract(context(server_dir, client_folder(tmp_path))))
+    extracted = len(rec.container_runs)
+    said = list(eng._mmaps(context(server_dir)))
+    assert rec.container_runs[extracted].cpus is None
+    assert rec.container_runs[extracted].cpuset is None
+    assert rec.container_runs[extracted].memory is None
+    assert not any("limited to" in line for line in said)
+
+
+def test_tortoise_mmaps_argv_has_no_threads_flag() -> None:
+    """Tortoise's fork rejects `--threads` as a map id, so the argv must never grow one.
+
+    The cap is the container's `--cpus` instead; this pins the argv shape the
+    four cap tests above assume.
+    """
+    assert "--threads" not in TORTOISE_MMAPS_ARGV
+    assert TORTOISE.install.native.cmangos.mmaps.cpu_cap == "half"
 
 
 def test_no_mmaps_container_is_handed_anything_that_names_the_users_client(
@@ -5719,3 +5848,351 @@ def test_a_cancelled_tbc_install_offers_the_users_own_compose_file(tmp_path: Pat
         "the folder `attach_existing()` accepts got no offer to attach it: " + note
     )
     assert f"Delete {server}" not in note and f"delete {server}" not in note, note
+
+
+# --- T811 family tests: the four failing cases ---------------------------------------
+
+OFFMESH_OLD = b"1 -1 2 3 4\n800 1.0 2.0 3.0 4.0 5.0 6.0\n"
+OFFMESH_NEW = b"1 -1 2 3 4\n800 1.0 2.0 3.0 4.0 5.0 7.0\n"
+
+
+def tortoise_entry() -> CatalogEntry:
+    entry = installable(load_catalog().get("wow-tortoise"))
+    assert entry.install.native is not None and entry.install.native.cmangos is not None
+    return entry
+
+
+def tortoise_engine(rec: Recorder):
+    entry = tortoise_entry()
+    eng = engine_for(entry, rec)
+    eng._test_gate = native.CallableGate(rec.probe, rec.reset)  # type: ignore[attr-defined]
+    return entry, eng
+
+
+def extract_and_mmaps(rec: Recorder, server_dir: Path, entry: CatalogEntry, eng) -> None:
+    list(eng._extract(context(server_dir, client_folder(server_dir.parent), entry=entry)))
+    rec.run_result = docker.AttachedRun(1, ("Movemap build is complete!",))
+    rec.success_returncodes = (1,)
+    list(eng._mmaps(context(server_dir, entry=entry)))
+    rec.success_returncodes = (0,)
+
+
+def test_a_changed_offmesh_line_rebuilds_only_map_800(tmp_path: Path) -> None:
+    _OffmeshMove = cmangos._OffmeshMove
+    _MovedChanges = cmangos._MovedChanges
+    _WorldCatchUp = cmangos._WorldCatchUp
+    entry, eng = tortoise_engine(Recorder())
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = Recorder()
+    entry, eng = tortoise_engine(rec)
+    extract_and_mmaps(rec, server_dir, entry, eng)
+    core = server_dir / "src" / "tortoise-wow"
+    old, new = "a" * 40, "b" * 40
+    evidence = extract.read_evidence(server_dir / "data")
+    assert evidence is not None
+    extract.write_evidence(
+        server_dir / "data", replace(evidence, offmesh_sha=extract.offmesh_sha(OFFMESH_OLD))
+    )
+    rec.heads[core] = new
+    rec.byte_trees[(core, old, "tools/mmap")] = {"offmesh.txt": OFFMESH_OLD}
+    rec.byte_trees[(core, new, "tools/mmap")] = {"offmesh.txt": OFFMESH_NEW}
+    moved = [(next(s for s in entry.emulator.sources if s.dest == "src/tortoise-wow"), core, old)]
+    found = eng._offmesh_moved(server_dir, moved)
+    assert found is not None and found.map_ids == ("800",), found
+    work = eng._offmesh_rebuild_work(server_dir, found)
+    assert work is not None
+    ctx = context(server_dir, entry=entry)
+    before = len(rec.container_runs)
+    said = list(work.forward(ctx))
+    assert any("map 800 was rebuilt" in line for line in said), said
+    assert any("limited to" in line for line in said), said
+    capped = [run for run in rec.container_runs[before:]]
+    assert all(run.cpus is not None for run in capped), "the per-map run keeps the T801 cap"
+    assert [run.argv[1] for run in rec.container_runs[before:]] == ["800"]
+    assert extract.read_evidence(server_dir / "data").offmesh_sha == extract.offmesh_sha(
+        OFFMESH_NEW
+    )
+
+
+def test_an_unchanged_offmesh_file_rebuilds_nothing(tmp_path: Path) -> None:
+    _MovedChanges = cmangos._MovedChanges
+    _WorldCatchUp = cmangos._WorldCatchUp
+    entry, eng = tortoise_engine(Recorder())
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = Recorder()
+    entry, eng = tortoise_engine(rec)
+    extract_and_mmaps(rec, server_dir, entry, eng)
+    core = server_dir / "src" / "tortoise-wow"
+    old = "a" * 40
+    rec.heads[core] = old
+    assert eng._offmesh_moved(server_dir, []) is None
+    assert (
+        eng.servers_down_work(
+            server_dir, _MovedChanges(catch_up=_WorldCatchUp(phases=()), confs=()), press="x"
+        )
+        is None
+    )
+
+
+def test_an_offmesh_change_already_recorded_rebuilds_nothing(tmp_path: Path) -> None:
+    entry, eng = tortoise_engine(Recorder())
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = Recorder()
+    entry, eng = tortoise_engine(rec)
+    extract_and_mmaps(rec, server_dir, entry, eng)
+    evidence = extract.read_evidence(server_dir / "data")
+    assert evidence is not None
+    extract.write_evidence(
+        server_dir / "data", replace(evidence, offmesh_sha=extract.offmesh_sha(OFFMESH_NEW))
+    )
+    core = server_dir / "src" / "tortoise-wow"
+    old, new = "a" * 40, "b" * 40
+    rec.heads[core] = new
+    rec.byte_trees[(core, old, "tools/mmap")] = {"offmesh.txt": OFFMESH_OLD}
+    rec.byte_trees[(core, new, "tools/mmap")] = {"offmesh.txt": OFFMESH_NEW}
+    moved = [(next(s for s in entry.emulator.sources if s.dest == "src/tortoise-wow"), core, old)]
+    assert eng._offmesh_moved(server_dir, moved) is None
+
+
+def test_a_rolled_back_update_puts_the_old_record_back(tmp_path: Path) -> None:
+    entry, eng = tortoise_engine(Recorder())
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = Recorder()
+    entry, eng = tortoise_engine(rec)
+    extract_and_mmaps(rec, server_dir, entry, eng)
+    current = extract.read_evidence(server_dir / "data")
+    assert current is not None
+    extract.write_evidence(
+        server_dir / "data", replace(current, offmesh_sha=extract.offmesh_sha(OFFMESH_OLD))
+    )
+    move = cmangos._OffmeshMove(sha=extract.offmesh_sha(OFFMESH_NEW), map_ids=("800",))
+    work = eng._offmesh_rebuild_work(server_dir, move)
+    assert work is not None
+    ctx = context(server_dir, entry=entry)
+    list(work.forward(ctx))
+    assert extract.read_evidence(server_dir / "data").offmesh_sha == extract.offmesh_sha(
+        OFFMESH_NEW
+    )
+    list(work.back(ctx))
+    assert extract.read_evidence(server_dir / "data").offmesh_sha == extract.offmesh_sha(
+        OFFMESH_OLD
+    )
+
+
+def test_an_old_install_without_a_record_rebuilds_nothing_and_records(tmp_path: Path) -> None:
+    entry, eng = tortoise_engine(Recorder())
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = Recorder()
+    entry, eng = tortoise_engine(rec)
+    extract_and_mmaps(rec, server_dir, entry, eng)
+    current = extract.read_evidence(server_dir / "data")
+    assert current is not None and current.offmesh_sha is None
+    core = server_dir / "src" / "tortoise-wow"
+    old, new = "a" * 40, "b" * 40
+    rec.heads[core] = new
+    rec.byte_trees[(core, old, "tools/mmap")] = {"offmesh.txt": OFFMESH_OLD}
+    rec.byte_trees[(core, new, "tools/mmap")] = {"offmesh.txt": OFFMESH_NEW}
+    (core / "tools" / "mmap").mkdir(parents=True, exist_ok=True)
+    (core / "tools" / "mmap" / "offmesh.txt").write_bytes(OFFMESH_OLD)
+    moved = [(next(s for s in entry.emulator.sources if s.dest == "src/tortoise-wow"), core, old)]
+    found = eng._offmesh_moved(server_dir, moved)
+    assert found is not None and found.map_ids == ()
+    assert eng._offmesh_rebuild_work(server_dir, found) is None
+    assert found.recorded_line != ""
+    before = len(rec.container_runs)
+    eng._note_offmesh(server_dir / "data", server_dir)
+    assert len(rec.container_runs) == before
+    assert extract.read_evidence(server_dir / "data").offmesh_sha == extract.offmesh_sha(
+        OFFMESH_OLD
+    ), "recording reads the checkout the maps were built from, which the test lays next"
+
+
+def test_a_failed_per_map_rebuild_keeps_the_old_record(tmp_path: Path) -> None:
+    _OffmeshMove = cmangos._OffmeshMove
+    entry, eng = tortoise_engine(Recorder())
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = Recorder()
+    entry, eng = tortoise_engine(rec)
+    extract_and_mmaps(rec, server_dir, entry, eng)
+    recorded = extract.offmesh_sha(OFFMESH_OLD)
+    current = extract.read_evidence(server_dir / "data")
+    extract.write_evidence(server_dir / "data", replace(current, offmesh_sha=recorded))
+    move = _OffmeshMove(sha=extract.offmesh_sha(OFFMESH_NEW), map_ids=("800",))
+    work = eng._offmesh_rebuild_work(server_dir, move)
+    assert work is not None
+    rec.run_result = docker.AttachedRun(3, ("broken",))
+    with pytest.raises(InstallerError, match="map 800"):
+        list(work.forward(context(server_dir, entry=entry)))
+    assert extract.read_evidence(server_dir / "data").offmesh_sha == recorded
+
+
+def old_map_800_files(server_dir: Path) -> dict[str, bytes]:
+    """Map 800's finished movement files, and a neighbour's tile, byte for byte (T811)."""
+    tiles = server_dir / "data" / "mmaps"
+    tiles.mkdir(parents=True, exist_ok=True)
+    old = {
+        "800.mmap": b"map 800's mmap, built from the old off-mesh file",
+        "8003232.mmtile": b"map 800's tile at 32,32, built from the old off-mesh file",
+        "8003233.mmtile": b"map 800's tile at 32,33, built from the old off-mesh file",
+    }
+    for name, body in old.items():
+        (tiles / name).write_bytes(body)
+    (tiles / "0010000.mmtile").write_bytes(b"map 1's tile, which no press may touch")
+    return old
+
+
+def drained(gen: Iterator[str]) -> tuple[list[str], object]:
+    """Everything a generator said, and what its `return` answered (the press's own shape)."""
+    said: list[str] = []
+    while True:
+        try:
+            said.append(next(gen))
+        except StopIteration as stop:
+            return said, stop.value
+
+
+def test_a_rolled_back_rebuild_puts_the_old_tiles_and_hash_back(tmp_path: Path) -> None:
+    """The failing case: the old build starts on tiles the rejected build's off-mesh made."""
+    entry, eng = tortoise_engine(Recorder())
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = Recorder()
+    entry, eng = tortoise_engine(rec)
+    extract_and_mmaps(rec, server_dir, entry, eng)
+    data = server_dir / "data"
+    old_sha = extract.offmesh_sha(OFFMESH_OLD)
+    new_sha = extract.offmesh_sha(OFFMESH_NEW)
+    extract.write_evidence(data, replace(extract.read_evidence(data), offmesh_sha=old_sha))
+    old = old_map_800_files(server_dir)
+    move = cmangos._OffmeshMove(sha=new_sha, map_ids=("800",))
+    work = eng._offmesh_rebuild_work(server_dir, move)
+    assert work is not None
+    ctx = context(server_dir, entry=entry)
+    rec.run_result = docker.AttachedRun(1, ("built",))
+    list(work.forward(ctx))
+    tiles = data / "mmaps"
+    # What the generator left for map 800, over the files it had set aside.
+    (tiles / "800.mmap").write_bytes(b"the mmap the rejected build wrote")
+    (tiles / "8003232.mmtile").write_bytes(b"the tile the rejected build wrote")
+    (tiles / "8009999.mmtile").write_bytes(b"a tile only the rejected build had")
+    assert extract.read_evidence(data).offmesh_sha == new_sha
+    said = list(work.back(ctx))
+    assert any("movement maps go back" in line for line in said), said
+    for name, body in old.items():
+        assert (tiles / name).read_bytes() == body, f"{name} did not come back byte for byte"
+    assert not (tiles / "8009999.mmtile").exists(), "the rejected build's own tile stayed"
+    assert (tiles / "0010000.mmtile").read_bytes() == b"map 1's tile, which no press may touch"
+    assert (
+        extract.read_evidence(data).offmesh_sha == old_sha
+    ), "the old build would run on tiles no off-mesh file recorded as current"
+    assert not (data / extract.MMAPS_BACKUP_DIR).exists(), "the rollback left its backup behind"
+
+
+def test_a_failed_per_map_rebuild_restores_that_map_at_once(tmp_path: Path) -> None:
+    """The failing case: a generator that fails leaves map 800's tiles half gone until rollback."""
+    entry, eng = tortoise_engine(Recorder())
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = Recorder()
+    entry, eng = tortoise_engine(rec)
+    extract_and_mmaps(rec, server_dir, entry, eng)
+    data = server_dir / "data"
+    old_sha = extract.offmesh_sha(OFFMESH_OLD)
+    extract.write_evidence(data, replace(extract.read_evidence(data), offmesh_sha=old_sha))
+    old = old_map_800_files(server_dir)
+    move = cmangos._OffmeshMove(sha=extract.offmesh_sha(OFFMESH_NEW), map_ids=("800",))
+    work = eng._offmesh_rebuild_work(server_dir, move)
+    assert work is not None
+    rec.run_result = docker.AttachedRun(3, ("broken",))
+    with pytest.raises(InstallerError, match="map 800"):
+        list(work.forward(context(server_dir, entry=entry)))
+    for name, body in old.items():
+        assert (
+            data / "mmaps" / name
+        ).read_bytes() == body, f"{name} was not put back the moment the generator failed"
+    assert not (data / extract.MMAPS_BACKUP_DIR).exists(), "a failed map left its backup behind"
+    assert extract.read_evidence(data).offmesh_sha == old_sha
+
+
+def test_a_leftover_backup_folder_is_put_back_at_the_next_press(tmp_path: Path) -> None:
+    """The failing case: a press that crashed mid-rebuild leaves map 800 out of `mmaps`."""
+    entry, eng = tortoise_engine(Recorder())
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = Recorder()
+    entry, eng = tortoise_engine(rec)
+    extract_and_mmaps(rec, server_dir, entry, eng)
+    data = server_dir / "data"
+    old_sha = extract.offmesh_sha(OFFMESH_OLD)
+    new_sha = extract.offmesh_sha(OFFMESH_NEW)
+    extract.write_evidence(data, replace(extract.read_evidence(data), offmesh_sha=old_sha))
+    old = old_map_800_files(server_dir)
+    # The press that did not finish: map 800 set aside, then the rejected build's
+    # tiles written where they were. The record still names the old off-mesh file.
+    extract.set_map_aside(data, "800", old_sha)
+    (data / "mmaps" / "8009999.mmtile").write_bytes(b"a tile the rejected build wrote")
+    core = server_dir / "src" / "tortoise-wow"
+    before, after = "a" * 40, "b" * 40
+    rec.heads[core] = after
+    rec.byte_trees[(core, before, "tools/mmap")] = {"offmesh.txt": OFFMESH_OLD}
+    rec.byte_trees[(core, after, "tools/mmap")] = {"offmesh.txt": OFFMESH_NEW}
+    core_source = next(s for s in entry.emulator.sources if s.dest == "src/tortoise-wow")
+    moved = [(core_source, core, before)]
+    said, changes = drained(eng.check_moved_sources(server_dir, moved, to_pin=False))
+    assert any("An earlier press did not finish" in line for line in said), said
+    for name, body in old.items():
+        assert (data / "mmaps" / name).read_bytes() == body, f"{name} did not come back"
+    assert not (data / "mmaps" / "8009999.mmtile").exists()
+    assert extract.read_evidence(data).offmesh_sha == old_sha
+    assert changes.offmesh is not None and changes.offmesh.map_ids == (
+        "800",
+    ), "the press did not go on to rebuild the map it had just put back"
+    assert changes.offmesh.sha == new_sha
+    assert not (data / extract.MMAPS_BACKUP_DIR).exists()
+
+
+def test_a_rebuild_that_stands_drops_the_tiles_it_replaced(tmp_path: Path) -> None:
+    """The failing case: the backup is removed before a rollback could need it."""
+    entry, eng = tortoise_engine(Recorder())
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = Recorder()
+    entry, eng = tortoise_engine(rec)
+    extract_and_mmaps(rec, server_dir, entry, eng)
+    data = server_dir / "data"
+    extract.write_evidence(
+        data, replace(extract.read_evidence(data), offmesh_sha=extract.offmesh_sha(OFFMESH_OLD))
+    )
+    old = old_map_800_files(server_dir)
+    move = cmangos._OffmeshMove(sha=extract.offmesh_sha(OFFMESH_NEW), map_ids=("800",))
+    work = eng._offmesh_rebuild_work(server_dir, move)
+    assert work is not None
+    rec.run_result = docker.AttachedRun(1, ("built",))
+    list(work.forward(context(server_dir, entry=entry)))
+    tiles = data / "mmaps"
+    new = {
+        "800.mmap": b"the mmap the new build wrote",
+        "8003232.mmtile": b"the tile the new build wrote",
+    }
+    for name, body in new.items():
+        (tiles / name).write_bytes(body)
+    assert (
+        data / extract.MMAPS_BACKUP_DIR
+    ).is_dir(), "the forward removed the backup before the new build had started"
+    said = list(work.done())
+    assert any("tiles they replaced are gone" in line for line in said), said
+    assert not (data / extract.MMAPS_BACKUP_DIR).exists(), "the new build is up: the backup goes"
+    assert not (data / extract.MMAPS_BACKUP_OLD).exists()
+    for name, body in new.items():
+        assert (tiles / name).read_bytes() == body, "the new build's tiles were put back too"
+    assert not (
+        tiles / "8003233.mmtile"
+    ).exists(), "a tile only the old build had survived a successful press"
+    assert extract.read_evidence(data).offmesh_sha == extract.offmesh_sha(OFFMESH_NEW)
+    assert old["800.mmap"] != new["800.mmap"]

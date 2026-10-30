@@ -62,6 +62,12 @@ VANILLA = load_catalog().get("wow-vanilla")
 NEW_BUILD_CHANGES: dict[str, tuple[str, ...]] = {
     "wow-wotlk": ("auth", "characters", "world", "playerbots"),
     "wow-unbound": ("auth", "characters", "world", "playerbots"),  # WotLK's family and pin
+    "wow-coa": (  # T812: WotLK's family; the CoA world_env leaves both updaters on
+        "auth",
+        "characters",
+        "world",
+        "playerbots",
+    ),
     "wow-tbc": (),
     "wow-vanilla": (),
     "wow-tortoise": ("auth", "characters", "world"),
@@ -249,7 +255,7 @@ def test_a_copy_that_cannot_go_back_leaves_the_servers_stopped_and_names_the_fil
     text = str(raised)
     assert rec.calls.count("recreate") == 1, "the old build was not started"
     assert fake.taken[0].files[0].name in text
-    assert "Maintenance" in text and "Restore" in text
+    assert "Backups & updates" in text and "Restore" in text
     assert "mysql exited 1" in text
     assert "agree again" not in text and "is running" not in text
     assert _moving_heads(rec, server_dir, made) == {OLD}, "the sources went back first"
@@ -471,7 +477,7 @@ def test_an_old_build_that_does_not_come_up_after_the_put_back_keeps_every_copy_
     assert "did not come up either" in text
     for path in (*fake.taken[0].files, *_safety_of(fake)):
         assert path.name in text, path
-    assert "Maintenance" in text
+    assert "Backups & updates" in text
     assert "starts on the databases it knows" not in text
     assert "agree again" not in text and "is running" not in text
     assert text.endswith(native.SOURCES_PUT_BACK_DATABASE_NOT_NOTE)
@@ -510,8 +516,8 @@ def test_an_old_build_that_did_not_come_up_is_said_stopped_in_exactly_these_word
         f"Its source folders and {WOTLK_LISTED} were put back, and the build from before this "
         "update still did not come up, so its servers were stopped. Every copy is kept: "
         f"{WOTLK_LISTED} as they were just before the new build started are in {files}, as the "
-        f"new build left them in {safety}. Restore the one you want on Maintenance (it works "
-        "with the server stopped), then press Start."
+        f"new build left them in {safety}. Restore the one you want on the Backups & updates "
+        "tab (it works with the server stopped), then press Start."
     ) in str(raised.value)
     assert "next older" not in str(raised.value), "no older copy to send the player to"
 
@@ -555,7 +561,7 @@ def test_an_old_build_that_cannot_be_stopped_after_failing_is_never_said_to_be_s
         "answer the stop), so they may still be restarting: press Stop on the Server tab. Every "
         f"copy is kept: {WOTLK_LISTED} as they were just before the new build started are in "
         f"{files}, as the new build left them in {safety}. Once it is stopped, restore the one "
-        "you want on Maintenance, then press Start."
+        "you want on the Backups & updates tab, then press Start."
     ) in text
     assert text.endswith(
         " The source folders were put back on the commits they were on, so what is on disk is "
@@ -792,7 +798,7 @@ def test_mixed_tags_whose_copy_will_not_go_back_name_the_file_to_restore(tmp_pat
     with pytest.raises(RollbackNotDone) as raised:
         list(made.update_to_latest(InstallOptions(server_dir=server_dir)))
     text = str(raised.value)
-    assert fake.taken[0].files[0].name in text and "Maintenance" in text
+    assert fake.taken[0].files[0].name in text and "Backups & updates" in text
     assert "prune" not in rec.calls, "the copy named as the one to restore is not removed"
 
 
@@ -1098,9 +1104,9 @@ def _refusal_for(module: Path) -> str:
         f"mod-playerbots/mod-playerbots in {module} is on {NEW[:7]}, not on {OLD[:7]}, the "
         "commit this server was built from, and its world server would apply the database "
         "updates in that folder, so the server is not started: press \u201cReturn to the tested "
-        "pin\u2026\u201d under \u201cServer build \u25be\u201d on the Modules tab, or put the "
-        "folder back with this command and press \u201cRebuild the server\u2026\u201d under "
-        "\u201cServer build \u25be\u201d on the Modules tab:\n"
+        "pin\u2026\u201d under \u201cServer version\u201d on the Backups & updates tab, or put "
+        "the folder back with this command and press \u201cRebuild the server\u2026\u201d under "
+        "\u201cServer version\u201d on the Backups & updates tab:\n"
         f"git -C {module} checkout --detach --force {OLD}"
     )
 

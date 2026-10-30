@@ -455,7 +455,15 @@ def test_the_smoke_run_builds_every_servers_tab_and_asks_docker_nothing(tmp_path
         fake = bin_ / name
         fake.write_text(f'#!/bin/sh\necho "{name} $*" >> "{calls}"\nexit 1\n', encoding="utf-8")
         fake.chmod(0o755)
-    games = ["wow-wotlk", "wow-tbc", "wow-vanilla", "wow-tortoise", "wow-unbound", "wow-centurion"]
+    games = [
+        "wow-wotlk",
+        "wow-tbc",
+        "wow-vanilla",
+        "wow-tortoise",
+        "wow-unbound",
+        "wow-coa",
+        "wow-centurion",
+    ]
     installs = []
     for game in games:
         server_dir = tmp_path / "servers" / game
@@ -1892,7 +1900,7 @@ def test_quitting_over_a_stop_still_joins_it_so_the_stop_finishes(
     gate = threading.Event()
     finished: list[float] = []
 
-    def slow_stop() -> bool:
+    def slow_stop(*, by_choice: bool = False) -> bool:
         gate.wait(60)
         finished.append(time.monotonic())
         return True
@@ -2100,6 +2108,76 @@ def test_an_uninstalled_server_loses_its_tab_and_every_registry_entry(
     assert tabs.indexOf(view) == -1, "the tab is still in the tab bar"
 
 
+def test_an_uninstall_tells_where_the_backups_went_after_its_tab_is_gone(
+    window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T722: the finished message outlives the tab it was written on.
+
+    `_uninstall_done` writes "was removed. Your backups were kept: …" to the tab's
+    label and then emits `uninstalled`, whose handler drops the tab — so the words
+    vanish with the label. The box after the drop names the backups folder.
+    """
+    from yulon import purge
+    from yulon.ui import message_box
+
+    kept = tmp_path / "t722-uninstall" / "wowserver - kept backups"
+    kept.mkdir(parents=True)
+    server_dir = tmp_path / "t722-uninstall"
+    catalog = _catalog_view(window)
+    catalog.installed.emit("wow-wotlk", server_dir, None)
+    view = _tab_for(window, server_dir)
+    tabs = window.property("tabs")
+    assert tabs.indexOf(view) != -1
+
+    shown: list[str] = []
+    order: list[str] = []
+
+    def show(parent: object, title: str, text: str) -> object:
+        order.append("box")
+        assert order == ["drop", "box"], "the box opened before the drop finished"
+        shown.append(title)
+        shown.append(text)
+        return None
+
+    real_forget = catalog.forget_installed
+
+    def forget(game: str, surviving: object) -> None:
+        real_forget(game, surviving)
+        order.append("drop")
+
+    monkeypatch.setattr(catalog, "forget_installed", forget)
+    monkeypatch.setattr(message_box, "show_information", show)
+    said: list[str] = []
+    view.uninstall_said.connect(said.append)
+    view._uninstall_done(purge.PurgeReport(folder_removed=True, backups_kept=kept))
+
+    assert said and f"Your backups were kept: they are now in {kept}." in said[0]
+    assert tabs.indexOf(view) == -1, "the tab survived its own uninstall"
+    process_events()
+    assert shown and shown[0] == "Server uninstalled", shown
+    assert f"Your backups were kept: they are now in {kept}." in shown[1], shown
+
+
+def test_a_failed_uninstall_shows_no_backups_box(
+    window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T722: `_uninstall_failed` emits nothing, so the drop's box stays shut."""
+    from yulon import purge
+    from yulon.ui import message_box
+
+    server_dir = tmp_path / "t722-failed"
+    _catalog_view(window).installed.emit("wow-wotlk", server_dir, None)
+    view = _tab_for(window, server_dir)
+    tabs = window.property("tabs")
+    shown: list[str] = []
+    monkeypatch.setattr(message_box, "show_information", lambda *a: shown.append("box"))
+    view._uninstall_failed(purge.PurgeRefusal("the folder could not be deleted"))
+    process_events()
+
+    assert tabs.indexOf(view) != -1, "a failed uninstall dropped the tab"
+    assert shown == [], shown
+
+
 def test_the_catalog_tile_is_recomputed_from_what_survived_the_uninstall(
     window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2234,7 +2312,7 @@ def _removable_tab(
     view = _tab_for(window, server_dir)
     stops: list[int] = []
 
-    def stop() -> bool:
+    def stop(**_kw: object) -> bool:
         stops.append(1)
         return True
 
@@ -2247,6 +2325,14 @@ def _removable_tab(
 
     view.services.controller.status = no_docker
     return view, stops
+
+
+def _answer_off_the_list(view: Any) -> None:
+    """Answer the remove dialog with "off this list" and press Remove this server… (T695)."""
+    from yulon.ui.widgets.remove_dialog import RemovalChoice
+
+    view._ask_removal = lambda _offered: RemovalChoice.OFF_THE_LIST
+    view.remove_server_button.click()
 
 
 def _remembered(window: Any, game: str, server_dir: Path) -> bool:
@@ -2277,7 +2363,7 @@ def test_the_server_tab_button_on_a_tbc_tab_asks_stops_forgets_and_keeps_every_f
     assert str(server_dir) in _catalog_view(window).button_for("wow-tbc").toolTip()
     saves_before = len(window.saved_states)
 
-    view.forget_install_button.click()
+    _answer_off_the_list(view)
 
     assert len(asked) == 1
     title, text, default = asked[0]
@@ -2304,7 +2390,7 @@ def test_answering_no_keeps_the_tab_the_record_and_the_server(
     server_dir = tmp_path / "t95-no"
     view, stops = _removable_tab(window, monkeypatch, server_dir)
 
-    view.forget_install_button.click()
+    _answer_off_the_list(view)
 
     assert len(asked) == 1
     assert stops == []
@@ -2335,14 +2421,14 @@ def test_a_server_the_last_poll_saw_stopped_is_still_stopped_before_it_is_forgot
     assert view.last_seen_running() is False
     remembered_at_the_stop: list[bool] = []
 
-    def stop_what_was_started_outside() -> bool:
+    def stop_what_was_started_outside(**_kw: object) -> bool:
         stops.append(1)
         remembered_at_the_stop.append(_remembered(window, "wow-tbc", server_dir))
         return True  # something was running, and is down now
 
     view.services.controller.stop = stop_what_was_started_outside
 
-    view.forget_install_button.click()
+    _answer_off_the_list(view)
 
     assert "If it is running, it is stopped first" in asked[0][1]
     assert stops == [1], "a server the last poll saw stopped was forgotten without a stop"
@@ -2358,13 +2444,13 @@ def test_a_stop_that_finds_nothing_running_goes_on_to_forget(
     server_dir = tmp_path / "t95-nothing-to-stop"
     view, stops = _removable_tab(window, monkeypatch, server_dir)
 
-    def nothing_running() -> bool:
+    def nothing_running(**_kw: object) -> bool:
         stops.append(1)
         return False
 
     view.services.controller.stop = nothing_running
 
-    view.forget_install_button.click()
+    _answer_off_the_list(view)
 
     assert stops == [1]
     assert window.property("tabs").indexOf(view) == -1
@@ -2381,7 +2467,7 @@ def test_a_server_the_last_poll_saw_running_is_told_it_is_running(
     view.services.controller.status = lambda: InstallStatus(db=True, auth=True, world=True)
     view.refresh_status()
 
-    view.forget_install_button.click()
+    _answer_off_the_list(view)
 
     assert "It is running, so it is stopped first" in asked[0][1]
 
@@ -2396,7 +2482,7 @@ def test_a_busy_tab_refuses_with_its_own_reason_and_asks_nothing(
         type(view), "busy_reason", lambda _self: "The database import is still running."
     )
 
-    view.forget_install_button.click()
+    _answer_off_the_list(view)
 
     assert told == ["The database import is still running."]
     assert asked == [] and stops == []
@@ -2414,12 +2500,12 @@ def test_a_failed_stop_asks_again_and_no_keeps_everything(
     server_dir = tmp_path / "t95-stop-fails"
     view, _ = _removable_tab(window, monkeypatch, server_dir)
 
-    def refuse() -> bool:
+    def refuse(**_kw: object) -> bool:
         raise docker.DockerRefusal("Docker would not say which project owns tbc-mangosd")
 
     view.services.controller.stop = refuse
 
-    view.forget_install_button.click()
+    _answer_off_the_list(view)
 
     assert [title for title, _, _ in asked] == [forgetting.TITLE, forgetting.STOP_FAILED_TITLE]
     assert "Docker would not say" in asked[1][1]
@@ -2438,12 +2524,12 @@ def test_a_failed_stop_overridden_by_a_second_yes_forgets_anyway(
     server_dir = tmp_path / "t95-stop-fails-yes"
     view, _ = _removable_tab(window, monkeypatch, server_dir)
 
-    def refuse() -> bool:
+    def refuse(**_kw: object) -> bool:
         raise docker.DockerCommandError("cannot stop")
 
     view.services.controller.stop = refuse
 
-    view.forget_install_button.click()
+    _answer_off_the_list(view)
 
     assert window.property("tabs").indexOf(view) == -1
     assert not _remembered(window, "wow-tbc", server_dir)
@@ -2464,14 +2550,14 @@ def test_a_job_started_during_the_stop_refuses_the_forget_after_it(
     server_dir = tmp_path / "t95-restore-in-the-gap"
     view, stops = _removable_tab(window, monkeypatch, server_dir)
 
-    def stop_while_a_restore_starts() -> bool:
+    def stop_while_a_restore_starts(**_kw: object) -> bool:
         stops.append(1)
         view._restore_running = True  # pressed on the Maintenance tab mid-stop
         return True
 
     view.services.controller.stop = stop_while_a_restore_starts
 
-    view.forget_install_button.click()
+    _answer_off_the_list(view)
 
     assert len(asked) == 1 and stops == [1]
     assert told == [forgetting.RESTORE_RUNNING]
@@ -2494,7 +2580,7 @@ def test_a_record_that_cannot_be_written_keeps_the_tab_and_the_live_record(
 
     monkeypatch.setattr(state, "save_state", _refuse)
 
-    view.forget_install_button.click()
+    _answer_off_the_list(view)
 
     assert told and "Access is denied" in told[0]
     assert window.property("tabs").indexOf(view) != -1, "the tab went over a record still on disk"
@@ -2509,7 +2595,7 @@ def test_a_gone_folder_is_forgotten_without_a_stop_and_with_t34s_words(
     view, stops = _removable_tab(window, monkeypatch, server_dir)
     shutil.rmtree(server_dir)
 
-    view.forget_install_button.click()
+    _answer_off_the_list(view)
 
     assert "no longer exists" in asked[0][1] and "NOT touched" in asked[0][1]
     assert stops == [], "a folder that is gone was stopped by a project-name guess (T34's rule)"
@@ -4503,7 +4589,7 @@ def test_a_join_that_fails_counts_even_when_nothing_else_holds_the_thread(qapp: 
         job_label = 'log panel "a thread nobody else holds"'
         running = True
 
-        def stop(self) -> None:
+        def stop(self, **_kw: object) -> None:
             pass
 
         def wait(self, _timeout_ms: int) -> bool:
@@ -4522,7 +4608,7 @@ def test_a_panel_that_finished_during_the_last_join_is_not_called_stuck(qapp: ob
         job_label = 'log panel "late but done"'
         running = False
 
-        def stop(self) -> None:
+        def stop(self, **_kw: object) -> None:
             pass
 
         def wait(self, _timeout_ms: int) -> bool:
@@ -4967,7 +5053,7 @@ def test_remove_from_yulon_names_the_ready_to_play_client_it_leaves(
     view.play_client_dir_changed.emit("wow-tbc", server_dir, play)
     view = _tab_for(window, server_dir)
 
-    view.forget_install_button.click()
+    _answer_off_the_list(view)
 
     assert len(asked) == 1
     assert f"ready-to-play client at {play} is left where it is" in asked[0][1]
@@ -6805,3 +6891,136 @@ def test_the_window_hands_the_catalog_its_early_checks(window: Any) -> None:
     view = _catalog_view(window)
     assert view._ready_check is native.early_refusal
     assert view._move_in is not None and view._move_in.check is not None
+
+
+# ------------------------------------------- T807: Open server and the Launcher button
+
+
+def _single_view_server(window: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
+    """A single-entry server (DDON) installed into the window, the way an install ends.
+
+    The view's status poll and its jobs are kept off the host: this is about which tab the
+    press reaches, not about Docker.
+    """
+    from yulon.ui.single_server_view import SingleServerView
+    from yulon.ui.widgets.job import run_inline
+
+    real_init = SingleServerView.__init__
+
+    def _quiet(self: Any, entry: Any, controller: Any, **kwargs: Any) -> None:
+        kwargs.setdefault("run_job", run_inline)
+        real_init(self, entry, controller, **kwargs)
+
+    monkeypatch.setattr(SingleServerView, "__init__", _quiet)
+    monkeypatch.setattr(SingleServerView, "poll", lambda self: None)
+    server_dir = tmp_path / "ddon-server"
+    _catalog_view(window).installed.emit("ddon", server_dir, None)
+    view = next(v for v in window.yulon_single_views if v.controller.server_dir == server_dir)
+    return view, server_dir
+
+
+def _tile_press(window: Any, game: str, server_dir: Path) -> None:
+    """The Catalog tile's real button, installed-looking, pressed."""
+    catalog_view = _catalog_view(window)
+    catalog_view._remember_installed(game, server_dir)
+    try:
+        catalog_view.button_for(game).click()
+    finally:
+        catalog_view.forget_installed(game, {})
+
+
+def test_open_server_on_a_wow_tile_shows_that_controller_tab(window: Any, tmp_path: Path) -> None:
+    first = _server(window, tmp_path, "t807-wow-one")
+    second = _server(window, tmp_path, "t807-wow-two")
+    tabs = window.property("tabs")
+    tabs.setCurrentWidget(second)
+
+    _tile_press(window, "wow-wotlk", first.services.controller.server_dir)
+
+    assert tabs.currentWidget() is first
+
+
+def test_open_server_on_a_single_entry_tile_shows_that_single_view(
+    window: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The review finding: the press hit `controllers` only and silently did nothing here."""
+    view, server_dir = _single_view_server(window, tmp_path, monkeypatch)
+    other = _server(window, tmp_path, "t807-wow-other")
+    tabs = window.property("tabs")
+    tabs.setCurrentWidget(other)
+    assert tabs.currentWidget() is not view
+
+    _tile_press(window, "ddon", server_dir)
+
+    assert tabs.currentWidget() is view
+
+
+def test_open_server_for_a_server_with_no_tab_says_so(
+    window: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yulon.ui import message_box
+
+    said: list[tuple[object, ...]] = []
+    monkeypatch.setattr(message_box, "show_information", lambda *a, **k: said.append(a))
+    other = _server(window, tmp_path, "t807-wow-none")
+    tabs = window.property("tabs")
+    tabs.setCurrentWidget(other)
+
+    _tile_press(window, "ddon", tmp_path / "nowhere")
+
+    assert len(said) == 1, "a press that finds no tab must say so, not do nothing"
+    assert tabs.currentWidget() is other
+
+
+def test_the_open_server_signal_is_wired_to_the_windows_tab_opener(
+    window: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The signal itself, emitted at the real window, for both kinds of server."""
+    view, server_dir = _single_view_server(window, tmp_path, monkeypatch)
+    wow = _server(window, tmp_path, "t807-wow-signal")
+    tabs = window.property("tabs")
+
+    _catalog_view(window).open_server.emit("ddon", server_dir)
+    assert tabs.currentWidget() is view
+    _catalog_view(window).open_server.emit("wow-wotlk", wow.services.controller.server_dir)
+    assert tabs.currentWidget() is wow
+
+
+@pytest.fixture
+def friend_launcher_closed(window: Any) -> Iterator[None]:
+    yield
+    launcher = getattr(window, "yulon_friend_launcher", None)
+    if launcher is not None:
+        launcher.close()
+        launcher.deleteLater()
+    process_events()
+
+
+def test_the_top_bar_launcher_button_opens_the_friend_launcher_and_raises_it_itself(
+    window: Any, friend_launcher_closed: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The button on the real top bar; the launcher (a window of its own) is what comes forward.
+
+    The main window being raised instead left the launcher behind it, and a second
+    press did not bring an already-open launcher forward either.
+    """
+    raised: list[Any] = []
+    real = main._bring_to_front
+    monkeypatch.setattr(
+        main, "_bring_to_front", lambda target, *a, **k: raised.append(target) or real(target)
+    )
+    window.yulon_friend_launcher = None
+
+    window.yulon_top_menu.launcher_button.click()
+
+    launcher = window.yulon_friend_launcher
+    assert launcher is not None and launcher.isVisible()
+    assert launcher.isWindow() and launcher.parent() is None
+    assert raised == [launcher], "the launcher itself comes forward, not the main window"
+
+    window.yulon_top_menu.launcher_button.click()  # already open: raised, not doubled
+
+    assert window.yulon_friend_launcher is launcher
+    assert raised == [launcher, launcher]
+    launcher.close()
+    assert window.yulon_friend_launcher is None, "closing drops the reference"

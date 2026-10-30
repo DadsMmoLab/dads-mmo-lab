@@ -88,6 +88,7 @@ from yulon import (
     networking,
     platform,
     realm_flag,
+    realm_name,
     resources,
     runner,
     seeded_accounts,
@@ -103,6 +104,7 @@ from yulon.catalog import (
     build_context,
     composegen,
     preflight,
+    script_built,
     snapshot,
     time_zone,
     upstream,
@@ -148,6 +150,7 @@ from yulon.log import get_logger
 from yulon.manifest import Db
 from yulon.ownership import Ownership as Ownership
 from yulon.said import SaidByYulon, carry_detail
+from yulon.server_build_presses import MAINTENANCE_TAB
 from yulon.support.redact import Redactor
 from yulon.ui import lines
 
@@ -222,6 +225,7 @@ OUR_OWN_FILES = (
     STATE_FILE,
     networking.INTENT_FILE,
     module_answers.ANSWERS_FILE,
+    realm_name.REALM_NAME_FILE,
     docker.FOLDER_ID_FILE,
     MOVE_IN_FILE,
 )
@@ -1310,7 +1314,7 @@ divergence before it moves anything (T126), and names it the next time.
 
 COPIES_RULE = (
     "A copy is kept until an update succeeds, and then only the newest stays; "
-    "Maintenance \u2192 Clean up\u2026 removes old ones sooner."
+    f"{MAINTENANCE_TAB} \u2192 Clean up\u2026 removes old ones sooner."
 )
 """The owner's rule (T633) as it is true: older copies go only after an update succeeded (T646)."""
 
@@ -1925,6 +1929,29 @@ def core_off_its_moved_pin_note(moved: Sequence[CatalogPin], named: Sequence[str
         f"the tested commits with your modules. If Yu'lon put {mods} back above, update "
         f"{'it' if one else 'them'} on the Modules tab again first, without pressing "
         f"“{server_build_presses.REBUILD}” in between."
+    )
+
+
+def module_before_rebuild_note(moved: Sequence[CatalogPin], named: Sequence[str]) -> str:
+    """Said in the Rebuild question when a new module meets a core off its moved pin (T795).
+
+    The Discord player's case again, but before the compile instead of after it:
+    mod-ale installed fresh on a core that sits behind the commits this version
+    of Yu'lon was tested with, and a seven-minute build that was bound to stop in
+    the module. This is a guess from two facts the app already keeps (the core's
+    commits and which modules went in since the last build), not a reading of the
+    module's code, so it only names the order and never stops the build.
+    """
+    mods = _listed(named)
+    one = len(named) == 1
+    return (
+        f"This server is not on the commits this version of Yu'lon was tested with "
+        f"({_on_and_tested(moved)}), and {mods} {'was' if one else 'were'} installed or updated "
+        f"since your last build. {'It' if one else 'They'} may have been written for the tested "
+        f"commits and fail to build on yours. If you would rather build the tested commits with "
+        f"your modules, say no and press "
+        f"{server_build_presses.under_server_build(server_build_presses.RETURN_TO_PIN)} "
+        f"instead. This is only a guess, and a yes here still builds what is on your server now."
     )
 
 
@@ -3716,14 +3743,14 @@ def copy_not_put_back(copy: snapshot.Snapshot, reason: str, *, rebuild: bool = F
         return (
             f"{_listed(names)} could not be put back {_as_it_was(names)} before the database "
             f"updates ran ({reason}), so the old build was not started on the databases they "
-            f"changed. Open Maintenance, choose {_in_backups(copy.files)} and press Restore (it "
-            "works with the server stopped), then press Start."
+            f"changed. Open the {MAINTENANCE_TAB} tab, choose {_in_backups(copy.files)} and "
+            "press Restore (it works with the server stopped), then press Start."
         )
     return (
         f"{_listed(names)} could not be put back {_as_it_was(names)} just before the new build "
         f"started ({reason}), so the old build was not started on the database the new one "
-        f"changed. Open Maintenance, choose {_in_backups(copy.files)} and press Restore (it "
-        "works with the server stopped), then press Start."
+        f"changed. Open the {MAINTENANCE_TAB} tab, choose {_in_backups(copy.files)} and press "
+        "Restore (it works with the server stopped), then press Start."
     )
 
 
@@ -3737,8 +3764,8 @@ def copy_not_usable(copy: snapshot.Snapshot, reason: str, *, rebuild: bool = Fal
             f"{'that database is' if len(names) == 1 else 'those databases are'} as the "
             f"rebuild left {'it' if len(names) == 1 else 'them'}. The copy "
             f"({_in_backups(copy.files)}) cannot be restored either. If you have a backup of "
-            "your own from before this rebuild, restore it on Maintenance (it works with the "
-            "server stopped), then press Start."
+            f"your own from before this rebuild, restore it on the {MAINTENANCE_TAB} tab (it "
+            "works with the server stopped), then press Start."
         )
     return (
         f"{_listed(names)} could not be put back {_as_it_was(names)} just before the new build "
@@ -3746,7 +3773,8 @@ def copy_not_usable(copy: snapshot.Snapshot, reason: str, *, rebuild: bool = Fal
         f"{'that database is' if len(names) == 1 else 'those databases are'} as the new build "
         f"left {'it' if len(names) == 1 else 'them'}. The copy ({_in_backups(copy.files)}) "
         "cannot be restored either. If you have a backup of your own from before this update, "
-        "restore it on Maintenance (it works with the server stopped), then press Start."
+        f"restore it on the {MAINTENANCE_TAB} tab (it works with the server stopped), then "
+        "press Start."
     )
 
 
@@ -3792,11 +3820,11 @@ def copy_old_build_down(
         return (
             f"{head}. Yu'lon could not stop its servers ({not_stopped}), so they may still be "
             f"restarting: press Stop on the Server tab. {kept} Once it is stopped, restore the "
-            "one you want on Maintenance, then press Start."
+            f"one you want on the {MAINTENANCE_TAB} tab, then press Start."
         )
     return (
-        f"{head}, so its servers were stopped. {kept} Restore the one you want on Maintenance "
-        "(it works with the server stopped), then press Start."
+        f"{head}, so its servers were stopped. {kept} Restore the one you want on the "
+        f"{MAINTENANCE_TAB} tab (it works with the server stopped), then press Start."
     )
 
 
@@ -4511,8 +4539,8 @@ def _record_unread(server_dir: Path, why: str) -> str:
     return (
         f"The server in {server_dir} has a restore record Yu'lon cannot read{why}, so it cannot "
         "tell whether a restore is still writing there, and nothing was stopped. If no restore "
-        "is running there, press Forget that record on that server's Maintenance tab, then "
-        "try again."
+        "is running there, press Forget that record on that server's "
+        f"{MAINTENANCE_TAB} tab, then try again."
     )
 
 
@@ -4588,7 +4616,7 @@ def sources_still_off(server_dir: Path) -> tuple[SourceOff, ...]:
 
     Reads `.git/HEAD` (`read_head_file()`), no git run. Once none is left the
     record is forgotten. The one reading behind the start refusal and the
-    Modules tab's version line and "Return to the tested pin…", so the two
+    Maintenance tab's version line and "Return to the tested pin…", so the two
     cannot disagree about whether a folder is off.
     """
     path = server_dir / SOURCES_OFF_FILE
@@ -4631,7 +4659,7 @@ def sources_off_refusal(server_dir: Path) -> str | None:
     Read by `Controller.refuse_start()`, so Start, Start and play, the launcher's
     PLAY, Restart and Recreate all refuse; NOT by the engine's `start_refusal()`,
     because "Return to the tested pin…" is one of the two ways out it names, and
-    the Modules tab offers it while this refuses (`source_version()`).
+    the Maintenance tab offers it while this refuses (`source_version()`).
 
     Each `git` command is on a line of its own (the owner's T296 rule: a command
     the player types stays, on its own line). Never raises.
@@ -7335,7 +7363,7 @@ class Seams:
     # return this seam's own fakes do not have to produce.
     start_db: Callable[..., object] = docker.start_database
     """Called with `because=`, which ends `start_database()`'s timeout sentence (T248)."""
-    start: Callable[[docker.ContainerSpec, Path], bool] = docker.start_staged
+    start: Callable[..., bool] = docker.start_staged
     recreate: Callable[..., bool] = docker.recreate_staged
     """`start` with `--force-recreate`, and the rebuild's only reason to exist as a seam.
 
@@ -7349,6 +7377,9 @@ class Seams:
     `Callable[...]` since T158: `stage_recreate()` passes `control=` (the load
     wait's `docker.StopControl`, carrying the rebuild's Cancel) and
     `before_signal=` (the moment past which something may have been touched).
+    T812 adds `services=`: the ordered start/recreate names the subset to
+    bring (db+world first, auth once the world said ready); None is all of
+    `compose_services()`, as today.
     """
     mark_realm_offline: Callable[..., object] = realm_flag.mark_offline
     """Set the realm row's offline bit before the world starts or is replaced (T577).
@@ -7529,6 +7560,13 @@ class Seams:
     exec_stdin: Callable[..., subprocess.CompletedProcess[str]] = docker.exec_stdin
     sql_query: Callable[[str, str, str, str | None, str], str] = docker.sql_query
     volume_exists: Callable[[str], bool] = docker.volume_exists
+    engine_size: Callable[..., tuple[int, int] | None] = docker.engine_size
+    """The daemon's CPU count and memory (T636), or None when it would not say.
+
+    A seam for T801: the Tortoise mmaps cap is computed from what the ENGINE
+    reports, not from the host, and a test that could not fake the answer could
+    not pin the cap at all — it would assert whatever box the test ran on.
+    """
     read_database: Callable[[CatalogEntry, Path], database_presence.Reading] = (
         database_presence.take_reading
     )
@@ -7738,6 +7776,7 @@ class Seams:
             wait_ready=on(docker.wait_ready_for, wsl_distro=distro),
             world_output=on(_world_output, wsl_distro=distro),
             container_tail=on(_container_tail, wsl_distro=distro),
+            engine_size=on(docker.engine_size, wsl_distro=distro),
             selinux_enforcing=lambda: False,
             # Asked beside `selinux_enforcing` by the compose render whatever the
             # answer; left to default it ran `stat -f` on the HOST (found by the
@@ -8201,7 +8240,8 @@ class StagedInstaller:
         (T197 fix round 2), which a Rebuild (`rebuilding`) may clear for itself.
         TrinityCore's adds a world update left unfinished
         (`trinitycore.world_update_start_refusal`). Then, but not for a Rebuild, an import
-        that never finished (`unfinished_import_refusal(strict=True)`, T739).
+        that never finished (`unfinished_import_refusal(strict=True)`, T739), then the
+        family's own (`family_start_refusal()`).
         """
         # T225 (live): with a stopped rebuild's build that may have landed since.
         # T739: an import that never finished. A Rebuild is no way out of one -- its importer
@@ -8212,7 +8252,10 @@ class StagedInstaller:
             # A Rebuild under the record is not refused: it holds (`_held_by_an_unfinished_
             # import()`), builds, and leaves the server stopped for Repair.
             return refused
-        return self.unfinished_import_refusal(server_dir, strict=True)
+        refused = self.unfinished_import_refusal(server_dir, strict=True)
+        if refused is not None:
+            return refused
+        return self.family_start_refusal(server_dir)
 
     def unfinished_import_refusal(self, server_dir: Path, *, strict: bool = False) -> str | None:
         """Why no world may start while this server's import record stands, or None (T739).
@@ -8284,11 +8327,33 @@ class StagedInstaller:
     def family_start_refusal(self, server_dir: Path) -> str | None:
         """The family's own reason no start may run, apart from `START_REFUSED_FILE` (T223).
 
-        None in the spine. TrinityCore's is a world update left unfinished. Asked by
-        the update route to decide whether a kept build's start is already refused
-        by its family, which then lets its own finish start it.
+        None in the spine. TrinityCore's is a world update left unfinished;
+        AzerothCore's is the realm-type gate (T812 C3a). Asked last by
+        `start_refusal()`.
         """
         return None
+
+    def family_finish_refusal(self, server_dir: Path) -> str | None:
+        """The family's refusal whose own finish press STARTS the kept build, or None (T223).
+
+        None in the spine. TrinityCore's is a world update left unfinished: "Finish
+        the world update" imports the kept build's tables and then starts it. A
+        family refusal with no such finish (AzerothCore's realm-type gate, T812 C3a)
+        is not one: forgetting the owed start for it would let the next Start run a
+        build that never started once its own refusal cleared.
+        """
+        return None
+
+    def owed_start_left_to_the_family(self, server_dir: Path) -> bool:
+        """Whether the untested-build refusal may be forgotten for the family's finish (T223).
+
+        Only when that refusal is the one recorded and the family's refusal is one
+        its own finish clears by starting (`family_finish_refusal()`).
+        """
+        return (
+            owed_start_refusal(server_dir) == UNTESTED_BUILD_REFUSAL
+            and self.family_finish_refusal(server_dir) is not None
+        )
 
     # -- the contract ----------------------------------------------------
 
@@ -8461,6 +8526,10 @@ class StagedInstaller:
         # make a working server time out. Before the closing line, because that
         # line is asserted to be LAST.
         yield from self._advertise_realm(replace(ctx, state=state))
+        # T808: the name the owner chose for the realm list, which the import's seed just replaced.
+        yield from self._apply_realm_name(
+            replace(ctx, state=state), "The install is finished and the server is running"
+        )
         # After the realm row, for `_advertise_realm()`'s reason: a background job
         # is a sentence, never a failed install (T179's movement maps).
         yield from self.after_ready(server_dir)
@@ -8841,6 +8910,8 @@ class StagedInstaller:
         )
         ctx = self._update_context(server_dir, cancel)
         yield from self._staged(stages, ctx)
+        # T808: an update may write the realm row again (the shared post-import step).
+        yield from self._apply_realm_name(ctx, "The database updates are applied")
 
     def repair_database_stages(self) -> tuple[Stage, ...]:
         """What Repair runs on a database Docker no longer has (T377): the install's own four.
@@ -8898,9 +8969,11 @@ class StagedInstaller:
         self._check_cancel(cancel)
         ctx = replace(self._update_context(server_dir, cancel), updates_only=False)
         yield from self._staged(self.repair_database_stages(), ctx)
+        # T808: the import just seeded the catalog's realm name into the new login database.
+        yield from self._apply_realm_name(ctx, "The database was made again")
         yield (
             f"{self.entry.name}'s database was made again from the server files and the server "
-            f"is running. If you have a backup, restore it on the Maintenance tab."
+            f"is running. If you have a backup, restore it on the {MAINTENANCE_TAB} tab."
         )
 
     def _guard_then(
@@ -9126,6 +9199,8 @@ class StagedInstaller:
             for stage in (self.stage_named("start-db"), self.stage_named("import"))
         )
         yield from self._staged(stages, ctx)
+        # T808: a corrected phase may write the realm row again (the shared post-import step).
+        yield from self._apply_realm_name(ctx, "The corrections are applied")
         if stopped:
             yield (
                 f"The world server was stopped for this and is still stopped. Press Start on "
@@ -9891,7 +9966,7 @@ class StagedInstaller:
             self._seams.mark_realm_offline(self.entry, spec, ctx.server_dir)
 
             def replace_them(say: docker.OutputSink) -> bool:
-                return self._seams.recreate(
+                return self._recreate_servers(
                     spec,
                     ctx.server_dir,
                     control=replace(control, say=say),
@@ -9932,6 +10007,28 @@ class StagedInstaller:
                     f"old build is still what is running: {exc}"
                 ) from exc
         yield "The containers were replaced."
+
+    def _recreate_servers(
+        self,
+        spec: docker.ContainerSpec,
+        server_dir: Path,
+        *,
+        control: docker.StopControl,
+        before_signal: Callable[[], None] | None = None,
+    ) -> bool:
+        """Replace this install's containers; the ordered start overrides it (T812).
+
+        The default is the `native.py:9894` call: `docker.recreate_staged`
+        over all three services. An entry with
+        `azerothcore.auth_after_world_ready` instead replaces db+world, waits
+        the world ready, replaces auth and opens the realm.
+        """
+        return self._seams.recreate(
+            spec,
+            server_dir,
+            control=control,
+            before_signal=before_signal,
+        )
 
     def _remove_the_old_servers(
         self, spec: docker.ContainerSpec, server_dir: Path
@@ -10630,6 +10727,10 @@ class StagedInstaller:
         if own_copy is not None:
             # T633's rule, on the Rebuild's own copy: older copies go only after a success.
             self._forget_older_copies(server_dir, own_copy)
+        if held is None:
+            # T808: the rebuild's import may have seeded the catalog's realm name over the row.
+            # A held press started nothing; its next Start puts the name back (`before_servers`).
+            yield from self._apply_realm_name(ctx, "The rebuild is finished")
         yield from self.after_ready(server_dir)
         if held is not None:
             yield held_rebuild_ending(self.entry.name, server_dir)
@@ -11302,10 +11403,7 @@ class StagedInstaller:
                     yield from work.keep()
                 except (InstallerError, OSError) as kept_failed:
                     also = f" {kept_failed}"
-                if (
-                    owed_start_refusal(server_dir) == UNTESTED_BUILD_REFUSAL
-                    and self.family_start_refusal(server_dir) is not None
-                ):
+                if self.owed_start_left_to_the_family(server_dir):
                     # T223 (lead ruling, option 1): the family's own record refuses
                     # Start, and T179's "Finish the world update" imports the kept
                     # build's tables and then starts it -- the owner-approved exit.
@@ -12273,8 +12371,8 @@ class StagedInstaller:
                 "have now could not be kept as a rollback and nothing was compiled over it. "
                 "Nothing was started. Check that Docker is running, then press the same entry "
                 # T155: `stage_recreate()`'s reason -- all three entries reach this.
-                f"under \u201c{server_build_presses.SERVER_BUILD}\u201d on the Modules tab "
-                "again."
+                # T692a: the entry is a button in the Server version section now.
+                f"under {server_build_presses.SERVER_BUILD_PLACE} again."
             )
         # T170 round 2: names gone is not a build gone. A retag or an `rmi -f`
         # takes the NAME off an image a container still holds by id, and that
@@ -13429,6 +13527,32 @@ class StagedInstaller:
                 "before."
             )
 
+    def _script_built_clause(self, server_dir: Path) -> str:
+        """T804: for a server inside a WSL distro, why it is not one the old script built.
+
+        The Rebuild press asks the script-built question first where the folder matches
+        (`install_wiring.script_built_rebuild_for_app()`); a press that got here anyway
+        names the rule that did not match, so the refusal says what to look at. Empty
+        outside a distro, and when the check itself could not run.
+        """
+        distro = self._seams.distro
+        if not distro:
+            return ""
+        try:
+            verdict = script_built.check(
+                server_dir, distro, seams=script_built.ScriptBuiltSeams.in_wsl(distro)
+            )
+        except Exception as exc:  # noqa: BLE001 - a clause must never hide the refusal itself
+            logger.warning(f"could not check {server_dir} against the old script's layout: {exc}")
+            return ""
+        if verdict.refusal is None:
+            return (
+                " This folder matches a server built by the old Dad's MMO Lab script: press "
+                f"{server_build_presses.under_server_build(server_build_presses.REBUILD)} "
+                "again to be asked to rebuild it the way that script did."
+            )
+        return f" {verdict.refusal}"
+
     def _refuse_unless_rebuildable(self, server_dir: Path) -> InstallState:
         """The two folders this button cannot help, refused by name before anything runs.
 
@@ -13463,7 +13587,7 @@ class StagedInstaller:
                 f"server there and cannot rebuild one. Nothing was started. A server this "
                 f'app installed carries that file; one adopted through "Use existing…", or '
                 f"built by another launcher, does not — rebuild that one the way it was "
-                f"built."
+                f"built.{self._script_built_clause(server_dir)}"
             )
         ours = generated_compose_files(server_dir)
         missing = [name for name in composegen.COMPOSE_FILES if name not in ours]
@@ -15867,8 +15991,7 @@ class StagedInstaller:
                 raise InstallStopped(_cancelled_message("the build"))
         if unreachable:
             again = (
-                f"press the same entry under \u201c{server_build_presses.SERVER_BUILD}\u201d on "
-                f"the Modules tab again"
+                f"press the same entry under {server_build_presses.SERVER_BUILD_PLACE} again"
                 if ctx.force_build
                 else "try again"
             )
@@ -16184,9 +16307,19 @@ class StagedInstaller:
             self.entry, self.entry.container_spec(), ctx.server_dir, unless_world_up=True
         )
         try:
-            self._seams.start(self.entry.container_spec(), ctx.server_dir)
+            self._start_servers(ctx)
         except docker.DockerCommandError as exc:
             raise carry_detail(exc, InstallerError(f"The server would not start: {exc}")) from exc
+
+    def _start_servers(self, ctx: StageContext) -> None:
+        """Bring this install's servers up; the ordered start overrides it (T812).
+
+        The default is today's single `up`: `docker.start_staged` over all
+        three services. An entry with `azerothcore.auth_after_world_ready`
+        instead ups db+world, waits the world ready, ups auth and opens the
+        realm (`ordered_start.start`), with `ctx.cancel` ending the waits.
+        """
+        self._seams.start(self.entry.container_spec(), ctx.server_dir)
 
     def stage_ready(self, ctx: StageContext, *, stop_lets_it_load: bool = False) -> Iterator[str]:
         """Wait until the database is healthy and both servers have said they are up.
@@ -16718,6 +16851,62 @@ class StagedInstaller:
             "address, stop and start it again on the Server tab."
         )
 
+    def _apply_realm_name(self, ctx: StageContext, done: str) -> Iterator[str]:
+        """Put the realm name the owner chose back in the realm row, if one was saved (T808).
+
+        THE ONE post-import step for the realm name, run by every press that can import or
+        make the login database again once its stages have finished: the install, Rebuild
+        (and "Update the server to latest…", which ends in one), Repair of a missing
+        database, "Apply pending database updates…" and the corrections press. An import
+        seeds the catalog's own name over the row, so without this the choice made on the
+        Networking tab would be undone until the next Start (whose `before_servers` step
+        puts it back too). Every caller is a `_reserving` press, so the server is held.
+
+        Nothing saved means nothing is sent and nothing is said. The row is read back:
+        an UPDATE that matched nothing also exits 0. Like `_advertise_realm()`, it can
+        never fail the press: a refusal is a sentence, which starts with `done`.
+
+        Not on a realm-type entry (CoA): its realm type decides the name and the switch
+        writes it, so the record is never read there (`realm_name.follows_realm_type()`).
+        """
+        if realm_name.follows_realm_type(self.entry):
+            return
+        saved = realm_name.read_saved_name(ctx.server_dir)
+        if saved is None:
+            return
+        failed = self._run_auth_statement(realm_name.name_sql(self.entry, saved), ctx)
+        if not failed:
+            reads = self._stored_realm_name(ctx)
+            if reads != saved:
+                failed = (
+                    "the realm row could not be read back"
+                    if reads is None
+                    else f"the realm row reads '{reads}'"
+                )
+        if failed:
+            yield (
+                f"{done}, but the realm name you chose ('{saved}') could not be set ({failed}). "
+                "It is still saved, and the next Start puts it back; or open this server's "
+                "Networking tab and press Save name."
+            )
+            return
+        yield f"The realm is called '{saved}' in the game's realm list, the name you chose."
+
+    def _stored_realm_name(self, ctx: StageContext) -> str | None:
+        """The realm row's name now, or None if it would not say (one readable row only)."""
+        try:
+            answer = self._seams.sql_query(
+                self.entry.container_spec().db,
+                self._native().db.client,
+                ctx.secrets.db_password,
+                None,
+                realm_name.name_query(self.entry),
+            )
+        except docker.DockerCommandError as exc:
+            logger.debug(f"the realm name could not be read back: {exc}")
+            return None
+        return realm_name.name_from_answer(answer)
+
     def _detected_lan_ip(self) -> str | None:
         """The seam's answer, or None — including when the seam itself blew up.
 
@@ -17228,6 +17417,13 @@ def _listing(folder: Path, *, ignoring: Collection[str] = ()) -> list[str]:
     "too few archives" about a folder nobody could open. Rewording was the fix
     rather than routing them through here: they need `Path`s and the raw error,
     and this function exists to hand back names and a refusal.
+
+    T811's backup listings in the same file are the same shape: they list this
+    run's own `mmaps.t811-backup/` and the `mmaps/` it fills, so what they decide
+    is which of the app's own files go back or go, never whether a folder is
+    somebody else's to write into. `put_maps_back()`, `put_map_back()`,
+    `_map_file_names()` and `_backup_names()` each answer their own sentence
+    about the movement maps, and `_drop_backup_root_if_empty()` logs.
 
     The narrow claim is pinned by enumeration rather than by assertion:
     `test_every_folder_listing_in_the_package_is_accounted_for` lists every

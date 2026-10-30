@@ -25,6 +25,8 @@ the same way, so a player meets one behaviour for "Yu'lon is still working".
 
 from __future__ import annotations
 
+from yulon.server_build_presses import MAINTENANCE_TAB
+
 UPDATE_BACKUP = "update_backup"
 BACKUP = "backup"
 RESTORE = "restore"
@@ -89,16 +91,16 @@ _SENTENCES: dict[str, str] = {
         f"half-made backup. {_WAIT}"
     ),
     BACKUP: (
-        "A backup of this server is running on its Maintenance tab. Stopping it now "
+        f"A backup of this server is running on its {MAINTENANCE_TAB} tab. Stopping it now "
         f"would lose the backup. {_WAIT}"
     ),
     RESTORE: (
-        "A restore is writing into this server's databases on its Maintenance tab. "
+        f"A restore is writing into this server's databases on its {MAINTENANCE_TAB} tab. "
         f"Stopping it now would leave them half-written. {_WAIT}"
     ),
     MOVE: (
         "Accounts and characters are being packed or brought in on this server's "
-        "Maintenance tab. Stopping now would leave its databases half-written. "
+        f"{MAINTENANCE_TAB} tab. Stopping now would leave its databases half-written. "
         f"{_WAIT}"
     ),
     NETWORK: (

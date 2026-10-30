@@ -289,7 +289,7 @@ def test_only_the_world_and_auth_servers_share_a_buildx_group(tmp_path: Path) ->
 
 
 PINNED_WOTLK_DOCKERFILE = (
-    Path(__file__).resolve().parent / "data" / "azerothcore-wotlk-8a4e76ea" / "Dockerfile"
+    Path(__file__).resolve().parent / "data" / "azerothcore-wotlk-3f2969dd" / "Dockerfile"
 )
 """The catalog pin's `apps/docker/Dockerfile`; `test_build_context` fails a pin bump until it is
 vendored again, which re-runs the check below on the new recipe."""

@@ -162,7 +162,7 @@ class _Lifecycle:
     refuse_before_a_stop = refuse_start  # T377: the restart asks this, the database included
     restart = Controller.restart  # T761: the real composite, reserved first, over these steps
 
-    def stop(self) -> bool:
+    def stop(self, **_kw: object) -> bool:
         self.calls.append("stop")
         return True
 
@@ -677,7 +677,9 @@ def test_the_tortoise_tab_holds_the_switch_and_the_wrapped_update_route(
     fake = _Docker(monkeypatch)
     lifecycle: list[str] = []
     monkeypatch.setattr(
-        tortoise_controller.TortoiseController, "stop", lambda _self: lifecycle.append("stop")
+        tortoise_controller.TortoiseController,
+        "stop",
+        lambda _self, **_kw: lifecycle.append("stop"),
     )
     monkeypatch.setattr(
         tortoise_controller.TortoiseController, "start", lambda _self: lifecycle.append("start")
@@ -1233,7 +1235,9 @@ def test_a_rebuild_that_fails_after_the_update_moved_the_module_stops_the_dashbo
     fake = _Docker(monkeypatch)
     lifecycle: list[str] = []
     monkeypatch.setattr(
-        tortoise_controller.TortoiseController, "stop", lambda _self: lifecycle.append("stop")
+        tortoise_controller.TortoiseController,
+        "stop",
+        lambda _self, **_kw: lifecycle.append("stop"),
     )
     monkeypatch.setattr(
         tortoise_controller.TortoiseController, "start", lambda _self: lifecycle.append("start")

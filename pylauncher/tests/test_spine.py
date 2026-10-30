@@ -35,7 +35,7 @@ from tests.support_native import (
     install,
     lay_patch_sources,
 )
-from yulon import docker, install_wiring, networking, platform, resources, runner
+from yulon import docker, install_wiring, networking, platform, realm_name, resources, runner
 from yulon.apply import ApplyError
 from yulon.catalog import composegen, native, preflight
 from yulon.catalog.catalog import CatalogEntry, ReadyMarkers, load_catalog
@@ -2593,6 +2593,43 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "models the index places; its `except OSError` logs and answers None, which is 'no "
         "check ran' and warns about nothing - nothing is written on the strength of it"
     ),
+    ("catalog/families/extract.py", "_map_file_names"): (
+        "T811. Lists the server's own `mmaps/` -- the output this app's extractor filled -- "
+        "for the files one map owns, before a rebuild moves them aside. It decides no write "
+        "permission: it decides which files `set_map_aside()` renames into this run's backup "
+        "folder, and only the names `owns_file()` claims (the map's `.mmap` and its four-digit "
+        "tiles). A folder that is not there has no files; any other OSError reaches "
+        "`set_map_aside()`'s own sentence, which says the map was not rebuilt and nothing was "
+        "changed"
+    ),
+    ("catalog/families/extract.py", "_backup_names"): (
+        "T811. Lists one map's folder INSIDE this run's own `mmaps.t811-backup/` when "
+        "`BACKUP_NAMES` is missing, to learn what a crashed press had moved before it wrote the "
+        "list. It decides a DELETE, and it says whether it could trust the list: "
+        "`put_map_back()` removes nothing when it cannot, because a folder made before the "
+        "first rename moved nothing and every file under `mmaps/` is then the old one. An "
+        "OSError here is `put_map_back()`'s refusal, and the files stay in the backup"
+    ),
+    ("catalog/families/extract.py", "put_map_back"): (
+        "T811. Lists the server's own `mmaps/` to find the rejected build's files -- names "
+        "`owns_file()` claims, not on `BACKUP_NAMES`, and not folders -- and removes them "
+        "before the old ones go back over them. It decides that DELETE and no other write, and "
+        "a folder whose list was lost removes nothing. An OSError is the refusal this function "
+        "raises, with what is left named"
+    ),
+    ("catalog/families/extract.py", "_drop_backup_root_if_empty"): (
+        "T811. Lists this run's own `mmaps.t811-backup/` to see whether only `offmesh.sha` is "
+        "left, which is when that folder is removed. It decides that one DELETE of a folder "
+        "this same run made, and an OSError answers 'not empty', so the folder stays for the "
+        "next press"
+    ),
+    ("catalog/families/extract.py", "put_maps_back"): (
+        "T811. Lists this run's own `mmaps.t811-backup/` for the map folders a crashed press "
+        "left, to put each back before the off-mesh file is compared at all. It decides no "
+        "write of its own: it names what `put_map_back()` puts back, and that function's own "
+        "rules bound each one. A folder that is not there is the ordinary empty answer; any "
+        "other OSError is this function's own refusal, raised before a map is touched"
+    ),
     ("catalog/build_context.py", "_sorted_entries"): (
         "T224. Lists the build context, the server folder, the way Docker's own walk "
         "filters it, to fingerprint the files a finished build was made from. It decides no "
@@ -3113,6 +3150,44 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "the player's own client is never chmodded and is left). Only in a folder whose step "
         "(a) marker was checked, never into a link, and never the player's own client"
     ),
+    ("client_packs.py", "foreign_files"): (
+        "T809 W5. Lists the ready-to-play client's top level for a loader name "
+        "(`version.dll`, whatever the case) this pack did not put there, so the "
+        "install step can refuse BEFORE fetching (`refuse_foreign_loader`). The "
+        "listing decides that refusal, but only inside a folder whose step (a) "
+        "marker was checked (`_gate`), never into a link, and the names it hands "
+        "back decide no write: the refusal is before any fetch, install or touch. "
+        "A folder that cannot be listed answers no names"
+    ),
+    ("client_packs.py", "reap_stale_loader"): (
+        "T809 W6B. Lists the marker's own client (the player's client the copy "
+        "was made from) for its top-level names, to tell a loader the copy still "
+        "holds but neither that client nor a pack record owns. The listing "
+        "decides a delete of that one loader name only, in a folder whose step "
+        "(a) marker was read first and only when the marker's own client no "
+        "longer has it. The copy's own names come from `foreign_files()` above; "
+        "a folder that cannot be listed ends the reap"
+    ),
+    ("client_packs.py", "_probe_locale"): (
+        "T809. Lists the copy's `Data/` for its four-character locale folders so "
+        "the pinned setup script can run over the one holding its "
+        "`locale-<same>.MPQ`, the way the script reads the client's own folders. "
+        "Read-only: the names decide only which locale the run is told, and a "
+        "missing folder refuses before anything runs. A folder that cannot be "
+        "listed answers no locale, which refuses the same way"
+    ),
+    ("coa_client.py", "backups"): (
+        "T825. Lists `.yulon-client-backup/` in the player's own client folder for the "
+        "versions whose backup journal is there, to name what an Undo could put back. It "
+        "decides no write: `rollback()` is given one version by name and reads that version's "
+        "journal itself"
+    ),
+    ("coa_client.py", "rollback"): (
+        "T825 review. Lists ONE version's backup folder (`.yulon-client-backup/<version>/`) "
+        "in the player's client, only after every Undo step is checkpointed done, to remove "
+        "what is in it except `.yulon-conflicts` (the player's files moved aside). A link "
+        "there is removed as a name, never followed; the folder's path was checked for links"
+    ),
     ("launcher_reads.py", "_scandir"): (
         "T187. Lists a ready-to-play client, its `Interface` and its `AddOns` -- one folder "
         "each, never a walk -- for the NAMES the launcher window shows under Addons in this "
@@ -3256,6 +3331,19 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "T624. Walks a folder module's own clone folder under `modules/` (links refused, `.git` "
         "and Yu'lon's records skipped) to READ its files into a move package. It decides no "
         "write: the files are read, never changed, and the package is written elsewhere"
+    ),
+    ("move_flows.py", "_sql_files_under"): (
+        "T802. Walks one update folder (`updates_include` under the server folder, or a "
+        "module's `data/sql/<pool>`) for the `.sql` files the one-shot updater would run "
+        "after a pack import. Read-only; it decides only whether the tail proof may let "
+        "the import in. A folder that is not there holds none, and a listing that "
+        "fails, or a folder reached through a link, answers None, which refuses"
+    ),
+    ("move_flows.py", "_module_sql_folders"): (
+        "T802. Lists `modules/` and each module's `data/sql/` for the `<pool>` folders "
+        "the updater walks, as a superset of what the one-shot is handed, so a withheld "
+        "module can only refuse, never let a file through. Read-only; an unreadable "
+        "folder answers None, which refuses"
     ),
     ("catalog/families/mmaps.py", "_keep_finished"): (
         "T209. Lists `data/mmaps` -- the pathfinding job's own output folder, refused when it "
@@ -3681,8 +3769,9 @@ def test_no_detectable_address_is_a_sentence_and_never_a_guess(
     they can reach and no idea why.
 
     `127.0.0.1` is in the list because it is an address a detector really
-    returns: `platform.detect_lan_ip()` filters it on its local branch and its
-    WSL branch, which asks Windows, does not.
+    returns: `platform.detect_lan_ip()` filters it on every branch now (T800
+    gave its WSL branch named pairs), and a detector that cannot read its
+    routes answers None.
 
     Mutations this catches: treating `None` as "already correct" and skipping
     silently (no line is said), writing whatever was detected (a statement
@@ -4598,3 +4687,81 @@ def test_a_recorded_address_this_computer_still_holds_gets_no_warning(
     said = _advertising(rec, server, lan_ip=lambda: "192.168.1.25")
     assert not [line for line in said if line.startswith("Warning:")], said
     assert _statements(rec) == [networking.realmlist_sql(ENTRY, "100.64.0.10", "100.64.0.10")]
+
+
+# -- T808: the realm name the owner chose survives the install's own seed ------
+
+
+def _name_statements(rec: Recorder) -> list[str]:
+    return [s for s in _statements(rec) if " SET name=" in s]
+
+
+def test_a_saved_realm_name_is_written_by_the_closing_step_after_the_address(
+    tmp_path: Path,
+) -> None:
+    """The import seeds the catalog's own name; the closing step must put the owner's back.
+
+    Mutation: dropping `_apply_realm_name()` from `run()` leaves `_statements` holding only the
+    address update, and this fails. Asserted against `realm_name.name_sql()`'s own output.
+    """
+    server = tmp_path / "wow"
+    server.mkdir()
+    assert realm_name.record_name(server, "Jerra's Realm") == ""
+    rec = Recorder()
+
+    said = _advertising(rec, server, lan_ip=lambda: "100.64.0.10")
+
+    assert _statements(rec) == [
+        networking.realmlist_sql(ENTRY, "100.64.0.10", "100.64.0.10"),
+        realm_name.name_sql(ENTRY, "Jerra's Realm"),
+    ]
+    assert [line for line in said if "Jerra's Realm" in line], said
+    assert said[-1].startswith(f"{ENTRY.name} is installed"), said[-1]
+
+
+def test_no_saved_realm_name_means_no_name_statement_and_no_extra_line(tmp_path: Path) -> None:
+    rec = Recorder()
+
+    said = _advertising(rec, tmp_path / "wow", lan_ip=lambda: "100.64.0.10")
+
+    assert _name_statements(rec) == []
+    assert not [line for line in said if "realm list" in line]
+
+
+def test_a_saved_realm_name_is_applied_even_when_the_loopback_was_chosen(tmp_path: Path) -> None:
+    """The address choice and the name choice are separate records; one must not eat the other."""
+    server = tmp_path / "wow"
+    server.mkdir()
+    networking.record_network_intent(server, "loopback")
+    realm_name.record_name(server, "Quiet Realm")
+    rec = Recorder(realm_row=f"{native.INSTALL_REALM_HOST}\t{native.INSTALL_REALM_HOST}\n")
+
+    _advertising(rec, server, lan_ip=lambda: "10.1.2.3")
+
+    assert _statements(rec) == [realm_name.name_sql(ENTRY, "Quiet Realm")]
+
+
+def test_a_realm_name_the_database_refuses_is_said_and_the_install_still_finishes(
+    tmp_path: Path,
+) -> None:
+    server = tmp_path / "wow"
+    server.mkdir()
+    realm_name.record_name(server, "Refused Realm")
+    rec = Recorder(failing_sql=" SET name=")
+
+    said = _advertising(rec, server, lan_ip=lambda: "100.64.0.10")
+
+    line = next(line for line in said if "Refused Realm" in line)
+    assert "could not be set" in line and "Save name" in line, line
+    assert said[-1].startswith(f"{ENTRY.name} is installed"), said[-1]
+
+
+def test_a_damaged_realm_name_record_sends_nothing(tmp_path: Path) -> None:
+    server = tmp_path / "wow"
+    server.mkdir()
+    (server / realm_name.REALM_NAME_FILE).write_text('{"name": "' + "x" * 40 + '"}', "utf-8")
+    rec = Recorder()
+
+    _advertising(rec, server, lan_ip=lambda: "100.64.0.10")
+
+    assert _name_statements(rec) == []

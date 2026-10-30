@@ -18,17 +18,17 @@ wow-wotlk      env/dist/etc/worldserver.conf  mod-playerbots/azerothcore-wotlk:
                                               `:2850-2858` (drops, gold);
                                               `WorldConfig.cpp:41-55,62,64,88,119`
 wow-tbc        etc/mangosd.conf             cmangos/mangos-tbc:
-                                              `mangosd.conf.dist.in:1560-1594`;
+                                              `mangosd.conf.dist.in:1566-1600`;
                                               `World/World.cpp:409-431,458`
 wow-vanilla    etc/mangosd.conf             cmangos/mangos-classic:
-                                              `mangosd.conf.dist.in:1499-1525`;
+                                              `mangosd.conf.dist.in:1505-1531`;
                                               `World/World.cpp:411-425,452`
 wow-tortoise   etc/mangosd.conf             tortoise-wow/tortoise-wow:
                                               `mangosd.conf.dist.in:1702-1716,1744,1776`;
-                                              `World.cpp:999-1012,1042`
+                                              `World.cpp:1045-1054,1084`
 wow-centurion  etc/worldserver.conf         thomasjteachey/TrinityCore112:
-                                              `worldserver.conf.dist:2525-2553,2618,2639`;
-                                              `World/World.cpp:570-583,594,621`
+                                              `worldserver.conf.dist:2537-2545,2563-2565,2630,2651`;
+                                              `World/World.cpp:570-583,597,624`
 =============  ===========================  ======================================
 
 All eleven keys exist under the same names on all five forks, and every fork's
@@ -213,25 +213,35 @@ _GAMES: dict[str, _GameRates] = {
     "wow-wotlk": _GameRates(
         file="env/dist/etc/worldserver.conf",
         repo="mod-playerbots/azerothcore-wotlk",
-        rev="8a4e76eac8c4ccebf547113afe7b51d6c3e91641",
+        rev="3f2969ddb0da42b48b4fca050c02b19163ba1e20",
         keys=_ALL_KEYS,
         notes={},
     ),
     # T554: the same core and the same world conf as wow-wotlk, at Unbound's OWN pin. It shipped on
     # 7f12e89e; T580 (2026-10-09) moved it to f19a1879, wow-wotlk's pin since T389; T655
     # (2026-10-10) moved both to 2a2211cd (worldserver.conf.dist unchanged between the two);
-    # the move to 8a4e76ea (2026-10-17) changed only the default of `DungeonFinder.OptionsMask`.
+    # the move to 8a4e76ea (2026-10-17) changed only the default of `DungeonFinder.OptionsMask`;
+    # T824 (2026-10-28) moved both to 3f2969dd, the newest, not live-tested (same conf.dist).
     "wow-unbound": _GameRates(
         file="env/dist/etc/worldserver.conf",
         repo="mod-playerbots/azerothcore-wotlk",
-        rev="8a4e76eac8c4ccebf547113afe7b51d6c3e91641",
+        rev="3f2969ddb0da42b48b4fca050c02b19163ba1e20",
+        keys=_ALL_KEYS,
+        notes={},
+    ),
+    # T812: the CoA fork's own world conf at its own pin (Rate.XP.* present in
+    # worldserver.conf.dist at 98570f24).
+    "wow-coa": _GameRates(
+        file="env/dist/etc/worldserver.conf",
+        repo="pjerra/azerothcore-wotlk-coa",
+        rev="98570f248b6095a23ef14bbbfac6731ac4c20d66",
         keys=_ALL_KEYS,
         notes={},
     ),
     "wow-tbc": _GameRates(
         file="etc/mangosd.conf",
         repo="cmangos/mangos-tbc",
-        rev="15b6ddb4ec9e443d49f4e438af73782ce5c16491",
+        rev="37767e954241e346453260b8bc8c1fb2e2afdf7d",
         keys=_ALL_KEYS,
         notes={
             **{
@@ -244,21 +254,21 @@ _GAMES: dict[str, _GameRates] = {
     "wow-vanilla": _GameRates(
         file="etc/mangosd.conf",
         repo="cmangos/mangos-classic",
-        rev="8ec338a1704e7dcb1c0213eb7ed58f9231ade40f",
+        rev="5731249195520323cb5fb9aa29761d4f033272ce",
         keys=_ALL_KEYS,
         notes={"Rate.Drop.Money": _QUEST_MONEY},
     ),
     "wow-tortoise": _GameRates(
         file="etc/mangosd.conf",
         repo="tortoise-wow/tortoise-wow",
-        rev="10393426efe4bbe1de3a31fd071ca36fae358bb6",
+        rev="33d0131a5f0f536dffaced04de859561bfc13d5a",
         keys=_ALL_KEYS,
         notes={"Rate.XP.Kill": _TURTLE_MODE, "Rate.Drop.Money": _LEVEL_CAP_MONEY},
     ),
     "wow-centurion": _GameRates(
         file="etc/worldserver.conf",
         repo="thomasjteachey/TrinityCore112",
-        rev="25d3e6efbee97c3cb38830003e2460d98e235f46",
+        rev="351950fb9a5579edfb96a301eb846f13e65aeda6",
         keys=_ALL_KEYS,
         notes={},
     ),

@@ -55,12 +55,13 @@ from __future__ import annotations
 
 import os
 import threading
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path
 
+from yulon import default_addons as _default_addons
 from yulon import module_source, resources
 from yulon.apply import (
     CLONE_DIRS,
@@ -79,11 +80,12 @@ from yulon.apply import (
 from yulon.apply import (
     refresh_module_updates as refresh_cached,
 )
-from yulon.catalog.native import read_state
+from yulon.catalog.native import LatestRoute, read_state
 from yulon.catalog.upstream import Comparison, Release, github_slug
 from yulon.catalog.upstream import cached_row as upstream_cached_row
 from yulon.controller_wow_tortoise import autoupdate, custom
 from yulon.controller_wow_tortoise.autoupdate import Arming, GuardedApplier
+from yulon.controller_wow_tortoise.botpool import Press
 from yulon.controller_wow_wotlk.maintenance import BackupReport, backups_dir
 
 # Explicit re-exports: the user layer's place, the copy and the replace question
@@ -91,6 +93,7 @@ from yulon.controller_wow_wotlk.maintenance import BackupReport, backups_dir
 from yulon.controller_wow_wotlk.modules import CustomInstall as CustomInstall
 from yulon.controller_wow_wotlk.modules import replacement_question as replacement_question
 from yulon.controller_wow_wotlk.modules import user_manifests_dir as user_manifests_dir
+from yulon.default_addons import AddonFollow
 from yulon.git import Git, is_behind
 from yulon.log import get_logger
 from yulon.manifest import Db, Manifest, ManifestType
@@ -484,6 +487,40 @@ Both publish dated releases in lockstep (v2026-09-23, -24, -25 on both, read
 2026-09-25), and the addon's README says it degrades gracefully against an older
 server (`TBM:CAPS`), so a skew is a note and never a refusal.
 """
+
+
+def follow_with_addon(
+    route: LatestRoute | None, follow: Callable[[], AddonFollow]
+) -> LatestRoute | None:
+    """The update route with the addon follow around `press` only (T814).
+
+    `None` in is `None` out. The addon step runs after a finished press, never
+    after a failed one (its exception propagates untouched) and never when the
+    press was stopped. `to_pin` is untouched: the way back leaves the addon
+    alone. The wrapper never raises after a finished update: the outcome's own
+    sentence is the failure's line.
+    """
+    if route is None:
+        return None
+
+    def run(inner: Press, cancel: threading.Event | None) -> Iterator[str]:
+        yield from inner(cancel)
+        if cancel is not None and cancel.is_set():
+            logger.info("the update was stopped, so the client addon was left as it is")
+            return
+        yield "Checking TortoiseBots Manager in your game client…"
+        try:
+            yield follow().sentence
+        except Exception as exc:  # noqa: BLE001 - the update is done; the addon step never fails it
+            logger.warning(f"following the server update for {ADDON_ID}: {exc}")
+            yield _default_addons.FOLLOW_FAILED.format(name="TortoiseBots Manager", why=_short(exc))
+
+    return replace(route, press=lambda cancel: run(route.press, cancel))
+
+
+def _short(exc: Exception) -> str:
+    """One line of `exc`, for the FAILED sentence (T814)."""
+    return " ".join(str(exc).split())
 
 
 def module_updates(

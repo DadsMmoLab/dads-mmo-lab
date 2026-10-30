@@ -184,10 +184,14 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         _all(supported()),
         hits=(
             "'azerothcore'",
+            "'azerothcore'",
             "'cmangos'",
             "'cmangos'",
             "'trinitycore'",
             "'trinitycore'",
+            ".azerothcore",
+            ".azerothcore",
+            ".azerothcore",
             ".azerothcore",
             ".cmangos",
             ".cmangos",
@@ -221,6 +225,17 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
     ),
     Site(
         "yulon.catalog.catalog",
+        "CatalogEntry._every_rerunnable_module_is_a_module_this_entry_clones",
+        "a re-runnable module (T813) names a module the entry clones",
+        {
+            "azerothcore": not_applicable("only a CMaNGOS block carries re-runnable modules"),
+            "cmangos": supported(),
+            "trinitycore": not_applicable("only a CMaNGOS block carries re-runnable modules"),
+        },
+        hits=(".cmangos",),
+    ),
+    Site(
+        "yulon.catalog.catalog",
         "CatalogEntry._the_trinitycore_block_agrees_with_the_entry",
         "the TrinityCore checkout is a cloned dest; renames land on the entry's schemas",
         {
@@ -243,7 +258,51 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
                 "shared/trinitycore names three services; the rendered file is checked instead"
             ),
         },
-        hits=("'azerothcore'",),
+        hits=("'azerothcore'", ".azerothcore", ".azerothcore"),
+    ),
+    Site(
+        "yulon.catalog.catalog",
+        "CatalogEntry._a_client_extract_needs_no_client_data_service",
+        "a client-extract entry lays maps from the player's client, not the download (T812)",
+        {
+            "azerothcore": supported(),
+            "cmangos": not_applicable("only an AzerothCore block carries a client extract"),
+            "trinitycore": not_applicable("only an AzerothCore block carries a client extract"),
+        },
+        hits=(".azerothcore",),
+    ),
+    Site(
+        "yulon.catalog.catalog",
+        "CatalogEntry._auth_after_world_needs_its_marker",
+        "starting auth after the world needs the auth ready marker and container (T812)",
+        {
+            "azerothcore": supported(),
+            "cmangos": not_applicable("only an AzerothCore block orders auth after the world"),
+            "trinitycore": not_applicable("only an AzerothCore block orders auth after the world"),
+        },
+        hits=(".azerothcore",),
+    ),
+    Site(
+        "yulon.catalog.catalog",
+        "CatalogEntry.container_spec",
+        "the ordered start flag rides the spec from the AzerothCore block (T812)",
+        {
+            "azerothcore": supported(),
+            "cmangos": not_applicable("only an AzerothCore block orders auth after the world"),
+            "trinitycore": not_applicable("only an AzerothCore block orders auth after the world"),
+        },
+        hits=(".azerothcore",),
+    ),
+    Site(
+        "yulon.catalog.ordered_start",
+        "ordered",
+        "starting auth after the world needs the AzerothCore block's flag (T812)",
+        {
+            "azerothcore": supported(),
+            "cmangos": not_applicable("only an AzerothCore block orders auth after the world"),
+            "trinitycore": not_applicable("only an AzerothCore block orders auth after the world"),
+        },
+        hits=(".azerothcore", ".azerothcore"),
     ),
     Site(
         "yulon.unbound_settings",
@@ -304,6 +363,93 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
             "trinitycore": not_applicable("only the AzerothCore engine reads this block"),
         },
         hits=(".azerothcore", ".azerothcore"),
+    ),
+    Site(
+        "yulon.coa_realm",
+        "_block",
+        "the realm-type engine reads the AzerothCore block (T812 C3a)",
+        {
+            "azerothcore": supported(),
+            "cmangos": not_applicable("only a realm-types entry reaches this module"),
+            "trinitycore": not_applicable("only a realm-types entry reaches this module"),
+        },
+        hits=(".azerothcore",),
+    ),
+    Site(
+        "yulon.coa_switch",
+        "switch_for",
+        "the Server tab's realm-type switch for a realm-types entry (T812 C3b)",
+        {
+            "azerothcore": supported("`realm_types`, when the entry names any"),
+            "cmangos": not_applicable("CMaNGOS sets its server through its conf table"),
+            "trinitycore": not_applicable("TrinityCore has no realm types"),
+        },
+        hits=(),
+        scanned=False,
+    ),
+    Site(
+        "yulon.ui.controller_view",
+        "ControllerView._show_realm_type",
+        "the Server tab's realm-type choice, for entries with realm types (T812 C3b)",
+        {
+            "azerothcore": supported("`realm_types`, when the entry names any"),
+            "cmangos": not_applicable("CMaNGOS sets its server through its conf table"),
+            "trinitycore": not_applicable("TrinityCore has no realm types"),
+        },
+        hits=(),
+        scanned=False,
+    ),
+    Site(
+        "yulon.ui.controller_view",
+        "ControllerView.switch_realm_type",
+        "the Server tab's realm-type switch press, for entries with realm types (T812 C3b)",
+        {
+            "azerothcore": supported("`realm_types`, when the entry names any"),
+            "cmangos": not_applicable("CMaNGOS sets its server through its conf table"),
+            "trinitycore": not_applicable("TrinityCore has no realm types"),
+        },
+        hits=(),
+        scanned=False,
+    ),
+    Site(
+        "yulon.catalog.composegen",
+        "_has_realm_types",
+        "whether the rendered override layers a realm type's env over the block (T812 C3a)",
+        {
+            "azerothcore": supported("`realm_types`, when the entry names any"),
+            "cmangos": not_applicable("CMaNGOS sets its server through its conf table"),
+            "trinitycore": not_applicable(
+                "TrinityCore sets its servers through its conf table; its override template "
+                "carries no environment block"
+            ),
+        },
+        hits=(".azerothcore",),
+    ),
+    Site(
+        "yulon.coa_client",
+        "map_data_sentence",
+        "whether a client update left the map data extracted from the old client (T825)",
+        {
+            "azerothcore": supported("`client_extract`, when the entry has one"),
+            "cmangos": not_applicable(
+                "no CMaNGOS entry publishes its client (`client.update`), so no update runs"
+            ),
+            "trinitycore": not_applicable(
+                "no TrinityCore entry publishes its client (`client.update`), so no update runs"
+            ),
+        },
+        hits=(".azerothcore", ".azerothcore"),
+    ),
+    Site(
+        "yulon.catalog.preflight",
+        "client_spec_of",
+        "the client rules of an AzerothCore entry with client_extract (T812 C4a)",
+        {
+            "azerothcore": supported("`client_extract.client`, when the entry has one"),
+            "cmangos": not_applicable("its `built.client` answered in `client_spec_for`"),
+            "trinitycore": not_applicable("its `built.client` answered in `client_spec_for`"),
+        },
+        hits=(".azerothcore",),
     ),
     Site(
         "yulon.catalog.families.cmangos",
@@ -577,6 +723,22 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         ),
     ),
     Site(
+        "yulon.dbreads",
+        "_env_prefix",
+        "the bot account prefix the world container's environment sets (`AC_*`), which "
+        "beats the conf and the default when the Bots tab counts or deletes bots (T805)",
+        {
+            "azerothcore": supported("the world service's compose environment and env_file"),
+            "cmangos": not_applicable(
+                "CMaNGOS reads no `AC_*` environment: its prefix is aiplayerbot.conf's alone"
+            ),
+            "trinitycore": not_applicable(
+                "this family's bot accounts are fixed rows with no prefix setting (T179)"
+            ),
+        },
+        hits=("'azerothcore'",),
+    ),
+    Site(
         "yulon.channel_setup",
         "_world_env",
         "the world environment the command channel is enabled through",
@@ -603,16 +765,21 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
     Site(
         "yulon.install_wiring",
         "import_gate_for",
-        "the one-shot import probe/reset pair (keyed on import_service)",
+        "the one-shot import probe/reset pair (keyed on import_service), and the world a "
+        "bootstrap loaded reading as absent rather than partial (T812 D3)",
         {
-            "azerothcore": supported(),
+            "azerothcore": supported(
+                "an entry that names a world_bootstrap_service is asked whether the bootstrap's "
+                "own load is the whole of what is there; every other entry keeps the probe's "
+                "answer (T812 D3)"
+            ),
             "cmangos": not_applicable("CMaNGOS's import is the engine's marker-gated SQL plan"),
             "trinitycore": not_applicable(
                 "TrinityCore's import is the engine's marker-gated SQL plan (CmangosInstaller's, "
                 "inherited)"
             ),
         },
-        scanned=False,
+        hits=(".azerothcore", ".azerothcore"),
     ),
     Site(
         "yulon.install_wiring",
@@ -705,7 +872,10 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         "read_only_confs",
         "the server's own confs the Tuning raw editor lists read-only (T43, T179 fix round 1)",
         {
-            "azerothcore": supported("its three confs, `AZEROTHCORE_CORE_FILES`"),
+            "azerothcore": supported(
+                "since T819 its three confs are editable with locked keys "
+                "(`yulon.core_conf`), so none is listed read-only"
+            ),
             "cmangos": supported(
                 "as before T179: handed WotLK's paths, which its install never has, so its raw "
                 "editor lists module confs only"
@@ -714,7 +884,22 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
                 "the world and login servers' confs (spec §2); its bot conf is the bot card's"
             ),
         },
-        hits=(".trinitycore", ".trinitycore"),
+        hits=("'azerothcore'", ".trinitycore", ".trinitycore"),
+    ),
+    Site(
+        "yulon.core_conf",
+        "is_editable_core",
+        "whether this game owns editable core confs (T819: the Tuning tab lists them "
+        "editable with locked keys instead of read-only)",
+        {
+            "azerothcore": supported("its three confs are the editable ones"),
+            "cmangos": not_applicable("only the azerothcore family owns editable core confs"),
+            "trinitycore": not_applicable(
+                "only the azerothcore family owns editable core confs; its own confs stay "
+                "read-only"
+            ),
+        },
+        hits=("'azerothcore'",),
     ),
     Site(
         "yulon.ui.controller_view",
@@ -737,6 +922,23 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
             "trinitycore": not_available(PARTY_REASON),
         },
         scanned=False,
+    ),
+    Site(
+        "yulon.controller_wow_wotlk.modules",
+        "importer_module_dirs",
+        "the module folders handed to the importer, less the ones the core's own importer "
+        "always applies (core_sql_modules, T812 D14)",
+        {
+            "azerothcore": supported(
+                "an entry that lists core_sql_modules never hands those folders over; every "
+                "other entry hands every folder on disk, as before"
+            ),
+            "cmangos": not_applicable("CMaNGOS has no module importer (no import_service)"),
+            "trinitycore": not_applicable(
+                "TrinityCore has no module importer (CmangosInstaller's, inherited)"
+            ),
+        },
+        hits=(".azerothcore",),
     ),
     # -- account schemes (Accounts.scheme; the AzerothCore arm names a family) -------
     Site(
@@ -1150,6 +1352,47 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
             "trinitycore": supported(),
         },
         hits=("isinstance TrinityCoreInstaller",),
+    ),
+    Site(
+        "yulon.move_flows",
+        "tail_updates",
+        "a pack import applies the missing bundled updates when the file is behind (T802)",
+        {
+            "azerothcore": supported(
+                "a strict hash-equal tail on a Yu'lon-owned server is applied by the one-shot"
+            ),
+            "cmangos": not_applicable(
+                "Tortoise migrations are non-idempotent; a tail is always refused"
+            ),
+            "trinitycore": not_applicable(
+                "TrinityCore has a different reimport path; a tail is always refused"
+            ),
+        },
+        hits=("'azerothcore'",),
+    ),
+    Site(
+        "yulon.move_flows",
+        "_tail_rows_of_server",
+        "the tail proof reads the server's update rows only on the updater's own ledger (T802)",
+        {
+            "azerothcore": supported("its `updates` table holds the rows the classifier compares"),
+            "cmangos": not_applicable(
+                "it keeps `migrations`, not `updates`; the tail is refused above"
+            ),
+            "trinitycore": not_applicable("out of scope: it has a different reimport path"),
+        },
+        hits=("'azerothcore'",),
+    ),
+    Site(
+        "yulon.ui.controller_view",
+        "_move_services",
+        "a pack import's one-shot seam is bound only where the updater can run it (T802)",
+        {
+            "azerothcore": supported("the Modules tab's `apply_module_sql` route, bound here"),
+            "cmangos": not_applicable("no importer one-shot; the tail is refused at plan time"),
+            "trinitycore": not_applicable("no importer one-shot; the tail is refused at plan time"),
+        },
+        hits=("'azerothcore'",),
     ),
     Site(
         "yulon.purge",

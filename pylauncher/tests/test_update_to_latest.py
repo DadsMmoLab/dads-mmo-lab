@@ -17,6 +17,7 @@ pass against a route that fetched, failed and walked away.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import threading
 from collections.abc import Callable, Iterator, Sequence
@@ -172,8 +173,8 @@ def test_every_shipped_source_is_classified_and_only_the_db_repos_stay() -> None
     # "nine sources, seven shallow" when the catalog held ten and nine. A number
     # in prose that nothing recomputes is a number that was true once.
     every = [source for entry in load_catalog().games for source in entry.emulator.sources]
-    assert len(every) == 15, [s.repo for s in every]
-    assert sum(1 for s in every if s.depth is not None) == 13
+    assert len(every) == 17, [s.repo for s in every]
+    assert sum(1 for s in every if s.depth is not None) == 14
     moving = {
         entry.id: tuple(s.repo for s in entry.emulator.sources if not native.held_at_its_pin(s))
         for entry in load_catalog().games
@@ -190,6 +191,7 @@ def test_every_shipped_source_is_classified_and_only_the_db_repos_stay() -> None
         "wow-vanilla": ("cmangos/mangos-classic", "cmangos/playerbots"),
         "wow-tortoise": ("tortoise-wow/tortoise-wow", "Sagiroth/TortoiseBots"),
         "wow-centurion": ("thomasjteachey/TrinityCore112",),
+        "wow-coa": ("pjerra/azerothcore-wotlk-coa", "pjerra/mod-playerbots-coa"),
     }, moving
 
 
@@ -245,6 +247,8 @@ def test_only_wotlk_has_a_server_source_inside_a_folder_the_modules_tab_lists() 
         ("wow-unbound", "modules/mod-playerbots"),
         ("wow-unbound", "modules/mod-ale"),
         ("wow-unbound", "modules/mod-unbound"),
+        # T812: CoA's bots land in the same listed folder; the fork core is the server dir.
+        ("wow-coa", "modules/mod-playerbots"),
     }, listed
 
 
@@ -267,6 +271,8 @@ def test_the_route_is_offered_for_every_shipped_entry_and_by_the_flag_not_the_id
         "wow-vanilla": True,
         "wow-tortoise": True,
         "wow-centurion": True,
+        # T812: CoA pins its fork and carries a patch; no update control until a gate proves one.
+        "wow-coa": False,
     }
     assert update_to_latest_for_app(ENTRY, Path("/srv/x")) is not None
     unflagged = ENTRY.install.native.model_copy(update={"update_to_latest": False})
@@ -1441,6 +1447,30 @@ def test_real_local_edits_reports_the_users_file_and_skips_the_one_we_patch(
     ), "an untracked file reset --hard never touches was counted as an edit"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="a POSIX mode bit is what a bind mount flips")
+def test_a_mode_only_change_is_not_an_edit_and_a_content_change_still_is(
+    origin: Path, tmp_path: Path
+) -> None:
+    """T797: a Windows bind mount flips 644 -> 755 and the user has changed nothing.
+
+    `local_edits()` read a mode-only change as "changes of your own" and refused
+    "Return to the tested pin" over a 9 MB SQL file the player never touched.
+    Mutation: drop `-c core.fileMode=false` from `_STATUS_ARGS` and the first
+    assertion fails, because `status` lists the chmod'd file.
+    """
+    if not git.git_available():
+        pytest.skip("no host git")
+    dest = tmp_path / "work"
+    real = git.RunnerGit()
+    real.clone(git.CloneSpec(url=f"file://{origin}", dest=dest, branch="main", depth=None))
+
+    (dest / "README").chmod(0o755)
+    assert real.local_edits(dest) == (), "a mode-only flip was counted as an edit"
+
+    (dest / "README").write_text("edited\n", encoding="utf-8", newline="\n")
+    assert real.local_edits(dest) == ("README",), "a real content edit was not counted"
+
+
 def test_restoring_a_source_asks_the_remote_for_nothing(tmp_path: Path) -> None:
     """The one difference from `_pin()`, and a mutation that added a fetch survived without it.
 
@@ -1949,14 +1979,14 @@ def test_the_two_confirmations_open_differently_and_neither_claims_an_undo() -> 
 
 
 def test_the_rewritten_history_refusal_says_where_the_press_is() -> None:
-    """T89 moved "Update the server to latest…" into the "Server build ▾" menu.
+    """T89 moved "Update the server to latest…" into a menu; T692a into the Server version section.
 
     This refusal tells the player to press it again, so it names the menu as
     well: the entry is not on the Modules toolbar itself any more.
     """
     said = str(native.RewrittenHistory("cmangos/x", "The release is on rewritten history."))
     assert "“Update the server to latest…”" in said
-    assert "“Server build ▾”" in said, said
+    assert "“Server version” on the Backups & updates tab" in said, said
 
 
 # -- T179: what changed between two commits (the TrinityCore route's question) ---------------
@@ -2314,8 +2344,8 @@ def test_a_rollback_that_leaves_the_tags_mixed_says_a_rebuild_is_needed_and_reco
         "replaced, so it is still running the build from before this update if it is up. Its "
         "image tags are mixed, so it must be rebuilt before it can start, and Start is refused "
         "until it is: press “Rebuild the "
-        "server…” under “Server build ▾” on the Modules tab, which compiles every image from "
-        "those commits."
+        "server…” under “Server version” on the Backups & updates tab, which compiles every "
+        "image from those commits."
     )
     state = native.read_state(server_dir, valid=())
     assert state is not None and state.source_revs == before, "the record is as it was"
@@ -2348,8 +2378,8 @@ def test_a_rollback_that_leaves_the_tags_mixed_after_the_containers_moved_record
 MIXED_REFUSAL = (
     "This server's image tags are mixed: an update or rebuild could not put the build from "
     "before it back, and left some images on one build and the rest on the other. It must be "
-    "rebuilt before it can start: press “Rebuild the server…” under “Server build ▾” on the "
-    "Modules tab."
+    "rebuilt before it can start: press “Rebuild the server…” under “Server version” on the "
+    "Backups & updates tab."
 )
 
 

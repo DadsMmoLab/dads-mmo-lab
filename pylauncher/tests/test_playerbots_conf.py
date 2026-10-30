@@ -535,7 +535,7 @@ def test_yes_writes_the_conf_then_offers_the_restart_that_loads_it(
 
     stopped: list[int] = []
     started: list[int] = []
-    view.services.controller.stop = lambda: stopped.append(1) or True  # type: ignore
+    view.services.controller.stop = lambda **_kw: stopped.append(1) or True  # type: ignore
     view.services.controller.start = lambda: started.append(1)  # type: ignore
     view.compose_banner_button.click()
     assert (stopped, started) == ([1], [1]), "the banner's Restart did not restart"

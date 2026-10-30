@@ -54,6 +54,7 @@ from yulon import (
     play_client,
     play_launch,
     purge,
+    realm_name,
     reset_defaults,
     runner,
     server_time_zone,
@@ -105,6 +106,7 @@ from yulon.manifest import Build, ConfKey, Manifest, ManifestType, Source, parse
 from yulon.manifest_store import ManifestStore
 from yulon.networking import NetworkPlan, NetworkReport
 from yulon.runner import run as _REAL_RUN
+from yulon.server_build_presses import MAINTENANCE_TAB
 from yulon.support import runlog
 from yulon.ui import controller_view as controller_view_module
 from yulon.ui import lines as log_lines
@@ -134,6 +136,7 @@ from yulon.ui.widgets.modules_panel import (
     BADGE_NOT_INSTALLED,
     NOT_IN_CATALOG,
 )
+from yulon.ui.widgets.remove_dialog import RemovalChoice
 
 WOTLK = load_catalog().get("wow-wotlk")
 TBC = load_catalog().get("wow-tbc")
@@ -359,7 +362,8 @@ def test_the_sub_tabs_carry_icon_and_title_in_the_tab_itself(
 
     for i in range(view._tabs.count()):
         assert view._tabs.tabText(i) != "", f"tab {i} missing its title"
-        assert view._tabs.tabToolTip(i) == view._tabs.tabText(i)
+        # The bar's text is escaped for Qt (`_drawn_title`); the tooltip is the plain title.
+        assert view._tabs.tabToolTip(i) == view._tabs.tabText(i).replace("&&", "&")
 
     assert view._tabs.tabText(0) == "Server"
     assert view._tabs.tabText(2) == "Accounts"
@@ -847,12 +851,12 @@ def test_removing_a_cpp_module_is_not_told_it_is_inert_on_disk() -> None:
     )
     assert "If mod-solocraft was in the last build it is still in there" in text
     assert "is on disk and inert" not in text
-    # T89: no banner is raised for a removal, so the only Rebuild on the tab is
-    # the entry under "Server build ▾" -- and the sentence says where it is.
-    assert (
-        f'"{controller_view_module.SERVER_BUILD_LABEL}"' in text
-        and f'"{controller_view_module.REBUILD_BUTTON_LABEL}"' in text
-    ), text
+    # T89: no banner is raised for a removal, so the only Rebuild is the
+    # press in the Server version section (T692a) -- and the sentence says where.
+    from yulon import server_build_presses
+
+    said = server_build_presses.under_server_build(controller_view_module.REBUILD_BUTTON_LABEL)
+    assert said in text, text
 
 
 def test_pending_sql_is_drawn_as_not_applied_with_the_file_count() -> None:
@@ -2216,7 +2220,7 @@ def test_a_stop_before_a_removal_that_was_refused_keeps_its_details(
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
     refusal = docker._stranger_refusal(((SPEC.world, "install-b"),), "ours", tmp_path)
 
-    def refuse() -> bool:
+    def refuse(**_kw: object) -> bool:
         raise refusal
 
     view.services.controller.stop = refuse  # type: ignore[method-assign]
@@ -2474,8 +2478,12 @@ def test_only_the_game_that_names_an_importer_is_wired_a_module_sql_route(
     assert ControllerServices.for_entry(WOTLK, tmp_path).module_sql is not None
     for entry in _every_game():
         game = entry.id
-        if game == "wow-unbound":  # T554: it runs the WotLK importer, on its own containers
-            assert entry.container_spec().import_service == "ub-db-import"
+        if game in ("wow-unbound", "wow-coa"):
+            # T554/T812: each runs the WotLK importer, on its own containers.
+            assert (
+                entry.container_spec().import_service
+                == {"wow-unbound": "ub-db-import", "wow-coa": "coa-db-import"}[game]
+            )
             assert ControllerServices.for_entry(entry, tmp_path).module_sql is not None
             continue
         if game == "wow-wotlk":
@@ -3289,74 +3297,62 @@ def _watch_remove(view: ControllerView, result: bool = True) -> list[int]:
     return calls
 
 
-def test_removing_containers_takes_two_presses(qapp: object, ps: _Ps, tmp_path: Path) -> None:
-    """A teardown sitting next to Stop must not be one click away."""
+def test_removing_containers_through_the_dialog_takes_effect_at_once(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T695: choosing Advanced in the dialog IS the deliberate step; there is no arming path."""
+    from yulon.ui.widgets.remove_dialog import RemovalChoice
+
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
     calls = _watch_remove(view)
+    view._ask_removal = lambda _offered: RemovalChoice.REMOVE_CONTAINERS  # type: ignore[method-assign]
 
-    view.remove_containers()
-    assert calls == [], "the first press removed something"
-    assert view.remove_button.text() == controller_view_module.REMOVE_ARMED
+    view.remove_server_button.click()
 
-    view.remove_containers()
     assert calls == [1]
-    assert view.remove_button.text() == controller_view_module.REMOVE_IDLE, "still armed after"
 
 
-def test_the_armed_warning_says_the_characters_are_kept(
+def test_the_advanced_choice_says_the_characters_are_kept_before_anything_runs(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
     """The reason this action is safe is the reason it must be stated.
 
     Someone reading "delete containers" next to a server they have played on
     will assume the worst unless told otherwise, and the truth — the database is
-    a volume and volumes are kept — is exactly what makes it pressable.
+    a volume and volumes are kept — is exactly what makes it pressable. It is
+    said on the dialog's Advanced choice, before anything runs.
     """
-    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
-    _watch_remove(view)
-    view.remove_containers()
-    said = view.danger_label.text()
-    assert "NOT" in said and "characters" in said
-    assert "volume" in said
-    assert "Cancel" in said, "no way out was offered"
+    from yulon.ui.widgets.remove_dialog import RemoveDialog
+
+    box = RemoveDialog(None, uninstall_available=True)
+    tip = box.containers_radio.toolTip()
+    assert "characters" in tip and "kept" in tip
+    assert "volume" in tip
 
 
-def test_refresh_cancels_an_armed_remove(qapp: object, ps: _Ps, tmp_path: Path) -> None:
-    """Arming then walking away must not leave a loaded button behind."""
+def test_dialog_cancel_removes_nothing_and_leaves_no_loaded_button(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Answering the dialog with Cancel removes nothing and arms nothing."""
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
     calls = _watch_remove(view)
+    view._ask_removal = lambda _offered: None  # type: ignore[method-assign]
 
-    view.remove_containers()
-    assert view.remove_button.text() == controller_view_module.REMOVE_ARMED
-    view.recheck()
-    assert view.remove_button.text() == controller_view_module.REMOVE_IDLE
+    view.remove_server_button.click()
 
-    view.remove_containers()
-    assert calls == [], "the press after a cancel removed something"
-
-
-def test_starting_or_stopping_also_disarms(qapp: object, ps: _Ps, tmp_path: Path) -> None:
-    """Any other server action means the user moved on."""
-    for action in ("start_server", "stop_server"):
-        view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
-        calls = _watch_remove(view)
-        view.remove_containers()
-        getattr(view, action)()
-        assert view.remove_button.text() == controller_view_module.REMOVE_IDLE, action
-        view.remove_containers()
-        assert calls == [], action
+    assert calls == []
+    assert view.arm_cancel_button.isHidden()
 
 
 def test_a_removal_that_found_nothing_says_so(qapp: object, ps: _Ps, tmp_path: Path) -> None:
     """False means "there was nothing of ours", which is not the same as done."""
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
     _watch_remove(view, result=False)
-    view.remove_containers()
-    view.remove_containers()
+    view._remove_containers_now()
     assert "no containers to remove" in view.danger_label.text()
 
 
-def test_a_removal_that_found_nothing_points_at_remove_from_yulon(
+def test_a_removal_that_found_nothing_points_at_remove_this_server(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
     """Andood's video (T95): every press ended "no containers to remove" and pointed nowhere.
@@ -3367,22 +3363,20 @@ def test_a_removal_that_found_nothing_points_at_remove_from_yulon(
     """
     view = ControllerView(TORTOISE, _services(ps, tmp_path, []), status_poll_ms=0)
     _watch_remove(view, result=False)
-    assert view.forget_install_button is not None
-    assert not _highlighted(view.forget_install_button)
+    assert not _highlighted(view.remove_server_button)
 
-    view.remove_containers()
-    view.remove_containers()
+    view._remove_containers_now()
 
     said = view.danger_label.text()
     assert "no containers to remove" in said
-    assert f'"{controller_view_module.REMOVE_FROM_YULON}" in the row above' in said, said
-    assert _highlighted(view.forget_install_button)
+    assert f'"{controller_view_module.REMOVE_THIS_SERVER}" in the row above' in said, said
+    assert _highlighted(view.remove_server_button)
     # T189: "the row above" is true where it is said -- the label is the
     # Danger zone's next item after the row that holds the button.
     column = view.danger_label.parentWidget().layout()
     at = column.indexOf(view.danger_label)
     row = column.itemAt(at - 1).widget()
-    assert row is not None and row.isAncestorOf(view.forget_install_button)
+    assert row is not None and row.isAncestorOf(view.remove_server_button)
     assert not view.danger_label.isHidden()
     assert "no containers" not in view.problem_label.text(), "said a page away as well"
     view._show_repair()  # what every import probe's answer ends in
@@ -3394,37 +3388,31 @@ def test_a_removal_that_removed_something_does_not_highlight_it(
 ) -> None:
     view = ControllerView(TORTOISE, _services(ps, tmp_path, []), status_poll_ms=0)
     _watch_remove(view, result=True)
-    view.remove_containers()
-    view.remove_containers()
-    assert view.forget_install_button is not None
-    assert not view.forget_install_button.isHidden(), "decision 4: always shown"
-    assert not _highlighted(view.forget_install_button)
+    view._remove_containers_now()
+    assert not view.remove_server_button.isHidden(), "decision 4: always shown"
+    assert not _highlighted(view.remove_server_button)
 
 
 def test_a_start_takes_the_highlight_back(qapp: object, ps: _Ps, tmp_path: Path) -> None:
     """The next Start recreates the containers, so "nothing to remove" is no longer true."""
     view = ControllerView(TORTOISE, _services(ps, tmp_path, []), status_poll_ms=0)
     _watch_remove(view, result=False)
-    view.remove_containers()
-    view.remove_containers()
-    assert view.forget_install_button is not None
-    assert _highlighted(view.forget_install_button)
+    view._remove_containers_now()
+    assert _highlighted(view.remove_server_button)
 
     view.start_server()
 
-    assert not _highlighted(view.forget_install_button)
-    assert not view.forget_install_button.isHidden()
+    assert not _highlighted(view.remove_server_button)
+    assert not view.remove_server_button.isHidden()
 
 
 def _nothing_to_remove_view(ps: _Ps, tmp_path: Path, **kwargs: Any) -> ControllerView:
-    """A Tortoise tab whose last "Stop and remove containers…" found nothing (T95)."""
+    """A Tortoise tab whose last container removal found nothing (T95)."""
     view = ControllerView(TORTOISE, _services(ps, tmp_path, []), status_poll_ms=0, **kwargs)
     _watch_remove(view, result=False)
     ps.names = ""
-    view.remove_containers()
-    view.remove_containers()
-    assert view.forget_install_button is not None
-    assert _highlighted(view.forget_install_button)
+    view._remove_containers_now()
+    assert _highlighted(view.remove_server_button)
     return view
 
 
@@ -3435,7 +3423,7 @@ def test_a_poll_that_sees_nothing_running_keeps_the_highlight(
     view = _nothing_to_remove_view(ps, tmp_path)
     view.refresh_status()
     view.refresh_status()
-    assert _highlighted(view.forget_install_button)
+    assert _highlighted(view.remove_server_button)
 
 
 def test_a_poll_that_sees_the_server_running_takes_the_highlight_back(
@@ -3443,14 +3431,14 @@ def test_a_poll_that_sees_the_server_running_takes_the_highlight_back(
 ) -> None:
     """A Rebuild, an Update, a Return-to-pin or an outside start brings it up without Start.
 
-    "Remove from Yu'lon…" lit with Start's own emphasis beside a live server
+    "Remove this server…" lit with Start's own emphasis beside a live server
     points the player at removing it (T95 Task 3 review, round 1).
     """
     view = _nothing_to_remove_view(ps, tmp_path)
     ps.names = view.services.controller.spec.world + "\n"
     view.refresh_status()
     assert view.last_seen_running() is True
-    assert not _highlighted(view.forget_install_button)
+    assert not _highlighted(view.remove_server_button)
 
 
 def test_a_stale_running_answer_does_not_take_the_highlight_back(
@@ -3468,14 +3456,12 @@ def test_a_stale_running_answer_does_not_take_the_highlight_back(
     gate.queued = []
     gate.hold = False
     ps.names = ""
-    view.remove_containers()
-    view.remove_containers()  # its own refresh is dropped: the poll is still out
-    assert view.forget_install_button is not None
-    assert _highlighted(view.forget_install_button)
+    view._remove_containers_now()  # its own refresh is dropped: the poll is still out
+    assert _highlighted(view.remove_server_button)
 
     run_inline(lambda: InstallStatus(db=True, auth=True, world=True), on_done, on_error)
 
-    assert _highlighted(view.forget_install_button), "an answer older than the removal cleared it"
+    assert _highlighted(view.remove_server_button), "an answer older than the removal cleared it"
     assert view.last_seen_running() is False, "the dropped refresh was asked again, and answered"
 
 
@@ -3484,9 +3470,8 @@ def test_a_removal_that_finds_containers_after_one_that_did_not_takes_it_back(
 ) -> None:
     view = _nothing_to_remove_view(ps, tmp_path)
     _watch_remove(view, result=True)
-    view.remove_containers()
-    view.remove_containers()
-    assert not _highlighted(view.forget_install_button)
+    view._remove_containers_now()
+    assert not _highlighted(view.remove_server_button)
     assert "Containers removed" in view.danger_label.text()
 
 
@@ -3600,32 +3585,29 @@ def test_the_repair_takes_two_presses_and_says_what_is_overwritten(
     assert view.repair_button.text() == controller_view_module.REPAIR_IDLE, "still armed after"
 
 
-def test_the_two_destructive_buttons_are_never_armed_together(
+def test_the_containers_route_stands_an_armed_repair_down(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
-    """Both write their warning into the same label (`danger_label`), so one disarms the other.
+    """The dialog's Advanced route runs at once, so an armed Repair must not survive it.
 
-    Two loaded buttons under one paragraph is a second press that does whichever
-    of them the user had forgotten about.
+    T695 keeps Repair as its own press, and `_remove_containers_now()` disarms
+    it first: one paragraph under the presses, one loaded button at most.
     """
+    from yulon.ui.widgets.remove_dialog import RemovalChoice
+
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
     removals = _watch_remove(view)
     repairs = _watch_repair(view)
     _db_up(view, ps)
-
-    view.remove_containers()
-    # The repair offer withdrawn (`_show_repair`) disarms a repair that is not
-    # armed: the teardown's warning stays with the teardown's armed press.
-    view._disarm_repair()
-    assert "characters are NOT" in view.danger_label.text()
     view.repair_import()
-    assert view.remove_button.text() == controller_view_module.REMOVE_IDLE
     assert view.repair_button.text() == controller_view_module.REPAIR_ARMED
-    assert "OVERWRITTEN" in view.danger_label.text(), "the warning is the teardown's"
+    view._ask_removal = lambda _offered: RemovalChoice.REMOVE_CONTAINERS  # type: ignore[method-assign]
 
-    view.remove_containers()
-    assert repairs == [], "arming the teardown left the import armed and it ran"
-    assert removals == [], "the teardown ran on what was its first press again"
+    view.remove_server_button.click()
+
+    assert removals == [1]
+    assert view.repair_button.text() == controller_view_module.REPAIR_IDLE
+    assert repairs == [], "the stood-down repair ran"
 
 
 def test_refresh_start_and_stop_all_cancel_an_armed_repair(
@@ -3718,7 +3700,12 @@ def test_neither_the_armed_copy_nor_the_running_one_offers_a_stop(
     disabled: list[bool] = []
 
     def fake_repair(output: docker.OutputSink | None = None) -> bool:
-        buttons = (view.start_button, view.stop_button, view.remove_button, view.repair_button)
+        buttons = (
+            view.start_button,
+            view.stop_button,
+            view.remove_server_button,
+            view.repair_button,
+        )
         disabled.append(not any(b.isEnabled() for b in buttons))
         return True
 
@@ -3840,10 +3827,10 @@ def test_every_action_button_is_locked_while_an_action_runs(
     """
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
     view._set_busy(True)
-    for name in ("start_button", "stop_button", "remove_button", "repair_button"):
+    for name in ("start_button", "stop_button", "remove_server_button", "repair_button"):
         assert not getattr(view, name).isEnabled(), name
     view._set_busy(False)
-    for name in ("remove_button", "repair_button"):
+    for name in ("remove_server_button", "repair_button"):
         assert getattr(view, name).isEnabled(), name
 
 
@@ -5032,6 +5019,7 @@ def test_each_game_waits_for_the_ready_line_its_own_server_prints(
     prints = {
         "wow-wotlk": "ready...",
         "wow-unbound": "ready...",
+        "wow-coa": "ready...",
         "wow-tbc": "Avg Diff: 15ms",
         "wow-vanilla": "Avg Diff: 15ms",
         "wow-tortoise": "World initialized in 12 seconds",
@@ -7125,6 +7113,8 @@ BOT_SQL_BY_GAME = {
     "wow-centurion": ("centurion_auth", "centurion_characters", "centurion-db"),
     # T554: the same schema names as WotLK, in the database container of its own.
     "wow-unbound": ("acore_auth", "acore_characters", "ub-database"),
+    # T812: the same schema names as WotLK, in the database container of its own.
+    "wow-coa": ("acore_auth", "acore_characters", "coa-database"),
 }
 """Written out per game rather than read back out of the entry.
 
@@ -7296,7 +7286,13 @@ def _uninstall_view(ps: _Ps, tmp_path: Path, fake: _FakeUninstall) -> Controller
     return ControllerView(WOTLK, services, status_poll_ms=0)
 
 
-def test_the_uninstall_button_will_not_act_until_its_plan_is_on_screen(
+def _answer_removal(view: ControllerView, choice: RemovalChoice) -> None:
+    """Answer the remove dialog with `choice` and press Remove this server… (T695)."""
+    view._ask_removal = lambda _offered: choice  # type: ignore[method-assign]
+    view.remove_server_button.click()
+
+
+def test_the_uninstall_route_will_not_act_until_its_plan_is_on_screen(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
     """The restore action's gate, not the typed-name box the decisions doc assumed.
@@ -7404,7 +7400,7 @@ def test_keep_my_characters_is_hidden_until_a_plan_is_on_screen(
     view = _uninstall_view(ps, tmp_path, fake)
     assert view.keep_characters_check.isHidden() is True
 
-    view.uninstall_button.click()
+    _answer_removal(view, RemovalChoice.EVERYTHING)
 
     assert view.keep_characters_check.isHidden() is False
 
@@ -7413,7 +7409,7 @@ def test_a_refused_plan_offers_no_keep_my_characters(qapp: object, ps: _Ps, tmp_
     fake = _FakeUninstall(tmp_path, refusal="ac-worldserver: still running. Stop the server first.")
     view = _uninstall_view(ps, tmp_path, fake)
 
-    view.uninstall_button.click()
+    _answer_removal(view, RemovalChoice.EVERYTHING)
 
     assert view.keep_characters_check.isHidden() is True
 
@@ -7424,7 +7420,6 @@ def test_keep_my_characters_sits_between_the_plan_and_the_confirm_button(
     """Audit A14: it sat above the plan, read before the thing it changes."""
     fake = _FakeUninstall(tmp_path)
     view = _uninstall_view(ps, tmp_path, fake)
-    view.uninstall_button.click()
 
     keep = _server_box_index(view, view.keep_characters_check)
     assert _server_box_index(view, view.uninstall_label) < keep
@@ -7439,7 +7434,7 @@ def test_the_confirm_button_names_what_happens_to_the_characters(
 ) -> None:
     fake = _FakeUninstall(tmp_path)
     view = _uninstall_view(ps, tmp_path, fake)
-    view.uninstall_button.click()
+    _answer_removal(view, RemovalChoice.EVERYTHING)
     assert view.uninstall_confirm_button.text() == (
         "Uninstall this server and delete my characters"
     )
@@ -7475,12 +7470,12 @@ def test_a_plan_with_no_character_volume_offers_no_keep_and_says_delete(
     """T188 fix round 1 (M3): there is nothing to keep, so a tick from before cannot promise it."""
     fake = _VolumeGoesAway(tmp_path)
     view = _uninstall_view(ps, tmp_path, fake)
-    view.uninstall_button.click()
+    _answer_removal(view, RemovalChoice.EVERYTHING)
     view.keep_characters_check.click()
     assert view.uninstall_confirm_button.text() == UNINSTALL_KEEP
 
     fake.volume = False
-    view.uninstall_button.click()
+    _answer_removal(view, RemovalChoice.EVERYTHING)
 
     assert view.keep_characters_check.isHidden() is True
     assert view.keep_characters_check.isChecked() is False
@@ -7730,12 +7725,17 @@ def test_a_ticked_plan_says_the_client_data_volume_is_kept_not_removed(
     assert removed and "_client-data" not in removed[0], said
 
 
-def test_a_tab_with_no_uninstall_wired_shows_no_uninstall_controls(
+def test_a_tab_with_no_uninstall_wired_shows_no_uninstall_plan_widgets(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
-    """8.9a is WotLK; 8.9b is Vanilla. A tree without the seam offers no button."""
+    """8.9a is WotLK; 8.9b is Vanilla. A tree without the seam offers no plan of its own."""
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
-    assert view.uninstall_button is None
+    assert view.services.uninstall is None
+    assert not view.uninstall_absent_label.isHidden()
+    offered: list[tuple[RemovalChoice, ...]] = []
+    view._ask_removal = lambda choices: offered.append(choices) or None  # type: ignore[method-assign]
+    view.remove_server_button.click()
+    assert offered == [(RemovalChoice.OFF_THE_LIST,)]
 
 
 def _highlighted(button: object) -> bool:
@@ -7743,10 +7743,10 @@ def _highlighted(button: object) -> bool:
     return bool(button.property("primary"))  # type: ignore[attr-defined]
 
 
-# -- "Forget this install…", for a folder that is gone (T34) -------------------
+# -- "Remove this server…" highlighted, for a folder that is gone (T34, T95, T695) --
 
 
-def test_the_forget_button_is_plain_while_the_folder_exists_and_highlighted_once_gone(
+def test_the_remove_press_is_plain_while_the_folder_exists_and_highlighted_once_gone(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
     """Re-checked on the same poll as the status line, not only at tab-build time.
@@ -7757,19 +7757,18 @@ def test_the_forget_button_is_plain_while_the_folder_exists_and_highlighted_once
     """
     fake = _FakeUninstall(tmp_path)
     view = _uninstall_view(ps, tmp_path, fake)
-    assert view.forget_install_button is not None
     view.refresh_status()
-    assert not _highlighted(view.forget_install_button)
+    assert not _highlighted(view.remove_server_button)
 
     shutil.rmtree(tmp_path)
     view.refresh_status()
-    assert _highlighted(view.forget_install_button)
+    assert _highlighted(view.remove_server_button)
     # Mutation: negate `_update_forget_visibility()`'s `is_dir()` check (or
     # drop it) and this assertion is what catches it — the button would then
     # be highlighted for the folder that exists and plain for the one that is gone.
 
 
-def test_the_forget_button_stays_plain_for_a_wsl_install_with_no_folder_here(
+def test_the_remove_press_stays_plain_for_a_wsl_install_with_no_folder_here(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
     """`server_dir.is_dir()` asks THIS process, which is right for a native
@@ -7782,17 +7781,16 @@ def test_the_forget_button_stays_plain_for_a_wsl_install_with_no_folder_here(
     view.services.controller.wsl_distro = "dml-arch"
     shutil.rmtree(tmp_path)
     view.refresh_status()
-    assert view.forget_install_button is not None
-    assert not _highlighted(view.forget_install_button)
+    assert not _highlighted(view.remove_server_button)
     # Mutation: drop the `wsl_distro is None` clause from
     # `_update_forget_visibility()` and this fails — the button would light up
     # for a distro path this process cannot evaluate.
 
 
-# -- "Remove from Yu'lon…" (T95): the tab asks the window; the window decides --
+# -- "Remove this server…" (T695): one press, the dialog routes; the window decides --
 
 
-def test_every_tab_has_the_remove_button_uninstall_or_not(
+def test_every_tab_has_the_remove_press_uninstall_or_not(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
     """TBC and Tortoise have no Uninstall seam: until T95 they had no way off the list at all."""
@@ -7802,18 +7800,16 @@ def test_every_tab_has_the_remove_button_uninstall_or_not(
 
     view = ControllerView(TBC, _services(ps, tmp_path, []), status_poll_ms=0)
     assert view.services.uninstall is None
-    assert view.uninstall_button is None, "T95 adds no Uninstall"
-    assert view.forget_install_button is not None
-    assert view.forget_install_button.text() == forgetting.BUTTON_LABEL
     assert controller_view_module.REMOVE_FROM_YULON == forgetting.BUTTON_LABEL
+    assert view.remove_server_button.text() == controller_view_module.REMOVE_THIS_SERVER
     view.refresh_status()
-    assert not view.forget_install_button.isHidden(), "decision 4: always on the Server tab"
-    assert view.forget_install_button.focusPolicy() & Qt.FocusPolicy.TabFocus, "no gamepad reach"
-    assert not _highlighted(view.forget_install_button)
+    assert not view.remove_server_button.isHidden(), "decision 4: always on the Server tab"
+    assert view.remove_server_button.focusPolicy() & Qt.FocusPolicy.TabFocus, "no gamepad reach"
+    assert not _highlighted(view.remove_server_button)
     shutil.rmtree(tmp_path)
     view.refresh_status()
-    assert not view.forget_install_button.isHidden()
-    assert _highlighted(view.forget_install_button)
+    assert not view.remove_server_button.isHidden()
+    assert _highlighted(view.remove_server_button)
     # Mutation: put back `if self.services.uninstall is None: return False` in
     # `_forget_is_eligible()` and the last assertion fails.
 
@@ -7888,7 +7884,7 @@ def test_the_stop_before_a_removal_goes_through_the_controller_and_reports_to_th
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
     stops: list[int] = []
 
-    def stop() -> bool:
+    def stop(**_kw: object) -> bool:
         stops.append(1)
         return True
 
@@ -7913,7 +7909,7 @@ def test_a_stop_before_a_removal_leaves_no_stopping_words_behind_when_it_succeed
     and asked again, before the window is told, as the failed stop does.
     """
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
-    view.services.controller.stop = lambda: True  # type: ignore[method-assign]
+    view.services.controller.stop = lambda **_kw: True  # type: ignore[method-assign]
     ps.names = ""
     at_the_emit: list[tuple[str, str]] = []
     view.stopped_for_removal.connect(
@@ -7933,7 +7929,7 @@ def test_a_failed_stop_before_a_removal_says_why_here_and_to_the_window(
 ) -> None:
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
 
-    def refuse() -> bool:
+    def refuse(**_kw: object) -> bool:
         raise docker.DockerRefusal("Docker would not say which project owns ac-worldserver")
 
     view.services.controller.stop = refuse  # type: ignore[method-assign]
@@ -7963,7 +7959,7 @@ def test_a_stop_before_a_removal_says_so_and_that_a_loading_server_is_slow(
     """
     gate = _Gate()
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, job_runner=gate)
-    view.services.controller.stop = lambda: True  # type: ignore[method-assign]
+    view.services.controller.stop = lambda **_kw: True  # type: ignore[method-assign]
     gate.hold = True
 
     view.stop_for_removal()
@@ -8098,8 +8094,7 @@ def test_a_force_stop_warning_from_another_stop_path_does_not_reach_the_next_sto
     fake.on_look = lambda: view.stop_anyway_button.click() if fake.looks == 2 else None
     view.stop_for_removal()
     _loading_vanilla(view, monkeypatch, [_HEARS])
-    view._remove_armed = True
-    view.remove_containers()
+    view._remove_containers_now()
     assert docker.WORLD_STOPPED_ANYWAY not in view.problem_label.text()
 
 
@@ -8342,7 +8337,7 @@ def test_a_removal_is_refused_while_a_backup_runs(qapp: object, ps: _Ps, tmp_pat
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, job_runner=gate)
     assert _refusal_while_held(view, gate, view.back_up) == forgetting.BACKUP_RUNNING
 
-    def refuse() -> NoReturn:
+    def refuse(**_kw: object) -> NoReturn:
         raise OSError("disk full")
 
     view.services.backup = refuse
@@ -8652,6 +8647,48 @@ def test_declining_the_rebuild_confirmation_starts_nothing(
     assert asked, "the user was never asked"
     assert str(tmp_path) in asked[0], "the question did not say which install it is about"
     assert view.rebuild_log.running is False
+
+
+def test_the_rebuild_question_carries_the_wirings_note_and_still_starts_on_yes(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T795: the heads-up is in the question, and a Yes still rebuilds (it never blocks)."""
+    asked: list[str] = []
+
+    def question(parent: object, title: str, text: str, *a: object, **k: object) -> object:
+        asked.append(text)
+        return controller_view_module.QMessageBox.StandardButton.Yes
+
+    monkeypatch.setattr(controller_view_module.QMessageBox, "question", question)
+    services, started = _rebuild_services(ps, tmp_path)
+    services.rebuild_note = lambda: "NOTE-FROM-THE-WIRING"
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    assert view.rebuild_server() is True
+    assert "NOTE-FROM-THE-WIRING" in asked[0]
+    wait_for_panel(view.rebuild_log)  # the rebuild runs on the panel's worker thread
+    assert started, "a note must never stop the rebuild"
+
+
+def test_a_rebuild_note_that_raises_is_left_out_and_the_question_is_still_asked(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asked: list[str] = []
+
+    def question(parent: object, title: str, text: str, *a: object, **k: object) -> object:
+        asked.append(text)
+        return controller_view_module.QMessageBox.StandardButton.No
+
+    def broken() -> str:
+        raise OSError("unreadable")
+
+    monkeypatch.setattr(controller_view_module.QMessageBox, "question", question)
+    services, _started = _rebuild_services(ps, tmp_path)
+    services.rebuild_note = broken
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    assert view.rebuild_server() is False
+    assert asked and "unreadable" not in asked[0]
 
 
 def test_a_rebuild_the_sources_refuse_is_refused_before_the_question(
@@ -9559,16 +9596,18 @@ def test_a_server_adopted_from_a_wsl_distro_is_not_offered_the_updates_button(
     assert inside.updates is None
 
 
-def test_a_tab_with_no_updates_route_has_a_dead_button_that_is_harmless_to_press(
+def test_a_tab_with_no_updates_route_has_no_button_and_the_press_is_harmless(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
-    """`services.updates is None` greys it, and pressing it anyway does nothing.
+    """T692a: `services.updates is None` hides it, and pressing it anyway does nothing.
 
-    Catches the button enabled unconditionally, and `apply_database_updates()`
+    A greyed control says "this exists and is not available now"; for a plan
+    that declares no phase to re-apply, nothing will ever enable it. Catches
+    the button enabled unconditionally, and `apply_database_updates()`
     reaching for a route it was never given.
     """
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
-    assert not view.updates_button.isEnabled()
+    assert view.apply_updates_button.isHidden()
     assert view.apply_database_updates() is False
 
 
@@ -9593,7 +9632,7 @@ def test_declining_the_updates_confirmation_starts_nothing(
     services, started, asked = _updates_services(ps, tmp_path)
     view = ControllerView(WOTLK, services, status_poll_ms=0)
 
-    assert view.updates_button.isEnabled()
+    assert view.apply_updates_button.isEnabled()
     assert view.apply_database_updates() is False
     assert seen == ["apply three files?"], seen
     assert asked == ["confirmation"], "the engine's own confirmation text was not used"
@@ -9624,7 +9663,7 @@ def test_a_confirmation_that_refuses_puts_the_sentence_where_the_user_is_and_sta
     route = services.updates
     assert route is not None
 
-    def refuse() -> str:
+    def refuse(**_kw: object) -> str:
         raise InstallerError("found no file matching src/x/*.sql under /srv")
 
     services.updates = native.UpdateRoute(confirmation=refuse, press=route.press)
@@ -9870,16 +9909,16 @@ def test_a_probe_that_raises_leaves_the_adopt_button_dead(
     assert not view.adopt_button.isEnabled()
 
 
-def test_a_tab_with_no_adopt_route_has_a_dead_button_that_is_harmless_to_press(
+def test_a_tab_with_no_adopt_route_has_no_button_and_the_press_is_harmless(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
-    """`services.adopt is None` greys it, and pressing it anyway does nothing.
+    """T692a: `services.adopt is None` hides it, and pressing it anyway does nothing.
 
     Catches the button enabled unconditionally, and `adopt_as_imported()`
     reaching for a route it was never given.
     """
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
-    assert not view.adopt_button.isEnabled()
+    assert view.adopt_button.isHidden()
     assert view.adopt_as_imported() is False
 
 
@@ -11138,7 +11177,7 @@ def test_a_clone_matched_in_one_family_is_not_listed_again_as_unknown_in_another
     assert bmah[0].data.family == "keg" and bmah[0].data.catalogued is True
 
 
-def test_the_forget_button_is_highlighted_even_when_the_status_poll_cannot_reach_docker(
+def test_the_remove_press_is_highlighted_even_when_the_status_poll_cannot_reach_docker(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
     """The button's whole case is an install that is gone — Docker usually with it (T54).
@@ -11172,9 +11211,8 @@ def test_the_forget_button_is_highlighted_even_when_the_status_poll_cannot_reach
 
     view.refresh_status()
 
-    assert view.forget_install_button is not None
     assert _highlighted(
-        view.forget_install_button
+        view.remove_server_button
     ), "the poll failed, so the user is told to press a button they cannot see"
     # The failure is still reported — this must not paper over Docker being gone.
     assert not view.docker_banner.isHidden()
@@ -12283,7 +12321,11 @@ def test_the_install_report_points_up_at_the_banner_it_raised(
     assert (
         f'"{controller_view_module.REBUILD_BUTTON_LABEL}" on the banner above the module list'
     ) in text, text
-    assert f'"{controller_view_module.SERVER_BUILD_LABEL}"' in text, text
+    from yulon import server_build_presses
+
+    assert (
+        server_build_presses.under_server_build(controller_view_module.REBUILD_BUTTON_LABEL) in text
+    ), text
 
 
 def _owing_a_rebuild(
@@ -13416,22 +13458,34 @@ def test_the_file_picker_lists_the_deployed_confs_and_opens_the_first(
     assert not view.tuning_panel.editor.isReadOnly()
 
 
-def test_the_servers_own_conf_is_listed_read_only_and_says_why(
+def test_wotlks_own_conf_opens_editable_and_names_its_locked_keys(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
-    """T43's own follow-up: who owns core configuration is a bigger question."""
-    _deploy(tmp_path, "env/dist/etc/worldserver.conf", "[worldserver]\nMotd = hi\n")
+    """T819: the AzerothCore family's own confs open editable, with locked keys.
+
+    Mutation: leave the family in `read_only_confs` and the editor is read-only again.
+    """
+    _deploy(
+        tmp_path,
+        "env/dist/etc/worldserver.conf",
+        "[worldserver]\n"
+        'LoginDatabaseInfo = "127.0.0.1;3306;acore;s3cret;acore_auth"\n'
+        "WorldServerPort = 8085\nMotd = hi\n",
+    )
     view = _tuned_view(ps, tmp_path)
     core = next(
         b
         for b in view.tuning_panel.file_buttons()
         if b.toolTip() == "env/dist/etc/worldserver.conf"
     )
-    assert core.text().endswith(tuning_panel.READ_ONLY_SUFFIX)
+    assert not core.text().endswith(tuning_panel.READ_ONLY_SUFFIX)
     core.click()
-    assert view.tuning_panel.editor.isReadOnly()
-    assert view.tuning_panel.file_note.text() == controller_view_module.TUNING_CORE_FILE
-    assert not view.tuning_panel.file_save_button.isEnabled()
+    assert not view.tuning_panel.editor.isReadOnly()
+    assert view.tuning_panel.file_note.text() == controller_view_module.TUNING_CORE_EDITABLE
+    assert view.tuning_panel.file_save_button.isEnabled()
+    assert "WorldServerPort" in view.tuning_panel.locked_list.text()
+    assert "s3cret" not in view.tuning_panel.editor.toPlainText()
+    assert "acore;***;acore_auth" in view.tuning_panel.editor.toPlainText()
 
 
 def test_a_raw_save_that_still_looks_like_a_conf_asks_nothing(
@@ -13588,7 +13642,11 @@ def test_a_raw_save_on_a_conf_that_links_to_another_folder_of_the_server_still_s
 
     view.save_tuning_file("BeastMaster.Enable = 0\n")
 
-    assert real.read_text(encoding="utf-8") == "BeastMaster.Enable = 0\n"
+    # T820: the atomic rename lands at the conf's own path -- the link itself is
+    # replaced, exactly as the card save's `_atomic_write` always did -- rather
+    # than writing through to the linked file as `open(path, "w")` did.
+    assert (tmp_path / file).read_text(encoding="utf-8") == "BeastMaster.Enable = 0\n"
+    assert "outside the server folder" not in view.tuning_report.toPlainText()
 
 
 def test_a_card_save_on_a_conf_that_links_to_another_folder_of_the_server_still_saves(
@@ -14352,11 +14410,12 @@ def test_the_size_cap_counts_bytes_not_characters(
     assert "too big" in view.tuning_panel.file_note.text()
 
 
-def test_the_picker_marks_the_core_files_read_only(qapp: object, ps: _Ps, tmp_path: Path) -> None:
-    """Item 13's other half: WHICH files are read-only is the view's list, not the panel's.
+def test_the_picker_marks_no_wotlk_core_file_read_only(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T819: the AzerothCore family's own confs sit in the row like files this tab writes.
 
-    Mutation: pass no `read_only` and `worldserver.conf` sits in the row
-    looking exactly like a file this tab will write.
+    Mutation: pass the old read-only list and `worldserver.conf` carries the suffix again.
     """
     core = tmp_path / "env" / "dist" / "etc" / "worldserver.conf"
     core.parent.mkdir(parents=True, exist_ok=True)
@@ -14364,7 +14423,8 @@ def test_the_picker_marks_the_core_files_read_only(qapp: object, ps: _Ps, tmp_pa
     view = _tuning_view(ps, tmp_path)
 
     labels = [b.text() for b in view.tuning_panel.file_buttons()]
-    assert "worldserver.conf · read-only" in labels
+    assert "worldserver.conf" in labels
+    assert "worldserver.conf · read-only" not in labels
 
 
 def test_restart_and_recreate_both_ask_first_and_do_nothing_on_no(
@@ -14574,21 +14634,21 @@ def test_the_tuning_tab_warns_about_the_keys_this_installs_compose_really_beats(
     assert "BeastMaster.Enable" not in said, "only the shadowed key is named"
 
 
-def test_the_file_this_install_shadows_most_is_the_one_it_will_not_write(
+def test_the_file_this_install_shadows_most_is_the_one_with_locked_keys(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
     """A fact worth pinning: `playerbots.conf` is where the shadowed keys really live.
 
     Every `AC_*` row this app writes is an `AiPlayerbot.*` or `Playerbots.*`
     key, and those live in `env/dist/etc/modules/playerbots.conf` -- which is
-    in `TUNING_CORE_FILES` and so is shown READ-ONLY (T43's own follow-up). So
-    on a shipped install the warning is mostly a statement about a file nobody
-    can edit here anyway, and the honest place to change those values is the
-    override itself.
+    in `TUNING_CORE_FILES` and since T819 is editable with the env-shadowed keys
+    locked (`core_conf.locked`). So on a shipped install the warning is mostly a
+    statement about lines nobody can edit here anyway, and the honest place to
+    change those values is the override itself.
 
-    Recorded rather than assumed: if that file ever becomes writable on this
-    tab, the warning is what stands between a user and an edit the world
-    ignores, and this test is where somebody will find that out.
+    Recorded rather than assumed: the locked list is what stands between a user
+    and an edit the world ignores, and this test is where somebody will find
+    that out.
 
     Mutation: drop `playerbots.conf` from `TUNING_CORE_FILES` and this fails,
     which is the review this change would owe.
@@ -14689,7 +14749,7 @@ def _answer(monkeypatch: pytest.MonkeyPatch, which: object) -> list[object]:
     return boxes
 
 
-def test_update_to_latest_is_in_the_server_build_menu_and_hidden_where_there_is_no_route(
+def test_update_to_latest_is_in_the_server_version_section_and_hidden_where_there_is_no_route(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
     """Hidden rather than greyed, which is this tab's one exception to its own rule.
@@ -14702,13 +14762,14 @@ def test_update_to_latest_is_in_the_server_build_menu_and_hidden_where_there_is_
     view = ControllerView(WOTLK, services, status_poll_ms=0)
     assert view.update_to_latest_action.text() == UPDATE_TO_LATEST_BUTTON_LABEL
     assert view.update_to_latest_action.isVisible()
-    # T89: in the one menu, straight after Rebuild, where the button sat right of it.
-    entries = view.server_build_menu.actions()
-    assert entries.index(view.update_to_latest_action) == entries.index(view.rebuild_action) + 1
+    # T692a: a button in the Server version section, bound to the action above.
+    assert view.server_version_section.isAncestorOf(view.update_to_latest_button)
+    assert not view.update_to_latest_button.isHidden()
 
     bare = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
     assert bare.services.update_to_latest is None
     assert not bare.update_to_latest_action.isVisible()
+    assert bare.update_to_latest_button.isHidden()
     assert bare.update_to_latest() is False
 
 
@@ -14891,7 +14952,7 @@ def test_a_backup_that_fails_stops_the_update_in_dmls_own_words(
     )
     made = _FakeMaintenance()
 
-    def refuse() -> BackupReport:
+    def refuse(**_kw: object) -> BackupReport:
         raise MaintenanceError("the database container is not running")
 
     made.back_up = refuse  # type: ignore[method-assign]
@@ -14924,7 +14985,7 @@ def test_a_backup_before_an_update_keeps_the_databases_words_in_details_and_the_
     made = _FakeMaintenance()
     denied = "ERROR 1045 (28000): Access denied for user 'root'@'localhost'"
 
-    def refuse() -> BackupReport:
+    def refuse(**_kw: object) -> BackupReport:
         raise MaintenanceError("Yu'lon could not list this server's databases.", detail=denied)
 
     made.back_up = refuse  # type: ignore[method-assign]
@@ -15353,7 +15414,7 @@ def _upstream_news(*counts: int | None) -> upstream.UpstreamNews:
     )
 
 
-def test_the_upstream_line_says_what_is_new_on_the_server_tab(
+def test_the_upstream_line_says_what_is_new_on_the_maintenance_tab(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
     services, spy = _latest(ps, tmp_path)
@@ -15364,8 +15425,8 @@ def test_the_upstream_line_says_what_is_new_on_the_server_tab(
         "Upstream has new code since this server was built: server 300 commits, "
         "mod-playerbots 50 commits."
     )
-    # On the SERVER tab, where a player looks at the server.
-    assert view._tabs.widget(0).isAncestorOf(view.upstream_label)
+    # In the Server version section on Maintenance, beside the version line.
+    assert view.server_version_section.isAncestorOf(view.upstream_label)
 
 
 @pytest.mark.parametrize("counts", [(0, 0), (None, None), (None, 0)])
@@ -15443,7 +15504,10 @@ def test_the_upstream_count_runs_on_a_worker_thread_with_the_real_runner(
     view = ControllerView(WOTLK, services, status_poll_ms=0)
     pump_until(lambda: not view.upstream_label.isHidden(), "the upstream line")
     assert threads and all(t is not threading.main_thread() for t in threads)
-    view._jobs.wait()  # type: ignore[attr-defined]
+    # Every job the view started at build, not only the upstream count: the Tuning tab's
+    # undo lookup (`_look_up_undo`) is one, and joining the threads (`_jobs.wait()`) left its
+    # answer queued, a T771 leak whenever it had not landed while the line was awaited.
+    pump_until_every_job_has_answered("the jobs the view started when it was built")
 
 
 def test_the_upstream_line_is_asked_again_when_a_job_finishes(
@@ -15477,15 +15541,17 @@ def test_the_version_line_and_the_way_back_are_drawn_from_one_reading(
     would take -- and the disagreement's shape is a live "Return to the tested
     pin…" over a line saying the server IS on it.
 
-    They are not the same ANSWER, though, and that is T77: the line is drawn
-    whenever there is something to say, the button only while something is off
-    its pin. This is the first state, where both are absent.
+    They are not the same ANSWER, though, and that is T77: the button is
+    offered only while something is off its pin, while the line always says
+    something -- "On the tested pin." where there is nothing else to say
+    (T692a). This is the first state: the line says so, and the way back is
+    absent.
     """
     services, spy = _latest(ps, tmp_path)
     view = ControllerView(WOTLK, services, status_poll_ms=0)
     assert spy.revs == ()
-    assert view.source_version_label.text() == ""
-    assert view.source_version_label.isHidden()
+    assert view.source_version_label.text() == "On the tested pin."
+    assert not view.source_version_label.isHidden()
     assert not view.return_to_pin_action.isVisible()
 
     spy.revs = (native.SourceRev("x/y", "a1b2c3d · 2026-09-16", pin=_PIN, ahead=12),)
@@ -15725,7 +15791,7 @@ class _FakeDatabase:
         self.running = True
         return True
 
-    def stop(self) -> None:
+    def stop(self, **_kw: object) -> None:
         self.stops += 1
         self.running = False
 
@@ -16787,11 +16853,25 @@ def _main_menu(window: Any) -> Any:
     return bar.catalog_button
 
 
+def _tab_index(view: ControllerView, title: str) -> int:
+    """Where the sub-tab whose plain title is `title` sits.
+
+    `tabText()` returns what `_add_panel_tab` set, which is the Qt-escaped form
+    (`_drawn_title`), so the comparison goes through the same escaping.
+    """
+    from yulon.ui.controller_view import _drawn_title
+
+    return next(
+        i for i in range(view._tabs.count()) if view._tabs.tabText(i) == _drawn_title(title)
+    )
+
+
 def _controller_in_the_real_window(view: ControllerView, tab_title: str) -> tuple[Any, Any]:
     """Lay `view` out inside the window `build_window()` builds, and show it.
 
     Returns the window -- so the caller can drive it across the range a user can
-    drag it to -- and `view`'s now-current sub-tab.
+    drag it to -- and `view`'s now-current sub-tab. `tab_title` is the plain
+    title, as `MAINTENANCE_TAB` spells it.
     """
     import main
     from yulon.ui.catalog_view import CatalogView
@@ -16803,7 +16883,7 @@ def _controller_in_the_real_window(view: ControllerView, tab_title: str) -> tupl
     tabs, _banner, _splitter = main.build_catalog_tab(window, catalog_view, panel)
     tabs.addTab(view, WOTLK.name)
     tabs.setCurrentWidget(view)
-    index = next(i for i in range(view._tabs.count()) if view._tabs.tabText(i) == tab_title)
+    index = _tab_index(view, tab_title)
     view._tabs.setCurrentIndex(index)
     window.setMinimumSize(*main.MINIMUM_WINDOW_SIZE)
     window.show()
@@ -17123,9 +17203,13 @@ def test_the_rebuild_log_takes_its_height_back_when_a_job_starts(
     the panel, its output is the thing worth the pixels. Driven through
     `LogPanel.run()` -- the call `rebuild_server()` itself makes -- rather than by
     setting the flag, so the cap is lifted by the same signal the app raises.
+
+    T692a: the log lives in the Server version section on Maintenance now, so
+    the window opens there -- a panel on a tab nobody looks at is never laid
+    out, and its height is nobody's number.
     """
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
-    window, _tab = _controller_in_the_real_window(view, "Modules")
+    window, _tab = _controller_in_the_real_window(view, MAINTENANCE_TAB)
     _at(window, (1920, 1080))
     # Before a job it is not drawn at all (T191, I8); the smallest it is ever
     # drawn is its strip.
@@ -18163,30 +18247,29 @@ def _a_rebuild_is_not_owed(view: ControllerView) -> None:
 def test_the_module_list_keeps_five_rows_after_a_job_at_the_desktop_shape(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
-    """The defect gate A found: one rebuild, and the list is a row and a half.
+    """T692a: one rebuild, and the list keeps its rows -- the log lives elsewhere now.
 
-    Four assertions, and each is here because the other three are satisfied by
-    something that would not fix this:
-
-    * the ROW COUNT is the complaint, and it is measured at the desktop shape
-      rather than the bare screen because that is the window the complaint was
-      made about;
-    * the log is NOT CLIPPED, so the count cannot be met by squeezing the panel
-      under its own minimum -- which is what the tab does on its own when it is
-      over-subscribed, and it would read as a fix here while showing a log with
-      its strip cut off;
-    * the log still HOLDS ITS LAST LINE and is showing it, so the count cannot be
-      met by a panel that has been made useless rather than smaller;
-    * and the cap is really the thing doing it -- the panel is at its share of
-      the tab and not at whatever a job's output happened to ask for.
+    The defect gate A found was one rebuild leaving the list a row and a half,
+    because the job's log competed with it on the same tab. The log lives in
+    the Server version section on Maintenance now, so what is asserted on
+    Modules is the ROW COUNT at the desktop shape -- measured at the window
+    the complaint was made about -- with a job run and a report in the box.
+    The log's own half (not clipped, holding its last line, capped at its
+    share of its tab) is asserted on Maintenance beside it.
     """
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
     window, tab = _controller_in_the_real_window(view, "Modules")
     _at(window, DESKTOP_1080P)
-
+    # The job runs with Maintenance forward: the log's share cap is taken
+    # against the tab it is on, at the time it runs.
+    view._show_page_of(view.rebuild_log)
+    _at(window, DESKTOP_1080P)
     _ran_a_job(view)
+
+    view._show_page_of(view.modules_panel)
+    _at(window, DESKTOP_1080P)
     # And a report in the box under it, because a press that starts a rebuild
-    # writes one: the two boxes take the tab together or not at all.
+    # writes one.
     view.module_report.setPlainText("Rebuild finished.")
     process_events()
 
@@ -18194,9 +18277,13 @@ def test_the_module_list_keeps_five_rows_after_a_job_at_the_desktop_shape(
     assert whole >= ROWS_VISIBLE_AFTER_A_JOB, (
         f"after one job only {whole} of {len(view.modules_panel.rows())} rows are wholly on "
         f"screen at {DESKTOP_1080P}: the list has {view.modules_panel.height()}px of the "
-        f"tab's {tab.height()}, the log {view.rebuild_log.height()} and the report "
-        f"{view.module_report.height()}"
+        f"tab's {tab.height()} and the report {view.module_report.height()}"
     )
+
+    # The log's half, on its own tab: a panel on a tab nobody looks at is
+    # never laid out, so Maintenance comes forward first.
+    view._show_page_of(view.rebuild_log)
+    _at(window, DESKTOP_1080P)
     assert view.rebuild_log.height() >= view.rebuild_log.minimumSizeHint().height(), (
         f"the log is CLIPPED at {view.rebuild_log.height()}px, not merely capped: it says "
         f"it needs {view.rebuild_log.minimumSizeHint().height()}"
@@ -18205,12 +18292,9 @@ def test_the_module_list_keeps_five_rows_after_a_job_at_the_desktop_shape(
     assert (
         "Compile finished." in view.rebuild_log.text()
     ), f"the log does not hold the job's last line: {view.rebuild_log.text()!r}"
-    share = tab.height() // controller_view_module.LOG_SHARE_OF_THE_TAB
-    assert view.rebuild_log.maximumHeight() == share, (
-        f"the log is not held to its share of the tab: its cap is "
-        f"{view.rebuild_log.maximumHeight()}px against the {share} a quarter of "
-        f"{tab.height()} comes to"
-    )
+    # No share-cap equality here: the cap divides the room on screen, and on a
+    # scrolling tab the room is whatever the page shows -- what matters is the
+    # log is drawn whole, which the two assertions above say.
 
 
 def test_the_desktop_shapes_missing_47px_no_longer_costs_a_module_row(
@@ -18237,10 +18321,10 @@ def test_the_desktop_shapes_missing_47px_no_longer_costs_a_module_row(
     assert _squeezed(tab) == [], f"clipped on the maximised desktop: {_squeezed(tab)}"
 
 
-def test_the_log_strip_folds_the_output_away_and_the_list_takes_it(
+def test_the_log_strip_folds_the_output_away_and_brings_it_back(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
-    """A click on the handle, and the height the log kept goes to the list.
+    """T692a: a click on the handle folds the Server version section's log, and back.
 
     Driven with `QTest.mouseClick` on the handle the panel really builds -- found
     through `findChild`, which is as much as a user has -- rather than by calling
@@ -18248,13 +18332,14 @@ def test_the_log_strip_folds_the_output_away_and_the_list_takes_it(
 
     Both directions, because a fold that cannot be undone is a hidden panel:
     the second click must bring the output back, with the job's line still in it.
+    The log lives on Maintenance now; the height it kept goes back to the tab's
+    scroll room there rather than to the Modules list.
     """
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
-    window, _tab = _controller_in_the_real_window(view, "Modules")
+    window, _tab = _controller_in_the_real_window(view, MAINTENANCE_TAB)
     _at(window, DESKTOP_1080P)
     _ran_a_job(view)
     open_log = view.rebuild_log.height()
-    open_list = view.modules_panel.height()
     handle = _the_handle_on(view.rebuild_log)
 
     _click(handle)
@@ -18263,10 +18348,6 @@ def test_the_log_strip_folds_the_output_away_and_the_list_takes_it(
     assert (
         view.rebuild_log.height() < open_log
     ), f"the log is folded but still {view.rebuild_log.height()}px, against {open_log} open"
-    assert view.modules_panel.height() > open_list, (
-        f"the log folded and the list did not grow: {view.modules_panel.height()}px, "
-        f"against {open_list} with the log open"
-    )
     assert view.rebuild_log.status_text() != "", "folding the log took its strip with it"
 
     _click(handle)
@@ -18483,7 +18564,7 @@ def test_every_modules_toolbar_button_reads_whole_at_every_width(
     for size in TOOLBAR_WIDTHS:
         _at(window, size)
         buttons = _module_toolbar_buttons(view)
-        assert len(buttons) >= 6, f"only {len(buttons)} buttons on the Modules action bar"
+        assert len(buttons) >= 3, f"only {len(buttons)} buttons on the Modules action bar"
         clipped = [why for why in (_clipped(b) for b in buttons) if why is not None]
         assert clipped == [], f"toolbar text cut off at {size}: {clipped}"
         outside = _bar_holds_every_line(view)
@@ -18519,14 +18600,13 @@ def _past_the_pin(ps: _Ps, tmp_path: Path) -> tuple[ControllerView, _LatestSpy, 
 def test_with_every_server_build_press_offered_the_toolbar_still_fits_one_line_at_1280(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
-    """T89: the sibling T83's test owed, with a route wired and the install past its pin.
+    """T692a: the Modules bar is shorter now that the server presses live on Maintenance.
 
-    Before T89 this state put seven buttons on the bar -- Rebuild, "Update the
-    server to latest…" and "Return to the tested pin…" side by side -- and it
-    wrapped at the 1280x800 the app opens at. The same three assertions as
+    Before T89 this state put seven buttons on the bar and it wrapped at the
+    1280x800 the app opens at. The same three assertions as
     `test_every_modules_toolbar_button_reads_whole_at_every_width`, and then that
-    all three presses are still OFFERED: a bar made to fit by dropping one is not
-    the fix.
+    all three presses are still OFFERED, on Maintenance: a bar made to fit by
+    dropping one is not the fix.
     """
     view, _spy, _rebuilt = _past_the_pin(ps, tmp_path)
     window, _tab = _controller_in_the_real_window(view, "Modules")
@@ -18546,38 +18626,31 @@ def test_with_every_server_build_press_offered_the_toolbar_still_fits_one_line_a
         f"the bar wrapped at the size the app opens at: {tops}, "
         f"{[(b.text(), b.y()) for b in buttons]}"
     )
-    # The triangle is in the label, so the style must not draw its own beside
-    # it: a plain button with the same label, under the same theme, is exactly
-    # as wide. The menu indicator Qt reserves is the only difference there is.
-    from PySide6.QtWidgets import QPushButton
 
-    plain = QPushButton(view.server_build_button.text(), view.module_actions)
-    process_events()
-    assert view.server_build_button.sizeHint().width() == plain.sizeHint().width(), (
-        f"{view.server_build_button.sizeHint().width()}px against a plain "
-        f"{plain.sizeHint().width()}: a second arrow is drawn beside the label's"
+    actions = (
+        view.rebuild_action,
+        view.update_to_latest_action,
+        view.return_to_pin_action,
+        view.put_the_folders_back_action,
     )
-    plain.deleteLater()
-    offered = [a.text() for a in view.server_build_menu.actions() if a.isVisible()]
-    assert offered == [
-        controller_view_module.REBUILD_BUTTON_LABEL,
-        UPDATE_TO_LATEST_BUTTON_LABEL,
-        RETURN_TO_PIN_BUTTON_LABEL,
-    ]
-    assert view.server_build_button in buttons
+    offered = [a.text() for a in actions if a.isVisible()]
+    assert controller_view_module.REBUILD_BUTTON_LABEL in offered
+    assert UPDATE_TO_LATEST_BUTTON_LABEL in offered
+    assert RETURN_TO_PIN_BUTTON_LABEL in offered
+    assert view.rebuild_button not in buttons
 
 
-def test_the_three_server_build_presses_are_one_menu_and_each_reaches_its_own_slot(
+def test_the_three_server_version_presses_are_bound_to_their_own_slots(
     qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """T89: one "Server build ▾" button, its three entries in the old left-to-right order.
+    """T692a: one button per server press on Maintenance, in the old left-to-right order.
 
-    Each entry is proved by what it DOES -- the dialog its own slot asks, and
-    declined so nothing starts -- rather than by its label: an entry wired to a
-    copy of the slot, or to its neighbour's, reads the same in the menu.
+    Each button is proved by what it DOES -- the dialog its own slot asks, and
+    declined so nothing starts -- rather than by its label: a button wired to a
+    copy of the slot, or to its neighbour's, reads the same in the section.
 
-    And the tooltips: the three buttons each explained themselves on hover, and
-    a `QMenu` does not show an action's tooltip unless it is told to.
+    And the tooltips: the old menu entries each explained themselves, and the
+    buttons carry those sentences now.
     """
     qmb = controller_view_module.QMessageBox
     asked: list[str] = []
@@ -18590,128 +18663,130 @@ def test_the_three_server_build_presses_are_one_menu_and_each_reaches_its_own_sl
     boxes = _answer(monkeypatch, qmb.StandardButton.Cancel)
     view, spy, rebuilt = _past_the_pin(ps, tmp_path)
 
-    assert view.server_build_button.text() == controller_view_module.SERVER_BUILD_LABEL
-    assert view.server_build_button.menu() is view.server_build_menu
-    assert view.server_build_menu.actions() == [
-        view.rebuild_action,
-        view.update_to_latest_action,
-        view.return_to_pin_action,
-        view.put_the_folders_back_action,  # T786: hidden here, nothing is off its build
-    ]
-    assert view.server_build_menu.toolTipsVisible(), "the menu hides its entries' tooltips"
-    for action in view.server_build_menu.actions():
-        # A QAction's tooltip defaults to its text; the three carried sentences.
-        assert action.toolTip().rstrip("…") != action.text().rstrip("…"), action.text()
+    assert view.server_version_section.isAncestorOf(view.rebuild_button)
+    assert view.server_version_section.isAncestorOf(view.update_to_latest_button)
+    assert view.server_version_section.isAncestorOf(view.return_to_pin_button)
+    assert view.rebuild_button.text() == controller_view_module.REBUILD_BUTTON_LABEL
+    assert view.update_to_latest_button.text() == UPDATE_TO_LATEST_BUTTON_LABEL
+    assert view.return_to_pin_button.text() == RETURN_TO_PIN_BUTTON_LABEL
+    for button in (
+        view.rebuild_button,
+        view.update_to_latest_button,
+        view.return_to_pin_button,
+    ):
+        # Each button carries the sentence its press explains itself with.
+        assert button.toolTip().rstrip("…") != button.text().rstrip("…"), button.text()
 
-    view.rebuild_action.trigger()
+    view.rebuild_button.click()
     assert len(asked) == 1 and boxes == [], (asked, boxes)
-    view.update_to_latest_action.trigger()
+    view.update_to_latest_button.click()
     assert len(asked) == 1 and len(boxes) == 1, (asked, boxes)
-    view.return_to_pin_action.trigger()
+    view.return_to_pin_button.click()
     assert len(asked) == 2 and len(boxes) == 1, (asked, boxes)
     assert asked[0] != asked[1], f"Rebuild and Return asked the same question: {asked}"
     assert spy.presses == [] and spy.pin_presses == [] and rebuilt == [], "a No still pressed"
 
 
-def test_the_server_build_button_greys_only_when_every_press_it_offers_is_dead(
+def test_a_hidden_action_hides_its_section_button_while_a_job_greys_the_rest(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
-    """T89: the button says "dead" on the bar only when the menu would say it three times.
+    """T692a: each section button follows its own action; a job greys them all.
 
-    The toolbar's other buttons grey where they cannot act, and the reader sees
-    that without pressing anything (`flow_layout`'s module docstring). A menu
-    moves that behind a press, so the button carries the menu's answer: live
-    while any entry it SHOWS is live. Counting a hidden entry would light a
-    button whose menu holds one greyed line; the rule leans on Qt for that -- a
-    hidden `QAction` reports itself disabled -- and the last step below is what
-    says so if Qt ever stops.
+    A hidden action's button is hidden too -- a greyed control says "this
+    exists and is not available now", and for a route that will never exist
+    there is nothing to grey. The last step below pins the sync the other way:
+    an action enabled by hand while hidden still leaves its button hidden.
     """
-    view, _spy, _rebuilt = _past_the_pin(ps, tmp_path)
-    assert view.server_build_button.isEnabled() is True
 
+    view, _spy, _rebuilt = _past_the_pin(ps, tmp_path)
+    assert view.rebuild_button.isEnabled() is True
+
+    actions = (
+        view.rebuild_action,
+        view.update_to_latest_action,
+        view.return_to_pin_action,
+        view.put_the_folders_back_action,
+    )
     view._set_busy(True)
-    assert [a.isEnabled() for a in view.server_build_menu.actions()] == [False] * 4
-    assert view.server_build_button.isEnabled() is False, "a job is running and it is live"
+    assert [a.isEnabled() for a in actions] == [False] * 4
+    assert view.rebuild_button.isEnabled() is False, "a job is running and it is live"
     view._set_busy(False)
-    assert [a.isEnabled() for a in view.server_build_menu.actions()] == [
+    assert [a.isEnabled() for a in actions] == [
         True,
         True,
         True,
         False,
     ]  # T786: the fourth entry is hidden
-    assert view.server_build_button.isEnabled() is True, "the job ended and it stayed grey"
+    assert view.rebuild_button.isEnabled() is True, "the job ended and it stayed grey"
 
-    # No rebuild wiring and no route: Rebuild is the one entry shown, and dead.
+    # No rebuild wiring and no route: Rebuild is hidden, not greyed -- nothing
+    # would ever enable it, so there is nothing to grey (the tab's own rule).
     services = _services(ps, tmp_path, [])
     services.rebuild = None
     bare = ControllerView(WOTLK, services, status_poll_ms=0)
     assert not bare.update_to_latest_action.isVisible()
-    assert bare.server_build_button.isEnabled() is False, "no entry can act and it is live"
-    # A hidden entry told to be enabled, by hand: no path today enables one while
-    # every shown entry is dead (`_set_update_buttons` sets both T64 entries
-    # together), so this asks the rule directly.
+    assert bare.update_to_latest_button.isHidden(), "a route-less press still shown"
+    assert bare.rebuild_button.isHidden(), "a wiring-less press still shown"
+    # A hidden action told to be enabled, by hand: no path today enables one
+    # while every shown button is dead (`_set_update_buttons` sets both T64
+    # entries together), so this asks the rule directly.
     bare.update_to_latest_action.setEnabled(True)
-    assert bare.server_build_button.isEnabled() is False, "lit by an entry nobody can see"
+    assert bare.update_to_latest_button.isHidden(), "lit by a press nobody can see"
 
-    # The same, with a route: Update is shown and live, so the menu has a use.
+    # The same, with a route: Update is shown and live, so the section has a use.
     services, _spy = _latest(ps, tmp_path)
     services.rebuild = None
     routed = ControllerView(WOTLK, services, status_poll_ms=0)
     assert routed.rebuild_action.isEnabled() is False
-    assert routed.server_build_button.isEnabled() is True
+    assert routed.update_to_latest_button.isEnabled() is True
 
 
-def test_the_pad_opens_server_build_and_chooses_update_from_it(
+def test_the_pad_reaches_update_from_the_server_version_section(
     qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """T89 on a Steam Deck: A opens the menu, the D-pad walks it, A chooses.
+    """T692a on a Steam Deck: the D-pad walks the section's buttons, A chooses.
 
     Through the real `Navigator` in the real window, which is what the pad's
-    poller calls -- the menu's entries are not widgets, so the D-pad walk that
-    moves between the toolbar's buttons has nothing to move to inside it.
+    poller calls. No menu any more: the presses are buttons, so the D-pad walk
+    between them reaches Update directly, and A on it reaches its dialog.
     """
-    from PySide6.QtWidgets import QApplication
-
     from yulon.ui.gamepad import Action, Direction, install_gamepad_navigation
 
     qmb = controller_view_module.QMessageBox
     boxes = _answer(monkeypatch, qmb.StandardButton.Cancel)
     view, spy, rebuilt = _past_the_pin(ps, tmp_path)
-    window, _tab = _controller_in_the_real_window(view, "Modules")
+    window, _tab = _controller_in_the_real_window(view, MAINTENANCE_TAB)
     _at(window, (1280, 800))
     nav, keyboard, gamepad = install_gamepad_navigation(window)
     try:
-        view.server_build_button.setFocus()
+        view.rebuild_button.setFocus()
         process_events()
-        nav.perform(Action.CONFIRM)
+        nav.navigate(Direction.RIGHT)
         process_events()
-        assert QApplication.activePopupWidget() is view.server_build_menu, "A did not open it"
-        nav.navigate(Direction.DOWN)
-        nav.navigate(Direction.DOWN)
-        assert view.server_build_menu.activeAction() is view.update_to_latest_action
+        assert view.update_to_latest_button.hasFocus(), "the D-pad cannot walk to Update"
         nav.perform(Action.CONFIRM)
         process_events()
     finally:
-        view.server_build_menu.close()
         keyboard.stop()
         gamepad.stop()
 
     assert len(boxes) == 1, "choosing Update did not reach its dialog"
-    assert QApplication.activePopupWidget() is None
     assert spy.presses == [] and rebuilt == []
 
 
-def test_the_modules_toolbar_wraps_rather_than_shrinking_at_the_smallest_window(
+def test_the_shorter_modules_toolbar_never_shrinks_its_buttons(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
-    """And the mechanism, because "nothing is clipped" has other solutions.
+    """T692a: the mechanism, because "nothing is clipped" has other solutions.
 
     A bar whose buttons were given shorter labels would pass the test above, and
-    so would one that dropped four of them into a `More…` menu. What is asserted
-    here is that the same six buttons are all still DRAWN, on more than one line,
-    and each at its own full size hint -- which is the difference between
-    wrapping and the `QHBoxLayout` this replaced, whose only answer to a bar that
-    does not fit is to shrink every item in it.
+    so would one that dropped two of them into a `More…` menu. What is asserted
+    here is that the same three buttons are all still DRAWN, each at its own
+    full size hint -- which is the difference between wrapping and the
+    `QHBoxLayout` this replaced, whose only answer to a bar that does not fit
+    is to shrink every item in it. T692a moved the server presses to
+    Maintenance, so the bar fits one line at the smallest window now; the
+    wrapping itself is still pinned by the `FlowBar` widget tests below.
     """
     import main
 
@@ -18720,18 +18795,14 @@ def test_the_modules_toolbar_wraps_rather_than_shrinking_at_the_smallest_window(
     _at(window, main.MINIMUM_WINDOW_SIZE)
 
     buttons = _module_toolbar_buttons(view)
-    tops = sorted({b.y() for b in buttons})
-    assert len(tops) > 1, (
-        f"the bar is still one line at {main.MINIMUM_WINDOW_SIZE}, so it did not wrap: "
-        f"{[(b.text(), b.width(), b.sizeHint().width()) for b in buttons]}"
-    )
+    assert len(buttons) == 3, f"the Modules bar lost a button: {[b.text() for b in buttons]}"
     shrunk = [
         f"{b.text()!r}: {b.width()} < {b.sizeHint().width()}"
         for b in buttons
         if b.width() < b.sizeHint().width()
     ]
-    assert shrunk == [], f"a wrapped bar still squeezed its buttons: {shrunk}"
-    assert all(b.isVisible() for b in buttons), "wrapping hid a button instead of moving it"
+    assert shrunk == [], f"the bar squeezed its buttons: {shrunk}"
+    assert all(b.isVisible() for b in buttons), "a button is hidden instead of drawn"
     assert _bar_holds_every_line(view) == [], "the bar is shorter than the lines it drew"
 
 
@@ -19185,7 +19256,9 @@ def test_a_failed_jobs_folded_strip_says_what_failed_on_one_line(
     shows.
     """
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
-    window, _tab = _controller_in_the_real_window(view, "Modules")
+    # T692a: the log lives on Maintenance now -- a panel on a tab nobody looks
+    # at is never laid out, and its field's height is nobody's number.
+    window, _tab = _controller_in_the_real_window(view, MAINTENANCE_TAB)
     _at(window, (1000, 700))
     refusal = (
         "that compose file was not written by Yu'lon, so this app will not rebuild the "
@@ -19392,7 +19465,7 @@ def test_every_sub_tab_but_tuning_scrolls_instead_of_squeezing(
 def _server_with_the_plan_up(
     tmp_path: Path, size: tuple[int, int] = T191_SIZES[0]
 ) -> tuple[ControllerView, Any, Any]:
-    """WotLK's Server tab in the real window at `size`, with Uninstall… pressed.
+    """WotLK's Server tab in the real window at `size`, with the plan up through the dialog.
 
     The factory's wiring, as the app builds it (the client folder row, the
     command channel), with only the plan's answer fixed. Returns the view, the
@@ -19418,8 +19491,7 @@ def _server_with_the_plan_up(
     view = ControllerView(WOTLK, services, status_poll_ms=0)
     window, _tab = _controller_in_the_real_window(view, "Server")
     _at(window, size)
-    assert view.uninstall_button is not None
-    view.uninstall_button.click()
+    _answer_removal(view, RemovalChoice.EVERYTHING)
     process_events()
     return view, window, view._tabs.currentWidget()
 
@@ -19507,10 +19579,8 @@ def test_the_server_tab_is_five_sections_with_every_control_in_its_own(
         ],
         "Help": [view.help_button],
         "Danger zone": [
-            view.remove_button,
+            view.remove_server_button,
             view.repair_button,
-            view.forget_install_button,
-            view.uninstall_button,
             view.repair_label,
             view.uninstall_label,
             view.keep_characters_check,
@@ -19648,15 +19718,12 @@ def test_the_danger_zone_is_bordered_red_and_its_buttons_keep_the_windows_style(
         _pixel_near(realm, 0, realm.height() // 2), QColor(COLOR_DANGER)
     ), "the Realm section is red too: the sheet is not scoped to the Danger zone"
     view.stop_button.setEnabled(True)
-    view.remove_button.setEnabled(True)
+    view.remove_server_button.setEnabled(True)
     process_events()
     # Its edge and its fill, for a danger button and a plain one, each against
     # its twin outside the zone: a sheet that reached the buttons shows first
     # in their borders.
-    for inside_button, outside_button in (
-        (view.remove_button, view.stop_button),
-        (view.forget_install_button, view.refresh_button),
-    ):
+    for inside_button, outside_button in ((view.remove_server_button, view.stop_button),):
         for x in (0, 4):
             inside = _pixel_near(inside_button, x, inside_button.height() // 2)
             outside = _pixel_near(outside_button, x, outside_button.height() // 2)
@@ -19671,73 +19738,59 @@ def test_a_game_with_no_uninstall_says_so_in_the_danger_zone(
 ) -> None:
     """A27: Tortoise has no Uninstall; the zone says what it has instead."""
     view = _server_view(TORTOISE, tmp_path, uninstall=None)
-    assert view.uninstall_button is None
     label = view.uninstall_absent_label
     assert not label.isHidden()
     assert _section_of(view, label) == "Danger zone"
-    assert "Remove from Yu'lon" in label.text() and TORTOISE.name in label.text()
+    assert "Remove this server" in label.text() and TORTOISE.name in label.text()
     assert str(view.services.controller.server_dir) in label.text()
 
     wotlk = _server_view(WOTLK, tmp_path / "w", uninstall=_PlanOnlyUninstall(tmp_path))
     assert wotlk.uninstall_absent_label.isHidden()
 
 
-def test_the_armed_warning_shows_in_the_danger_zone_under_its_press(
+def test_the_remove_outcome_shows_in_the_danger_zone_under_its_press(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
-    """At 960 Realm's `problem_label` is a page away from the press that arms.
+    """At 960 Realm's `problem_label` is a page away from the press.
 
     The page starts at its top, where `problem_label` is, and the press is then
-    brought on screen as the pad brings it (`_scroll_into_view`). The warning
-    has to be there, in the Danger zone, directly under the presses; and
-    Realm's label keeps what it said before.
+    brought on screen as the pad brings it (`_scroll_into_view`). How the
+    remove went has to be there, in the Danger zone, directly under the
+    presses.
     """
     from yulon.ui.gamepad import _scroll_into_view
 
     view, _window, page = _server_with_the_plan_up(tmp_path)
     page.verticalScrollBar().setValue(0)
-    view.problem_label.setText("A message from before the press.")
     process_events()
-    assert not _whole_in_the_page(view.remove_button, page), "the press was on screen already"
+    assert not _whole_in_the_page(
+        view.remove_server_button, page
+    ), "the press was on screen already"
     label = view.danger_label
-    assert label.isHidden(), "a warning before anything was armed"
-
-    view.remove_button.click()
-    _scroll_into_view(view.remove_button)
-    process_events()
-    assert view.remove_button.text() == controller_view_module.REMOVE_ARMED
-    assert _section_of(view, label) == "Danger zone"
-    assert not label.isHidden() and "characters are NOT" in label.text(), label.text()
-    assert _whole_in_the_page(view.remove_button, page)
-    assert _whole_in_the_page(label, page), "the warning is off screen under its press"
-    row = view.remove_button.parentWidget()
-    assert label.y() >= row.geometry().bottom(), "the warning is not under the presses"
-    assert view.problem_label.text() == "A message from before the press."
-
-    view.recheck()
-    process_events()
-    assert label.isHidden() and label.text() == "", "the warning outlived the cancel"
 
     view.services.controller.remove = lambda: True  # type: ignore[method-assign]
-    view.remove_button.click()
-    assert not label.isHidden()
-    view.remove_button.click()
-    pump_until(lambda: "Containers removed" in label.text(), "the remove to finish")
-    assert "characters are NOT" not in label.text(), "the warning outlived the press it armed"
-    assert not label.isHidden(), "how the remove went is said where it was pressed"
+    _answer_removal(view, RemovalChoice.REMOVE_CONTAINERS)
+    _scroll_into_view(view.remove_server_button)
+    process_events()
+    assert _section_of(view, label) == "Danger zone"
+    assert not label.isHidden() and "Containers removed" in label.text(), label.text()
+    assert _whole_in_the_page(view.remove_server_button, page)
+    assert _whole_in_the_page(label, page), "the outcome is off screen under its press"
+    row = view.remove_server_button.parentWidget()
+    assert label.y() >= row.geometry().bottom(), "the outcome is not under the presses"
 
 
-def test_a_press_at_the_bottom_edge_brings_its_warning_on_screen(
+def test_a_press_at_the_bottom_edge_brings_its_outcome_on_screen(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
-    """A mouse press on a remove button the window's bottom edge cuts under.
+    """A mouse press on a remove press the window's bottom edge cuts under.
 
-    Nothing moves the focus, so the pad's scroll does not run: the warning
+    Nothing moves the focus, so the pad's scroll does not run: the outcome
     would open under the edge unless the page is asked to show it.
     """
     view, _window, page = _server_with_the_plan_up(tmp_path)
     body = page.widget()
-    button = view.remove_button
+    button = view.remove_server_button
     bottom = button.mapTo(body, button.rect().bottomLeft()).y()
     page.verticalScrollBar().setValue(bottom + 1 - page.viewport().height())
     process_events()
@@ -19745,10 +19798,11 @@ def test_a_press_at_the_bottom_edge_brings_its_warning_on_screen(
     below = button.mapTo(page.viewport(), button.rect().bottomLeft()).y()
     assert page.viewport().height() - below < 8, "the press is not at the bottom edge"
 
-    button.click()
+    view.services.controller.remove = lambda: True  # type: ignore[method-assign]
+    _answer_removal(view, RemovalChoice.REMOVE_CONTAINERS)
     process_events()
-    assert _whole_in_the_page(view.danger_label, page), "the warning opened under the edge"
-    assert _whole_in_the_page(button, page), "the press it warns about scrolled away"
+    assert _whole_in_the_page(view.danger_label, page), "the outcome opened under the edge"
+    assert _whole_in_the_page(button, page), "the press it reports on scrolled away"
 
 
 @pytest.mark.parametrize("outcome", ["done", "refused"])
@@ -19845,9 +19899,7 @@ def test_a_remove_that_ends_on_another_tab_leaves_the_server_page_where_it_was(
         return True
 
     view.services.controller.remove = remove_while_away  # type: ignore[method-assign]
-    view.remove_button.click()
-    process_events()
-    view.remove_button.click()
+    _answer_removal(view, RemovalChoice.REMOVE_CONTAINERS)
     process_events()
     assert "Containers removed" in view.danger_label.text(), view.danger_label.text()
     assert view._tabs.tabText(view._tabs.currentIndex()) == "Console"
@@ -19906,14 +19958,13 @@ def test_realm_and_play_end_at_their_last_row_when_nothing_is_said(
 def _server_states(view: ControllerView) -> Iterator[str]:
     """Put the Server tab through the states that grow it; yield each one's name."""
     yield "idle"
-    assert view.uninstall_button is not None
-    view.uninstall_button.click()
+    _answer_removal(view, RemovalChoice.EVERYTHING)
     process_events()
     yield "plan up"
-    view.remove_button.click()
+    view.services.controller.remove = lambda: True  # type: ignore[method-assign]
+    _answer_removal(view, RemovalChoice.REMOVE_CONTAINERS)
     process_events()
-    assert view.remove_button.text() == controller_view_module.REMOVE_ARMED
-    yield "remove armed"
+    yield "remove done"
     view._disarm_actions()
     view.problem_label.setText(" ".join(["The server refused to stop because of a reason."] * 12))
     process_events()
@@ -19928,11 +19979,10 @@ def _server_states(view: ControllerView) -> Iterator[str]:
 def test_the_server_tab_is_whole_in_every_state_at_every_size(
     qapp: object, ps: _Ps, tmp_path: Path, size: tuple[int, int]
 ) -> None:
-    """Nothing cut, overlapped or sideways: idle, plan up, armed, a long refusal, the stop offers.
+    """Nothing cut, overlapped or sideways: idle, plan up, remove done, a long refusal, stops.
 
-    The plan-up state at 960x640 is T188's after-render: "Refresh", "Stop and
-    remove containers…", "Remove from Yu'lon…" and "Add to Steam…" cut short in
-    one row of ten.
+    The plan-up state at 960x640 is T188's after-render: "Refresh",
+    "Remove this server…" and "Add to Steam…" cut short in one row of ten.
     """
     from yulon.ui.gamepad import _scroll_into_view
 
@@ -19945,15 +19995,15 @@ def test_the_server_tab_is_whole_in_every_state_at_every_size(
         process_events()
         if found := _page_faults(page):
             faults[shown] = found
-        if shown == "remove armed":
-            # The warning is next to the press that armed it, on screen with it.
-            _scroll_into_view(view.remove_button)
+        if shown == "remove done":
+            # The outcome is next to the press that ran it, on screen with it.
+            _scroll_into_view(view.remove_server_button)
             process_events()
             label = view.danger_label
             assert _section_of(view, label) == "Danger zone", size
-            assert not label.isHidden() and "characters are NOT" in label.text(), size
-            assert _whole_in_the_page(view.remove_button, page), size
-            assert _whole_in_the_page(label, page), f"the armed warning is off screen at {size}"
+            assert not label.isHidden() and "Containers removed" in label.text(), size
+            assert _whole_in_the_page(view.remove_server_button, page), size
+            assert _whole_in_the_page(label, page), f"the remove outcome is off screen at {size}"
     assert faults == {}, f"the Server tab at {size}: {faults}"
 
 
@@ -19970,7 +20020,7 @@ def test_the_server_tabs_buttons_keep_their_own_width_at_1080p(
     view = _server_view(WOTLK, tmp_path, uninstall=_PlanOnlyUninstall(tmp_path))
     window, tab = _controller_in_the_real_window(view, "Server")
     _at(window, T191_SIZES[2])
-    view.uninstall_button.click()
+    _answer_removal(view, RemovalChoice.EVERYTHING)
     process_events()
     wide = [
         f"{b.text()!r}: {b.width()} for a hint of {b.sizeHint().width()}"
@@ -19999,7 +20049,7 @@ def test_the_pad_reaches_every_server_control_and_walks_down_the_sections_in_ord
     view = _server_view(WOTLK, tmp_path, uninstall=_PlanOnlyUninstall(tmp_path))
     window, tab = _controller_in_the_real_window(view, "Server")
     _at(window, size)
-    view.uninstall_button.click()
+    _answer_removal(view, RemovalChoice.EVERYTHING)
     process_events()
     nav, keyboard, gamepad = install_gamepad_navigation(window)
     try:
@@ -20554,41 +20604,36 @@ def test_a_server_without_a_bots_tab_draws_no_bot_count_box_over_its_tabs(
     assert not view.bot_count_group.isVisible()
 
 
-def test_the_modules_job_row_is_not_drawn_until_a_job_runs_and_then_stays(
+def test_the_maintenance_job_row_is_not_drawn_until_a_job_runs_and_then_stays(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
-    """I8: no "idle" strip with a dead Stop on a tab that has run nothing.
+    """T692a (I8): no "idle" strip with a dead Stop on a tab that has run nothing.
 
-    Before a job the row is not there and the list has its height. A job
-    started while another tab is open brings it, open; and it STAYS once it is
-    there: folded by hand after the job, it is the strip, not gone -- the
-    T80 promise that a job's last line is one press away holds from the first
-    job on.
+    Before a job the row is not there. A job started while another tab is open
+    brings it, open; and it STAYS once it is there: folded by hand after the
+    job, it is the strip, not gone -- the T80 promise that a job's last line
+    is one press away holds from the first job on. The log lives in the Server
+    version section on Maintenance now.
     """
     from PySide6.QtCore import Qt
     from PySide6.QtTest import QTest
 
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
-    window, _tab = _controller_in_the_real_window(view, "Modules")
+    window, _tab = _controller_in_the_real_window(view, MAINTENANCE_TAB)
     _at(window, T191_SIZES[2])
     log = view.rebuild_log
     assert log.isHidden(), "an idle job row is drawn before any job ran"
-    without_the_row = view.modules_panel.height()
 
     titles = [view._tabs.tabText(index) for index in range(view._tabs.count())]
     view._tabs.setCurrentIndex(titles.index("Server"))
     _ran_a_job(view)
     assert not log.isHidden(), "the job ran and its log is still not drawn"
-    view._tabs.setCurrentIndex(titles.index("Modules"))
+    view._tabs.setCurrentIndex(_tab_index(view, MAINTENANCE_TAB))
     process_events()
-    assert not log.collapsed, "the job's log came back folded on a tab with the room for it"
 
     QTest.mouseClick(log._collapse, Qt.MouseButton.LeftButton)
     process_events()
     assert log.collapsed and log.isVisible(), "folded by hand, the row went away"
-    assert (
-        view.modules_panel.height() < without_the_row
-    ), "the list is as tall with the strip as without it: the hidden row was not hidden"
     _ran_a_job(view)
     assert log.isVisible(), "a second job hid the row"
 
@@ -20611,35 +20656,27 @@ def test_tortoises_bot_job_rows_are_not_drawn_until_their_jobs_run(
     assert view.dashboard_log.isHidden(), "the other job's row came with it"
 
 
-def test_a_job_leaves_nothing_on_the_modules_tab_cut_at_the_narrow_windows(
+def test_a_job_leaves_nothing_on_the_maintenance_tab_cut_at_the_narrow_windows(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
-    """The wrapped bar's second line must not be paid for out of the log's text pane.
+    """T692a: the log's room on Maintenance, where no ladder folds it for width.
 
-    T83 round 1's defect, and it is what a minimum that under-reports buys.
-    `FlowLayout.minimumSize()` answered one line at every width, so with the bar
-    wrapped at 1000x700 the tab's own layout claimed it needed 482px when the
-    real need was 538 -- and `QBoxLayout`, told the tab fitted, drew
-    `_IdleLogPanel` at 153px of the 180 it needs and cut its text pane. That is
-    the state T80's cap docstring exists to prevent, and it came back one ticket
-    later through a widget that had nothing to do with logs.
-
-    Three assertions, each of which the other two are satisfied without:
-
-    * nothing on the tab is drawn under its own minimum, which is the defect;
-    * every toolbar label is still whole, so the height cannot be found by
-      un-wrapping the bar and clipping the text again;
-    * and the log is USABLE at whatever height it ended up with -- folded is
-      fine, because a folded `LogPanel` is its strip and the strip carries the
-      job's status line and Stop; drawn-but-cut is not, and the two are a few
-      pixels apart on screen.
+    T83 round 1's defect was a minimum that under-reported: with the Modules
+    bar wrapped at 1000x700 the tab's layout claimed it needed 482px when the
+    real need was 538, and `QBoxLayout` drew `_IdleLogPanel` at 153px of the
+    180 it needs and cut its text pane. The log lives in the Server version
+    section on Maintenance now, whose page scrolls past what fits -- so what
+    is asserted is that at the narrow widths nothing on the tab is drawn
+    under its own minimum, and the log is USABLE at whatever height it ended
+    up with: drawn at no less than it needs, its strip carrying the job's
+    status line.
 
     Run AFTER a job, because that is the only state in which this tab has an
     open log at all: `_IdleLogPanel` starts folded and it is `run_started` that
     asks for the room (T80).
     """
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
-    window, tab = _controller_in_the_real_window(view, "Modules")
+    window, tab = _controller_in_the_real_window(view, MAINTENANCE_TAB)
     _at(window, DESKTOP_1080P)
     _ran_a_job(view)
     assert not view.rebuild_log.collapsed, "the job did not open the log, so nothing is tested"
@@ -20647,14 +20684,8 @@ def test_a_job_leaves_nothing_on_the_modules_tab_cut_at_the_narrow_windows(
     for size in LOG_OPEN_WIDTHS:
         _at(window, size)
         assert _drawn_under_their_minimum(tab) == [], (
-            f"something on the Modules tab is drawn under its own minimum at {size} with "
+            f"something on the Maintenance tab is drawn under its own minimum at {size} with "
             f"the log open: {_drawn_under_their_minimum(tab)}"
-        )
-        clipped = [why for why in (_clipped(b) for b in _module_toolbar_buttons(view)) if why]
-        assert clipped == [], f"toolbar text cut off at {size}: {clipped}"
-        assert _bar_holds_every_line(view) == [], (
-            f"a toolbar button is drawn outside the action bar at {size}: "
-            f"{_bar_holds_every_line(view)}"
         )
         log = view.rebuild_log
         assert log.height() >= log.minimumSizeHint().height(), (
@@ -20664,51 +20695,35 @@ def test_a_job_leaves_nothing_on_the_modules_tab_cut_at_the_narrow_windows(
         assert log.status_text() != "", f"the log's strip is empty at {size}"
 
 
-def test_the_modules_log_takes_its_height_back_when_the_window_grows(
+def test_the_maintenance_log_opens_for_a_job_and_keeps_a_hand_fold(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
-    """The fold the panel does for room is undone when the room comes back.
+    """T692a: the Server version section's log opens for a job; a hand fold sticks.
 
-    The other half of the test above, and the one that says the fold is a
-    response to a width rather than a one-way door. It is easy to get wrong in
-    exactly one way: a panel that remembers "I folded myself" and clears that
-    memory on its own `set_collapsed()` never re-opens -- measured, with the log
-    left folded at 1280x800 where there were 312px of room for it.
-
-    And the last assertion is the other direction: a fold the USER asked for
-    survives a window that grows, or the app re-opens a panel somebody has just
-    put away.
+    The log lives on Maintenance now, where no ladder folds it for room -- the
+    tab scrolls instead. What is pinned is the panel's own contract: a finished
+    job's output opens it, a fold the USER asked for survives anything but the
+    next job, and the next job opens it again with its new output.
     """
-    import main
-
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
-    window, _tab = _controller_in_the_real_window(view, "Modules")
+    window, _tab = _controller_in_the_real_window(view, MAINTENANCE_TAB)
     _at(window, DESKTOP_1080P)
     _ran_a_job(view)
 
-    _at(window, main.MINIMUM_WINDOW_SIZE)
-    assert view.rebuild_log.collapsed, (
-        f"the log is open at {main.MINIMUM_WINDOW_SIZE}, where the tab has "
-        f"{view.rebuild_log.height()}px for the {view.rebuild_log.minimumSizeHint().height()} "
-        "an open one needs"
-    )
-
-    _at(window, main.DEFAULT_WINDOW_SIZE)
-
-    assert not view.rebuild_log.collapsed, (
-        "the log was folded to fit a narrow window and never came back at "
-        f"{main.DEFAULT_WINDOW_SIZE}"
-    )
-    assert "Compile finished." in view.rebuild_log.text(), "the fold lost the job's output"
+    assert not view.rebuild_log.collapsed, "a job's output left the log folded away"
+    assert "Compile finished." in view.rebuild_log.text(), "the job's output is not in the log"
 
     _click(_the_handle_on(view.rebuild_log))
     assert view.rebuild_log.collapsed, "the handle did not fold the log"
     _at(window, (1920, 1080))
 
-    assert view.rebuild_log.collapsed, (
-        "a bigger window re-opened a log the user had folded; only a fold the PANEL did "
-        "for room is its own to undo"
-    )
+    assert (
+        view.rebuild_log.collapsed
+    ), "a bigger window re-opened a log the user had folded; only a new job is its own to undo"
+
+    _ran_a_job(view, last_line="the second job")
+    assert not view.rebuild_log.collapsed, "a new job ran with its output still folded away"
+    assert "the second job" in view.rebuild_log.text()
 
 
 def _what_the_tab_owes(tab: Any) -> int:
@@ -20734,10 +20749,10 @@ def _what_the_tab_owes(tab: Any) -> int:
     return owed + box.spacing() * max(0, shown - 1)
 
 
-def test_a_wrap_reaches_the_tabs_own_minimum_without_a_restyle(
+def test_the_shorter_bar_keeps_the_tabs_minimum_honest_without_a_restyle(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
-    """The bar wrapping has to move the TAB's minimum, and a plain resize is the test.
+    """T692a: the Modules bar is one line at 960 now; the tab's minimum must say so.
 
     A parent `QBoxLayout` works its children's minimums out when it is
     invalidated and re-uses them until a child says they have moved.
@@ -20750,15 +20765,13 @@ def test_a_wrap_reaches_the_tabs_own_minimum_without_a_restyle(
     re-ask anyway; so does a real drag, most of the time
     (`main._Window._restyle_for_width`). Measured through `_at()`, removing
     `updateGeometry()` changes nothing and reads as dead code -- it was removed
-    once on exactly that evidence. Through a plain `resize()` the tab's minimum
-    stays at the 376px it had with the bar on one line while the bar itself says
-    106, and everything downstream -- `_IdleLogPanel`'s room, and so whether the
-    log is folded or cut -- is decided from that stale number.
+    once on exactly that evidence.
 
-    Two assertions: the tab's minimum went UP by at least a line when the bar
-    wrapped, and it is at least what its children add up to. The second is the
-    invariant and the first is what makes it non-vacuous -- a tab whose minimum
-    was already generous would satisfy the second at both widths.
+    T692a moved the server presses to Maintenance, so the bar no longer wraps
+    at 960: what is asserted is one line at both widths and the invariant --
+    the tab's minimum is at least what its children add up to, through a plain
+    `resize()` with no restyle to invalidate anything. The wrapping half of
+    this mechanism is the `FlowBar` widget tests' (with six buttons).
     """
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
     window, tab = _controller_in_the_real_window(view, "Modules")
@@ -20767,21 +20780,14 @@ def test_a_wrap_reaches_the_tabs_own_minimum_without_a_restyle(
     window.resize(1400, 800)
     process_events()
     assert len(bar.flow()._lines(bar.width())) == 1, "1400px already wrapped the bar"
-    on_one_line = tab.minimumSizeHint().height()
-    line = bar.flow()._line_height()
 
     window.resize(960, 800)
     process_events()
 
-    assert len(bar.flow()._lines(bar.width())) > 1, "960px did not wrap the bar"
-    wrapped = tab.minimumSizeHint().height()
-    assert wrapped >= on_one_line + line, (
-        f"the bar wrapped and the tab's minimum went {on_one_line} -> {wrapped}, less than the "
-        f"{line}px line it gained: the tab is still being laid out against the old one"
-    )
-    assert wrapped >= _what_the_tab_owes(tab), (
-        f"the tab says it needs {wrapped}px and its own children add up to "
-        f"{_what_the_tab_owes(tab)}"
+    assert len(bar.flow()._lines(bar.width())) == 1, "960px wrapped the shorter bar"
+    assert tab.minimumSizeHint().height() >= _what_the_tab_owes(tab), (
+        f"the tab says it needs {tab.minimumSizeHint().height()}px and its own children add up "
+        f"to {_what_the_tab_owes(tab)}"
     )
 
 
@@ -20870,33 +20876,24 @@ def test_a_populated_report_leaves_nothing_on_the_modules_tab_cut(
 
 
 @pytest.mark.slow
-def test_the_report_box_is_what_gives_after_the_log_and_before_the_list(
+def test_the_report_box_is_what_gives_before_the_card_and_the_list(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
-    """The ORDER, asked as three questions the absence of clipping does not ask.
+    """T692a: the ORDER on Modules now that the log lives on Maintenance.
 
-    A tab that folded everything at every width would pass the test above, and
-    so would one that took the height out of the list first and left the user
-    with two rows on a window that could have shown six. What is asserted is
-    that each step is only taken when the one before it was not enough:
+    A tab that folded everything at every width would pass the clipping tests,
+    and so would one that took the height out of the list first. What is
+    asserted is that each step is only taken when the one before it was not
+    enough -- report, then the card's sentence, then the list:
 
-    * at the smallest window with a report in the box AND a rebuild owed, BOTH
-      boxes are folded and the list is at its own floor -- the narrowest case,
-      where all three steps are needed;
-    * at 1280x800 NEITHER is folded and the list floor is back, so none of this
-      is a one-way door;
-    * and the list never gives while a box is still open, which is the order
-      itself.
-
-    The banner is what makes the first case reach step 3 at all since T85: the
-    minimum window went up to hold the wrapped bar and the card whole with one on
-    screen, and without one the smallest window now fits with the list at its
-    full `MODULE_LIST_MIN_HEIGHT`.
-
-    Since T153 the card's one-line form is a rung of its own, between the boxes
-    and the list, and it is what gives at the smallest window now: the list
-    keeps its whole floor there. The list's own rung is still asserted, on a tab
-    shorter than any window the app allows -- see the second half.
+    * at the smallest window with a report in the box AND a rebuild owed, the
+      tab still holds everything open: the version lines, the server presses
+      and the log that used to fill it live on Maintenance now;
+    * on a tab shorter than any window allows, the report folds first, then
+      the card goes to one line, and the list keeps its floor throughout --
+      the shortfall past that is the scroll page's, not the list's;
+    * at 1280x800 the report is back open and the card whole, so none of this
+      is a one-way door.
     """
     import main
 
@@ -20909,47 +20906,27 @@ def test_the_report_box_is_what_gives_after_the_log_and_before_the_list(
     process_events()
 
     _at(window, main.MINIMUM_WINDOW_SIZE)
-    assert view.rebuild_log.collapsed, "the log is open at the smallest window"
-    assert view.module_report_strip.collapsed, "the report is open at the smallest window"
-    assert (
-        view.custom_module_line.isVisible()
-    ), "the card still has its sentence at the smallest window: it is not on one line"
+    assert not view.module_report_strip.collapsed, "the report folded where the tab holds it"
+    assert view.custom_module_card.isVisible(), "the card folded where the tab holds it whole"
     assert view.modules_panel.minimumHeight() == controller_view_module.MODULE_LIST_MIN_HEIGHT, (
-        "both boxes are folded and the card is on one line, so the tab no longer spends its "
-        "wrapped sentence and frame -- and the list's floor should not have given: it is "
+        f"the list's floor gave at the smallest window: it is "
         f"{view.modules_panel.minimumHeight()} of {controller_view_module.MODULE_LIST_MIN_HEIGHT}"
     )
 
-    # The list's own rung, which no window the app allows reaches any more with
-    # the shipped catalog and theme (T153): the window's minimum lifted, and the
-    # tab made 60px shorter than the smallest it can really be. That is the
-    # state this rung exists for -- a height somebody else's number got wrong --
-    # and asserting it here keeps the ladder's last step exercised somewhere
-    # rather than quietly covering nothing.
+    # Below any window the app allows: the report gives first, then the card's
+    # sentence, and the list's floor holds -- past that the page scrolls.
     window.setMinimumSize(0, 0)
     try:
-        _at(window, (main.MINIMUM_WINDOW_SIZE[0], main.MINIMUM_WINDOW_SIZE[1] - 60))
-        assert view.rebuild_log.collapsed and view.module_report_strip.collapsed
-        assert (
-            view.custom_module_line.isVisible()
-        ), "the card still has its sentence on a tab shorter than allowed"
+        _at(window, (960, 620))
+        assert view.module_report_strip.collapsed, "the report stayed open on a short tab"
+        assert view.custom_module_card.isVisible(), "the card folded before the report did"
+        _at(window, (960, 580))
+        assert view.module_report_strip.collapsed, "the report came back on a shorter tab"
+        assert view.custom_module_line.isVisible(), "the card kept its sentence past the report"
         floor = controller_view_module.MODULE_LIST_MIN_HEIGHT
-        assert view.modules_panel.minimumHeight() < floor, (
-            "both boxes folded and the card on one line, on a tab 60px shorter than the smallest "
-            "window, and the list's floor did not give: it is "
+        assert view.modules_panel.minimumHeight() == floor, (
+            "the list gave height while the tab still holds its floor: it is "
             f"{view.modules_panel.minimumHeight()} of {floor}"
-        )
-        #
-        # `_LIST_FLOOR_FLOOR` and NOT the list's own `minimumSizeHint()`, which is
-        # what this asserted until T85 on the belief that Qt ignores a minimum under
-        # a widget's hint. It does not -- `qSmartMinSize` prefers an explicit
-        # `minimumHeight()` at any value above zero -- and the hint was 70 where the
-        # ladder needed 40, so the last rung was 30px shorter than it reads and the
-        # shortfall went on to the toolbar and the card instead.
-        assert view.modules_panel.minimumHeight() >= controller_view_module._LIST_FLOOR_FLOOR, (
-            f"the floor was lowered to {view.modules_panel.minimumHeight()}, under the "
-            f"{controller_view_module._LIST_FLOOR_FLOOR} that is the bottom of this ladder -- "
-            "below it the honest answer is a tab that scrolls, not a shorter list"
         )
     finally:
         window.setMinimumSize(*main.MINIMUM_WINDOW_SIZE)
@@ -20957,30 +20934,24 @@ def test_the_report_box_is_what_gives_after_the_log_and_before_the_list(
     _a_rebuild_is_not_owed(view)
     _at(window, main.DEFAULT_WINDOW_SIZE)
 
-    assert not view.rebuild_log.collapsed, "the log never came back at the default window"
     assert not view.module_report_strip.collapsed, "the report never came back"
-    # T80/T85's shot at the size the app opens at, and T153 does not change it:
-    # the list there is under two rows with both boxes open, and the card keeps
-    # its sentence because folding the boxes would give the list its rows.
     assert view.custom_module_card.isVisible(), "the card lost its sentence at the default window"
     assert view.modules_panel.minimumHeight() == controller_view_module.MODULE_LIST_MIN_HEIGHT, (
         f"the list's floor is still {view.modules_panel.minimumHeight()} at a window with "
         f"room for the {controller_view_module.MODULE_LIST_MIN_HEIGHT} it asks for"
     )
 
-    # And the order: wherever the list has given anything, both boxes are away.
+    # And the order across widths at a short height: the list keeps its floor
+    # everywhere here, and wherever the report is folded the card follows
+    # before the list ever would.
     for width in range(960, 1400, 20):
         _at(window, (width, 700))
-        if view.modules_panel.minimumHeight() < controller_view_module.MODULE_LIST_MIN_HEIGHT:
-            assert view.rebuild_log.collapsed and view.module_report_strip.collapsed, (
-                f"at {width}px the list gave height while a box was still open: log "
-                f"folded={view.rebuild_log.collapsed}, report "
-                f"folded={view.module_report_strip.collapsed}"
-            )
-            # And the card's rung before it (T153).
-            assert (
-                view.custom_module_line.isVisible()
-            ), f"at {width}px the list gave height while the card still had its sentence"
+        assert (
+            view.modules_panel.minimumHeight() >= controller_view_module.MODULE_LIST_MIN_HEIGHT
+        ), (
+            f"at {width}px the list gave height it still holds: "
+            f"{view.modules_panel.minimumHeight()}"
+        )
 
 
 THE_WRAPPED_WIDTHS = tuple(range(960, 1120, 10))
@@ -21061,24 +21032,10 @@ def test_the_smallest_window_draws_the_toolbar_and_the_card_whole_with_a_rebuild
 ) -> None:
     """T85's first half: the size the app PROMISES, in the state gate 6 found it in.
 
-    The banner is the whole of what was new. It costs this tab 62px plus the
-    spacing above it, it is on screen for as long as it takes a user to press
-    Rebuild, and at the 960x600 the app used to allow it put the tab 82px past
-    what `_TabFit`'s whole ladder could give: the wrapped action bar was drawn
-    82px of its 106 with `Rebuild the server…` sliced through its own border, and
-    the custom-module card 82 of 122 with both its buttons hanging below the
-    frame. `QBoxLayout` shares a shortfall over every child, so the two widgets
-    whose only way of being shorter is to cut the words in them paid it.
-
-    Two things had to change and this test needs both. The ladder's last rung was
-    30px shorter than it read -- `_TabFit` floored the list at its own
-    `minimumSizeHint()` of 70 on the belief that Qt ignores anything under it,
-    and Qt does not -- and even with the list at `_LIST_FLOOR_FLOOR` the tab was
-    48px short, so `MINIMUM_WINDOW_SIZE` went from 600 to 640.
-
-    Swept across `THE_WRAPPED_WIDTHS` rather than asked at the minimum, because
-    the worst case is at the wide end of where the bar wraps and not at 960: see
-    that constant.
+    The banner is the whole of what was new. T692a moved the server presses to
+    Maintenance, so the Modules bar is one line at every swept width now; what
+    this still pins is that nothing on the tab is cut with the banner up, a
+    job's output in the log and a report in the box.
 
     After a job AND with a report in the box, which is the state that puts every
     rung of the ladder under load at once.
@@ -21092,21 +21049,15 @@ def test_the_smallest_window_draws_the_toolbar_and_the_card_whole_with_a_rebuild
     _a_rebuild_is_owed(view)
     assert view.module_report.toPlainText() != "", "the report box is empty, so a rung is unloaded"
 
-    wrapped: list[int] = []
     for width in THE_WRAPPED_WIDTHS:
         _at(window, (width, main.MINIMUM_WINDOW_SIZE[1]))
         assert (
             view.rebuild_banner.isHidden() is False
         ), f"the banner left the screen at {width}px, so this is not the case under test"
-        if len({b.y() for b in _module_toolbar_buttons(view)}) > 1:
-            wrapped.append(width)
         assert _cut_on_the_modules_tab(view, tab) == [], (
             f"something on the Modules tab is cut at {width}x{main.MINIMUM_WINDOW_SIZE[1]} with a "
             f"rebuild owed: {_cut_on_the_modules_tab(view, tab)}"
         )
-    # Not at any one width (see `THE_WRAPPED_WIDTHS`), but somewhere: a sweep of
-    # nothing but one-line bars never measured the hard case at all.
-    assert wrapped, f"the action bar was one line at every width in {THE_WRAPPED_WIDTHS}"
 
 
 # ---------------------------------------------------------------------------
@@ -21166,21 +21117,18 @@ def _past_its_pin(
 def test_the_module_list_keeps_two_rows_at_the_smallest_window(
     qapp: object, ps: _Ps, tmp_path: Path, past_the_pins: bool
 ) -> None:
-    """The state the T89 gate photographed: the list was its header and nothing else.
+    """T692a: the list keeps its rows at the smallest window, on or past the pins.
 
-    Past the pins is that state, with the two version lines on screen. On the
-    pins is the same window without them, and it is here because it fails
-    differently: the tab has 34px more, the card whole leaves the list 100px --
-    a header and ONE row -- and a card that gave its sentence only when the
-    list was under `MODULE_LIST_MIN_HEIGHT` would keep it there.
+    The state the T89 gate photographed was the list as its header and nothing
+    else. Past the pins used to add the two version lines on screen; they live
+    in the Server version section on Maintenance now, so both params share the
+    roomier tab -- and both must still show the rows, with nothing else on the
+    tab drawn under its minimum. A list given its rows by cutting the card or
+    the bar is the bug from underneath.
 
-    Swept across `THE_WRAPPED_WIDTHS` at the minimum height, because the worst
-    case is at the wide end of where the bar wraps (T85) and not at 960.
-
-    Two assertions, and the second is what stops the first being bought the way
-    this tab used to buy height: rows on screen, AND nothing else on the tab
-    drawn under its minimum -- a list given its rows by cutting the card or the
-    bar is the bug from underneath.
+    Swept across `THE_WRAPPED_WIDTHS` at the minimum height, where the bar
+    used to wrap (T85): the shorter bar is one line at every width now, which
+    is only more room for the list.
     """
     import main
 
@@ -21190,14 +21138,14 @@ def test_the_module_list_keeps_two_rows_at_the_smallest_window(
         view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
     window, tab = _controller_in_the_real_window(view, "Modules")
 
-    wrapped: list[int] = []
     for width in THE_WRAPPED_WIDTHS:
         _at(window, (width, main.MINIMUM_WINDOW_SIZE[1]))
         assert (
-            view.source_version_label.isVisible() is past_the_pins
-        ), f"the version lines are not in the state under test at {width}px"
-        if len({b.y() for b in _module_toolbar_buttons(view)}) > 1:
-            wrapped.append(width)
+            view.source_version_label.isVisible() is False
+        ), f"the version lines are still on Modules at {width}px"
+        assert (
+            len({b.y() for b in _module_toolbar_buttons(view)}) == 1
+        ), f"the shorter bar wrapped at {width}px"
         whole = _whole_rows_on_screen(view.modules_panel)
         assert whole >= ROWS_AT_THE_SMALLEST_WINDOW, (
             f"{whole} whole rows on screen at {width}x{main.MINIMUM_WINDOW_SIZE[1]}, in a list "
@@ -21207,7 +21155,6 @@ def test_the_module_list_keeps_two_rows_at_the_smallest_window(
             f"something on the Modules tab is cut at {width}x{main.MINIMUM_WINDOW_SIZE[1]}: "
             f"{_cut_on_the_modules_tab(view, tab)}"
         )
-    assert wrapped, f"the action bar was one line at every width in {THE_WRAPPED_WIDTHS}"
 
 
 @pytest.mark.slow
@@ -21254,17 +21201,17 @@ def _the_list_needs_the_cards_sentence(view: ControllerView) -> None:
     _ran_a_job(view)
 
 
-def test_at_the_smallest_window_the_card_folds_for_a_jobs_row_and_not_before(
+def test_at_the_smallest_window_the_card_keeps_its_sentence_with_a_jobs_row(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
-    """Both sides of the card's rule at ONE size: whole where the list has its rows, else a line.
+    """T692a: the card no longer folds for a job's row at 960x640, and must not.
 
-    Past the pins at 960x640, the list beside the card whole has the two rows the
-    card would give its sentence for, so folding it there would take the words
-    away for nothing. A job's row on the tab takes that room, and then the card
-    goes to its one line. A fit that over-bills the tab -- counting a row that is
-    not drawn -- folds the first state and is caught here, which the tests that
-    only ever run with the job's row cannot see.
+    Past the pins the version lines, the server presses and the log lived on
+    this tab, and a job's row took the room the card's sentence needed. They
+    live on Maintenance now, so the list beside the card whole keeps its rows
+    with the row drawn too -- folding there would take the words away for
+    nothing. A fit that over-bills the tab -- counting a row that is not drawn
+    -- still folds, and is caught by the ladder's own unit tests.
     """
     import main
 
@@ -21281,24 +21228,22 @@ def test_at_the_smallest_window_the_card_folds_for_a_jobs_row_and_not_before(
 
     _the_list_needs_the_cards_sentence(view)
     _at(window, main.MINIMUM_WINDOW_SIZE)
-    assert view.custom_module_card.isHidden(), "a job's row took the room and the card stayed whole"
-    assert view.custom_module_line.isVisible(), "neither form of the card is on screen"
+    assert view.custom_module_card.isVisible(), "a job's row folded the card that has room"
+    assert view.custom_module_line.isHidden(), "the one-line card is on screen beside the card"
 
 
-def test_the_card_gives_its_sentence_for_the_list_and_keeps_both_presses(
+def test_the_card_keeps_its_sentence_and_both_presses_at_the_smallest_window(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
-    """What the card gives up is its sentence, and only where the list needs it.
+    """T692a: the card stays whole at 960x640 with a job's row, presses and all.
 
     * At the size the app opens at, the card is whole -- title, sentence and both
       buttons -- because the list has its rows there without it.
     * At 960x640 with a job's row on the tab (`_the_list_needs_the_cards_sentence`)
-      it is one line, and that line still carries BOTH presses and
-      they are the same presses: each opens the same dialog the card's own
-      button opens. A fold that hid a press behind a handle would leave a small
-      window that cannot install a module from a link at all (see
-      `_TabFit`'s docstring for why this is a line and not a strip).
-    * And the window made big again brings the sentence back: not a one-way door.
+      it is STILL whole: the version lines, the server presses and the log that
+      used to take its room live on Maintenance now. Both presses open the same
+      dialogs the card's own buttons open.
+    * And the window made big again keeps it whole: not a one-way door.
     """
     import main
 
@@ -21318,20 +21263,15 @@ def test_the_card_gives_its_sentence_for_the_list_and_keeps_both_presses(
     assert view.custom_module_line.isHidden(), "the one-line card is on screen beside the card"
 
     _at(window, main.MINIMUM_WINDOW_SIZE)
-    assert view.custom_module_card.isHidden(), "the card kept its sentence at the smallest window"
-    assert view.custom_module_line.isVisible(), "neither form of the card is on screen"
-    line_buttons = (view.module_link_line_button, view.module_folder_line_button)
-    assert [b.text() for b in line_buttons] == [
-        view.module_link_button.text(),
-        view.module_folder_button.text(),
-    ]
-    for button in line_buttons:
+    assert view.custom_module_card.isVisible(), "the card folded where it has room"
+    assert view.custom_module_line.isHidden(), "the one-line card is on screen beside the card"
+    for button in (view.module_link_button, view.module_folder_button):
         assert button.isVisible() and button.isEnabled(), f"{button.text()!r} is not pressable"
         _click(button)
     assert asked == [
         controller_view_module.MODULE_LINK_DIALOG_TITLE,
         controller_view_module.MODULE_FOLDER_DIALOG_TITLE,
-    ], f"the one-line card's presses opened {asked}"
+    ], f"the card's presses opened {asked}"
 
     _at(window, main.DEFAULT_WINDOW_SIZE)
     assert view.custom_module_card.isVisible(), "the sentence never came back"
@@ -21348,6 +21288,11 @@ def test_the_one_line_cards_presses_are_greyed_by_the_cards_own_gate(
     press on one is a press on the card's -- so the two gates that grey these
     buttons (`_set_custom_module_buttons` and the busy lock) need not know the
     line exists, and a third one added later cannot forget it.
+
+    T692a: the tab no longer folds the card on its own at any window the app
+    allows, so the one-line form is put on screen by hand here. What is pinned
+    is the relay wiring, not the trigger -- the trigger is the ladder's, and
+    its unit tests own it.
     """
     import main
 
@@ -21366,29 +21311,36 @@ def test_the_one_line_cards_presses_are_greyed_by_the_cards_own_gate(
     view._refresh_source_version()
     window, _tab = _controller_in_the_real_window(view, "Modules")
     _at(window, main.MINIMUM_WINDOW_SIZE)
-    # A job's row on the tab, as T153 measured it: with no job run the row is
-    # not drawn (T191) and the card has the room to be whole.
-    _ran_a_job(view)
-    assert view.custom_module_line.isVisible(), "the one-line card is not what is on screen"
+    # The form the ladder would choose if the tab were short: put on by hand,
+    # because at this window the card keeps its sentence now (T692a). The
+    # fit's event filter is off meanwhile, or the next layout puts it back.
+    _tab.removeEventFilter(view.modules_fit)
+    try:
+        view.custom_module_card.setVisible(False)
+        view.custom_module_line.setVisible(True)
+        process_events()
+        assert view.custom_module_line.isVisible(), "the one-line card is not what is on screen"
 
-    link, folder = view.module_link_line_button, view.module_folder_line_button
-    assert not link.isEnabled(), "the line offers a link install the game has no route for"
-    assert (
-        link.toolTip()
-        == view.module_link_button.toolTip()
-        == (controller_view_module.MODULE_CUSTOM_NO_ROUTE)
-    )
-    assert folder.isEnabled() and folder.toolTip() == view.module_folder_button.toolTip()
-    _click(link)
-    assert asked == [], "a greyed line button still opened the dialog"
+        link, folder = view.module_link_line_button, view.module_folder_line_button
+        assert not link.isEnabled(), "the line offers a link install the game has no route for"
+        assert (
+            link.toolTip()
+            == view.module_link_button.toolTip()
+            == (controller_view_module.MODULE_CUSTOM_NO_ROUTE)
+        )
+        assert folder.isEnabled() and folder.toolTip() == view.module_folder_button.toolTip()
+        _click(link)
+        assert asked == [], "a greyed line button still opened the dialog"
 
-    # The busy lock, which greys the card's buttons by name and nothing else.
-    view._set_busy(True)
-    process_events()
-    assert not folder.isEnabled(), "the busy lock greyed the card's button and not the line's"
-    view.module_folder_button.setEnabled(True)
-    process_events()
-    assert folder.isEnabled(), "the line did not follow its card's button back"
+        # The busy lock, which greys the card's buttons by name and nothing else.
+        view._set_busy(True)
+        process_events()
+        assert not folder.isEnabled(), "the busy lock greyed the card's button and not the line's"
+        view.module_folder_button.setEnabled(True)
+        process_events()
+        assert folder.isEnabled(), "the line did not follow its card's button back"
+    finally:
+        _tab.installEventFilter(view.modules_fit)
 
 
 def test_a_game_with_no_outside_module_route_says_so_instead_of_two_dead_buttons(
@@ -21462,13 +21414,14 @@ def test_a_game_with_the_route_keeps_its_two_buttons_and_the_card_sentence(
 def test_every_game_either_has_the_outside_module_route_or_says_it_has_not(
     qapp: object, tmp_path: Path
 ) -> None:
-    """T596: the shipped games split cleanly; WotLK, Unbound (its sibling) and Tortoise take some.
+    """T596: the shipped games split cleanly; WotLK, Unbound and CoA (its siblings) and Tortoise
+    take some.
 
-    Unbound is built by WotLK's factory and Tortoise has its own route since T596
+    Unbound and CoA are built by WotLK's factory and Tortoise has its own route since T596
     step 2, so their boxes keep both presses and the card's own sentence; every
     other game must show the "can't take" sentence.
     """
-    takes = {"wow-wotlk", "wow-unbound", "wow-tortoise"}
+    takes = {"wow-wotlk", "wow-unbound", "wow-coa", "wow-tortoise"}
     for entry in load_catalog().games:
         services = ControllerServices.for_entry(entry, tmp_path / entry.id, None)
         view = ControllerView(entry, services, status_poll_ms=0)
@@ -21683,21 +21636,17 @@ def _press_a_on(
 
 
 @pytest.mark.slow
-def test_the_pad_reaches_whichever_form_of_the_card_is_on_screen(
+def test_the_pad_reaches_the_cards_presses_at_the_smallest_window(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
-    """The Steam Deck's route to the card's two presses, across the card's change of form.
+    """T692a: the Steam Deck's route to the card's two presses at 960x640.
 
-    Through the real `Navigator`, primed at the window the app opens at -- which
-    is what fills its cache of focusable widgets -- then the window made small
-    enough that the card goes to one line. The navigator caches that list per
-    window and filters it only when it is built, so a card that changes form
-    under a primed navigator leaves it holding the hidden buttons and never
-    finding the relays: the one-line card's presses would be on screen and out
-    of the pad's reach.
-
-    Then the window grown again, and the whole card's buttons must be reachable
-    once more -- the change is not a one-way door for the pad either.
+    Through the real `Navigator`, primed at the window the app opens at. The
+    card used to go to one line at the smallest window, and the navigator's
+    per-window cache of focusable widgets had to follow that change of form;
+    it keeps its sentence there now, so what is pinned is that the whole
+    card's buttons are on screen and in the pad's reach at both sizes, and A
+    on each opens its dialog.
     """
     import main
     from yulon.ui.gamepad import install_gamepad_navigation
@@ -21724,30 +21673,27 @@ def test_the_pad_reaches_whichever_form_of_the_card_is_on_screen(
         } <= reached, "the whole card's buttons are out of the pad's reach before anything changed"
 
         _at(window, main.MINIMUM_WINDOW_SIZE)
-        assert view.custom_module_line.isVisible(), "the card did not go to one line"
+        assert view.custom_module_card.isVisible(), "the card folded where it has room"
         routes = _pad_routes(nav, start, home=window)
         reached = set(routes)
-        line = [view.module_link_line_button, view.module_folder_line_button]
-        assert (
-            set(line) <= reached
-        ), "the one-line card's presses are on screen and the pad cannot reach them"
-        hidden = {view.module_link_button, view.module_folder_button} & reached
-        assert not hidden, f"the pad still lands on the hidden card's buttons: {hidden}"
-        for button in line:
+        assert {
+            view.module_link_button,
+            view.module_folder_button,
+        } <= reached, "the card's presses are on screen and the pad cannot reach them"
+        for button in (view.module_link_button, view.module_folder_button):
             _press_a_on(nav, start, button, routes, home=window)
         assert asked == [
             controller_view_module.MODULE_LINK_DIALOG_TITLE,
             controller_view_module.MODULE_FOLDER_DIALOG_TITLE,
-        ], f"A on the one-line card opened {asked}"
+        ], f"A on the card opened {asked}"
 
         _at(window, main.DEFAULT_WINDOW_SIZE)
-        assert view.custom_module_card.isVisible(), "the card stayed on one line"
+        assert view.custom_module_card.isVisible(), "the card folded at the default window"
         reached = set(_pad_routes(nav, start))
         assert {
             view.module_link_button,
             view.module_folder_button,
-        } <= reached, "the whole card came back and the pad cannot reach its buttons"
-        assert not set(line) & reached, "the pad still lands on the hidden line's buttons"
+        } <= reached, "the pad cannot reach the card's buttons after growing the window"
     finally:
         keyboard.stop()
         gamepad.stop()
@@ -22558,11 +22504,13 @@ def test_down_from_tunings_conf_list_stops_at_the_conf_buttons_under_it(
 ) -> None:
     """The live check's first press: 960x640, the control above the conf list, Down (T175).
 
-    It lands on the first conf button straight under it, and not on the
+    It lands on a conf button straight under it, and not on the
     full-width strip at the bottom of the tab. Since T190 the conf list and the
     cards share 960x640 through a "Settings | Edit file" switch, so the press
     starts on the switch with the file side shown -- the row a player is on
-    when the conf buttons are what they came for.
+    when the conf buttons are what they came for. Since T819 the core confs
+    carry no read-only suffix, so the narrower buttons share one row, and Down
+    lands on the one nearest straight under the switch rather than the first.
     """
     from PySide6.QtCore import Qt
     from PySide6.QtTest import QTest
@@ -22594,7 +22542,18 @@ def test_down_from_tunings_conf_list_stops_at_the_conf_buttons_under_it(
         nav.navigate(Direction.DOWN)
         landed = QApplication.focusWidget()
         assert landed is not view.tuning_report_strip, "Down went past the conf buttons"
-        assert landed is confs[0], f"Down from the switch went to {_pad_describe(landed, window)}"
+        top = _edges_in(confs[0], window)[1]
+        first_row = [b for b in confs if _edges_in(b, window)[1] == top]
+        assert landed in first_row, f"Down from the switch went to {_pad_describe(landed, window)}"
+        middle = (_edges_in(switch, window)[0] + _edges_in(switch, window)[2]) // 2
+
+        def middle_of(button: object) -> int:
+            left, _top, right, _bottom = _edges_in(button, window)
+            return abs((left + right) // 2 - middle)
+
+        assert landed is min(
+            first_row, key=middle_of
+        ), f"Down from the switch went to {_pad_describe(landed, window)}"
     finally:
         keyboard.stop()
         gamepad.stop()
@@ -22658,17 +22617,15 @@ def _shows_and_hides(widget: Any) -> list[str]:
 
 
 @pytest.mark.slow
-def test_the_card_changes_form_at_most_once_per_step_of_a_drag(
+def test_the_card_keeps_its_form_through_a_drag_at_the_smallest_heights(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
-    """The fold is decided from the card WHOLE, so its own fold cannot undo it.
+    """T692a: the card no longer crosses its fold width in the draggable range.
 
-    Were the decision read off the tab as it is -- card folded, room over -- the
-    card would unfold, find no room, and fold: two transitions per settle, which
-    is the flash `test_a_restyle_at_an_unchanged_width_folds_nothing` catches in
-    the log. Zero at an unchanged width, at most one per step across a sweep
-    that crosses the fold width, and at least one somewhere so the bound is a
-    bound on something.
+    The fold is decided from the card WHOLE, so its own fold cannot undo it --
+    that invariant is the ladder's unit tests'. What is pinned here is that
+    across the whole sweep the card never moves: zero transitions, hence no
+    flicker, and the sentence stays where the window can hold it.
     """
     from yulon.ui.theme import apply_dadcraft_theme
 
@@ -22682,17 +22639,15 @@ def test_the_card_changes_form_at_most_once_per_step_of_a_drag(
     assert seen == [], f"a restyle at an unchanged size moved the card {seen}"
 
     worst: list[str] = []
-    moved = 0
     for width in range(960, 1301, 10):
         seen.clear()
         window.resize(width, 700)
         apply_dadcraft_theme(window, width=window.width())
         process_events()
-        moved += len(seen)
-        if len(seen) > 1:
+        if seen:
             worst.append(f"{width}: {seen}")
-    assert worst == [], f"the card flickered during a drag at {worst[:3]}"
-    assert moved, "the card never changed form in the sweep, so the bound is on nothing"
+    assert worst == [], f"the card moved during a drag at {worst[:3]}"
+    assert view.custom_module_card.isVisible(), "the card folded somewhere in the sweep"
 
 
 def test_the_cards_minimum_taken_while_it_is_folded_is_the_one_it_has_whole(
@@ -22706,6 +22661,9 @@ def test_the_cards_minimum_taken_while_it_is_folded_is_the_one_it_has_whole(
     laid-out answer for the same card shown at the same width -- with the fit's
     event filter off for the second reading, or it would fold the card again
     before it could be read.
+
+    T692a: the tab no longer folds the card on its own, so the folded form is
+    put on by hand. What is pinned is the derivation, not the trigger.
     """
     import main
 
@@ -22713,10 +22671,13 @@ def test_the_cards_minimum_taken_while_it_is_folded_is_the_one_it_has_whole(
     window, tab = _controller_in_the_real_window(view, "Modules")
     _the_list_needs_the_cards_sentence(view)
     _at(window, main.MINIMUM_WINDOW_SIZE)
+    tab.removeEventFilter(view.modules_fit)
+    view.custom_module_card.setVisible(False)
+    view.custom_module_line.setVisible(True)
+    process_events()
     assert view.custom_module_card.isHidden(), "the card is whole here, so nothing is derived"
     derived = view.modules_fit.card_minimum()
 
-    tab.removeEventFilter(view.modules_fit)
     try:
         view.custom_module_line.setVisible(False)
         view.custom_module_card.setVisible(True)
@@ -22758,7 +22719,9 @@ def test_the_logs_minimum_in_the_state_it_is_not_in_is_the_one_it_really_has(
     Maximised, so neither answer is a cap's or a shortfall's.
     """
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
-    window, _tab = _controller_in_the_real_window(view, "Modules")
+    # T692a: the log lives on Maintenance now; the derivation is the panel's
+    # own, but its numbers need the theme polish a visible tab gives.
+    window, _tab = _controller_in_the_real_window(view, MAINTENANCE_TAB)
     _at(window, DESKTOP_1080P)
     log = view.rebuild_log
     # A job first: before one the row is not drawn (T191), and a hidden widget
@@ -22804,98 +22767,15 @@ report to give and needing the report AND the list's floor.
 
 
 @pytest.mark.slow
-def test_a_press_on_the_log_reopens_it_at_the_window_the_app_opens_at(
+def test_a_press_on_the_report_reopens_it_spending_the_lists_floor(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
-    """T85's second half: the fold that went one way, and the chevron that did nothing.
+    """T692a: a press reopens the report where the tab can hold it on the list's floor.
 
-    Live at 1280x800 with a rebuild owed, a log left open while maximised folded
-    itself on the way down and its chevron was then dead -- it came back only on
-    a window big enough that nothing had to give. The banner is why: it costs
-    this tab 52px at this width, and with it an open log and a populated report
-    want 668px of a 620px tab. One of them has to fold, the published order sends
-    the log, and pressing its handle did nothing at all, because `_apply()`
-    derives the fold from `_has_room` and `set_room(False)` is a no-op when the
-    answer has not changed.
-
-    The answer is that a press REORDERS the ladder (`_TabFit._give_order`): the
-    panel a person last asked for goes last, so the other one gives for it, and
-    a press may spend the list's floor where folding the other one is not
-    enough. Both directions are asserted, and the second is what stops this being
-    "the log always wins" -- a press on the REPORT's strip takes it back, and
-    neither panel is privileged over the other.
-
-    Asked at two sizes: 1280x800, which is what gate round 6 photographed, and
-    the 1252x734 a 1280x800 FRAME leaves the client on that box. At 620px of tab
-    folding the report is enough; at 554 it leaves the log two pixels short, so
-    the second case is the one that needs the list's floor as well.
-
-    The last assertion is the one the live defect would still pass without: the
-    log is not merely un-collapsed but drawn at the height it needs. A panel
-    opened at a size that cannot hold it is a cut panel, which is what T83's
-    round 3 measured when the press showed the box itself.
-    """
-    import main
-
-    for size in (main.DEFAULT_WINDOW_SIZE, THE_CLIENT_INSIDE_A_1280x800_FRAME):
-        view = ControllerView(
-            WOTLK, _services_with_the_card_buttons(ps, tmp_path), status_poll_ms=0
-        )
-        window, _tab = _controller_in_the_real_window(view, "Modules")
-        _at(window, DESKTOP_1080P)
-        _ran_a_job(view)
-        _a_rebuild_is_owed(view)
-        assert not view.rebuild_log.collapsed, "the job did not open the log while maximised"
-
-        _at(window, size)
-        assert view.rebuild_log.collapsed, (
-            f"the log is still open at {size} with a rebuild owed, so the press below is not "
-            "the press this ticket is about"
-        )
-
-        _click(_the_handle_on(view.rebuild_log))
-
-        assert not view.rebuild_log.collapsed, (
-            f"the chevron did nothing: the log is still folded at {size}, where the tab can "
-            "hold it once the report and the list's floor give"
-        )
-        assert view.module_report_strip.collapsed, (
-            f"both are open at {size}, so nothing gave -- either the tab grew or this is "
-            "measuring a size where the question does not arise"
-        )
-        assert view.rebuild_log.height() >= view.rebuild_log.minimumSizeHint().height(), (
-            f"the log was opened at {view.rebuild_log.height()}px against the "
-            f"{view.rebuild_log.minimumSizeHint().height()} it needs at {size}: open and cut"
-        )
-        assert "Compile finished." in view.rebuild_log.text(), "the fold lost the job's output"
-
-        # And back the other way: the report's own strip takes the height back.
-        _click(view.module_report_strip)
-
-        assert not view.module_report_strip.collapsed, (
-            f"a press on the report's strip did not reopen it at {size} -- the log is being "
-            "privileged rather than the panel the user last asked for"
-        )
-        assert view.rebuild_log.collapsed, f"the report reopened without the log giving at {size}"
-
-
-def test_folding_the_log_by_hand_gives_the_report_its_height_back(
-    qapp: object, ps: _Ps, tmp_path: Path
-) -> None:
-    """The other side of the reorder: what the user puts AWAY costs the tab nothing.
-
-    `_TabFit` used to ask "can this tab hold both panels open?" whatever anybody
-    wanted, and that question has no answer that helps here. Once a press has put
-    the log at the end of the give order, a tab asking it keeps refusing the
-    report for a log that is folded and that nobody is asking for -- the user
-    presses the log shut to get the report back and gets neither.
-
-    So `settle()` starts from what is ASKED FOR (`wants_open()`) rather than from
-    both panels open. The log folded by hand is not asked for, the sum drops by
-    the whole of an open log, and the report fits with room over.
-
-    Three presses, and the third is the assertion: the first proves the size is
-    one where they do not both fit, the second is the reorder, the third is this.
+    The log lives on Maintenance now, so the ladder is one panel: the report
+    the tab folds for room, and the chevron that must not be dead -- a press
+    the tab answers by spending the list's floor, down to `_LIST_FLOOR_FLOOR`
+    and no further. Both directions: folding it by hand gives the floor back.
     """
     import main
 
@@ -22903,50 +22783,99 @@ def test_folding_the_log_by_hand_gives_the_report_its_height_back(
     window, _tab = _controller_in_the_real_window(view, "Modules")
     _at(window, DESKTOP_1080P)
     _ran_a_job(view)
+    view.module_report.setPlainText(A_REFUSAL_IN_THE_REPORT_BOX)
+    _a_rebuild_is_owed(view)
+    process_events()
+
+    window.setMinimumSize(0, 0)
+    try:
+        _at(window, (960, 620))
+        assert view.module_report_strip.collapsed, "the report is open where it must fold"
+        assert (
+            view.modules_panel.minimumHeight() == controller_view_module.MODULE_LIST_MIN_HEIGHT
+        ), "the list gave height before any press asked for it"
+
+        _click(view.module_report_strip)
+
+        assert not view.module_report_strip.collapsed, (
+            "the chevron did nothing: the report is still folded where the tab can "
+            "hold it on the list's floor"
+        )
+        assert (
+            view.modules_panel.minimumHeight() < controller_view_module.MODULE_LIST_MIN_HEIGHT
+        ), "the report reopened without spending the list's floor"
+        assert (
+            view.modules_panel.minimumHeight() >= controller_view_module._LIST_FLOOR_FLOOR
+        ), "the press spent the list past its floor"
+
+        # And back the other way: what the user puts away costs the tab nothing.
+        _click(view.module_report_strip)
+
+        assert view.module_report_strip.collapsed, "the second press did not fold the report"
+        assert (
+            view.modules_panel.minimumHeight() == controller_view_module.MODULE_LIST_MIN_HEIGHT
+        ), "the list's floor did not come back with the report folded"
+    finally:
+        window.setMinimumSize(*main.MINIMUM_WINDOW_SIZE)
+
+
+def test_folding_the_report_by_hand_costs_the_tab_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T692a: the report folded by hand is not asked for, so the list keeps its floor.
+
+    `settle()` starts from what is ASKED FOR (`wants_open()`) rather than from
+    the panel open. The report folded by hand drops out of the sum, the list
+    stays at its floor, and unfolding it by hand at a window with room changes
+    nothing else.
+    """
+    import main
+
+    view = ControllerView(WOTLK, _services_with_the_card_buttons(ps, tmp_path), status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, DESKTOP_1080P)
+    _ran_a_job(view)
+    view.module_report.setPlainText(A_REFUSAL_IN_THE_REPORT_BOX)
     _a_rebuild_is_owed(view)
     _at(window, main.DEFAULT_WINDOW_SIZE)
 
-    assert view.rebuild_log.collapsed and not view.module_report_strip.collapsed, (
-        "the tab holds both at this size, so there is nothing for either press to cost: "
-        f"log folded={view.rebuild_log.collapsed}, report "
-        f"folded={view.module_report_strip.collapsed}"
-    )
-
-    _click(_the_handle_on(view.rebuild_log))
-    assert not view.rebuild_log.collapsed, "the press did not open the log"
-    assert view.module_report_strip.collapsed, "the report did not give for it"
-
-    _click(_the_handle_on(view.rebuild_log))
-
-    assert view.rebuild_log.collapsed, "the second press did not fold the log"
-    assert not view.module_report_strip.collapsed, (
-        "the report is still folded for a log the user has just put away: the room is being "
-        "worked out from what the tab COULD hold rather than from what is asked for"
-    )
+    assert not view.module_report_strip.collapsed, "the report is folded where the tab holds it"
+    _click(view.module_report_strip)
+    assert view.module_report_strip.collapsed, "the press did not fold the report"
+    assert (
+        view.modules_panel.minimumHeight() == controller_view_module.MODULE_LIST_MIN_HEIGHT
+    ), "folding the report by hand spent the list's floor"
     assert view.module_report.toPlainText() != "", "the report came back empty"
+
+    _click(view.module_report_strip)
+    assert not view.module_report_strip.collapsed, "the press did not reopen the report"
+    assert (
+        view.modules_panel.minimumHeight() == controller_view_module.MODULE_LIST_MIN_HEIGHT
+    ), "reopening the report by hand spent the list's floor"
 
 
 @pytest.mark.slow
 def test_a_restyle_at_an_unchanged_width_folds_nothing(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
-    """The flicker: a themed restyle used to unfold the log and refold it.
+    """T692a: the flicker bound, for the report strip that still folds for room.
 
-    Every height on this tab is a function of the theme, the theme is
-    regenerated at every width the window settles at
-    (`main._Window._restyle_for_width`), and a widget's size hint is stale until
-    it has been polished. Decided inside the layout pass that asks for it, the
-    fold was taken against half-updated numbers: the action bar's minimum still
-    said one line, so the tab looked 56px roomier than it was, the log opened,
-    the bar was re-laid, and the log folded again. Two transitions per settle at
-    every width from 940 to 1110 -- a visible flash on every drag below the fold
-    width, measured before `_TabFit`'s coalescing timer.
+    The flicker: a themed restyle used to unfold the log and refold it. Every
+    height on this tab is a function of the theme, the theme is regenerated at
+    every width the window settles at (`main._Window._restyle_for_width`), and
+    a widget's size hint is stale until it has been polished. Decided inside
+    the layout pass that asks for it, the fold was taken against half-updated
+    numbers. The log lives on Maintenance now and no ladder folds it, so what
+    is counted here is the report's strip -- the same derivation, the same
+    flash, one object.
 
-    Asserted as ZERO at an unchanged size and at most one per step across the
-    sweep, for BOTH of the strips that fold for room. One is the honest bound for
-    a step that really does cross a fold width: the state has to change once, and
-    it is the SECOND transition that is the flicker.
+    Asserted as ZERO at an unchanged size and at most one per step across a
+    sweep that crosses the report's fold width, and at least one somewhere so
+    the bound is a bound on something. The sweep runs at a height below any
+    window the app allows, where the fold boundary crosses the widths: at the
+    heights the app really reaches the report stays open everywhere now.
     """
+    import main
     from yulon.ui.theme import apply_dadcraft_theme
 
     view = ControllerView(WOTLK, _services_with_the_card_buttons(ps, tmp_path), status_poll_ms=0)
@@ -22954,48 +22883,38 @@ def test_a_restyle_at_an_unchanged_width_folds_nothing(
     _at(window, DESKTOP_1080P)
     _ran_a_job(view)
     view.module_report.setPlainText(A_REFUSAL_IN_THE_REPORT_BOX)
+    _a_rebuild_is_owed(view)
     process_events()
-    _at(window, (960, 640))
-    assert view.rebuild_log.collapsed, "minimum window did not fold the log"
-    assert view.module_report_strip.collapsed, "minimum window did not fold the report"
-
-    # BOTH strips, because they are two objects running the same derivation and
-    # a flicker in either is the same flash on the same tab. Counted with the
-    # report POPULATED, which is also what gives the report strip a fold to
-    # flicker: an empty box is folded by its text and never consulted about room.
-    log_seen, restore_log = _counting_folds(view.rebuild_log)
-    report_seen, restore_report = _counting_folds(view.module_report_strip)
+    window.setMinimumSize(0, 0)
     try:
-        apply_dadcraft_theme(window, width=window.width())
-        process_events()
-        assert log_seen == [], f"a restyle at an unchanged size folded the log {log_seen}"
-        assert report_seen == [], f"a restyle at an unchanged size folded the report {report_seen}"
-
-        worst: list[str] = []
-        moved = 0
-        # Up to 1200 and not 1110: the report's own fold width is 1120 at this
-        # height, and a sweep that stopped short of it counted a strip that
-        # never moves -- which cannot flicker, so half of this test would have
-        # been green about nothing. `moved` is what says so out loud.
-        for width in range(940, 1201, 10):
-            log_seen.clear()
-            report_seen.clear()
-            window.resize(width, 700)
+        _at(window, (960, 635))
+        seen, restore_report = _counting_folds(view.module_report_strip)
+        try:
             apply_dadcraft_theme(window, width=window.width())
             process_events()
-            moved += len(log_seen) + len(report_seen)
-            if len(log_seen) > 1:
-                worst.append(f"{width}: log {log_seen}")
-            if len(report_seen) > 1:
-                worst.append(f"{width}: report {report_seen}")
-        assert worst == [], f"a strip flickered during a drag at {worst[:3]}"
-        assert moved, (
-            "neither strip folded or unfolded anywhere in the sweep, so 'at most one "
-            "transition per step' is a bound on nothing"
-        )
+            assert seen == [], f"a restyle at an unchanged size folded the report {seen}"
+
+            worst: list[str] = []
+            moved = 0
+            # At this height the report's fold boundary crosses the sweep: wide
+            # windows grow the theme's fonts until the report no longer fits.
+            for width in range(940, 1201, 10):
+                seen.clear()
+                window.resize(width, 635)
+                apply_dadcraft_theme(window, width=window.width())
+                process_events()
+                moved += len(seen)
+                if len(seen) > 1:
+                    worst.append(f"{width}: report {seen}")
+            assert worst == [], f"the strip flickered during a drag at {worst[:3]}"
+            assert moved, (
+                "the strip never folded or unfolded anywhere in the sweep, so 'at most one "
+                "transition per step' is a bound on nothing"
+            )
+        finally:
+            restore_report()
     finally:
-        restore_log()
-        restore_report()
+        window.setMinimumSize(*main.MINIMUM_WINDOW_SIZE)
 
 
 def test_opening_the_report_by_hand_cannot_cut_the_tab(
@@ -23022,6 +22941,10 @@ def test_opening_the_report_by_hand_cannot_cut_the_tab(
     or one that never folds at all, satisfies "nothing is cut" and is a
     different bug -- so the same press is made again at a width with the room,
     and there it opens.
+
+    T692a: the report no longer folds at the smallest window the app allows
+    (the version lines, the server presses and the log moved to Maintenance),
+    so the folded state is reached on a tab shorter than allowed.
     """
     import main
 
@@ -23030,10 +22953,19 @@ def test_opening_the_report_by_hand_cannot_cut_the_tab(
     _at(window, DESKTOP_1080P)
     _ran_a_job(view)
     view.module_report.setPlainText(A_REFUSAL_IN_THE_REPORT_BOX)
+    # The banner's load is what folds the report here: without one the roomier
+    # tab holds it open at every height probed (T692a).
+    _a_rebuild_is_owed(view)
     process_events()
 
-    _at(window, main.MINIMUM_WINDOW_SIZE)
-    assert view.module_report_strip.collapsed, "the report is not folded here, so no press to test"
+    window.setMinimumSize(0, 0)
+    try:
+        _at(window, (960, 620))
+        assert (
+            view.module_report_strip.collapsed
+        ), "the report is not folded here, so no press to test"
+    finally:
+        window.setMinimumSize(*main.MINIMUM_WINDOW_SIZE)
 
     _click(view.module_report_strip)
     process_events()
@@ -24614,8 +24546,9 @@ def _realmlist(client: Path) -> str:
 
 
 def test_the_button_offers_to_make_one_and_then_reads_play(
-    qapp: object, ps: _Ps, tmp_path: Path
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(controller_view_module.platform, "detect", lambda: "windows")
     original = _game_client(tmp_path / "clients" / "WoW")
     without, _ = _play_view(ps, tmp_path, original=original)
     assert without.play_button is not None
@@ -24630,9 +24563,10 @@ def test_the_button_offers_to_make_one_and_then_reads_play(
     assert with_one.play_menu_button is not None and not with_one.play_menu_button.isHidden()
     entries = [action.text() for action in with_one.play_menu.actions()]
     assert entries == [
+        controller_view_module.CLIENT_OPTIONS_LABEL,
         controller_view_module.REFRESH_PLAY_CLIENT_LABEL,
         controller_view_module.DELETE_PLAY_CLIENT_LABEL,
-    ]
+    ], "wow-wotlk on Windows offers Lumenveil under Client options… (T809 W4)"
 
 
 def test_no_write_seam_means_no_button(qapp: object, ps: _Ps, tmp_path: Path) -> None:
@@ -26214,7 +26148,7 @@ class _ClockTimer(QObject):
     def start(self) -> None:
         self.due = self._clock.now + self._interval
 
-    def stop(self) -> None:
+    def stop(self, **_kw: object) -> None:
         self.due = None
 
     def isActive(self) -> bool:  # noqa: N802 - QTimer's name
@@ -27167,7 +27101,9 @@ def test_an_entry_without_client_data_shows_no_options_in_the_make_dialog(
 ) -> None:
     original = _game_client(tmp_path / "clients" / "WoW")
     asker = _Asked(cancel=True)
-    view, _ = _play_view(ps, tmp_path, original=original, asker=asker)
+    bare = WOTLK.client.model_copy(update={"packs": (), "exe_patch": None, "config_wtf": None})
+    entry = WOTLK.model_copy(update={"client": bare})
+    view, _ = _play_view(ps, tmp_path, original=original, asker=asker, entry=entry)
 
     view.make_play_client()
 
@@ -27176,6 +27112,603 @@ def test_an_entry_without_client_data_shows_no_options_in_the_make_dialog(
     assert dialog.client_options is None
     chosen = dialog.choice()
     assert chosen is not None and chosen.client_choices is None
+
+
+def test_the_shipped_wotlk_entry_offers_lumenveil_in_the_make_dialog(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T809 W4: wow-wotlk's one optional pack reaches the Make dialog on Windows."""
+    monkeypatch.setattr(controller_view_module.platform, "detect", lambda: "windows")
+    original = _game_client(tmp_path / "clients" / "WoW")
+    asker = _Asked(cancel=True)
+    view, _ = _play_view(ps, tmp_path, original=original, asker=asker)
+    view.make_play_client()
+
+    assert asker.offers[0].client is not None
+    assert [pack.id for pack in asker.offers[0].client.packs] == ["lumenveil"]
+    dialog = controller_view_module.PlayClientDialog(asker.offers[0], jobs=run_inline)
+    assert dialog.client_options is not None
+    assert list(dialog.client_options.pack_boxes) == ["lumenveil"]
+    assert (
+        dialog.client_options.pack_boxes["lumenveil"].toolTip() != ""
+    ), "the credit line rides on the box"
+
+
+def test_the_make_dialog_hides_lumenveil_off_windows(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T809 W4: Linux/macOS offer no box for the Windows-only pack."""
+    ClientOptionsBox = controller_view_module.ClientOptionsBox
+    client = WOTLK.client
+    for here in ("linux", "macos"):
+        monkeypatch.setattr(
+            controller_view_module.client_packs.platform, "detect", lambda here=here: here
+        )
+        box = ClientOptionsBox(client, choices=None, parent=None)
+        assert list(box.pack_boxes) == [], here
+
+
+def _lumen_entry(tmp_path: Path) -> CatalogEntry:
+    """WotLK's shipped entry: one optional pack, Windows-only, with setup from the catalog.
+
+    The catalog's own pack (real Lumenveil bytes) never downloads in the suite:
+    the `site` fake answers it by id with a small local zip of the same members.
+    """
+    from yulon.catalog.catalog import ClientPack, load_catalog
+
+    for game_id in ("wow-wotlk", "wow-unbound"):
+        assert "lumenveil" in [p.id for p in load_catalog().get(game_id).client.packs]
+    lumen = {p.id: p for p in WOTLK.client.packs}["lumenveil"]
+    assert isinstance(lumen, ClientPack)
+    return WOTLK.model_copy(update={"client": WOTLK.client.model_copy(update={"packs": (lumen,)})})
+
+
+def _lumen_members() -> dict[str, bytes]:
+    return {
+        "version.dll": b"lumen loader",
+        "CoAVolFog.dll": b"fog",
+        "CoAVolFog.ini": b"stock=1\n",
+        "CoAVolFog-regions.ini": b"regions\n",
+        "Lumenveil-Setup.cmd": b"setup\n",
+        "Lumenveil-Uninstall.cmd": b"uninstall\n",
+        "Lumenveil/lamp_extract.exe": b"exe",
+        "Lumenveil/LEGAL.txt": b"legal\n",
+        "Lumenveil/LICENSE.txt": b"license\n",
+        "Lumenveil/README.txt": b"readme\n",
+        "Lumenveil/THIRD-PARTY-NOTICES.txt": b"notices\n",
+        "Lumenveil/licenses/bzip2.txt": b"bzip2\n",
+        "Lumenveil/licenses/DearImGui-MIT.txt": b"imgui\n",
+        "Lumenveil/licenses/Everwood-MIT.txt": b"everwood\n",
+        "Lumenveil/licenses/GPL-2.0.txt": b"gpl\n",
+        "Lumenveil/licenses/zlib.txt": b"zlib\n",
+    }
+
+
+def _lumen_play(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, site: _Site
+) -> tuple[CatalogEntry, Path, Path, list[list[str]], Any]:
+    """A Lumenveil Play: windows, the pack ticked, the locale fixture, the fake runner.
+
+    Shares one `_Outcome`-shaped fake with `test_client_packs`' `_run_with`: two
+    runs (lamps, then water), each laying its own output.
+    """
+    monkeypatch.setattr(controller_view_module.platform, "detect", lambda: "windows")
+    monkeypatch.setattr(client_packs.platform, "detect", lambda: "windows")
+    entry = _lumen_entry(tmp_path)
+    original = _game_client(tmp_path / "clients" / "WoW")
+    play = _built(original, tmp_path)
+    (play / "Data" / "enUS").mkdir(parents=True, exist_ok=True)
+    (play / "Data" / "enUS" / "locale-enUS.MPQ").write_bytes(b"locale")
+    site.members["lumenveil"] = _lumen_members()
+    seen: list[list[str]] = []
+
+    def fake(argv: list[str], *, cwd: Path, timeout: float | None = None) -> Any:
+        import types as _types
+
+        index = len(seen)
+        seen.append(list(argv))
+        assert cwd == play, "setup runs with the ready-to-play copy as its cwd"
+        assert argv[0].endswith("lamp_extract.exe"), argv
+        if "--out" in argv[1:]:
+            (cwd / "lampdata.bin").write_bytes(b"lamps")
+        else:
+            (cwd / "liquiddata.bin").write_bytes(b"water")
+        assert index < 2, "the exe runs twice: lamps, then water"
+        return _types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(client_packs, "_run_child", fake)
+    client_packs.write_record(
+        play,
+        client_packs.PackRecord({}, None, {"packs": {"lumenveil": True}, "exe_options": {}}),
+        game=WOTLK.id,
+        server_dir=tmp_path,
+    )
+    return entry, original, play, seen, site
+
+
+def test_play_with_lumenveil_ticked_installs_runs_setup_and_records_outputs(
+    qapp: object,
+    ps: _Ps,
+    tmp_path: Path,
+    site: _Site,
+    steps: list[str],
+    asks: _Asks,
+    monkeypatch: pytest.MonkeyPatch,
+    launched: list[object],
+) -> None:
+    """T809 W4 end-to-end: checkbox on -> fetch -> install -> two setup runs -> record.
+
+    The record holds both setup outputs with their hashes and no pending note;
+    the copy holds the installed files beside them; the next Play runs nothing.
+    """
+    entry, original, play, seen, _ = _lumen_play(tmp_path, monkeypatch, site)
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+
+    view.play()
+
+    assert site.calls == ["lumenveil"], "the ticked pack is fetched, nothing else"
+    assert len(seen) == 2, "the setup exe runs twice: lamps, then water"
+    assert (play / "version.dll").read_bytes() == b"lumen loader"
+    assert (play / "lampdata.bin").read_bytes() == b"lamps"
+    assert (play / "liquiddata.bin").read_bytes() == b"water"
+    record = client_packs.read_record(play)
+    installed = record.packs["lumenveil"]
+    assert installed["files"]["lampdata.bin"] == hashlib.sha256(b"lamps").hexdigest()
+    assert installed["files"]["liquiddata.bin"] == hashlib.sha256(b"water").hexdigest()
+    assert set(installed["setup"]) == {"lampdata.bin", "liquiddata.bin"}
+    assert "setup_pending" not in installed
+    assert steps[-1] == "launch" and asks.calls == [], "an optional pack never asks"
+    steps.clear()
+    seen.clear()
+    site.calls.clear()
+
+    view.play()
+
+    assert site.calls == ["lumenveil"], "the version is cheaply checked again, then nothing re-runs"
+    assert seen == [], "setup that already ran never runs again"
+    assert steps[-1] == "launch"
+
+
+def test_a_killed_setup_leaves_a_pending_record_the_next_play_cleans(
+    qapp: object,
+    ps: _Ps,
+    tmp_path: Path,
+    site: _Site,
+    steps: list[str],
+    asks: _Asks,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T809 W4: a kill between the pending write and the exe leaves outputs the next Play cleans.
+
+    The first Play's runner lays `lampdata.bin` then dies; the record it already
+    wrote carries `setup_pending`. The next Play removes that leftover first,
+    runs both runs again, and records clean outputs with no note.
+    """
+    entry, original, play, _seen, _ = _lumen_play(tmp_path, monkeypatch, site)
+
+    class Killed(BaseException):
+        pass
+
+    def killer(argv: list[str], *, cwd: Path, timeout: float | None = None) -> Any:
+        (cwd / "lampdata.bin").write_bytes(b"half a run")
+        raise Killed()
+
+    monkeypatch.setattr(client_packs, "_run_child", killer)
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+
+    with pytest.raises(Killed):
+        view._prepare_client(play, original, frozenset())
+
+    held = client_packs.read_record(play).packs["lumenveil"]
+    assert held.get("setup_pending") == ["lampdata.bin", "liquiddata.bin"]
+    assert (play / "lampdata.bin").read_bytes() == b"half a run"
+
+    def retry(argv: list[str], *, cwd: Path, timeout: float | None = None) -> Any:
+        import types as _types
+
+        if "--out" in argv[1:]:
+            (cwd / "lampdata.bin").write_bytes(b"lamps")
+        else:
+            (cwd / "liquiddata.bin").write_bytes(b"water")
+        return _types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(client_packs, "_run_child", retry)
+    again, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+    steps.clear()
+
+    again.play()
+
+    assert (play / "lampdata.bin").read_bytes() == b"lamps"
+    assert (play / "liquiddata.bin").read_bytes() == b"water"
+    done = client_packs.read_record(play).packs["lumenveil"]
+    assert "setup_pending" not in done
+    assert steps[-1] == "launch"
+
+
+def test_a_failed_setup_stops_play_leaves_no_pack_files_and_asks_again(
+    qapp: object,
+    ps: _Ps,
+    tmp_path: Path,
+    site: _Site,
+    steps: list[str],
+    asks: _Asks,
+    monkeypatch: pytest.MonkeyPatch,
+    launched: list[object],
+) -> None:
+    """Item 5: the water run's non-zero exit rolls the pack back and Play asks to retry."""
+    entry, original, play, seen, _ = _lumen_play(tmp_path, monkeypatch, site)
+
+    def first_lamps_then_fail(argv: list[str], *, cwd: Path, timeout: float | None = None) -> Any:
+        import types as _types
+
+        seen.append(list(argv))
+        if "--out" in argv[1:]:
+            (cwd / "lampdata.bin").write_bytes(b"lamps")
+            return _types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        return _types.SimpleNamespace(returncode=3, stdout="lamp 3 failed", stderr="")
+
+    monkeypatch.setattr(client_packs, "_run_child", first_lamps_then_fail)
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+    asks.answers = [None]
+
+    view.play()
+
+    title, text, yes, save = asks.calls[0]
+    assert "stopped before it finished (code 3)" in text and "lamp 3 failed" in text
+    assert yes == "Retry" and save is not None, "an optional pack offers a skip"
+    assert "launch" not in steps, "a failed setup never launches"
+    assert launched == []
+    assert not (play / "version.dll").exists(), "the rollback took the install with it"
+    assert not (play / "lampdata.bin").exists() and not (play / "liquiddata.bin").exists()
+    held = client_packs.read_record(play).packs.get("lumenveil")
+    assert held is not None, "the installed entry stays: the next Play repairs and tries again"
+    assert "setup" not in held, "no completed outputs are recorded"
+    assert "lampdata.bin" not in held["files"], "no output hash is recorded"
+    assert held.get("setup_pending") == [
+        "lampdata.bin",
+        "liquiddata.bin",
+    ], "the pending note stays: the next Play cleans the leftovers and tries again"
+
+
+def test_switching_lumenveil_off_after_setup_removes_its_files_and_outputs(
+    qapp: object,
+    ps: _Ps,
+    tmp_path: Path,
+    site: _Site,
+    steps: list[str],
+    asks: _Asks,
+    monkeypatch: pytest.MonkeyPatch,
+    launched: list[object],
+) -> None:
+    """Item 5: pack off after a full Play removes the install, the outputs, and the record."""
+    entry, original, play, _seen, _ = _lumen_play(tmp_path, monkeypatch, site)
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+
+    view.play()
+
+    assert steps[-1] == "launch" and (play / "lampdata.bin").is_file()
+    held = client_packs.read_record(play)
+    client_packs.write_record(
+        play,
+        client_packs.PackRecord(
+            held.packs,
+            held.exe,
+            {"packs": {"lumenveil": False}, "exe_options": {}},
+            held.config_seeded,
+            held.launcher,
+        ),
+        game=WOTLK.id,
+        server_dir=tmp_path,
+    )
+    steps.clear()
+    launched.clear()
+    again, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+
+    again.play()
+
+    assert steps[-1] == "launch"
+    assert not (play / "version.dll").exists()
+    assert not (play / "lampdata.bin").exists() and not (play / "liquiddata.bin").exists()
+    assert not (play / "Lumenveil").exists(), "the emptied folder goes too"
+    assert "lumenveil" not in client_packs.read_record(play).packs
+
+
+def test_play_with_an_updated_lumenveil_reruns_setup_and_records_new_outputs(
+    qapp: object,
+    ps: _Ps,
+    tmp_path: Path,
+    site: _Site,
+    steps: list[str],
+    asks: _Asks,
+    monkeypatch: pytest.MonkeyPatch,
+    launched: list[object],
+) -> None:
+    """Item 5: v2's new exe and stale outputs rerun setup through the whole Play."""
+    entry, original, play, seen, _ = _lumen_play(tmp_path, monkeypatch, site)
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+
+    view.play()
+
+    assert len(seen) == 2 and steps[-1] == "launch"
+    site.members["lumenveil"] = {
+        **_lumen_members(),
+        "version.dll": b"lumen loader v2",
+        "Lumenveil/lamp_extract.exe": b"exe v2",
+    }
+    site.version = "2"
+    seen.clear()
+    steps.clear()
+    launched.clear()
+    again, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+
+    again.play()
+
+    assert len(seen) == 2, "the new exe runs on the next Play"
+    assert steps[-1] == "launch"
+    done = client_packs.read_record(play).packs["lumenveil"]
+    assert "setup_pending" not in done
+    assert set(done["setup"]) == {"lampdata.bin", "liquiddata.bin"}
+
+
+def test_play_repairs_a_deleted_pack_file_without_rerunning_setup(
+    qapp: object,
+    ps: _Ps,
+    tmp_path: Path,
+    site: _Site,
+    steps: list[str],
+    asks: _Asks,
+    monkeypatch: pytest.MonkeyPatch,
+    launched: list[object],
+) -> None:
+    """Item 5: repair keeps `"setup"` and output hashes, so the next Play stays quiet."""
+    entry, original, play, seen, _ = _lumen_play(tmp_path, monkeypatch, site)
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+
+    view.play()
+
+    assert len(seen) == 2 and steps[-1] == "launch"
+    (play / "version.dll").unlink()
+    seen.clear()
+    steps.clear()
+    launched.clear()
+    again, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+
+    again.play()
+
+    assert (play / "version.dll").read_bytes() == b"lumen loader", "the missing file comes back"
+    assert seen == [], "recorded outputs stand: setup never reruns"
+    assert steps[-1] == "launch"
+    done = client_packs.read_record(play).packs["lumenveil"]
+    assert done["files"]["lampdata.bin"] == hashlib.sha256(b"lamps").hexdigest()
+    assert done["files"]["liquiddata.bin"] == hashlib.sha256(b"water").hexdigest()
+    once_more, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+    seen.clear()
+    steps.clear()
+
+    once_more.play()
+
+    assert seen == [], "the next Play does not refuse the owned outputs"
+    assert steps[-1] == "launch"
+
+
+def test_play_with_a_foreign_loader_refuses_lumenveil_but_not_an_addons_pack(
+    qapp: object,
+    ps: _Ps,
+    tmp_path: Path,
+    site: _Site,
+    steps: list[str],
+    asks: _Asks,
+    monkeypatch: pytest.MonkeyPatch,
+    launched: list[object],
+) -> None:
+    """Items 1+5: another mod's loader refuses Lumenveil before its fetch, never an addons pack."""
+    from yulon.catalog.catalog import ClientPack as _Pack
+
+    addons = _Pack.model_validate(
+        {
+            "id": "addons",
+            "label": "Addons",
+            "source": {
+                "kind": "url",
+                "url": "https://packs.example.org/addons.zip",
+                "version_url": "https://packs.example.org/addons.version",
+            },
+            "install": [{"member": "*", "to_dir": "Interface/AddOns"}],
+        }
+    )
+    lumen = {pack.id: pack for pack in WOTLK.client.packs}["lumenveil"]
+    entry = WOTLK.model_copy(
+        update={"client": WOTLK.client.model_copy(update={"packs": (lumen, addons)})}
+    )
+    monkeypatch.setattr(controller_view_module.platform, "detect", lambda: "windows")
+    monkeypatch.setattr(client_packs.platform, "detect", lambda: "windows")
+    original = _game_client(tmp_path / "clients" / "WoW")
+    play = _built(original, tmp_path)
+    (play / "Data" / "enUS").mkdir(parents=True, exist_ok=True)
+    (original / "version.dll").write_bytes(b"someone else's loader")
+    (play / "version.dll").write_bytes(b"someone else's loader")
+    site.members["lumenveil"] = _lumen_members()
+    site.members["addons"] = {"Foo/Foo.toc": b"## Interface: 30300"}
+    client_packs.write_record(
+        play,
+        client_packs.PackRecord(
+            {}, None, {"packs": {"lumenveil": True, "addons": True}, "exe_options": {}}
+        ),
+        game=WOTLK.id,
+        server_dir=tmp_path,
+    )
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+    asks.answers = ["save"]
+    view.play()
+
+    title, text, yes, save = asks.calls[0]
+    assert "another mod's version.dll" in text
+    assert yes == "Retry" and save == "Play without Lumenveil"
+    assert "lumenveil" not in site.calls, "Lumenveil refuses before its fetch: never fetched"
+    assert site.calls == ["addons"], "the addons pack fetches and installs despite the loader"
+    assert steps[-1] == "launch", "skipping Lumenveil launches with the addons pack"
+    assert len(launched) == 1
+    assert (play / "version.dll").read_bytes() == b"someone else's loader", "untouched"
+    assert (play / "Interface" / "AddOns" / "Foo" / "Foo.toc").is_file()
+
+
+def test_play_after_removing_the_foreign_loader_from_the_original_proceeds(
+    qapp: object,
+    ps: _Ps,
+    tmp_path: Path,
+    site: _Site,
+    steps: list[str],
+    asks: _Asks,
+    monkeypatch: pytest.MonkeyPatch,
+    launched: list[object],
+) -> None:
+    """T809 W6B: the copy's stale loader goes once the original lost it; Play proceeds."""
+    entry, original, play, seen, _ = _lumen_play(tmp_path, monkeypatch, site)
+    (original / "version.dll").write_bytes(b"someone else's loader")
+    (play / "version.dll").write_bytes(b"someone else's loader")
+    (original / "version.dll").unlink()
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+
+    view.play()
+
+    assert len(launched) == 1, "the stale loader is reaped and Play starts the game"
+    assert asks.calls == [], "no refusal question once the original lost it"
+    assert (play / "version.dll").read_bytes() == b"lumen loader"
+
+
+def test_an_update_button_appears_after_a_pin_bump_and_updates_through_the_shared_apply(
+    qapp: object,
+    ps: _Ps,
+    tmp_path: Path,
+    site: _Site,
+    steps: list[str],
+    asks: _Asks,
+    monkeypatch: pytest.MonkeyPatch,
+    launched: list[object],
+) -> None:
+    """T809 W6: a pin bump shows the note and the button; the button runs the shared apply."""
+    ClientOptionsDialog = controller_view_module.ClientOptionsDialog
+    entry, original, play, seen, _ = _lumen_play(tmp_path, monkeypatch, site)
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+
+    view.play()
+
+    site.members["lumenveil"] = {
+        **_lumen_members(),
+        "version.dll": b"lumen loader v2",
+        "Lumenveil/lamp_extract.exe": b"exe v2",
+    }
+    site.version = "2"
+    seen.clear()
+    again, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    record = client_packs.read_record(play)
+    bumped = entry.client.packs[0].model_copy(update={"sha256": "0" * 64})
+    bumped_entry = entry.model_copy(
+        update={"client": entry.client.model_copy(update={"packs": (bumped,)})}
+    )
+    again.entry = bumped_entry
+    offer = controller_view_module.ClientOptionsOffer(
+        client=bumped_entry.client,
+        choices=record.choices,
+        installed=frozenset(record.packs),
+        unavailable=frozenset(),
+        records=dict(record.packs),
+    )
+    dialog = ClientOptionsDialog(offer, None, view=again)
+
+    assert list(dialog.options.update_notes) == ["lumenveil"]
+    assert (
+        "A newer Lumenveil (0.1.0) is available." in dialog.options.update_notes["lumenveil"].text()
+    )
+    assert list(dialog.options.update_buttons) == ["lumenveil"]
+    assert "Lumenveil 0.1.0" in dialog.options.pack_boxes["lumenveil"].text()
+    assert dialog.options.update_buttons["lumenveil"].isEnabled()
+    calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    real_install = client_packs.install
+
+    def spy_install(play_dir: object, pack: object, fetched: object, **kw: object) -> object:
+        calls.append(((play_dir, pack, fetched), dict(kw)))
+        return real_install(play_dir, pack, fetched, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(client_packs, "install", spy_install)
+    said: list[str] = []
+    dialog.update_pack("lumenveil")
+    dialog._say.setVisible(True)
+    said.append(dialog._say.text())
+    # The fake site proves the new zip under its own hash: the bumped pin differs, so the
+    # apply runs the shared engine path and the record takes the fetched hash.
+    assert len(calls) == 1 and calls[0][1].get("previous") == dict(record.packs["lumenveil"])
+    done = client_packs.read_record(play).packs["lumenveil"]
+    assert done["sha256"] != record.packs["lumenveil"]["sha256"]
+    assert "setup_pending" not in done
+    assert said and "\n" not in said[0], "one plain sentence"
+
+
+def test_no_update_button_when_current_and_failed_update_keeps_the_old_pack(
+    qapp: object,
+    ps: _Ps,
+    tmp_path: Path,
+    site: _Site,
+    steps: list[str],
+    asks: _Asks,
+    monkeypatch: pytest.MonkeyPatch,
+    launched: list[object],
+) -> None:
+    """T809 W6: current shows no button; a failed update keeps the record and says one line."""
+    ClientOptionsDialog = controller_view_module.ClientOptionsDialog
+    entry, original, play, seen, _ = _lumen_play(tmp_path, monkeypatch, site)
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+
+    view.play()
+
+    record = client_packs.read_record(play)
+    before = dict(record.packs["lumenveil"])
+    matched = entry.client.packs[0].model_copy(update={"sha256": before["sha256"]})
+    matched_entry = entry.model_copy(
+        update={"client": entry.client.model_copy(update={"packs": (matched,)})}
+    )
+    offer = controller_view_module.ClientOptionsOffer(
+        client=matched_entry.client,
+        choices=record.choices,
+        installed=frozenset(record.packs),
+        unavailable=frozenset(),
+        records=dict(record.packs),
+    )
+    dialog = ClientOptionsDialog(offer, None, view=view)
+    assert dialog.options.update_buttons == {}, "current: no button"
+    assert dialog.options.update_notes == {}
+
+    bumped = entry.client.packs[0].model_copy(update={"sha256": "0" * 64})
+    view.entry = entry.model_copy(
+        update={"client": entry.client.model_copy(update={"packs": (bumped,)})}
+    )
+    site.errors["lumenveil"] = client_packs.PackError("the makers moved it.")
+    said: list[tuple[object, str]] = []
+    view.update_client_pack(
+        "lumenveil",
+        done=lambda pack, sentence: said.append((pack, sentence)),
+        failed=lambda pack, sentence: said.append((pack, sentence)),
+    )
+    record = client_packs.read_record(play)
+    assert record.packs["lumenveil"] == before, "a failed update keeps the old pack working"
+    assert (play / "version.dll").read_bytes() == b"lumen loader"
+    assert len(said) == 1 and "could not be updated" in said[0][1]
+    assert said[0][1].count(".") >= 1 and "\n" not in said[0][1], "one plain sentence"
 
 
 def test_make_saves_the_choices_into_the_record(
@@ -27209,7 +27742,8 @@ def test_client_options_is_in_the_menu_only_for_an_entry_that_has_options(
         controller_view_module.REFRESH_PLAY_CLIENT_LABEL,
         controller_view_module.DELETE_PLAY_CLIENT_LABEL,
     ]
-    plain, _ = _play_view(ps, tmp_path, original=original, play=play)
+    plain_entry = WOTLK.model_copy(update={"client": WOTLK.client.model_copy(update={"packs": ()})})
+    plain, _ = _play_view(ps, tmp_path, original=original, play=play, entry=plain_entry)
     assert controller_view_module.CLIENT_OPTIONS_LABEL not in [
         action.text() for action in plain.play_menu.actions()
     ]
@@ -28316,7 +28850,8 @@ def test_a_pack_the_catalog_dropped_is_removed_at_the_next_play(
     first.play()
     assert (play / "Data" / "patch-W.MPQ").is_file()
 
-    plain, _ = _play_view(ps, tmp_path, original=original, play=play)  # no client section
+    bare = WOTLK.model_copy(update={"client": WOTLK.client.model_copy(update={"packs": ()})})
+    plain, _ = _play_view(ps, tmp_path, original=original, play=play, entry=bare)  # no packs
     plain.play()
 
     assert not (play / "Data" / "patch-W.MPQ").exists()
@@ -29538,7 +30073,7 @@ def test_a_start_yulon_refused_says_its_own_sentence_as_written(
     if "dml-arch" in str(refusal):
         view.services.controller.wsl_distro = "dml-arch"
 
-    def refuse() -> NoReturn:
+    def refuse(**_kw: object) -> NoReturn:
         raise refusal
 
     view.services.controller.start = refuse  # type: ignore[method-assign]
@@ -30197,7 +30732,7 @@ def test_a_running_start_greys_the_server_presses_with_a_wait(
     The Start never answers here, so the tab stays busy for the asserts.
     """
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
-    base = view.forget_install_button.toolTip()
+    base = view.remove_server_button.toolTip()
     view._run = lambda *_a, **_k: None  # type: ignore[method-assign]
 
     view.start_button.click()
@@ -30209,8 +30744,7 @@ def test_a_running_start_greys_the_server_presses_with_a_wait(
         view.start_button,
         view.stop_button,
         view.refresh_button,
-        view.remove_button,
-        view.forget_install_button,
+        view.remove_server_button,
     ):
         assert not button.isEnabled(), button.text()
         assert button.toolTip() == "Wait: Start is running.", button.text()
@@ -30218,7 +30752,7 @@ def test_a_running_start_greys_the_server_presses_with_a_wait(
     view._set_busy(False)
 
     assert "Wait:" not in line.text()
-    assert view.forget_install_button.toolTip() == base
+    assert view.remove_server_button.toolTip() == base
 
 
 def test_the_server_line_says_why_start_or_stop_is_greyed_after_a_reading(
@@ -30239,41 +30773,6 @@ def _shown_in_row(press: Any) -> list[Any]:
     flow = press.parentWidget().flow()
     widgets = [flow.itemAt(i).widget() for i in range(flow.count())]
     return [w for w in widgets if w is not None and not w.isHidden()]
-
-
-def test_an_armed_remove_offers_cancel_beside_it(qapp: object, ps: _Ps, tmp_path: Path) -> None:
-    """C35: the way out of an armed press was "Press Refresh to cancel.", a press elsewhere.
-
-    Mutation: leave Cancel's click unconnected and the remove stays armed.
-    """
-    from PySide6.QtWidgets import QGroupBox
-
-    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
-    calls = _watch_remove(view)
-    cancel = view.arm_cancel_button
-    assert cancel.isHidden() and cancel.text() == "Cancel"
-
-    view.remove_button.click()
-
-    assert not cancel.isHidden()
-    danger = view.findChild(QGroupBox, "danger-zone")
-    assert danger is not None and danger.isAncestorOf(cancel)
-    row = _shown_in_row(view.remove_button)
-    assert abs(row.index(cancel) - row.index(view.remove_button)) == 1, [b.text() for b in row]
-    said = view.danger_label.text()
-    assert said.endswith("Press it again to go ahead, or Cancel."), said
-    assert "Press Refresh to cancel" not in said
-
-    view.problem_label.setText("Port 3724 is in use by another program.")
-    cancel.click()
-
-    assert view.remove_button.text() == controller_view_module.REMOVE_IDLE
-    assert cancel.isHidden()
-    assert view.danger_label.isHidden()
-    # Fix round 1, F5 (the lead's ruling): only what the armed press wrote goes.
-    assert view.problem_label.text() == "Port 3724 is in use by another program."
-    view.remove_button.click()
-    assert calls == [], "the press after Cancel removed something"
 
 
 def test_an_armed_repair_offers_cancel_beside_it(qapp: object, ps: _Ps, tmp_path: Path) -> None:
@@ -30513,13 +31012,14 @@ def test_cancel_leaves_a_pointer_at_the_docker_box_alone(
     view.start_server()
     pointer = controller_view_module.START_FAILED_NO_DOCKER
     assert view.problem_label.text() == pointer
-    _watch_remove(view)
+    _watch_repair(view)
+    _db_up(view, ps)
 
-    view.remove_button.click()
+    view.repair_import()
     view.arm_cancel_button.click()
 
     assert view.problem_label.text() == pointer
-    assert view.remove_button.text() == controller_view_module.REMOVE_IDLE
+    assert view.repair_button.text() == controller_view_module.REPAIR_IDLE
     assert view.docker_banner.isVisibleTo(view)
 
 
@@ -31501,7 +32001,15 @@ def test_a_tab_opened_at_start_up_asks_for_the_addons_a_moment_later(
 
 @pytest.mark.parametrize(
     "game_id",
-    ["wow-wotlk", "wow-unbound", "wow-tbc", "wow-vanilla", "wow-tortoise", "wow-centurion"],
+    [
+        "wow-wotlk",
+        "wow-unbound",
+        "wow-coa",
+        "wow-tbc",
+        "wow-vanilla",
+        "wow-tortoise",
+        "wow-centurion",
+    ],
 )
 def test_every_game_gets_the_move_group_from_its_real_factory(game_id: str, tmp_path: Path) -> None:
     from yulon.catalog.catalog import load_catalog
@@ -31684,3 +32192,484 @@ def test_a_game_with_no_route_has_no_outside_add_ons_and_no_note(
     object.__setattr__(view.services, "client_addons", None)
     assert view._outside_addons_work(lambda _line: None) == ()
     assert view._has_outside_addons() is False
+
+
+def _open_core(view: ControllerView) -> None:
+    """Pick the core conf's button: `open_tuning_file` alone leaves the old file current."""
+    next(
+        b
+        for b in view.tuning_panel.file_buttons()
+        if b.toolTip() == "env/dist/etc/worldserver.conf"
+    ).click()
+
+
+def test_a_core_save_that_changes_a_locked_key_writes_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T819: a Save that touches a locked key is refused before a byte moves (M3)."""
+    path = _deploy(
+        tmp_path,
+        "env/dist/etc/worldserver.conf",
+        "[worldserver]\nWorldServerPort = 8085\nMotd = hi\n",
+    )
+    view = _tuned_view(ps, tmp_path)
+    _open_core(view)
+    before = path.read_bytes()
+
+    view.save_tuning_file("[worldserver]\nWorldServerPort = 9\nMotd = hi\n")
+
+    assert path.read_bytes() == before
+    assert tuning.backups_of(path) == ()
+    assert "WorldServerPort" in view.tuning_report.toPlainText()
+
+
+def test_a_core_save_asks_with_the_diff_then_backs_up_and_writes(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T819: one confirm lists the changes, then a backup and the write (M4, M8)."""
+    path = _deploy(
+        tmp_path,
+        "env/dist/etc/worldserver.conf",
+        "[worldserver]\n"
+        'LoginDatabaseInfo = "127.0.0.1;3306;acore;s3cret;acore_auth"\n'
+        "Rate.XP.Kill = 1\n",
+    )
+    dist = path.with_name("worldserver.conf.dist")
+    dist.write_text(
+        "[worldserver]\n"
+        'LoginDatabaseInfo = "127.0.0.1;3306;acore;acore;acore_auth"\n'
+        "Rate.XP.Kill = 1\n",
+        encoding="utf-8",
+    )
+    view = _tuned_view(ps, tmp_path)
+    _open_core(view)
+    asked: list[str] = []
+
+    def question(_parent: object, _title: str, said: str, *_a: object, **_k: object) -> int:
+        asked.append(said)
+        return int(controller_view_module.QMessageBox.StandardButton.Yes)
+
+    monkeypatch.setattr(controller_view_module.QMessageBox, "question", question)
+    view.save_tuning_file(
+        "[worldserver]\n"
+        'LoginDatabaseInfo = "127.0.0.1;3306;acore;***;acore_auth"\n'
+        "Rate.XP.Kill = 2\n"
+    )
+
+    assert len(asked) == 1
+    assert "Rate.XP.Kill: 1 -> 2" in asked[0]
+    assert "s3cret" not in asked[0]
+    backups = tuning.backups_of(path)
+    assert len(backups) == 1
+    assert "s3cret" in path.read_text(encoding="utf-8")
+    assert "Rate.XP.Kill = 2" in path.read_text(encoding="utf-8")
+
+
+def test_a_core_save_refuses_when_the_file_changed_while_it_was_open(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A module or server update between open and Save is never erased (Codex)."""
+    path = _deploy(tmp_path, "env/dist/etc/worldserver.conf", "[worldserver]\nMotd = hi\n")
+    view = _tuned_view(ps, tmp_path)
+    _open_core(view)
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "question",
+        lambda *a, **k: int(controller_view_module.QMessageBox.StandardButton.Yes),
+    )
+    after_update = "[worldserver]\nMotd = updated by a module\n"
+    path.write_text(after_update, encoding="utf-8")
+
+    view.save_tuning_file("[worldserver]\nMotd = yo\n")
+
+    assert path.read_text(encoding="utf-8") == after_update
+    assert tuning.backups_of(path) == ()
+    assert view.tuning_report.toPlainText() == controller_view_module.TUNING_CORE_CHANGED
+
+
+def test_a_core_save_reopens_the_file_and_never_holds_the_password(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The saved file is read back masked, so the editor holds the new text (Opus)."""
+    path = _deploy(
+        tmp_path,
+        "env/dist/etc/worldserver.conf",
+        "[worldserver]\n"
+        'LoginDatabaseInfo = "127.0.0.1;3306;acore;s3cret;acore_auth"\n'
+        "Motd = hi\n",
+    )
+    view = _tuned_view(ps, tmp_path)
+    _open_core(view)
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "question",
+        lambda *a, **k: int(controller_view_module.QMessageBox.StandardButton.Yes),
+    )
+    # The reload after a save waits for a stopped WSL distro; the save's own
+    # reopen does not, so this is the path that reads the file back (T133).
+    monkeypatch.setattr(view, "_waits_for_the_distro", lambda *_a: True)
+
+    view.save_tuning_file(
+        "[worldserver]\n"
+        'LoginDatabaseInfo = "127.0.0.1;3306;acore;***;acore_auth"\n'
+        "Motd = yo\n"
+    )
+
+    assert "Motd = yo" in path.read_text(encoding="utf-8")
+    assert view._tuning_raw == path.read_bytes().decode("utf-8")
+    assert "s3cret" not in view.tuning_panel.editor.toPlainText()
+
+
+def test_a_core_save_lints_first_and_an_answer_of_no_writes_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The lint confirm stays first for a core conf too, as on a module's (Opus)."""
+    path = _deploy(tmp_path, "env/dist/etc/worldserver.conf", "[worldserver]\nMotd = hi\n")
+    view = _tuned_view(ps, tmp_path)
+    _open_core(view)
+    asked: list[str] = []
+
+    def question(_parent: object, _title: str, said: str, *_a: object, **_k: object) -> int:
+        asked.append(said)
+        return int(controller_view_module.QMessageBox.StandardButton.No)
+
+    monkeypatch.setattr(controller_view_module.QMessageBox, "question", question)
+
+    view.save_tuning_file("[worldserver]\nMotd\n")
+
+    assert len(asked) == 1, asked
+    assert "does not look like a setting" in asked[0]
+    assert path.read_text(encoding="utf-8") == "[worldserver]\nMotd = hi\n"
+    assert tuning.backups_of(path) == ()
+
+
+def test_a_core_save_answered_no_writes_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T819: No on the diff confirm leaves the file alone."""
+    path = _deploy(tmp_path, "env/dist/etc/worldserver.conf", "[worldserver]\nMotd = hi\n")
+    view = _tuned_view(ps, tmp_path)
+    _open_core(view)
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "question",
+        lambda *a, **k: int(controller_view_module.QMessageBox.StandardButton.No),
+    )
+    before = path.read_bytes()
+
+    view.save_tuning_file("[worldserver]\nMotd = yo\n")
+
+    assert path.read_bytes() == before
+    assert tuning.backups_of(path) == ()
+
+
+def test_play_never_reports_a_regenerated_output_as_left_alone(
+    qapp: object,
+    ps: _Ps,
+    tmp_path: Path,
+    site: _Site,
+    steps: list[str],
+    asks: _Asks,
+    monkeypatch: pytest.MonkeyPatch,
+    launched: list[object],
+) -> None:
+    """Item 3: an edited setup output is regenerated, never reported as "left alone"."""
+    entry, original, play, seen, _ = _lumen_play(tmp_path, monkeypatch, site)
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+
+    view.play()
+
+    assert len(seen) == 2 and steps[-1] == "launch"
+    (play / "lampdata.bin").write_bytes(b"the player's edit")
+    site.members["lumenveil"] = {
+        **_lumen_members(),
+        "version.dll": b"lumen loader v2",
+        "Lumenveil/lamp_extract.exe": b"exe v2",
+    }
+    site.version = "2"
+    again, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+    seen.clear()
+    steps.clear()
+    launched.clear()
+
+    again.play()
+
+    assert steps == [
+        "install lumenveil",
+        "launch",
+    ], "the reinstall and the regenerated setup still lead to launch"
+    assert (play / "lampdata.bin").read_bytes() == b"lamps"
+    said = again.play_label.text()
+    assert (
+        "lampdata.bin" not in said
+    ), "a setup output setup regenerated is not 'left alone because you changed it'"
+
+
+# -- T808: the realm name on the Networking tab ------------------------------
+
+
+def _name_services(
+    ps: _Ps, tmp_path: Path, saved: list[str], *, shown: str = "Seeded Realm"
+) -> ControllerServices:
+    services = _services(ps, tmp_path, [])
+    services.realm_name_current = lambda: realm_name.NameState(shown, True)
+
+    def save(name: str) -> realm_name.SaveResult:
+        saved.append(name)
+        return realm_name.SaveResult(
+            f"The realm is now called '{name}'.", ok=True, remembered=True, applied=True
+        )
+
+    services.realm_name_save = save
+    return services
+
+
+def test_the_networking_tab_has_no_realm_name_control_without_a_realm_name_seam(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+
+    assert view.realm_name_row.isHidden()
+    assert view.realm_name_report.isHidden()
+
+
+def test_the_networking_tab_shows_the_realm_name_control_when_the_seam_exists(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    view = ControllerView(WOTLK, _name_services(ps, tmp_path, []), status_poll_ms=0)
+
+    assert not view.realm_name_row.isHidden()
+    assert view.realm_name_button.text() == "Save name"
+
+
+def test_the_realm_name_field_is_filled_from_the_server_but_never_over_what_is_typed(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    view = ControllerView(WOTLK, _name_services(ps, tmp_path, []), status_poll_ms=0)
+
+    view.refresh_realm_name()
+    assert view.realm_name_edit.text() == "Seeded Realm"
+
+    view.realm_name_edit.textEdited.emit("Mine")
+    view.realm_name_edit.setText("Mine")
+    view.refresh_realm_name()
+    assert view.realm_name_edit.text() == "Mine"
+
+
+def test_pressing_save_name_sends_the_trimmed_name_to_the_seam_and_shows_its_sentence(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    saved: list[str] = []
+    view = ControllerView(WOTLK, _name_services(ps, tmp_path, saved), status_poll_ms=0)
+
+    view.realm_name_edit.setText("  Jerra's Realm  ")
+    view.realm_name_button.click()
+
+    assert saved == ["Jerra's Realm"]
+    assert "Jerra's Realm" in view.realm_name_report.text()
+    assert view.realm_name_button.isEnabled()
+
+
+def test_a_refused_realm_name_is_said_on_the_tab_and_never_reaches_the_seam(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    saved: list[str] = []
+    view = ControllerView(WOTLK, _name_services(ps, tmp_path, saved), status_poll_ms=0)
+
+    for bad, said in (("", "empty"), ("x" * 33, "at most 32"), ("a\nb", "control")):
+        view.realm_name_edit.setText(bad)
+        view.save_realm_name()
+        assert said in view.realm_name_report.text(), (bad, view.realm_name_report.text())
+
+    assert saved == []
+
+
+def test_a_held_server_says_so_instead_of_changing_the_realm_name(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    services = _name_services(ps, tmp_path, [])
+
+    def held(name: str) -> realm_name.SaveResult:
+        raise docker.ServerHeldError("Another Yu'lon is working on this server.")
+
+    services.realm_name_save = held
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    view.realm_name_edit.setText("Whatever")
+    view.save_realm_name()
+
+    assert "Another Yu'lon" in view.realm_name_report.text()
+    assert view.realm_name_button.isEnabled()
+
+
+def test_with_no_known_database_password_save_name_is_grey_and_says_the_real_reason(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T785's refusal, not "applied the next time the server starts": that start asks with the
+    same unknown password. The saved name is still shown, and the refusal is not replaced by
+    the reading's note. Mutation: leave the button out of `_grey_for_the_database()`, or show
+    `result.note` over the refusal."""
+    from yulon.ui.widgets.reasons import reason_of
+
+    saved: list[str] = []
+    services = _name_services(ps, tmp_path, saved)
+    refusal = "This server's .db_password is missing, so Yu'lon cannot know it and tried none."
+    services.db_refusal = refusal
+    services.realm_name_current = lambda: realm_name.NameState(
+        "Kept Realm",
+        False,
+        "The database did not answer, so this is the name saved for this server.",
+    )
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    assert not view.realm_name_button.isEnabled()
+    assert reason_of(view.realm_name_button) == refusal
+    view.refresh_realm_name()
+    assert view.realm_name_edit.text() == "Kept Realm"
+    assert view.realm_name_report.text() == refusal
+
+    view.realm_name_edit.setText("Other Realm")
+    view.save_realm_name()  # a press by another road than the grey button
+    assert saved == []
+    assert view.realm_name_report.text() == refusal
+    assert not view.realm_name_button.isEnabled()
+
+
+def test_every_game_with_a_realm_row_gets_the_realm_name_seams_and_a_start_step(
+    tmp_path: Path,
+) -> None:
+    """Every factory wires both seams (`_assemble()`) and the start step (`_keeping_the_realm_name`
+    on the controller it builds). Mutation: drop the helper from one factory's controller."""
+    for entry in _every_game():
+        if realm_name.follows_realm_type(entry):
+            continue  # CoA: the realm type decides the name (the tests below)
+        services = ControllerServices.for_entry(entry, tmp_path / entry.id)
+        assert services.realm_name_save is not None, entry.id
+        assert services.realm_name_current is not None, entry.id
+        assert services.controller.before_servers is not None, entry.id
+
+
+# -- T808 x T812: the realm type decides a CoA realm's name --------------------
+
+
+def test_only_the_realm_type_entry_follows_its_realm_type() -> None:
+    """The exemption is CoA's alone; every other game keeps the T808 control."""
+    follows = {e.id for e in _every_game() if realm_name.follows_realm_type(e)}
+
+    assert follows == {"wow-coa"}
+
+
+def test_a_coa_server_gets_no_realm_name_seams_and_no_name_start_step(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A saved name in a CoA folder is never applied by Start: only the realm-type gate and the
+    port keeper run. Mutation: drop the `follows_realm_type` returns in BOTH
+    `_keeping_the_realm_name` and `keep_at_start` (either one alone holds), or wire the seams
+    in `_assemble()` for every entry."""
+    server = tmp_path / "coa"
+    assert realm_name.record_name(server, "Saved Realm") == ""
+    entry = load_catalog().get("wow-coa")
+    written: list[str] = []
+    monkeypatch.setattr(
+        controller_view_module.DockerSql,
+        "run_statement",
+        lambda self, db, statement: written.append(statement),
+    )
+    monkeypatch.setattr(controller_view_module.DockerSql, "query", lambda self, db, statement: "")
+    monkeypatch.setattr(controller_view_module.docker, "start_database", lambda *a, **k: None)
+    read: list[Path] = []
+    real_read = realm_name.read_saved_name
+    monkeypatch.setattr(realm_name, "read_saved_name", lambda d: read.append(d) or real_read(d))
+    monkeypatch.setattr(controller_view_module, "_realm_type_gate", lambda *a, **k: None)
+    monkeypatch.setattr(controller_view_module, "_realm_port_keeper", lambda *a, **k: lambda: None)
+
+    services = ControllerServices.for_entry(entry, server)
+
+    assert services.realm_name_save is None
+    assert services.realm_name_current is None
+    if services.controller.before_servers is not None:
+        services.controller.before_servers()
+    assert read == []
+    assert not any(b"Saved Realm".hex().upper() in s for s in written), written
+
+
+def test_keep_at_start_never_reads_or_applies_a_saved_name_on_coa(tmp_path: Path) -> None:
+    entry = load_catalog().get("wow-coa")
+    assert realm_name.record_name(tmp_path, "Saved Realm") == ""
+    sent: list[str] = []
+    up: list[str] = []
+
+    class _Sql:
+        def run_statement(self, db: object, statement: str) -> None:
+            sent.append(statement)
+
+        def query(self, db: object, statement: str) -> str:
+            return ""
+
+    keep = realm_name.keep_at_start(entry, tmp_path, _Sql(), lambda: up.append("db"), None)
+
+    assert keep() is None
+    assert sent == [] and up == []
+    result = realm_name.RealmNames(entry, tmp_path, _Sql()).save("Other")
+    assert not result.ok and result.text == realm_name.FOLLOWS_REALM_TYPE
+    assert sent == []
+    assert realm_name.read_saved_name(tmp_path) == "Saved Realm", "nothing rewrote the record"
+
+
+def test_the_networking_tab_says_a_coa_name_follows_the_realm_type(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """No field and no Save name on CoA, one plain line; WotLK keeps the control.
+    Mutation: drop `follows_type` in the tab builder (the line stays hidden)."""
+    coa = load_catalog().get("wow-coa")
+    view = ControllerView(coa, _services(ps, tmp_path, []), status_poll_ms=0)
+
+    assert view.realm_name_row.isHidden()
+    assert not view.realm_name_report.isHidden()
+    assert view.realm_name_report.text() == "The realm name follows the realm type."
+
+    other = ControllerView(WOTLK, _name_services(ps, tmp_path, []), status_poll_ms=0)
+    assert not other.realm_name_row.isHidden()
+    assert other.realm_name_report.text() != "The realm name follows the realm type."
+
+
+def test_the_start_step_wired_for_a_game_applies_a_saved_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server = tmp_path / "tortoise"
+    realm_name.record_name(server, "Saved Realm")
+    started: list[str] = []
+    monkeypatch.setattr(
+        controller_view_module.docker,
+        "start_database",
+        lambda *a, **k: started.append("database"),
+    )
+    written: list[str] = []
+    monkeypatch.setattr(
+        controller_view_module.DockerSql,
+        "run_statement",
+        lambda self, db, statement: written.append(statement),
+    )
+    entry = load_catalog().get("wow-tortoise")
+    services = ControllerServices.for_entry(entry, server)
+
+    assert services.controller.before_servers is not None
+    reason = services.controller.before_servers()
+
+    assert reason is None
+    assert started == ["database"]
+    assert written == [realm_name.name_sql(entry, "Saved Realm")]
+
+
+def test_every_azerothcore_factory_takes_a_safety_copy_before_repair_clears_an_import(
+    tmp_path: Path,
+) -> None:
+    """T678 review round 3's copy before Repair clears an unfinished first import; T812 C3b's
+    rewrite of the WotLK controller dropped it and nothing failed. Mutation: drop
+    `safety_copy=` from `_for_wotlk()`'s Controller."""
+    for game in ("wow-wotlk", "wow-unbound", "wow-coa"):
+        entry = load_catalog().get(game)
+        services = ControllerServices.for_entry(entry, tmp_path / game)
+        assert services.controller.safety_copy is not None, game

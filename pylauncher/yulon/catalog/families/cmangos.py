@@ -70,7 +70,7 @@ import posixpath
 import queue
 import re
 import threading
-from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
+from collections.abc import Callable, Generator, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import ClassVar, cast
@@ -123,6 +123,7 @@ from yulon.catalog.native import (
 )
 from yulon.log import get_logger
 from yulon.manifest import Db
+from yulon.server_build_presses import MAINTENANCE_TAB
 
 logger = get_logger(__name__)
 
@@ -239,8 +240,8 @@ def newer_migrations_refusal(
     return (
         f"{head} To go back, first put {_listed(databases)} back as "
         f"{'it was' if one else 'they were'} before {those}: press Stop on the Server tab, "
-        f"restore {dumps} on Maintenance (it works with the server stopped), then press "
-        f"{back} again without starting the server in between, since a start would apply "
+        f"restore {dumps} on the {MAINTENANCE_TAB} tab (it works with the server stopped), then "
+        f"press {back} again without starting the server in between, since a start would apply "
         f"{those} again. Restoring loses whatever changed in {_listed(databases)} since that "
         "copy was taken."
     )
@@ -599,6 +600,28 @@ class CmangosInstaller(StagedInstaller):
 
     # -- the world updates a `*-db` pin brings to an existing server (T531) ----
 
+    def before_rebuild(
+        self, server_dir: Path, route: str, press: str = server_build_presses.REBUILD
+    ) -> Iterator[str]:
+        """Put back a movement-map backup an unfinished press left, before anything changes.
+
+        T811's crash door for EVERY press, not only the update route's own check:
+        a Rebuild pressed after an update crashed would otherwise start a world on
+        `mmaps` missing the map that press had set aside. Restoring puts the tiles
+        and the off-mesh hash they were built from back together; nothing else of
+        the press is undone.
+        """
+        yield from self._restore_maps_a_press_left(server_dir)
+
+    def _restore_maps_a_press_left(self, server_dir: Path) -> Iterator[str]:
+        """Put back the tiles a press that did not finish set aside (T811); says so when it did."""
+        restored = extract.put_maps_back(server_dir / DATA_DIR)
+        if restored:
+            yield (
+                "An earlier press did not finish, so the movement maps it rebuilt were put "
+                f"back first ({_maps_named(restored)})."
+            )
+
     def check_moved_sources(
         self,
         server_dir: Path,
@@ -613,8 +636,15 @@ class CmangosInstaller(StagedInstaller):
         `*-db` checkout, or the ledger's first reading of it could not be what the install
         applied. Then each `report` phase whose files live in a source that just moved --
         the bots' world SQL -- is asked of git, and what changed is named, never applied.
-        What is returned is what `servers_down_work()` acts on.
+        What is returned is what `servers_down_work()` acts on. A movement-map
+        backup an earlier press did not finish with is put back FIRST (T811), so
+        the comparison below reads the hash the tiles on disk were built from.
         """
+        # T811: BEFORE anything reads the off-mesh record. A backup folder is a press
+        # that did not finish: its maps are put back with the hash they were built
+        # from, so the comparison below still sees the change instead of finding it
+        # already recorded, and the rebuild starts over from the old tiles.
+        yield from self._restore_maps_a_press_left(server_dir)
         catch_up = self._world_catch_up_plan()
         if catch_up.applying():
             # The `*-db` checkouts the catch-up will move get the route's own three
@@ -640,7 +670,71 @@ class CmangosInstaller(StagedInstaller):
         if self._updates_at_start():
             trees = self._migrations_moved(moved, to_pin=to_pin)
             yield from self._refuse_what_the_databases_ran(server_dir, trees, to_pin=to_pin)
-        return _MovedChanges(catch_up=catch_up, confs=self._conf_defaults_moved(moved))
+        offmesh = self._offmesh_moved(server_dir, moved)
+        if offmesh is not None and offmesh.map_ids:
+            yield offmesh.said()
+        elif offmesh is not None:
+            yield offmesh.recorded_line
+        return _MovedChanges(
+            catch_up=catch_up,
+            confs=self._conf_defaults_moved(moved),
+            offmesh=offmesh,
+        )
+
+    def _offmesh_moved(
+        self,
+        server_dir: Path,
+        moved: Sequence[tuple[EmulatorSource, Path, str]],
+    ) -> _OffmeshMove | None:
+        """The new off-mesh bytes and which maps changed, or the old install's record (T811).
+
+        Old bytes come from git at the pre-move commit, never from disk. A move that did
+        not touch the core, or a plan naming no off-mesh file, or a file git cannot read
+        at either end, takes no part. Nothing is written here: the rebuild records.
+        """
+        rel = self._data().mmaps.offmesh_repo_path
+        if rel is None:
+            return None
+        core = self._core_source()
+        if core is None:
+            return None
+        entry = next(
+            ((source, dest, old) for source, dest, old in moved if source.repo == core.repo),
+            None,
+        )
+        if entry is None:
+            return None
+        _source, dest, old = entry
+        new = self._seams.head_sha(dest)
+        if new is None:
+            raise InstallerError(
+                f"Yu'lon could not read which commit {dest} is on, so it could not tell whether "
+                f"the movement maps are current. {NOTHING_DONE}"
+            )
+        if new == old:
+            return None
+        found = self._seams.tree_bytes(dest, old, rel)
+        before = None if found is None else found.get(rel)
+        after = self._seams.tree_bytes(dest, new, rel)
+        current_after = None if after is None else after.get(rel)
+        if before is None or current_after is None:
+            return None
+        changed = extract.offmesh_changed_ids(before, current_after)
+        if not changed:
+            return None
+        current = extract.read_evidence(server_dir / DATA_DIR)
+        if current is None or current.offmesh_sha is None:
+            return _OffmeshMove(
+                sha=extract.offmesh_sha(current_after),
+                map_ids=(),
+                recorded_line=(
+                    "the movement maps now record the core's off-mesh file, so a later change "
+                    "is seen; this press rebuilt nothing."
+                ),
+            )
+        if current.offmesh_sha == extract.offmesh_sha(current_after):
+            return None
+        return _OffmeshMove(sha=extract.offmesh_sha(current_after), map_ids=changed)
 
     # -- a moved module's changed conf defaults, carried into the live conf (T656) ----
 
@@ -883,6 +977,16 @@ class CmangosInstaller(StagedInstaller):
                     )
         return changed
 
+    def _rerunnable_modules(self) -> set[str]:
+        """The modules whose migrations may run again (T813).
+
+        The module's author guarantees every migration it ships is idempotent,
+        so a changed SHA-1 there never blocks an update. Matched on the owner
+        module, never on bytes: any new bytes in a listed module go on, and a
+        later edit refuses only in an unlisted module or the core.
+        """
+        return {entry.module for entry in self._data().rerunnable_modules}
+
     def _refuse_changed_migrations(
         self, changed: _Changed, held: Mapping[Db, set[str]], *, to_pin: bool
     ) -> None:
@@ -892,11 +996,15 @@ class CmangosInstaller(StagedInstaller):
         has already refused a changed file whose old bytes the database holds, so in
         practice this is a forward Return or "Update the server to latest…" (T767 made the
         forward Return skip that file). A file refuses when the ledger holds an old key
-        and no new one. No SQL is run to test whether the new bytes could run twice. Every
-        source with such a file is named in the `UpdateRefused`, so the Server tab offers
-        none of their commits again.
+        and no new one. A file owned by a listed module
+        (`CmangosData.rerunnable_modules`, T813) does not refuse: that module's
+        author guarantees every migration it ships is idempotent. Core files and
+        other modules refuse exactly as before. No SQL is run to test whether the
+        new bytes could run twice. Every source with such a file is named in the
+        `UpdateRefused`, so the Server tab offers none of their commits again.
         """
         schemas = self.entry.schema_map()
+        rerunnable = self._rerunnable_modules()
         again: dict[str, list[str]] = {}
         refused: dict[str, str] = {}
         for role, labelled in changed.items():
@@ -904,6 +1012,8 @@ class CmangosInstaller(StagedInstaller):
                 if any(k.upper() in held[role] for k in ran) and not any(
                     k.upper() in held[role] for k in new
                 ):
+                    if owner.module and owner.module in rerunnable:
+                        continue
                     again.setdefault(schemas[role], []).append(label)
                     refused.setdefault(owner.source.repo, owner.new)
         if refused:
@@ -1322,20 +1432,133 @@ class CmangosInstaller(StagedInstaller):
             return None
         world = self._world_catch_up_work(changes.catch_up)
         confs = self._conf_defaults_work(server_dir, changes.confs)
-        if world is None or confs is None:
-            return world or confs
-        first, then = world, confs
+        navmesh = self._offmesh_rebuild_work(server_dir, changes.offmesh)
+        works = [work for work in (world, confs, navmesh) if work is not None]
+        if not works:
+            return None
+        if len(works) == 1:
+            return works[0]
 
         def forward(ctx: StageContext) -> Iterator[str]:
-            yield from first.forward(ctx)
-            yield from then.forward(ctx)
+            for work in works:
+                yield from work.forward(ctx)
 
         def back(ctx: StageContext) -> Iterator[str]:
-            yield from then.back(ctx)
-            yield from first.back(ctx)
+            for work in reversed(works):
+                yield from work.back(ctx)
+
+        def done() -> Iterator[str]:
+            for work in works:
+                yield from work.done()
 
         return ServersDownWork(
-            prepare=lambda: iter(()), forward=forward, back=back, finishes_start_refusal=False
+            prepare=lambda: iter(()),
+            forward=forward,
+            back=back,
+            done=done,
+            finishes_start_refusal=False,
+        )
+
+    def _offmesh_rebuild_work(
+        self, server_dir: Path, offmesh: _OffmeshMove | None
+    ) -> ServersDownWork | None:
+        """Rebuild only the maps whose off-mesh lines changed, once the new build runs (T811).
+
+        `forward()` -- servers down, the new image tagged, before it starts -- puts
+        back any backup a press that did not finish left, runs the generator once per
+        changed map over the install's own `data/mmaps`, keeping every other map's
+        tiles, then records the new hash. Each map's own files are moved aside before
+        its generator runs and put back at once if it fails, so one map is never left
+        half old and half new. Nothing is wiped and no count gate judges it.
+
+        `back()` -- the new build started nothing -- puts the set-aside tiles and the
+        hash they were built from back together, so the old build runs on the tiles
+        its own core was built with rather than on the rejected build's. What is set
+        aside is deleted by `done()`, once the new build is up: until then a rollback
+        still has something to put back.
+        """
+        if offmesh is None or not offmesh.map_ids:
+            return None
+        data = self._data()
+        recorded: list[str] = []
+
+        def forward(ctx: StageContext) -> Iterator[str]:
+            data_dir = server_dir / DATA_DIR
+            if (server_dir / native_secret.STATE_FILE).is_file() and not data_dir.is_dir():
+                raise InstallerError(
+                    "the movement maps cannot be rebuilt: the install's data folder is gone. "
+                    f"{NOTHING_DONE}"
+                )
+            yield from self._restore_maps_a_press_left(server_dir)
+            # Read after the put-back, never before: the hash has to be the one the
+            # tiles now on disk were built from, which is what a rollback restores.
+            current = extract.read_evidence(data_dir)
+            previous = None if current is None else current.offmesh_sha
+            if current is not None:
+                recorded.append(previous or "")
+            image_ref = self._image_ref(ctx, data.extract.image)
+            user_args = self._user_args()
+            cap = _MmapCap()
+            if data.mmaps.cpu_cap == "half":
+                cap = _half_engine_cap(self._seams.engine_size())
+                yield cap.said()
+            yield from self._stream(
+                lambda sink: extract.run_mmaps_for_maps(
+                    data.mmaps,
+                    offmesh.map_ids,
+                    image_ref=image_ref,
+                    data_dir=data_dir,
+                    run_container=self._seams.run_container,
+                    user_args=user_args,
+                    sink=sink,
+                    cancel=ctx.cancel,
+                    previous_sha=previous,
+                    cpus=cap.cpus,
+                    cpuset=cap.cpuset,
+                    memory=cap.memory,
+                ),
+                cancel=ctx.cancel,
+                stage="mmaps",
+            )
+            self._check_cancel(ctx.cancel)
+            if current is not None:
+                extract.write_evidence(data_dir, replace(current, offmesh_sha=offmesh.sha))
+            maps = ", ".join(f"map {each}" for each in offmesh.map_ids)
+            yield (
+                f"the off-mesh file changed, so {maps} "
+                f"{'was' if len(offmesh.map_ids) == 1 else 'were'} rebuilt."
+            )
+
+        def back(ctx: StageContext) -> Iterator[str]:
+            data_dir = server_dir / DATA_DIR
+            # The tiles go back BEFORE the record, and only the tiles can say which
+            # record that is: the backup wrote the hash they were built from.
+            restored = extract.put_maps_back(data_dir)
+            if recorded and not restored:
+                # Nothing to put back (a map with no finished tiles yet), but the new
+                # hash was recorded: put the old one back or the next press would call
+                # tiles that were never built current.
+                current = extract.read_evidence(data_dir)
+                if current is not None:
+                    before = recorded[0] or None
+                    extract.write_evidence(data_dir, replace(current, offmesh_sha=before))
+            if not restored and not recorded:
+                return
+            yield (
+                "the new build did not start, so the movement maps go back to "
+                "the off-mesh file they were built from."
+            )
+
+        def done() -> Iterator[str]:
+            if extract.drop_maps_backup(server_dir / DATA_DIR):
+                yield "The rebuilt movement maps stand; the tiles they replaced are gone."
+
+        return ServersDownWork(
+            prepare=lambda: iter(()),
+            forward=forward,
+            back=back,
+            done=done,
+            finishes_start_refusal=False,
         )
 
     def _world_catch_up_work(self, catch_up: _WorldCatchUp) -> ServersDownWork | None:
@@ -2657,12 +2880,30 @@ class CmangosInstaller(StagedInstaller):
         asserts the order over a live install, because a guard whose
         correctness is its position in a sequence is disarmed silently by a
         reordering that looks unrelated.
+
+        **The CPU cap (T801).** Tortoise's MoveMapGen starts one worker per
+        core `std::thread::hardware_concurrency()` reports — the fork's generator
+        has NO `--threads` option, and passing it one makes the tool reject
+        "--threads" as a map id — so a plan saying `cpu_cap: half` caps the
+        container instead (`_half_engine_cap`), three ways, because each bounds
+        one thing: `--cpus` its CPU time, `--cpuset-cpus` the cores its workers
+        run on (the first N), and `--memory` its RAM, at half the engine's. The
+        worker COUNT is not bounded: under glibc 2.35+ the tool counts the host's
+        online cores whatever the container is pinned to, so the memory ceiling
+        is what keeps it from taking the machine down -- past it the generator
+        is killed inside its container. An engine that would not say is given
+        `--cpus 2` alone, the number the CMaNGOS generators spell themselves,
+        and no core or memory ceiling it could not size.
         """
         data = self._data()
         data_dir = self._data_dir(ctx)
         image_ref = self._image_ref(ctx, data.extract.image)
         user_args = self._user_args()
         yield "Generating movement maps (this can take an hour or more)."
+        cap = _MmapCap()
+        if data.mmaps.cpu_cap == "half":
+            cap = _half_engine_cap(self._seams.engine_size())
+            yield cap.said()
         yield from self._stream(
             lambda sink: extract.run_mmaps(
                 data.mmaps,
@@ -2672,11 +2913,19 @@ class CmangosInstaller(StagedInstaller):
                 user_args=user_args,
                 sink=sink,
                 cancel=ctx.cancel,
+                cpus=cap.cpus,
+                cpuset=cap.cpuset,
+                memory=cap.memory,
             ),
             cancel=ctx.cancel,
             stage="mmaps",
         )
         self._check_cancel(ctx.cancel)
+        self._note_offmesh(data_dir, ctx.server_dir)
+        # T811: a full generation replaces every map's tiles, so a backup a crashed
+        # per-map press left is no longer a state to go back to -- and its hash would
+        # be older than the one just recorded.
+        extract.drop_maps_backup(data_dir)
         yield "Map generation finished."
 
     def _conf(self, ctx: StageContext) -> Iterator[str]:
@@ -3201,16 +3450,16 @@ class CmangosInstaller(StagedInstaller):
                 f"itself may be the thing that is not answering — it reads a stopped container "
                 f"and Docker being down the same way — so check that Docker is running, "
                 f"then press Stop on the Server tab if the server is up, and apply these "
-                f'files with "{UPDATES_BUTTON_LABEL}" on the Modules tab (or run the install '
-                f"again from the command line)."
+                f'files with "{UPDATES_BUTTON_LABEL}" on the {MAINTENANCE_TAB} tab (or run the '
+                f"install again from the command line)."
             )
         raise InstallerError(
             f"{self.entry.name}'s world server is running, and it holds these databases in "
             f"memory and writes back over whatever it finds in them. Nothing was applied, "
             f"nothing was imported and nothing was cleared. Press Stop on the Server tab, then "
-            f'apply these files with "{UPDATES_BUTTON_LABEL}" on the Modules tab — it starts '
-            f"the database on its own and keeps the world server down — or run the install "
-            f"again from the command line. (A remembered install's catalog tile reads "
+            f'apply these files with "{UPDATES_BUTTON_LABEL}" on the {MAINTENANCE_TAB} tab — '
+            f"it starts the database on its own and keeps the world server down — or run the "
+            f"install again from the command line. (A remembered install's catalog tile reads "
             f"Installed and cannot be pressed, which is why the button is the remedy here; "
             f"Codex on T24.)"
         )
@@ -4058,6 +4307,51 @@ class CmangosInstaller(StagedInstaller):
         db = self.entry.databases
         return {name: name for name in (db.auth, db.characters, db.world, *db.extra)}
 
+    # -- the off-mesh file a moved core brings (T811) ----------------------
+
+    def _offmesh_core_dest(self, server_dir: Path) -> Path | None:
+        """The core checkout holding this plan's off-mesh file, or None without one (T811)."""
+        if self._data().mmaps.offmesh_repo_path is None:
+            return None
+        core = self._core_source()
+        return server_dir / core.dest if core is not None else None
+
+    def _core_source(self) -> EmulatorSource | None:
+        """The source whose checkout holds this plan's off-mesh file (T811)."""
+        rel = self._data().mmaps.offmesh_repo_path
+        if rel is None:
+            return None
+        sources = list(self.entry.emulator.sources)
+        for source in sources:
+            if not any(
+                other is not source and source.dest.startswith(f"{other.dest.rstrip('/')}/")
+                for other in sources
+            ):
+                return source
+        return sources[0] if sources else None
+
+    def _note_offmesh(self, data_dir: Path, server_dir: Path) -> None:
+        """Record the hash the maps now hold, read off the built checkout (T811).
+
+        The checkout is the build's own, so its bytes are what the generator ran on.
+        Old installs record without rebuilding anything; the absence of a file writes
+        nothing, and the hash is only ever replaced, never cleared.
+        """
+        rel = self._data().mmaps.offmesh_repo_path
+        dest = self._offmesh_core_dest(server_dir)
+        if rel is None or dest is None:
+            return
+        try:
+            data = (dest / rel).read_bytes()
+        except OSError:
+            return
+        current = extract.read_evidence(data_dir)
+        if current is None:
+            return
+        if current.offmesh_sha == extract.offmesh_sha(data):
+            return
+        extract.write_evidence(data_dir, replace(current, offmesh_sha=extract.offmesh_sha(data)))
+
     # -- what only the engine knows ---------------------------------------
 
     def _data_dir(self, ctx: StageContext) -> Path:
@@ -4529,6 +4823,45 @@ def _assignments(text: str) -> dict[str, int]:
 
 
 @dataclass(frozen=True)
+class _MmapCap:
+    """A generator container's ceilings (`docker.ContainerRun`'s three fields); none by default."""
+
+    cpus: int | None = None
+    cpuset: str | None = None
+    memory: int | None = None
+
+    def said(self) -> str:
+        cores = f" (cores {self.cpuset})" if self.cpuset is not None else ""
+        ram = (
+            f" and {self.memory / (1024 * 1024 * 1024):.1f} GiB of memory"
+            if self.memory is not None
+            else ""
+        )
+        return f"mmaps: limited to {self.cpus} CPUs{cores}{ram}"
+
+
+def _half_engine_cap(size: tuple[int, int] | None) -> _MmapCap:
+    """The ceilings for a `cpu_cap: half` generator, from the engine's `(CPUs, bytes)` or None.
+
+    CPUs: half the engine's cores, but no more than half its memory in GiB (a
+    movement-map worker is ~2 GB, so a many-core box with little RAM is bounded by the
+    RAM), at least 1 -- as `--cpus` (CPU time) and as `--cpuset-cpus 0-(N-1)`, the
+    first N cores, which exist on any engine that reported more than N. Memory: half the
+    engine's, as `--memory`, the one ceiling that bounds the generator's RAM whatever
+    number of workers it starts. An engine that would not say gets `--cpus 2` only: low
+    enough that "we don't know" cannot mean "flat out", and no pin or ceiling sized
+    against a machine nobody measured.
+    """
+    if size is None:
+        return _MmapCap(cpus=2)
+    cpus, mem_bytes = size
+    mem_gib = mem_bytes // (1024 * 1024 * 1024)
+    cap = max(1, min(cpus // 2, mem_gib // 2))
+    cores = "0" if cap == 1 else f"0-{cap - 1}"
+    return _MmapCap(cpus=cap, cpuset=cores, memory=max(1, mem_bytes // 2))
+
+
+@dataclass(frozen=True)
 class _WorldCatchUp:
     """The plan's `on_update` phases, each with the source whose checkout holds its files (T531)."""
 
@@ -4622,12 +4955,35 @@ def _glob_names(glob: str, path: str) -> bool:
     return where == folder and fnmatch.fnmatchcase(name, pattern)
 
 
+def _maps_named(prefixes: Iterable[str]) -> str:
+    """`map 800, map 5` from the backup folders' zero-padded names (T811)."""
+    return ", ".join(f"map {int(each) if each.isdigit() else each}" for each in prefixes)
+
+
+@dataclass(frozen=True)
+class _OffmeshMove:
+    """What an update's move did to the off-mesh file: the new bytes, and which maps (T811)."""
+
+    sha: str
+    map_ids: tuple[str, ...]
+    recorded_line: str = ""
+    """Said when there was nothing to rebuild: an old install's first record (T811)."""
+
+    def said(self) -> str:
+        maps = ", ".join(f"map {each}" for each in self.map_ids)
+        return (
+            f"the core's off-mesh file changed, so {maps} "
+            f"{'is' if len(self.map_ids) == 1 else 'are'} rebuilt once the new build starts."
+        )
+
+
 @dataclass(frozen=True)
 class _MovedChanges:
-    """What `check_moved_sources()` found, for `servers_down_work()` (T531, T656)."""
+    """What `check_moved_sources()` found, for `servers_down_work()` (T531, T656, T811)."""
 
     catch_up: _WorldCatchUp
     confs: tuple[_ConfDefaults, ...]
+    offmesh: _OffmeshMove | None = None
 
 
 @dataclass

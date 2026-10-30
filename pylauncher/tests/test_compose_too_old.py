@@ -434,7 +434,7 @@ def _gather(entry_id: str, tmp_path: Path, asked: list[str]) -> preflight.Facts:
     )
 
 
-@pytest.mark.parametrize("entry_id", ["wow-wotlk", "wow-unbound"])
+@pytest.mark.parametrize("entry_id", ["wow-wotlk", "wow-unbound", "wow-coa"])
 def test_an_azerothcore_install_reads_the_version_and_the_offer(
     entry_id: str, tmp_path: Path
 ) -> None:
@@ -714,3 +714,74 @@ def test_a_download_said_to_be_too_big_is_not_read_at_all(tmp_path: Path) -> Non
             "https://x/compose", tmp_path / "compose", cap=200, open_url=lambda _r: response  # type: ignore[arg-type,return-value]
         )
     assert reads == []
+
+
+# ------------------------------------------------------- T762 #8: the ways out
+
+
+def test_a_tuning_restart_refused_for_old_compose_shows_update_docker_compose(
+    qapp: object, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """T762 #8: the Tuning refusal names Update Docker Compose, so the press shows at once."""
+    from tests.test_controller_view import WOTLK, _Ps, _services
+    from yulon.ui.controller_view import ControllerView
+    from yulon.ui.widgets.job import run_inline
+
+    monkeypatch.setattr(runner, "run", _Ps())
+    view = ControllerView(
+        WOTLK, _services(_Ps(), tmp_path, []), status_poll_ms=0, job_runner=run_inline
+    )
+    monkeypatch.setattr(view, "_confirm", lambda title, question: True)
+    sentence = platform.compose_too_old_sentence((2, 6, 1), linux=True, offer=True)
+
+    def refused(*_a: object, **_k: object) -> None:
+        raise ComposeTooOld(sentence, offer=True)
+
+    monkeypatch.setattr(view.services.controller, "refuse_before_a_stop", refused)
+    view.restart_server()
+    assert view.tuning_report.toPlainText() == sentence
+    assert view.update_compose_button.isVisibleTo(view)
+
+
+def test_a_repair_refused_for_old_compose_shows_it(
+    qapp: object, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """T762 #8: a Repair refused for an old Compose shows Update Docker Compose at once."""
+    from tests.test_controller_view import WOTLK, _Ps, _services
+    from yulon.ui.controller_view import ControllerView
+    from yulon.ui.widgets.job import run_inline
+
+    monkeypatch.setattr(runner, "run", _Ps())
+    view = ControllerView(
+        WOTLK, _services(_Ps(), tmp_path, []), status_poll_ms=0, job_runner=run_inline
+    )
+    sentence = platform.compose_too_old_sentence((2, 6, 1), linux=True, offer=True)
+    view._repair_failed(ComposeTooOld(sentence, offer=True))
+    assert view.danger_label.text() == sentence
+    assert view.update_compose_button.isVisibleTo(view)
+
+
+def test_a_tuning_refusal_pointing_at_repair_shows_repair(
+    qapp: object, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """T762 #8: a Tuning Restart refused for a cut-off import offers Repair at once."""
+    from tests.test_controller_view import WOTLK, _Ps, _services
+    from yulon.controller import IMPORT_ENDED, ImportEnded
+    from yulon.ui.controller_view import ControllerView
+    from yulon.ui.widgets.job import run_inline
+
+    monkeypatch.setattr(runner, "run", _Ps())
+    view = ControllerView(
+        WOTLK, _services(_Ps(), tmp_path, []), status_poll_ms=0, job_runner=run_inline
+    )
+    monkeypatch.setattr(view, "_confirm", lambda title, question: True)
+    state = docker.ImportState("absent", "acore_world holds no tables")
+
+    def refused(*_a: object, **_k: object) -> None:
+        raise ImportEnded(IMPORT_ENDED, state=state)
+
+    monkeypatch.setattr(view.services.controller, "refuse_before_a_stop", refused)
+    view.restart_server()
+    assert view.tuning_report.toPlainText() == IMPORT_ENDED
+    assert view.repair_button.isVisibleTo(view)
+    assert view.repair_label.isVisibleTo(view)

@@ -240,7 +240,11 @@ def test_install_into_an_unfinished_move_sends_the_player_to_bring_in(
     (folder / native.MOVE_IN_FILE).write_text("{}", encoding="utf-8")
     built, _ = view(tmp_path, Mover(tmp_path))
     assert built.start_install(WOTLK) is False
-    assert shown and BRING_FROM_ANOTHER in shown[0]
+    assert shown == [
+        f"A bring-in on this folder is not finished. Press {BRING_FROM_ANOTHER} again with the "
+        "same file and folder to carry on (nothing is lost)."
+    ]
+    assert (folder / native.MOVE_IN_FILE).exists()
 
 
 def test_attaching_an_unfinished_move_sends_the_player_to_bring_in(

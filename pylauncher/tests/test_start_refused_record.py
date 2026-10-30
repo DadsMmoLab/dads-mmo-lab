@@ -179,7 +179,7 @@ class _Running(Controller):
         super().__init__(TORTOISE.container_spec(), server_dir)
         self.calls: list[str] = []
 
-    def stop(self) -> bool:
+    def stop(self, **_kw: object) -> bool:
         self.calls.append("stop")
         return True
 

@@ -29,6 +29,7 @@ from yulon.catalog.catalog import (
     ConfigWtf,
     ExePatch,
     ExeWrite,
+    PackSetup,
     load_catalog,
 )
 
@@ -173,37 +174,214 @@ def test_a_client_without_the_new_fields_names_no_host() -> None:
     assert client.hosts() == frozenset()
 
 
-def test_the_shipped_catalog_uses_the_new_fields_on_centurion_and_unbound_alone() -> None:
-    """Groundwork for T179: Centurion is the first entry with a ready-to-play client section,
-    WoW Unbound (T555) the second; every other entry behaves exactly as before (its own tests:
-    test_catalog_centurion, test_unbound_entry)."""
+def test_the_shipped_catalog_uses_the_new_fields_on_wotlk_centurion_and_unbound() -> None:
+    """T809 W2: wow-wotlk and wow-unbound carry the Lumenveil ClientPack; Centurion does not.
+    WoW Unbound (T555) keeps its required addons pack beside it; WoW Conquest of Azeroth (T812)
+    carries its own client fields and no packs; every other entry behaves exactly as before
+    (its own tests: test_catalog_centurion, test_unbound_entry, test_coa_entry)."""
     raw = json.loads(CATALOG_FILE.read_text(encoding="utf-8"))
     for entry in raw["games"]:
-        if entry["id"] not in ("wow-centurion", "wow-unbound"):
+        if entry["id"] in ("wow-wotlk", "wow-centurion", "wow-unbound"):
+            assert "packs" in entry["client"], entry["id"]
+            continue
+        if entry["id"] == "wow-coa":
             assert set(entry["client"]) <= {
                 "version",
                 "build",
                 "required_build",
-                "also_builds",
-                "foreign_data_dies_after",
                 "addon_interface",
                 "realmlist_file",
+                "exe_names",
+                "wine_dll_overrides",
+                "update",
+                "hd_patches",
                 "notes",
-            }
+            }, sorted(set(entry["client"]))
+            continue
+        assert set(entry["client"]) <= {
+            "version",
+            "build",
+            "required_build",
+            "also_builds",
+            "foreign_data_dies_after",
+            "addon_interface",
+            "realmlist_file",
+            "notes",
+        }
     for game in load_catalog().games:
+        # T828: the HD patches choice is CoA's alone.
+        assert (game.client.hd_patches is not None) == (game.id == "wow-coa"), game.id
+        if game.id == "wow-wotlk":
+            assert [pack.id for pack in game.client.packs] == ["lumenveil"]
+            assert game.client.exe_patch is None
+            assert game.client.config_wtf is None
+            assert game.client.hosts() == frozenset(
+                {
+                    "github.com",
+                    "release-assets.githubusercontent.com",
+                    "objects.githubusercontent.com",
+                }
+            )
+            continue
         if game.id == "wow-centurion":
             assert game.client.packs and game.client.exe_patch and game.client.config_wtf
             assert game.client.hosts() == frozenset({"centurionpvp.com", "wow.baerthe.com"})
             continue
         if game.id == "wow-unbound":
-            assert game.client.packs and game.client.config_wtf
+            assert [pack.id for pack in game.client.packs] == ["unbound-addons", "lumenveil"]
+            assert game.client.config_wtf
             assert game.client.exe_patch is None
-            assert game.client.hosts() == frozenset()
+            assert game.client.hosts() == frozenset(
+                {
+                    "github.com",
+                    "release-assets.githubusercontent.com",
+                    "objects.githubusercontent.com",
+                }
+            )
+            continue
+        if game.id == "wow-coa":
+            assert game.client.exe_names == ("ascension.exe",)
+            assert game.client.wine_dll_overrides == "divxtac=d"
+            assert game.client.packs == ()
+            assert game.client.exe_patch is None
+            assert game.client.config_wtf is None
+            # T825: the client update's manifest host is the only host the entry names.
+            assert game.client.hosts() == frozenset({"launcher-api.coa-development.org"})
+            # T828: the CoA launcher's "Enable HD patches" off is exactly `-hd 0`.
+            assert game.client.hd_patches is not None
+            assert game.client.hd_patches.args_when_off == ("-hd", "0")
             continue
         assert game.client.packs == ()
         assert game.client.exe_patch is None
         assert game.client.config_wtf is None
         assert game.client.hosts() == frozenset()
+
+
+LUMENVEIL_URL = (
+    "https://github.com/lumenveil/Lumenveil/releases/download/v0.1.0/Lumenveil-0.1.0.zip"
+)
+LUMENVEIL_SHA256 = "78d1e1ca7450858a67d6ec2298343c3f67cda9aa920aa800e28982d8d3fee83b"
+LUMENVEIL_SIZE = 1_233_402
+LUMENVEIL_RELEASE = "https://github.com/lumenveil/Lumenveil/releases"
+LUMENVEIL_RELEASE_TAG = "v0.1.0"
+LUMENVEIL_RELEASE_DATE = "2026-10-21"
+"""T809 W2 pin (verified 2026-10-24): release page + tag + release date, and how the bytes proved.
+
+Zip hash recomputed locally from the downloaded asset and compared with the
+release's SHA256SUMS.txt line for Lumenveil-0.1.0.zip: match; all 16 zip members rechecked
+against their SHA256SUMS.txt lines: all OK. Size is the asset's byte count.
+`test_the_lumenveil_pin_names_its_release` holds the page, tag and date beside the hash,
+so a silent re-point at another tag fails here rather than in the download."""
+
+LUMENVEIL_MEMBERS = (
+    "version.dll",
+    "CoAVolFog.dll",
+    "CoAVolFog.ini",
+    "CoAVolFog-regions.ini",
+    "Lumenveil-Setup.cmd",
+    "Lumenveil-Uninstall.cmd",
+    "Lumenveil/lamp_extract.exe",
+    "Lumenveil/LEGAL.txt",
+    "Lumenveil/LICENSE.txt",
+    "Lumenveil/README.txt",
+    "Lumenveil/THIRD-PARTY-NOTICES.txt",
+    "Lumenveil/licenses/bzip2.txt",
+    "Lumenveil/licenses/DearImGui-MIT.txt",
+    "Lumenveil/licenses/Everwood-MIT.txt",
+    "Lumenveil/licenses/GPL-2.0.txt",
+    "Lumenveil/licenses/zlib.txt",
+)
+"""The zip's 16 members as the catalog installs them: root members verbatim, and the
+`Lumenveil\\...` members with forward slashes, because the catalog's `_inside` refuses
+backslashes. Spelled per member (no `"*"`) so an unexpected member is never laid in."""
+
+
+def _lumenveil_of(game_id: str) -> ClientPack:
+    """The shipped Lumenveil pack on one entry, failing loudly when it is missing."""
+    packs = {pack.id: pack for pack in load_catalog().get(game_id).client.packs}
+    assert "lumenveil" in packs, f"{game_id} lost its Lumenveil pack"
+    return packs["lumenveil"]
+
+
+def test_the_lumenveil_pack_is_pinned_identical_and_windows_only() -> None:
+    """The pin both entries share: URL, hash, size, members, platform, hosts, setup, credit."""
+    for game_id in ("wow-wotlk", "wow-unbound"):
+        pack = _lumenveil_of(game_id)
+        assert pack.label == "Lumenveil"
+        assert (pack.source.kind, pack.source.url) == ("url", LUMENVEIL_URL)
+        assert pack.source.version_url is None, "no latest to chase: an update is a catalog change"
+        assert pack.sha256 == LUMENVEIL_SHA256
+        assert (pack.md5, pack.md5_file, pack.sha256_file) == (None, None, None)
+        assert pack.optional is True and pack.default is False, "opt-in extra, off until chosen"
+        assert pack.size_hint == LUMENVEIL_SIZE
+        assert pack.platforms == ("windows",), "the setup exe runs on the player's machine"
+        assert pack.redirect_hosts == (
+            "release-assets.githubusercontent.com",
+            "objects.githubusercontent.com",
+        )
+        assert [(rule.member, rule.to) for rule in pack.install] == [
+            (member, member) for member in LUMENVEIL_MEMBERS
+        ]
+        assert pack.remove_when_off == ("CoAVolFog.log",), "spots stay: player data, plan D5"
+        assert pack.setup is not None
+        assert pack.setup.run == "Lumenveil/lamp_extract.exe"
+        assert pack.setup.runs == (
+            (
+                "--data",
+                "{data}",
+                "--out",
+                "{dir}/lampdata.bin",
+                "--locale",
+                "{locale}",
+                "--background",
+            ),
+            (
+                "--data",
+                "{data}",
+                "--liquids",
+                "{dir}/liquiddata.bin",
+                "--maps",
+                "0,1,530,571",
+                "--locale",
+                "{locale}",
+                "--background",
+            ),
+        )
+        assert pack.setup.writes == ("lampdata.bin", "liquiddata.bin")
+        assert pack.setup.timeout_seconds == 1800
+        assert pack.credit.startswith("Lumenveil") and "GPL-2.0" in pack.credit
+        assert "CoAVolFog" in pack.credit
+
+
+def test_the_lumenveil_pin_names_its_release() -> None:
+    """Item 7: the pinned hash is answerable -- the release page, tag and date it came from."""
+    assert LUMENVEIL_URL == (
+        f"{LUMENVEIL_RELEASE}/download/{LUMENVEIL_RELEASE_TAG}/Lumenveil-0.1.0.zip"
+    )
+    assert LUMENVEIL_RELEASE == "https://github.com/lumenveil/Lumenveil/releases"
+    assert LUMENVEIL_RELEASE_TAG == "v0.1.0"
+    assert LUMENVEIL_RELEASE_DATE == "2026-10-21"
+
+
+def test_the_lumenveil_setup_runs_cover_what_the_shipped_cmd_runs() -> None:
+    """The pinned Lumenveil-Setup.cmd (from inside the verified zip) runs lamp_extract.exe
+    twice: once with `--out lampdata.bin` (lamps) and once with `--liquids liquiddata.bin
+    --maps 0,1,530,571` (water). Both share `--data <client Data> --locale <probed> --background`
+    with cwd the game folder; the locale is probed from Data/???? folders holding
+    `locale-<same>.MPQ` at setup time, so the `.cmd` line's paths and locale reach the
+    catalog as the `{data}`/`{dir}`/`{locale}` placeholders the engine fills in per run.
+    This test fails when the pinned runs stop being the two runs the .cmd runs."""
+    pack = _lumenveil_of("wow-wotlk")
+    assert pack.setup is not None
+    assert len(pack.setup.runs) == 2
+    lamps, water = pack.setup.runs
+    assert "--out" in lamps and "{dir}/lampdata.bin" in lamps
+    assert "--liquids" in water and "{dir}/liquiddata.bin" in water
+    assert "--maps" in water and "0,1,530,571" in water
+    for run in pack.setup.runs:
+        assert "--data" in run and "{data}" in run
+        assert "--locale" in run and "{locale}" in run
+        assert "--background" in run
 
 
 Mutation = Callable[[dict[str, Any]], None]
@@ -537,7 +715,221 @@ REFUSALS: dict[str, tuple[Mutation, str]] = {
         _set("config_wtf.seed.gx Window", "1"),
         "String should match pattern",
     ),
+    # T809 W1: the new optional pack fields.
+    "platforms not a list": (
+        _set("packs.3.platforms", "windows"),
+        "Input should be a valid tuple",
+    ),
+    "platforms naming no platform": (
+        _set("packs.3.platforms", ["wine"]),
+        "Input should be",
+    ),
+    "setup exe empty": (
+        _set(
+            "packs.3.setup",
+            {
+                "run": "",
+                "runs": [["--background"]],
+                "writes": ["lampdata.bin"],
+            },
+        ),
+        "at least 1 character",
+    ),
+    "setup naming a script": (
+        _both(
+            _set("packs.3.install.0.member", "Lumenveil/Lumenveil-Setup.cmd"),
+            _set("packs.3.install.0.to", "Lumenveil/Lumenveil-Setup.cmd"),
+            _set(
+                "packs.3.setup",
+                {
+                    "run": "Lumenveil/Lumenveil-Setup.cmd",
+                    "runs": [["--background"]],
+                    "writes": ["lampdata.bin"],
+                },
+            ),
+        ),
+        "run directly",
+    ),
+    "setup run outside the zip": (
+        _set(
+            "packs.3.setup",
+            {
+                "run": "../lamp_extract.exe",
+                "runs": [["--background"]],
+                "writes": ["lampdata.bin"],
+            },
+        ),
+        "relative POSIX path",
+    ),
+    "setup run naming no member": (
+        _set(
+            "packs.3.setup",
+            {
+                "run": "Lumenveil/who-is-this.exe",
+                "runs": [["--background"]],
+                "writes": ["lampdata.bin"],
+            },
+        ),
+        "not an installed member",
+    ),
+    "setup with no runs": (
+        _set(
+            "packs.3.setup",
+            {"run": "Lumenveil/lamp_extract.exe", "runs": [], "writes": ["lampdata.bin"]},
+        ),
+        "at least 1 item",
+    ),
+    "setup with an empty run": (
+        _set(
+            "packs.3.setup",
+            {"run": "Lumenveil/lamp_extract.exe", "runs": [[]], "writes": ["lampdata.bin"]},
+        ),
+        "names no argv",
+    ),
+    "setup with an empty run word": (
+        _set(
+            "packs.3.setup",
+            {"run": "Lumenveil/lamp_extract.exe", "runs": [[""]], "writes": ["lampdata.bin"]},
+        ),
+        "no empty words",
+    ),
+    "setup naming an unknown placeholder": (
+        _set(
+            "packs.3.setup",
+            {
+                "run": "Lumenveil/lamp_extract.exe",
+                "runs": [["--out", "{bogus}"]],
+                "writes": ["lampdata.bin"],
+            },
+        ),
+        "{bogus}",
+    ),
+    "setup with no writes": (
+        _set(
+            "packs.3.setup",
+            {
+                "run": "Lumenveil/lamp_extract.exe",
+                "runs": [["--background"]],
+                "writes": [],
+            },
+        ),
+        "at least 1 item",
+    ),
+    "setup with a negative timeout": (
+        _set(
+            "packs.3.setup",
+            {
+                "run": "Lumenveil/lamp_extract.exe",
+                "runs": [["--background"]],
+                "writes": ["lampdata.bin"],
+                "timeout_seconds": -1,
+            },
+        ),
+        "greater than 0",
+    ),
+    "setup write climbing out": (
+        _set(
+            "packs.3.setup",
+            {
+                "run": "Lumenveil/lamp_extract.exe",
+                "runs": [["--background"]],
+                "writes": ["../lampdata.bin"],
+            },
+        ),
+        "relative POSIX path",
+    ),
+    "two packs sharing one setup output": (
+        _set(
+            "packs.0.setup",
+            {
+                "run": "patch-Y.MPQ",
+                "runs": [["--background"]],
+                "writes": ["Data/patch-F.MPQ"],
+            },
+        ),
+        "setup writes",
+    ),
+    "a pack removing another pack's setup output": (
+        _set("packs.0.remove_when_off", ["data/PATCH-f.mpq"]),
+        "removes",
+    ),
+    "redirect host with a scheme": (
+        _set("packs.3.redirect_hosts", ["https://objects.githubusercontent.com"]),
+        "bare hostnames",
+    ),
 }
+
+
+def _lumenveil_like_pack() -> dict[str, Any]:
+    """A pack that uses every new T809 field once, shaped like the planned Lumenveil entry."""
+    return {
+        "id": "lumenveil",
+        "label": "Lumenveil",
+        "source": {
+            "kind": "url",
+            "url": "https://github.com/lumenveil/Lumenveil/releases/download/v0.1.0/Lumenveil-0.1.0.zip",
+        },
+        "sha256": "2" * 64,
+        "install": [
+            {"member": "Lumenveil/lamp_extract.exe", "to": "Lumenveil/lamp_extract.exe"},
+            {"member": "version.dll", "to": "version.dll"},
+        ],
+        "optional": True,
+        "default": False,
+        "platforms": ["windows"],
+        "redirect_hosts": [
+            "release-assets.githubusercontent.com",
+            "objects.githubusercontent.com",
+        ],
+        "setup": {
+            "run": "Lumenveil/lamp_extract.exe",
+            "runs": [["--batch"]],
+            "writes": ["lampdata.bin", "liquiddata.bin"],
+            "timeout_seconds": 900,
+        },
+        "credit": "Lumenveil, GPL-2.0, github.com/lumenveil/Lumenveil",
+    }
+
+
+def test_a_pack_with_the_new_fields_parses_and_names_its_redirect_hosts() -> None:
+    """The Lumenveil shape loads, keeps its values, and widens `hosts()` by the redirect hosts."""
+    data = _client()
+    data["packs"].append(_lumenveil_like_pack())
+    client = Client.model_validate(data)
+    pack = next(item for item in client.packs if item.id == "lumenveil")
+    assert pack.platforms == ("windows",)
+    assert pack.redirect_hosts == (
+        "release-assets.githubusercontent.com",
+        "objects.githubusercontent.com",
+    )
+    assert pack.setup is not None
+    assert pack.setup.run == "Lumenveil/lamp_extract.exe"
+    assert pack.setup.runs == (("--batch",),)
+    assert pack.setup.writes == ("lampdata.bin", "liquiddata.bin")
+    assert pack.setup.timeout_seconds == 900
+    assert pack.credit.startswith("Lumenveil")
+    assert "release-assets.githubusercontent.com" in client.hosts()
+    assert "objects.githubusercontent.com" in client.hosts()
+    assert "github.com" in client.hosts()
+
+
+def test_redirect_hosts_compare_case_insensitively() -> None:
+    """Hostnames are DNS names: the catalog stores them lowered, matching `hosts()` of urls."""
+    data = _client()
+    data["packs"].append(_lumenveil_like_pack())
+    data["packs"][-1]["redirect_hosts"] = ["Objects.GitHubUserContent.Com"]
+    pack = next(item for item in Client.model_validate(data).packs if item.id == "lumenveil")
+    assert pack.redirect_hosts == ("objects.githubusercontent.com",)
+
+
+def test_new_fields_default_to_absent_so_every_existing_pack_behaves_as_now() -> None:
+    """Absent = today's behaviour: every platform, no redirect hosts, no setup, no credit."""
+    client = Client.model_validate(_client())
+    pack = client.packs[3]
+    assert pack.platforms == ()
+    assert pack.redirect_hosts == ()
+    assert pack.setup is None
+    assert pack.credit == ""
 
 
 @pytest.mark.parametrize("name", sorted(REFUSALS))
@@ -586,3 +978,11 @@ def test_write_and_model_types_are_importable_for_the_engine() -> None:
     assert ConfigWtf().always == {} and ConfigWtf().seed == {}
     assert ExePatch.model_fields["options"].default_factory is dict
     assert ClientPack.model_fields["optional"].default is False
+    assert ClientPack.model_fields["platforms"].default == ()
+    assert ClientPack.model_fields["redirect_hosts"].default == ()
+    assert ClientPack.model_fields["setup"].default is None
+    assert ClientPack.model_fields["credit"].default == ""
+    assert PackSetup.model_fields["timeout_seconds"].default == 900
+    assert PackSetup(run="a.exe", runs=[["--background"]], writes=["b.bin"]).runs == (
+        ("--background",),
+    )

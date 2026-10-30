@@ -21,7 +21,7 @@ from yulon.catalog import native, snapshot
 
 MB = 1_048_576
 RULE = "kept until an update succeeds"
-CLEAN_UP = "Maintenance → Clean up…"
+CLEAN_UP = "Backups & updates → Clean up…"
 
 
 def _lay(server_dir: Path, name: str, size: int) -> None:

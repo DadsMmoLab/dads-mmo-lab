@@ -550,9 +550,37 @@ SEAMS: dict[str, tuple[str, str]] = {
         "an Applier install/remove: the tab's applier, or Centurion's add-on-only one, holds",
     ),
     "db_refusal": ("reads", "a sentence"),
+    "realm_name_current": ("reads", "the realm row's name, else the saved one; writes nothing"),
+    "realm_name_save": (
+        "held",
+        f"{_SEAMS}.test_a_realm_name_save_while_another_yulon_holds_the_server_writes_nothing",
+    ),
     "shelf": (
         "held",
         "tests.test_backup_shelf.test_another_yulon_holding_the_server_refuses_before_the_lease",
+    ),
+    # Fields of the open-tickets batch (T805, T795, T804):
+    "bot_rndbot_delete": (
+        "held",
+        "tests.test_delete_random_bots."
+        "test_a_delete_while_another_yulon_holds_the_server_writes_nothing",
+    ),
+    "rebuild_note": ("reads", "a heads-up sentence, from files only; writes nothing"),
+    "script_built_rebuild": (
+        "outside",
+        "docker build and compose up of the old script's own project; writes nothing in the "
+        "folder or the databases, and refuses unless the world is stopped (script_built R8)",
+    ),
+    "table_repair": (
+        "held",
+        "tests.test_table_repair."
+        "test_a_repair_while_another_yulon_holds_the_server_dumps_and_repairs_nothing",
+    ),
+    # Fields of the Conquest of Azeroth entry (T812):
+    "realm_switch": (
+        "held",
+        "tests.test_coa_switch_hold."
+        "test_a_switch_while_another_yulon_holds_the_server_switches_nothing",
     ),
 }
 

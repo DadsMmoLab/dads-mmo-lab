@@ -745,12 +745,12 @@ def test_a_mismatched_kept_build_keeps_its_record_while_docker_keeps_its_names(
 
 # -- WotLK in normal use: only what its Dockerfile reads counts (T230) --------
 
-WOTLK_DATA = Path(__file__).resolve().parent / "data" / "azerothcore-wotlk-8a4e76ea"
-"""mod-playerbots/azerothcore-wotlk at commit 2a2211cd8f3d157da432ec0175ddd4b8a191931f (the
-catalog's pin for wow-wotlk; read at 7f12e89e 2026-10-05, the same bytes at f19a1879
-2026-10-08 and at 2a2211cd 2026-10-10), byte for byte: the root `.dockerignore`,
-`apps/docker/Dockerfile` and `src/cmake/genrev.cmake`. WotLK renders none of its own, so these
-are what Docker builds the server folder with."""
+WOTLK_DATA = Path(__file__).resolve().parent / "data" / "azerothcore-wotlk-3f2969dd"
+"""mod-playerbots/azerothcore-wotlk at commit 3f2969ddb0da42b48b4fca050c02b19163ba1e20 (the
+catalog's pin for wow-wotlk since T824; read at 7f12e89e 2026-10-05, the same bytes at f19a1879
+2026-10-08, at 2a2211cd 2026-10-10, at 8a4e76ea 2026-10-17 and at 3f2969dd 2026-10-28), byte for
+byte: the root `.dockerignore`, `apps/docker/Dockerfile` and `src/cmake/genrev.cmake`. WotLK
+renders none of its own, so these are what Docker builds the server folder with."""
 UPSTREAM_DOCKERIGNORE = WOTLK_DATA / "dockerignore"
 HEAD_COMMIT = "c" * 40
 

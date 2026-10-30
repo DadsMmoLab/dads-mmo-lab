@@ -73,7 +73,8 @@ answer": the build is then not kept. It is never a guess. The cases are:
   would send, a link whose target cannot be read, any other OSError, a file
   that changed while it was read, and either cap (`MAX_BYTES`, `MAX_ENTRIES`).
 
-Deliberately left out: Yu'lon's own `.yulon*` files at the context root. They
+Deliberately left out: Yu'lon's own `.yulon*` files at the context root, and the
+`.yulon-tmp` temp files a crash leaves beside a conf at any depth (T791). They
 are never compiled, and writing the record of a kept build would otherwise change
 the fingerprint that record holds. On a known recipe two more things are left out,
 each with its proof in the T230 plan §1:
@@ -138,6 +139,11 @@ upstream context, such as AzerothCore's, from turning into an unbounded read."""
 MAX_ENTRIES = 200_000
 """Folder entries looked at, admitted or not, past which there is no answer (plan §2)."""
 OWN_PREFIX = ".yulon"
+TEMP_MARK = ".yulon-tmp"
+"""In a name, a temp file a crash left behind (T791): `..env.yulon-tmp-XXXX` beside a conf
+(`families/conf.py` `_write`) or `<name>.<pid>.yulon-tmp`. A conf folder can sit inside a
+folder the recipe reads (AzerothCore's `conf/`), so this is skipped at any depth, not only
+at the root as `OWN_PREFIX` is."""
 CHUNK = 1024 * 1024
 MAX_RECIPE_BYTES = 16 * 1024 * 1024
 """The overlay and the `.dockerignore` are read whole; one larger than this is not ours."""
@@ -629,7 +635,7 @@ def _walk(stream: _Stream, context: Path, rules: Rules, known: _Known | None = N
         if entry is None:
             stack.pop()
             continue
-        if not frame.parts and entry.name.startswith(OWN_PREFIX):
+        if (not frame.parts and entry.name.startswith(OWN_PREFIX)) or TEMP_MARK in entry.name:
             continue
         parts = (*frame.parts, entry.name)
         rel = "/".join(parts)

@@ -16,15 +16,16 @@ a password can have (`commands.py`). The shortest name (3) and password (4) are 
 same allow-list's. The longest are each core's own `MAX_ACCOUNT_STR` and password
 ceiling, read at the catalog's pinned trees on 2026-10-11:
 
-- `azerothcore` (AzerothCore): name 17, password 16. azerothcore-wotlk 2a2211cd and
-  8a4e76ea `src/server/game/Accounts/AccountMgr.h:34-35`.
-- `mangos_srp6` (CMaNGOS): name 16, password 16. mangos-tbc 15b6ddb4 and mangos-classic
-  8ec338a1 `src/game/Accounts/AccountMgr.h:34`; `ChangePassword` holds the password to
-  the same 16.
+- `azerothcore` (AzerothCore): name 17, password 16. azerothcore-wotlk 2a2211cd,
+  8a4e76ea and 3f2969dd (T824, 2026-10-28) `src/server/game/Accounts/AccountMgr.h:34-35`.
+- `mangos_srp6` (CMaNGOS): name 16, password 16. mangos-tbc 15b6ddb4 and 37767e95,
+  mangos-classic 8ec338a1 and 57312491 (T824, 2026-10-28)
+  `src/game/Accounts/AccountMgr.h:34`; `ChangePassword` holds the password to the same 16.
 - `mangos_sha` (tortoise-wow, the MaNGOS-Zero line): name 16, password 16. tortoise-wow
-  6131a26f and 10393426 `src/game/AccountMgr.h:50`, `AccountMgr.cpp:146`.
+  6131a26f, 10393426 and 33d0131a (T824, 2026-10-28) `src/game/AccountMgr.h:50`,
+  `AccountMgr.cpp:136`.
 - `trinitycore` (TrinityCore112, Centurion): name 16, password 16. TrinityCore112
-  25d3e6ef `src/server/game/Accounts/AccountMgr.h:41-42`.
+  25d3e6ef and 351950fb (T824, 2026-10-28) `src/server/game/Accounts/AccountMgr.h:41-42`.
 
 A core's own `account create` refuses a longer one (`AOR_NAME_TOO_LONG`), so a row
 written past it is one the server's own commands cannot name.
@@ -138,7 +139,8 @@ def bot_problem(name: str, bot_prefix: str | None) -> str:
     """Why `name` is the random bots' to have, or "": it starts with their account prefix (T749).
 
     `bot_prefix` is `bot_prefix()`'s answer. Yu'lon's population count reads every
-    account whose name starts with it as a bot (`dbreads`: `UPPER(username) LIKE 'PREFIX%'`),
+    account whose name starts with it as a bot (`dbreads.prefix_match`:
+    `UPPER(username) LIKE 'PREFIX%' ESCAPE '!'`),
     so a player's account named so would be counted as one.
     """
     if bot_prefix and name.strip().upper().startswith(bot_prefix.upper()):

@@ -144,12 +144,35 @@ class LauncherPlace(BaseModel):
         return recent_addresses(value) if isinstance(value, list) else []
 
 
+class FriendServer(BaseModel):
+    """One saved friend server (T807): a game whose server is NOT installed here.
+
+    The player picks a game, types a realm address and names the entry; the
+    ready-to-play client Yu'lon made for it is remembered by its folder. `realm`
+    is the address as typed; `host` and `auth_port` are what it parsed to.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    name: str = Field(min_length=1)
+    game: str = Field(min_length=1)
+    realm: str = Field(min_length=1)
+    host: str = Field(min_length=1)
+    auth_port: int = Field(ge=1, le=65535)
+    client_folder: Path
+    """The player's own client the ready-to-play copy was made from."""
+    play_folder: Path
+    """The ready-to-play client itself, marked for this friend server."""
+
+
 class UiSettings(BaseModel):
     """Everything `ui.json` holds."""
 
     model_config = ConfigDict(extra="ignore")
 
     launchers: dict[str, LauncherPlace] = Field(default_factory=dict)
+    friend_servers: tuple[FriendServer, ...] = ()
+    """T807: the saved friend servers, newest last, one per name."""
     noticed_leftovers: list[str] = Field(default_factory=list)
     """T179: the temporary client copies Yu'lon has already said it could not remove,
     by folder, so the start-up notice is said once per folder and not at every start."""
@@ -332,6 +355,36 @@ def remember_tray(
             settings.keep_in_tray = keep_in_tray
         if tray_note is not None:
             settings.tray_note = tray_note
+        return save_ui_settings(settings, path)
+
+
+def friend_servers(path: Path | None = None) -> tuple[FriendServer, ...]:
+    """The saved friend servers, in the order they are kept (T807). Never raises."""
+    return load_ui_settings(path).friend_servers
+
+
+def remember_friend_server(server: FriendServer, path: Path | None = None) -> bool:
+    """Save one friend server under its name, replacing the one of that name (T807).
+
+    False = not written (the file could not be saved; the window says so and the
+    entry still works until the app closes).
+    """
+    with _LOCK:
+        settings = load_ui_settings(path)
+        kept = [one for one in settings.friend_servers if one.name != server.name]
+        kept.append(server)
+        settings.friend_servers = tuple(kept)
+        return save_ui_settings(settings, path)
+
+
+def forget_friend_server(name: str, path: Path | None = None) -> bool:
+    """Drop one saved friend server by name (T807). True when it is not on the list any more."""
+    with _LOCK:
+        settings = load_ui_settings(path)
+        kept = tuple(one for one in settings.friend_servers if one.name != name)
+        if len(kept) == len(settings.friend_servers):
+            return True
+        settings.friend_servers = kept
         return save_ui_settings(settings, path)
 
 

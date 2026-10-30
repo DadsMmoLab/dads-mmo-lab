@@ -95,6 +95,7 @@ from yulon.kept_backups import PARTIAL, kept_backups_path
 from yulon.log import get_logger
 from yulon.ownership import Ownership
 from yulon.said import SaidByYulon
+from yulon.server_build_presses import MAINTENANCE_TAB
 
 if TYPE_CHECKING:
     from yulon.catalog.catalog import CatalogEntry
@@ -1331,14 +1332,14 @@ def _restore_refusal(server_dir: Path) -> str | None:
         return (
             "A restore from the last session is still writing into this server's databases "
             "in Docker. Uninstalling now would cut it off. Wait for it to finish (the "
-            "Maintenance tab says when), then uninstall again. Nothing was removed."
+            f"{MAINTENANCE_TAB} tab says when), then uninstall again. Nothing was removed."
         )
     return (
         "A restore of this server did not finish, so its databases may be half-written. The "
         "record that says so would not come back with a reinstall, and a reinstall that kept "
-        "the characters would start on them with no warning. On the Maintenance tab, restore "
-        "a backup again, or press Forget that record if you have put the databases right or "
-        "will not keep them, then uninstall again. Nothing was removed."
+        f"the characters would start on them with no warning. On the {MAINTENANCE_TAB} tab, "
+        "restore a backup again, or press Forget that record if you have put the databases "
+        "right or will not keep them, then uninstall again. Nothing was removed."
     )
 
 

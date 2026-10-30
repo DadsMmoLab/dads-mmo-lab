@@ -222,7 +222,7 @@ CHIP_ACTION_LABELS: dict[ChipAction, str] = {
 }
 """What each action's button says: the same words as the press it runs.
 
-The two "Server build ▾" entries come from `server_build_presses`, which the view
+The two Server version section entries come from `server_build_presses`, which the view
 reads too; they cannot be imported from `controller_view` -- this module
 deliberately imports nothing from it (module docstring). Until T155 they were
 typed here, and the rebuild's had stayed "Rebuild server…" after the press it

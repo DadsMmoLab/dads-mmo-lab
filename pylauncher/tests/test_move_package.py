@@ -28,6 +28,7 @@ from yulon.move import (
     read_package,
     write_package,
 )
+from yulon.server_build_presses import UPDATE_TO_LATEST, under_server_build
 
 AT = datetime(2026, 10, 9, 15, 30)
 DIGEST_A = "a" * 64
@@ -358,8 +359,8 @@ def test_a_different_digest_is_refused_with_both_counts() -> None:
         "The databases in this file are not at the same version as this server's "
         "(acore_auth: 10 updates in the file, 12 here), and Yu'lon cannot convert characters "
         "between versions. Put both servers on the same version (use "
-        "“Update the server to latest…” under “Server build ▾” on the Modules tab on the one "
-        "that is behind, and pack again if it was the old one), then try again."
+        "“Update the server to latest…” under “Server version” on the Backups & updates tab on "
+        "the one that is behind, and pack again if it was the old one), then try again."
     )
 
 
@@ -601,3 +602,227 @@ def test_a_dump_unpacked_from_a_package_is_owner_only(tmp_path: Path) -> None:
     finally:
         os.umask(old)
     assert _mode(written) == 0o600, oct(_mode(written))
+
+
+# ------------------------------------------------------------------ update names (T802)
+
+
+def _updates_dump(names: tuple[str, ...], *, modules: tuple[tuple[str, str], ...] = ()) -> bytes:
+    """A dump whose `updates` table holds `names` (RELEASED) and `modules` (MODULE rows)."""
+    rows = [
+        f"('{n}','{hashlib.sha1(n.encode()).hexdigest().upper()}','RELEASED',"
+        "'2026-10-01 00:00:00',0)"
+        for n in names
+    ]
+    rows += [f"('{n}','{h * 40}','MODULE','2026-10-01 00:00:00',0)" for n, h in modules]
+    return (
+        b"-- yulon-backup: game=wow-wotlk\n-- MySQL dump 10.13\nUSE `acore_auth`;\n"
+        b"INSERT INTO `t` VALUES (1);\n"
+        + f"INSERT INTO `updates` VALUES {','.join(rows)};\n".encode()
+    )
+
+
+def _updates_package(
+    tmp_path: Path,
+    body: bytes,
+    evidence: Evidence,
+) -> move.Package:
+    dest = tmp_path / "ledger.zip"
+    write_package(
+        dest,
+        header(schema_evidence={"acore_auth": evidence}),
+        [dump(tmp_path, "acore_auth", body=body)],
+    )
+    return read_package(dest)
+
+
+NAMES = tuple(f"2026_10_{n:02d}_00.sql" for n in range(1, 6))
+
+
+def _evidence_of(names: tuple[str, ...], modules: tuple[tuple[str, str], ...] = ()) -> Evidence:
+    return Evidence(
+        kind="updates",
+        count=len(names),
+        digest=move.digest_of(names),
+        modules=tuple(sorted(f"{n}|{h * 40}" for n, h in modules)),
+    )
+
+
+def test_dump_update_names_match_the_manifest_digest(tmp_path: Path) -> None:
+    modules = (("mod_a.sql", "a"),)
+    package = _updates_package(
+        tmp_path, _updates_dump(NAMES, modules=modules), _evidence_of(NAMES, modules)
+    )
+    core, module_rows = move.updates_names_in_dump(package, "acore_auth") or ((), ())
+    assert core == tuple(sorted(NAMES))
+    assert module_rows == ("mod_a.sql|" + "a" * 40,)
+
+
+def test_dump_update_names_that_disagree_with_the_digest_refuse(tmp_path: Path) -> None:
+    body = _updates_dump(NAMES)
+    wrong_digest = Evidence(kind="updates", count=5, digest=DIGEST_A)
+    wrong_count = Evidence(kind="updates", count=6, digest=move.digest_of(NAMES))
+    extra_modules = _evidence_of(NAMES, (("mod_x.sql", "b"),))
+    for evidence in (wrong_digest, wrong_count, extra_modules):
+        package = _updates_package(tmp_path, body, evidence)
+        assert move.updates_names_in_dump(package, "acore_auth") is None
+        (tmp_path / "ledger.zip").unlink()
+        (tmp_path / "src" / "acore_auth.sql").unlink()
+    # The same dump with evidence that does add up is read, so the refusals above are the
+    # cross-check's doing and not the dump's.
+    package = _updates_package(tmp_path, body, _evidence_of(NAMES))
+    assert move.updates_names_in_dump(package, "acore_auth") is not None
+
+
+@pytest.mark.parametrize(
+    "tuple_text",
+    [
+        "('2026_10_01_00.sql','ABC','RELEASED','2026-10-01 00:00:00',0)",  # hash is not 40 hex
+        f"('2026_10_01_00.sql','{'A' * 40}','RELEASED','2026-10-01 00:00:00')",  # a column short
+        f"('2026_10_01_00.sql','{'A' * 40}','RELEASED','2026-10-01 00:00:00',0,1)",  # one too many
+        "('2026_10_01_00.sql',NULL,'RELEASED','2026-10-01 00:00:00',0)",
+        f"('it\\'s.sql','{'A' * 40}','RELEASED','2026-10-01 00:00:00',0)",  # an escaped quote
+    ],
+)
+def test_a_malformed_updates_tuple_refuses(tmp_path: Path, tuple_text: str) -> None:
+    good = f"('2026_10_02_00.sql','{'B' * 40}','RELEASED','2026-10-01 00:00:00',0)"
+    names = ("2026_10_01_00.sql", "2026_10_02_00.sql")
+    body = (
+        b"-- yulon-backup: game=wow-wotlk\nUSE `acore_auth`;\n"
+        + f"INSERT INTO `updates` VALUES {tuple_text},{good};\n".encode()
+    )
+    package = _updates_package(tmp_path, body, _evidence_of(names))
+    assert move.updates_names_in_dump(package, "acore_auth") is None
+
+
+def test_a_dump_with_no_updates_insert_has_no_names(tmp_path: Path) -> None:
+    package = _updates_package(tmp_path, b"-- yulon-backup: game=wow-wotlk\n", _evidence_of(NAMES))
+    assert move.updates_names_in_dump(package, "acore_auth") is None
+
+
+def _sides(file: tuple[str, ...], here: tuple[str, ...], *, built_here: bool = True) -> str | None:
+    def names_of(names: tuple[str, ...]) -> move.NamesOf:
+        return lambda schema: (tuple(sorted(names)), ())
+
+    return move.version_difference(
+        {"acore_auth": _evidence_of(file)},
+        {"acore_auth": _evidence_of(here)},
+        file_names=names_of(file),
+        server_names=names_of(here),
+        built_here=built_here,
+    )
+
+
+def test_a_file_whose_updates_are_inside_this_servers_is_called_behind() -> None:
+    said = _sides(NAMES[:4], NAMES)
+    assert said is not None
+    assert said.startswith(
+        "The file is behind this server (acore_auth: 4 updates in the file, 5 here). "
+        "Bring the OLD server up to date and pack again"
+    )
+
+
+def test_this_server_is_called_behind_only_with_a_press_it_can_use() -> None:
+    owned = _sides(NAMES, NAMES[:4], built_here=True)
+    adopted = _sides(NAMES, NAMES[:4], built_here=False)
+    assert owned is not None and adopted is not None
+    assert owned.startswith("This server is behind the file (acore_auth: 5 updates in the file")
+    assert under_server_build(UPDATE_TO_LATEST) in owned
+    assert "launcher that built it" in adopted
+    assert UPDATE_TO_LATEST not in adopted
+
+
+def test_updates_that_are_neither_inside_the_other_are_called_different() -> None:
+    said = _sides((*NAMES[:3], "only_file.sql"), (*NAMES[:3], "only_here.sql"))
+    assert said is not None
+    assert said.startswith("The two servers ran different updates")
+    assert "whole server" in said
+
+
+def test_unknown_names_keep_the_plain_sentence() -> None:
+    said = move.version_difference(
+        {"acore_auth": _evidence_of(NAMES)},
+        {"acore_auth": _evidence_of(NAMES[:4])},
+        file_names=lambda schema: None,
+        server_names=lambda schema: (NAMES[:4], ()),
+    )
+    assert said is not None and said.startswith("The databases in this file are not at the same")
+
+
+# ------------------------------------------------------------ appliable tails (T802)
+
+
+def _row(name: str, state: str = "RELEASED") -> move.TailRow:
+    return (name, hashlib.sha1(name.encode()).hexdigest().upper(), state)
+
+
+def _rows(names: tuple[str, ...], state: str = "RELEASED") -> list[move.TailRow]:
+    return [_row(name, state) for name in names]
+
+
+def test_a_file_behind_by_a_tail_is_appliable(tmp_path: Path) -> None:
+    tail = move.appliable_tail(_rows(NAMES[:4]), _rows(NAMES))
+    assert tail == (NAMES[4],)
+
+
+def test_a_matching_ledger_has_no_tail() -> None:
+    assert move.appliable_tail(_rows(NAMES), _rows(NAMES)) is None
+
+
+def test_a_file_ahead_has_no_tail() -> None:
+    assert move.appliable_tail(_rows(NAMES), _rows(NAMES[:4])) is None
+
+
+def test_a_different_set_has_no_tail() -> None:
+    file = _rows(NAMES[:3]) + [_row("only_file.sql")]
+    here = _rows(NAMES[:3]) + [_row("only_here.sql")]
+    assert move.appliable_tail(file, here) is None
+
+
+def test_a_shared_name_with_another_hash_has_no_tail() -> None:
+    file = _rows(NAMES[:4])
+    here = _rows(NAMES)
+    name, _, state = here[0]
+    here[0] = (name, "B" * 40, state)
+    assert move.appliable_tail(file, here) is None
+
+
+def test_a_gap_before_the_newest_has_no_tail() -> None:
+    file = _rows((NAMES[0], NAMES[2], NAMES[3], NAMES[4]))
+    assert move.appliable_tail(file, _rows(NAMES)) is None
+
+
+def test_an_archived_missing_row_has_no_tail() -> None:
+    file = _rows(NAMES[:4])
+    here = _rows(NAMES[:4]) + [_row(NAMES[4], "ARCHIVED")]
+    assert move.appliable_tail(file, here) is None
+
+
+def test_module_rows_must_match() -> None:
+    file = _rows(NAMES[:4]) + [("mod_a.sql", "A" * 40, "MODULE")]
+    here = _rows(NAMES) + [("mod_a.sql", "B" * 40, "MODULE")]
+    assert move.appliable_tail(file, here) is None
+
+
+def test_tail_file_paths_point_at_the_checkout(tmp_path: Path) -> None:
+    root = tmp_path / "server"
+    assert move.tail_update_path(root, "acore_auth", "2026_10_05_00.sql") == (
+        root / "data" / "sql" / "updates" / "db_auth" / "2026_10_05_00.sql"
+    )
+    assert move.tail_update_path(root, "acore_playerbots", "a.sql") == (
+        root / "modules" / "mod-playerbots" / "data" / "sql" / "playerbots" / "updates" / "a.sql"
+    )
+
+
+def test_tail_file_matches_hashes_the_whole_file(tmp_path: Path) -> None:
+    body = b"-- an update\nINSERT INTO t VALUES (1);\n"
+    path = tmp_path / "2026_10_05_00.sql"
+    path.write_bytes(body)
+    assert move.tail_file_matches(path, hashlib.sha1(body).hexdigest())
+    assert not move.tail_file_matches(path, "0" * 40)
+    assert not move.tail_file_matches(tmp_path / "missing.sql", hashlib.sha1(body).hexdigest())
+
+    # Mutation: hashing only the first byte would pass a prefix but not the file.
+    other = tmp_path / "other.sql"
+    other.write_bytes(b"-- an update\nINSERT INTO t VALUES (2);\n")
+    assert not move.tail_file_matches(other, hashlib.sha1(body).hexdigest())

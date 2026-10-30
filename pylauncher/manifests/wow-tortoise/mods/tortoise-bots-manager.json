@@ -47,8 +47,10 @@
     "it yet, install this addon through the Modules tab's own Install, so this row reads installed",
     "and its Remove works as ever. Play (the ready-to-play client only) never touches git or the",
     "network: it copies back, from the clone already on disk, any file of the addon the client",
-    "lacks, and never overwrites one that is there. Updates stay the Modules tab's Check for",
+    "lack, and never overwrites one that is there. Updates stay the Modules tab's Check for",
     "updates and Update. A Remove is remembered per server and nothing puts the addon back;",
-    "installing it by hand lifts that. Nothing is written to the server and nothing is restarted."
+    "installing it by hand lifts that. Nothing is written to the server and nothing is restarted.",
+    "Since T814 a finished Update the server to latest also updates it (release follows release);",
+    "Return to the tested pin leaves it as it is."
   ]
 }

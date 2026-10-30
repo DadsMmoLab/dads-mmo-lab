@@ -80,20 +80,20 @@ class TortoiseController(Controller):
             entry, self.spec, self.server_dir, wsl_distro=self.wsl_distro
         )
 
-    def stop(self) -> bool:
+    def stop(self, *, by_choice: bool = False) -> bool:
         """Mark the realm offline while the database is still up, then stop (T577).
 
         Only when the database is already running: a Stop must not start one to say the
         realm is closing, and the Start that follows marks it again before its world starts.
         """
         if self.wsl_distro is not None and wsl.known_stopped(self.wsl_distro):
-            return super().stop()
+            return super().stop(by_choice=by_choice)
         # T581: held offline on purpose for the whole Stop, so the dashboard tick does not
         # put a realm back online while its world saves on the way down.
         with realm_flag.deliberately_offline(self.spec):
             self._mark_the_realm_offline(start_database=False)
             try:
-                return super().stop()
+                return super().stop(by_choice=by_choice)
             except Exception:
                 # A Stop given up (a Cancel while the world loads or saves) or refused leaves
                 # the world running, and only a start clears the bit: take it off again. If

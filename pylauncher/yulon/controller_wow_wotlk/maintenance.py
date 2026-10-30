@@ -112,6 +112,7 @@ from yulon import docker, platform, runner
 from yulon.apply import DB_NAMES, RootPassword, mysql_client, mysql_env
 from yulon.controller_wow_wotlk import docker_ctl
 from yulon.log import get_logger
+from yulon.server_build_presses import MAINTENANCE_TAB
 
 logger = get_logger(__name__)
 
@@ -140,6 +141,25 @@ SYSTEM_SCHEMAS = frozenset({"information_schema", "performance_schema", "mysql",
 # (Discord report, 2026-08-26). `backup(core_databases=...)` is what a caller
 # holding the catalog entry passes instead.
 CORE_DATABASES: tuple[str, ...] = (DB_NAMES["auth"], DB_NAMES["characters"], DB_NAMES["world"])
+REALM_DATABASES: tuple[str, ...] = (
+    DB_NAMES["auth"],
+    DB_NAMES["characters"],
+    DB_NAMES["playerbots"],
+)
+"""The schemas one realm type's characters live in (T812 C3b fix round 1).
+
+An auth/characters/playerbots dump without the realm-type record is refused while a
+realm type is active: every CoA dump made before the record carries none, and its
+names say nothing about which type its rows belong to. The world database holds no
+type's characters, so its dumps are unaffected.
+"""
+
+
+def _dump_touches_a_realm_database(databases: tuple[str, ...]) -> bool:
+    """Whether a dump writes into any schema a realm type's characters live in."""
+    lowered = {name.lower() for name in databases}
+    return any(name.lower() in lowered for name in REALM_DATABASES)
+
 
 CLIENT_CACHE_NOTE = (
     "Item and spell changes are cached by the WoW client, not the server. Each "
@@ -231,6 +251,14 @@ class _HasIdAndName(Protocol):
 GAME_RECORD = re.compile(r"-- yulon-backup: game=([a-z0-9]+(?:-[a-z0-9]+)*)")
 _GAME_RECORD_BYTES = re.compile(rb"-- yulon-backup: game=([a-z0-9]+(?:-[a-z0-9]+)*)")
 _GAME_RECORD_LEAD = b"-- yulon-backup:"
+# The realm-type record a backup of a CoA server carries, beside the game record (T812 C3b).
+# Same shape, same place: one comment line ahead of mysqldump's banner, in the file so a
+# rename cannot separate it. `realm_types` entries only: every other game's dumps carry no
+# such line, and old CoA dumps carry none either. The id is the catalog realm-type grammar
+# (`AcRealmType`), the one the engine's guards already splice into SQL.
+REALM_RECORD = re.compile(r"-- yulon-backup: realm-type=([a-z][a-z0-9]{1,9})")
+_REALM_RECORD_BYTES = re.compile(rb"-- yulon-backup: realm-type=([a-z][a-z0-9]{1,9})")
+_REALM_RECORD_LEAD = b"-- yulon-backup: realm-type="
 
 IMPORT_RECORD_LEAD = "-- yulon-import-record: "
 """The line a rollback copy carries: the unfinished-import record as the copy was taken (T712).
@@ -303,6 +331,30 @@ class SchemaMysql(MysqlDocker, Protocol):
 
 RunningNames = Callable[[], list[str]]
 """What is running right now, by container name — `yulon.docker.status`."""
+
+LOCK_ACQUIRE_S = 10.0
+"""How long the database may take to grant a table read lock before it is reported (T822).
+
+A lock queues behind whatever is already writing that table, and a MyISAM table lock queues
+behind its readers too. Ten seconds is longer than any single statement a world is playing
+through, and short enough that the player behind the copy is still watching for the answer.
+"""
+
+LOCK_RELEASE_S = 10.0
+"""How long the locking client may take to unlock and exit; after that it is killed (T822).
+
+Killing the client releases the lock at the server just as `UNLOCK TABLES` does. What must
+never happen is the block ending while a client still holds the table.
+"""
+
+LOCK_ANSWERED = "yulon-table-locked"
+"""The word the client prints once the server has granted the lock (T822).
+
+The client's stdin is a pipe, so "it did not exit" is not the same as "it holds the lock":
+`FLUSH TABLES … WITH READ LOCK` can wait indefinitely. `SELECT '<this word>'` after the
+statement is the only proof that the lock is held, and `--unbuffered` is what makes that
+answer leave the client's own buffer.
+"""
 
 
 @dataclass(frozen=True)
@@ -449,6 +501,124 @@ class DockerMysql:
             raise MaintenanceError(f"the query failed: {_stderr(proc)}")
         return (proc.stdout or b"").decode("utf-8", "replace")
 
+    @contextlib.contextmanager
+    def read_lock(self, *statements: str) -> Iterator[None]:
+        """Hold a table read lock from the first of `statements` the server grants (T822).
+
+        A **lock outlives the session that took it and no longer**, so this is the one
+        `DockerMysql` call that does not start a client per statement: it starts ONE client,
+        feeds it the lock, waits for the server to answer, and keeps that process alive until
+        the block ends — then sends `UNLOCK TABLES` and closes it. That is what makes the
+        files a caller copies while inside the block a consistent snapshot rather than a copy
+        taken under a server that is still writing.
+
+        `statements` are tried in order in SEPARATE sessions: MySQL's batch client aborts on
+        the first error, so a refused `FLUSH TABLES … WITH READ LOCK` cannot be followed by
+        `LOCK TABLES … READ` on the same one. The first statement that is answered wins.
+
+        The wait is bounded (`LOCK_ACQUIRE_S`): a lock queued behind a long write is reported
+        rather than waited on indefinitely, because the caller has something useful to say
+        about a copy it could not make consistent.
+
+        Raises:
+            MaintenanceError: no statement could be granted, there is no docker CLI to run, or
+                the client died before answering. The block is never entered on a refusal.
+
+        The session is closed in a `finally`, on every path including an exception inside the
+        block: closing its stdin makes the client exit, and a client that has exited holds no
+        lock. A client that does not exit within `LOCK_RELEASE_S` is killed, which releases
+        the lock at the server the same way.
+        """
+        last: MaintenanceError | None = None
+        session: _LockSession | None = None
+        for statement in statements:
+            try:
+                session = self._lock_session(statement)
+                break
+            except MaintenanceError as exc:
+                last = exc
+                logger.warning(f"a table lock could not be taken: {exc.detail or exc}")
+        if session is None:
+            raise last or MaintenanceError("no table lock was asked for")
+        try:
+            yield
+        finally:
+            session.release()
+
+    def _lock_session(self, statement: str) -> _LockSession:
+        """Start one client, feed it `statement`, and answer once the server has granted it."""
+        prefix = platform.docker_prefix(self.wsl_distro)
+        if prefix is None:
+            raise MaintenanceError(platform.DOCKER_CLI_MISSING_HELP)
+        argv = [
+            *prefix,
+            "exec",
+            "-i",
+            "-e",
+            "MYSQL_PWD",  # value taken from OUR env by `docker exec`, never written here
+            self.db_container,
+            mysql_client(self.db_container, client=self.client),
+            "-uroot",
+            "--batch",
+            "--skip-column-names",
+            # Without it the client's stdout is block-buffered when it is a pipe, and the
+            # answer to the lock would sit in that buffer while we waited for it.
+            "--unbuffered",
+        ]
+        try:
+            proc = subprocess.Popen(  # noqa: S603 - argv is built above, never a shell string
+                argv,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                env=runner.child_env(mysql_env(self.root_password, self.wsl_distro)),
+                creationflags=runner.creationflags(),
+            )
+        except OSError as exc:
+            logger.warning(f"{argv[0]} could not be started: {exc}")
+            raise MaintenanceError(platform.DOCKER_CLI_MISSING_HELP) from exc
+        said: list[str] = []
+        answered = threading.Event()
+
+        def listen() -> None:
+            out = proc.stdout
+            if out is None:  # pragma: no cover - Popen above always gives one
+                answered.set()
+                return
+            for raw in out:
+                line = raw.decode("utf-8", "replace").rstrip("\r\n")
+                said.append(line)
+                if line.strip() == LOCK_ANSWERED:
+                    answered.set()
+            answered.set()  # the client ended: an answer too, and not a granted lock
+
+        threading.Thread(target=listen, name="yulon-db-lock", daemon=True).start()
+        try:
+            assert proc.stdin is not None
+            proc.stdin.write(f"{statement}\nSELECT '{LOCK_ANSWERED}';\n".encode())
+            proc.stdin.flush()
+        except (OSError, ValueError) as exc:
+            logger.warning(f"the lock's client could not be written to: {exc}")
+        granted = answered.wait(LOCK_ACQUIRE_S) and any(
+            line.strip() == LOCK_ANSWERED for line in said
+        )
+        if granted:
+            return _LockSession(proc)
+        stdin = proc.stdin
+        if stdin is not None:
+            try:
+                stdin.close()
+            except (OSError, ValueError) as exc:
+                logger.warning(f"the lock's client could not be closed: {exc}")
+        try:
+            proc.wait(timeout=LOCK_RELEASE_S)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+        words = " / ".join(line for line in said if line.strip())
+        detail = words or f"no answer in {LOCK_ACQUIRE_S:g} seconds"
+        raise MaintenanceError("Yu'lon could not hold the tables still.", detail=detail)
+
     def _dump_argv(self, database: str, ignore: Sequence[str] = ()) -> list[str]:
         """`mysqldump` for one database, with the flags each justified.
 
@@ -575,6 +745,37 @@ class DockerMysql:
         except OSError as exc:
             logger.warning(f"{argv[0]} could not be started: {exc}")
             raise MaintenanceError(platform.DOCKER_CLI_MISSING_HELP) from exc
+
+
+class _LockSession:
+    """One live client holding a table lock, and the one way to let it go (T822).
+
+    A small class and not a dataclass: `proc` is the whole state, and the class exists so
+    `release()` -- the one thing that must not be forgotten -- has somewhere to live.
+    """
+
+    def __init__(self, proc: subprocess.Popen[bytes]) -> None:
+        self.proc = proc
+
+    def release(self) -> None:
+        """`UNLOCK TABLES`, then end the client; a client that will not end is killed.
+
+        Both roads release the lock at the server, which is the property that matters: an
+        exception inside the copy finishes here exactly as an ordinary finish does.
+        """
+        stdin = self.proc.stdin
+        if stdin is not None:
+            try:
+                stdin.write(b"UNLOCK TABLES;\n")
+                stdin.flush()
+                stdin.close()
+            except (OSError, ValueError) as exc:
+                logger.warning(f"the table lock's client could not be told to unlock: {exc}")
+        try:
+            self.proc.wait(timeout=LOCK_RELEASE_S)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+            self.proc.wait()
 
 
 @dataclass(frozen=True)
@@ -793,6 +994,7 @@ def backup(
     import_record: str | None | _ImportState = UNSAID,
     directory: Path | None = None,
     restore_safety_copy: bool = False,
+    realm_type: str | None = None,
 ) -> BackupReport:
     """Dump every database this install has into `backups_dir(server_dir)`.
 
@@ -825,12 +1027,10 @@ def backup(
         import_record: For a rollback copy (T712): the unfinished-import record as it reads
             now (None: there is none), written into every file (`IMPORT_RECORD_LEAD`).
             Left `UNSAID`, no line is written.
-        directory: Where the dumps go instead of `backups_dir(server_dir)`. Only the move
-            package uses it (T747): its dumps are working files the Backups list never shows.
-        restore_safety_copy: True only from `_safety_backup()`: the copy a restore takes of
-            what it is about to overwrite. It is the one backup taken while a restore record
-            stands (T746), because restoring again is the way out that record names.
-
+        realm_type: The realm type id the dump holds (T812 C3b), written into every
+            file beside the game record. Only the Server tab passes one, from the
+            file's active type; a None writes no line (every other game, the safety
+            copies, the move package).
     Raises:
         MaintenanceError: a restore of this folder did not finish (T746: its databases may
             be half-written, and a copy of them would be listed as a good backup; the T681
@@ -885,6 +1085,7 @@ def backup(
                     game,
                     tuple((ignore_tables or {}).get(database, ())),
                     import_record,
+                    realm_type=realm_type,
                 )
             )
         except MaintenanceError as exc:
@@ -917,6 +1118,7 @@ def _dump_one(
     game: Game,
     ignore: tuple[str, ...] = (),
     import_record: str | None | _ImportState = UNSAID,
+    realm_type: str | None = None,
 ) -> Dump:
     """Dump one database to `target`, via a `.partial` that is only renamed if it verifies.
 
@@ -929,12 +1131,19 @@ def _dump_one(
         # `os.replace` would take this file out silently, and the thing it would
         # take out is a backup.
         raise MaintenanceError(f"{target} already exists; refusing to overwrite a backup")
+    if (
+        realm_type is not None
+        and REALM_RECORD.fullmatch(f"-- yulon-backup: realm-type={realm_type}") is None
+    ):
+        raise MaintenanceError(f"{realm_type!r} is not a realm type id a backup can record")
     partial = target.with_name(target.name + ".partial")
     try:
         record = f"-- yulon-backup: game={game.id}"
         if GAME_RECORD.fullmatch(record) is None:
             raise MaintenanceError(f"{game.id!r} is not a game id a backup can record")
         header = record.encode() + b"\n"
+        if realm_type is not None:
+            header += f"-- yulon-backup: realm-type={realm_type}\n".encode()
         if not isinstance(import_record, _ImportState):
             said = "none" if import_record is None else json.dumps(import_record)
             header += f"{IMPORT_RECORD_LEAD}{said}\n".encode()
@@ -964,6 +1173,10 @@ def _dump_one(
         if backup_game(partial) != game.id:
             raise MaintenanceError(
                 f"{target.name} did not take its game record, so it was not kept"
+            )
+        if backup_realm_type(partial) != realm_type:
+            raise MaintenanceError(
+                f"{target.name} did not take its realm type record, so it was not kept"
             )
     except MaintenanceError:
         partial.unlink(missing_ok=True)
@@ -1160,6 +1373,8 @@ def _game_in_head(head: bytes, name: str) -> str | None:
         line = line.rstrip(b" \t\r")
         if not line.startswith(_GAME_RECORD_LEAD):
             continue
+        if line.startswith(_REALM_RECORD_LEAD):
+            continue  # T812 C3b: the realm record shares the lead; it is not the game
         record = _GAME_RECORD_BYTES.fullmatch(line)
         if record is None:
             raise MaintenanceError(
@@ -1173,6 +1388,60 @@ def _game_in_head(head: bytes, name: str) -> str | None:
         raise MaintenanceError(
             f"{name} names two different games ({found[0]} and {found[1]}), so it cannot "
             "be trusted to belong to either. Yu'lon will not restore it."
+        )
+    return found[0] if found else None
+
+
+def backup_realm_type(path: Path) -> str | None:
+    """The realm type id a backup records, or None when it records none (T812 C3b).
+
+    The same preamble rule as `backup_game()`: only above the dump's own banner,
+    never the rows below it. A file with no banner, or no such line, answers
+    None: every other game's dumps, and every CoA dump made before the line.
+
+    Raises:
+        MaintenanceError: the preamble holds a record that does not read, or two
+            that name different realm types.
+    """
+    try:
+        head = _read_edge(path, 0)
+    except OSError as exc:
+        raise MaintenanceError(f"could not read {path}: {exc}") from exc
+    return _realm_in_head(head, path.name)
+
+
+def realm_recorded_in(head: bytes, name: str) -> str | None:
+    """The realm record in the first bytes of a dump already in hand (T812 C3b).
+
+    The public spelling of what `backup_realm_type()` and `restore()` read, for
+    a caller that holds the head of a file it never put on disk.
+    """
+    return _realm_in_head(head, name)
+
+
+def _realm_in_head(head: bytes, name: str) -> str | None:
+    """`backup_realm_type()`'s reading, of the first bytes of a file already in hand."""
+    match = _DUMP_HEADER.search(head)
+    if match is None:
+        return None
+    found: list[str] = []
+    for line in head[: match.start()].split(b"\n"):
+        line = line.rstrip(b" \t\r")
+        if not line.startswith(_REALM_RECORD_LEAD):
+            continue
+        record = _REALM_RECORD_BYTES.fullmatch(line)
+        if record is None:
+            raise MaintenanceError(
+                f"The realm type record in {name} cannot be read, so Yu'lon cannot tell "
+                "which realm type it holds and will not restore it."
+            )
+        realm_id = record.group(1).decode("ascii")
+        if realm_id not in found:
+            found.append(realm_id)
+    if len(found) > 1:
+        raise MaintenanceError(
+            f"{name} names two different realm types ({found[0]} and {found[1]}), so it "
+            "cannot be trusted to hold either one's data. Yu'lon will not restore it."
         )
     return found[0] if found else None
 
@@ -1195,6 +1464,22 @@ def _wrong_game_refusal(found: str, game: Game) -> str:
         "Restoring it here would put another game's data into this server, so Yu'lon will "
         f"not do it. Restore it on a {_name_of_game(found)} server instead."
     )
+
+
+def _wrong_realm_refusal(found: str, active: str) -> str:
+    """Why a dump of another realm type is not restored (T812 C3b)."""
+    return (
+        f"This backup holds the {found} realm type's characters, but this server is set to "
+        f"the {active} realm type. Switch realm type to {found} on the Server tab to put "
+        "it right, or restore a backup of the type this server runs."
+    )
+
+
+UNPROVEN_REALM_BACKUP = (
+    "This backup does not say which realm type it belongs to, so it was not restored. "
+    "It was made before Yu'lon wrote that down. Restore it only if you made it on the "
+    "realm type this server runs now."
+)
 
 
 UNLABELED_BACKUP = (
@@ -1267,8 +1552,8 @@ def unfinished_restore_sentence(
         return (
             f"A restore of this server did not finish, and its record at {record.marker} cannot "
             f"be read, so the databases may be half-written and {held_off} "
-            "them. On the Maintenance tab, restore a backup again, or press Forget that record "
-            "if you have already put the databases right."
+            f"them. On the {MAINTENANCE_TAB} tab, restore a backup again, or press Forget that "
+            "record if you have already put the databases right."
         )
     named = ", ".join(record.databases) or "this server's databases"
     copy = ", ".join(str(p) for p in record.safety_backup)
@@ -1282,7 +1567,7 @@ def unfinished_restore_sentence(
         return (
             f"A restore of {named} was still loading when Yu'lon last closed, and Yu'lon cannot "
             f"tell whether it finished, so {held_off} those databases. On "
-            "the Maintenance tab, restore a backup again to be sure, or press Forget that "
+            f"the {MAINTENANCE_TAB} tab, restore a backup again to be sure, or press Forget that "
             f"record if you know it finished.{taken}"
         )
     if moving_in and record.backup.parent.name.startswith(MOVE_IN_COPY_FOLDER):
@@ -1294,7 +1579,7 @@ def unfinished_restore_sentence(
         )
     return (
         f"A restore of {named} did not finish, so those databases may be half-written and "
-        f"{held_off} them. On the Maintenance tab, restore a backup again to "
+        f"{held_off} them. On the {MAINTENANCE_TAB} tab, restore a backup again to "
         f"finish it, or press Forget that record if you have already put them right.{taken}"
     )
 
@@ -1780,6 +2065,7 @@ def plan_restore(
     running: RunningNames | None = None,
     wsl_distro: str | None = None,
     can_start_database: bool = False,
+    realm_type: str | None = None,
 ) -> RestorePlan:
     """Work out what restoring `backup_file` would do, without doing any of it.
 
@@ -1817,6 +2103,15 @@ def plan_restore(
       schema names say nothing; the record is the only thing that does. A backup
       with NO record is not refused (all old ones are like that) and is marked
       `game_unproven` for the player to answer.
+    * the backup records another realm type than `realm_type` (T812 C3b). A parked
+      type's dump names the plain schemas, so without this the restore would load
+      another type's characters under this one's rules. A backup with NO realm
+      record that touches a realm database (auth/characters/playerbots) is refused
+      while a realm type is active: every other game's dumps carry none, but so does
+      every CoA dump made before the record, and the names say nothing about which
+      type its rows belong to. One naming the same type as the server is allowed, and
+      a headerless dump of the world database alone is allowed: it holds no type's
+      characters.
     """
     refusals: list[str] = []
     earlier_run = interrupted_restore(server_dir)
@@ -1863,6 +2158,16 @@ def plan_restore(
                     game_unproven = True
                 elif recorded != game.id:
                     refusals.append(_wrong_game_refusal(recorded, game))
+            try:
+                recorded_realm = backup_realm_type(backup_file)
+            except MaintenanceError as exc:
+                refusals.append(str(exc))
+            else:
+                if recorded_realm is None:
+                    if realm_type is not None and _dump_touches_a_realm_database(databases):
+                        refusals.append(UNPROVEN_REALM_BACKUP)
+                elif realm_type is not None and recorded_realm != realm_type:
+                    refusals.append(_wrong_realm_refusal(recorded_realm, realm_type))
 
     try:
         names = _census(running, wsl_distro=wsl_distro)
@@ -1917,6 +2222,7 @@ def restore(
     safety_label: str = "pre-restore",
     before_load: Callable[[], object] | None = None,
     last_of_a_copy: bool = True,
+    realm_type: str | None = None,
 ) -> RestoreReport:
     """Overwrite the databases `plan.backup` names. This destroys player data.
 
@@ -1975,7 +2281,13 @@ def restore(
             "the restore was not confirmed against this backup, so nothing was changed"
         )
     fresh = plan_restore(
-        plan.backup, plan.server_dir, game=game, spec=spec, running=running, wsl_distro=wsl_distro
+        plan.backup,
+        plan.server_dir,
+        game=game,
+        spec=spec,
+        running=running,
+        wsl_distro=wsl_distro,
+        realm_type=realm_type,
     )
     if fresh.refusals:
         raise MaintenanceError(f"restore refused: {' '.join(fresh.refusals)}")
@@ -2011,6 +2323,7 @@ def restore(
             safety_label=safety_label,
             before_load=before_load,
             last_of_a_copy=last_of_a_copy,
+            realm_type=realm_type,
         )
 
 
@@ -2029,6 +2342,7 @@ def _restore_from(
     safety_label: str,
     before_load: Callable[[], object] | None,
     last_of_a_copy: bool = True,
+    realm_type: str | None = None,
 ) -> RestoreReport:
     """`restore()` from the marker onward, loading from `source`, the handle it checks here."""
     recorded = _recorded_game_of(source, plan.backup.name)
@@ -2036,6 +2350,14 @@ def _restore_from(
         raise MaintenanceError(f"restore refused: {_wrong_game_refusal(recorded, game)}")
     if recorded is None and not plan.unlabeled_accepted:
         raise MaintenanceError(f"{UNLABELED_BACKUP} Nothing was restored.")
+    recorded_realm = _recorded_realm_of(source, plan.backup.name)
+    if recorded_realm is None:
+        if realm_type is not None and _dump_touches_a_realm_database(plan.databases):
+            raise MaintenanceError(f"restore refused: {UNPROVEN_REALM_BACKUP}")
+    elif realm_type is not None and recorded_realm != realm_type:
+        raise MaintenanceError(
+            f"restore refused: {_wrong_realm_refusal(recorded_realm, realm_type)}"
+        )
     if _digest_of(source, plan.backup.name) != fresh.content_digest:
         raise MaintenanceError(
             f"{plan.backup.name} is not the file that was checked — it changed in between. "
@@ -2311,6 +2633,17 @@ def _recorded_game_of(source: IO[bytes], name: str) -> str | None:
     except OSError as exc:
         raise MaintenanceError(f"could not read {name}: {exc}") from exc
     return _game_in_head(head, name)
+
+
+def _recorded_realm_of(source: IO[bytes], name: str) -> str | None:
+    """The realm record of an open file, read from its first bytes, then rewound."""
+    try:
+        source.seek(0)
+        head = source.read(_EDGE_BYTES)
+        source.seek(0)
+    except OSError as exc:
+        raise MaintenanceError(f"could not read {name}: {exc}") from exc
+    return _realm_in_head(head, name)
 
 
 def _usable_copies(earlier: InterruptedRestore | None) -> dict[str, Path]:

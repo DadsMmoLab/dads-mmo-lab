@@ -21,6 +21,7 @@ and never reaches the GUI, which passes `ui/widgets/prompt.py` instead.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import getpass
 import logging
 import sys
@@ -28,17 +29,23 @@ import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from yulon import docker, module_moves, platform, server_build_presses, wsl
 from yulon.after_stop import TrueAfterStop, stop_took_effect
-from yulon.catalog import upstream
+from yulon.catalog import script_built, upstream
 
 # By name and not as the module. `import_gate_for()` below binds a local called
 # `native` in a walrus (`entry.install.native`), and a module of the same name
 # imported at the top of the file is exactly the kind of shadow that type-checks
 # in one function and not in the other.
-from yulon.catalog.catalog import CatalogEntry, DbPasswordUnknown, SingleEntry, load_catalog
+from yulon.catalog.catalog import (
+    INSTALL_RECORD,
+    CatalogEntry,
+    DbPasswordUnknown,
+    SingleEntry,
+    load_catalog,
+)
 from yulon.catalog.families import azerothcore, trinitycore
 from yulon.catalog.installer import (
     DEFAULT_INSTALLERS_ROOT,
@@ -69,6 +76,7 @@ from yulon.catalog.native import (
     ale_playerbots_note,
     core_off_its_moved_pin_note,
     correction_phases,
+    module_before_rebuild_note,
     module_order_note,
     moved_pin_confirmation,
     moved_pins,
@@ -164,7 +172,8 @@ def import_gate_for(
     import graph on itself the first time anything in that package moves.
     """
     spec = entry.container_spec()
-    if not spec.import_service:
+    import_service = spec.import_service
+    if not import_service:
         return None, None
 
     from yulon.apply import DockerSql
@@ -199,14 +208,49 @@ def import_gate_for(
         spec.db, password, schemas=entry.schema_map(), wsl_distro=wsl_distro, client=client
     )
     mysql = wotlk_maintenance.DockerMysql(spec.db, password, wsl_distro=wsl_distro, client=client)
+    bootstrap = None if native is None or native.azerothcore is None else native.azerothcore
+    names = entry.databases
 
     def probe() -> docker.ImportState:
         try:
-            return wotlk_repair.import_state(
+            state = wotlk_repair.import_state(
                 sql, mysql, lambda: docker.health(spec.db, wsl_distro=wsl_distro)
             )
         except _PasswordUnknown as exc:
             return docker.ImportState("unreadable", str(exc))
+        if bootstrap is None or not bootstrap.world_bootstrap_service:
+            return state
+        if state.state != "partial" or server_dir is None:
+            return state
+        # T812 live-proof D3: the CoA world bootstrap fills `acore_world` from
+        # the baseline BEFORE the import has created `acore_auth` and
+        # `acore_characters`, which the generic probe reads as `partial` — and
+        # `reset_unfinished()` then finds nothing to drop, so the import was
+        # never run. Ask the two facts that make it the bootstrap's own work:
+        # no import in this folder was ever started and not seen to finish
+        # (its record is what a world an import touched would leave), and the
+        # schemas hold exactly the loaded world (`version` is the table that
+        # script loads last). Everything else keeps the probe's answer,
+        # including every game with no bootstrap and every world with the
+        # import's own tables in it.
+        try:
+            if docker.one_shot_ended_marker(server_dir, import_service).is_file():
+                return state
+            loaded = wotlk_repair.only_the_world_was_loaded(
+                sql,
+                mysql,
+                done_marker=azerothcore.AzerothCoreInstaller.WORLD_BOOTSTRAP_DONE_TABLE,
+            )
+        except Exception as exc:  # noqa: BLE001 - an unproven answer keeps the probe's
+            logger.warning(f"could not tell whether only the world was loaded: {exc}")
+            return state
+        if not loaded:
+            return state
+        return docker.ImportState(
+            "absent",
+            f"{names.world} holds the base data this install loaded and "
+            f"{names.auth}, {names.characters} hold no tables, so the import never ran",
+        )
 
     def reset(*, everything: bool = False, seeded: bool = False) -> tuple[str, ...]:
         try:
@@ -658,6 +702,34 @@ def _core_note(entry: CatalogEntry, server_dir: Path, wsl_distro: str | None) ->
     return note
 
 
+def rebuild_note_for_app(
+    entry: CatalogEntry, server_dir: Path, *, wsl_distro: str | None = None
+) -> Callable[[], str]:
+    """The note the Rebuild question carries before the compile, or "" for none (T795).
+
+    Said when the core is off a pin that moved AND a module went in or was updated since
+    the last build: the compile that follows is the one T586 failed in. Files only
+    (`.git/HEAD` and the module records), no git run, and a server inside a WSL distro that
+    is stopped is not read. A heuristic: the build is never refused for it.
+    """
+
+    def note() -> str:
+        pins = _catalog_pins(entry, server_dir, wsl_distro)
+        if not pins:
+            return ""
+        moved = moved_pins(read_state(server_dir, valid=()), pins)
+        if not moved:
+            return ""
+        # Local: the module engine is not otherwise needed here (it is a type-only import above).
+        from yulon.apply import rebuilds_owed_now  # noqa: PLC0415
+
+        owed = rebuilds_owed_now(server_dir)
+        named = tuple(sorted({key.partition("/")[2] for key in owed} - {""}))
+        return module_before_rebuild_note(moved, named) if named else ""
+
+    return note
+
+
 RebuildSource = Callable[[threading.Event | None], Iterator[str]]
 """What a controller tab drives to rebuild its install: cancel in, lines out.
 
@@ -714,6 +786,46 @@ def rebuild_for_app(
         )
 
     return rebuild
+
+
+class ScriptBuiltRebuild(NamedTuple):
+    """T804's second Rebuild route: the question's gate and the press it runs on Yes."""
+
+    applies: Callable[[], bool]
+    """Cheap and file-only (the GUI thread asks it): may this folder be a script-built server?"""
+    source: RebuildSource
+    """`script_built.rebuild_as_built()`, which checks every rule again before it compiles."""
+
+
+SCRIPT_BUILT_ENTRY_ID = "wow-wotlk"
+
+
+def script_built_rebuild_for_app(
+    entry: CatalogEntry,
+    server_dir: Path,
+    *,
+    wsl_distro: str | None = None,
+) -> ScriptBuiltRebuild | None:
+    """ "Rebuild it the way it was built" for a WotLK server the old script built in WSL (T804).
+
+    None unless the tab's server lives in a WSL distro and the entry is WotLK: the only
+    place that script ran. `applies()` is the cheap file half (`script_built.looks_script_built()`)
+    and never reads a distro WSL did not say is running (`_distro_down()`, T133); the press
+    runs all of `script_built.check()` on its worker before anything is compiled.
+    """
+    if wsl_distro is None or entry.id != SCRIPT_BUILT_ENTRY_ID:
+        return None
+    distro = wsl_distro
+
+    def applies() -> bool:
+        if not _in_the_distro(server_dir, distro) or _distro_down(distro):
+            return False
+        return script_built.looks_script_built(server_dir)
+
+    def source(cancel: threading.Event | None = None) -> Iterator[str]:
+        return script_built.rebuild_as_built(server_dir, distro, cancel)
+
+    return ScriptBuiltRebuild(applies, source)
 
 
 def repair_database_for_app(
@@ -931,8 +1043,11 @@ def update_to_latest_for_app(
             # read of the folder boots the distro as well) and no git.
             return upstream.UpstreamNews(checked_unix=upstream.now_unix(), sources=())
         if wsl_distro is None:
-            return installer_for(entry).upstream_news(options)
-        return installer_for(entry, seams=Seams.in_wsl(wsl_distro)).upstream_news(options)
+            found = installer_for(entry).upstream_news(options)
+        else:
+            found = installer_for(entry, seams=Seams.in_wsl(wsl_distro)).upstream_news(options)
+        # T802: no install record = built by another launcher; the press refuses there.
+        return dataclasses.replace(found, adopted=not (server_dir / INSTALL_RECORD).is_file())
 
     return LatestRoute(
         confirmation=confirmation,

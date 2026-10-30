@@ -108,6 +108,7 @@ from yulon.catalog.native import (
 from yulon.catalog.snapshot import DatabaseSnapshot
 from yulon.log import get_logger
 from yulon.manifest import Db
+from yulon.server_build_presses import MAINTENANCE_TAB
 
 logger = get_logger(__name__)
 
@@ -1351,6 +1352,10 @@ class TrinityCoreInstaller(CmangosInstaller):
 
     def family_start_refusal(self, server_dir: Path) -> str | None:
         """A world update left unfinished (T179); the spine's question, answered (T223)."""
+        return world_update_start_refusal(server_dir)
+
+    def family_finish_refusal(self, server_dir: Path) -> str | None:
+        """A world update left unfinished: "Finish the world update" starts the kept build."""
         return world_update_start_refusal(server_dir)
 
     def servers_down_work(
@@ -2620,8 +2625,8 @@ def _backup_advice(press: str | None) -> str:
     if press != server_build_presses.UPDATE_TO_LATEST:
         return ""
     return (
-        " If you took the backup offered before the update, it has them as they were (Restore on "
-        "the Maintenance tab)."
+        " If you took the backup offered before the update, it has them as they were (Restore "
+        f"on the {MAINTENANCE_TAB} tab)."
     )
 
 
@@ -2630,7 +2635,7 @@ def _finish_advice(names: Sequence[str], press: str | None) -> str:
     again = (
         "the update again"
         if press is None
-        else f"\u201c{press}\u201d under \u201c{server_build_presses.SERVER_BUILD}\u201d again"
+        else f"{server_build_presses.under_server_build(press)} again"
     )
     return (
         f"Press \u201c{FINISH_WORLD_BUTTON}\u201d on the Server tab (or {again}) to import "
@@ -2765,7 +2770,7 @@ def _needed_and_missing(entry: CatalogEntry, missing: Sequence[str], *, past_the
         "finished and the server is still refused a start. Nothing was imported. Put "
         f"{'it' if one else 'them'} back in the sources and press "
         f"\u201c{FINISH_WORLD_BUTTON}\u201d again, or press {presses} under "
-        f"\u201c{server_build_presses.SERVER_BUILD}\u201d on the Modules tab, which builds a "
+        f"{server_build_presses.SERVER_BUILD_PLACE}, which builds a "
         "new version in place of the one this server was left on."
     )
 

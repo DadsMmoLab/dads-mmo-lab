@@ -48,8 +48,9 @@ class FakeController:
         self.world_up = True
         return ["ac-worldserver", "ac-authserver"]
 
-    def stop(self) -> bool:
+    def stop(self, *, by_choice: bool = False) -> bool:
         self.calls.append("stop")
+        self.stopped_by_choice = by_choice
         was = self.world_up
         self.world_up = False
         return was
@@ -155,6 +156,8 @@ def test_stop_and_status(config: Path) -> None:
     services = FakeServices(FakeController(world_up=True))
     assert _run(["status", "wow-wotlk"], config, services)[:2] == (0, ["running"])
     assert _run(["stop", "wow-wotlk"], config, services)[:2] == (0, ["WoW WotLK stopped."])
+    # T826: the player's own Stop, so the install's "When stopping" choice reaches it.
+    assert services.controller.stopped_by_choice is True  # type: ignore[attr-defined]
     assert _run(["status", "wow-wotlk"], config, services)[:2] == (1, ["stopped"])
     assert _run(["stop", "wow-wotlk"], config, services)[:2] == (0, ["WoW WotLK was not running."])
 

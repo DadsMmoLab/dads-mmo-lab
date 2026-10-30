@@ -1679,6 +1679,28 @@ def test_git_is_never_left_waiting_on_an_invisible_password_prompt(
     assert envs[0]["GIT_ASKPASS"] == ""
 
 
+def test_git_runs_in_the_c_locale_so_its_refusal_prefixes_are_english(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A German git writes `schwerwiegend:` where English writes `fatal:`.
+
+    The refusal reasons are read by their English prefixes, so every git the
+    launcher starts must run in the C locale. Mutation: drop the two
+    `LC_ALL` / `LANGUAGE` lines from `_no_prompt_env()` and this fails.
+    """
+    envs: list[dict[str, str] | None] = []
+
+    def fake_run(argv: list[str], cwd: Path | None = None, env=None):
+        envs.append(env)
+        return _completed()
+
+    monkeypatch.setattr(runner, "run", fake_run)
+    git.RunnerGit().clone(git.CloneSpec(url="https://example/any.git", dest=tmp_path / "c"))
+    assert envs and envs[0] is not None
+    assert envs[0]["LC_ALL"] == "C"
+    assert envs[0]["LANGUAGE"] == "C"
+
+
 def test_container_git_reports_a_failure_as_a_git_error(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

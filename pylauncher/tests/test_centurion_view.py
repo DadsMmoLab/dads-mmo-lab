@@ -238,7 +238,7 @@ class _Pathfinding:
         self.now = mmaps.MmapsStatus(state="running", percent=0)
         return "Pathfinding data is being made."
 
-    def stop(self) -> str:
+    def stop(self, **_kw: object) -> str:
         self.stopped += 1
         self.now = mmaps.MmapsStatus(state="not-started")
         return "Stopped."
@@ -602,11 +602,13 @@ def test_the_raw_editor_lists_centurions_own_confs_read_only(qapp: object, tmp_p
 def test_the_other_games_raw_editor_lists_what_it_always_did(qapp: object, tmp_path: Path) -> None:
     from yulon.catalog.catalog import load_catalog
 
-    for game in ("wow-wotlk", "wow-tbc", "wow-vanilla", "wow-tortoise"):
+    for game in ("wow-tbc", "wow-vanilla", "wow-tortoise"):
         entry = load_catalog().get(game)
         assert view_module.reset_defaults.read_only_confs(entry) == (
             view_module.TUNING_CORE_FILES
         ), game
+    # Since T819 the AzerothCore family's own confs are editable with locked keys.
+    assert view_module.reset_defaults.read_only_confs(load_catalog().get("wow-wotlk")) == ()
 
 
 def test_my_party_on_centurion_is_the_registrys_note_and_the_shipped_games_keep_theirs(
@@ -701,7 +703,7 @@ class _RealJob:
             user_args=("--user", "1000:1000"),
         )
 
-    def stop(self) -> str:
+    def stop(self, **_kw: object) -> str:
         return mmaps.stop_mmaps(self.server, MM_ENTRY, runner=self.docker, install_id=mm.INSTALL_ID)
 
 

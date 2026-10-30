@@ -34,9 +34,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from yulon import server_build_presses
+from yulon.server_build_presses import MAINTENANCE_TAB
 
 BUTTON_LABEL = "Remove from Yu'lon…"
-"""The tab menu's entry and the Server tab's button (`controller_view.REMOVE_FROM_YULON`)."""
+"""The tab menu's entry (`controller_view.REMOVE_FROM_YULON`)."""
 
 TITLE = "Remove this server from Yu'lon?"
 REFUSED_TITLE = "This server cannot be removed yet"
@@ -52,19 +53,19 @@ UPDATE_BACKUP_RUNNING = (
     "then try again. Nothing was removed."
 )
 PANEL_RUNNING = (
-    "A rebuild, a database update or an adopt is running on this server's Modules tab. "
-    "Wait for it to finish, then try again. Nothing was removed."
+    "A rebuild, a database update or an adopt is running on this server's "
+    f"{MAINTENANCE_TAB} tab. Wait for it to finish, then try again. Nothing was removed."
 )
 SERVER_ACTION_RUNNING = (
     "Another action is running on this server's tab. Wait for it to finish on the "
     "Server tab, then try again. Nothing was removed."
 )
 BACKUP_RUNNING = (
-    "A backup of this server is running on its Maintenance tab. Wait for it to finish, "
-    "then try again. Nothing was removed."
+    f"A backup of this server is running on its {MAINTENANCE_TAB} tab. Wait for it to "
+    "finish, then try again. Nothing was removed."
 )
 RESTORE_RUNNING = (
-    "A restore is writing into this server's databases on its Maintenance tab, and "
+    f"A restore is writing into this server's databases on its {MAINTENANCE_TAB} tab, and "
     "stopping the server now would leave them half-written. Wait for it to finish, then "
     "try again. Nothing was removed."
 )
@@ -72,49 +73,49 @@ RESTORE_RUNNING = (
 # server (`docker.hold_the_server()`, T216). Siblings of the two above: the same jobs, asked
 # about by a different press, so they say "nothing was started or stopped" instead.
 RESTORE_HOLDS_THE_SERVER = (
-    "A restore is writing into this server's databases on its Maintenance tab. Starting "
-    "the server now would let the world save over what is being restored, and stopping it "
-    "would leave the databases half-written. Wait for the restore to finish, then try "
-    "again. Nothing was started or stopped."
+    f"A restore is writing into this server's databases on its {MAINTENANCE_TAB} tab. "
+    "Starting the server now would let the world save over what is being restored, and "
+    "stopping it would leave the databases half-written. Wait for the restore to finish, "
+    "then try again. Nothing was started or stopped."
 )
 # T737: what a Pack or Bring in is told while that restore holds the server (`move_flows`'s
 # `move_held_reason()`). The sentence above is about starting and stopping, which a move asks
 # neither of; a move's own reason is what it would read or write.
 RESTORE_HOLDS_A_MOVE = (
-    "A restore is writing into this server's databases on its Maintenance tab. Packing them "
-    "now would take a half-restored copy, and bringing a move in would write over what is "
-    "being restored. Wait for the restore to finish, then try again. Nothing was packed or "
-    "brought in."
+    f"A restore is writing into this server's databases on its {MAINTENANCE_TAB} tab. "
+    "Packing them now would take a half-restored copy, and bringing a move in would write "
+    "over what is being restored. Wait for the restore to finish, then try again. Nothing "
+    "was packed or brought in."
 )
 BACKUP_HOLDS_THE_SERVER = (
-    "A backup is running on this server's Maintenance tab with the database started on its "
-    "own for it, and the database is stopped again when the backup ends. Wait for the "
-    "backup to finish, then try again. Nothing was started or stopped."
+    f"A backup is running on this server's {MAINTENANCE_TAB} tab with the database started "
+    "on its own for it, and the database is stopped again when the backup ends. Wait for "
+    "the backup to finish, then try again. Nothing was started or stopped."
 )
 # What a Backup or Restore refused by `docker.maintenance_lease()` is told: the running job's
 # own sentence, to which the refused one adds what it did not do (T216 review round 3).
 BACKUP_HOLDS_THE_DATABASES = (
-    "A backup of this server is running on its Maintenance tab. Wait for it to finish, "
-    "then try again."
+    f"A backup of this server is running on its {MAINTENANCE_TAB} tab. Wait for it to "
+    "finish, then try again."
 )
 RESTORE_HOLDS_THE_DATABASES = (
-    "A restore is writing into this server's databases on its Maintenance tab. Wait for "
-    "it to finish, then try again."
+    f"A restore is writing into this server's databases on its {MAINTENANCE_TAB} tab. Wait "
+    "for it to finish, then try again."
 )
 # T681: what every other press of this Yu'lon that would write to the server is told while a
 # Restore loads (`docker.hold_the_server(alone=...)`): a Modules job's SQL, an account, a network
 # change, a bot rebuild. Nothing it would have written was written.
 RESTORE_WRITES_ALONE = (
-    "A restore is writing into this server's databases on its Maintenance tab, and nothing "
-    "else may write to them until it has finished. Wait for the restore to finish, then try "
-    "again. Nothing was changed."
+    f"A restore is writing into this server's databases on its {MAINTENANCE_TAB} tab, and "
+    "nothing else may write to them until it has finished. Wait for the restore to finish, "
+    "then try again. Nothing was changed."
 )
 
 
 MOVE_WRITES_ALONE = (
-    "Accounts and characters are being brought in on this server's Maintenance tab, and "
-    "nothing else may write to its databases until that has finished. Wait for it to finish, "
-    "then try again. Nothing was changed."
+    f"Accounts and characters are being brought in on this server's {MAINTENANCE_TAB} tab, "
+    "and nothing else may write to its databases until that has finished. Wait for it to "
+    "finish, then try again. Nothing was changed."
 )
 """T681 review: a bring-in's load is a restore's load; every other writer waits for it."""
 
@@ -128,13 +129,13 @@ def another_press_writes(press: str) -> str:
 
 
 MOVE_HOLDS_THE_SERVER = (
-    "Accounts and characters are being packed or brought in on this server's Maintenance tab, "
-    "with the database started on its own for it. Wait for that to finish, then try again. "
-    "Nothing was started or stopped."
+    "Accounts and characters are being packed or brought in on this server's "
+    f"{MAINTENANCE_TAB} tab, with the database started on its own for it. Wait for that "
+    "to finish, then try again. Nothing was started or stopped."
 )
 MOVE_HOLDS_THE_DATABASES = (
-    "Accounts and characters are being packed or brought in on this server's Maintenance "
-    "tab. Wait for that to finish, then try again."
+    "Accounts and characters are being packed or brought in on this server's "
+    f"{MAINTENANCE_TAB} tab. Wait for that to finish, then try again."
 )
 # T737: the same three for a whole-server bring-in (the Catalog tile's "Bring from another
 # computer…") while it puts the databases in: it is not on the Maintenance tab, and it brings
@@ -163,16 +164,16 @@ MOVE_IN_WRITES_ALONE = (
     "was changed."
 )
 MOVE_RUNNING = (
-    "Accounts and characters are being packed or brought in on this server's Maintenance "
-    "tab, and removing the server now would leave its databases half-written. Wait for it "
-    "to finish, then try again. Nothing was removed."
+    "Accounts and characters are being packed or brought in on this server's "
+    f"{MAINTENANCE_TAB} tab, and removing the server now would leave its databases "
+    "half-written. Wait for it to finish, then try again. Nothing was removed."
 )
 # T604: the Maintenance tab deleting old backups holds the databases' lease like a Backup does,
 # so a dump cannot start into a folder being cleared.
 PRESS_DELETE_BACKUPS = "Delete backups"
 DELETE_HOLDS_THE_DATABASES = (
-    "Old backups are being deleted on this server's Maintenance tab. Wait for that to "
-    "finish, then try again."
+    f"Old backups are being deleted on this server's {MAINTENANCE_TAB} tab. Wait for that "
+    "to finish, then try again."
 )
 TUNING_RUNNING = (
     "A Tuning change is being saved or put back on this server's Tuning tab. Wait for it "

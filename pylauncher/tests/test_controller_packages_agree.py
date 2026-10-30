@@ -24,7 +24,7 @@ from pathlib import Path
 import pytest
 
 from yulon import apply as apply_module
-from yulon import install_wiring, party, serverlock
+from yulon import coa_realm, install_wiring, party, realm_name, serverlock
 from yulon.catalog import bot_dashboard, native
 from yulon.catalog.catalog import CatalogEntry
 from yulon.catalog.families import azerothcore, mmaps
@@ -184,6 +184,7 @@ def test_every_seam_builder_in_every_package_binds_the_declared_client(tmp_path:
         "wow-tortoise": (tortoise_accounts, tortoise_maintenance),
         "wow-wotlk": (wotlk_accounts, wotlk_maintenance),
         "wow-unbound": (wotlk_accounts, wotlk_maintenance),  # T554: WotLK's package, its own entry
+        "wow-coa": (wotlk_accounts, wotlk_maintenance),  # T812: WotLK's package, its own entry
         "wow-centurion": (centurion_accounts, centurion_maintenance),
     }
     catalog = load_catalog()
@@ -222,8 +223,8 @@ def test_every_seam_builder_in_every_package_binds_the_declared_client(tmp_path:
                     + repr(expected)
                 )
                 checked += 1
-    assert checked == 16, (  # T554: wow-unbound runs the WotLK package's two builders
-        str(checked) + " builders were exercised, not 16. An exact count, not a floor: the "
+    assert checked == 18, (  # T554/T812: unbound and coa run the WotLK package's two builders
+        str(checked) + " builders were exercised, not 18. An exact count, not a floor: the "
         "floor this replaced had slack of one, so a deleted builder still passed it."
     )
 
@@ -632,8 +633,52 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
         # T785: set only when the install's database password cannot be known; absent on every
         # tab built over a folder that has one, the reference included.
         undbrefused = {"db_refusal"}
+        # T805's "Delete every random bot…" deletes through the AzerothCore module's tables
+        # (`rndbots.py`: mod-playerbots' `playerbots_random_bots` and `account_type`), which
+        # only an AzerothCore tree has. Tortoise's own pool reset is `bot_pool_rebuild`, and
+        # CMaNGOS and TrinityCore (Centurion) have no such module to delete for. Read off the
+        # install family the wiring is written for, so a family that gains the press fails
+        # this until its tab offers it.
+        unbotdeleted = (
+            set()
+            if native_block is not None and native_block.family == "azerothcore"
+            else {"bot_rndbot_delete"}
+        )
+        # T822's "Repair the damaged table…": `REPAIR TABLE` is a MyISAM/Aria tool, so it is
+        # offered for the CMaNGOS family alone -- its `characters`/`realmd.account` tables are
+        # MyISAM, while AzerothCore (wow-wotlk and wow-unbound) and TrinityCore (Centurion)
+        # store theirs in InnoDB, where the press would only ever refuse. Read off the install
+        # family the wiring is written for, so a family that gains the press fails this until
+        # its tab offers it; absent on the reference too.
+        unrepairable = (
+            set()
+            if native_block is not None and native_block.family == "cmangos"
+            else {"table_repair"}
+        )
+        # T804's "rebuild it the way the old script built it": decided by the DISTRO, not the
+        # game -- it exists only for a WotLK folder inside a WSL distro, and this test builds
+        # every tab with no distro (`script_built_rebuild_for_app`: None without one). So it
+        # is absent here for every game, the reference included; the one game it is offered
+        # for, and the distro half, are driven in `test_script_built_rebuild.py`.
+        undistroed = {"script_built_rebuild"}
+        # T812 C3b: the realm-type switch is CoA-only (realm types): only an
+        # entry that names `realm_types` gets one, read through the function
+        # the wiring reads, so a tree that gains the block fails this until
+        # its wiring lands. Centurion is the current prover: its fixture
+        # entry names none, so it must be absent there.
+        unswitched = set() if coa_realm.has_realm_types(entry) else {"realm_switch"}
+        # T808 x T812: the other side of the same fact. A realm-type entry's name is its
+        # realm type's (the switch writes it), so it has no realm-name seams; read through
+        # the function the wiring reads.
+        unnamed = (
+            {"realm_name_current", "realm_name_save"}
+            if realm_name.follows_realm_type(entry)
+            else set()
+        )
         allowed = (
             undbrefused
+            | unbotdeleted
+            | undistroed
             | unrepaired
             | unpathed
             | unowed
@@ -653,15 +698,19 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
             | unadoptable
             | unwindowed
             | undashboarded
+            | unrepairable
             | unpaired
             | unrebuilt
             | untipped
             | uncorrectable
             | unlocked
+            | unswitched
+            | unnamed
         )
-        if game in ("wow-wotlk", "wow-unbound"):  # T554: Unbound is the same package
+        if game in ("wow-wotlk", "wow-unbound", "wow-coa"):  # T554/T812: same package as WotLK
             reference = (
                 undbrefused
+                | undistroed
                 | unprobed
                 | unpathed
                 | unowed
@@ -669,13 +718,20 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
                 | unadoptable
                 | unwindowed
                 | undashboarded
+                | unrepairable
                 | unrepaired
                 | unpaired
                 | unrebuilt
                 | untipped
                 | uncorrectable
                 | unlocked
+                | unswitched
+                | unnamed
             )
+            if game == "wow-coa":
+                # T812: CoA pins its fork and carries a patch; no update control
+                # until a gate proves one (catalog `update_to_latest: false`).
+                reference = reference | unlatest
             assert (
                 set(absent) == reference
             ), f"wow-wotlk is the reference and is missing {sorted(set(absent) - reference)}"

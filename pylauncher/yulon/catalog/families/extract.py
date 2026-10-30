@@ -51,7 +51,7 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
 
-from yulon import client_names, container_end, docker, platform, rmtree
+from yulon import client_names, container_end, docker, platform, rmtree, server_build_presses
 from yulon.after_stop import TrueAfterStop
 from yulon.catalog.catalog import ExtractPlan, ExtractTool, MmapPlan, RetrySpec
 from yulon.catalog.installer import InstallerError, InstallStopped
@@ -88,6 +88,8 @@ class Evidence:
     required_file_size: int | None
     required_file_mtime: int | None
     tools: tuple[ToolRecord, ...]
+    offmesh_sha: str | None = None
+    """Sha256 of the off-mesh bytes the movement maps were built from (T811); None names old."""
     client_facts_complete: bool = True
     """Were `client_path` and the required file's facts actually obtained?
 
@@ -238,6 +240,8 @@ def _parse(text: str) -> Evidence:
     tools = raw["tools"]
     if not isinstance(tools, list):
         raise TypeError(f"tools is a {type(tools).__name__}, not a list")
+    if raw.get("offmesh_sha") is not None and _optional_sha(raw["offmesh_sha"]) is None:
+        raise TypeError(f"offmesh_sha is {raw['offmesh_sha']!r}, which is not a sha256 hash")
     return Evidence(
         plan_hash=str(raw["plan_hash"]),
         client_path=str(raw["client_path"]),
@@ -248,12 +252,21 @@ def _parse(text: str) -> Evidence:
             for record in tools
         ),
         client_facts_complete=complete,
+        offmesh_sha=_optional_sha(raw.get("offmesh_sha")),
     )
 
 
 def _optional_int(value: Any) -> int | None:
     """`None` stays `None`; anything else must be a number or the file is not usable."""
     return None if value is None else int(value)
+
+
+def _optional_sha(value: Any) -> str | None:
+    """A recorded off-mesh hash, or None for an install that predates it (T811)."""
+    if value is None:
+        return None
+    text = str(value)
+    return text if len(text) == 64 and all(c in "0123456789abcdef" for c in text) else None
 
 
 def write_evidence(data_dir: Path, evidence: Evidence) -> None:
@@ -1630,9 +1643,10 @@ DIRTY_MARKERS: tuple[str, ...] = (DIR_INDEX, DIR_BIN)
 r"""The two names `vmap_extractor`'s `main()` stats before it will start at all.
 
 Read out of the pinned sources on m910q, 2026-09-05, at the two revisions
-`catalog.json` names -- `cmangos/mangos-classic` 8ec338a1
+`catalog.json` named then -- `cmangos/mangos-classic` 8ec338a1
 (`contrib/vmap_extractor/vmapextract/vmapexport.cpp:472-483`) and
-`cmangos/mangos-tbc` f82e7d67 (the same file, :522-533). Re-read at both
+`cmangos/mangos-tbc` f82e7d67 (the same file, :522-533); `contrib/` is byte-identical at
+the current pins 57312491 and 37767e95 (T824's GitHub compare). Re-read at both
 revisions on yulon-fedora 2026-09-05 (`~/probe10`, `git init` + `git fetch
 --depth 1` BY SHA): the twelve lines are byte-identical at the two revisions,
 and the condition is an OR over exactly these two paths -- quoted whole,
@@ -1974,6 +1988,47 @@ are CHOSEN rather than where they meet — grep for `MmapPlan.model_fields` in
 `data/mmaps` would keep passing on the day a field pointed it elsewhere.
 """
 
+MMAPS_BACKUP_DIR = "mmaps.t811-backup"
+"""Under `data/`: the mmaps files a per-map rebuild set aside, until the build is up (T811).
+
+Inside `data/` so that setting a map's files aside is a rename on one disk --
+instant, and no second copy of gigabytes of maps -- and so that Uninstall, which
+removes the server folder, takes it too. No tool writes here and `counts()` never
+looks here: every count is of a `produces` folder by name.
+"""
+
+MMAPS_BACKUP_OLD = f"{MMAPS_BACKUP_DIR}.old"
+"""The backup, renamed out of the way once the new build is up, then deleted.
+
+The rename is the atomic step that makes the old tiles unreachable: a deletion
+that stops half way -- a locked file on Windows -- then leaves nothing a later
+press would put back over the tiles the running build is using. A leftover of
+this name is only ever deleted, never restored, and the next press tries again.
+"""
+
+BACKUP_NAMES = ".names"
+"""In a map's backup folder: the names of the files set aside, one per line.
+
+Written before the first file moves, so a press that crashed half way through
+the move, or through the put-back, can finish the job: the list tells an old
+file that belongs back (a name on it) from a tile the rejected build wrote
+(a name that is not, removed).
+"""
+
+BACKUP_SHA = "offmesh.sha"
+"""In the backup folder: the off-mesh hash the tiles set aside were built from.
+
+Written once per run, before the first tile moves. A put-back restores it with
+the tiles -- and so must a press that finds a backup its predecessor left --
+or the old tiles would be read as current by the next off-mesh comparison.
+"""
+
+MMAP_SUFFIX = ".mmap"
+"""The per-map file the generator rewrites whenever a map starts (MapBuilder.cpp:649-651)."""
+
+MMTILE_SUFFIX = ".mmtile"
+"""One finished navmesh tile (MapBuilder.cpp:963); `mmaps.py` has the whole-tile rule for it."""
+
 MMAPS_CANCEL_NOTE = (
     "Map generation restarts from the beginning; the extracted maps it reads are kept."
 )
@@ -1996,6 +2051,71 @@ about neither: after a wipe the machine is a folder poorer than the sentence
 implies, and the user needs to know that the next attempt is not optional.
 """
 
+PROGRESS_EVERY_DEFAULT: float | None = None
+"""`run_mmaps()`'s progress line cadence when the caller names none: off.
+
+`None` is the CMaNGOS runs' byte-identical default: the stage yields exactly
+the lines it always has. The CoA `_mmaps` stage passes 60. `0` or negative is
+also off, so a catalog or caller can never ask for a line per byte.
+"""
+
+
+def _progress_due(
+    progress_every: float | None, started: float, now: float, last: float | None
+) -> bool:
+    """Whether a progress line is owed: cadence set, past the first interval, new interval."""
+    if progress_every is None or progress_every <= 0:
+        return False
+    if now - started < progress_every:
+        return False
+    return last is None or now - last >= progress_every
+
+
+def _progress_line(started: float, now: float, data_dir: Path) -> str:
+    """One progress line: mmaps files so far and elapsed, over the folder being written."""
+    have = file_count(data_dir / MMAPS_DIR)
+    elapsed = int(now - started)
+    return (
+        f"Movement maps: {have} files so far ({elapsed}s elapsed). "
+        "This takes hours on a first install; the server starts when it is done."
+    )
+
+
+def _progress_watcher(
+    progress_every: float | None,
+    clock: Callable[[], float],
+    data_dir: Path,
+    sink: docker.OutputSink,
+) -> tuple[docker.OutputSink, Callable[[], None]]:
+    """The container-run sink plus its flush: a progress line at most every `progress_every`.
+
+    `None`/non-positive disables: the sink IS `sink` and the flush is a no-op,
+    which is what keeps every CMaNGOS caller byte-identical. Otherwise each
+    container line first asks whether a progress line is owed (`_progress_due`
+    on the watcher clock: test-seamed, never `time.monotonic` direct) and, when
+    one is, sinks it BEFORE the container's own line — and the flush after the
+    run sinks one last line when the cadence is on but no interval ever elapsed,
+    so a short run still says one thing rather than nothing.
+    """
+    started = clock()
+    last: list[float | None] = [None]
+
+    def watch(line: str) -> None:
+        now = clock()
+        if _progress_due(progress_every, started, now, last[0]):
+            sink(_progress_line(started, now, data_dir))
+            last[0] = now
+        sink(line)
+
+    def flush() -> None:
+        if progress_every is None or progress_every <= 0:
+            return
+        if last[0] is not None:
+            return
+        sink(_progress_line(started, clock(), data_dir))
+
+    return watch, flush
+
 
 def run_mmaps(
     plan: MmapPlan,
@@ -2006,6 +2126,11 @@ def run_mmaps(
     user_args: Sequence[str],
     sink: docker.OutputSink,
     cancel: threading.Event | None,
+    cpus: int | None = None,
+    cpuset: str | None = None,
+    memory: int | None = None,
+    progress_every: float | None = None,
+    clock: Callable[[], float] | None = None,
 ) -> Iterator[str]:
     """Generate `data/mmaps` from the extracted maps and vmaps, unless the evidence vouches for it.
 
@@ -2099,18 +2224,30 @@ def run_mmaps(
         # (review, 2026-09-02).
         raise InstallerError(f"{exc}{cleared}") from exc
     yield f"mmaps: running {' '.join(plan.argv)}"
-    run = _quiet(run_container)(
-        docker.ContainerRun(
-            image=image_ref,
-            argv=tuple(plan.argv),
-            mounts=(docker.Mount(data_dir, OUT_MOUNT),),
-            workdir=OUT_MOUNT,
-            user_args=tuple(user_args),
-            security_args=EXTRACT_HARDENING,
-        ),
-        sink=sink,
-        cancel=cancel,
+    progress_sink, progress_flush = _progress_watcher(
+        progress_every if progress_every is not None else PROGRESS_EVERY_DEFAULT,
+        clock if clock is not None else time.monotonic,
+        data_dir,
+        sink,
     )
+    try:
+        run = _quiet(run_container)(
+            docker.ContainerRun(
+                image=image_ref,
+                argv=tuple(plan.argv),
+                mounts=(docker.Mount(data_dir, OUT_MOUNT),),
+                workdir=OUT_MOUNT,
+                user_args=tuple(user_args),
+                security_args=EXTRACT_HARDENING,
+                cpus=cpus,
+                cpuset=cpuset,
+                memory=memory,
+            ),
+            sink=progress_sink,
+            cancel=cancel,
+        )
+    finally:
+        progress_flush()
     if run.returncode == docker.CANCELLED_RETURNCODE or (cancel is not None and cancel.is_set()):
         _left_running("map generation", run, data_dir)
         raise InstallStopped(f"map generation was stopped.{cleared} {MMAPS_CANCEL_NOTE}")
@@ -2174,6 +2311,447 @@ def run_mmaps(
     record = ToolRecord(MMAPS_TOOL, argv_hash(plan.argv), int(time.time()))
     write_evidence(data_dir, with_record(current, record))
     yield f"mmaps: done ({_counts_text(seen)})"
+
+
+def offmesh_sha(data: bytes) -> str:
+    """The sha256 of an off-mesh file's bytes, as recorded beside the mmaps record (T811)."""
+    return hashlib.sha256(data).hexdigest()
+
+
+def offmesh_map_ids(data: bytes) -> frozenset[str]:
+    """The map ids an off-mesh file names: the first token of each non-blank line (T811).
+
+    Blank lines and `#` comments name no map. A line with no parseable leading number still
+    reaches the diff as its raw token, so a reformatted line is never silently dropped.
+    """
+    ids: set[str] = set()
+    for line in data.decode("utf-8", errors="replace").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        ids.add(stripped.split(None, 1)[0])
+    return frozenset(ids)
+
+
+def offmesh_changed_ids(old: bytes, new: bytes) -> tuple[str, ...]:
+    """The map ids whose off-mesh lines changed between two files (T811).
+
+    Added, removed or edited lines all count: the ids named by either side's lines that are
+    not in both. Sorted numerically where the ids are numbers, so the rebuild order is stable.
+    """
+    before = {line for line in old.decode("utf-8", errors="replace").splitlines() if line.strip()}
+    after = {line for line in new.decode("utf-8", errors="replace").splitlines() if line.strip()}
+    changed = before ^ after
+    ids: set[str] = set()
+    for line in changed:
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            continue
+        ids.add(stripped.split(None, 1)[0])
+    return tuple(sorted(ids, key=lambda each: (0, int(each)) if each.isdigit() else (1, each)))
+
+
+def per_map_argv(plan: MmapPlan, map_id: str) -> tuple[str, ...]:
+    """This generator's argv for one map: `MoveMapGen <id>` with the plan's own flags (T811)."""
+    argv = list(plan.argv)
+    if len(argv) < 3 or argv[1] != "--silent":
+        raise InstallerError(
+            f"this generator's per-map run is not known for {list(plan.argv)}: "
+            "the plan's argv must start with the generator and --silent"
+        )
+    rest = argv[2:] if not argv[2].isdigit() else argv[3:]
+    out: list[str] = [argv[0], map_id]
+    pending = list(rest)
+    while pending:
+        flag = pending.pop(0)
+        if flag in ("--offMeshInput", "--settingsInput"):
+            if not pending:
+                raise InstallerError(
+                    f"this generator's per-map run is not known for {list(plan.argv)}: "
+                    f"{flag} names no file"
+                )
+            out += [flag, pending.pop(0)]
+        elif flag in ("--silent", "--doNotFilterDeepWater"):
+            out.append(flag)
+        else:
+            raise InstallerError(
+                f"this generator's per-map run is not known for {list(plan.argv)}: "
+                f"no per-map spelling for {flag}"
+            )
+    return tuple(out)
+
+
+def run_mmaps_for_maps(
+    plan: MmapPlan,
+    map_ids: Sequence[str],
+    *,
+    image_ref: str,
+    data_dir: Path,
+    run_container: RunContainer,
+    user_args: Sequence[str],
+    sink: docker.OutputSink,
+    cancel: threading.Event | None,
+    previous_sha: str | None = None,
+    cpus: int | None = None,
+    cpuset: str | None = None,
+    memory: int | None = None,
+) -> Iterator[str]:
+    """Regenerate only the named maps, without touching the other maps' tiles (T811).
+
+    Each map's own files are moved into `MMAPS_BACKUP_DIR` before its generator
+    runs (`set_map_aside`), and put back at once if that run fails or is stopped,
+    so one map is never left half old and half new. What a successful run set
+    aside stays there until the new build is up (`drop_maps_backup`); `put_maps_back()`
+    is the rollback, and `previous_sha` is the off-mesh hash the tiles were built
+    from, written beside them so that rollback restores the record too.
+    """
+    if not map_ids:
+        return
+    for map_id in map_ids:
+        if cancel is not None and cancel.is_set():
+            raise InstallStopped(
+                f"map generation was stopped before map {map_id} started, so nothing was "
+                f"removed. {MMAPS_CANCEL_NOTE}"
+            )
+        argv = per_map_argv(plan, map_id)
+        yield f"mmaps: rebuilding map {map_id} ({' '.join(argv)})"
+        set_map_aside(data_dir, map_id, previous_sha)
+        run = _quiet(run_container)(
+            docker.ContainerRun(
+                image=image_ref,
+                argv=argv,
+                mounts=(docker.Mount(data_dir, OUT_MOUNT),),
+                workdir=OUT_MOUNT,
+                user_args=tuple(user_args),
+                security_args=EXTRACT_HARDENING,
+                cpus=cpus,
+                cpuset=cpuset,
+                memory=memory,
+            ),
+            sink=sink,
+            cancel=cancel,
+        )
+        if run.returncode == docker.CANCELLED_RETURNCODE or (
+            cancel is not None and cancel.is_set()
+        ):
+            _left_running(f"map generation for map {map_id}", run, data_dir)
+            raise InstallStopped(
+                f"map generation for map {map_id} was stopped.{_put_back_note(data_dir, map_id)} "
+                f"{MMAPS_CANCEL_NOTE}"
+            )
+        if docker.cli_missing_run(run):
+            raise InstallerError(
+                "map generation could not be started, so no movement data was written."
+                f"{_put_back_note(data_dir, map_id)} {docker.last_words(run.tail)}"
+            )
+        if run.returncode not in plan.success_codes:
+            expected = ", ".join(str(code) for code in plan.success_codes)
+            raise InstallerError(
+                f"map generation for map {map_id} failed (exit {run.returncode}); this server's "
+                f"generator reports {expected} when it finishes."
+                f"{_put_back_note(data_dir, map_id)} Its last words were: "
+                f"{docker.last_words(run.tail)}"
+            )
+        yield f"mmaps: map {map_id} done"
+
+
+def _put_back_note(data_dir: Path, map_id: str) -> str:
+    """Put one map's tiles back after its generator failed, at once; what that costs in words.
+
+    Empty when the put-back worked: the failure's own sentence is the one the
+    player needs. A put-back that did not work is added to it rather than
+    replacing it, because the next press finishes what this one could not (T811).
+    """
+    try:
+        put_map_back(data_dir, map_id)
+    except InstallerError as exc:
+        return f" {exc}"
+    return ""
+
+
+# ------------------------------------- T811: the tiles one map's rebuild replaces
+
+
+def map_prefix(map_id: str) -> str:
+    """The `%03u` the generator writes into its file names for this map.
+
+    `MapBuilder.cpp:649-651` names the per-map file and `:963` every tile with the
+    map id printed `%03u`, so map 800 owns `800.mmap` and `800YYXX.mmtile`.
+    """
+    if not (map_id.isascii() and map_id.isdigit()):
+        raise InstallerError(
+            f"{map_id!r} is not a map id: the movement-map generator names a map by a number."
+        )
+    return f"{int(map_id):03d}"
+
+
+def owns_file(name: str, prefix: str) -> bool:
+    """Whether a file in `mmaps/` belongs to the map `prefix`: its `.mmap` or one of its tiles."""
+    if name == f"{prefix}{MMAP_SUFFIX}":
+        return True
+    if not name.startswith(prefix) or not name.endswith(MMTILE_SUFFIX):
+        return False
+    tile = name[len(prefix) : -len(MMTILE_SUFFIX)]
+    return len(tile) == 4 and tile.isdigit()
+
+
+def _map_file_names(out: Path, prefix: str) -> tuple[str, ...]:
+    """Every file one map owns in `mmaps/`, by name; `()` when the folder is not there."""
+    try:
+        with os.scandir(out) as entries:
+            return tuple(sorted(entry.name for entry in entries if owns_file(entry.name, prefix)))
+    except FileNotFoundError:
+        return ()
+
+
+def set_map_aside(data_dir: Path, map_id: str, offmesh_sha: str | None) -> tuple[str, ...]:
+    """Move this map's mmaps files into the run's backup folder; the names moved.
+
+    Renames only, all inside `data/`, so the old tiles are whole wherever they
+    are and no byte is copied. The list of names and the off-mesh hash they were
+    built from are written BEFORE the first rename (`BACKUP_NAMES`, `BACKUP_SHA`),
+    so a press cut short inside the move, or inside the put-back, is finished by
+    the next `put_maps_back()`. Empty when the map has no files yet: there is
+    nothing to put back, and no folder is made for it.
+
+    Raises:
+        InstallerError: the folder could not be listed, or a file could not be
+            moved -- after what did move was put back, so this map is as it was.
+    """
+    prefix = map_prefix(map_id)
+    out = data_dir / MMAPS_DIR
+    try:
+        names = _map_file_names(out, prefix)
+    except OSError as exc:
+        raise InstallerError(
+            f"The movement maps for map {map_id} could not be listed in {out} ({exc}), so that "
+            "map was not rebuilt. Nothing was changed."
+        ) from exc
+    if not names:
+        return ()
+    root = data_dir / MMAPS_BACKUP_DIR
+    held = root / prefix
+    try:
+        held.mkdir(parents=True)
+        if not (root / BACKUP_SHA).exists():
+            (root / BACKUP_SHA).write_text(offmesh_sha or "", encoding="utf-8")
+        (held / BACKUP_NAMES).write_text("\n".join(names) + "\n", encoding="utf-8")
+        for name in names:
+            os.rename(out / name, held / name)
+    except OSError as exc:
+        try:
+            put_map_back(data_dir, map_id)
+            told = "Nothing was changed."
+        except InstallerError as again:
+            told = f"Part of it is still in {held} ({again}); the next press puts it back."
+        raise InstallerError(
+            f"The movement maps for map {map_id} could not be moved aside ({exc}), so that map "
+            f"was not rebuilt. {told}"
+        ) from exc
+    return names
+
+
+def _backup_names(held: Path) -> tuple[set[str], bool]:
+    """What `BACKUP_NAMES` lists, and whether it could be read; the files there when not.
+
+    Written before the first rename, so the list is there for every folder a file
+    was moved into. The second answer matters: an unreadable list must not license
+    removing a file -- a press cut short between the folder's `mkdir` and the list
+    has moved nothing, and every file under `mmaps/` is still the old one.
+    """
+    try:
+        text = (held / BACKUP_NAMES).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        with os.scandir(held) as entries:
+            return {entry.name for entry in entries if entry.is_file()}, False
+    return {line for line in text.splitlines() if line}, True
+
+
+def put_map_back(data_dir: Path, map_id: str) -> tuple[str, ...]:
+    """Put one map's set-aside files back and remove what the rejected build wrote; their names.
+
+    `BACKUP_NAMES` is the authority, never the files left in the folder: a name
+    on the list is one of the old files, put back over whatever stands under it
+    now (`os.replace`), and a matching file under `mmaps/` that is not on the
+    list is the rejected build's and is removed first. Both steps are therefore
+    idempotent, which is what lets a later press finish a put-back a crash cut
+    short. A folder that lost its list has its files put back but nothing
+    removed -- a press can have made the folder before it moved one, and every
+    file under `mmaps/` would then be the old one. The folder goes only once it
+    is empty, so the next press finds it. `()` when this map has no backup.
+
+    Raises:
+        InstallerError: a file could not be removed or moved. What is left stays
+            in the backup folder, and the next press tries again.
+    """
+    prefix = map_prefix(map_id)
+    held = data_dir / MMAPS_BACKUP_DIR / prefix
+    if not held.is_dir() or held.is_symlink():
+        return ()
+    try:
+        names, listed = _backup_names(held)
+    except OSError as exc:
+        raise InstallerError(
+            f"The movement maps kept for map {map_id} in {held} could not be read ({exc}), so "
+            "they were not put back."
+        ) from exc
+    out = data_dir / MMAPS_DIR
+    try:
+        out.mkdir(parents=True, exist_ok=True)
+        if listed:
+            with os.scandir(out) as entries:
+                rejected = [
+                    entry.name
+                    for entry in entries
+                    if entry.name not in names
+                    and owns_file(entry.name, prefix)
+                    and not entry.is_dir(follow_symlinks=False)
+                ]
+            for name in rejected:
+                (out / name).unlink()
+        for name in sorted(names):
+            if os.path.lexists(held / name):
+                os.replace(held / name, out / name)
+        (held / BACKUP_NAMES).unlink(missing_ok=True)
+        held.rmdir()
+    except OSError as exc:
+        raise InstallerError(
+            f"The movement maps for map {map_id} could not be put back ({exc}); they are still "
+            f"in {held}, and the next press puts them back."
+        ) from exc
+    _drop_backup_root_if_empty(data_dir)
+    return tuple(sorted(names))
+
+
+def _drop_backup_root_if_empty(data_dir: Path) -> None:
+    """Remove the backup folder once no map is left in it; a failure is logged, never raised.
+
+    The hash only goes with the last map: another map's folder still needs it, so
+    a put-back of one map of several leaves both in place.
+    """
+    root = data_dir / MMAPS_BACKUP_DIR
+    try:
+        with os.scandir(root) as entries:
+            left = [entry.name for entry in entries]
+    except OSError:
+        return
+    if any(name != BACKUP_SHA for name in left):
+        return
+    try:
+        (root / BACKUP_SHA).unlink(missing_ok=True)
+        root.rmdir()
+    except OSError as exc:
+        logger.warning(f"{root} could not be removed ({exc}); it holds nothing to put back")
+
+
+def _restore_backup_sha(data_dir: Path, text: str | None) -> None:
+    """Write the hash the backup recorded back into the evidence, when the backup holds one.
+
+    `text` is the marker's content, read before the maps were put back, because
+    the last map's put-back takes the backup folder and the marker with it.
+    None is "the marker could not be read": the record is then left as it is.
+    """
+    if text is None:
+        return
+    current = read_evidence(data_dir)
+    if current is None:
+        return
+    before = text.strip() or None
+    if current.offmesh_sha == before:
+        return
+    try:
+        write_evidence(data_dir, replace(current, offmesh_sha=before))
+    except OSError as exc:
+        raise InstallerError(
+            "The movement maps were put back, but the record of the off-mesh file they were "
+            f"built from could not be written ({exc}), so the next press would take them for "
+            "current. Press "
+            f"{server_build_presses.under_server_build(server_build_presses.UPDATE_TO_LATEST)} "
+            "again once the server folder is writable."
+        ) from exc
+
+
+def put_maps_back(data_dir: Path) -> tuple[str, ...]:
+    """Put back every map a backup holds, and the off-mesh hash with them; the maps put back.
+
+    The crash door (T811): a press that did not finish leaves `MMAPS_BACKUP_DIR`
+    behind, and the next press calls this before it compares the off-mesh file at
+    all -- so the old tiles and the hash they were built from go back together,
+    and that comparison sees the change again instead of finding it recorded.
+    Also the rollback: `back()` calls it after a build that started nothing.
+    Empty when there was no backup.
+
+    Raises:
+        InstallerError: a map could not be put back; what is left stays in the
+            backup folder, and the next press tries again.
+    """
+    root = data_dir / MMAPS_BACKUP_DIR
+    try:
+        with os.scandir(root) as entries:
+            prefixes = sorted(
+                entry.name
+                for entry in entries
+                if entry.is_dir(follow_symlinks=False) and not entry.is_symlink()
+            )
+    except FileNotFoundError:
+        return ()
+    except OSError as exc:
+        raise InstallerError(
+            f"The movement maps kept in {root} could not be read ({exc}), so they were not put "
+            "back."
+        ) from exc
+    try:
+        sha_text: str | None = (root / BACKUP_SHA).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        sha_text = ""
+    except OSError as exc:
+        logger.warning(
+            f"{root / BACKUP_SHA} could not be read ({exc}), so the off-mesh hash the movement "
+            "maps were built from is left as it is"
+        )
+        sha_text = None
+    for prefix in prefixes:
+        put_map_back(data_dir, prefix)
+    _restore_backup_sha(data_dir, sha_text)
+    _drop_backup_root_if_empty(data_dir)
+    return tuple(prefixes)
+
+
+def drop_maps_backup(data_dir: Path) -> bool:
+    """The new build is up: the tiles it replaced are no longer kept; True when one was.
+
+    The folder is renamed out of the way FIRST (`MMAPS_BACKUP_OLD`, one step, the
+    same disk), so a deletion that stops half way -- a locked file on Windows --
+    leaves nothing a later press would put back over the tiles the running build
+    uses. A leftover of that name from an earlier press is only ever deleted.
+    A deletion that fails is logged, never raised: the new build is up, and a
+    file that will not go is not a reason to call the press undone.
+    """
+    old = data_dir / MMAPS_BACKUP_OLD
+    _delete_backup_quietly(old)
+    root = data_dir / MMAPS_BACKUP_DIR
+    if not os.path.lexists(root):
+        return False
+    try:
+        os.rename(root, old)
+    except OSError as exc:
+        logger.warning(
+            f"{root} could not be set aside for deletion ({exc}); it stays, and the next press "
+            "puts it back before it compares the off-mesh file"
+        )
+        return False
+    _delete_backup_quietly(old)
+    return True
+
+
+def _delete_backup_quietly(path: Path) -> None:
+    """Delete a backup tree that is already out of the way; a failure is logged, never raised."""
+    if not os.path.lexists(path):
+        return
+    try:
+        rmtree.remove_tree(path)
+    except OSError as exc:
+        logger.warning(f"{path} could not be deleted ({exc}); the next press tries again")
 
 
 # ------------------------------------- T241: the map data a re-extraction replaces, kept aside

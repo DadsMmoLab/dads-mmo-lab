@@ -11,7 +11,7 @@ from typing import Any
 
 from yulon.ui import quit_anyway
 
-REASON = "A restore is writing into this server's databases on its Maintenance tab."
+REASON = "A restore is writing into this server's databases on its Backups & updates tab."
 
 
 def test_the_box_names_the_work_and_the_cost_and_waiting_is_the_default(qapp: Any) -> None:

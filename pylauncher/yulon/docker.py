@@ -54,6 +54,7 @@ from yulon import (
 from yulon.after_stop import StopTookEffect, TrueAfterStop
 from yulon.log import get_logger
 from yulon.said import SaidByYulon, details_below
+from yulon.server_build_presses import MAINTENANCE_TAB
 from yulon.ui import lines
 
 logger = get_logger(__name__)
@@ -195,6 +196,20 @@ class SaveFirst:
 
 
 @dataclass(frozen=True)
+class BotSavesSkippable:
+    """A Stop that writes every player's save and then does not wait for the bots' (T826).
+
+    Built by `CatalogEntry.container_spec()` from the entry's `stop_without_bot_saves`.
+    `save` is typed at the console before the signal and its queue waited for until empty;
+    the world then gets `seconds` to close before it alone is killed.
+    """
+
+    save: SaveFirst
+    seconds: float = 20.0
+    waits_by_default: bool = True
+
+
+@dataclass(frozen=True)
 class ContainerSpec:
     """How one server install is addressed: its containers, services and ports.
 
@@ -234,12 +249,28 @@ class ContainerSpec:
     `wait_for_the_world_to_load()`.
     """
 
+    bot_saves_skippable: BotSavesSkippable | None = None
+    """How a Stop that does not wait for the bots' saves is done, or None: it always waits (T826).
+
+    Set by `CatalogEntry.container_spec()` from the entry's `stop_without_bot_saves`: the
+    AzerothCore games. Used only by a stop whose `StopControl.skip_bot_saves` is set.
+    """
+
     save_first: SaveFirst | None = None
     """How this world is asked to save everyone before its signal, or None (T410, T411).
 
     Set by `CatalogEntry.container_spec()` from the entry's `save_before_stop`:
     Centurion and Tortoise, whose own close loses saves. See
     `save_then_stop_the_world()`.
+    """
+    auth_after_world: bool = False
+    """Start the auth server only after the world said ready, then open the realm (T812).
+
+    Set by `CatalogEntry.container_spec()` from the entry's
+    `azerothcore.auth_after_world_ready`: Conquest of Azeroth's authserver lists a
+    realm as online the moment its row's flag says so, so auth goes up only once
+    the world is listening, and the row's offline bit is then cleared. False: the one
+    `compose up` names all three services, as before.
     """
 
     def compose_services(self) -> tuple[str, ...]:
@@ -553,12 +584,23 @@ SERVER_IN_MOTION = (
 """Why a hold could not be taken: a lifecycle command for the same server is running."""
 
 _HOLD_LOCK = threading.Lock()
-_HELD: dict[str, list[str]] = {}
+_HELD: dict[str, list[_Hold]] = {}
 _IN_FLIGHT: dict[str, int] = {}
 _PRESSES: dict[str, list[str]] = {}
 """The presses of this process inside a reservation of each server right now (T681)."""
 _ALONE: dict[str, tuple[str, str]] = {}
 """A server one job writes to alone: `(its press, what every other press is told)` (T681)."""
+
+
+@dataclass(frozen=True)
+class _Hold:
+    """A Maintenance job holding the server: its sentence, the press that took it (T738),
+    and what a move is told while it holds (`for_a_move`, T738 part 4)."""
+
+    reason: str
+    press: str
+    for_a_move: str | None = None
+
 
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
@@ -724,6 +766,7 @@ def hold_the_server(
     spec: ContainerSpec | None = None,
     wsl_distro: str | None = None,
     alone: str | None = None,
+    for_a_move: str | None = None,
 ) -> Iterator[None]:
     """Keep every start, stop and recreate of this server away while the block runs (T216).
 
@@ -768,12 +811,18 @@ def hold_the_server(
     the block is refused while one of them is inside. Another Yu'lon is kept out by the
     cross-process reservation above, as before.
 
+    `for_a_move` (T738 part 4) is what a Pack, a Bring in, or a second "Bring from another
+    computer…" on the same folder is told while it holds: the holder's own move sentence.
+    Keying that answer on the hold's text breaks the day the sentence is reworded, and keying
+    it on the press alone cannot tell the two bring-ins apart (both hold with PRESS_BRING_IN).
+
     Raises:
         ServerHeldError: a start, stop or recreate of this server is running
             (`SERVER_IN_MOTION`), another Yu'lon holds the server (`ServerReserved`), or, with
             `alone`, another press of this process is working on it.
     """
     key = _server_key(server_dir)
+    hold = _Hold(reason, press, for_a_move)
     with _HOLD_LOCK:
         if _IN_FLIGHT.get(key):
             raise ServerHeldError(SERVER_IN_MOTION)
@@ -782,15 +831,15 @@ def hold_the_server(
             if inside:
                 raise ServerHeldError(forgetting.another_press_writes(inside[-1]))
             _ALONE[key] = (press, alone)
-        _HELD.setdefault(key, []).append(reason)
+        _HELD.setdefault(key, []).append(hold)
     try:
         with _reserved_for(server_dir, press, spec, wsl_distro):
             yield
     finally:
         with _HOLD_LOCK:
-            reasons = _HELD[key]
-            reasons.remove(reason)
-            if not reasons:
+            holds = _HELD[key]
+            holds.remove(hold)
+            if not holds:
                 del _HELD[key]
             if alone is not None:
                 del _ALONE[key]
@@ -825,10 +874,49 @@ def held_reason(server_dir: Path | str) -> str | None:
     folder is re-entrant, so the reservation alone would not refuse.
     """
     with _HOLD_LOCK:
-        reasons = _HELD.get(_server_key(server_dir))
-        if reasons:
-            return reasons[-1]
+        holds = _HELD.get(_server_key(server_dir))
+        if holds:
+            return holds[-1].reason
     return orphaned_restore_reason(server_dir)
+
+
+def holder(server_dir: Path | str) -> _Hold | None:
+    """The Maintenance job holding the server now, or None (T738).
+
+    This process's own holds only, newest one: `held_reason()`'s sentence plus the press
+    that took it, for the title of the dialog refusing over it. An orphaned load another
+    Yu'lon left running is not one of this process's holds: None, as `held_here()`.
+    """
+    with _HOLD_LOCK:
+        holds = _HELD.get(_server_key(server_dir))
+        return holds[-1] if holds else None
+
+
+def move_held_reason(server_dir: Path | str) -> str | None:
+    """The sentence a Pack or Bring in is told while the server is held, or None (T738 part 4).
+
+    One locked read, for `move_flows.move_held_reason()`'s only call: the current local
+    `_Hold`'s `for_a_move` sentence (else its `reason`), else the orphaned-load sentence.
+    The split `holder()` / `held_reason()` reads let a hold taken between them read as
+    unheld -- the first saw nothing, then `orphaned_restore_reason()` saw `_HELD` and
+    answered None -- so a move wrote its record under an active hold. Here the orphan
+    record is read only after one lock saw no local hold, and a second lock then answers
+    a hold taken in between instead of the orphan result, so a newly acquired local hold
+    is never missed.
+    """
+    key = _server_key(server_dir)
+    with _HOLD_LOCK:
+        holds = _HELD.get(key)
+        if holds:
+            hold = holds[-1]
+            return hold.for_a_move or hold.reason
+    orphan = orphaned_restore_reason(server_dir)
+    with _HOLD_LOCK:
+        holds = _HELD.get(key)
+        if holds:
+            hold = holds[-1]
+            return hold.for_a_move or hold.reason
+    return orphan
 
 
 def held_here(server_dir: Path | str) -> bool:
@@ -925,8 +1013,8 @@ def _in_flight(
     with _HOLD_LOCK:
         held = _HELD.get(key)
         if held:
-            logger.warning(f"refused a start/stop/recreate of {server_dir}: {held[-1]}")
-            raise ServerHeldError(held[-1])
+            logger.warning(f"refused a start/stop/recreate of {server_dir}: {held[-1].reason}")
+            raise ServerHeldError(held[-1].reason)
         _IN_FLIGHT[key] = _IN_FLIGHT.get(key, 0) + 1
     try:
         stopping = press == forgetting.PRESS_STOP
@@ -1132,6 +1220,29 @@ def compose_project_name(server_dir: Path, *, wsl_distro: str | None = None) -> 
         return None
     name = parsed.get("name") if isinstance(parsed, dict) else None
     return name if isinstance(name, str) and name else None
+
+
+def compose_config(server_dir: Path, *, wsl_distro: str | None = None) -> dict[str, Any] | None:
+    """`docker compose config --format json` of this folder, parsed; None if it cannot say (T804).
+
+    The whole document, for the one reader that checks several facts of it at once
+    (`catalog.script_built.check()`); the narrower readers above each ask for one.
+    """
+    proc = _docker(
+        ["compose", "config", "--format", "json"],
+        cwd=server_dir,
+        timeout=_COMPOSE_CONFIG_TIMEOUT_SECONDS,
+        wsl_distro=wsl_distro,
+    )
+    if proc.returncode != 0:
+        logger.debug(f"compose config failed in {server_dir}: {proc.stderr.strip()}")
+        return None
+    try:
+        parsed = json.loads(proc.stdout)
+    except ValueError:
+        logger.debug("compose config did not return JSON")
+        return None
+    return parsed if isinstance(parsed, dict) else None
 
 
 def compose_service_images(
@@ -1684,7 +1795,9 @@ def database_volume(
     return None
 
 
-def staged_up_argv(spec: ContainerSpec, *, force_recreate: bool = False) -> list[str]:
+def staged_up_argv(
+    spec: ContainerSpec, *, force_recreate: bool = False, services: Sequence[str] | None = None
+) -> list[str]:
     """The argv of the one `compose up` this app runs, with and without the rebuild's force.
 
     One builder for both spellings, so the service selection and `--no-deps`
@@ -1708,19 +1821,24 @@ def staged_up_argv(spec: ContainerSpec, *, force_recreate: bool = False) -> list
     compose that did not would be an hour of correct compiler output followed by
     the old binary still running, which is the exact report this control exists
     to answer.
+
+    `services` names the services to bring (T812): the ordered start ups
+    db+world first and auth once the world said ready. None is all of
+    `compose_services()`, as today; naming a subset still carries `--no-deps`,
+    so the one-shot import is never selected either way.
     """
     argv = ["compose", "up", "-d"]
     if force_recreate:
         argv.append("--force-recreate")
-    return [*argv, "--no-deps", *spec.compose_services()]
+    return [*argv, "--no-deps", *(spec.compose_services() if services is None else services)]
 
 
-def recreate_argv(spec: ContainerSpec) -> list[str]:
+def recreate_argv(spec: ContainerSpec, *, services: Sequence[str] | None = None) -> list[str]:
     """`staged_up_argv()` as the rebuild spells it — the name a test can assert on."""
-    return staged_up_argv(spec, force_recreate=True)
+    return staged_up_argv(spec, force_recreate=True, services=services)
 
 
-def recreate_stop_argv(spec: ContainerSpec) -> list[str]:
+def recreate_stop_argv(spec: ContainerSpec, *, services: Sequence[str] | None = None) -> list[str]:
     """What the rebuild stops before its recreate: the servers, not the database (T98).
 
     `compose up --force-recreate` replaces the database FIRST (dependency
@@ -1733,9 +1851,16 @@ def recreate_stop_argv(spec: ContainerSpec) -> list[str]:
     under the world anyway, 270.2 s. Stopping the servers first, with the
     grace every other stop here uses, lets the world drain onto a live
     database, and then the database has nobody to wait for.
+
+    `services` (T812) narrows the stop to those services' servers: the
+    ordered recreate's auth-only replace must not stop the world it just
+    readied. None stops all servers, as today.
     """
     database = spec.service_for(spec.db)
     servers = [service for service in spec.compose_services() if service != database]
+    if services is not None:
+        wanted = set(services)
+        servers = [service for service in servers if service in wanted]
     return ["compose", "stop", "-t", str(STOP_GRACE_SECONDS), *reversed(servers)]
 
 
@@ -1747,6 +1872,7 @@ def stop_servers_staged(
     wsl_distro: str | None = None,
     control: StopControl | None = None,
     before_signal: Callable[[], None] | None = None,
+    services: Sequence[str] | None = None,
 ) -> None:
     """Stop this install's servers and leave its database up: `recreate_stop_argv()`, waited for.
 
@@ -1761,15 +1887,23 @@ def stop_servers_staged(
     before the world's own signal (`save_then_stop_the_world()`), so a caller
     can tell "nothing was signalled" from "something may have been". Compose's stop of services that
     are not running is a no-op, and so is the wait of a world that is down.
+
+    `services` (T812) narrows the stop: the ordered recreate's auth-only
+    replace stops auth alone, never the world it just readied. None stops all
+    servers, as today. The load wait and the save still cover the world when
+    it is among them; narrowing past it skips both for it.
     """
-    heard = wait_for_the_world_to_load(spec, control, wsl_distro=wsl_distro)
-    # T384: the world saves before the grace below can reach it. `before_signal` is
-    # called inside, right before the world's own signal (after any save it is asked
-    # for first, which a give-up can still end with nothing sent).
-    save_then_stop_the_world(
-        spec, control, wsl_distro=wsl_distro, before_signal=before_signal, heard=heard
-    )
-    _run(recreate_stop_argv(spec), cwd=server_dir, wsl_distro=wsl_distro)
+    if services is None or spec.service_for(spec.world) in set(services):
+        heard = wait_for_the_world_to_load(spec, control, wsl_distro=wsl_distro)
+        # T384: the world saves before the grace below can reach it. `before_signal` is
+        # called inside, right before the world's own signal (after any save it is asked
+        # for first, which a give-up can still end with nothing sent).
+        save_then_stop_the_world(
+            spec, control, wsl_distro=wsl_distro, before_signal=before_signal, heard=heard
+        )
+    elif before_signal is not None:
+        before_signal()
+    _run(recreate_stop_argv(spec, services=services), cwd=server_dir, wsl_distro=wsl_distro)
 
 
 @_a_lifecycle_command
@@ -1780,6 +1914,7 @@ def recreate_staged(
     wsl_distro: str | None = None,
     control: StopControl | None = None,
     before_signal: Callable[[], None] | None = None,
+    services: Sequence[str] | None = None,
 ) -> bool:
     """Replace this install's long-running containers from the images on disk now.
 
@@ -1797,11 +1932,23 @@ def recreate_staged(
     `recreate_stop_argv()`), for the reason given there -- and with its wait
     for a loading world, so the rebuild's replace is the check right before
     the signal, cancellable through `control` (T158). `before_signal` is its.
+
+    `services` names the services to replace (T812): the ordered recreate
+    replaces db+world first and auth once the world said ready. None is all
+    of `compose_services()`, as today. The stop narrows with the replace, so
+    an auth-only replace stops auth alone, never the world beside it.
     """
     stop_servers_staged(
-        spec, server_dir, wsl_distro=wsl_distro, control=control, before_signal=before_signal
+        spec,
+        server_dir,
+        wsl_distro=wsl_distro,
+        control=control,
+        before_signal=before_signal,
+        services=services,
     )
-    return start_staged(spec, server_dir, wsl_distro=wsl_distro, force_recreate=True)
+    return start_staged(
+        spec, server_dir, wsl_distro=wsl_distro, force_recreate=True, services=services
+    )
 
 
 @_a_lifecycle_command
@@ -1811,6 +1958,7 @@ def start_staged(
     *,
     wsl_distro: str | None = None,
     force_recreate: bool = False,
+    services: Sequence[str] | None = None,
 ) -> bool:
     """Start this install's long-running services, and only those.
 
@@ -1873,7 +2021,8 @@ def start_staged(
         DockerCommandError: compose failed, or a named service is not running
             once it returned.
     """
-    argv = staged_up_argv(spec, force_recreate=force_recreate)
+    named = spec.compose_services() if services is None else tuple(services)
+    argv = staged_up_argv(spec, force_recreate=force_recreate, services=named)
     logger.info(f"start_staged(): `{' '.join(argv)}` in {server_dir}")
     _run(argv, cwd=server_dir, wsl_distro=wsl_distro)
     listed = _status_safe(wsl_distro=wsl_distro)
@@ -1881,7 +2030,12 @@ def start_staged(
         logger.warning("start_staged(): could not confirm what is running; taking compose's word")
         return True
     running = {line.strip() for line in listed}
-    missing = [name for name in (spec.db, spec.auth, spec.world) if name not in running]
+    by_service = dict(zip(spec.compose_services(), (spec.db, spec.auth, spec.world), strict=False))
+    missing = [
+        by_service.get(service, service)
+        for service in named
+        if by_service.get(service, service) not in running
+    ]
     if missing:
         raise DockerRefusal(
             f"Docker reported the start as done, but {', '.join(missing)} "
@@ -2819,7 +2973,7 @@ def repair_import(
                 f"an earlier import of this install did not finish, but characters {counted} in "
                 f"its databases ({before.detail}). A first import never writes a character, so "
                 "somebody may have played on this server since, and nothing was cleared or run. "
-                "To go back, restore one of its backups on the Maintenance tab."
+                f"To go back, restore one of its backups on the {MAINTENANCE_TAB} tab."
             )
         logger.warning(
             f"repair_import(): copying, then clearing, what an unfinished first import wrote "
@@ -2864,7 +3018,8 @@ def repair_import(
         raise DockerRefusal(
             f"this install's databases hold player data ({before.detail}). Re-running the import "
             "would overwrite it, so it was not run. If the database is damaged, restore the last "
-            "backup from the Maintenance tab instead — that is the path that keeps characters."
+            f"backup from the {MAINTENANCE_TAB} tab instead — that is the path that keeps "
+            "characters."
         )
     if before.state == "imported":
         raise DockerRefusal(
@@ -4271,6 +4426,37 @@ whose traffic cannot be read at all, which is never taken for silence.
 _SAVE_POLL_SECONDS = 2.0
 """How long a stop pauses between two looks at a world that is saving (T384)."""
 
+PLAYERS_SAVE_CEILING_SECONDS = 180
+"""The longest a Stop that does not wait for the bots waits for every player's save (T826).
+
+Before the signal, `saveall` (every character, bots included) and then the character queue
+until it is empty. Measured on yulon-ubuntu2 (WotLK, 500 bots, 2026-09-10, `party.py`'s
+`LEVEL_SLEEP`): a row written by `saveall` agreed 1.4 to 8.2 s after it came back. A queue
+that is not empty by this time falls back to the full wait (`PLAYERS_SAVE_UNSEEN`), so this
+bounds only how long the fast Stop tries before it becomes the safe one."""
+
+PLAYERS_SAVE_UNSEEN = (
+    "Yu'lon could not see every player's save written, so this Stop waits for all the saves, "
+    "the bots' too, after all."
+)
+"""Said when a Stop that was not to wait for the bots falls back to the full wait (T826)."""
+
+WORLD_STOPPED_WITHOUT_BOT_SAVES = (
+    "The players were saved first. The world server was stopped without waiting for the rest "
+    "of the bots' saves, as this server is set to do, so bots may have lost their latest "
+    "changes."
+)
+"""Said when the world was killed at `BotSavesSkippable.seconds` after its signal (T826)."""
+
+
+def world_closing_without_bot_saves(seconds: float) -> str:
+    """Said once the world is signalled in a Stop that does not wait for the bots (T826)."""
+    return (
+        "The players are saved. The world server is closing; Yu'lon gives it "
+        f"{int(seconds)} seconds and then stops it without waiting for the bots' saves."
+    )
+
+
 WORLD_SAVING = (
     "Saving characters: the world server is writing every character to its database before it "
     "closes. That usually takes under a minute and can take several on a busy disk. Yu'lon "
@@ -4553,6 +4739,17 @@ class StopControl:
     on it returned in 11.9-20.2 s, at the cycle's own crash, never at SIGKILL).
     """
 
+    skip_bot_saves: bool = False
+    """The player's "do not wait for the bots to be saved" for THIS stop (T826).
+
+    Off for every stop but the ones the player's choice reaches: `Controller.stop(by_choice=
+    True)` sets it on a copy of its control (`dataclasses.replace`, so the events are shared)
+    when the install's choice says so. Every other stop -- a backup's, an update's or a
+    rebuild's, a move's, a removal's, a realm switch's -- builds or keeps a control without it,
+    so it waits for every save whatever the choice. Read only for a spec with
+    `bot_saves_skippable`; see `save_then_stop_the_world()`.
+    """
+
     def forced(self) -> bool:
         """Has anyone asked for the stop regardless?"""
         return self.anyway.is_set() or any(event.is_set() for event in self.also_anyway)
@@ -4709,13 +4906,15 @@ def _type_at_the_world(
     window: float,
     wsl_distro: str | None,
     answer_marker: str | None = None,
+    save: SaveFirst | None = None,
 ) -> Any | None:
     """One console line to this world; its `ConsoleReply`, or None when it could not be typed.
 
     Where this host cannot type at the console at all (T496), the line goes through the
-    install's command channel instead (`_ask_the_channel()`).
+    install's command channel instead (`_ask_the_channel()`). `save` is the save whose console
+    this is, `spec.save_first` unless given (T826 passes `bot_saves_skippable.save`).
     """
-    save = spec.save_first
+    save = save or spec.save_first
     assert save is not None
     if not _console_reaches(wsl_distro):
         return _ask_the_channel(spec, command, wsl_distro)
@@ -4734,20 +4933,42 @@ def _type_at_the_world(
         return None
 
 
-def _queue_length(spec: ContainerSpec, wsl_distro: str | None) -> int | None:
+def _queue_length(
+    spec: ContainerSpec, wsl_distro: str | None, save: SaveFirst | None = None
+) -> int | None:
     """The world's character save queue as its `queue_command` reports it, or None (T410)."""
-    save = spec.save_first
+    save = save or spec.save_first
     assert save is not None
-    reply = _type_at_the_world(spec, save.queue_command, _QUEUE_LOOK_WINDOW_SECONDS, wsl_distro)
+    reply = _type_at_the_world(
+        spec, save.queue_command, _QUEUE_LOOK_WINDOW_SECONDS, wsl_distro, save=save
+    )
     if reply is None:
         return None
     return save.queue_length("\n".join(getattr(reply, "lines", ())))
 
 
+SaveOutcome = Literal["written", "asked", "not_asked", "unfinished"]
+"""How the save asked for before a signal ended (T826): `written` -- the queue was seen empty
+after it; `asked` -- the console answered and there is no queue to read; `not_asked` -- it did
+not answer; `unfinished` -- the queue's wait ran out."""
+
+
 def _save_everyone_first(
-    spec: ContainerSpec, control: StopControl, say: Callable[..., None], wsl_distro: str | None
-) -> bool:
+    spec: ContainerSpec,
+    control: StopControl,
+    say: Callable[..., None],
+    wsl_distro: str | None,
+    *,
+    save: SaveFirst | None = None,
+    say_failures: bool = True,
+    ceiling: float = WORLD_SAVE_CEILING_SECONDS,
+) -> SaveOutcome:
     """Have a running world whose own close loses saves save everyone, and wait for it (T410, T411).
+
+    T826: also the players' save of a Stop that does not wait for the bots' saves, with
+    `save` (`BotSavesSkippable.save`), `ceiling` its shorter bound and `say_failures` False:
+    there a save not seen written is no loss -- the stop falls back to the full wait, and says
+    so itself -- so neither `SAVE_FIRST_NOT_ASKED` nor `SAVE_FIRST_UNFINISHED` is said.
 
     Before the signal, while the world still runs and its database is up. Typed at
     the console (`SaveFirst.command`, `saveall`), which needs no credential. For a
@@ -4787,17 +5008,20 @@ def _save_everyone_first(
     still running, which is what every handler of that type says -- after
     `SaveFirst.if_given_up` is typed, so what `first` closed is open again.
 
-    Returns whether the save was asked for and, for a queue core, seen through: False after
-    `SAVE_FIRST_NOT_ASKED` (`SAVE_FIRST_NOT_ASKED_HERE` where the console needs a terminal this
-    host cannot open, T496) or `SAVE_FIRST_UNFINISHED`, so the close is not then said to have
-    saved every character.
+    Returns how it ended (`SaveOutcome`): `not_asked` after `SAVE_FIRST_NOT_ASKED`
+    (`SAVE_FIRST_NOT_ASKED_HERE` where the console needs a terminal this host cannot open, T496)
+    and `unfinished` after `SAVE_FIRST_UNFINISHED`, so the close is not then said to have saved
+    every character; `written` only when the queue was seen empty.
     """
-    save = spec.save_first
+    save = save or spec.save_first
     assert save is not None
     not_asked = SAVE_FIRST_NOT_ASKED if _console_reaches(wsl_distro) else SAVE_FIRST_NOT_ASKED_HERE
     say(SAVE_FIRST_ASKING)
     for line in save.first:
-        if _type_at_the_world(spec, line, _QUEUE_LOOK_WINDOW_SECONDS, wsl_distro) is None:
+        if (
+            _type_at_the_world(spec, line, _QUEUE_LOOK_WINDOW_SECONDS, wsl_distro, save=save)
+            is None
+        ):
             logger.warning(f"{spec.world} was not told {line!r} before its save; saving anyway")
     window = (
         _SAVE_COMMAND_WINDOW_SECONDS
@@ -4810,12 +5034,13 @@ def _save_everyone_first(
         window,
         wsl_distro,
         answer_marker=None if save.prompt_precedes_answer else _SAVE_ANSWER,
+        save=save,
     )
     answered = reply is not None and bool(getattr(reply, "prompted", False))
     if not save.queue_command:
-        if not answered:
+        if not answered and say_failures:
             say(not_asked, warn=True)
-        return answered
+        return "asked" if answered else "not_asked"
     started = _save_clock()
     last_shrunk = started
     before: int | None = None
@@ -4823,13 +5048,18 @@ def _save_everyone_first(
     while True:
         if control.abandon.is_set():
             for line in save.if_given_up:
-                if _type_at_the_world(spec, line, _QUEUE_LOOK_WINDOW_SECONDS, wsl_distro) is None:
+                if (
+                    _type_at_the_world(
+                        spec, line, _QUEUE_LOOK_WINDOW_SECONDS, wsl_distro, save=save
+                    )
+                    is None
+                ):
                     logger.warning(f"{spec.world} was left running without {line!r}")
             raise SaveFirstAbandoned(
                 f"The stop was not sent: it was given up while {spec.world} was writing its "
                 "saves, so the world was left running."
             )
-        length = _queue_length(spec, wsl_distro) if reply is not None else None
+        length = _queue_length(spec, wsl_distro, save) if reply is not None else None
         now = _save_clock()
         if not looked:
             looked = True
@@ -4838,24 +5068,23 @@ def _save_everyone_first(
                 # wait for: said by the reply alone, and the stop goes on.
                 if answered:
                     logger.info(f"{spec.world}'s save queue could not be read; not waited on")
-                else:
+                    return "asked"
+                if say_failures:
                     say(not_asked, warn=True)
-                return answered
+                return "not_asked"
             if length > 0:
                 say(SAVE_FIRST_QUEUED.format(count=length))
         if length == 0:
             say(SAVE_FIRST_WRITTEN)
-            return True
+            return "written"
         if length is not None:
             if before is not None and length < before:
                 last_shrunk = now
             before = length
-        if (
-            now - started >= WORLD_SAVE_CEILING_SECONDS
-            or now - last_shrunk >= WORLD_SAVE_STALL_SECONDS
-        ):
-            say(SAVE_FIRST_UNFINISHED, warn=True)
-            return False
+        if now - started >= ceiling or now - last_shrunk >= WORLD_SAVE_STALL_SECONDS:
+            if say_failures:
+                say(SAVE_FIRST_UNFINISHED, warn=True)
+            return "unfinished"
         control.abandon.wait(_SAVE_POLL_SECONDS)
 
 
@@ -4892,6 +5121,14 @@ def save_then_stop_the_world(
     console while it still runs, and for Centurion waited for until that save queue is
     written (`_save_everyone_first()`, T410/T411). Only then is it signalled.
 
+    T826: with `control.skip_bot_saves` on a spec with `bot_saves_skippable`, the world is first
+    told to save everyone and its character queue waited for until EMPTY (at most
+    `PLAYERS_SAVE_CEILING_SECONDS`), so every player's save is written before the signal --
+    AzerothCore queues the players' own logout saves behind every bot's. Only when that was
+    seen is the wait after the signal cut at `bot_saves_skippable.seconds`: the world alone is
+    killed (`WORLD_STOPPED_WITHOUT_BOT_SAVES`) and the caller stops the database as always.
+    A save not seen written says `PLAYERS_SAVE_UNSEEN` and the stop waits as it always did.
+
     Each look is a bounded `docker inspect`, then -- while it runs -- a bounded read of its
     `/proc/net/dev`. Once the players are gone the world's only traffic is its database, so
     bytes still moving mean it is still saving. It ends on the first of:
@@ -4927,10 +5164,33 @@ def save_then_stop_the_world(
             before_signal()
         return
     saved_first = True
+    # T826: the player's "do not wait for the bots' saves", for a game that offers it. Every
+    # player is saved and SEEN written first; only then is the wait after the signal cut short.
+    skippable = spec.bot_saves_skippable if control.skip_bot_saves else None
+    cut_after: float | None = None
     if spec.save_first is not None:
         state = container_state(world, timeout=_LOAD_LOOK_TIMEOUT, wsl_distro=wsl_distro)
         if state.settled:
-            saved_first = _save_everyone_first(spec, control, say, wsl_distro)
+            saved_first = _save_everyone_first(spec, control, say, wsl_distro) in (
+                "written",
+                "asked",
+            )
+    elif skippable is not None:
+        state = container_state(world, timeout=_LOAD_LOOK_TIMEOUT, wsl_distro=wsl_distro)
+        if state.settled:
+            outcome = _save_everyone_first(
+                spec,
+                control,
+                say,
+                wsl_distro,
+                save=skippable.save,
+                say_failures=False,
+                ceiling=PLAYERS_SAVE_CEILING_SECONDS,
+            )
+            if outcome == "written":
+                cut_after = skippable.seconds
+            else:
+                say(PLAYERS_SAVE_UNSEEN)
     if before_signal is not None:
         before_signal()
     proc = _docker(["kill", "-s", "TERM", world], timeout=_LOAD_LOOK_TIMEOUT, wsl_distro=wsl_distro)
@@ -4978,7 +5238,11 @@ def save_then_stop_the_world(
             run = state.started_at
             if not saying:
                 saying = True
-                say(WORLD_SAVING)
+                say(
+                    WORLD_SAVING
+                    if cut_after is None
+                    else world_closing_without_bot_saves(cut_after)
+                )
             look = exec_output(
                 world, ["cat", "/proc/net/dev"], timeout=_LOAD_LOOK_TIMEOUT, wsl_distro=wsl_distro
             )
@@ -4987,6 +5251,15 @@ def save_then_stop_the_world(
                 # Moved, or could not be read: neither is silence.
                 last_moved = now
                 moved = count if count is not None else moved
+        if cut_after is not None and now - started >= cut_after:
+            # T826: every player's save was seen written before the signal; the bots' are what
+            # is still queued. The world alone is killed; the database is stopped as always.
+            say(WORLD_STOPPED_WITHOUT_BOT_SAVES)
+            try:
+                kill_container(world, wsl_distro=wsl_distro)
+            except DockerCommandError as exc:
+                logger.warning(f"could not kill {world}: {exc}")
+            return
         verdict = ""
         if now - started >= WORLD_SAVE_CEILING_SECONDS:
             verdict = WORLD_SAVE_TOO_LONG
@@ -6730,6 +7003,29 @@ step's output arrives as `#<n> <seconds> ...` and is not read at all
 _STEP_OUTPUT = re.compile(r"^\s*#\d+\s")
 """A line BuildKit's plain progress prints for a step: `#25 213.5 ...`, `#9 ERROR: ...`."""
 
+_ONE_SHOT_ERROR = re.compile(
+    r"^(?:" r"curl: \(\d+\)" r"|ERROR \d+ \([0-9A-Z]+\)" r"|error setting certificate file" r")",
+)
+"""The tool's own failure line, at the start of a line: curl's or mysql's (T810).
+
+Compose prefixes every line with `<service>  | ` and a curl progress meter
+fills the tail with `  0  0  ... --:--:--` readings. The reporter's curl 77
+then quoted a meter line instead of `curl: (77) error setting certificate
+file`. An error recognised here wins over the tail's last lines, in the same
+way a compiler diagnostic wins over BuildKit's epilogue.
+"""
+
+_CURL_METER = re.compile(r"^\s*\d+\s+[\d\s]+--[:\-]")
+"""A curl progress-meter reading, recognised so it is never quoted (T810).
+
+Measured on the reporter's own stream: two lines of bare column readings
+between every error line, `  0  0  0 ... 0 --:--:-- --:--:-- ...`. A meter
+line names nothing and explains nothing, the way ninja's `[NNN/MMMM]
+Building CXX object` progress does for a build -- and like that progress it
+arrives wedged between the lines that do. Matched after `unprefixed()`, so
+the service prefix compose puts in front is already gone.
+"""
+
 
 def builder_connection_lost(tail: Sequence[str]) -> bool:
     """Did this build end because its client lost Docker's builder? (T202)
@@ -6848,6 +7144,11 @@ def last_words(tail: tuple[str, ...], *, from_build: bool = False) -> str:
     than anything that went wrong, so the failing step's output is preferred
     and the `ERROR:` line is kept beside it with its command elided — see
     `_buildkit_failure()`.
+
+    For a failed one-shot (a compose service that printed its own error and
+    exited) the same shape holds: compose's own closing lines and a curl
+    progress meter fill the tail's last lines, so the tool's own error line is
+    preferred and leads — see `_ONE_SHOT_ERROR` (T810).
     """
     said = [line.strip() for line in tail if line.strip()]
     if not said:
@@ -6862,6 +7163,35 @@ def last_words(tail: tuple[str, ...], *, from_build: bool = False) -> str:
             # says where to look (review, 2026-09-12).
             text = text[:_LAST_WORDS_CHARS] + "…"
         return f"{text} / {_elided(error_line)}" if error_line else text
+    error_at = [
+        index
+        for index, line in enumerate(said)
+        if _ONE_SHOT_ERROR.search(unprefixed(line)) and not _COMPOSE_OWN_LINE.match(line.strip())
+    ]
+    if error_at and not from_build:
+        # A one-shot's own error line beats compose's closing lines and curl's
+        # meter. The reporter's tail ended in two meter readings and an
+        # "Aborting on container exit..." line, and all five quoted lines were
+        # those. Quoted in stream order: the error with the line before it
+        # (the fetch's last reading) and the line after it (curl's own
+        # "Warning: Problem (retrying ...)", read as the run's own words, not
+        # as a promise — the fail-fast below never retries this; the run
+        # already ended). `unprefixed()` matches without compose's own
+        # `<service>  | `; the quoted line keeps it, like every other answer.
+        at = error_at[-1]
+        latest = said[at]
+        # The error's own neighbourhood, not the tail's last lines: those are
+        # meter readings and compose's own "Aborting on container exit...".
+        nearby = said[max(0, at - 1) : at + 2]
+        window = [line for line in nearby if not _CURL_METER.match(unprefixed(line))]
+        lines = list(dict.fromkeys([latest, *window]))
+        following = [line for line in said[at + 1 :] if not _CURL_METER.match(unprefixed(line))]
+        lines.extend(line for line in following if line not in lines)
+        text = " / ".join(lines[:_LAST_WORDS_LINES])
+        # From the HEAD: the error line leads, and a long neighbour must not push
+        # its own words ("ERROR 1146 ...") off the front (CI shard 2, 2026-10-28).
+        return text if len(text) <= _LAST_WORDS_CHARS else text[:_LAST_WORDS_CHARS] + "…"
+
     kept = _build_log_elsewhere(said) if from_build else ""
     if kept:
         # T50. The step output is not in the buffer to be selected from, so the
@@ -8092,6 +8422,31 @@ class ContainerRun:
     env: Mapping[str, str] = field(default_factory=dict)
     user_args: tuple[str, ...] = ()
     ulimits: tuple[str, ...] = ()
+    cpus: int | None = None
+    """A `--cpus` ceiling on the container, in whole CPUs, or None for no ceiling.
+
+    A whole CPU, not a fraction: Docker accepts `1.5`, but the only caller today
+    caps a movement-map generator by halving what the engine reports, and a
+    half-core more of that tool buys nothing worth a second spelling of the
+    rounding rule. `None` is "the tool may use the engine whole" — the decision
+    a caller that states nothing has taken — and nothing is emitted for it.
+    """
+    cpuset: str | None = None
+    """`--cpuset-cpus`: the cores the container may run on (`"0-3"`), or None for any.
+
+    `cpus` bounds CPU TIME only: a tool that starts one worker per core it can see
+    still starts them all, sharing that time. Pinning the cores places every worker on
+    those N, and a tool that counts the affinity mask sees N. glibc 2.35 and later count
+    `/sys/devices/system/cpu/online` for `get_nprocs()` instead, so such a tool still
+    starts a worker per HOST core; what bounds its memory is `memory`, not this.
+    """
+    memory: int | None = None
+    """`--memory` and `--memory-swap`, in bytes: the container's hard RAM ceiling, or None.
+
+    Both flags carry the same number, so the container gets no swap beyond its RAM:
+    past the ceiling the kernel kills the tool inside the container, rather than the
+    machine running out of memory under it.
+    """
     security_args: tuple[str, ...] = ()
     """The caller's container-level security decision, verbatim, or nothing.
 
@@ -8193,6 +8548,12 @@ class ContainerRun:
         argv = [*self.user_args, *self.security_args]
         for limit in self.ulimits:
             argv += ["--ulimit", limit]
+        if self.cpus is not None:
+            argv += ["--cpus", str(self.cpus)]
+        if self.cpuset is not None:
+            argv += ["--cpuset-cpus", self.cpuset]
+        if self.memory is not None:
+            argv += ["--memory", str(self.memory), "--memory-swap", str(self.memory)]
         for mount in self.mounts:
             if not mount.host.is_absolute():
                 raise ValueError(f"bind mount source must be absolute, got {mount.host!r}")
@@ -8930,7 +9291,7 @@ def _take_claim(
         "-c",
         "cat >/dev/null",
     ]
-    logger.info(f"claiming the folder: `docker {' '.join(argv[len(prefix):])}`")
+    logger.info(f"claiming the folder: `docker {' '.join(argv[len(prefix) :])}`")
     try:
         proc = subprocess.Popen(
             argv,
@@ -10257,6 +10618,37 @@ def copy_from_image(image: str, src: str, dest: Path) -> None:
                 logger.warning(
                     f"could not remove {container[:12]} after the copy: {removal.stderr.strip()}"
                 )
+
+
+def copy_from_container(
+    container: str,
+    src: str,
+    dest: Path | str,
+    *,
+    wsl_distro: str | None = None,
+) -> None:
+    """`docker cp <container>:<src> <dest>` from a container that is already running.
+
+    `copy_from_image()`'s sibling for a file on a live container's own filesystem, which
+    is how T822 keeps a copy of a crashed table's files before repairing it. The copy is
+    a read of the container and a write to the host: `dest`'s folder must exist, and
+    `docker cp`'s own rules decide whether a file or a folder lands in it.
+
+    `wsl_distro` is REQUIRED for a server that lives inside a distro (T125). The CLI
+    then runs in that distro, so a Windows spelling of `dest` would be resolved on the
+    wrong side of the boundary; the caller translates it (`platform.wsl_linux_path`)
+    and this function runs the argv it was given.
+
+    Raises:
+        DockerCliMissingError: there was no docker CLI to run.
+        DockerCommandError: docker refused the copy, or did not answer in time.
+    """
+    proc = _docker(["cp", f"{container}:{src}", str(dest)], wsl_distro=wsl_distro)
+    if proc.returncode == 0:
+        return
+    if _cli_missing(proc):
+        raise DockerCliMissingError(platform.DOCKER_CLI_MISSING_HELP)
+    raise DockerCommandError(f"docker cp {container}:{src} exited {proc.returncode}: {proc.stderr}")
 
 
 _STDIN_CHUNK_BYTES = 1 << 20

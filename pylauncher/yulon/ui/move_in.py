@@ -20,6 +20,7 @@ from yulon.log import get_logger
 from yulon.manifest import Manifest, ManifestType
 from yulon.manifest_store import ManifestStore
 from yulon.move_flows import MoveError
+from yulon.server_build_presses import MAINTENANCE_TAB
 
 logger = get_logger(__name__)
 
@@ -92,7 +93,7 @@ def _server_for(entry: CatalogEntry) -> Callable[[Path, Path | None], move_serve
 
         services = ControllerServices.for_entry(entry, server_dir, client_dir)
         if services.move is None or services.move.world is None:
-            raise MoveError(f"{entry.name} has no Maintenance engine here.")
+            raise MoveError(f"{entry.name} has no {MAINTENANCE_TAB} engine here.")
         store = services.store
 
         def persist(manifest: Manifest) -> None:

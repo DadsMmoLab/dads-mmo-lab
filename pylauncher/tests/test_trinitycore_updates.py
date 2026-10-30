@@ -570,7 +570,7 @@ def test_a_world_import_that_fails_rolls_back_and_the_record_names_every_file(
     }
     assert (
         "Press “Finish the world update” on the Server tab (or “Update the server "
-        f"to latest…” under “Server build ▾” again) to import "
+        "to latest…” under “Server version” on the Backups & updates tab again) to import "
         f"{WORLD_SQL}/creature.sql, {WORLD_SQL}/version.sql again."
     ) in said
     assert "If you took the backup offered before the update" in said
@@ -2319,9 +2319,11 @@ def test_a_rollback_that_leaves_the_servers_stopped_never_says_they_run(box: Box
         "put back by this, so the old build will start on the database as the new one left "
         "it.\n"
         "Press “Finish the world update” on the Server tab (or “Update the server to latest…” "
-        f"under “Server build ▾” again) to import {files} again. The world tables could not all "
+        f"under “Server version” on the Backups & updates tab again) to import {files} again. "
+        "The world tables could not all "
         f"be put back for the build from before this update: {stopped} If you took the backup "
-        "offered before the update, it has them as they were (Restore on the Maintenance tab). "
+        "offered before the update, it has them as they were (Restore on the Backups & updates "
+        "tab). "
         "The source folders were put back on the commits they were on, so what is on disk is "
         "the build that was put back; it stays stopped for the reason given above."
     )
@@ -2677,8 +2679,8 @@ NEEDED_AND_MISSING = (
     "and the build this server was left on needs that table, so the world update was not "
     "finished and the server is still refused a start. Nothing was imported. Put it back in "
     "the sources and press “Finish the world update” again, or press “Update the server to "
-    "latest…” or “Return to the tested pin…” under “Server build ▾” on the Modules tab, "
-    "which builds a new version in place of the one this server was left on."
+    "latest…” or “Return to the tested pin…” under “Server version” on the Backups & updates "
+    "tab, which builds a new version in place of the one this server was left on."
 )
 
 

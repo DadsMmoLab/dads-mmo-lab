@@ -32,7 +32,7 @@ import json
 import re
 import sys
 import zipfile
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path, PurePosixPath
@@ -918,10 +918,278 @@ def dump_from_another_game(name: str, found: str, target_name: str) -> str:
     )
 
 
+def digest_of(names: Iterable[str]) -> str:
+    """SHA-256 of a version's items, order-free: how two servers' versions are compared."""
+    return hashlib.sha256("\n".join(sorted(names)).encode("utf-8")).hexdigest()
+
+
+UpdateNames = tuple[tuple[str, ...], tuple[str, ...]]
+"""A ledger's `(core update names, module rows)`; a module row is `name|hash`, as in `Evidence`."""
+
+_UPDATES_INSERT = "INSERT INTO `updates` VALUES "
+_UPDATE_ROW = re.compile(
+    r"\('([^'\\]*)','([0-9A-Fa-f]{40})','([A-Za-z_]+)','\d{4}-\d\d-\d\d \d\d:\d\d:\d\d',\d+\)"
+)
+_CORE_STATES = frozenset({"RELEASED", "ARCHIVED"})
+
+
+def _rows_of_insert(statement: str) -> list[tuple[str, str, str]] | None:
+    """`(name, hash, state)` of every tuple of one `INSERT INTO updates VALUES ...;`, else None.
+
+    Every tuple must be exactly `('<name>','<40 hex>','<STATE>','<time>',<int>)`: a tuple of
+    any other shape, or text between tuples, answers None rather than a guess.
+    """
+    rows: list[tuple[str, str, str]] = []
+    pos = len(_UPDATES_INSERT)
+    while True:
+        found = _UPDATE_ROW.match(statement, pos)
+        if found is None:
+            return None
+        rows.append((found.group(1), found.group(2), found.group(3)))
+        pos = found.end()
+        if statement[pos : pos + 1] == ",":
+            pos += 1
+            continue
+        return rows if statement[pos:].rstrip("\r\n") == ";" else None
+
+
+def updates_names_in_dump(package: Package, schema: str) -> UpdateNames | None:
+    """The update names a package's `db/<schema>.sql` ledger holds, or None when unsure (T802).
+
+    `Evidence` keeps a count and a digest only, so this reads the names back out of the dump to
+    tell which of two servers is behind. It answers None for anything it cannot be sure of: no
+    `updates` insert, one of another shape, an unreadable member, or names that do not add up to
+    the manifest's own `Evidence` for that schema (kind, count, digest and module rows). The
+    caller then keeps the plain "not at the same version" sentence.
+    """
+    evidence = package.manifest.schema_evidence.get(schema)
+    if evidence is None or evidence.kind != "updates":
+        return None
+    try:
+        member = package.member(schema)
+        rows: list[tuple[str, str, str]] = []
+        with zipfile.ZipFile(package.path) as archive, archive.open(member.file) as fh:
+            for raw in fh:
+                if not raw.startswith(b"INSERT INTO `updates`"):
+                    continue
+                found = _rows_of_insert(raw.decode("utf-8"))
+                if found is None:
+                    return None
+                rows.extend(found)
+    except (OSError, ValueError, KeyError, zipfile.BadZipFile, MovePackageError):
+        return None
+    if not rows:
+        return None
+    core = tuple(sorted(name for name, _, state in rows if state in _CORE_STATES))
+    modules = tuple(sorted(f"{name}|{h}" for name, h, state in rows if state not in _CORE_STATES))
+    return checked_names(core, modules, evidence)
+
+
+def update_name_queries(schema: str) -> tuple[str, str]:
+    """`(core, module)` SELECTs for the `updates` names of `schema` on a server (T802).
+
+    The statements live here, with the ledger knowledge that reads their answers
+    (`checked_names()`, `updates_names_in_dump()`), and not beside the refusal sentences that
+    use the names: they are SQL for the database, not words for the player.
+    """
+    quoted = f"`{schema}`"
+    core = (
+        f"SELECT `name` FROM {quoted}.`updates` "
+        "WHERE `state` IN ('RELEASED', 'ARCHIVED') ORDER BY `name`;"
+    )
+    modules = (
+        f"SELECT `name`, `hash` FROM {quoted}.`updates` "
+        "WHERE `state` NOT IN ('RELEASED', 'ARCHIVED') ORDER BY `name`;"
+    )
+    return core, modules
+
+
+def tail_row_queries(schema: str) -> str:
+    """The `(name, hash, state)` SELECT for the `updates` rows of `schema` (T802).
+
+    The full rows the tail classifier (`appliable_tail()`) compares: the sentences
+    above (`update_name_queries()`) answer names only, because they only say which
+    side is behind. Asked once a tail sentence is owed, off the server alone.
+    """
+    return (
+        f"SELECT `name`, `hash`, `state` FROM `{schema}`.`updates` "
+        "WHERE `state` IN ('RELEASED', 'ARCHIVED') ORDER BY `name`;"
+    )
+
+
+def ledger_row_queries(schema: str) -> str:
+    """The `(name, hash, state)` SELECT for EVERY `updates` row of `schema` (T802).
+
+    Every state, module and custom rows too: the one-shot's updater skips a file by
+    its name in any row, so the scope check (`move_flows._one_shot_pending()`)
+    needs the whole ledger, not the core rows `tail_row_queries()` answers.
+    """
+    return f"SELECT `name`, `hash`, `state` FROM `{schema}`.`updates` ORDER BY `name`;"
+
+
+def checked_names(
+    core: Sequence[str], modules: Sequence[str], evidence: Evidence
+) -> UpdateNames | None:
+    """`(core, modules)` as a tuple pair when they add up to `evidence`, else None."""
+    core_names = tuple(sorted(core))
+    module_rows = tuple(sorted(modules))
+    if (
+        evidence.kind != "updates"
+        or len(core_names) != evidence.count
+        or digest_of(core_names) != evidence.digest
+        or module_rows != tuple(sorted(evidence.modules))
+    ):
+        return None
+    return core_names, module_rows
+
+
+NamesOf = Callable[[str], "UpdateNames | None"]
+"""Schema -> its update names, or None when they are not known."""
+
+
+def _which_is_behind(
+    schema: str, theirs: Evidence, ours: Evidence, file_names: NamesOf, server_names: NamesOf
+) -> Literal["file", "server", "different"] | None:
+    """Which side's updates are a strict subset of the other's; None when names are unknown."""
+    if theirs.kind != "updates" or ours.kind != "updates":
+        return None
+    in_file = file_names(schema)
+    here = server_names(schema)
+    if in_file is None or here is None:
+        return None
+    file_set, here_set = set(in_file[0]), set(here[0])
+    if file_set < here_set:
+        return "file"
+    if here_set < file_set:
+        return "server"
+    return "different"
+
+
+TailRow = tuple[str, str, str]
+"""One ledger row: `(name, sha1 hex, state)`; ledger hashes read uppercase, compared case-free."""
+
+
+Tail = tuple[str, ...]
+"""The update names the target already ran that the file lacks, per schema, sorted."""
+
+
+def appliable_tail(file_rows: Sequence[TailRow], server_rows: Sequence[TailRow]) -> Tail | None:
+    """The tail names the target ran but the file lacks, or None (T802).
+
+    Both sides are `(name, sha1, state)` rows read off the `updates` ledger of one
+    schema. The file's core names must be a STRICT subset of the server's: every
+    name the file holds the server holds too with the same sha1 (or both say the
+    row is ARCHIVED), and the server holds at least one name more. Every missing
+    name sorts after the file's newest name (a gap in the middle is another merge
+    order and is refused), and every missing row is RELEASED on the server (no
+    ARCHIVED backfill from a very old file). Module rows must match exactly; a
+    row that is not a core state on one side and is on the other is a mismatch.
+    """
+    file_core = {name: (sha1, state) for name, sha1, state in file_rows if state in _CORE_STATES}
+    server_core = {
+        name: (sha1, state) for name, sha1, state in server_rows if state in _CORE_STATES
+    }
+    file_module = sorted(
+        (name, sha1) for name, sha1, state in file_rows if state not in _CORE_STATES
+    )
+    server_module = sorted(
+        (name, sha1) for name, sha1, state in server_rows if state not in _CORE_STATES
+    )
+    if file_module != server_module:
+        return None
+    if not file_core or set(file_core) >= set(server_core):
+        return None
+    for name, (sha1, state) in file_core.items():
+        held = server_core.get(name)
+        if held is None:
+            return None
+        if state != "ARCHIVED" or held[1] != "ARCHIVED":
+            if sha1.upper() != held[0].upper():
+                return None
+    if not all(
+        server_core.get(name, (None, None))[1] == "RELEASED"
+        for name in set(server_core) - set(file_core)
+    ):
+        return None
+    newest = max(file_core)
+    missing = sorted(set(server_core) - set(file_core))
+    if not all(name > newest for name in missing):
+        return None
+    return tuple(missing)
+
+
+CORE_UPDATE_DIR = "data/sql/updates"
+"""Where the core's released updates live in a core checkout (`db_<x>` folders under it)."""
+
+MODULE_UPDATES_DIR = "modules/mod-playerbots/data/sql/playerbots/updates"
+"""Where mod-playerbots' released updates live in a server folder."""
+
+
+def tail_update_path(server_dir: Path, schema: str, name: str) -> Path:
+    """The checkout file an appliable tail row is proved against (T802).
+
+    The core checkout IS the server folder (source `dest` "."): `data/sql/updates`
+    holds `db_auth`, `db_characters` and `db_world` folders. mod-playerbots keeps
+    its own tree under `modules/mod-playerbots/data/sql/playerbots/updates`.
+    The playerbots schema is the only module one an import touches; no other
+    module row can reach the tail (module rows must match exactly above).
+    """
+    if schema == "acore_playerbots":
+        return server_dir / MODULE_UPDATES_DIR / f"{name}"
+    return server_dir / CORE_UPDATE_DIR / f"db_{schema.removeprefix('acore_')}" / f"{name}"
+
+
+def tail_file_matches(path: Path, sha1: str) -> bool:
+    """Whether `path`'s bytes hash to the ledger's `sha1` (T802).
+
+    The updater hashes the whole file's bytes (`UpdateFetcher.cpp`:
+    `SHA1::GetDigestOf(ReadSQLUpdate(path))`, and `ReadSQLUpdate` reads
+    `in.rdbuf()` to the end), so this hashes the whole file too, in 1 MB
+    chunks: a hash-equal file holds the bytes the target already ran.
+    """
+    digest = hashlib.sha1()
+    try:
+        with open(path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(_CHUNK), b""):
+                digest.update(chunk)
+    except OSError:
+        return False
+    return digest.hexdigest().upper() == sha1.upper()
+
+
+def _ordered_sentence(details: Sequence[str], sides: Sequence[str], *, built_here: bool) -> str:
+    """The refusal when every difference is a ledger of update names whose sides are known."""
+    detail = "; ".join(details)
+    if set(sides) == {"file"}:
+        return (
+            f"The file is behind this server ({detail}). Bring the OLD server up to date and "
+            f"pack again: use {under_server_build(UPDATE_TO_LATEST)} on it if Yu'lon built it, "
+            "or the launcher that built it if not."
+        )
+    if set(sides) == {"server"}:
+        how = (
+            f"use {under_server_build(UPDATE_TO_LATEST)} on this server"
+            if built_here
+            else "update it with the launcher that built it"
+        )
+        return (
+            f"This server is behind the file ({detail}). To bring the file in, {how}, "
+            "then try again."
+        )
+    return (
+        f"The two servers ran different updates ({detail}); bring the whole server instead "
+        "(the whole-server file)."
+    )
+
+
 def version_difference(
     package: Mapping[str, Evidence],
     here: Mapping[str, Evidence | None],
     optional: frozenset[str] = frozenset(),
+    *,
+    file_names: NamesOf | None = None,
+    server_names: NamesOf | None = None,
+    built_here: bool = False,
 ) -> str | None:
     """A sentence if the package's databases are not at this server's version, else None.
 
@@ -939,8 +1207,14 @@ def version_difference(
     `optional` names schemas that may have no ledger at all (playerbots, the Lua engine). For
     those a missing record is a state, not an error: none on both sides matches, and a record
     on one side only is a difference, named as that.
+
+    `file_names` and `server_names` (T802) give each side's update names where they are known.
+    When every difference is an `updates` ledger and both sides' names are known, the refusal
+    says which server is behind instead of the plain sentence; `built_here` says whether Yu'lon
+    built this server, so the advice is a press that can work. Any doubt keeps the plain one.
     """
     differences: list[str] = []
+    sides: list[str | None] = []
     for schema in sorted(set(package) | set(optional)):
         theirs = package.get(schema)
         ours = here.get(schema)
@@ -951,14 +1225,17 @@ def version_difference(
                 differences.append(
                     f"{schema}: this server has an update record and the file has none"
                 )
+                sides.append(None)
                 continue
             if ours is None:
                 differences.append(
                     f"{schema}: the file has an update record and this server has none"
                 )
+                sides.append(None)
                 continue
         elif ours is None:
             differences.append(f"{schema}: this server's version could not be read")
+            sides.append(None)
             continue
         elif theirs is None:  # pragma: no cover - the loop covers package keys only
             continue
@@ -966,7 +1243,14 @@ def version_difference(
             differences.append(
                 f"{schema}: {theirs.count} {_unit(theirs.kind)} in the file, {ours.count} here"
             )
+            sides.append(
+                _which_is_behind(schema, theirs, ours, file_names, server_names)
+                if file_names is not None and server_names is not None
+                else None
+            )
     if differences:
+        if all(side is not None for side in sides):
+            return _ordered_sentence(differences, [s for s in sides if s], built_here=built_here)
         return (
             "The databases in this file are not at the same version as this server's "
             f"({'; '.join(differences)}), and Yu'lon cannot convert characters between versions. "

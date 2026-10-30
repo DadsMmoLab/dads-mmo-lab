@@ -80,7 +80,9 @@ def _stopping(view: ControllerView, monkeypatch: pytest.MonkeyPatch) -> list[str
         "end_reservation",
         lambda holder, **_kw: events.append(f"end:{holder.container}") or True,
     )
-    monkeypatch.setattr(view.services.controller, "stop", lambda: events.append("stop") or True)
+    monkeypatch.setattr(
+        view.services.controller, "stop", lambda **_kw: events.append("stop") or True
+    )
     return events
 
 
@@ -119,7 +121,7 @@ def test_stop_asks_only_once_per_press(
     monkeypatch.setattr(controller_view_module, "_ask_with", asked)
     _stopping(view, monkeypatch)
     monkeypatch.setattr(
-        view.services.controller, "stop", lambda: (_ for _ in ()).throw(_refused(HOLDER))
+        view.services.controller, "stop", lambda **_kw: (_ for _ in ()).throw(_refused(HOLDER))
     )
 
     view._stop_failed(_refused(HOLDER))
@@ -254,7 +256,7 @@ def test_stop_anyway_stops_even_when_the_holders_reservation_would_not_be_remove
     monkeypatch.setattr(docker, "RESERVATIONS_ON", True)
     monkeypatch.setattr(docker, "server_claim", _always_held)  # the holder is still there
     monkeypatch.setattr(
-        view.services.controller, "stop", lambda: stop_staged(_SPEC, tmp_path) or True
+        view.services.controller, "stop", lambda **_kw: stop_staged(_SPEC, tmp_path) or True
     )
 
     view._stop_failed(_refused(HOLDER))
@@ -278,7 +280,7 @@ def test_stop_anyway_stops_when_another_yulon_took_the_server_after_the_removal(
     monkeypatch.setattr(docker, "RESERVATIONS_ON", True)
     monkeypatch.setattr(docker, "server_claim", _always_held)  # a newcomer holds it again
     monkeypatch.setattr(
-        view.services.controller, "stop", lambda: stop_staged(_SPEC, tmp_path) or True
+        view.services.controller, "stop", lambda **_kw: stop_staged(_SPEC, tmp_path) or True
     )
 
     view._stop_failed(_refused(HOLDER))

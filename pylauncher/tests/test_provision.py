@@ -253,6 +253,45 @@ def test_linux_dry_run_runs_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
     assert report.docker_ready is False
 
 
+def test_an_image_based_system_without_docker_gets_the_bazzite_message(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    marker = tmp_path / "ostree-booted"
+    marker.write_text("")
+    monkeypatch.setattr(platform, "OSTREE_BOOTED_PATH", str(marker))
+    monkeypatch.setattr(platform.sys, "platform", "linux")
+    run = _Run()
+    report = platform.ensure_docker(
+        run=run,
+        which=lambda n: "/usr/bin/dnf" if n == "dnf" else None,
+        user="pk",
+        ask=lambda q: "y",
+    )
+    # Nothing but the daemon probe ran: no dnf, no sudo, no usermod.
+    assert run.calls == [["docker", "info"]]
+    assert report.manual_steps == (platform.DOCKER_IMAGE_BASED_STEP,)
+    refusal = str(installer.docker_unavailable(report))
+    assert "rpm-ostree" in refusal and "Bazzite-DX" in refusal and "reboot" in refusal
+    assert "systemctl start docker" not in refusal and "usermod" not in refusal
+
+
+def test_without_the_ostree_marker_the_dnf_route_is_unchanged(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(platform, "OSTREE_BOOTED_PATH", str(tmp_path / "absent"))
+    monkeypatch.setattr(platform.sys, "platform", "linux")
+    monkeypatch.setattr(platform, "is_steamos", lambda: False)
+    run = _Run()
+    report = platform.ensure_docker(
+        run=run,
+        which=lambda n: "/usr/bin/dnf" if n == "dnf" else None,
+        dry_run=True,
+        user="pk",
+    )
+    assert platform.DOCKER_IMAGE_BASED_STEP not in report.manual_steps
+    assert report.skipped[0].startswith("(dry run) dnf")
+
+
 def test_linux_without_a_package_manager_gives_manual_steps(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1612,11 +1651,12 @@ def test_a_pacman_keyring_failure_off_steamos_never_names_steamos_readonly(
 def test_an_apt_box_is_advised_about_the_install_that_failed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The same rule on a distro with no keyring story: first failure, own command.
+    """The same rule on a distro with no keyring story: failures, own commands.
 
-    `apt-get update` succeeded and `apt-get install` did not, so the advice is
-    about the install — not about `systemctl`, not about `usermod`, and not the
-    pacman keyring sentence, which is the neighbouring branch.
+    `apt-get update` succeeded and `apt-get install` did not, so the advice
+    lists every step that failed, in order — install first — not `apt-get
+    update` (it ran, and it worked), and not the pacman keyring sentence, which
+    is the neighbouring branch.
     """
     _linux(monkeypatch)
     report = platform.ensure_docker(
@@ -1638,9 +1678,72 @@ def test_an_apt_box_is_advised_about_the_install_that_failed(
     assert advice.startswith("Start here"), advice
     assert "sudo apt-get install -y docker.io docker-compose-v2 docker-buildx" in advice
     assert "apt-get update" not in advice  # it ran, and it worked
-    assert "systemctl" not in advice and "usermod" not in advice
     assert "pacman-key" not in advice  # the keyring branch was not reached
+    assert "sudo systemctl enable --now docker" in advice
+    assert "sudo usermod -aG docker pk" in advice
+    assert advice.index("sudo apt-get install") < advice.index("sudo systemctl")
+    assert advice.index("sudo systemctl") < advice.index("sudo usermod")
+    assert "in order" in advice
     assert not [m for m in report.manual_steps if "To do it yourself" in m]
+
+
+def test_a_four_step_chain_lists_every_command_in_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The T799 follow-up: every failed step is named, each on its own line.
+
+    `apt-get update` itself failed here, so the whole chain went with it —
+    install, `systemctl`, `usermod`. Naming only `sudo apt-get update` reads
+    as the fix until the next step fails the same way; the remedy lists all
+    four as `sudo <command>` lines, in run order, and says to run them in
+    that order before pressing Install again.
+    """
+    _linux(monkeypatch)
+    report = platform.ensure_docker(
+        run=_FailsInOrder(
+            {
+                "apt-get update": (100, "E: Unable to fetch some archives"),
+                "apt-get install": (100, "E: Unable to locate package docker.io"),
+                "systemctl enable": (1, "Unit docker.service does not exist"),
+                "usermod -aG": (6, "usermod: group 'docker' does not exist"),
+            }
+        ),
+        which=_which("apt-get"),
+        user="pk",
+        wait_seconds=0.0,
+        ask=_answers(group="y", password=None),
+        run_input=_never_feeds,
+    )
+
+    advice = report.manual_steps[0]
+    assert advice.startswith("Start here"), advice
+    lines = advice.split("\n")
+    assert "sudo apt-get update" in lines
+    assert "sudo apt-get install -y docker.io docker-compose-v2 docker-buildx" in lines
+    assert "sudo systemctl enable --now docker" in lines
+    assert "sudo usermod -aG docker pk" in lines
+    positions = [lines.index(line) for line in lines if line.startswith("sudo ")]
+    assert positions == sorted(positions) and len(positions) == 4
+    assert advice.index("sudo apt-get update") < advice.index("sudo apt-get install")
+    assert advice.index("sudo systemctl") < advice.index("sudo usermod")
+    assert "in order" in advice and "press Install again" in advice
+
+
+def test_a_single_failed_step_keeps_the_singular_wording() -> None:
+    """Mutation guard for the `len(commands) == 1` branch: one failure reads as one.
+
+    Deleting the branch would pluralise a lone failure ("Run these ... in
+    order") while still naming the right command, so no end-to-end test could
+    see it — the apt tests above always fail three or four steps at once.
+    """
+    advice = platform.docker_setup_remedy(
+        ["apt-get install -y docker.io: exit 100 E: Unable to locate package docker.io"],
+        steamos=False,
+    )
+    assert advice.startswith("Start here"), advice
+    assert "Run it in a terminal" in advice
+    assert "in order" not in advice
+    assert advice.rstrip().endswith("sudo apt-get install -y docker.io")
 
 
 def test_a_run_where_only_the_join_failed_still_advises_the_join(

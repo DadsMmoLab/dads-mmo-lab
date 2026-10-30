@@ -120,7 +120,7 @@ def test_the_dashboards_restart_says_it_too(tmp_path: Path) -> None:
     tortoise = CATALOG.get("wow-tortoise")
 
     class _Restarted(Controller):
-        def stop(self) -> bool:
+        def stop(self, **_kw: object) -> bool:
             return True
 
         def start(self) -> None:

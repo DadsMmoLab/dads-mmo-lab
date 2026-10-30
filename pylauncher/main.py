@@ -165,7 +165,7 @@ def build_catalog_tab(
 
     The header goes onto the window as its `header` property rather than into
     this tuple (T90). `build_window()` is the only caller that wants it — for
-    `add_action()`, the home of the "Check for updates" button — and a fourth
+    `add_action()`, the home of the "Check for Yu'lon updates" button — and a fourth
     element would be a fourth thing for every OTHER caller to name and ignore.
     A property holds a QObject by pointer, which is safe here for the reason
     `_Window`'s docstring gives about lists: only a Python container is copied.
@@ -602,6 +602,7 @@ def build_window() -> object:
     from yulon.ui.answers import said_yes
     from yulon.ui.catalog_view import CatalogView
     from yulon.ui.controller_view import ControllerServices, ControllerView
+    from yulon.ui.friend_launcher import FriendLauncher
     from yulon.ui.icons import get_app_icon, get_tab_icon
     from yulon.ui.launcher_window import LauncherWindow
     from yulon.ui.logs_view import LogsView
@@ -686,6 +687,8 @@ def build_window() -> object:
         servers_changed = Signal()
         yulon_show_server_tab: Callable[[str, object], None]
         yulon_show_logs: Callable[[], None]
+        yulon_friend_launcher: QWidget | None
+        yulon_show_friend_launcher: Callable[[], None]
         yulon_quit: Callable[[], bool]
         # T690: `close_refusal()` for the tray, which asks it before its Quit question.
         yulon_close_refusal: Callable[..., str | None]
@@ -978,8 +981,21 @@ def build_window() -> object:
 
     def show_server_tab(game: str, server_dir: object) -> None:
         """The launcher's "Server tab…": this window, on that server's tab."""
-        view = controllers.get((game, Path(str(server_dir))))
+        key = (game, Path(str(server_dir)))
+        # A WoW core has a controller tab, a single-entry game (DDON, DFO) a single view
+        # (T807): the Catalog tile's "Open server" reaches this for both kinds.
+        view: QWidget | None = controllers.get(key)
         if view is None:
+            view = single_views.get(key)
+        if view is None:
+            from yulon.ui.message_box import show_information
+
+            show_information(
+                window,
+                "Open server",
+                "Yu'lon has no open tab for that server. Use the tile's Use existing… "
+                "button to add it again.",
+            )
             return
         tabs.setCurrentWidget(view)
         _bring_to_front(window)
@@ -992,6 +1008,25 @@ def build_window() -> object:
         _bring_to_front(window)
 
     window.yulon_show_logs = show_logs
+
+    def show_friend_launcher() -> None:
+        """The top bar's **Launcher** (T807): the friend-server window, one at a time.
+
+        Built lazily — the window is for exactly the machine that has no server
+        installed, so the button must not have cost anything before it is
+        pressed — and raised when it is already open instead of doubled.
+        """
+        launcher = getattr(window, "yulon_friend_launcher", None)
+        if launcher is None or not shiboken6.isValid(launcher):
+            launcher = FriendLauncher(catalog)
+            launcher.closed.connect(lambda: setattr(window, "yulon_friend_launcher", None))
+            window.yulon_friend_launcher = launcher
+        # The launcher is a top-level window of its own (no parent): it is the one
+        # brought forward, un-minimized, on the first press and on every later one.
+        _bring_to_front(launcher)
+
+    window.yulon_show_friend_launcher = show_friend_launcher
+    top_menu.launcher_button.clicked.connect(lambda _checked=False: show_friend_launcher())
 
     def drop_controller(key: tuple[str, Path]) -> None:
         """Tear one live tab down completely, mirroring `_stop_background_threads()`.
@@ -1166,7 +1201,28 @@ def build_window() -> object:
             # And the header's name for the tab on screen with it: a tab removed
             # off screen moves no selection, so nothing else asks (T192).
             follow_the_tab_on_screen()
+        said = uninstall_text.pop(key, "")
+        if said:
+            # T722: after the drop, so the dead tab's frame is gone and the box
+            # has a live window for a parent. Not before it, and not inside the
+            # view's slot: the box would open over a tab about to vanish, and a
+            # nested loop there runs before `uninstalled` reaches the drop. A
+            # failure emits nothing, so this stays shut for one.
+            from PySide6.QtCore import QTimer
+
+            from yulon.ui.message_box import show_information
+
+            QTimer.singleShot(0, lambda: show_information(window, "Server uninstalled", said))
         catalog_view.forget_installed(game, state.installed_dirs())
+
+    uninstall_text: dict[tuple[str, Path], str] = {}
+    """What each finished uninstall said, kept past its tab (T722).
+
+    `_uninstall_done` writes the words to the tab's label and then emits
+    `uninstalled`, whose handler drops the tab — and the label with it. So the
+    view says them first through `uninstall_said`, and this remembers them for
+    the box shown once the tab is gone.
+    """
 
     removal_pending: set[tuple[str, Path]] = set()
     """Removals waiting on their stop (T95). A key is added right before
@@ -1784,6 +1840,7 @@ def build_window() -> object:
             if in_smoke_test()
             else ControllerView(entry, services)
         )
+        view.uninstall_said.connect(lambda text, k=key: uninstall_text.__setitem__(k, text))
         view.uninstalled.connect(on_uninstalled)
         view.client_dir_changed.connect(on_client_dir_changed)
         view.play_client_dir_changed.connect(on_play_client_dir_changed)
@@ -1945,6 +2002,9 @@ def build_window() -> object:
     catalog_view.installed.connect(on_installed)
     catalog_view.fresh_install.connect(on_fresh_install)
     catalog_view.adopted.connect(on_adopted)
+    # T807: the tile's "Open server" press — the window already knows how to find a
+    # server's tab (the launcher's "Server tab…" uses it).
+    catalog_view.open_server.connect(show_server_tab)
 
     # README §10: non-blocking update check on a background thread; the bar only
     # if a `-Public` release is newer than this build and has not been skipped.
@@ -2526,7 +2586,7 @@ def build_window() -> object:
     # `.old`, and this is the earliest moment it is provably not needed.
     announce_previous_update(update_bar)
 
-    check_button = QPushButton("Check for updates", window)
+    check_button = QPushButton("Check for Yu'lon updates", window)
     check_button.setObjectName(CHECK_UPDATES_BUTTON)
     # Placed inside the Settings submenu panel (`SettingsView.add_action`).
     check_button.clicked.connect(update_host.check_now)

@@ -21,8 +21,8 @@ The command is the same on every family, read from each pinned tree:
 * TBC, mangos-tbc `75f9ae68`: `src/game/Chat/Chat.cpp:83`, `SEC_CONSOLE`, console
   allowed; handler `Chat.cpp:3800`. SOAP runs every command at `SEC_CONSOLE`
   (`src/mangosd/MaNGOSsoap.cpp:113`).
-* Vanilla, mangos-classic `8ec338a1`: `Chat.cpp:83`, handler `Chat.cpp:3714`,
-  `MaNGOSsoap.cpp:113`.
+* Vanilla, mangos-classic `57312491`: `Chat.cpp:83`, handler `Chat.cpp:3714`,
+  `MaNGOSsoap.cpp:115`.
 * Tortoise, tortoise-wow `187af788`: `src/game/Chat/Chat.cpp:71`, handler
   `src/mangosd/CliRunnable.cpp:74`; SOAP at `SEC_CONSOLE` in
   `src/mangosd/MaNGOSsoap.cpp:196`.

@@ -33,22 +33,25 @@ V1_GAMES = (
     "wow-tortoise",
     "wow-centurion",
     "wow-unbound",
+    "wow-coa",
 )
-"""README §1's four v1 servers, and Centurion after them (T179 Task 7)."""
+"""README §1's four v1 servers, Centurion after them (T179 Task 7), Unbound (T554) and CoA
+(T812)."""
 
 
-def test_bundled_catalog_describes_exactly_the_six_servers() -> None:
+def test_bundled_catalog_describes_exactly_the_seven_servers() -> None:
     """README §1: v1 scope is WoW WotLK / TBC / Vanilla / Tortoise, acronyms only.
 
-    Plus Centurion (T179), the first server that is not one of the four, and WoW Unbound
-    (T554), a WotLK of its own that runs beside the first and so has ports of its own.
+    Plus Centurion (T179), the first server that is not one of the four, WoW Unbound
+    (T554) and WoW Conquest of Azeroth (T812), each a WotLK of its own that runs
+    beside the first and so has ports of its own.
     """
     catalog = load_catalog()
     assert tuple(g.id for g in catalog.games) == V1_GAMES
     for game in catalog.games:
         assert "Dadcraft" not in game.name and "Dadcraft" not in game.id
-        # shared by every v1 server (README §12), except the one built to run beside WotLK
-        assert game.ports.auth == (3725 if game.id == "wow-unbound" else 3724)
+        # shared by every v1 server (README §12), except the ones built to run beside WotLK
+        assert game.ports.auth == {"wow-unbound": 3725, "wow-coa": 3726}.get(game.id, 3724)
         assert game.client.build > 0
 
 
@@ -234,18 +237,18 @@ def test_every_shipped_entry_is_installable_on_linux_and_names_its_family() -> N
 
 GATE_PINS = {
     "wow-wotlk": {
-        "mod-playerbots/azerothcore-wotlk": "8a4e76eac8c4ccebf547113afe7b51d6c3e91641",
-        "mod-playerbots/mod-playerbots": "d750b4b3a50effdf22bedc8032f0e8e5f7cb8091",
+        "mod-playerbots/azerothcore-wotlk": "3f2969ddb0da42b48b4fca050c02b19163ba1e20",
+        "mod-playerbots/mod-playerbots": "e88cc4099e69f35126b28942a412ca702d20453b",
     },
     "wow-tbc": {
-        "cmangos/mangos-tbc": "15b6ddb4ec9e443d49f4e438af73782ce5c16491",
-        "cmangos/playerbots": "da4419afc44f97bb950ca2ebccc3f29a902a3fab",
-        "cmangos/tbc-db": "ebe51a83b0fde5397f0ecd82a36cb6c40f667d36",
+        "cmangos/mangos-tbc": "37767e954241e346453260b8bc8c1fb2e2afdf7d",
+        "cmangos/playerbots": "6823423e07789c875f55a0fee9beeae0d3b69561",
+        "cmangos/tbc-db": "1c54acd200540076c3078d22a66fd417d0f6dd60",
     },
     "wow-vanilla": {
-        "cmangos/mangos-classic": "8ec338a1704e7dcb1c0213eb7ed58f9231ade40f",
-        "cmangos/playerbots": "da4419afc44f97bb950ca2ebccc3f29a902a3fab",
-        "cmangos/classic-db": "ec4f596146be6467ea93c57397858e329e2db852",
+        "cmangos/mangos-classic": "5731249195520323cb5fb9aa29761d4f033272ce",
+        "cmangos/playerbots": "6823423e07789c875f55a0fee9beeae0d3b69561",
+        "cmangos/classic-db": "603ece109099ce44a5447a1b1cffd65c7272d71c",
     },
 }
 """The commit each shipped source is pinned to, and the gate that ran on it.
@@ -254,6 +257,15 @@ Read out of the gate boxes' own checkouts (`git rev-parse HEAD` in each source's
 `dest`), never off a branch tip. Pinned 2026-09-05; `wow-wotlk` moved 2026-09-26, 2026-10-08,
 2026-10-10 and 2026-10-17:
 
+* T824 (2026-10-28) moved all three to upstream's heads of that day WITHOUT a live gate:
+  `wow-wotlk` core `8a4e76ea` -> `3f2969dd` and module `d750b4b3` -> `e88cc409`; `wow-tbc`
+  `15b6ddb4` -> `37767e95`, `da4419af` -> `6823423e`, `ebe51a83` -> `1c54acd2`; `wow-vanilla`
+  `8ec338a1` -> `57312491`, `da4419af` -> `6823423e`, `ec4f5961` -> `603ece10` -- the newest at
+  2026-10-28, not live-tested (owner decision: users report, we fall back). The 11 Server rates
+  keys were re-read in each `.conf.dist` at the new pin and all still exist. `wow-unbound`
+  shares both WotLK sources, `wow-tortoise` (`10393426` -> `33d0131a`, TortoiseBots `ff668fee`
+  -> `573c7919`, release v1.14.0) and `wow-centurion` (`25d3e6ef` -> `351950fb`) are pinned in
+  their own tests; their reasons were checked against the new revs, not against a live run.
 * `wow-wotlk`: 2026-10-17 (v0.9.18), core `8a4e76ea` (16 Oct, 164 commits on) and module `d750b4b3`
   (12 commits on), pinned to the newest `Playerbot`/`master` tips without a live run: the owner's
   word, CI the only gate. Read from the two compares instead: no file under `data/sql/base`
@@ -392,15 +404,18 @@ def test_every_entry_says_whether_it_offers_the_update_to_latest_control() -> No
         "wow-tortoise": True,
         # T179 decision 2: code = pull + rebuild, world = changed tables re-imported.
         "wow-centurion": True,
+        # T812: CoA pins its fork and carries a patch; no update control until a gate proves one.
+        "wow-coa": False,
     }, offered
 
 
 def test_only_one_server_runs_at_a_time_is_visible_in_the_data() -> None:
     """Every v1 server publishes the same auth port, so the §12 guard will engage."""
-    ports = {g.ports.auth for g in load_catalog().games if g.id != "wow-unbound"}
+    ports = {g.ports.auth for g in load_catalog().games if g.id not in ("wow-unbound", "wow-coa")}
     assert ports == {3724}
-    # ... and the one entry made to run BESIDE another has ports of its own (T552).
+    # ... and the entries made to run BESIDE another have ports of their own (T552, T812).
     assert load_catalog().get("wow-unbound").ports.auth == 3725
+    assert load_catalog().get("wow-coa").ports.auth == 3726
 
 
 def test_unknown_game_and_bad_entries_are_rejected() -> None:
@@ -672,15 +687,17 @@ def test_a_game_with_a_one_shot_import_service_asks_its_database_with_the_folder
     THAT folder's password, or a new install's probe answers "unreadable" for a healthy
     database.
     """
-    from yulon import install_wiring
+    from yulon import docker, install_wiring
     from yulon.controller_wow_wotlk import repair as wotlk_repair
 
     seen: list[str] = []
 
-    def fake_import_state(sql: object, _mysql: object, _health: object) -> object:
+    def fake_import_state(sql: object, _mysql: object, _health: object = None) -> object:
         password = sql.root_password  # type: ignore[attr-defined]
         seen.append(password() if callable(password) else password)
-        return object()
+        # A finished import: the CoA entry's probe reads `state` for its own
+        # bootstrap question, and this test is about the password it asks with.
+        return docker.ImportState("imported", "every acore_* schema has tables", complete=True)
 
     monkeypatch.setattr(wotlk_repair, "import_state", fake_import_state)
     with_import = [entry for entry in load_catalog().games if entry.containers.db_import]
@@ -1087,7 +1104,7 @@ def test_tortoise_clones_the_core_branch_the_bots_module_requires_and_the_module
         "`main` carries the headless bot sessions (`bot-helpers` was merged into it) and, "
         "since v0.9.18, the SOAP interface of PR #491 that `1181dev` held alone from "
         "2026-09-17: 1181dev's last commit 6131a26f is an ancestor of the pinned main tip "
-        "10393426 (main is four commits ahead), and the TortoiseBots README names the core's "
+        "33d0131a (main is well ahead of it), and the TortoiseBots README names the core's "
         "`main` branch as its base; `bot-helpers` itself has no SOAP"
     )
     assert core.dest == "src/tortoise-wow"
@@ -1276,6 +1293,7 @@ def test_the_catalog_names_the_build_a_players_own_client_must_report_t576() -> 
     assert cat.get("wow-wotlk").client.required_build == 12340
     assert cat.get("wow-centurion").client.required_build == 12340
     assert cat.get("wow-unbound").client.required_build == 12340
+    assert cat.get("wow-coa").client.required_build == 12340
     assert cat.get("wow-centurion").client.build == 12342
     # T594: the games that read the player's client at Install name their builds too (see
     # test_install_client_build.py); a TBC/Vanilla/Tortoise number is no longer None.

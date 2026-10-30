@@ -14,9 +14,10 @@ import builtins
 import fnmatch
 import hashlib
 import json
+import posixpath
 import re
 from pathlib import Path, PurePosixPath
-from typing import Annotated, Literal
+from typing import Annotated, ClassVar, Literal
 from urllib.parse import urlsplit
 
 from pydantic import (
@@ -30,7 +31,7 @@ from pydantic import (
 )
 
 from yulon import server_build_presses
-from yulon.docker import ContainerSpec, SaveFirst
+from yulon.docker import BotSavesSkippable, ContainerSpec, SaveFirst
 from yulon.manifest import ALLOWED_REPO_HOSTS, Db, Source, check_repo
 from yulon.platform import PlatformId
 
@@ -396,6 +397,121 @@ class ModuleHealth(_Strict):
         return self
 
 
+class AcRealmType(_Strict):
+    """One realm type an AzerothCore entry may switch between (T812 C1).
+
+    The ACTIVE type lives under the plain `acore_auth`/`acore_characters`/
+    `acore_playerbots` names, so every module reading `entry.databases.*` stays
+    right; inactive types are parked in `<name>_<id>` schemas and a switch is
+    one atomic `RENAME TABLE` with the servers stopped. `world_env` carries the
+    conf keys this type sets, merged over the block's own `world_env`.
+    """
+
+    id: Annotated[str, Field(pattern=r"^[a-z][a-z0-9]{1,9}$")] = Field(
+        description="The DB suffix the parked schemas carry: `<name>_<id>`.",
+    )
+    label: str = Field(min_length=1)
+    description: str = Field(min_length=1)
+    realm_name: Annotated[str, Field(min_length=1, max_length=32)] = Field(
+        description="The realm row's name for this type.",
+    )
+    world_env: dict[Annotated[str, Field(pattern=r"^AC_[A-Z0-9_]+$")], str] = Field(
+        default_factory=dict,
+        description="Conf keys this realm type sets, merged over the block's `world_env`.",
+    )
+
+    @field_validator("realm_name")
+    @classmethod
+    def _realm_name_is_plain_text(cls, value: str) -> str:
+        if any(mark in value for mark in ("'", '"', "\\")):
+            raise ValueError(
+                f"realm_name carries a quote or backslash ({value!r}): it is written into "
+                "an UPDATE statement, not through a parameter"
+            )
+        return value
+
+
+class AcSurgicalMap(_Strict):
+    """One map carved out of a disabled client archive at extract time (T812 C1).
+
+    The archive stays OUT of the main run: the extract appends a tool that links
+    it under `link_as` in a scratch view of the client, extracts there, and
+    copies only this map's files into the shared `data/`.
+    """
+
+    map_id: int = Field(ge=0, description="The map extracted on the side, e.g. 936.")
+    archive: str = Field(
+        min_length=1,
+        description="Client-relative path of the disabled archive holding the map.",
+    )
+    link_as: str = Field(
+        min_length=1,
+        description="Client-relative path the archive is linked as in the scratch view.",
+    )
+    extra_vmaps: tuple[Annotated[str, Field(min_length=1)], ...] = Field(
+        default=(),
+        description="Bare vmap file names copied beside the map's own tiles.",
+    )
+    min_maps: int = Field(
+        ge=1,
+        description="How many `maps/<map>*.map` files the side run must leave behind.",
+    )
+
+    @field_validator("archive")
+    @classmethod
+    def _archive_inside_data(cls, value: str) -> str:
+        return _below(value, "archive", "the client's Data/ folder")
+
+    @field_validator("link_as")
+    @classmethod
+    def _link_is_an_archive_inside_data(cls, value: str) -> str:
+        _below(value, "link_as", "the client's Data/ folder")
+        if not value.casefold().endswith(".mpq"):
+            raise ValueError(f"link_as names the archive the tools open (.MPQ), got {value!r}")
+        return value
+
+    @field_validator("extra_vmaps")
+    @classmethod
+    def _extras_are_bare_names(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        for name in value:
+            if "/" in name or "\\" in name:
+                raise ValueError(
+                    f"extra_vmaps holds bare file names copied out of the run, got {name!r}"
+                )
+        return value
+
+
+class AcClientExtract(_Strict):
+    """How an AzerothCore entry extracts its client data and movement maps (T812 C1).
+
+    The same shape as `CmangosData`'s client/extract/mmaps triple, with the
+    coverage this family needs: which maps must exist before the server may
+    start, which the checkout-relative mmaps config is, and which maps are
+    carved out of disabled archives on the side.
+    """
+
+    client: ClientSpec
+    extract: ExtractPlan
+    mmaps: MmapPlan
+    mmaps_config: str = Field(
+        min_length=1,
+        description="Checkout-relative path of the `mmaps-config.yaml` the generator needs.",
+    )
+    required_maps: tuple[Annotated[int, Field(ge=0)], ...] = Field(
+        min_length=1,
+        description="Map ids whose maps and vmaps must exist before the server starts.",
+    )
+    surgical_maps: tuple[AcSurgicalMap, ...] = Field(
+        default=(),
+        description="Maps carved out of disabled archives after the main run (e.g. 936).",
+    )
+
+    @field_validator("mmaps_config")
+    @classmethod
+    def _config_inside_the_checkout(cls, value: str) -> str:
+        return _below(value, "mmaps_config", "the checkout")
+
+
 class AzerothCoreData(_Strict):
     """The AzerothCore family's own install data: the worldserver env block (A2), and the
     module confs the install writes from their `.dist` (T137)."""
@@ -476,6 +592,103 @@ class AzerothCoreData(_Strict):
             "RSS reading by the first gate."
         ),
     )
+
+    client_extract: AcClientExtract | None = Field(
+        default=None,
+        description=(
+            "How this entry extracts its client data and movement maps from the player's "
+            "client (T812): the client's shape, the extractor tools and their evidence, "
+            "the mmaps run and its config, and the maps that must exist before the "
+            "server starts. None: the entry has no extract stage and behaves as before."
+        ),
+    )
+    world_bootstrap_service: str | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Compose service that loads the world's base data after start-db, before import "
+            "(T812). None: the entry has no bootstrap stage."
+        ),
+    )
+    realm_types: tuple[AcRealmType, ...] = Field(
+        default=(),
+        description=(
+            "The realm types this entry may switch between (T812). Empty: one realm, as " "before."
+        ),
+    )
+    default_realm_type: str | None = Field(
+        default=None,
+        min_length=1,
+        description="The active type of a fresh install; required exactly when realm types are.",
+    )
+    auth_after_world_ready: bool = Field(
+        default=False,
+        description=(
+            "Start the auth server only after the world is ready, then set its offline flag "
+            "row from the world (T812). False: both servers start as before."
+        ),
+    )
+    core_sql_modules: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "Folders under `modules/` whose `data/sql/` the core's own importer always applies, "
+            "so Yu'lon never names them in `AC_UPDATES_ALLOWED_MODULES` (T812 D14). The CoA "
+            "fork's `src/tools/dbimport/Main.cpp:119-120` (pin 98570f24) prepends "
+            "`COA_DATABASE_MODULE_LIST` (`mod-ascension,`) to whatever list it is given, and "
+            "`UpdateFetcher.cpp` walks a folder once per time its module is named, so a second "
+            "`mod-ascension` made the importer abort on `Duplicate filename`. Empty: "
+            "every module folder is the app's to hand over, as before."
+        ),
+    )
+
+    @field_validator("core_sql_modules")
+    @classmethod
+    def _core_sql_modules_are_folder_names(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        for name in value:
+            if not name or name.startswith(".") or "/" in name or "\\" in name or "," in name:
+                raise ValueError(
+                    "core_sql_modules names a folder directly under modules/ (no separator, "
+                    f"comma or leading dot), got {name!r}"
+                )
+        return value
+
+    @model_validator(mode="after")
+    def _realm_type_ids_are_unique(self) -> AzerothCoreData:
+        seen = [realm.id for realm in self.realm_types]
+        doubled = sorted({realm_id for realm_id in seen if seen.count(realm_id) > 1})
+        if doubled:
+            raise ValueError(f"realm type ids must be unique, got {doubled} more than once")
+        return self
+
+    @model_validator(mode="after")
+    def _a_default_realm_type_is_a_listed_one(self) -> AzerothCoreData:
+        if self.realm_types and self.default_realm_type is None:
+            raise ValueError(
+                "an entry with realm types names its default realm type " "(default_realm_type)"
+            )
+        if self.default_realm_type is not None:
+            if not self.realm_types:
+                raise ValueError(
+                    f"default_realm_type {self.default_realm_type!r} names no realm type: "
+                    "the entry lists none"
+                )
+            if self.default_realm_type not in {realm.id for realm in self.realm_types}:
+                raise ValueError(
+                    f"default_realm_type {self.default_realm_type!r} is not one of this "
+                    f"entry's realm types {sorted(realm.id for realm in self.realm_types)}"
+                )
+        return self
+
+    @model_validator(mode="after")
+    def _a_world_env_key_has_one_owner(self) -> AzerothCoreData:
+        for realm in self.realm_types:
+            repeated = sorted(set(self.world_env) & set(realm.world_env))
+            if repeated:
+                raise ValueError(
+                    f"realm type {realm.id!r} repeats world_env keys {repeated}: one key "
+                    "has one owner, the block's or the type's, never both"
+                )
+        return self
 
 
 MpqDepth = int | Literal["recursive"]
@@ -667,6 +880,30 @@ class MmapPlan(_Strict):
         description=(
             "False (Tortoise) turns a shortfall into a warning: bots need mmaps, a solo realm "
             "does not."
+        ),
+    )
+    cpu_cap: Literal["half"] | None = Field(
+        default=None,
+        description=(
+            "Asks the caller to cap the generator's container at half the Docker engine: "
+            "CPU time (--cpus) and the cores it runs on (--cpuset-cpus, the first N) at half "
+            "the reported CPUs but no more than half the reported GiB, at least one; its RAM "
+            "(--memory) at half the reported memory. The tool's worker count is not bounded "
+            "(it may count the host's cores), so the memory ceiling is what bounds its RAM. "
+            "An engine that would not say gets --cpus 2 only. Only value is `half`, and only "
+            "one entry "
+            "wants it: Tortoise's MoveMapGen starts a worker per core and has no --threads "
+            "option to ask for fewer, which ran every CPU flat out for an hour and could "
+            "hard-reboot a PC (T801). None is the decision 'uncapped', which the CMaNGOS "
+            "generators already make themselves with --threads 2 in their argv."
+        ),
+    )
+    offmesh_repo_path: str | None = Field(
+        default=None,
+        description=(
+            "Checkout-relative path of the off-mesh file this generator reads (T811). Only the "
+            "entry whose image carries it names it: the update route diffs its bytes across the "
+            "move and rebuilds only the maps whose lines changed. TBC and Vanilla name none."
         ),
     )
     success_codes: tuple[int, ...] = Field(
@@ -1126,6 +1363,51 @@ class SourcePatch(_Strict):
         return value
 
 
+class RerunnableModule(_Strict):
+    """One module whose migrations the worldserver may run again (T813).
+
+    The module's author guarantees every migration it ships is idempotent, so a
+    changed SHA-1 in that module never blocks an update: the world re-runs the
+    file and its own guards make it a no-op where it already applied. Data,
+    because which module gave that guarantee is a fact about one upstream tree
+    and not about the family: the entry carries it beside the pin it was
+    checked against, and the CMaNGOS engine reads it where the refusal is decided.
+    """
+
+    module: str = Field(
+        min_length=1,
+        description="The module as the ledger keys it (the source's folder name).",
+    )
+    reason: str = Field(
+        min_length=1,
+        description="One sentence saying who guarantees idempotency and what was checked.",
+    )
+
+    @field_validator("reason")
+    @classmethod
+    def _a_plain_sentence(cls, value: str) -> str:
+        if re.search(r"\bT\d{1,3}\b", value):
+            raise ValueError(f"reason names no ticket, got {value!r}")
+        if "`" in value:
+            raise ValueError(f"reason names no command and takes no backticks, got {value!r}")
+        if re.search(
+            r"\bdocker\s+(?:compose|ps|logs|exec|run|start|stop|restart|rm|volume|image|"
+            r"info|version|system|attach|inspect|cp|pull|build|create|kill|network)\b"
+            r"|\bsystemctl\b|\bjournalctl\b|\bwsl(?:\.exe)?\s+-{1,2}[a-z]"
+            r"|\bsudo\s+(?:apt|apt-get|pacman|dnf|zypper|systemctl|service|usermod|chcon|passwd)\b"
+            r"|\b(?:apt|apt-get|pacman|dnf|zypper|brew)\s+(?:-S\b|install\b|update\b)"
+            r"|\bgit\s+(?:fetch|reset|clone|log|status|stash|pull|-C)\b|\bgit checkout -"
+            r"|\b(?:gunzip|chcon|xcode-select|usermod|passwd|pacman-key|steamos-readonly)\b"
+            r"|\b(?:firewall-cmd|firewall-offline-cmd)\b|\bufw\s+(?:allow|enable)\b"
+            r"|\bcompose\s+(?:logs|up|down|ps|run|build|ls|exec)\b|--rm\b",
+            value,
+        ):
+            raise ValueError(f"reason names no command, got {value!r}")
+        if "\n" in value or not value.endswith("."):
+            raise ValueError("reason must be one sentence ending in a full stop, " f"got {value!r}")
+        return value
+
+
 class CmangosData(_Strict):
     """Everything the CMaNGOS family needs that differs per game (roadmap 7.3)."""
 
@@ -1143,6 +1425,22 @@ class CmangosData(_Strict):
             "trees carry no known defect this project works around (2026-09-05: Tortoise)."
         ),
     )
+    rerunnable_modules: tuple[RerunnableModule, ...] = Field(
+        default=(),
+        description=(
+            "Modules whose migrations the worldserver may run again (T813). A changed file "
+            "whose owner module is listed here never refuses; core files and other "
+            "modules refuse exactly as before."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _no_rerunnable_twice(self) -> CmangosData:
+        """Each reviewed module is listed once."""
+        seen = [entry.module for entry in self.rerunnable_modules]
+        if len(set(seen)) != len(seen):
+            raise ValueError(f"rerunnable_modules lists {sorted(seen)} with a repeat")
+        return self
 
 
 def _below(value: str, field: str, root: str) -> str:
@@ -1795,6 +2093,66 @@ class SaveBeforeStop(_Strict):
         return self
 
 
+class StopWithoutBotSaves(_Strict):
+    """How this world's Stop may skip waiting for the bots' saves, when the player says so (T826).
+
+    The live reason: a CoA Stop sat 2 to 25 minutes on `Waiting for N queries to finish`. Read
+    at the CoA core (`playerbots-references/azerothcore-wotlk-coa`): on a signal AzerothCore runs
+    the scripts' `OnShutdown()` FIRST -- playerbots logs out every bot there ("Logging out all
+    bots..."), each a logout save -- and only then `KickAll()`s the real players, so their own
+    logout saves queue BEHIND every bot's. Cutting that wait short could lose them. So the save
+    of every player is asked for and SEEN WRITTEN while the world still runs: `command`
+    (`saveall`), then `queue_command` until the character queue is empty (`server debug` prints
+    `CharacterDatabase queue size: N`, `cs_server.cpp:246` there). Only then is the world
+    signalled, given `seconds` to close, and killed if it has not -- the world alone; the
+    database is stopped as always. A save that cannot be seen written falls back to the full
+    wait. Present only for a core whose signal is where its long wait is: never beside
+    `save_before_stop` (that close drops what is queued, so its whole wait is the save Yu'lon
+    asks for first), and not for a core with no console line that reads its queue.
+    """
+
+    command: str = Field(
+        default="saveall",
+        pattern=r"^[^\r\n]+$",
+        description="The console line that saves every player in the world, typed first.",
+    )
+    queue_command: str = Field(
+        min_length=1,
+        pattern=r"^[^\r\n]+$",
+        description="The console line whose answer holds the character save queue's length.",
+    )
+    queue_pattern: str = Field(
+        min_length=1,
+        description="A regular expression with ONE group, the length, found in that answer.",
+    )
+    seconds: int = Field(
+        default=20,
+        ge=5,
+        le=300,
+        description=(
+            "How long the world gets to close after its signal, once every player's save is "
+            "seen written, before it is stopped without the rest of the bots' saves."
+        ),
+    )
+    waits_by_default: bool = Field(
+        default=True,
+        description=(
+            "The choice an install has before the player makes one: True waits for every save "
+            "(the safe, slower Stop)."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _a_pattern_of_one_group(self) -> StopWithoutBotSaves:
+        try:
+            groups = re.compile(self.queue_pattern).groups
+        except re.error as exc:
+            raise ValueError(f"queue_pattern is not a regular expression: {exc}") from exc
+        if groups != 1:
+            raise ValueError("queue_pattern needs exactly one group: the queue's length")
+        return self
+
+
 class NativeInstall(_Strict):
     """What the native install engine needs that is a fact about THIS game (roadmap 6.2, 7.1).
 
@@ -1893,6 +2251,13 @@ class NativeInstall(_Strict):
             "close loses saves (T410, T411; `SaveBeforeStop`). None: the signal saves everyone."
         ),
     )
+    stop_without_bot_saves: StopWithoutBotSaves | None = Field(
+        default=None,
+        description=(
+            "Whether this game offers a Stop that does not wait for the bots' saves, and how "
+            "(T826, `StopWithoutBotSaves`). None: every Stop waits for every save."
+        ),
+    )
     azerothcore: AzerothCoreData | None = Field(
         default=None, description="Present exactly when `family` is azerothcore (7.3 validates)."
     )
@@ -1951,13 +2316,25 @@ class NativeInstall(_Strict):
             "cmangos": self.cmangos,
             "trinitycore": self.trinitycore,
         }
+        if self.stop_without_bot_saves is not None and self.save_before_stop is not None:
+            raise ValueError(
+                "stop_without_bot_saves is for a world that saves on its signal; one with "
+                "save_before_stop drops what is queued when it closes, so its Stop cannot skip "
+                "the save it asks for first"
+            )
         present = sorted(name for name, block in blocks.items() if block is not None)
         if present != [self.family]:
             raise ValueError(
                 f"family is {self.family!r} but the blocks present are {present}; "
                 f"exactly the `{self.family}` block must be present"
             )
+        azerothcore_image = (
+            self.azerothcore.client_extract.extract.image
+            if self.azerothcore is not None and self.azerothcore.client_extract is not None
+            else None
+        )
         extract_images = {
+            "azerothcore": azerothcore_image,
             "cmangos": self.cmangos.extract.image if self.cmangos is not None else None,
             "trinitycore": self.trinitycore.extract.image if self.trinitycore is not None else None,
         }
@@ -2710,6 +3087,90 @@ class InstallRule(_Strict):
         return self
 
 
+class PackSetup(_Strict):
+    """A pack's post-install setup step: an exe the zip installed, run in the client copy.
+
+    Lumenveil's `lamp_extract.exe` reads the client's own files and writes
+    `lampdata.bin`/`liquiddata.bin` beside it (1-5 minutes). `run` names the
+    exe as a zip member, because that is what the catalog pins; the engine
+    runs the file that member was installed as, with cwd the ready-to-play
+    copy. `runs` are the argv lists after the exe, taken from the pinned setup
+    script: one run for the lamps (`--out`), one for the water (`--liquids
+    --maps`); both share `--data`/`--locale`/`--background`, whose values the
+    engine fills in per run (`{data}` = the copy's Data folder, `{dir}` = the
+    copy folder, `{locale}` = probed). `writes` are the files setup creates,
+    relative to the client folder, recorded by hash like every installed file
+    so switching the pack off removes exactly them. Windows only (plan D6: run
+    directly, no cmd.exe).
+    """
+
+    _PLACEHOLDERS: ClassVar[frozenset[str]] = frozenset({"{data}", "{dir}", "{locale}"})
+
+    run: str = Field(
+        min_length=1,
+        description="The setup exe, as a zip member (`Lumenveil/lamp_extract.exe`).",
+    )
+    runs: tuple[tuple[str, ...], ...] = Field(
+        min_length=1,
+        description=(
+            "Argv lists after the exe, one per run, taken from the pinned setup script. "
+            "Only {data}, {dir} and {locale} name a value the engine fills in."
+        ),
+    )
+    writes: tuple[str, ...] = Field(
+        min_length=1,
+        description="Files setup creates in the client folder, recorded by hash.",
+    )
+    timeout_seconds: int = Field(
+        default=900,
+        gt=0,
+        description="Seconds one setup run may take; Lumenveil's 1-5 minutes bounded at 10.",
+    )
+
+    @field_validator("run")
+    @classmethod
+    def _run_stays_inside_the_zip(cls, value: str) -> str:
+        return _inside(value, "setup.run", names_a_file=True)
+
+    @field_validator("runs")
+    @classmethod
+    def _runs_stay_plain_words(
+        cls, value: tuple[tuple[str, ...], ...]
+    ) -> tuple[tuple[str, ...], ...]:
+        for index, run in enumerate(value):
+            if not run:
+                raise ValueError(f"setup runs[{index}] names no argv: each run takes at least one")
+            for word in run:
+                if not word:
+                    raise ValueError(
+                        f"setup runs[{index}] names an empty word: argv has no empty words"
+                    )
+                for hole in re.findall(r"\{[^{}]*\}", word):
+                    if hole not in cls._PLACEHOLDERS:
+                        raise ValueError(
+                            f"setup runs[{index}] names {hole!r}: only "
+                            "{data}, {dir} and {locale} name a value the engine fills in"
+                        )
+        return value
+
+    @field_validator("writes")
+    @classmethod
+    def _writes_stay_inside_the_client(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        for item in value:
+            _inside(item, "setup.writes", names_a_file=True)
+        return value
+
+    @model_validator(mode="after")
+    def _writes_are_distinct(self) -> PackSetup:
+        seen: dict[str, str] = {}
+        for item in self.writes:
+            key = PurePosixPath(item).as_posix().casefold()
+            if key in seen:
+                raise ValueError(f"setup writes {item!r} more than once")
+            seen[key] = item
+        return self
+
+
 class ClientPack(_Strict):
     """One zip of files a server's ready-to-play client needs, or may have (T181 b).
 
@@ -2731,6 +3192,15 @@ class ClientPack(_Strict):
 
     id: Slug
     label: str = Field(min_length=1)
+    version: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=32,
+        description=(
+            "The display version shown beside the pack (set for lumenveil from its URL); "
+            "the played version is the record's installed version, never this."
+        ),
+    )
     description: str = ""
     source: PackSource
     sha256: Sha256 | None = None
@@ -2770,6 +3240,54 @@ class ClientPack(_Strict):
     size_hint: int | None = Field(
         default=None, ge=0, description="Bytes, for the download size the dialog shows."
     )
+    platforms: tuple[PlatformId, ...] = Field(
+        default=(),
+        description=(
+            "Platforms this pack is offered on; empty means every one. A Windows-only "
+            "pack (Lumenveil: its setup exe runs on the player's machine) is never "
+            "shown nor installed elsewhere."
+        ),
+    )
+    redirect_hosts: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "Extra hosts a download for this pack may be redirected to, beyond the "
+            "hosts its own urls name. GitHub serves a release asset from "
+            "release-assets.githubusercontent.com / objects.githubusercontent.com; "
+            "without them the redirect is refused."
+        ),
+    )
+    setup: PackSetup | None = Field(
+        default=None,
+        description=(
+            "A setup exe the pack installs, run once in the ready-to-play copy. "
+            "None: unpacking the zip is the whole job."
+        ),
+    )
+    credit: str = Field(
+        default="",
+        description="Who made this pack's contents, shown beside the option.",
+    )
+
+    @field_validator("redirect_hosts")
+    @classmethod
+    def _redirect_hosts_are_bare_hostnames(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        lowered: list[str] = []
+        for item in value:
+            if (
+                not item
+                or "://" in item
+                or "/" in item
+                or "@" in item
+                or ":" in item
+                or any(part.isspace() for part in item)
+            ):
+                raise ValueError(
+                    f"redirect_hosts takes bare hostnames, got {item!r}: no scheme, port, "
+                    "login or path, just the host a redirect may go to"
+                )
+            lowered.append(item.casefold())
+        return tuple(lowered)
 
     @field_validator("remove_when_off")
     @classmethod
@@ -2850,6 +3368,19 @@ class ClientPack(_Strict):
                 f"pack {self.id!r}: default only means something on an optional pack; "
                 "a required pack is always installed"
             )
+        if self.setup is not None:
+            run = self.setup.run.casefold()
+            if run.endswith(".cmd") or run.endswith(".bat"):
+                raise ValueError(
+                    f"pack {self.id!r}: setup run {self.setup.run!r} is a script: the exe "
+                    "is run directly, with runs from the catalog"
+                )
+            names = {rule.member.casefold() for rule in self.install if rule.member != "*"}
+            if run not in names and not any(rule.member == "*" for rule in self.install):
+                raise ValueError(
+                    f"pack {self.id!r}: setup run {self.setup.run!r} is not an installed "
+                    "member, so Yu'lon would have nothing to run"
+                )
         return self
 
 
@@ -3017,6 +3548,53 @@ class ConfigWtf(_Strict):
         return self
 
 
+class ClientUpdate(_Strict):
+    """Where the makers publish the client, so Yu'lon can keep the player's copy current (T825).
+
+    `manifest_url` answers a JSON list of every client file with its size and
+    SHA-256; `objects_url` is the folder each file is fetched from by that
+    digest (`<objects_url><sha256>`). Both https, and their hosts join
+    `Client.hosts()`, the only hosts a client download may reach.
+    """
+
+    manifest_url: str = Field(description="The https URL of the client's file list (JSON).")
+    objects_url: str = Field(
+        description="The https folder a file is fetched from by its SHA-256; ends with `/`."
+    )
+
+    @field_validator("manifest_url")
+    @classmethod
+    def _manifest_is_https(cls, value: str) -> str:
+        return _https_url(value, "client update manifest_url")
+
+    @field_validator("objects_url")
+    @classmethod
+    def _objects_is_an_https_folder(cls, value: str) -> str:
+        _https_url(value, "client update objects_url")
+        if not value.endswith("/"):
+            raise ValueError(f"client update objects_url must end with '/', got {value!r}")
+        return value
+
+
+LaunchArg = Annotated[str, Field(pattern=r"^[A-Za-z0-9_.=+-]+$")]
+"""One argument Play passes to the client: letters, digits and `_.=+-`, no space, quote or
+shell character, so it reads the same in an argv, a Steam launch option and a script."""
+
+
+class HdPatches(_Strict):
+    """The client's own HD patches, which its executable switches off on its command line (T828).
+
+    Read from the Conquest of Azeroth launcher (v0.7.6): its saved "Enable HD patches"
+    (default on) starts the game with no arguments, and when off starts `<exe> -hd 0`.
+    Yu'lon offers the same choice per install, on by default.
+    """
+
+    args_when_off: tuple[LaunchArg, ...] = Field(
+        min_length=1,
+        description="The arguments the client is started with when the player turns HD off.",
+    )
+
+
 class Client(_Strict):
     """The client the USER supplies (README §3a) and how to point it at the server.
 
@@ -3069,10 +3647,57 @@ class Client(_Strict):
         ),
     )
     realmlist_file: str = "realmlist.wtf"
+    exe_names: tuple[Annotated[str, Field(pattern=r"^[^\\/:*?\"<>|]+\.exe$")], ...] = Field(
+        default=("wow.exe",),
+        min_length=1,
+        description=(
+            "The client executables Play may start, lower case (T812). Each ends `.exe`; "
+            "the default is the stock name every shipped entry has used until now."
+        ),
+    )
+    wine_dll_overrides: str | None = Field(
+        default=None,
+        pattern=r"^[A-Za-z0-9_.,;=-]+$",
+        description=(
+            "The `WINEDLLOVERRIDES` value Play runs the client with (T812). " "None: no overrides."
+        ),
+    )
     notes: tuple[str, ...] = ()
     packs: tuple[ClientPack, ...] = ()
     exe_patch: ExePatch | None = None
     config_wtf: ConfigWtf | None = None
+    update: ClientUpdate | None = Field(
+        default=None,
+        description=(
+            "Where the makers publish the client's files, for Update client on the Server "
+            "tab (T825). None: Yu'lon does not update this game's client."
+        ),
+    )
+    hd_patches: HdPatches | None = Field(
+        default=None,
+        description=(
+            "The client's built-in HD patches and how to start it with them off, for "
+            "Enable HD patches on the Server tab (T828). None: no such choice."
+        ),
+    )
+
+    @field_validator("exe_names")
+    @classmethod
+    def _exe_names_are_lower_case_and_distinct(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        """Lower case, because the client folder is usually on Windows and `Ascension.exe`
+
+        must not slip past a rule that only knows `ascension.exe`; distinct casefolded,
+        for the same reason two packs may not install one file twice.
+        """
+        lowered = [name.casefold() for name in value]
+        if any(name != name.casefold() for name in value):
+            raise ValueError(
+                f"exe_names are lower case, got {[n for n in value if n != n.casefold()]}"
+            )
+        doubled = sorted({name for name in lowered if lowered.count(name) > 1})
+        if doubled:
+            raise ValueError(f"exe_names must be distinct, got {doubled} more than once")
+        return value
 
     @model_validator(mode="after")
     def _also_builds_extend_a_required_build(self) -> Client:
@@ -3111,6 +3736,17 @@ class Client(_Strict):
                     )
                 owner[target] = pack.id
         for pack in self.packs:
+            if pack.setup is not None:
+                for item in pack.setup.writes:
+                    target = PurePosixPath(item).as_posix().casefold()
+                    if owner.get(target, pack.id) != pack.id:
+                        raise ValueError(
+                            f"pack {pack.id!r} setup writes {item!r}, which pack "
+                            f"{owner[target]!r} installs: switching one off must never delete "
+                            "the other's file"
+                        )
+                    owner[target] = pack.id
+        for pack in self.packs:
             for item in pack.remove_when_off:
                 target = PurePosixPath(item).as_posix().casefold()
                 if owner.get(target, pack.id) != pack.id:
@@ -3124,17 +3760,22 @@ class Client(_Strict):
     def hosts(self) -> frozenset[str]:
         """Every host a download for this client may reach: packs and clean exe sources.
 
-        The allow-list later steps check every fetch against, so a redirect to
-        anywhere else is refused. Not `fallback_page`: that is a page a person
+        Packs add their urls' hosts plus `redirect_hosts`: a redirect target
+        (GitHub's release-asset hosts) the catalog names so the engine does
+        not refuse it. Not `fallback_page`: that is a page a person
         is sent to, never fetched.
         """
         urls: list[str | None] = []
+        extra: list[str] = []
         for pack in self.packs:
             urls += [pack.source.url, pack.source.version_url]
+            extra += list(pack.redirect_hosts)
         if self.exe_patch is not None:
             urls += [source.url for source in self.exe_patch.clean_sources]
+        if self.update is not None:
+            urls += [self.update.manifest_url, self.update.objects_url]
         hosts = (urlsplit(url).hostname for url in urls if url is not None)
-        return frozenset(host for host in hosts if host)
+        return frozenset([host for host in hosts if host] + extra)
 
 
 class BotRegistry(_Strict):
@@ -3517,6 +4158,42 @@ class CatalogEntry(_Strict):
         return self
 
     @model_validator(mode="after")
+    def _every_rerunnable_module_is_a_module_this_entry_clones(self) -> CatalogEntry:
+        """A `RerunnableModule.module` is a module this entry clones (T813).
+
+        The engine skips a changed file whose owner module is listed, where the
+        module is a non-core source's folder name. A name no module source
+        provides -- including the core's own folder name, whose files the
+        ledger keys with an empty module -- is an entry that can never match,
+        so it is refused here.
+        """
+        native = self.install.native
+        block = native.cmangos if native is not None else None
+        if block is None:
+            return self
+        cores = {
+            source.dest
+            for source in self.emulator.sources
+            if not any(
+                source.dest.startswith(f"{other.dest.rstrip('/')}/modules/")
+                for other in self.emulator.sources
+                if other is not source
+            )
+        }
+        modules = {
+            posixpath.basename(source.dest.rstrip("/"))
+            for source in self.emulator.sources
+            if source.dest not in cores
+        }
+        for entry in block.rerunnable_modules:
+            if entry.module not in modules:
+                raise ValueError(
+                    f"rerunnable module {entry.module!r} is not a module of any of this "
+                    f"entry's sources {sorted(modules)}"
+                )
+        return self
+
+    @model_validator(mode="after")
     def _the_trinitycore_block_agrees_with_the_entry(self) -> CatalogEntry:
         """The block's checkout, renames and account scheme agree with the rest of the entry.
 
@@ -3606,7 +4283,13 @@ class CatalogEntry(_Strict):
             "db_import": c.db_import,
             "client_data": c.client_data,
         }
+        if native.azerothcore is not None and native.azerothcore.client_extract is not None:
+            # A client-extract entry lays its data from the player's client (T812): the
+            # old download service is gone, so its template name is gone with it.
+            del given["client_data"]
         for field, suffix in AZEROTHCORE_CONTAINER_SUFFIXES.items():
+            if field not in given:
+                continue
             want = prefix + suffix
             if given[field] != want:
                 raise ValueError(
@@ -3620,6 +4303,56 @@ class CatalogEntry(_Strict):
                 f"{self.id}: operations.port {ops.port} is not install.native.soap_port "
                 f"{native.soap_port}; the base file publishes the second and the command "
                 "channel dials the first, so they must be one number"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _a_client_extract_needs_no_client_data_service(self) -> CatalogEntry:
+        """`client_extract` replaces the `client-data` fetch: both would lay maps and DBCs.
+
+        The old service pulls the data from a download; the new stage extracts it
+        from the player's own client. An entry naming both has two writers of
+        `data/` and no rule for which one wins, and `requires_client_dir` is how
+        the engine knows the player's folder must be there to read.
+        """
+        native = self.install.native
+        block = native.azerothcore if native is not None else None
+        if block is None or block.client_extract is None:
+            return self
+        if self.containers.client_data is not None:
+            raise ValueError(
+                f"{self.id}: client_extract extracts maps from the player's client, so "
+                "containers.client_data must be absent (it is the download that "
+                "client_extract replaces)"
+            )
+        if not self.install.requires_client_dir:
+            raise ValueError(
+                f"{self.id}: client_extract reads the player's client, so "
+                "install.requires_client_dir must be true"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _auth_after_world_needs_its_marker(self) -> CatalogEntry:
+        """`auth_after_world_ready` waits on the auth log and the auth container.
+
+        The flag row is re-asserted through `containers.auth`, and the start
+        order waits for `ready.auth` before it; without either the entry names
+        an order nobody keeps and a row nobody writes.
+        """
+        native = self.install.native
+        block = native.azerothcore if native is not None else None
+        if block is None or not block.auth_after_world_ready:
+            return self
+        if native is not None and native.ready.auth is None:
+            raise ValueError(
+                f"{self.id}: auth_after_world_ready waits on the auth server's ready line, "
+                "so install.native.ready.auth must be set"
+            )
+        if self.containers.auth is None:
+            raise ValueError(
+                f"{self.id}: auth_after_world_ready re-asserts the realm flag through the "
+                "auth container, so containers.auth must be set"
             )
         return self
 
@@ -3662,6 +4395,8 @@ class CatalogEntry(_Strict):
 
     def container_spec(self) -> ContainerSpec:
         """The `ContainerSpec` a controller for this game would be built from."""
+        native = self.install.native
+        block = native.azerothcore if native is not None else None
         return ContainerSpec(
             db=self.containers.db,
             auth=self.containers.auth,
@@ -3673,6 +4408,27 @@ class CatalogEntry(_Strict):
                 self.install.native is not None and self.install.native.stop_waits_for_world_load
             ),
             save_first=self._save_first(),
+            bot_saves_skippable=self._bot_saves_skippable(),
+            auth_after_world=block is not None and block.auth_after_world_ready,
+        )
+
+    def _bot_saves_skippable(self) -> BotSavesSkippable | None:
+        """The entry's `stop_without_bot_saves` with its console's prompt, for the stop (T826)."""
+        native = self.install.native
+        if native is None or native.stop_without_bot_saves is None:
+            return None
+        fast = native.stop_without_bot_saves
+        console = self.console
+        return BotSavesSkippable(
+            save=SaveFirst(
+                command=fast.command,
+                queue_command=fast.queue_command,
+                queue_pattern=fast.queue_pattern,
+                prompt=console.prompt,
+                prompt_precedes_answer=console.prompt_precedes_answer,
+            ),
+            seconds=float(fast.seconds),
+            waits_by_default=fast.waits_by_default,
         )
 
     def _save_first(self) -> SaveFirst | None:

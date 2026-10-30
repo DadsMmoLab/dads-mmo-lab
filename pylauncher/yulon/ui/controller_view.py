@@ -32,12 +32,25 @@ import time
 from collections import deque
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 from functools import partial
 from pathlib import Path, PurePosixPath
 from typing import Any, NamedTuple, NoReturn, Protocol, TypeVar, assert_never, cast
 
 import shiboken6
-from PySide6.QtCore import QEvent, QObject, QPoint, QSize, Qt, QTimer, QUrl, Signal, Slot
+from PySide6.QtCore import (
+    QEvent,
+    QMetaObject,
+    QObject,
+    QPoint,
+    QSize,
+    Qt,
+    QThread,
+    QTimer,
+    QUrl,
+    Signal,
+    Slot,
+)
 from PySide6.QtGui import QAction, QColor, QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import (
     QAbstractButton,
@@ -81,8 +94,10 @@ from yulon import (
     client_exe,
     client_names,
     client_packs,
+    coa_switch,
     commands,
     conf_dist,
+    core_conf,
     database_presence,
     dbreads,
     default_addons,
@@ -90,6 +105,7 @@ from yulon import (
     docker_advice,
     forgetting,
     gaming_mode,
+    hd_patches,
     install_wiring,
     logsnap,
     module_moves,
@@ -102,6 +118,7 @@ from yulon import (
     play_client,
     play_launch,
     purge,
+    realm_name,
     reset_defaults,
     resources,
     seeded_accounts,
@@ -111,6 +128,8 @@ from yulon import (
     server_time_zone,
     serverlock,
     sql_log_offer,
+    stop_choice,
+    table_repair,
     teardown,
     tuning,
     unbound_settings,
@@ -133,7 +152,15 @@ from yulon.apply import (
     reapplies_on_top,
     required_prompts,
 )
-from yulon.catalog import bot_dashboard, composegen, native, preflight, time_zone, upstream
+from yulon.catalog import (
+    bot_dashboard,
+    composegen,
+    native,
+    preflight,
+    script_built,
+    time_zone,
+    upstream,
+)
 from yulon.catalog.catalog import CatalogEntry, Client, ClientPack, ConfigWtf, DbPasswordUnknown
 from yulon.catalog.families import azerothcore, clientdir, decisions, mmaps, trinitycore
 from yulon.catalog.installer import (
@@ -181,16 +208,19 @@ from yulon.controller_wow_wotlk import accounts as wotlk_accounts
 from yulon.controller_wow_wotlk import console as wotlk_console
 from yulon.controller_wow_wotlk import maintenance as wotlk_maintenance
 from yulon.controller_wow_wotlk import modules as wotlk_modules
-from yulon.git import Behind, RunnerGit, is_behind
+from yulon.controller_wow_wotlk import rndbots as wotlk_rndbots
+from yulon.git import Behind, is_behind
 from yulon.log import get_logger
 from yulon.manifest import ConfKey, Manifest, ManifestType, Prompt, When
 from yulon.manifest_store import FAMILY_FILES, ManifestStore
 from yulon.networking import Mode, NetworkPlan, NetworkReport
 from yulon.said import SaidByYulon, split_details
+from yulon.server_build_presses import MAINTENANCE_TAB
 from yulon.support.redact import hide_account_passwords
-from yulon.ui import lines, single_instance
+from yulon.ui import client_update, lines, single_instance
 from yulon.ui.answers import said_yes
 from yulon.ui.catalog_view import DirPicker, _qt_dir_picker, offer_a_docker_group_restart
+from yulon.ui.client_update import ClientUpdateControl
 from yulon.ui.folder_picker import pick_folder
 from yulon.ui.help_places import HELP_BUTTON, show_help_places
 from yulon.ui.icons import dadcraft_icon, get_tab_icon
@@ -202,7 +232,6 @@ from yulon.ui.theme import (
     COLOR_TEXT_MUTED,
     COLOR_TEXT_WARNING,
     PLAY_MENU_BUTTON,
-    SERVER_BUILD_BUTTON,
     get_theme,
     normalize_theme_name,
     resolve_widget_theme,
@@ -235,6 +264,7 @@ from yulon.ui.widgets.page import (
 from yulon.ui.widgets.party_panel import PartyPanel
 from yulon.ui.widgets.prompt import InputPrompter
 from yulon.ui.widgets.reasons import ReasonLine, drop_reason, reason_of, set_enabled_why
+from yulon.ui.widgets.remove_dialog import RemovalChoice, ask_removal, offered_choices
 from yulon.ui.widgets.tuning_panel import TuningPanel, build_tuning_cards
 
 logger = get_logger(__name__)
@@ -1166,11 +1196,28 @@ def has_client_data(client: Client) -> bool:
     return bool(client.packs or client.exe_patch is not None or client.config_wtf is not None)
 
 
-def has_client_choices(client: Client) -> bool:
-    """Whether a player can choose anything: an optional pack or a Wow.exe option."""
-    return any(pack.optional for pack in client.packs) or bool(
-        client.exe_patch is not None and client.exe_patch.options
+def shown_packs(client: Client, platform_id: str | None = None) -> tuple[ClientPack, ...]:
+    """The optional packs this machine is offered: `wanted`'s platform filter, choice-blind.
+
+    The Make dialog and "Client options…" show the same boxes the launcher shows
+    and Play installs: a Windows-only pack (Lumenveil) never appears on Wine, Linux
+    or macOS. `wanted` also reads the player's ticks, which a dialog lists rather
+    than applies, so this asks it nothing and filters only by platform.
+    """
+    here = client_packs.offered_on(platform_id)
+    return tuple(
+        pack
+        for pack in client.packs
+        if pack.optional and (not pack.platforms or here in pack.platforms)
     )
+
+
+def has_client_choices(client: Client) -> bool:
+    """Whether a player can choose anything: an offered optional pack or a Wow.exe option."""
+    here = client_packs.offered_on()
+    return any(
+        pack.optional and (not pack.platforms or here in pack.platforms) for pack in client.packs
+    ) or bool(client.exe_patch is not None and client.exe_patch.options)
 
 
 class ClientOptionsBox(QWidget):
@@ -1192,6 +1239,9 @@ class ClientOptionsBox(QWidget):
         *,
         installed: Collection[str] = (),
         unavailable: Collection[str] = (),
+        records: Mapping[str, Mapping[str, Any]] | None = None,
+        on_update: Callable[[str], None] | None = None,
+        updates_enabled: bool = True,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -1218,11 +1268,14 @@ class ClientOptionsBox(QWidget):
         box.addWidget(self.extra_label)
         self.pack_boxes: dict[str, QCheckBox] = {}
         self._sizes: dict[str, int] = {}
-        for pack in client.packs:
-            if not pack.optional:
-                continue
+        self.update_notes: dict[str, QLabel] = {}
+        self.update_buttons: dict[str, QPushButton] = {}
+        held = records or {}
+        for pack in shown_packs(client):
             gone = pack.id in unavailable
             check = QCheckBox(self._pack_text(pack, gone), self)
+            if pack.credit:
+                check.setToolTip(pack.credit)
             check.setChecked(bool(chosen_packs.get(pack.id, pack.default)))
             if gone and pack.id not in installed:
                 check.setChecked(False)
@@ -1232,6 +1285,21 @@ class ClientOptionsBox(QWidget):
             check.toggled.connect(self._update_extra)
             self.pack_boxes[pack.id] = check
             box.addWidget(check)
+            if (
+                pack.id in installed
+                and pack.version
+                and client_packs.update_state(pack, held.get(pack.id)) == "update available"
+            ):
+                note = QLabel(f"A newer {pack.label} ({pack.version}) is available.", self)
+                note.setWordWrap(True)
+                box.addWidget(note)
+                self.update_notes[pack.id] = note
+                if on_update is not None:
+                    update = QPushButton(f"Update {pack.label}", self)
+                    update.setEnabled(updates_enabled)
+                    update.clicked.connect(lambda _on=False, pack_id=pack.id: on_update(pack_id))
+                    box.addWidget(update)
+                    self.update_buttons[pack.id] = update
         self.exe_boxes: dict[str, QCheckBox] = {}
         if client.exe_patch is not None:
             for name, option in client.exe_patch.options.items():
@@ -1244,6 +1312,8 @@ class ClientOptionsBox(QWidget):
     @staticmethod
     def _pack_text(pack: ClientPack, gone: bool) -> str:
         text = pack.label
+        if pack.version:
+            text += f" {pack.version}"
         if pack.description:
             text += f" — {pack.description}"
         if pack.size_hint:
@@ -1273,25 +1343,41 @@ class ClientOptionsOffer:
     """What "Client options…" shows: the client section, the record's choices, what is where.
 
     `installed` are the pack ids the record says are in the ready-to-play client;
-    `unavailable` the optional packs whose address answered 404 at the last Play.
+    `unavailable` the optional packs whose address answered 404 at the last Play;
+    `records` the record's per-pack entries, so the dialog can say an update is available.
     """
 
     client: Client
     choices: dict[str, Any]
     installed: frozenset[str]
     unavailable: frozenset[str]
+    records: Mapping[str, Mapping[str, Any]] | None = None
 
 
 ClientOptionsAsker = Callable[[QWidget, ClientOptionsOffer], dict[str, Any] | None]
 """How the tab asks "Client options…": a seam, so a test answers it without a modal."""
 
 
+RemovalAsker = Callable[[tuple[RemovalChoice, ...]], RemovalChoice | None]
+"""How the tab asks "Remove this server…": a seam, so a test answers it without a modal.
+
+Called with the choices offered for this wiring, in dialog order; answers the
+choice, or None for Cancel. The default builds `remove_dialog.RemoveDialog`.
+"""
+
+
 class ClientOptionsDialog(QDialog):
     """ "Client options…": the checkboxes, Save and Cancel. Save applies at the next Play."""
 
-    def __init__(self, offer: ClientOptionsOffer, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        offer: ClientOptionsOffer,
+        parent: QWidget | None = None,
+        view: ControllerView | None = None,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle(CLIENT_OPTIONS_LABEL.rstrip("…"))
+        self._view = view
         box = QVBoxLayout(self)
         intro = QLabel(
             "Choose what this server's ready-to-play client has. A change takes effect "
@@ -1300,11 +1386,18 @@ class ClientOptionsDialog(QDialog):
         )
         intro.setWordWrap(True)
         box.addWidget(intro)
+        self._say = QLabel("", self)
+        self._say.setWordWrap(True)
+        self._say.setVisible(False)
+        box.addWidget(self._say)
         self.options = ClientOptionsBox(
             offer.client,
             offer.choices,
             installed=offer.installed,
             unavailable=offer.unavailable,
+            records=offer.records,
+            on_update=self.update_pack,
+            updates_enabled=self._updates_idle(),
             parent=self,
         )
         box.addWidget(self.options)
@@ -1315,10 +1408,47 @@ class ClientOptionsDialog(QDialog):
         buttons.rejected.connect(self.reject)
         box.addWidget(buttons)
 
+    def _updates_idle(self) -> bool:
+        """Whether the Update button starts enabled: never on a held client."""
+        view = self._view
+        if view is None:
+            return True
+        return view.play_client_busy() is None
 
-def ask_client_options(parent: QWidget, offer: ClientOptionsOffer) -> dict[str, Any] | None:
+    @Slot()
+    def update_pack(self, pack_id: str) -> None:
+        """Run one pack's update through the view's shared apply; say done or failed in a line."""
+        view = self._view
+        if view is None:
+            return
+        for button in self.options.update_buttons.values():
+            button.setEnabled(False)
+        self._say.setText("")
+        self._say.setVisible(False)
+        view.update_client_pack(
+            pack_id,
+            done=lambda _pack, sentence: self._update_done(sentence),
+            failed=lambda _pack, sentence: self._update_failed(sentence),
+        )
+
+    def _update_done(self, sentence: str) -> None:
+        self._say.setText(sentence)
+        self._say.setVisible(True)
+
+    def _update_failed(self, sentence: str) -> None:
+        self._say.setText(sentence)
+        self._say.setVisible(True)
+        for button in self.options.update_buttons.values():
+            button.setEnabled(self._updates_idle())
+
+
+def ask_client_options(
+    parent: QWidget,
+    offer: ClientOptionsOffer,
+    view: ControllerView | None = None,
+) -> dict[str, Any] | None:
     """The real `ClientOptionsAsker`: the dialog, modal; None for Cancel."""
-    dialog = ClientOptionsDialog(offer, parent)
+    dialog = ClientOptionsDialog(offer, parent, view=view)
     if dialog.exec() != QDialog.DialogCode.Accepted:
         return None
     return dialog.options.choices()
@@ -1717,6 +1847,14 @@ class _PackStopped(Exception):
         self.reason = reason
 
 
+_UpdatePending = tuple[
+    ClientPack,
+    Callable[[ClientPack, str], None] | None,
+    Callable[[ClientPack, str], None] | None,
+]
+"""A pack update in flight: the pack and the `done`/`failed` its slots hand to (T809 W6)."""
+
+
 @dataclass(frozen=True)
 class _Prepared:
     """What the Play pipeline did, read on the GUI thread: lines to show, and 404 packs."""
@@ -1923,6 +2061,173 @@ def _world_upkeep(
     return WorldUpkeep(read=read, reextract=reextract, finish_world=finish)
 
 
+def _realm_switch(
+    entry: CatalogEntry,
+    server_dir: Path,
+    sql: DockerSql,
+    *,
+    wsl_distro: str | None,
+) -> coa_switch.RealmSwitch | None:
+    """The Server tab's realm-type switch for a CoA server; None for every other (T812 C3b).
+
+    Built from the entry's own containers and the tab's own hold: the switch runs
+    stop → switch → start under `docker.server_hold` (the T607 seam every other
+    mutating press uses), so a switch, an Install/Repair import and a second
+    switch can never run at once. The SQL seams are the tab's `DockerSql`
+    (the import probe's client). Not for a server inside a WSL distro: the
+    import one-shot the first switch runs cannot be driven from here.
+
+    T812 C8 (the live run): the Stop is followed by the database alone
+    (`start_db`, D5), and a first switch's import is the db-import one-shot
+    alone (`coa_switch.switch_import`, D6-D8), never the whole installer.
+    """
+    from yulon import account_rules, coa_realm
+
+    if wsl_distro is not None or not coa_realm.has_realm_types(entry):
+        return None
+    spec = entry.container_spec()
+    bot_prefix = account_rules.bot_prefix(entry, server_dir) or ""
+    seams = _realm_import_seams(entry, server_dir, wsl_distro=wsl_distro)
+    return coa_switch.switch_for(
+        entry,
+        server_dir,
+        hold_server=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
+        sql=coa_realm.FnSql(
+            run=lambda statement: sql.run_statement("characters", statement),
+            ask=lambda statement: sql.query("characters", statement),
+        ),
+        servers_running=lambda: bool(
+            docker.world_running(spec.world, wsl_distro=wsl_distro)
+            or docker.world_running(spec.auth, wsl_distro=wsl_distro)
+        ),
+        run_import=lambda context: coa_switch.switch_import(entry, server_dir, context, seams),
+        check_import=lambda: coa_switch.check_switch_import(server_dir, seams),
+        # The name only: the row's address and world port are the engine's to carry from
+        # the type just parked (`coa_realm._carry_realm_address`, T812 C8 D13), and the
+        # switch's Start asks the tab's realm-port keeper again.
+        set_realm_row=lambda name, _port: sql.run_statement(
+            "auth", coa_realm.realm_name_update(entry, name)
+        ),
+        write_override=lambda env: _write_realm_override(entry, server_dir, env),
+        stop=lambda: _stop_for_realm_switch(entry, server_dir, wsl_distro=wsl_distro),
+        start_db=lambda: docker.start_database(
+            spec, server_dir, because="nothing was switched", wsl_distro=wsl_distro
+        ),
+        start=lambda: _start_for_realm_switch(entry, server_dir, sql, wsl_distro=wsl_distro),
+        bot_prefix=bot_prefix,
+    )
+
+
+def _stop_for_realm_switch(
+    entry: CatalogEntry, server_dir: Path, *, wsl_distro: str | None
+) -> bool:
+    """Stop for a realm-type switch: the existing Stop, saving every character (T812 C3b)."""
+    from yulon import controller as _controller_module
+
+    controller = _controller_module.Controller(
+        entry.container_spec(), server_dir, wsl_distro=wsl_distro
+    )
+    return controller.stop()
+
+
+def _start_for_realm_switch(
+    entry: CatalogEntry, server_dir: Path, sql: DockerSql, *, wsl_distro: str | None
+) -> None:
+    """Start for a realm-type switch: the tab's own Start, ordered for CoA (T812 C3b).
+
+    With the tab's `before_servers` (T812 C8 D13): the realm-type gate and the
+    realm-port keeper, as the Server tab's Start asks them. A bare Controller
+    asked neither, so a fresh type's row kept the import's 8085 and the auth wait
+    looked for this server's port forever.
+    """
+    from yulon import controller as _controller_module
+
+    spec = entry.container_spec()
+    controller = _controller_module.Controller(
+        spec,
+        server_dir,
+        wsl_distro=wsl_distro,
+        before_servers=_before_the_servers(
+            _realm_type_gate(entry, spec, server_dir, sql, wsl_distro=wsl_distro),
+            _realm_port_keeper(entry, spec, server_dir, sql, wsl_distro=wsl_distro),
+        ),
+    )
+    controller.start()
+
+
+def _realm_import_seams(
+    entry: CatalogEntry, server_dir: Path, *, wsl_distro: str | None
+) -> coa_switch.ImportSeams:
+    """The docker seams a first switch's import runs through (T812 C8 D6-D8).
+
+    The entry's own one-shot service and this folder's import probe (the
+    password is the folder's own, T748), so the switch imports and verifies
+    exactly as the install's import stage does, without the installer's other
+    stages around it.
+    """
+    spec = entry.container_spec()
+    probe, _reset = install_wiring.import_gate_for(
+        entry, server_dir=server_dir, wsl_distro=wsl_distro
+    )
+    return coa_switch.ImportSeams(
+        service=spec.import_service,
+        probe=probe,
+        end_one_shot=lambda service, folder: docker.end_one_shot(
+            service, folder, wsl_distro=wsl_distro, record_ended=True
+        ),
+        one_shot=lambda service, folder, sink: docker.run_one_shot(
+            service, folder, sink=sink, wsl_distro=wsl_distro
+        ),
+        verify=docker.verify_import,
+    )
+
+
+def _write_realm_override(entry: CatalogEntry, server_dir: Path, env: Mapping[str, str]) -> None:
+    """Rewrite the compose override for the switch's target type (T812 C3b).
+
+    The render every writer goes through (`composegen.render`), with what every
+    other regeneration hands it (T812 C8 D10, the live run: "generates its
+    database password per install, and none was given"): the folder's own
+    password (`db_password`, as `channel_setup.enable()` and the reset read it),
+    the bind label the installed override already carries (else the host's
+    answer, `channel_setup.install_bind_label`), the channel's enable while a
+    press is live, and the bot-count carry-over (`bot_count.world_env`). Then the
+    file's own writer (`_replace_whole`), whole or left as it was.
+    """
+    from yulon import channel_setup, coa_realm
+    from yulon.catalog import bot_count, composegen
+    from yulon.resources import installers_dir
+
+    password = entry.install.db_password(server_dir)
+    if password is None:
+        raise coa_realm.RealmSwitchError(
+            "This server's database password could not be read, so the new realm type's "
+            "settings were not written. Press Switch realm type again once it can be read."
+        )
+    target = server_dir / composegen.OVERRIDE_FILE
+    label: str | None = None
+    if target.is_file() and composegen.is_ours(target):
+        try:
+            label = composegen.bind_label_of(target.read_text(encoding="utf-8"))
+        except composegen.MixedBindLabels:
+            label = None
+    if label is None:
+        label = channel_setup.install_bind_label(server_dir)
+    base = dict(env)
+    operations = entry.operations
+    if operations is not None and composegen.channel_world_env(entry, server_dir) is not None:
+        base.update(operations.enable_env)
+    plan = composegen.render(
+        entry,
+        server_dir,
+        templates_root=installers_dir(),
+        world_env=bot_count.world_env(entry, server_dir, base),
+        db_password=password,
+        bind_label=label,
+    )
+    composegen._replace_whole(target, plan.override)
+
+
 @dataclass
 class ControllerServices:
     """Everything the view calls down into. Real implementations by default; fakes in tests.
@@ -1955,6 +2260,13 @@ class ControllerServices:
     write, on the job's thread; the account and character writes take it inside their own seams.
     `None` (a harness) holds nothing.
     """
+    realm_name_current: Callable[[], realm_name.NameState] | None = None
+    """The realm name the Networking tab's field shows: the realm row's, else the saved one (T808).
+
+    `None` for a harness, and for a server with no realm row: the field is then absent.
+    """
+    realm_name_save: Callable[[str], realm_name.SaveResult] | None = None
+    """Check, remember and apply a new realm name (T808); a job, under the server's hold."""
     db_refusal: str | None = None
     """Why nothing on this tab may touch the database, in player words, or None (T785).
 
@@ -2055,6 +2367,15 @@ class ControllerServices:
 
     `None` everywhere else, which leaves the button absent: the setting it
     writes is TortoiseBots', and the other games' bot modules do not read it.
+    """
+    bot_rndbot_delete: wotlk_rndbots.RndbotDelete | None = None
+    """T805's "Delete every random bot…", on the AzerothCore trees only.
+
+    `None` everywhere else, which leaves the button absent: the delete goes
+    through `DockerSql`'s write half against THIS core's schemas, and a
+    CMaNGOS install's schemas are not the ones these statements name. Both
+    seams never hold at once: `_build_bot_rebuild` draws the Tortoise button
+    when the first is here and this one when it is not.
     """
     steam: steam_module.SteamShortcuts | None = None
     """8.8's two Steam library entries, on Linux and the Steam Deck only.
@@ -2264,6 +2585,19 @@ class ControllerServices:
     """What the Rebuild press would refuse, asked BEFORE its question (T217 live proof).
 
     `install_wiring.rebuild_refusal_for_app()`; None asks nothing first."""
+    rebuild_note: Callable[[], str] | None = None
+    """A heads-up the Rebuild question carries, or "" for none (T795).
+
+    `install_wiring.rebuild_note_for_app()`: files only, never blocks the press; None asks nothing.
+    """
+    script_built_rebuild: install_wiring.ScriptBuiltRebuild | None = None
+    """T804: Rebuild for a WotLK server the old bash script built inside WSL; None elsewhere.
+
+    `install_wiring.script_built_rebuild_for_app()`. When set and its `applies()` says the
+    folder looks like that server, the Rebuild press asks `script_built.question()` instead
+    of the ordinary confirmation and runs this route's source on Yes. It writes nothing in
+    the folder and does not take the server over.
+    """
     updates: native.UpdateRoute | None = None
     """Apply the install plan's re-runnable phases to this server; None when it has none.
 
@@ -2319,6 +2653,15 @@ class ControllerServices:
     `install_wiring.corrections_for_app()` answers: an entry whose plan marks a
     step `reapply_when_changed`, never a server inside a WSL distro. `None`
     means no banner and no check.
+    """
+
+    table_repair: table_repair.TableRepair | None = None
+    """T822's "Repair the damaged table…" for the CMaNGOS family; None elsewhere.
+
+    Wired by `_for_tortoise`, `_for_tbc` and `_for_vanilla` and by no other factory, which
+    is a pinned fact (`test_table_repair.py`) rather than a habit. The object carries the
+    hold, the backup and the `docker cp` for one install, so the view asks nothing about
+    containers or schemas.
     """
 
     update_to_latest: native.LatestRoute | None = None
@@ -2438,6 +2781,14 @@ class ControllerServices:
     `None` hides both: every game whose update route leaves neither owing.
     """
 
+    realm_switch: coa_switch.RealmSwitch | None = None
+    """T812 C3b: the Server tab's realm-type choice and switch press for a CoA server.
+
+    `None` hides the choice: every entry without `realm_types`. Built in `_for_wotlk`
+    from the entry, the tab's hold (`docker.server_hold`, the T607 seam) and the
+    engine's SQL seams, so the switch, an Install/Repair import and a second
+    switch can never run at once.
+    """
     characters_withheld: Mapping[str, str] = field(default_factory=dict)
     """Characters verbs (`play.VERBS`) this tree does not offer, each with why (T179).
 
@@ -3012,6 +3363,58 @@ def _mysql_for(
     )
 
 
+def _copy_the_table_files(
+    tables: Sequence[table_repair.CrashedTable],
+    datadir: str,
+    engines: Mapping[str, str],
+    *,
+    container: str,
+    server_dir: Path,
+    wsl_distro: str | None,
+) -> Path:
+    """Copy each damaged table's own files into the backups folder (T822).
+
+    A whole dump is the backup; this is the specialist's copy of the files a repair may
+    rewrite. `docker cp` reads the table's `.frm` and its engine's data and index files
+    (`MYD`/`MYI` for MyISAM, `MAD`/`MAI` for Aria) out of the running database container,
+    whose `@@datadir` the caller read.
+
+    One folder per table, named `<stamp>_before-repair_<db>.<table>`, the first one
+    returned for the report. `docker cp`'s destination is a host path, so a server inside
+    a WSL distro gets its distro spelling of it (T125): the CLI runs in that distro.
+
+    The caller (`table_repair.repair()`) holds a read lock on these tables around this call.
+    That is what makes the files a snapshot rather than a mixture of two writes: `mysqld`
+    keeps writing while players are connected, and nothing here can stop it on its own.
+
+    Raises whatever `docker.copy_from_container()` raises for the first file it could not
+    copy; nothing is repaired on that failure until the player says so.
+    """
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    data = datadir.strip().rstrip("/")
+    folders: list[Path] = []
+    for table in tables:
+        folder = (
+            wotlk_maintenance.backups_dir(server_dir)
+            / f"{stamp}_before-repair_{table.db}.{table.table}"
+        )
+        folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+        engine = engines.get(table.sql_name, "").upper()
+        suffixes = ("frm", "MAD", "MAI") if engine == "ARIA" else ("frm", "MYD", "MYI")
+        target: Path | str = str(folder)
+        if wsl_distro is not None:
+            inside = platform.wsl_linux_path(folder)
+            if inside is not None:
+                target = inside
+        for suffix in suffixes:
+            source = f"{data}/{table.db}/{table.table}.{suffix}"
+            docker.copy_from_container(container, source, target, wsl_distro=wsl_distro)
+        folders.append(folder)
+    if not folders:  # pragma: no cover - `repair()` refuses an empty list first
+        raise ValueError("no damaged tables to copy")
+    return folders[0]
+
+
 def _database_alone(
     spec: docker.ContainerSpec, server_dir: Path, *, wsl_distro: str | None
 ) -> DatabaseAlone:
@@ -3090,6 +3493,8 @@ def _move_services(
     *,
     wsl_distro: str | None,
     store: ManifestStore | None = None,
+    sql: apply_module.LedgerReader | None = None,
+    user_game: str | None = None,
 ) -> move_flows.MoveServices:
     """The Move group's four presses, over the same engine the Backup and Restore buttons use.
 
@@ -3151,6 +3556,25 @@ def _move_services(
             # The cross-process hold for the move's database stretch (lead's decision, 2026-10-09).
             spec=entry.container_spec(),
             wsl_distro=wsl_distro,
+            # T802: the tail's one-shot, on AzerothCore-family servers alone. None
+            # everywhere else binds the tail refusal at plan time.
+            apply_updates=(
+                (
+                    lambda output: wotlk_modules.apply_module_sql(
+                        server_dir,
+                        spec=entry.container_spec(),
+                        output=output,
+                        wsl_distro=wsl_distro,
+                        ledger=sql,
+                        user_game=user_game or entry.id,
+                    )
+                )
+                if entry.install.native is not None
+                and entry.install.native.family == "azerothcore"
+                and sql is not None
+                and user_game is not None
+                else None
+            ),
         ),
         whole=whole,
     )
@@ -3189,6 +3613,10 @@ def _steam_seam(
         game=entry.name,
         server_dir=server_dir,
         client_dir=client_dir,
+        exe_names=entry.client.exe_names,
+        wine_dll_overrides=entry.client.wine_dll_overrides,
+        # T828: CoA's `-hd 0` when this install has its HD patches off, read at the press.
+        launch_args=partial(hd_patches.launch_args, entry.client, server_dir),
         # Steam Deck Gaming Mode: the Server tile starts the server through `yulon --server`
         # and stops it when the game closes, and a third tile stops it (`gaming_mode`).
         gaming=partial(_wow_gaming_scripts, entry, server_dir),
@@ -3240,6 +3668,7 @@ def _server_hold_for(
 
 
 _R = TypeVar("_R")
+_C = TypeVar("_C", bound=Controller)
 
 
 def _under_the_hold(
@@ -3282,6 +3711,7 @@ def _assemble(
     my_party: MyPartySeam | None = None,
     play: object | None = None,
     bots: BotBrowser | None = None,
+    bot_rndbot_delete: wotlk_rndbots.RndbotDelete | None = None,
     console_probe: Callable[[str], object] | None = None,
     uninstall: Uninstall | None = None,
     module_sql: ModuleSqlRoute | None = None,
@@ -3301,6 +3731,7 @@ def _assemble(
     module_forget: Callable[[Manifest], bool] | None = None,
     default_addons: tuple[str, ...] = (),
     mysql: wotlk_maintenance.DockerMysql | None = None,
+    table_repair: table_repair.TableRepair | None = None,
 ) -> ControllerServices:
     """The seams that are the same sentence for every game, plus the ones that are not.
 
@@ -3310,9 +3741,13 @@ def _assemble(
     function object in all four packages.
     """
     spec = entry.container_spec()
-    if spec.save_first is not None and channel_setup is not None:
+    names = realm_name.RealmNames(entry, server_dir, sql)
+    follows_type = realm_name.follows_realm_type(entry)
+    saves_first = spec.save_first is not None or spec.bot_saves_skippable is not None
+    if saves_first and channel_setup is not None:
         # T496: where the console needs a terminal this host cannot open (Windows), the save
         # a Stop asks for first goes through this install's command channel, on every route.
+        # T826: so does the players' save of a Stop that does not wait for the bots.
         live_channel = getattr(channel_setup, "live_channel", None)
         if callable(live_channel):
             docker.save_through_channel(spec.world, server_dir, live_channel)
@@ -3332,6 +3767,18 @@ def _assemble(
             _server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
             "Apply the network plan",
             lambda plan: networking.apply(plan, sql=sql, server_dir=server_dir),
+        ),
+        # T808: the realm name; the write goes under the same hold as the network apply.
+        # None on a realm-type entry (CoA): there the realm type's switch writes the name.
+        realm_name_current=None if follows_type else names.current,
+        realm_name_save=(
+            None
+            if follows_type
+            else _under_the_hold(
+                _server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
+                "Change the realm name",
+                names.save,
+            )
         ),
         # T610: the account row is written under the server's cross-process hold, in the shared
         # half so that every game's factory gets it (five of them pass their own writer).
@@ -3356,7 +3803,16 @@ def _assemble(
         # factory that never bound `play`.
         database_alone=_database_alone(spec, server_dir, wsl_distro=wsl_distro),
         move=(
-            _move_services(entry, server_dir, mysql, controller, wsl_distro=wsl_distro, store=store)
+            _move_services(
+                entry,
+                server_dir,
+                mysql,
+                controller,
+                wsl_distro=wsl_distro,
+                store=store,
+                sql=sql,
+                user_game=entry.id,
+            )
             if mysql is not None
             else None
         ),
@@ -3374,6 +3830,7 @@ def _assemble(
         my_party=my_party,
         play=play,
         bots=bots,
+        bot_rndbot_delete=bot_rndbot_delete,
         console_probe=console_probe,
         # Defaulted to None here rather than demanded from every factory: three
         # of the four games name no import service at all, and a keyword they
@@ -3440,6 +3897,11 @@ def _assemble(
             ),
         ),
         rebuild_refusal=install_wiring.rebuild_refusal_for_app(
+            entry, server_dir, wsl_distro=wsl_distro
+        ),
+        rebuild_note=install_wiring.rebuild_note_for_app(entry, server_dir, wsl_distro=wsl_distro),
+        # T804: beside the rebuild, for the folder the old bash script built in WSL.
+        script_built_rebuild=install_wiring.script_built_rebuild_for_app(
             entry, server_dir, wsl_distro=wsl_distro
         ),
         # HERE for the same reason the rebuild is, and offered to far fewer
@@ -3528,6 +3990,14 @@ def _assemble(
         # T179 Task 6. HERE for the same reason: whether an update can leave the
         # map data or the world tables owing is the entry's engine's fact.
         world_upkeep=_world_upkeep(entry, server_dir, wsl_distro=wsl_distro),
+        # T822. HERE because it is a parameter of this assembly: only the three
+        # CMaNGOS factories build one, and an entry without it gets no banner.
+        table_repair=table_repair,
+        # T812 C3b. HERE for T171's reason: the choice is a catalog fact
+        # (`realm_types`), and only a realm-types entry gets a switch. Held under
+        # the tab's per-server hold, so the switch, an Install/Repair import and
+        # a second switch can never run at once.
+        realm_switch=_realm_switch(entry, server_dir, sql, wsl_distro=wsl_distro),
     )
 
 
@@ -3644,6 +4114,76 @@ def _settings_mods(store: ManifestStore) -> Callable[[], tuple[Manifest, ...]]:
     return mods
 
 
+def _before_the_servers(
+    *steps: Callable[[], str | None] | None,
+) -> Callable[[], str | None] | None:
+    """`Controller.before_servers` as the given steps in order: the first reason refuses.
+
+    None when no step is given, so a server with neither asks nothing.
+    """
+    given = [step for step in steps if step is not None]
+    if not given:
+        return None
+    if len(given) == 1:
+        return given[0]
+
+    def ask() -> str | None:
+        for step in given:
+            reason = step()
+            if reason:
+                return reason
+        return None
+
+    return ask
+
+
+def _realm_type_of(entry: CatalogEntry, server_dir: Path) -> str | None:
+    """The active realm type id for the backup record, or None (T812 C3b).
+
+    Only an entry with `realm_types` records one: the file's active id (the
+    default when it is missing, C3a), so the dump's auth/characters/playerbots
+    files carry which set they hold. Read at press time, not at tab build: the
+    type can change between a Backup and a Restore.
+    """
+    from yulon import coa_realm
+
+    if not coa_realm.has_realm_types(entry):
+        return None
+    return coa_realm.active(entry, server_dir).id
+
+
+def _realm_type_gate(
+    entry: CatalogEntry,
+    spec: docker.ContainerSpec,
+    server_dir: Path,
+    sql: DockerSql,
+    *,
+    wsl_distro: str | None,
+) -> Callable[[], str | None] | None:
+    """The realm-type start gate for a realm-types entry; None for every other (T812 C3a).
+
+    Asked once every refusal has passed, before the realm port keeper: it starts
+    the database alone and then reads the marker (`coa_realm.before_servers_gate`),
+    so the gate never decides on a database that was not up.
+    """
+    from yulon import coa_realm
+
+    return coa_realm.before_servers_gate(
+        entry,
+        server_dir,
+        start_db=lambda: docker.start_database(
+            spec,
+            server_dir,
+            because="the realm type of its databases could not be read",
+            wsl_distro=wsl_distro,
+        ),
+        sql=coa_realm.FnSql(
+            run=lambda statement: sql.run_statement("characters", statement),
+            ask=lambda statement: sql.query("characters", statement),
+        ),
+    )
+
+
 def _realm_port_keeper(
     entry: CatalogEntry,
     spec: docker.ContainerSpec,
@@ -3698,6 +4238,44 @@ def _realm_port_keeper(
         )
 
     return keep
+
+
+def _keeping_the_realm_name(
+    controller: _C,
+    entry: CatalogEntry,
+    server_dir: Path,
+    sql: DockerSql,
+    *,
+    wsl_distro: str | None,
+) -> _C:
+    """`controller`, whose start step now also puts a saved realm name back (T808).
+
+    Called by each game's factory on the controller it has just built, never by
+    `_assemble()`: the shared assembly is handed whatever controller a caller
+    has, and must not change it. An import seeds the catalog's own name, so every
+    Start re-applies the owner's; the step the controller already had (the realm
+    port keeper, T552) goes first and its refusal stands, and the name never
+    refuses a start (`realm_name.keep_at_start()`).
+
+    A realm-type entry (CoA) keeps its controller unchanged: its realm type decides
+    the name, and the switch writes it (`realm_name.follows_realm_type()`).
+    """
+    if realm_name.follows_realm_type(entry):
+        return controller
+    spec = entry.container_spec()
+    controller.before_servers = realm_name.keep_at_start(
+        entry,
+        server_dir,
+        sql,
+        lambda: docker.start_database(
+            spec,
+            server_dir,
+            because="the saved realm name could not be applied",
+            wsl_distro=wsl_distro,
+        ),
+        controller.before_servers,
+    )
+    return controller
 
 
 def _for_wotlk(
@@ -3944,26 +4522,59 @@ def _for_wotlk(
         # it lives in a conf file the user can change while the app is open,
         # and a list built on a stale marker is a list of the wrong characters.
         bots=_BotBrowser(entry, server_dir, sql),
-        controller=Controller(
-            spec,
+        # T805: the Bots tab's "Delete every random bot…", which deletes the bots'
+        # characters and rndbot accounts itself, over the same DockerSql every read
+        # here goes through. `alone` is the database-alone pair Backup uses, so the
+        # delete can start the database of a stopped server and put it back; the
+        # world-stopped guard asks `docker.world_running()` for the SAME answer the
+        # Server tab draws from.
+        bot_rndbot_delete=wotlk_rndbots.for_entry(
+            entry,
             server_dir,
-            wsl_distro=wsl_distro,
-            import_probe=probe,
-            reset_unfinished=reset,
-            pre_stop=recorder,
-            before_servers=_realm_port_keeper(entry, spec, server_dir, sql, wsl_distro=wsl_distro),
-            # T678 review round 3: a copy before Repair clears an unfinished first import.
-            safety_copy=lambda: wotlk_maintenance.safety_copy_sentence(
-                wotlk_maintenance.backup(
-                    server_dir,
-                    mysql,
-                    game=wotlk_maintenance.game_of(entry),
-                    label="before-repair",
-                    spec=spec,
-                    core_databases=entry.core_databases(),
-                    wsl_distro=wsl_distro,
-                )
+            sql=sql,
+            world_running=lambda: docker.world_running(spec.world, wsl_distro=wsl_distro),
+            alone=(lambda a: wotlk_rndbots.DatabaseAlone(a.bring_up, a.take_down))(
+                _database_alone(spec, server_dir, wsl_distro=wsl_distro)
             ),
+            hold_server=lambda press: docker.server_hold(
+                server_dir, press, spec=spec, wsl_distro=wsl_distro, label=entry.name
+            ),
+        ),
+        # T808: the saved realm name goes back after the realm port, at every Start
+        # (never on a realm-type entry: there the realm type decides the name).
+        controller=_keeping_the_realm_name(
+            Controller(
+                spec,
+                server_dir,
+                wsl_distro=wsl_distro,
+                import_probe=probe,
+                reset_unfinished=reset,
+                pre_stop=recorder,
+                # T812 C3b: the Server tab's Repair import runs under the tab's
+                # per-server hold, so an Install/Repair import and a realm-type
+                # switch can never run at once.
+                hold_server=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
+                before_servers=_before_the_servers(
+                    _realm_type_gate(entry, spec, server_dir, sql, wsl_distro=wsl_distro),
+                    _realm_port_keeper(entry, spec, server_dir, sql, wsl_distro=wsl_distro),
+                ),
+                # T678 review round 3: a copy before Repair clears an unfinished first import.
+                safety_copy=lambda: wotlk_maintenance.safety_copy_sentence(
+                    wotlk_maintenance.backup(
+                        server_dir,
+                        mysql,
+                        game=wotlk_maintenance.game_of(entry),
+                        label="before-repair",
+                        spec=spec,
+                        core_databases=entry.core_databases(),
+                        wsl_distro=wsl_distro,
+                    )
+                ),
+            ),
+            entry,
+            server_dir,
+            sql,
+            wsl_distro=wsl_distro,
         ),
         sql=sql,
         # Three facts, from three different places, and the command needs all of
@@ -4065,12 +4676,14 @@ def _for_wotlk(
         unfinished_modules=(
             (lambda: apply_module.unfinished_clones(server_dir)) if entry.has_manifests else None
         ),
-        # T44 item 1. `RunnerGit` and not the containerized git: this is a
-        # local read of a folder the user can see, it runs once per clone, and
-        # a `docker run` per module to print a sha would cost more than the
-        # line is worth. A machine with no host git answers `None` and the rows
-        # simply show nothing, which is the documented outcome.
-        module_version=(RunnerGit().head_version if entry.has_manifests else None),
+        # T44 item 1 (T774 inside WSL). The distro's git for a server inside WSL
+        # (`apply.module_git(server_dir)`), host git elsewhere: Git for Windows
+        # refuses a checkout reached over `\\wsl.localhost`, so host git left
+        # every row's version blank. A machine with no host git answers `None`
+        # and the rows simply show nothing, which is the documented outcome.
+        module_version=(
+            (apply_module.module_git(server_dir).head_version) if entry.has_manifests else None
+        ),
         # A module from a link or a folder (design page, lane C's four seams),
         # wired once lanes A and B were on the branch (2026-09-08). Lane C
         # left this as a comment naming the four lines because the objects
@@ -4119,6 +4732,9 @@ def _for_wotlk(
             spec=spec,
             core_databases=entry.core_databases(),
             wsl_distro=wsl_distro,
+            # T812 C3b: a CoA backup carries its realm type beside the game record;
+            # every other entry passes None and writes none.
+            realm_type=_realm_type_of(entry, server_dir),
         ),
         plan_restore=lambda path, can_start_database=False: wotlk_maintenance.plan_restore(
             path,
@@ -4127,6 +4743,7 @@ def _for_wotlk(
             spec=spec,
             wsl_distro=wsl_distro,
             can_start_database=can_start_database,
+            realm_type=_realm_type_of(entry, server_dir),
         ),
         # `confirm=plan.token` is not a rubber stamp: the token can only come
         # from a plan, a plan can only come from a real file, and the human
@@ -4148,6 +4765,7 @@ def _for_wotlk(
             # on the tab whose Backup button was already correct.
             core_databases=entry.core_databases(),
             wsl_distro=wsl_distro,
+            realm_type=_realm_type_of(entry, server_dir),
         ),
     )
 
@@ -4238,20 +4856,47 @@ def _for_tbc(
         channel_for_saved=channel.live_channel,
         hold_server=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
     )
+    # T822: a crash can leave `realmd.account` (MyISAM here) or one of `characters`'
+    # few MyISAM tables damaged. The row's hold is this install's SPEC, and the copy
+    # is read from this install's db container.
+    repair_route = table_repair.TableRepair(
+        schemas=(entry.databases.characters, entry.databases.auth),
+        mysql=mysql,
+        hold=partial(
+            docker.hold_the_server,
+            server_dir,
+            table_repair.REPAIR_HOLD_REASON,
+            press=table_repair.REPAIR_PRESS,
+            spec=spec,
+            wsl_distro=wsl_distro,
+        ),
+        backup=partial(tbc_maintenance.backup, server_dir, mysql, wsl_distro=wsl_distro),
+        copy_files=partial(
+            _copy_the_table_files,
+            container=spec.db,
+            server_dir=server_dir,
+            wsl_distro=wsl_distro,
+        ),
+    )
     return _assemble(
         entry,
         server_dir,
         client_dir=client_dir,
         wsl_distro=wsl_distro,
         mysql=mysql,
+        table_repair=repair_route,
         dashboard=watcher.tick,
         log_snapshot=recorder,
         channel_setup=channel,
         accounts=accounts_admin,
         play=characters_admin,
         bots=_BotBrowser(entry, server_dir, sql),
-        controller=tbc_controller.TbcController(
-            server_dir, wsl_distro=wsl_distro, pre_stop=recorder
+        controller=_keeping_the_realm_name(
+            tbc_controller.TbcController(server_dir, wsl_distro=wsl_distro, pre_stop=recorder),
+            entry,
+            server_dir,
+            sql,
+            wsl_distro=wsl_distro,
         ),
         sql=sql,
         # No `prompt=`: this package binds this console's prompt and the side of
@@ -4403,12 +5048,34 @@ def _for_vanilla(
         channel_for_saved=channel.live_channel,
         hold_server=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
     )
+    # T822: `realmd.account` is MyISAM on this tree, so a crash during bot activity
+    # reaches the card's read through the bot clause. Same seams as TBC's.
+    repair_route = table_repair.TableRepair(
+        schemas=(entry.databases.characters, entry.databases.auth),
+        mysql=mysql,
+        hold=partial(
+            docker.hold_the_server,
+            server_dir,
+            table_repair.REPAIR_HOLD_REASON,
+            press=table_repair.REPAIR_PRESS,
+            spec=spec,
+            wsl_distro=wsl_distro,
+        ),
+        backup=partial(vanilla_maintenance.backup, server_dir, mysql, wsl_distro=wsl_distro),
+        copy_files=partial(
+            _copy_the_table_files,
+            container=spec.db,
+            server_dir=server_dir,
+            wsl_distro=wsl_distro,
+        ),
+    )
     return _assemble(
         entry,
         server_dir,
         client_dir=client_dir,
         wsl_distro=wsl_distro,
         mysql=mysql,
+        table_repair=repair_route,
         dashboard=watcher.tick,
         log_snapshot=recorder,
         channel_setup=channel,
@@ -4445,8 +5112,14 @@ def _for_vanilla(
             ),
         ),
         bots=_BotBrowser(entry, server_dir, sql),
-        controller=vanilla_controller.VanillaController(
-            server_dir, wsl_distro=wsl_distro, pre_stop=recorder
+        controller=_keeping_the_realm_name(
+            vanilla_controller.VanillaController(
+                server_dir, wsl_distro=wsl_distro, pre_stop=recorder
+            ),
+            entry,
+            server_dir,
+            sql,
+            wsl_distro=wsl_distro,
         ),
         sql=sql,
         send_console=lambda cmd: vanilla_console.send_command(
@@ -4628,8 +5301,14 @@ def _for_centurion(
                 avoid_images=purge.removable_images(composegen.built_image_refs(entry, server_dir)),
             ),
         ),
-        controller=centurion_controller.CenturionController(
-            entry, server_dir, wsl_distro=wsl_distro, pre_stop=recorder
+        controller=_keeping_the_realm_name(
+            centurion_controller.CenturionController(
+                entry, server_dir, wsl_distro=wsl_distro, pre_stop=recorder
+            ),
+            entry,
+            server_dir,
+            sql,
+            wsl_distro=wsl_distro,
         ),
         sql=sql,
         send_console=lambda cmd: centurion_console.send_command(entry, cmd, wsl_distro=wsl_distro),
@@ -4834,8 +5513,12 @@ def _for_tortoise(
         channel_for_saved=channel.live_channel,
         hold_server=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
     )
-    lifecycle = tortoise_controller.controller_for(
-        server_dir, wsl_distro=wsl_distro, pre_stop=recorder
+    lifecycle = _keeping_the_realm_name(
+        tortoise_controller.controller_for(server_dir, wsl_distro=wsl_distro, pre_stop=recorder),
+        entry,
+        server_dir,
+        sql,
+        wsl_distro=wsl_distro,
     )
     # 8.7d's guarded applier (see the `applier=` comment below), built before
     # `_assemble()` since T596 because the custom route is bound over it too.
@@ -4898,12 +5581,34 @@ def _for_tortoise(
         if entry.has_manifests
         else None
     )
+    # T822: the reported table is here — `tw_char.characters` is MyISAM — and so is
+    # `tw_logon`'s account table. The hold is this package's SPEC.
+    repair_route = table_repair.TableRepair(
+        schemas=(entry.databases.characters, entry.databases.auth),
+        mysql=mysql,
+        hold=partial(
+            docker.hold_the_server,
+            server_dir,
+            table_repair.REPAIR_HOLD_REASON,
+            press=table_repair.REPAIR_PRESS,
+            spec=spec,
+            wsl_distro=wsl_distro,
+        ),
+        backup=partial(tortoise_maintenance.backup, server_dir, mysql, wsl_distro=wsl_distro),
+        copy_files=partial(
+            _copy_the_table_files,
+            container=spec.db,
+            server_dir=server_dir,
+            wsl_distro=wsl_distro,
+        ),
+    )
     services = _assemble(
         entry,
         server_dir,
         client_dir=client_dir,
         wsl_distro=wsl_distro,
         mysql=mysql,
+        table_repair=repair_route,
         dashboard=watcher.tick,
         log_snapshot=recorder,
         channel_setup=channel,
@@ -4969,7 +5674,9 @@ def _for_tortoise(
         unfinished_modules=(
             (lambda: apply_module.unfinished_clones(server_dir)) if entry.has_manifests else None
         ),
-        module_version=(RunnerGit().head_version if entry.has_manifests else None),
+        module_version=(
+            (apply_module.module_git(server_dir).head_version) if entry.has_manifests else None
+        ),
         # T612: the two Sagiroth client addons go in by themselves (new install, every Play).
         default_addons=tortoise_modules.DEFAULT_ADDONS if entry.has_manifests else (),
         applier=module_applier,
@@ -5037,20 +5744,33 @@ def _for_tortoise(
         # T607: the whole rebuild is held under this server's cross-process reservation.
         hold_server=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
     )
+    followed = tortoise_botpool.wrap_route(
+        tortoise_botdash.wrap_route(services.update_to_latest, dashboard_switch),
+        entry,
+        server_dir,
+        channels=adoption_channels,
+        restart=lambda: tortoise_botpool.restart_world(lifecycle),
+        wsl_distro=wsl_distro,
+        moved=module_moved,
+    )
+    if module_applier is not None and services.store is not None:
+        store = services.store
+        followed = tortoise_modules.follow_with_addon(
+            followed,
+            lambda: default_addons.follow_server_update(
+                server_dir,
+                module_applier,
+                lambda: store.load_all("mod"),
+                tortoise_modules.ADDON_ID,
+                place=lambda: default_addons.client_place(client_dir, module_applier.client_dir),
+            ),
+        )
     return replace(
         services,
         custom_module_tips=(TORTOISE_LINK_TIP, TORTOISE_FOLDER_TIP),
         bot_dashboard=dashboard_switch,
         bot_pool_rebuild=pool_rebuild,
-        update_to_latest=tortoise_botpool.wrap_route(
-            tortoise_botdash.wrap_route(services.update_to_latest, dashboard_switch),
-            entry,
-            server_dir,
-            channels=adoption_channels,
-            restart=lambda: tortoise_botpool.restart_world(lifecycle),
-            wsl_distro=wsl_distro,
-            moved=module_moved,
-        ),
+        update_to_latest=followed,
     )
 
 
@@ -5094,6 +5814,8 @@ _FACTORIES: dict[str, _Factory] = {
     "wow-wotlk": _for_wotlk,
     # T554: WoW Unbound is AzerothCore with the WotLK controller; T552 made it entry-driven.
     "wow-unbound": _for_wotlk,
+    # T812: WoW Conquest of Azeroth is AzerothCore with the WotLK controller, as Unbound is.
+    "wow-coa": _for_wotlk,
     "wow-tbc": _for_tbc,
     "wow-vanilla": _for_vanilla,
     "wow-tortoise": _for_tortoise,
@@ -5276,7 +5998,20 @@ RETURN_TO_PIN_BUTTON_LABEL = server_build_presses.RETURN_TO_PIN
 """The way back off an untested commit, shown only once there is one to go back from."""
 
 PUT_THE_FOLDERS_BACK_BUTTON_LABEL = server_build_presses.PUT_THE_FOLDERS_BACK
-"""T766's press, in the same menu (T786); shown while `put_the_folders_back_offered()` is True."""
+"""T766's press, in the section's Advanced fold (T692a, T786); shown while offered."""
+
+ON_THE_TESTED_PIN = "On the tested pin."
+"""The Server version line for an install whose sources all sit on their catalog pins (T692a)."""
+
+ADOPT_NOT_READY = "The databases do not read as a finished import waiting to be claimed."
+"""Why Adopt as imported… is greyed until the databases read `populated` (T692a/T195).
+
+One sentence for every other probe answer. `imported` means the row is already
+there and the press would refuse; `absent` and `partial` mean there is no
+import to make a claim about; `unreadable` means nobody could look -- and no
+reading yet means the same. Each is, definitionally, not the one answer this
+press can act on.
+"""
 
 
 class UpdateChoice(enum.Enum):
@@ -5377,8 +6112,8 @@ def _relabel(box: QMessageBox, which: QMessageBox.StandardButton, text: str) -> 
 REBUILD_BUTTON_LABEL = server_build_presses.REBUILD
 """The rebuild press's label, in one place because many things say it.
 
-The press wears it -- the banner's button, the first entry under
-`SERVER_BUILD_LABEL` since T89, and a rebuild-owed chip's subpanel button -- and
+The press wears it -- the banner's button, the Maintenance tab's Server version
+section button, and a rebuild-owed chip's subpanel button -- and
 `_format_report()`, the chip's sentence and the engine's refusals tell the user
 to press it by name. Two literals would be one rename away from a report that
 points at a control that is not there any more, which is the class of defect
@@ -5387,21 +6122,14 @@ spelling now lives in `server_build_presses`, below everything that says it.
 """
 
 SERVER_BUILD_LABEL = server_build_presses.SERVER_BUILD
-"""The Modules toolbar button that holds the three compile-this-server presses (T89).
+"""The Maintenance tab's section holding the compile-this-server presses (T692a).
 
-Rebuild, "Update the server to latest…" and "Return to the tested pin…" were
-three buttons side by side, and with a route wired -- every catalog entry that
-offers one -- the bar was seven buttons and wrapped at the 1280x800 the app
-opens at. The owner's decision of 2026-09-27: one button with a menu, the three
-labels unchanged. The triangle is in the label because it is the only thing on
-the bar that says this press opens a list rather than acting or asking.
+T89's "Server build ▾" menu button held them before: Rebuild, "Update the server
+to latest…" and "Return to the tested pin…" were three buttons side by side,
+and with a route wired the bar was seven buttons and wrapped at the 1280x800
+the app opens at. The section holds one button per press now, each bound to the
+same QAction the menu entries were.
 """
-
-SERVER_BUILD_TIP = (
-    "Compile this server again: from the same code, from the newest code, or back on the "
-    "commit this app was tested against. Every entry asks first."
-)
-"""The menu button's own tooltip; each entry keeps the one its button had (T89)."""
 
 PATHFINDING_START = mmaps.START_PRESS
 PATHFINDING_STOP = "Stop making the pathfinding data"
@@ -5440,18 +6168,11 @@ WORLD_UPKEEP_BUSY = (
     "Nothing was started."
 )
 
-REMOVE_IDLE = "Stop and remove containers…"
-REMOVE_ARMED = "Press again to remove"
-"""Two labels for one button, because a teardown should not be one click away.
-
-The wording changes rather than a dialog appearing: the explanation is a
-paragraph naming what is kept, `danger_label` renders it directly under the
-press (T189: in Realm's `problem_label` it was a page away at 960), and a
-modal would arrive from a worker thread.
-"""
+REMOVE_THIS_SERVER = "Remove this server…"
+"""T695: the Danger zone's one removal press, opening the dialog with the three routes."""
 
 REMOVE_FROM_YULON = "Remove from Yu'lon…"
-"""T95: the Server tab's way off the list, the same words as `forgetting.BUTTON_LABEL`.
+"""T95: the tab menu's way off the list, the same words as `forgetting.BUTTON_LABEL`.
 
 A local constant rather than an import, so this ticket adds no line to the
 module's import block (a parallel ticket edits it). `test_controller_view.py`
@@ -5472,8 +6193,8 @@ STOP_OVER_A_LOAD_TITLE = "A restore is still running"
 STOP_OVER_A_LOAD = (
     "A restore from the last session is still writing into {name}'s databases in Docker. "
     "Stopping the server now stops its database under that restore and leaves those "
-    "databases half-written. Wait for it to finish (the Maintenance tab says when), or stop "
-    "anyway."
+    f"databases half-written. Wait for it to finish (the {MAINTENANCE_TAB} tab says when), "
+    "or stop anyway."
 )
 """T711: the question before a Stop over a restore load that outlived the last Yu'lon."""
 CLEAR_RESERVATION_LABEL = "Clear it"
@@ -5609,7 +6330,7 @@ REPAIR_DATABASE_CONFIRM = (
     "Docker no longer has this server's database. Repair makes it again from the server files, "
     "the way the install did, and then starts the server.\n\n"
     "Your accounts and characters are not in the server files, so they do not come back. If you "
-    "have a backup, restore it on the Maintenance tab once the repair has finished.\n\n"
+    f"have a backup, restore it on the {MAINTENANCE_TAB} tab once the repair has finished.\n\n"
     "This can take several minutes. Repair now?"
 )
 """What the Server tab's **Repair the database…** asks before it runs (T377)."""
@@ -5621,8 +6342,7 @@ UNINSTALL_FAILED_BROKE = "The uninstall did not finish. Details below says why."
 """An Uninstall that broke rather than being refused by Yu'lon; the error is in Details (T248)."""
 
 STOP_LOG_NOT_SAVED = (
-    "The server stopped. Yu'lon couldn't save a copy of its log this time; Details below "
-    "says why."
+    "The server stopped. Yu'lon couldn't save a copy of its log this time; Details below says why."
 )
 """A Stop whose log snapshot failed; what went wrong is in Details (T211)."""
 
@@ -5728,6 +6448,14 @@ CONSOLE_SHUTDOWN_REFUSED = (
 
 BOTS_FIRST_PAGE = "This is the first page of bots."
 BOTS_LAST_PAGE = "This is the last page of bots."
+
+_BOT_FILTER_DEBOUNCE_MS = 400
+"""T806: how long a keystroke in the bots' filter waits for company before it re-reads.
+
+A keystroke burst becomes one read, not one per key; the last keystroke wins. 400 ms
+is short enough to feel live and long enough that "sindorei" is one query, not nine.
+"""
+
 BOT_COUNT_READING = "Wait: Yu'lon is reading the bot count from this server's settings."
 BOT_COUNT_UNREADABLE = "Yu'lon can't change the bot count here; the line above says why."
 BOT_COUNT_NO_ROUTE = "This game has no bot count Yu'lon can set."
@@ -5901,8 +6629,8 @@ def repair_armed_unfinished(state: docker.ImportState) -> str:
         f"{counted}, written by that import, and no characters. A copy of all three is saved "
         "in the server's backups folder first, and the Repair is refused if any character is "
         "found. If people have played on this server, press Cancel now and restore a backup "
-        "from the Maintenance tab instead. The server must be stopped; a full import takes "
-        "10-30 minutes and cannot be stopped once it starts.\n\n"
+        f"from the {MAINTENANCE_TAB} tab instead. The server must be stopped; a full import "
+        "takes 10-30 minutes and cannot be stopped once it starts.\n\n"
     )
 
 
@@ -6642,7 +7370,7 @@ class _TabFit(QObject):
     def __init__(
         self,
         tab: QWidget,
-        log: _IdleLogPanel,
+        log: _IdleLogPanel | None,
         report: _ReportStrip,
         listing: QWidget,
         floor: int,
@@ -6655,6 +7383,9 @@ class _TabFit(QObject):
         # T613: the add-on box keeps its sentence exactly where the card keeps its own.
         self._addon_box = addon_box
         self._tab = tab
+        # T692a: None where the tab holds no log panel -- the rebuild log lives
+        # on Maintenance now, so Modules folds only its report. A foreign log
+        # must not be settled from here: its fold would follow this tab's room.
         self._log = log
         self._report = report
         self._listing = listing
@@ -6670,7 +7401,8 @@ class _TabFit(QObject):
         # caught by -- but a record of a press, and the only thing it does is
         # move that panel to the END of the give order below.
         self._asked_for: _IdleLogPanel | _ReportStrip | None = None
-        log.wants_changed.connect(lambda by_hand: self._asked(log, by_hand))
+        if log is not None:
+            log.wants_changed.connect(lambda by_hand: self._asked(log, by_hand))
         report.wants_changed.connect(lambda by_hand: self._asked(report, by_hand))
         tab.installEventFilter(self)
 
@@ -6696,8 +7428,9 @@ class _TabFit(QObject):
 
         `LOG, REPORT` is the published order and the one that holds until a
         person says otherwise; the panel they last pressed open goes last.
+        With no log (T692a) the report is the whole order.
         """
-        order: list[QObject] = [self._log, self._report]
+        order: list[QObject] = [self._report] if self._log is None else [self._log, self._report]
         if self._asked_for is self._log:
             order.reverse()
         return order
@@ -6713,13 +7446,13 @@ class _TabFit(QObject):
         this at the list's ordinary floor first, because the list is step 3 and
         nothing may spend it in advance.
         """
-        open_now: dict[QObject, bool] = {
-            self._log: self._log.wants_open(),
-            self._report: self._report.wants_open(),
-        }
+        open_now: dict[QObject, bool] = {self._report: self._report.wants_open()}
+        log = self._log
+        if log is not None:
+            open_now[log] = log.wants_open()
         for panel in self._give_order():
             if self._owed(
-                log_open=open_now[self._log],
+                log_open=bool(open_now[log]) if log is not None else False,
                 report_open=open_now[self._report],
                 list_floor=list_floor,
             ) <= page_room(self._tab):
@@ -6783,9 +7516,11 @@ class _TabFit(QObject):
                 with_the_list = self._fold_until_it_fits(_LIST_FLOOR_FLOOR)
                 if with_the_list[asked]:
                     open_now = with_the_list
-            log_room = open_now[self._log]
+            log = self._log
+            log_room = bool(open_now[log]) if log is not None else False
             report_room = open_now[self._report]
-            self._log.set_room(log_room)
+            if log is not None:
+                log.set_room(log_room)
             self._report.set_room(report_room)
             # Step 3 (T153): what the list would have with the card whole AND
             # both boxes folded, the list billed at nothing so the answer is
@@ -6943,7 +7678,7 @@ class _TabFit(QObject):
             shown += 1
             if widget is self._addon_box:
                 owed += self._addon_box.minimum_for(inner, card_whole)
-            elif widget is self._log:
+            elif widget is self._log and self._log is not None:
                 owed += self._log.open_minimum() if log_open else self._log.folded_minimum()
             elif widget is self._listing:
                 owed += list_floor
@@ -7259,8 +7994,8 @@ who fixes one field and a user who wonders what state their conf is in.
 TUNING_REVERTED = "{module}: put {file} back from {backup}.\n{rule}"
 
 TUNING_PUT_BACK_DURING_RESTORE = (
-    "{press}: a restore is running on the Maintenance tab, so nothing was put back. Press it "
-    "again once the restore has finished."
+    "{press}: a restore is running on the " + f"{MAINTENANCE_TAB} tab, so nothing was put "
+    "back. Press it again once the restore has finished."
 )
 """T145: Tortoise's restore sets aiplayerbot.conf's rebuild request off as it starts, on its
 worker, and a put-back at the same moment would race that write."""
@@ -7664,7 +8399,31 @@ TUNING_CORE_FILE = (
     "This is the server's own configuration, not a module's. Yu'lon shows it read-only in "
     "this version: who owns core configuration is a bigger question than one module's conf."
 )
-"""Why `worldserver.conf` is listed but not editable here (T43's own follow-up)."""
+"""Why a TrinityCore server's `worldserver.conf` is listed but not editable here."""
+
+TUNING_CORE_EDITABLE = (
+    "This is the server's own configuration. The servers read it when they start, so press "
+    "Restart for a change to take effect. Lines Yu'lon sets are locked; the list is under "
+    "the editor."
+)
+"""What an editable AzerothCore core conf says under the editor (T819)."""
+
+TUNING_CORE_LOCKED = "Nothing was written. Yu'lon sets these lines, so they stay as they are:"
+"""The refusal when a core-conf Save touches a locked key (T819): the keys follow."""
+
+TUNING_CORE_CHANGED = (
+    "The file changed while it was open, so nothing was saved; reopen it to see what it says now."
+)
+"""The refusal when a core conf on disk is no longer the text the editor opened (T819)."""
+
+TUNING_CORE_CONFIRM = "Save these {n} changes to {name}? A backup is taken first.\n{lines}{more}"
+"""The one confirm before a core-conf Save writes (T819): the diff, then the backup."""
+
+TUNING_AUTH_RESTART = (
+    "The login server reads this file when it starts, so the change takes effect at the "
+    "next restart. The file itself is on your disk and the server reads it from there."
+)
+"""What a change to `authserver.conf` costs (T819): the restart sentence says login server."""
 
 
 @dataclass(frozen=True)
@@ -7801,12 +8560,12 @@ def _read_time_zone(route: server_time_zone.TimeZoneRoute, generation: int) -> T
 
 
 TUNING_CORE_FILES: tuple[str, ...] = reset_defaults.AZEROTHCORE_CORE_FILES
-"""The install's own conf files, listed read-only beside the module ones.
+"""The AzerothCore family's own conf files, listed beside the module ones.
 
 Named (in `reset_defaults`, since T94) and not discovered by a glob of
-`env/dist/etc`: a glob would also list every module conf a second time, and
-the point of the list is that these three are the ones this tab deliberately
-will not write.
+`env/dist/etc`: a glob would also list every module conf a second time. Since
+T819 the tab lists them editable with locked keys rather than read-only; the
+read-only list is `_tuning_read_only_files()`.
 """
 
 REBUILD_BOTS_LABEL = "Rebuild random bots…"
@@ -7823,6 +8582,21 @@ REBUILD_BOTS_TEXT = (
     "player in it."
 )
 """T144's one dialog. Its three buttons are `ask_backup_choice()`'s, relabelled."""
+
+DELETE_BOTS_LABEL = "Delete every random bot…"
+DELETE_BOTS_TITLE = "Delete every random bot?"
+DELETE_BOTS_TEXT = (
+    "Every random bot is deleted from the server's databases: its account and characters "
+    "with everything they own -- level, gear, bags, bank, mail, quests, professions, pets "
+    "and the items they have up for auction. A guild a random bot leads passes to its "
+    "highest-ranked member left, or is disbanded if nobody is left; arena teams do the "
+    "same, and groups a random bot leads are disbanded.\n\n"
+    "What stays: your own accounts and characters, and the AddClass and city bots. The "
+    "bots module makes its random-bot accounts again when the server starts.\n\n"
+    "It is all or nothing: if any part fails, nothing is deleted. The server must be "
+    "stopped: the press refuses while it is running."
+)
+"""T805's one dialog. Its three buttons are `ask_backup_choice()`'s, relabelled."""
 
 REBUILD_BOTS_AFTER_UPDATE = (
     "TortoiseBots changed. Rebuild the random bots so they get the new behaviour? They lose "
@@ -7881,6 +8655,7 @@ TUNING_RESET_BROKE = "Reset to default did not finish. Details below says why."
 TUNING_JOB_BROKE = "The {job} did not finish. Details below says why."
 """T214: a Tuning press that broke; what broke is in Details and the log."""
 TIME_ZONE_BROKE = "The time zone was not changed. Details below says why."
+REPAIR_BROKE = "The table repair did not finish; the log says why. Nothing else was changed."
 MODULE_JOB_BROKE = "{what} did not finish. Details below says why."
 MODULE_UPDATES_BROKE = "Yu'lon couldn't check for module updates. Details below says why."
 MODULE_SQL_BROKE = "The SQL run did not finish. Details below says why."
@@ -7913,7 +8688,7 @@ will not write module SQL underneath a running worldserver (checklist 8.7a) —
 before the click rather than after it. It is a courtesy, not the guard.
 """
 
-MODULE_UPDATES_BUTTON_LABEL = "Check for updates"
+MODULE_UPDATES_BUTTON_LABEL = "Check module updates"
 """The Modules tab's read-only button (checklist 8.7a's first clause)."""
 
 MODULE_UPDATES_TIP = (
@@ -8204,9 +8979,8 @@ SUB_TABS_NAME = "server-sub-tabs"
 """The object name of a server's sub-tab widget, which its own style sheet selects by (T191)."""
 
 UNINSTALL_ABSENT = (
-    "Uninstall is not offered for {name} yet: Stop and remove containers… frees its "
-    "containers, Remove from Yu'lon… takes it off the list, and the folder {server_dir} "
-    "stays for you to delete."
+    "Uninstall is not offered for {name} yet: Remove this server… takes it off the list "
+    "or frees its containers, and the folder {server_dir} stays for you to delete."
 )
 """The Danger zone's sentence for a game with no uninstall seam (T189 A27)."""
 
@@ -8286,12 +9060,32 @@ class _ToldLine(QLabel):
         self.said.emit()
 
 
+REALM_NAME_LABEL = "Realm name"
+"""The Networking tab's field for the name players see in the game's realm list (T808)."""
+REALM_NAME_BUTTON = "Save name"
+REALM_NAME_PLACEHOLDER = "Up to 32 characters"
+REALM_NAME_SAVING = "Saving the realm name…"
+REALM_NAME_NOT_READ = "The realm name could not be read from this server."
+REALM_NAME_NOT_SAVED = "The realm name could not be saved. Nothing was changed."
+REALM_NAME_FOLLOWS_TYPE = realm_name.FOLLOWS_REALM_TYPE
+"""The Networking tab's line, in place of the control, on a realm-type entry (CoA, T812)."""
+
 _PAGES_THAT_FIT_THEMSELVES = frozenset({"Tuning"})
 """Sub-tabs `_add_panel_tab` leaves out of a `ScrollPage` (T191).
 
 Tuning is T190's: that ticket fits the tab itself, its cards and its conf list,
 and a page around it would be a second answer to the same question.
 """
+
+
+def _drawn_title(title: str) -> str:
+    """`title` as a `QTabBar` draws it: one ampersand marks a mnemonic, so it is doubled.
+
+    "Backups & updates" (T692b) without this draws as "Backups  updates",
+    underlining the space. `tabText()` returns what was set, so a test that
+    compares the drawn title goes through here too.
+    """
+    return title.replace("&", "&&")
 
 
 class _FieldLabel(QLabel):
@@ -8328,6 +9122,13 @@ class ControllerView(QWidget):
 
     Emitted only after `purge.run()` returned. A tab dropped after a FAILED
     removal would take away the only surface that could try again.
+    """
+    uninstall_said = Signal(str)  # T722: the finished uninstall's words, before `uninstalled`
+    """What the finished uninstall said, while the tab still exists to say it.
+
+    The label carries the same words, but the window drops the tab on
+    `uninstalled` — and the label with it — before anyone could read them back.
+    So this goes first, and the window shows the box after the drop.
     """
 
     remove_requested = Signal(str, object)  # game id, server_dir (T95)
@@ -8395,6 +9196,7 @@ class ControllerView(QWidget):
         pick_client_dir: DirPicker = _qt_dir_picker,
         play_client_asker: PlayClientAsker | None = None,
         client_options_asker: ClientOptionsAsker | None = None,
+        removal_asker: RemovalAsker | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -8415,9 +9217,20 @@ class ControllerView(QWidget):
         )
         # T181 b/c: "Client options…" for the same reason.
         self._client_options_asker: ClientOptionsAsker = client_options_asker or ask_client_options
+        # T695's removal dialog, a seam for the other askers' reason. The real
+        # one is the dialog, with this tab behind it as the parent.
+        self._ask_removal: RemovalAsker = removal_asker or self._default_ask_removal
+        # What the dialog opens with selected. Off the list, unless the way-out
+        # highlight says that is the answer (`_update_forget_visibility()`).
+        self._removal_preselect = RemovalChoice.OFF_THE_LIST
         # A Make…, Refresh or Delete writing the ready-to-play client: it holds
         # the close (`busy_reason()`) the way the import does.
         self._play_client_running = False
+        # T809 W6: the pack update in flight (`update_client_pack`): the bound
+        # slots can carry only the worker's answer, so the caller's pack and its
+        # `done`/`failed` wait here for them to pick up. One at a time under the
+        # play-client lock (`_play_client_refusal()` refuses the second).
+        self._update_pending: _UpdatePending | None = None
         # Play's two waits: a Start it asked for, and a Refresh it asked for.
         self._play_after_start = False
         self._play_after_refresh = False
@@ -8494,6 +9307,11 @@ class ControllerView(QWidget):
         # T540: the verdict the line shows now, for the tray's cards (players,
         # bots, uptime). The same reading, kept; None whenever the line is gone.
         self.last_verdict: dashboard_module.Verdict | None = None
+        # T822: tables another table's damage kept out of the backup, kept for the next press;
+        # and the question a repair job asks the GUI thread from its worker.
+        self._repair_extra: tuple[table_repair.CrashedTable, ...] = ()
+        self._repair_copy_question = ""
+        self._repair_copy_answer = False
         # T382: the Tuning restart's wait for the world, which no button waits on.
         self._world_wait: threading.Event | None = None
         self._world_wait_number = 0
@@ -8558,16 +9376,15 @@ class ControllerView(QWidget):
         layout.addWidget(self._tabs)
 
         self._restore_plan: wotlk_maintenance.RestorePlan | None = None
-        self._remove_armed = False
         # T95. The last status poll's answer, or None while no poll has answered
         # (never polled, or docker unreachable). The window reads it to decide
         # whether a removal stops the server first.
         self._last_status: InstallStatus | None = None
-        # T95. Set by a "Stop and remove containers…" press that found nothing to
+        # T95. Set by a container removal that found nothing to
         # remove. Cleared by the next Start, by a removal that did find some, and
         # by a fresh poll that sees the server running (a Rebuild, an Update, a
         # Return-to-pin or an outside start brings it up without Start). While it
-        # holds, "Remove from Yu'lon…" is highlighted: it is the way out of the
+        # holds, "Remove this server…" is highlighted: it is the way out of the
         # dead end in Andood's video.
         self._nothing_to_remove = False
         # T145 round 7: a Tuning backup is being put back (Revert, raw Revert,
@@ -8743,6 +9560,10 @@ class ControllerView(QWidget):
         # T171: built before any tab, like T99's box, so `_set_busy()` can
         # always reach it; the Tuning tab is what shows it.
         self._build_time_zone_group()
+        # T692a: the server-build actions, owned by no tab. The Maintenance
+        # tab's Server version section binds buttons to them, and the Modules
+        # tab's banner reaches the same `rebuild_server` slot.
+        self._build_server_build_actions()
         self._build_server_tab()
         self._build_console_tab()
         self._build_accounts_tab()
@@ -8786,6 +9607,7 @@ class ControllerView(QWidget):
             # polled at all, here included.
             self.refresh_status()
             self.refresh_verdict()
+            self.refresh_realm_name()
             # T127: what the files say about the bot dashboard, once. It changes
             # only through the switch, whose job re-reads it when it ends.
             self.refresh_bot_dashboard()
@@ -8814,10 +9636,11 @@ class ControllerView(QWidget):
 
         In a `ScrollPage` (T191), so a tab that needs more height than the
         window has scrolls instead of drawing everything on it shorter than it
-        needs -- except the pages in `_PAGES_THAT_FIT_THEMSELVES`.
+        needs -- except the pages in `_PAGES_THAT_FIT_THEMSELVES`. The label is
+        drawn through `_drawn_title`; the tooltip keeps the plain title.
         """
         page = tab if title in _PAGES_THAT_FIT_THEMSELVES else ScrollPage(tab)
-        index = self._tabs.addTab(page, get_tab_icon(icon_name), title)
+        index = self._tabs.addTab(page, get_tab_icon(icon_name), _drawn_title(title))
         self._tabs.setTabToolTip(index, title)
 
     def _show_page_of(self, widget: QWidget) -> None:
@@ -8834,6 +9657,52 @@ class ControllerView(QWidget):
                 if isinstance(page, ScrollPage) and page is not widget:
                     page.ensureWidgetVisible(widget)
                 return
+
+    def _build_server_build_actions(self) -> None:
+        """T692a: the server-build QActions the Server version section binds to.
+
+        Structural visibility is settled here and never touched again: Rebuild
+        and Apply pending database updates… are shown while this install has
+        wiring for them, hidden where nothing would ever enable them (the tab's
+        own rule for Update to latest). Enabled follows the jobs; greyed
+        buttons say why on the section's reason line.
+        """
+        self.rebuild_action = QAction(REBUILD_BUTTON_LABEL, self)
+        self.rebuild_action.triggered.connect(self.rebuild_server)
+        self.rebuild_action.setToolTip(
+            "Compile the server again so modules installed since the last build are in it. "
+            "Asks first — it takes as long as an install's compile and the server goes down."
+        )
+        self.rebuild_action.setVisible(self.services.rebuild is not None)
+        self.updates_action = QAction(native.UPDATES_BUTTON_LABEL, self)
+        self.updates_action.triggered.connect(self.apply_database_updates)
+        self.updates_action.setToolTip(
+            "Apply the SQL this server's install plan has gained since it was installed. "
+            "Asks first, names every file, and refuses while the server is running."
+        )
+        self.updates_action.setVisible(self.services.updates is not None)
+        self.update_to_latest_action = QAction(UPDATE_TO_LATEST_BUTTON_LABEL, self)
+        self.update_to_latest_action.triggered.connect(self.update_to_latest)
+        self.update_to_latest_action.setToolTip(
+            "Fetch the newest code from the repositories this server was built from and compile "
+            "it. Asks first, and offers a backup: this is code nobody has tested with this app."
+        )
+        self.update_to_latest_action.setVisible(self.services.update_to_latest is not None)
+        self.return_to_pin_action = QAction(RETURN_TO_PIN_BUTTON_LABEL, self)
+        self.return_to_pin_action.triggered.connect(self.return_to_the_tested_pin)
+        self.return_to_pin_action.setToolTip(
+            "Compile the server again from the commit this app was tested against. It does not "
+            "undo anything the newer server wrote into your databases."
+        )
+        self.return_to_pin_action.setVisible(False)
+        self._put_back_offered = False
+        self.put_the_folders_back_action = QAction(PUT_THE_FOLDERS_BACK_BUTTON_LABEL, self)
+        self.put_the_folders_back_action.triggered.connect(self.put_the_folders_back)
+        self.put_the_folders_back_action.setToolTip(
+            "Put the source folders back on the build they were made from and write this app's "
+            "own files back. Asks first; compiles nothing, and the server must be stopped."
+        )
+        self.put_the_folders_back_action.setVisible(False)
 
     # ------------------------------------------------------------ server tab
 
@@ -8890,12 +9759,6 @@ class ControllerView(QWidget):
         self.distro_label = QLabel("", tab)
         self.distro_label.setWordWrap(True)
         self._show_the_distro()
-        # T124: what upstream has that this server was not built from. Hidden
-        # until a reading says there is something -- and for no network, no
-        # route, or nothing new, it stays hidden rather than saying so.
-        self.upstream_label = QLabel("", tab)
-        self.upstream_label.setWordWrap(True)
-        self.upstream_label.setVisible(False)
         # T179: how far the background movement-map job has got, read off the
         # GUI thread on the poll, with Start where a run could begin and Stop
         # where one is running. Hidden for a server without the job.
@@ -8929,6 +9792,18 @@ class ControllerView(QWidget):
         self.finish_world_button = QPushButton(trinitycore.FINISH_WORLD_BUTTON, tab)
         self.finish_world_button.clicked.connect(self.finish_world_update)
         self._show_world_upkeep()
+        # T812 C3b: the realm-type choice, for entries with `realm_types`.
+        # A combo of labels with descriptions as tooltips, and a press that
+        # switches after the confirm dialog; hidden for every other entry.
+        self.realm_type_label = QLabel("", tab)
+        self.realm_type_label.setWordWrap(True)
+        self.realm_type_choice = QComboBox(tab)
+        self.realm_type_choice.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        self.realm_type_switch_button = QPushButton("Switch realm type…", tab)
+        self.realm_type_switch_button.clicked.connect(self.switch_realm_type)
+        self._show_realm_type()
         # T36. Visible for every game, including WotLK -- AzerothCore reads no
         # client itself, but the folder is still a host path a manifest's
         # `client` step or the Steam entry can use, and hiding the row there
@@ -9001,20 +9876,24 @@ class ControllerView(QWidget):
         self.restart_button.setToolTip(RESTART_TIP)
         self.refresh_button = QPushButton("Refresh", tab)
         self.refresh_button.setIcon(dadcraft_icon("refresh", COLOR_TEXT_GOLD, 14))
-        # Deliberate, per checklist 6.5: nothing removes a container today, and
-        # whatever does must not be a stray click next to Stop. It arms on the
-        # first press and acts on the second, and anything else disarms it.
-        self.remove_button = QPushButton(REMOVE_IDLE, tab)
-        self.remove_button.setIcon(dadcraft_icon("trash", "#FFB8B8", 14))
-        self.remove_button.setProperty("danger", True)
+        self._build_stop_choice(tab)
+        # T695: the Danger zone's one removal press. It opens the dialog with
+        # the three routes; Repair stays its own press because it repairs.
+        self.remove_server_button = QPushButton(REMOVE_THIS_SERVER, tab)
+        self.remove_server_button.setIcon(dadcraft_icon("trash", "#FFB8B8", 14))
+        self.remove_server_button.setProperty("danger", True)
+        self.remove_server_button.setToolTip(
+            "Take this server off the list, uninstall it, or remove its containers. "
+            "You choose first; nothing happens until you do."
+        )
         # Hidden unless the database has said there is an unfinished import to
         # finish. A destructive action that is always on screen is one that gets
         # pressed by accident, and this one is only ever right for a broken
         # install — the installer imports on every healthy path.
         self.repair_button = QPushButton(REPAIR_IDLE, tab)
         self.repair_button.setVisible(False)
-        # C35 (T195): the way out of an armed Remove or Repair, beside it in the
-        # Danger zone. Shown only while one of them is armed.
+        # C35 (T195): the way out of an armed Repair, beside it in the
+        # Danger zone. Shown only while it is armed.
         self.arm_cancel_button = QPushButton(ARM_CANCEL, tab)
         self.arm_cancel_button.setVisible(False)
         # Hidden until a Start is actually refused for the ports. Every v1
@@ -9086,24 +9965,11 @@ class ControllerView(QWidget):
         self.repair_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.repair_label.setVisible(False)
         # 8.9a. Built only where the seam is wired, so a game outside 8.9a/8.9b
-        # has no uninstall controls rather than ones that cannot work. The three
-        # are a set: a button that shows the PLAN, the checkbox owner answer 2
-        # asked for, and a second button that only appears once a plan is on
-        # screen.
-        self.uninstall_button: QPushButton | None = None
-        # T34's button, and since T95 it is on EVERY tab and ALWAYS shown (owner
-        # decision 4, 2026-09-23). TBC and Tortoise have no Uninstall, so gating
-        # it on `services.uninstall` left them no way off the list at all (Andood,
-        # 2026-09-22). The × on the sidebar tab is mouse-only; this is the route
-        # for a gamepad. It is low-key: no `primary`/`danger` property, and it
-        # sits after the row's stretch, away from Start and Stop.
-        # `_update_forget_visibility()` lights it up (`primary`) when it is the
-        # answer. The press asks the window (`remove_requested`), which does the rest.
-        self.forget_install_button: QPushButton | None = QPushButton(REMOVE_FROM_YULON, tab)
-        self.forget_install_button.setToolTip(
-            "Stop listing this server in Yu'lon. Nothing is deleted; you are asked first."
-        )
-        self.forget_install_button.clicked.connect(self.forget_install)
+        # has no uninstall controls rather than ones that cannot work. The plan,
+        # the checkbox owner answer 2 asked for, and the red press that acts on
+        # them are reached through the remove dialog now, not through a button
+        # of their own. T677 and T690 keep their behaviour: the plan, the
+        # play-client tick and the red "Uninstall this server" confirm stay.
         # T520: where a player takes a problem with this game -- its server's
         # project, its bots' project, its community, Yu'lon -- from the catalog.
         # Never greyed: a job running is no reason not to read where help is.
@@ -9154,19 +10020,16 @@ class ControllerView(QWidget):
             self.steam_button = QPushButton("Add to Steam\u2026", tab)
             self.steam_button.clicked.connect(self.add_to_steam)
         self._build_play_controls(tab)
-        if self.services.uninstall is not None:
-            self.uninstall_button = QPushButton("Uninstall\u2026", tab)
-            self.uninstall_button.clicked.connect(self.show_uninstall_plan)
-            self.uninstall_confirm_button.clicked.connect(self.run_uninstall)
-            self.uninstall_cancel_button.clicked.connect(self.put_away_uninstall_plan)
-            self.keep_characters_check.toggled.connect(self._redraw_uninstall_plan)
-            self.delete_play_client_check.toggled.connect(self._redraw_uninstall_plan)
-            self.uninstall_label.setVisible(True)
+        self.uninstall_confirm_button.clicked.connect(self.run_uninstall)
+        self.uninstall_cancel_button.clicked.connect(self.put_away_uninstall_plan)
+        self.keep_characters_check.toggled.connect(self._redraw_uninstall_plan)
+        self.delete_play_client_check.toggled.connect(self._redraw_uninstall_plan)
+        self.uninstall_label.setVisible(self.services.uninstall is not None)
         self.start_button.clicked.connect(self.start_server)
         self.stop_button.clicked.connect(self.stop_server)
         self.restart_button.clicked.connect(self.restart_from_server_tab)
         self.refresh_button.clicked.connect(self.recheck)
-        self.remove_button.clicked.connect(self.remove_containers)
+        self.remove_server_button.clicked.connect(self.remove_server)
         self.repair_button.clicked.connect(self.repair_import)
         self.arm_cancel_button.clicked.connect(self.cancel_armed)
         self.stop_other_button.clicked.connect(self.stop_other_and_start)
@@ -9202,12 +10065,12 @@ class ControllerView(QWidget):
         box.addWidget(self.kept_build_banner)
 
         realm, realm_column = section("Realm", tab)
+        realm_column.addWidget(self.verdict_label)
+        realm_column.addWidget(self.repair_banner)
         for label in (
-            self.verdict_label,
             self.docker_banner,
             self.status_label,
             self.distro_label,
-            self.upstream_label,
             self.pathfinding_label,
         ):
             realm_column.addWidget(label)
@@ -9216,11 +10079,15 @@ class ControllerView(QWidget):
         )
         realm_column.addWidget(self.world_upkeep_label)
         realm_column.addWidget(_bar(realm, self.reextract_button, self.finish_world_button))
+        realm_column.addWidget(self.realm_type_label)
+        realm_column.addWidget(_bar(realm, self.realm_type_choice, self.realm_type_switch_button))
         realm_column.addWidget(
             _bar(
                 realm, self.start_button, self.stop_button, self.restart_button, self.refresh_button
             )
         )
+        realm_column.addWidget(_bar(realm, self.stop_choice_label, self.stop_choice_box))
+        realm_column.addWidget(self.stop_choice_note)
         realm_column.addWidget(self.server_reasons)
         # The refusal, then the offers it makes: read in that order.
         realm_column.addWidget(self.problem_label)
@@ -9253,11 +10120,25 @@ class ControllerView(QWidget):
                 self.play_menu_button,
                 self.play_cancel_button,
                 self.steam_button,
+                *(
+                    (
+                        self.client_update.button,
+                        self.client_update.fix_button,
+                        self.client_update.cancel_button,
+                    )
+                    if self.client_update is not None
+                    else ()
+                ),
             )
             if b is not None
         ]
         play_column.addWidget(_bar(play, *play_presses))
+        if self.hd_patches_check is not None:
+            play_column.addWidget(self.hd_patches_check)
         play_column.addWidget(self.play_label)
+        if self.client_update is not None:
+            play_column.addWidget(self.client_update.label)
+            play_column.addWidget(self.client_update.kind_label)
         play_column.addWidget(self.steam_label)
         play_column.addWidget(self.steam_details)
         self._add_section(box, play, self.play_button is not None or self.steam_button is not None)
@@ -9297,23 +10178,14 @@ class ControllerView(QWidget):
         help_column.addWidget(_bar(help_box, self.help_button))
         self._add_section(box, help_box, bool(self.entry.help_places))
 
-        # Every press that removes something, in one red-bordered box (T189
+        # T695: one removal press and Repair, in one red-bordered box (T189
         # A22/C27): none of them sits beside Refresh any more. Under the
         # presses, T188's order: what the plan removes, then the two choices
         # that change it, then the press that acts on them.
         danger, danger_column = section("Danger zone", tab, danger=True)
-        danger_presses = [
-            b
-            for b in (
-                self.remove_button,
-                self.arm_cancel_button,
-                self.repair_button,
-                self.forget_install_button,
-                self.uninstall_button,
-            )
-            if b is not None
-        ]
-        danger_column.addWidget(_bar(danger, *danger_presses))
+        danger_column.addWidget(
+            _bar(danger, self.remove_server_button, self.arm_cancel_button, self.repair_button)
+        )
         danger_column.addWidget(self.danger_label)
         danger_column.addWidget(self.danger_details)
         danger_column.addWidget(self.repair_label)
@@ -9328,7 +10200,7 @@ class ControllerView(QWidget):
         self.uninstall_absent_label.setStyleSheet(f"color: {COLOR_TEXT_MUTED};")
         self.uninstall_absent_label.setVisible(self.services.uninstall is None)
         danger_column.addWidget(self.uninstall_absent_label)
-        if self.uninstall_button is not None:
+        if self.services.uninstall is not None:
             danger_column.addWidget(self.uninstall_label)
             danger_column.addWidget(self.uninstall_details)
             danger_column.addWidget(self.keep_characters_check)
@@ -9341,6 +10213,134 @@ class ControllerView(QWidget):
         for press in self._server_presses():
             self.server_reasons.watch(press)
         self._add_panel_tab(tab, "server", "Server")
+
+    def _build_stop_choice(self, tab: QWidget) -> None:
+        """T826: whether this server's Stop waits for the bots to be saved, kept per install.
+
+        Under Start/Stop/Restart, the presses it changes. Shown only for a game that offers it
+        (`ContainerSpec.bot_saves_skippable`); for the rest every Stop waits for every save and
+        there is nothing to choose. The install's record is read (one small file, no job) only
+        once WSL says the server's distro runs (`_waits_for_the_distro()`, T133: any read in a
+        stopped distro boots it); until then the box shows the catalog's default and is greyed,
+        and it is greyed again whenever WSL stops saying the distro runs
+        (`_stop_choice_offline()`), so nothing can be written there either. A change is written
+        off the GUI thread (`_stop_choice_changed()`), and one that cannot be written is said and
+        put back, so the box never shows a choice the next Stop will not make.
+        """
+        found = getattr(
+            getattr(self.services.controller, "spec", None), "bot_saves_skippable", None
+        )
+        skippable = found if isinstance(found, docker.BotSavesSkippable) else None
+        self.stop_choice_label = QLabel(stop_choice.CHOICE_TITLE, tab)
+        self.stop_choice_box = QComboBox(tab)
+        self.stop_choice_box.addItem(stop_choice.WAIT_LABEL, True)
+        self.stop_choice_box.addItem(stop_choice.NO_WAIT_LABEL, False)
+        self.stop_choice_box.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        self.stop_choice_box.setMinimumContentsLength(24)
+        self.stop_choice_note = QLabel(stop_choice.CHOICE_NOTE, tab)
+        self.stop_choice_note.setWordWrap(True)
+        self.stop_choice_note.setStyleSheet(f"color: {COLOR_TEXT_MUTED};")
+        offered = skippable is not None
+        self._stop_choice_offered = offered
+        self._stop_choice_writing = False
+        self._stop_choice_waits = True
+        for widget in (self.stop_choice_label, self.stop_choice_box, self.stop_choice_note):
+            widget.setVisible(offered)
+        if skippable is None:
+            return
+        tip = stop_choice.choice_tip(skippable.seconds)
+        self.stop_choice_label.setToolTip(tip)
+        self.stop_choice_box.setToolTip(tip)
+        self._show_stop_choice(skippable.waits_by_default)
+        self.stop_choice_box.setEnabled(False)
+        self.stop_choice_box.currentIndexChanged.connect(self._stop_choice_changed)
+        self._read_stop_choice()
+
+    def _read_stop_choice(self) -> None:
+        """Read the install's "When stopping" record once the distro runs, then enable the box.
+
+        One small file and no job, like the Tuning tab's rates rows and SQL-log offer: a job
+        queued while the tab is built would be one more answer for every press-ordering rule
+        to account for. Gated like every reading the tab takes by itself (T133).
+        """
+        if self._stop_choice_writing:
+            return  # the write's own answer settles the box
+        if self._waits_for_the_distro("stop choice", self._read_stop_choice):
+            return
+        self._show_stop_choice(not self.services.controller.skips_bot_saves())
+        self.stop_choice_box.setEnabled(True)
+
+    def _stop_choice_offline(self) -> None:
+        """WSL no longer says the distro runs: grey the box and read it again once it does."""
+        if not self._stop_choice_offered or self._stop_choice_writing:
+            return
+        self.stop_choice_box.setEnabled(False)
+        self._waits_for_the_distro("stop choice", self._read_stop_choice)
+
+    def _show_stop_choice(self, waits: bool) -> None:
+        """Put the box on `waits` without it counting as the player's change."""
+        self._stop_choice_waits = waits
+        blocked = self.stop_choice_box.blockSignals(True)
+        try:
+            self.stop_choice_box.setCurrentIndex(0 if waits else 1)
+        finally:
+            self.stop_choice_box.blockSignals(blocked)
+
+    def _stop_choice_changed(self, index: int) -> None:
+        """The player picked how this server's Stop treats the bots' saves: keep it (T826).
+
+        Written off the GUI thread, and only while WSL says the distro runs: a write under
+        `\\\\wsl.localhost` on the GUI thread would start a stopped distro and freeze the
+        window (T133). The worker asks WSL again right before it writes (`_world_reading()`),
+        because the tab's answer can be a poll old. The box is greyed until the answer lands.
+        """
+        waits = bool(self.stop_choice_box.itemData(index))
+        if self._distro != "running":
+            self._stop_choice_not_kept(stop_choice.CHOICE_NOT_NOW)
+            self._stop_choice_offline()
+            return
+        server_dir = self.services.controller.server_dir
+
+        def write() -> object:
+            stop_choice.choose(server_dir, waits)
+            return waits
+
+        self._stop_choice_writing = True
+        self.stop_choice_box.setEnabled(False)
+        self._run(self._world_reading(write), self._stop_choice_kept, self._stop_choice_failed)
+
+    @Slot(object)
+    def _stop_choice_kept(self, waits: object) -> None:
+        self._stop_choice_writing = False
+        if waits is None:
+            # The worker found the distro no longer running and wrote nothing.
+            self._stop_choice_not_kept(stop_choice.CHOICE_NOT_NOW)
+            self._stop_choice_offline()
+            return
+        self._stop_choice_waits = bool(waits)
+        self.stop_choice_note.setText(stop_choice.CHOICE_NOTE)
+        self._stop_choice_settle()
+
+    @Slot(object)
+    def _stop_choice_failed(self, exc: object) -> None:
+        self._stop_choice_writing = False
+        logger.warning(f"could not keep the Stop choice: {exc}")
+        self._stop_choice_not_kept(stop_choice.CHOICE_NOT_KEPT.format(why=exc))
+        self._stop_choice_settle()
+
+    def _stop_choice_not_kept(self, why: str) -> None:
+        """Put the box back on the last choice that was kept, and say why in plain words."""
+        self._show_stop_choice(self._stop_choice_waits)
+        self.stop_choice_note.setText(why)
+
+    def _stop_choice_settle(self) -> None:
+        """After a write: the box is pressable again only while the distro is known to run."""
+        if self._distro == "running":
+            self.stop_choice_box.setEnabled(True)
+        else:
+            self._stop_choice_offline()
 
     def _server_presses(self) -> tuple[QAbstractButton, ...]:
         """The Server tab's presses a job of ours greys, in the order the tab draws them."""
@@ -9356,10 +10356,9 @@ class ControllerView(QWidget):
                 self.play_menu_button,
                 self.set_client_dir_button,
                 self.forget_client_dir_button,
-                self.remove_button,
+                self.remove_server_button,
                 self.repair_button,
-                self.forget_install_button,
-                self.uninstall_button,
+                self.realm_type_switch_button,
                 self.keep_characters_check,
                 self.delete_play_client_check,
                 self.uninstall_confirm_button,
@@ -9410,6 +10409,24 @@ class ControllerView(QWidget):
             f"background-color: {COLOR_BG_PARCHMENT}; border: 1px solid {COLOR_TEXT_WARNING};"
         )
         self.corrections_banner.setVisible(False)
+        # T822's banner, T106's shape: a crash left a table damaged and the card's line says
+        # so. It lives under that line, on the Server tab, because the error is seen there.
+        self.repair_banner = QWidget(tab)
+        repair_box = QHBoxLayout(self.repair_banner)
+        repair_box.setContentsMargins(8, 6, 8, 6)
+        self.repair_banner_label = QLabel("", self.repair_banner)
+        self.repair_banner_label.setWordWrap(True)
+        self.repair_banner_label.setStyleSheet(f"color: {COLOR_TEXT_WARNING};")
+        self.repair_banner_button = QPushButton(
+            table_repair.REPAIR_TABLES_LABEL, self.repair_banner
+        )
+        self.repair_banner_button.clicked.connect(self.repair_damaged_tables)
+        repair_box.addWidget(self.repair_banner_label, 1)
+        repair_box.addWidget(self.repair_banner_button)
+        self.repair_banner.setStyleSheet(
+            f"background-color: {COLOR_BG_PARCHMENT}; border: 1px solid {COLOR_TEXT_WARNING};"
+        )
+        self.repair_banner.setVisible(False)
         # T224 (owner D3): a finished build kept by a rebuild that replaced no
         # container, and the press that removes it now.
         self.kept_build_banner = QWidget(tab)
@@ -9592,6 +10609,8 @@ class ControllerView(QWidget):
             # distro no longer runs, and it sat above "world down" and the
             # stopped line (T133 live gate). The next one waits for `running`.
             self._clear_the_verdict()
+            # T826: no write to the distro's folder while WSL does not say it runs.
+            self._stop_choice_offline()
             return
         waiting = list(self._waiting_on_distro.values())
         self._waiting_on_distro.clear()
@@ -9708,6 +10727,7 @@ class ControllerView(QWidget):
         self.verdict_label.setVisible(True)
         self.last_verdict = result
         self.enable_channel_button.setEnabled(_press_is_allowed(result))
+        self._refresh_repair_banner()
         self._world_loops = result.state == "restart_loop"
         self._refresh_start_reason()
         # A stopped verdict only keeps the sentence on the tab (T608); it is not a world that
@@ -9790,6 +10810,7 @@ class ControllerView(QWidget):
         self.verdict_label.setText("")
         self.verdict_label.setVisible(False)
         self.last_verdict = None
+        self._refresh_repair_banner()
         self._world_loops = False
         self._world_failed = False
         self._world_ready = False
@@ -10000,7 +11021,101 @@ class ControllerView(QWidget):
         self.finish_world_button.setVisible(can_finish)
         self.finish_world_button.setEnabled(can_finish and not held)
 
+    # ------------------------------------------------ T812 C3b: realm types
+
+    def _show_realm_type(self) -> None:
+        """Draw the realm-type choice; hidden for every entry without `realm_types`."""
+        if not hasattr(self, "realm_type_label"):
+            return  # `_set_busy()` before the Server tab exists
+        from yulon import coa_realm
+
+        entry = self.entry
+        types = list(coa_realm.types_of(entry))
+        if not types:
+            for widget in (
+                self.realm_type_label,
+                self.realm_type_choice,
+                self.realm_type_switch_button,
+            ):
+                widget.setVisible(False)
+            return
+
+        current = coa_realm.active(entry, self.services.controller.server_dir).id
+        self.realm_type_label.setText("Realm type: each keeps its own characters.")
+        self.realm_type_label.setVisible(True)
+        box = self.realm_type_choice
+        box.blockSignals(True)
+        box.clear()
+        for realm in types:
+            box.addItem(f"{realm.label} — {realm.realm_name}", realm.id)
+            box.setItemData(box.count() - 1, realm.description, Qt.ItemDataRole.ToolTipRole)
+        box.setCurrentIndex(max(0, box.findData(current)))
+        box.blockSignals(False)
+        box.setVisible(True)
+        self._set_realm_switch_button()
+
+    def _set_realm_switch_button(self) -> None:
+        """Offer the switch only for a type that is not the current one, and never while busy."""
+        if self.services.realm_switch is None:
+            self.realm_type_switch_button.setVisible(False)
+            self.realm_type_choice.setEnabled(False)
+            return
+        chosen = self.realm_type_choice.currentData()
+        from yulon import coa_realm
+
+        current = coa_realm.active(self.entry, self.services.controller.server_dir).id
+        offered = self.services.realm_switch is not None and chosen != current and not self._busy
+        self.realm_type_switch_button.setVisible(self.services.realm_switch is not None)
+        self.realm_type_switch_button.setEnabled(bool(offered))
+        self.realm_type_choice.setEnabled(self.services.realm_switch is not None and not self._busy)
+
     @Slot()
+    def switch_realm_type(self) -> None:
+        """Ask, then stop, switch and start again on the worker thread (T812 C3b)."""
+        switch = self.services.realm_switch
+        if switch is None or self._busy:
+            return
+        from yulon import coa_realm
+
+        target = self.realm_type_choice.currentData()
+        types = {realm.id: realm for realm in coa_realm.types_of(self.entry)}
+        if target not in types:
+            return
+        realm = types[target]
+        from yulon import coa_switch
+
+        if not self._confirm(
+            "Switch realm type",
+            coa_switch.confirm_text(realm.label, realm.realm_name),
+        ):
+            return
+        self.problem_label.setText("")
+        self._set_busy(True, "Switch realm type")
+        self.status_label.setText("Switching realm type…")
+        self._run(
+            lambda: list(switch.switch_to(target)),
+            self._realm_switched,
+            self._realm_switch_failed,
+        )
+
+    @Slot(object)
+    def _realm_switched(self, lines: object) -> None:
+        """A finished switch: say what moved, refresh for the new world."""
+        self._set_busy(False)
+        said = "\n".join(str(line) for line in lines) if isinstance(lines, list) else str(lines)
+        self.problem_label.setText(said)
+        self._show_realm_type()
+        self.refresh_status()
+
+    @Slot(object)
+    def _realm_switch_failed(self, exc: object) -> None:
+        """A refused switch: said, with the holder's sentence when it is held."""
+        self._set_busy(False)
+        self.problem_label.setText(str(exc))
+        self.action_failed.emit(str(exc))
+        self._show_realm_type()
+        self.refresh_status()
+
     def reextract_map_data(self) -> bool:
         """Extract the map data again from the player's client; streams into the log panel.
 
@@ -10373,7 +11488,7 @@ class ControllerView(QWidget):
         """Whether this server's folder is confirmed gone on this host (T34; T95).
 
         One predicate for the two things that depend on it: the highlight on
-        "Remove from Yu'lon…" (`_update_forget_visibility()`) and, through
+        "Remove this server…" (`_update_forget_visibility()`) and, through
         `folder_is_gone()`, which question the window asks and whether it
         stops the server first. Asked fresh each time, never cached, because
         a folder can come back between a poll and a press (review, T34 round 2).
@@ -10386,7 +11501,7 @@ class ControllerView(QWidget):
         return controller.wsl_distro is None and platform.folder_is_gone(controller.server_dir)
 
     def _update_forget_visibility(self) -> None:
-        """Highlight "Remove from Yu'lon…" while it is the way out (T34, T54; T95 decision 4).
+        """Highlight "Remove this server…" while it is the way out (T34, T54; T95 decision 4).
 
         The button itself is always shown now. What this re-reads on every poll,
         including a poll that could not reach Docker (T54), is whether it is
@@ -10394,17 +11509,18 @@ class ControllerView(QWidget):
         nothing (until the next Start). Read fresh on every poll rather than
         once at tab-build time, because the folder can be deleted out from
         under an open tab. `primary` is the theme's own emphasis, the property
-        Start carries, so no new QSS is needed.
+        Start carries, so no new QSS is needed. While highlighted the dialog
+        opens with "Only take it off this list" selected.
         """
-        if self.forget_install_button is None:
-            return
         highlight = self._forget_is_eligible() or self._nothing_to_remove
-        if bool(self.forget_install_button.property("primary")) == highlight:
+        if highlight:
+            self._removal_preselect = RemovalChoice.OFF_THE_LIST
+        if bool(self.remove_server_button.property("primary")) == highlight:
             return
-        self.forget_install_button.setProperty("primary", highlight)
-        style = self.forget_install_button.style()
-        style.unpolish(self.forget_install_button)
-        style.polish(self.forget_install_button)
+        self.remove_server_button.setProperty("primary", highlight)
+        style = self.remove_server_button.style()
+        style.unpolish(self.remove_server_button)
+        style.polish(self.remove_server_button)
 
     def folder_is_gone(self) -> bool:
         """Confirmed absent on this host, for the window's dialog (T95). `_forget_is_eligible()`."""
@@ -10653,14 +11769,18 @@ class ControllerView(QWidget):
         another action of ours is live is two writers.
         """
         state = self._adopt_state
-        offered = (
-            self.services.adopt is not None
-            and state is not None
-            and state.state == "populated"
-            and not self._busy
-            and not self.rebuild_log.running
-        )
-        self.adopt_button.setEnabled(offered)
+        # Structural: no adopt route, no button rather than a dead one.
+        self.adopt_button.setVisible(self.services.adopt is not None)
+        if self.services.adopt is None:
+            return
+        if self._busy:
+            set_enabled_why(self.adopt_button, wait_for(self._busy_job))
+        elif self.rebuild_log.running:
+            set_enabled_why(self.adopt_button, wait_for("the server build"))
+        elif state is None or state.state != "populated":
+            set_enabled_why(self.adopt_button, ADOPT_NOT_READY)
+        else:
+            set_enabled_why(self.adopt_button, None)
 
     @Slot(object)
     def _import_failed(self, exc: object) -> None:
@@ -10855,22 +11975,21 @@ class ControllerView(QWidget):
             # reached for (review, 2026-08-23).
             for press in self._server_presses():
                 set_enabled_why(press, wait_for(job))
-            self.rebuild_action.setEnabled(False)
+            self._grey_build_action(self.rebuild_action, wait_for(job))
             # And both T64 presses, for the rebuild's reason exactly: each of
             # them IS that rebuild with a fetch in front of it. Disabled and not
             # hidden -- whether they exist at all is `_refresh_source_version()`'s
-            # question and a job of ours must not answer it. All three dead
-            # greys "Server build ▾" itself (`_set_server_build_button`, T89).
-            self.update_to_latest_action.setEnabled(False)
-            self.return_to_pin_action.setEnabled(False)
-            self.put_the_folders_back_action.setEnabled(False)
+            # question and a job of ours must not answer it.
+            self._grey_build_action(self.update_to_latest_action, wait_for(job))
+            self._grey_build_action(self.return_to_pin_action, wait_for(job))
+            self._grey_build_action(self.put_the_folders_back_action, wait_for(job))
             # And the updates press, for the importer's reason above rather than
             # for symmetry: it reaches the same `import` stage against the same
             # databases, so one while another action is live is two writers.
-            self.updates_button.setEnabled(False)
+            self._grey_build_action(self.updates_action, wait_for(job))
             # And the adopt press, which starts the database and writes a row
             # into it -- the same rule again, one size smaller.
-            self.adopt_button.setEnabled(False)
+            set_enabled_why(self.adopt_button, wait_for(job))
             # The Modules tab's importer too, and for the reason above rather
             # than for symmetry: `repair_import()` and `apply_module_sql()` run
             # the SAME one-shot service against the same databases, so one
@@ -10963,13 +12082,10 @@ class ControllerView(QWidget):
             self._refresh_sql_log_offer()
             # Re-enabled, not re-shown: `_show_repair()` owns whether Repair is
             # visible at all, and an invisible button being enabled is harmless.
-            self.remove_button.setEnabled(True)
+            self.remove_server_button.setEnabled(True)
             self.repair_button.setEnabled(True)
             self.reinstall_docker_button.setEnabled(True)
-            if self.uninstall_button is not None:
-                self.uninstall_button.setEnabled(True)
-            if self.forget_install_button is not None:
-                self.forget_install_button.setEnabled(True)
+            self._set_realm_switch_button()
             self.uninstall_confirm_button.setEnabled(True)
             self.uninstall_cancel_button.setEnabled(True)
             self.keep_characters_check.setEnabled(True)
@@ -10982,7 +12098,7 @@ class ControllerView(QWidget):
             if self.play_menu_button is not None:
                 self.play_menu_button.setEnabled(True)
             self.delete_play_client_check.setEnabled(True)
-            self.rebuild_action.setEnabled(self.services.rebuild is not None)
+            self._offer_rebuild_button()
             # Back to what this install can do, never unconditionally, and then
             # the version line is re-read: the job that just finished may BE the
             # press that moved this server off its pins, so the line and the
@@ -10997,7 +12113,7 @@ class ControllerView(QWidget):
             # Back to what this install can do, never unconditionally: three of
             # the four games have no such phase and must not be handed a live
             # button by any job of their own finishing.
-            self.updates_button.setEnabled(self.services.updates is not None)
+            self._offer_updates_button()
             # Back to what this install can do AND what its databases last said,
             # which is why this one goes through the rule rather than repeating
             # half of it: a job of ours finishing must not hand back a control
@@ -11006,6 +12122,8 @@ class ControllerView(QWidget):
             # T162: back to what the dashboard's files last said, never unconditionally.
             if self.dashboard_log is not None:
                 self._set_rebuild_dashboard_button()
+        # T822: the banner's press waits for whatever this tab is running.
+        self._refresh_repair_banner()
         # T187: the launcher window greys its settings while this tab is busy.
         self.play_state_changed.emit()
         if not busy and self._badge_held is not None:
@@ -11068,7 +12186,12 @@ class ControllerView(QWidget):
         self._set_busy(True, "Stop")
         self.status_label.setText("Stopping…")
         self._hold_badge("stopping")
-        self._run(self.services.controller.stop, self._stop_done, self._stop_failed)
+        # T826: the player's Stop, so the install's "When stopping" choice reaches it.
+        self._run(
+            lambda: self.services.controller.stop(by_choice=True),
+            self._stop_done,
+            self._stop_failed,
+        )
 
     def _stop_over_a_running_load_agreed(self) -> bool:
         """False when a restore load from the last session still writes and the player keeps it.
@@ -11126,7 +12249,7 @@ class ControllerView(QWidget):
         """The worker half of "Stop anyway": end the holder's reservation, then Stop as always."""
         if docker.end_reservation(holder, wsl_distro=self.services.controller.wsl_distro):
             try:
-                return self.services.controller.stop()
+                return self.services.controller.stop(by_choice=True)
             except docker.ServerReserved as newcomer:
                 # Another Yu'lon took the server between the removal and this Stop (Codex
                 # review): the confirmed Stop is not asked about twice, and still stops.
@@ -11137,7 +12260,7 @@ class ControllerView(QWidget):
         # "Stop always stops": the Stop the player confirmed runs without a reservation of
         # its own, for this one Stop only.
         with docker.stopping_regardless():
-            return self.services.controller.stop()
+            return self.services.controller.stop(by_choice=True)
 
     def _offer_to_clear_a_leftover(self, exc: object) -> None:
         """T568: a refusal naming this user's own leftover reservation offers [Clear it].
@@ -11246,6 +12369,7 @@ class ControllerView(QWidget):
         self._set_busy(False)
         self._withdraw_the_database_offer()
         self._say_zone_problem()
+        self._show_realm_type()
         self.refresh_status()
         self._settle_the_channel()
         # T386: a Start's one ask lands while the world loads, as an install's
@@ -11259,8 +12383,6 @@ class ControllerView(QWidget):
             # T181: Play asked for this Start ("Start and play"); it is done.
             self._play_after_start = False
             self._play_wait_for_the_realm()
-
-    # -- the wait for the realm after Play's own Start (T672) ---------------
 
     def _play_wait_for_the_realm(self) -> None:
         """Hold the game until the Tuning tab's ready check says the realm is up.
@@ -11657,13 +12779,7 @@ class ControllerView(QWidget):
         self._offer_to_clear_a_leftover(exc)
         if isinstance(exc, DatabaseMissing):
             self._offer_to_repair_the_database(str(exc))
-        # T658: the sentence names the press, so the press is there beside it.
-        self.update_compose_button.setVisible(isinstance(exc, ComposeTooOld) and exc.offer)
-        if isinstance(exc, ImportEnded):
-            # T658: the refusal points at Repair; the reading it was refused on is the one
-            # Repair is offered on, now, not at the next status poll.
-            self._import_state = exc.state
-            self._show_repair()
+        self._offer_the_ways_out(exc)
         raw = str(exc)
         msg = raw
         why = ""
@@ -11714,6 +12830,23 @@ class ControllerView(QWidget):
         self.problem_details.set_text("" if rolled else why)
         self.action_failed.emit(rolled or (_for_the_log(exc) if why else msg))
         self.refresh_status()
+
+    def _offer_the_ways_out(self, exc: object) -> None:
+        """Show the press a refusal names, beside its sentence (T762 #8).
+
+        The Start path did this right: a refusal naming **Update Docker Compose**
+        shows that press, and one naming **Repair** offers it on the reading it
+        was refused on, now rather than at the next status poll. The press lives
+        on the Server tab, and the ComposeTooOld sentence says so (it names the
+        Server tab through its **Update Docker Compose** press).
+        """
+        # T658: the sentence names the press, so the press is there beside it.
+        self.update_compose_button.setVisible(isinstance(exc, ComposeTooOld) and exc.offer)
+        if isinstance(exc, ImportEnded):
+            # T658: the refusal points at Repair; the reading it was refused on is the one
+            # Repair is offered on, now, not at the next status poll.
+            self._import_state = exc.state
+            self._show_repair()
 
     def _roll_the_channel_back_if_it_took_the_port(self, message: str) -> str:
         """Undo the press when the start failed on the port the channel claims.
@@ -12388,7 +13521,9 @@ class ControllerView(QWidget):
         said.extend(report.warnings)
         if play_said is not None:
             said.append(play_said)
-        self.uninstall_label.setText(" ".join(said))
+        text = " ".join(said)
+        self.uninstall_label.setText(text)
+        self.uninstall_said.emit(text)
         # Last, and only on success: the window drops this tab on this signal,
         # which destroys the view. Nothing may touch `self` after it.
         self.uninstalled.emit(self.entry.id, self.services.controller.server_dir)
@@ -12451,7 +13586,7 @@ class ControllerView(QWidget):
         """
         client = self.entry.client
         return client_build.refusal(
-            steam_module.client_executable(client_dir),
+            steam_module.client_executable(client_dir, names=client.exe_names),
             version=client.version,
             build=client.required_build,
             also=client.also_builds,
@@ -12642,6 +13777,8 @@ class ControllerView(QWidget):
         self.play_cancel_button.clicked.connect(self._cancel_play_download)
         self._made: _MadePlayClient | None = None
         self.play_button: QPushButton | None = None
+        self.client_update: ClientUpdateControl | None = None
+        self.hd_patches_check: QCheckBox | None = None
         self.launcher_button: QPushButton | None = None
         self.play_menu_button: QPushButton | None = None
         self.play_menu = QMenu(tab)
@@ -12703,10 +13840,76 @@ class ControllerView(QWidget):
         self.play_menu_button.setToolTip("More for the ready-to-play client")
         self.play_menu_button.setMenu(self.play_menu)
         self.play_menu_button.setVisible(has_play)
+        self._build_client_update(tab)
+        self._build_hd_patches(tab)
         if not has_play and self.services.client_dir is None:
             # The button is hidden until there is a folder to make one from
             # (T181); the section says so, and where (T189).
             self.play_label.setText(PLAY_NEEDS_A_CLIENT_FOLDER)
+
+    def _build_client_update(self, tab: QWidget) -> None:
+        """T825: "Update client" beside Play, for an entry whose makers publish its client.
+
+        Its own job and Cancel, never the tab's busy lock: an update never holds Play.
+        Checked once now (the tab is rebuilt when the client folder changes), with a
+        short deadline; a failed check is a sentence, never a refusal.
+        """
+        if self.entry.client.update is None:
+            return
+        self.client_update = ClientUpdateControl(
+            self.entry,
+            self.services.controller.server_dir,
+            lambda: self.services.client_dir,
+            self._jobs,
+            tab,
+        )
+        undo = self.play_menu.addAction(client_update.UNDO_LABEL)
+        undo.setToolTip("Put back the client files the last Update client replaced. Asks first.")
+        undo.triggered.connect(self.client_update.undo_pressed)
+        self.client_update.check()
+
+    def _build_hd_patches(self, tab: QWidget) -> None:
+        """T828: "Enable HD patches" under Play, for an entry whose client can switch them off.
+
+        Saved per install the moment it changes (`hd_patches.save`), read again at every
+        Play, so it applies to the next start and never holds Play. A save that fails puts
+        the box back and says why.
+        """
+        if self.entry.client.hd_patches is None:
+            return
+        server_dir = self.services.controller.server_dir
+        check = QCheckBox(hd_patches.LABEL, tab)
+        check.setToolTip(hd_patches.TIP)
+        check.setChecked(hd_patches.enabled(server_dir))
+        check.toggled.connect(self._hd_patches_toggled)
+        self.hd_patches_check = check
+
+    @Slot(bool)
+    def _hd_patches_toggled(self, on: bool) -> None:
+        check = self.hd_patches_check
+        if check is None:
+            return
+        server_dir = self.services.controller.server_dir
+        try:
+            hd_patches.save(server_dir, on)
+        except OSError as exc:
+            check.blockSignals(True)
+            check.setChecked(not on)
+            check.blockSignals(False)
+            self._say_play(
+                f"The HD patches choice could not be saved in {server_dir} "
+                f"({exc.strerror or exc}), so it is as it was. Check that you can write "
+                "to that folder, then try again."
+            )
+            return
+        said = (
+            "HD patches are on from the next time you start the game."
+            if on
+            else "HD patches are off from the next time you start the game."
+        )
+        if self.services.steam is not None:
+            said += " " + hd_patches.STEAM_KEEPS_OLD
+        self._say_play(said)
 
     def _say_play(self, text: str) -> None:
         self.play_label.setText(text)
@@ -13316,7 +14519,10 @@ class ControllerView(QWidget):
         self._run(
             lambda: _Compared(
                 play_client.stale(
-                    play, source, keep=module_kept_files(server_dir, play, client_dir)
+                    play,
+                    source,
+                    keep=module_kept_files(server_dir, play, client_dir),
+                    exe_names=self.entry.client.exe_names,
                 ),
                 archives_left_out(server_dir, play, source, client_dir),
             ),
@@ -13502,6 +14708,16 @@ class ControllerView(QWidget):
             if pack.id not in wanted or pack.id in skip:
                 continue
             check_cancel()
+            # A loader another mod put in the copy refuses BEFORE its fetch (D7),
+            # but only for a pack that installs a top-level version.dll itself:
+            # one version.dll loads, and nothing of the pack is touched.
+            if client_packs.pack_installs_loader(pack):
+                try:
+                    client_packs.refuse_foreign_loader(play, pack, packs.get(pack.id))
+                except client_packs.PackError as exc:
+                    if not client_packs.reap_stale_loader(play, pack, packs.get(pack.id)):
+                        raise _PackStopped(pack, str(exc)) from exc
+                    client_packs.refuse_foreign_loader(play, pack, packs.get(pack.id))
             say(f"Getting {pack.label}…")
             try:
                 # Each kind by name, and nothing falls through to the downloader: a
@@ -13554,35 +14770,93 @@ class ControllerView(QWidget):
             if same:
                 assert have is not None
                 if not client_packs.recorded_files_missing(play, have):
-                    continue
-                say(f"Putting back the missing files of {pack.label}…")
+                    done = have
+                else:
+                    say(f"Putting back the missing files of {pack.label}…")
+                    try:
+                        done = client_packs.install(
+                            play,
+                            pack,
+                            fetched,
+                            game=game,
+                            server_dir=server_dir,
+                            previous=have,
+                            only_missing=True,
+                        )
+                    except client_packs.PartialInstall as exc:
+                        packs[pack.id] = exc.entry
+                        save()
+                        raise _PackStopped(pack, str(exc)) from exc
+                    except client_packs.PackError as exc:
+                        raise _PackStopped(pack, str(exc)) from exc
+                    packs[pack.id] = done
+                    save()
             else:
                 say(f"Installing {pack.label}…")
-            try:
-                done = client_packs.install(
-                    play,
-                    pack,
-                    fetched,
-                    game=game,
-                    server_dir=server_dir,
-                    previous=have,
-                    only_missing=same,
-                )
-            except client_packs.PartialInstall as exc:
-                packs[pack.id] = exc.entry
+                try:
+                    done = client_packs.install(
+                        play,
+                        pack,
+                        fetched,
+                        game=game,
+                        server_dir=server_dir,
+                        previous=have,
+                        only_missing=False,
+                    )
+                except client_packs.PartialInstall as exc:
+                    packs[pack.id] = exc.entry
+                    save()
+                    raise _PackStopped(pack, str(exc)) from exc
+                except client_packs.PackError as exc:
+                    raise _PackStopped(pack, str(exc)) from exc
+                packs[pack.id] = done
                 save()
-                raise _PackStopped(pack, str(exc)) from exc
-            except client_packs.PackError as exc:
-                raise _PackStopped(pack, str(exc)) from exc
-            packs[pack.id] = done
-            save()
             left_behind = done.get("left_behind")
+            if pack.setup is not None:
+                check_cancel()
+                say(f"Preparing {pack.label}'s light and water data (1-5 minutes)…")
+                pack_id = pack.id
+                try:
+                    # The pending note rides in the record BEFORE the exe runs, so a
+                    # kill between the two still cleans on the next Play; the final
+                    # save drops it. The engine rolls back on any setup failure.
+                    def keep_pending(
+                        pending_entry: Mapping[str, Any], pack_id: str = pack_id
+                    ) -> None:
+                        packs[pack_id] = dict(pending_entry)
+                        save()
+
+                    packs[pack.id] = client_packs.run_setup(
+                        play,
+                        pack,
+                        done,
+                        game=game,
+                        server_dir=server_dir,
+                        record=have,
+                        on_pending=keep_pending,
+                    )
+                    save()
+                except client_packs.PackError as exc:
+                    raise _PackStopped(pack, str(exc)) from exc
             if left_behind:
-                notes.append(
-                    f"{pack.label}: left alone because you changed them: "
-                    + ", ".join(left_behind)
-                    + "."
-                )
+                # Setup outputs are never told as "left alone": the install
+                # regenerates them (the note rides `setup_pending` instead),
+                # so that wording would contradict what Play then does.
+                alone = [
+                    rel
+                    for rel in left_behind
+                    if not (
+                        pack.setup is not None
+                        and isinstance(rel, str)
+                        and rel in done.get("setup_pending", [])
+                    )
+                ]
+                if alone:
+                    notes.append(
+                        f"{pack.label}: left alone because you changed them: "
+                        + ", ".join(sorted(alone))
+                        + "."
+                    )
         # 2. Wow.exe.
         if client.exe_patch is not None:
             check_cancel()
@@ -13596,7 +14870,9 @@ class ControllerView(QWidget):
             )
             choices = {**record.choices, "exe_options": picked_exe}
             options = client_exe.options_for(client.exe_patch, picked_exe)
-            exe = client_exe.apply(play, source, client.exe_patch, options)
+            exe = client_exe.apply(
+                play, source, client.exe_patch, options, exe_names=client.exe_names
+            )
             try:
                 save()
             except client_packs.PackError as exc:
@@ -13608,7 +14884,9 @@ class ControllerView(QWidget):
         elif exe is not None:
             # The catalog dropped the patch: the original's Wow.exe comes back.
             say("Putting your own Wow.exe back…")
-            if play_client.restore_original_exe(play, source, game=game, server_dir=server_dir):
+            if play_client.restore_original_exe(
+                play, source, game=game, server_dir=server_dir, exe_names=client.exe_names
+            ):
                 exe = None
         # 3. Config.wtf (else step (a)'s realmlist.wtf, written by `_launch`).
         cfg = client.config_wtf
@@ -13814,6 +15092,118 @@ class ControllerView(QWidget):
 
         return report
 
+    def _lumen_update_work(self, pack_id: str) -> tuple[str, str]:
+        """Fetch, prove, install (with `previous=`) and set up one installed pack (T809 W6).
+
+        The shared Play apply for a single pack: fetch by kind, then `install` over the
+        recorded entry (`previous=`), then `run_setup` over the new install. The record is
+        written at every step like Play's (pending note first, final entry after setup),
+        so a killed update resumes where Play would. Returns `(pack_id, done_sentence)`.
+        Anything the player reads comes back as `PackError`, so a failed update raises
+        with the record as it was and says so in one sentence.
+        """
+        play = self.services.play_client_dir
+        assert play is not None
+        client = self.entry.client
+        game = self.entry.id
+        server_dir = self.services.controller.server_dir
+        pack = next(p for p in client.packs if p.id == pack_id)
+        say = self._play_relay.emit_line
+        cancelled = self._play_cancel.is_set
+        packs = dict(client_packs.read_record(play).packs)
+        have = packs.get(pack.id)
+
+        def save() -> None:
+            record = client_packs.read_record(play)
+            client_packs.write_record(
+                play,
+                client_packs.PackRecord(
+                    dict(packs),
+                    record.exe,
+                    record.choices,
+                    record.config_seeded,
+                    record.launcher,
+                ),
+                game=game,
+                server_dir=server_dir,
+            )
+
+        say(f"Getting {pack.label}…")
+        kind = pack.source.kind
+        try:
+            if kind == "checkout":
+                fetched = client_packs.fetch_checkout(pack, server_dir)
+            elif kind == "checkout_folder":
+                fetched = client_packs.fetch_checkout_folder(
+                    pack, server_dir, entry_id=game, cancelled=cancelled
+                )
+            elif kind == "url":
+                fetched = client_packs.fetch_url(
+                    pack,
+                    entry_id=game,
+                    allowed_hosts=client.hosts(),
+                    progress=self._download_progress(pack),
+                    cancelled=cancelled,
+                )
+            else:
+                assert_never(kind)
+        except client_packs.Cancelled:
+            raise
+        except client_packs.PackUnavailable as exc:
+            raise client_packs.PackError(str(exc)) from exc
+        except client_packs.PackError as exc:
+            raise client_packs.PackError(
+                _checkout_refusal(pack, server_dir, wsl_distro=self.services.controller.wsl_distro)
+                or str(exc)
+            ) from exc
+        if client_packs.pack_installs_loader(pack):
+            try:
+                client_packs.refuse_foreign_loader(play, pack, have)
+            except client_packs.PackError as exc:
+                if not client_packs.reap_stale_loader(play, pack, have):
+                    raise client_packs.PackError(str(exc)) from exc
+                client_packs.refuse_foreign_loader(play, pack, have)
+        try:
+            done = client_packs.install(
+                play,
+                pack,
+                fetched,
+                game=game,
+                server_dir=server_dir,
+                previous=have,
+            )
+        except client_packs.PartialInstall as exc:
+            packs[pack.id] = exc.entry
+            save()
+            raise client_packs.PackError(str(exc)) from exc
+        except client_packs.PackError as exc:
+            raise client_packs.PackError(str(exc)) from exc
+        packs[pack.id] = done
+        save()
+        if pack.setup is not None:
+            say(f"Preparing {pack.label}\u2019s light and water data (1-5 minutes)…")
+            pack_key = pack.id
+
+            def keep_pending(pending_entry: Mapping[str, Any]) -> None:
+                packs[pack_key] = dict(pending_entry)
+                save()
+
+            try:
+                packs[pack.id] = client_packs.run_setup(
+                    play,
+                    pack,
+                    done,
+                    game=game,
+                    server_dir=server_dir,
+                    record=have,
+                    on_pending=keep_pending,
+                )
+            except client_packs.PackError as exc:
+                raise client_packs.PackError(str(exc)) from exc
+            save()
+        label = pack.version or pack.label
+        return pack.id, f"{label} is updated."
+
     @staticmethod
     def _removal_notes(
         play: Path,
@@ -13952,6 +15342,9 @@ class ControllerView(QWidget):
             os_name=platform.detect(),
             home=Path.home(),
             config_dir=platform.config_dir(),
+            exe_names=self.entry.client.exe_names,
+            wine_dll_overrides=self.entry.client.wine_dll_overrides,
+            args=hd_patches.launch_args(self.entry.client, self.services.controller.server_dir),
         )
         try:
             play_launch.launch(spec)
@@ -14005,8 +15398,12 @@ class ControllerView(QWidget):
             choices=record.choices,
             installed=frozenset(record.packs),
             unavailable=self._client_unavailable,
+            records=dict(record.packs),
         )
-        chosen = self._client_options_asker(self, offer)
+        if self._client_options_asker is ask_client_options:
+            chosen = ask_client_options(self, offer, view=self)
+        else:
+            chosen = self._client_options_asker(self, offer)
         if chosen is None:
             return
         # Again: the dialog is modal, and a job may have started behind it.
@@ -14035,6 +15432,91 @@ class ControllerView(QWidget):
             )
 
         self._run(save, self._client_options_saved, self._play_client_job_failed)
+
+    def update_client_pack(
+        self,
+        pack_id: str,
+        *,
+        done: Callable[[ClientPack, str], None] | None = None,
+        failed: Callable[[ClientPack, str], None] | None = None,
+    ) -> None:
+        """Update one installed pack now through the shared Play apply (T809 W6).
+
+        The button's path: the SAME fetch/prove/install/setup as Play for that pack
+        (`_lumen_update_work`, `previous=` the recorded entry), on the worker under the
+        play-client lock. `done`/`failed` hear the pack and one plain sentence; a failure
+        leaves the record as it was, so the old pack keeps working. Refused while a
+        server hold, a module job, or a Play (or another pack write) runs; off Windows
+        the pack's own checkbox is never shown, so no button is either.
+
+        The work runs under `_update_pending` the way `_backup_before_update` carries a
+        backup chained in front of a server update: the callbacks are bound slots
+        and can carry only the worker's answer, so the caller's `done`/`failed`
+        waits here for them to pick up.
+        """
+        play = self.services.play_client_dir
+        pack = next((p for p in self.entry.client.packs if p.id == pack_id), None)
+        if self.services.set_play_client_dir is None or play is None or pack is None:
+            return
+        if (
+            client_packs.update_state(pack, client_packs.read_record(play).packs.get(pack_id))
+            != "update available"
+        ):
+            return
+        refusal = self._play_client_refusal()
+        if refusal is None and self._play_pending:
+            refusal = PLAY_PENDING
+        if refusal is not None:
+            if failed is not None:
+                failed(pack, refusal)
+            else:
+                self._play_refused(refusal)
+            return
+        marker = self._usable_play_client()
+        if marker is None:
+            return
+        self._play_client_running = True
+        self._hold_busy()
+        self._update_pending = (pack, done, failed)
+        self._say_play(f"Updating {pack.label}…")
+        self._run(
+            lambda: self._lumen_update_work(pack_id),
+            self._update_done,
+            self._update_failed,
+        )
+
+    @Slot(object)
+    def _update_done(self, result: object) -> None:
+        """An update's worker answered: give back the lock and hand on its sentence."""
+        pending, self._update_pending = self._update_pending, None
+        self._release_play_client()
+        if pending is None:
+            return
+        pack, done, _failed = pending
+        sentence = result[1] if isinstance(result, tuple) else f"{pack.label} is updated."
+        if done is not None:
+            done(pack, sentence)
+        else:
+            self._say_play(sentence)
+
+    @Slot(object)
+    def _update_failed(self, exc: object) -> None:
+        """An update failed: the record is as it was, so the old pack keeps working."""
+        pending, self._update_pending = self._update_pending, None
+        self._release_play_client()
+        if pending is None:
+            return
+        pack, _done, failed = pending
+        if isinstance(exc, client_packs.Cancelled):
+            sentence = "Update cancelled. Nothing was changed."
+        elif isinstance(exc, client_packs.PackError):
+            sentence = f"{pack.label} could not be updated: {exc}"
+        else:
+            sentence = f"{pack.label} could not be updated."
+        if failed is not None:
+            failed(pack, sentence)
+        else:
+            self._play_refused(sentence)
 
     @Slot(object)
     def _client_options_saved(self, _result: object) -> None:
@@ -14184,6 +15666,7 @@ class ControllerView(QWidget):
                 keep=module_kept_files(server_dir, play, client_dir),
                 exe_patch=self.entry.client.exe_patch,
                 catalog_always=_catalog_always(self.entry.client.config_wtf),
+                exe_names=self.entry.client.exe_names,
                 flags_lost=lost,
             )
             left_out = archives_left_out(server_dir, play, source, client_dir)
@@ -14315,31 +15798,49 @@ class ControllerView(QWidget):
         self.action_failed.emit(message)
 
     @Slot()
-    def remove_containers(self) -> None:
-        """Arm on the first press; remove on the second.
+    def remove_server(self) -> None:
+        """Open the removal dialog and route its answer; Cancel removes nothing (T695).
 
-        The action is safe for player data — the database is a named volume and
-        `remove_staged()` never passes `-v` — but it is still a teardown, and it
-        sits in the Danger zone. Arming says what will happen, under the presses
-        (`danger_label`, T189), before anything is touched.
+        With no new removal code: "off this list" reaches `forget_install()`;
+        "keep" ticks the box then `show_uninstall_plan()`; "everything" unticks
+        it then the plan; Advanced runs `_remove_containers_now()`. The dialog
+        is reached through `self._ask_removal` (default builds the dialog) so
+        tests answer it without a modal.
         """
-        if not self._remove_armed:
-            # Only one of the two destructive buttons is ever armed. Both write
-            # their warning into the same label, so two armed at once would show
-            # one paragraph over two loaded buttons, and the second press would
-            # do whichever the user had forgotten about.
-            self._disarm_repair()
-            self._remove_armed = True
-            self.remove_button.setText(REMOVE_ARMED)
-            self.arm_cancel_button.setVisible(True)
-            self._say_under_the_presses(
-                "This stops the server and deletes its containers. Your characters are NOT "
-                "affected — the database lives in a Docker volume, which is kept. The next "
-                "Start recreates the containers, which takes longer than a normal start. "
-                + ARMED_LAST_LINE
-            )
+        offered = offered_choices(self.services.uninstall is not None)
+        choice = self._ask_removal(offered)
+        if choice is None:
             return
-        self._disarm_remove()
+        if choice is RemovalChoice.OFF_THE_LIST:
+            self.forget_install()
+        elif choice is RemovalChoice.REMOVE_CONTAINERS:
+            self._remove_containers_now()
+        elif self.services.uninstall is None:
+            return
+        elif choice is RemovalChoice.KEEP_CHARACTERS:
+            self.keep_characters_check.setChecked(True)
+            self.show_uninstall_plan()
+        else:
+            self.keep_characters_check.setChecked(False)
+            self.show_uninstall_plan()
+
+    def _default_ask_removal(self, offered: tuple[RemovalChoice, ...]) -> RemovalChoice | None:
+        """Build the dialog for this wiring; the choice, or None for Cancel."""
+        return ask_removal(
+            self,
+            uninstall_available=self.services.uninstall is not None,
+            preselect=self._removal_preselect,
+        )
+
+    def _remove_containers_now(self) -> None:
+        """Stop the server and delete its containers, at once (T695).
+
+        The armed branch of the old two-press gesture, factored out: choosing
+        Advanced in the dialog IS the deliberate second step, so there is no
+        arming path. The action is safe for player data — the database is a
+        named volume and `remove_staged()` never passes `-v`.
+        """
+        self._disarm_repair()
         self._set_busy(True, "Remove containers")
         self._stop_forced = ""
         self._stop_forced_details = ""
@@ -14379,26 +15880,17 @@ class ControllerView(QWidget):
         self.danger_label.setVisible(False)
         self.danger_details.set_text("")
 
-    def _disarm_remove(self) -> None:
-        """Unload the press; its warning goes with it, and only its own.
-
-        A press that was not armed leaves the line alone: it may be the other
-        press's warning, or how a remove or repair went -- which every import
-        probe's answer would otherwise wipe, through `_show_repair`.
-        """
-        was = self._remove_armed
-        self._remove_armed = False
-        self.remove_button.setText(REMOVE_IDLE)
-        self.arm_cancel_button.setVisible(self._repair_armed)
-        if was:
-            self._clear_danger_label()
-
     def _disarm_repair(self) -> None:
-        """`_disarm_remove`'s twin."""
+        """Unload the armed Repair press; its warning goes with it, and only its own.
+
+        A press that was not armed leaves the line alone: it may be how a remove
+        or repair went -- which every import probe's answer would otherwise
+        wipe, through `_show_repair`.
+        """
         was = self._repair_armed
         self._repair_armed = False
         self.repair_button.setText(REPAIR_IDLE)
-        self.arm_cancel_button.setVisible(self._remove_armed)
+        self.arm_cancel_button.setVisible(False)
         if was:
             self._clear_danger_label()
 
@@ -14413,7 +15905,6 @@ class ControllerView(QWidget):
         So the line under the Danger zone's presses goes too, armed or not --
         except while the import it is reporting is still running.
         """
-        self._disarm_remove()
         self._disarm_repair()
         self._hide_stop_other()
         self.clear_reservation_button.setVisible(False)
@@ -14424,13 +15915,12 @@ class ControllerView(QWidget):
 
     @Slot()
     def cancel_armed(self) -> None:
-        """Put the armed Remove or Repair down, and the warning with it (C35, T195).
+        """Put the armed Repair down, and the warning with it (C35, T195).
 
         Only what the armed press wrote goes: its paragraph under the presses.
         A refusal in `problem_label` -- a pointer at the Docker box, a port in
         use -- and the offer that answers it are another matter's, and stay.
         """
-        self._disarm_remove()
         self._disarm_repair()
 
     @Slot(object)
@@ -14441,13 +15931,13 @@ class ControllerView(QWidget):
         # lights up.
         self._nothing_to_remove = not result
         # Under the presses, where the player pressed: "in the row above" is
-        # the Danger zone's row, which holds Remove from Yu'lon.
+        # the Danger zone's row, which holds Remove this server….
         self._say_under_the_presses(
             self._after_the_stop(
                 "Containers removed; volumes kept. The next Start will recreate them."
                 if result
                 else (
-                    f'There were no containers to remove. "{REMOVE_FROM_YULON}" in the row '
+                    f'There were no containers to remove. "{REMOVE_THIS_SERVER}" in the row '
                     "above takes this server off Yu'lon's list and deletes nothing."
                 )
             )
@@ -14477,7 +15967,6 @@ class ControllerView(QWidget):
         this text is a warning and not the guard.
         """
         if not self._repair_armed:
-            self._disarm_remove()
             self._repair_armed = True
             self.repair_button.setText(REPAIR_ARMED)
             self.arm_cancel_button.setVisible(True)
@@ -14490,10 +15979,10 @@ class ControllerView(QWidget):
                 "characters and world databases is OVERWRITTEN. It is offered because those "
                 "databases hold no accounts and no characters — if that is wrong, press "
                 "Cancel now, while nothing has happened yet, and restore a backup from the "
-                "Maintenance tab instead. The server must be stopped; the database is started "
-                "if it is not running and is left running afterwards. A full import takes "
-                "10-30 minutes, and once it starts it cannot be stopped and the window cannot "
-                "be closed until it finishes.\n\n" + ARMED_LAST_LINE
+                f"{MAINTENANCE_TAB} tab instead. The server must be stopped; the database is "
+                "started if it is not running and is left running afterwards. A full import "
+                "takes 10-30 minutes, and once it starts it cannot be stopped and the window "
+                "cannot be closed until it finishes.\n\n" + ARMED_LAST_LINE
             )
             return
         self._disarm_repair()
@@ -14566,6 +16055,7 @@ class ControllerView(QWidget):
         self._import_running = False
         # T214 review: the import's last lines go under Details, not in the line.
         self._say_under_the_presses(str(exc), details=_detail_of(exc))
+        self._offer_the_ways_out(exc)
         self.action_failed.emit(_for_the_log(exc))
         self._import_asked = False
         self.refresh_status()
@@ -14860,6 +16350,16 @@ class ControllerView(QWidget):
         self.character_list.currentRowChanged.connect(self._character_chosen)
         self.refresh_characters_button = QPushButton("Refresh the list", people)
         self.refresh_characters_button.clicked.connect(self.refresh_characters)
+        # T806: the filter above the roster. Narrowing is LOCAL — the rows in the list
+        # are what the server said, and the filter only hides the ones that do not
+        # match — so a keystroke costs no database read and works while the server is
+        # down. Matches the NAME only, case-insensitive substring; the built-in clear
+        # button is the X that empties it again.
+        self.character_filter = QLineEdit(people)
+        self.character_filter.setPlaceholderText("Filter by name…")
+        self.character_filter.setClearButtonEnabled(True)
+        self.character_filter.textChanged.connect(self._apply_character_filter)
+        people_box.addWidget(self.character_filter)
         people_box.addWidget(self.character_list, 1)
         people_box.addWidget(self.refresh_characters_button)
 
@@ -15337,12 +16837,32 @@ class ControllerView(QWidget):
                 self.character_list.setCurrentItem(item)
         if self.character_list.currentRow() < 0:
             self._character_chosen(-1)
+        # The filter survives the refresh and is applied to the new rows: a filtered
+        # list that Refresh empties back to every character is a filter that lies.
+        self._apply_character_filter()
         # A23 (T195): an empty roster says how to get a character into it; the
         # hint goes again with the first character, and only the hint does.
         if self.character_list.count() == 0:
             self.character_report.setText(CHARACTERS_EMPTY)
         elif self.character_report.text() == CHARACTERS_EMPTY:
             self.character_report.setText("")
+
+    def _apply_character_filter(self) -> None:
+        """T806: hide the roster rows whose NAME does not contain the filter.
+
+        Case-insensitive substring, against the name the row carries (`UserRole`),
+        not against the whole row text — "search" on the tab asks for names. A
+        chosen row the filter hid is no longer the choice: the actions grey out
+        rather than act on a character the player cannot see.
+        """
+        text = self.character_filter.text().strip().lower()
+        for row in range(self.character_list.count()):
+            item = self.character_list.item(row)
+            name = item.data(Qt.ItemDataRole.UserRole)
+            item.setHidden(bool(text) and (not isinstance(name, str) or text not in name.lower()))
+        current = self.character_list.currentItem()
+        if current is not None and current.isHidden():
+            self.character_list.setCurrentRow(-1)
 
     @Slot(object)
     def _characters_failed(self, exc: object) -> None:
@@ -15397,7 +16917,8 @@ class ControllerView(QWidget):
         if play is None or not name:
             return
         self._character_action(
-            "Teleporting", lambda: play.teleport(name, where)  # type: ignore[attr-defined]
+            "Teleporting",
+            lambda: play.teleport(name, where),  # type: ignore[attr-defined]
         )
 
     @Slot()
@@ -15433,7 +16954,8 @@ class ControllerView(QWidget):
         if play is None or not name:
             return
         self._character_action(
-            "Marking for rename", lambda: play.rename(name)  # type: ignore[attr-defined]
+            "Marking for rename",
+            lambda: play.rename(name),  # type: ignore[attr-defined]
         )
 
     @Slot()
@@ -15774,7 +17296,12 @@ class ControllerView(QWidget):
         self.bot_list.customContextMenuRequested.connect(self._show_bot_context_menu)
         row = QHBoxLayout()
         self.bot_filter = QLineEdit(browse)
-        self.bot_filter.setPlaceholderText("name begins with…")
+        # T806: a keystroke re-reads the first page a beat after typing stops
+        # (`_bot_filter_typed`); the Find button still re-reads it now, and the
+        # built-in clear button empties the filter and so re-reads it too.
+        self.bot_filter.setPlaceholderText("Filter by name…")
+        self.bot_filter.setClearButtonEnabled(True)
+        self.bot_filter.textChanged.connect(self._bot_filter_typed)
         self.bot_filter.returnPressed.connect(self.filter_bots)
         self.filter_bots_button = QPushButton("Find", browse)
         self.filter_bots_button.clicked.connect(self.filter_bots)
@@ -15803,6 +17330,11 @@ class ControllerView(QWidget):
         self._bot_cursors: list[tuple[str, int] | None] = [None]
         self._bot_next: tuple[str, int] | None = None
         self._bot_total: int | None = None
+        # T806: the live filter's beat. One shot per keystroke burst, armed here
+        # where the tab exists; a game without the browse seam never arms one.
+        self._bot_filter_timer = QTimer(self)
+        self._bot_filter_timer.setSingleShot(True)
+        self._bot_filter_timer.timeout.connect(self.filter_bots)
         self._show_page_buttons()
         # Two panels side by side: the bot roster on the left, My Party on the
         # right. Both are group boxes already; giving them equal columns lets a
@@ -15881,26 +17413,36 @@ class ControllerView(QWidget):
     def _build_bot_rebuild(self, inside: QVBoxLayout) -> None:
         """T144: "Rebuild random bots…", its report line and its own log, under the count.
 
-        Absent -- not greyed -- without the seam, which is every game but
-        Tortoise: nothing would ever enable it there. Its own log panel rather
-        than the Modules tab's, because the press is made on this tab and the
-        job runs for minutes; the panel's start and finish lock and unlock the
-        Server tab through `_set_busy`, like every long job of ours.
+        T805: the AzerothCore trees get the SAME panel with "Delete every random bot…"
+        instead, whose job deletes the rows itself rather than asking a bots module for
+        a rebuild. Absent -- not greyed -- without either seam: nothing would ever
+        enable it there. Its own log panel rather than the Modules tab's, because the
+        press is made on this tab and the job runs for minutes; the panel's start and
+        finish lock and unlock the Server tab through `_set_busy`, like every long job
+        of ours.
         """
         self.bot_rebuild_button: QPushButton | None = None
         self.bot_rebuild_report: QLabel | None = None
         self.bot_rebuild_log: _IdleLogPanel | None = None
         self._bots_tab = None
-        if self.services.bot_pool_rebuild is None:
+        if self.services.bot_pool_rebuild is None and self.services.bot_rndbot_delete is None:
             return
         group = self.bot_count_group
         row = QHBoxLayout()
-        self.bot_rebuild_button = QPushButton(REBUILD_BOTS_LABEL, group)
+        tortoise = self.services.bot_pool_rebuild is not None
+        self.bot_rebuild_button = QPushButton(
+            REBUILD_BOTS_LABEL if tortoise else DELETE_BOTS_LABEL, group
+        )
         self.bot_rebuild_button.setToolTip(
             "Delete every random bot and let the bots module make them again, so they get the "
             "module's newest behaviour. Asks first, offers a backup, and restarts the server."
+            if tortoise
+            else "Delete every random bot's character and its rndbot account from the server's "
+            "databases. Asks first and offers a backup; the server must be stopped."
         )
-        self.bot_rebuild_button.clicked.connect(self.rebuild_random_bots)
+        self.bot_rebuild_button.clicked.connect(
+            self.rebuild_random_bots if tortoise else self.delete_random_bots
+        )
         row.addWidget(self.bot_rebuild_button)
         row.addStretch(1)
         self.bot_rebuild_report = QLabel("", group)
@@ -15982,6 +17524,47 @@ class ControllerView(QWidget):
             title=f"Rebuilding {self.entry.name}'s random bots",
             cancel=cancel,
             record_as=f"rebuild-bots-{self.entry.id}-"
+            f"{composegen.install_id(self.services.controller.server_dir)}",
+        )
+
+    @Slot()
+    def delete_random_bots(self) -> bool:
+        """T805's press: ask the one question, then delete in this group's log. False if not run.
+
+        The same three answers as the rebuild's (`ask_backup_choice()`), Cancel the
+        default and the Escape button. The backup, when asked for, is the first step OF
+        the job -- `_backup_with_the_database()`, which starts the database alone if the
+        server is down -- and a failed one stops it before anything is written. The
+        world-stopped rule is inside the job, so a world started between the press and
+        the deletes is still refused before any row goes.
+        """
+        seam = self.services.bot_rndbot_delete
+        log = self.bot_rebuild_log
+        if seam is None or log is None:
+            return False
+        refusal = self._bot_rebuild_refusal()
+        if refusal is not None:
+            show_information(self, "Something else is running", refusal)
+            return False
+        choice = ask_backup_choice(
+            self,
+            DELETE_BOTS_TITLE,
+            DELETE_BOTS_TEXT,
+            back_up_first="Back up first, then delete",
+            without_backup="Delete without a backup",
+        )
+        if choice is UpdateChoice.CANCEL:
+            logger.info(f"deleting {self.entry.id}'s random bots declined at the confirmation")
+            return False
+        backup = self._backup_with_the_database if choice is UpdateChoice.BACK_UP_FIRST else None
+        cancel = threading.Event()
+        if self.bot_rebuild_report is not None:
+            self.bot_rebuild_report.setText("")
+        return log.run(
+            lambda: seam.delete(backup=backup, cancel=cancel),
+            title=f"Deleting {self.entry.name}'s random bots",
+            cancel=cancel,
+            record_as=f"delete-bots-{self.entry.id}-"
             f"{composegen.install_id(self.services.controller.server_dir)}",
         )
 
@@ -16569,12 +18152,20 @@ class ControllerView(QWidget):
         )
 
     @Slot()
+    def _bot_filter_typed(self) -> None:
+        """T806: one re-read a beat after the keystrokes stop, not one per keystroke."""
+        self._bot_filter_timer.start(_BOT_FILTER_DEBOUNCE_MS)
+
+    @Slot()
     def filter_bots(self) -> None:
         """A new filter starts at the first page.
 
         Otherwise a filter typed on page nine shows page nine of a list that may
         now be one page long, which reads as "no bots match".
         """
+        timer = getattr(self, "_bot_filter_timer", None)
+        if timer is not None:
+            timer.stop()
         self._bot_cursors = [None]
         self.refresh_bots()
 
@@ -16943,6 +18534,157 @@ class ControllerView(QWidget):
 
     # -------------------------------------------------------- maintenance tab
 
+    #: Property holding why a server-build action is greyed, for its button's line (T692a/T195).
+    _GREY_WHY = "yulon_grey_why"
+
+    @staticmethod
+    def _bind_button_to_action(button: QPushButton, action: QAction) -> None:
+        """Mirror an action's text, tip, visible and enabled onto its section button (T692a).
+
+        Enabled goes through `set_enabled_why()`, so a greyed button says why
+        on the section's reason line (T195, I3/A10/A23/I4: a Deck has no
+        hover). The reason is the one the greying site stored on the action
+        with `_grey_build_action()`; a hidden action's button stays dead
+        without one, because the guard only reads buttons that are drawn.
+        """
+
+        def sync() -> None:
+            button.setText(action.text())
+            button.setToolTip(action.toolTip())
+            button.setVisible(action.isVisible())
+            if action.isEnabled():
+                set_enabled_why(button, None)
+            elif action.isVisible():
+                set_enabled_why(button, str(action.property(ControllerView._GREY_WHY) or ""))
+            else:
+                button.setEnabled(False)
+
+        action.changed.connect(sync)
+        sync()
+
+    def _grey_build_action(self, action: QAction, reason: str) -> None:
+        """Grey a server-build action, with its button saying why (T692a/T195).
+
+        The reason is stored on the action because the button only follows
+        `changed`: whoever greys the action next without one would leave the
+        button greyed with yesterday's words. `set_enabled_why()` refuses an
+        empty reason, which is what makes a silent grey loud here instead.
+        """
+        action.setProperty(ControllerView._GREY_WHY, reason)
+        action.setEnabled(False)
+
+    def _offer_build_action(self, action: QAction) -> None:
+        """Offer a server-build action again, clearing why it was greyed."""
+        action.setProperty(ControllerView._GREY_WHY, None)
+        action.setEnabled(True)
+
+    def _build_server_version_section(self, tab: QWidget, box: QVBoxLayout) -> None:
+        """T692a: the server-level presses, as buttons on the Maintenance tab."""
+        version, column = section(server_build_presses.SERVER_BUILD, tab)
+        self.server_version_section = version
+        self.source_version_label = QLabel("", version)
+        self.source_version_label.setWordWrap(True)
+        self.source_version_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self.source_version_label.setVisible(False)
+        self.upstream_label = QLabel("", version)
+        self.upstream_label.setWordWrap(True)
+        self.upstream_label.setVisible(False)
+        column.addWidget(self.source_version_label)
+        column.addWidget(self.upstream_label)
+        # QPushButtons bound to the existing QActions by hand, not QToolButtons:
+        # `setDefaultAction()` strips the labels' trailing ellipsis, which the
+        # pinned-label guard owns. Each press triggers its action, and each
+        # action's `changed` syncs its button's text, tip, enabled and visible.
+        self.rebuild_button = QPushButton(REBUILD_BUTTON_LABEL, version)
+        self.rebuild_button.clicked.connect(self.rebuild_action.trigger)
+        self.update_to_latest_button = QPushButton(UPDATE_TO_LATEST_BUTTON_LABEL, version)
+        self.update_to_latest_button.clicked.connect(self.update_to_latest_action.trigger)
+        self.apply_updates_button = QPushButton(native.UPDATES_BUTTON_LABEL, version)
+        self.apply_updates_button.clicked.connect(self.updates_action.trigger)
+        for button, action in (
+            (self.rebuild_button, self.rebuild_action),
+            (self.update_to_latest_button, self.update_to_latest_action),
+            (self.apply_updates_button, self.updates_action),
+        ):
+            self._bind_button_to_action(button, action)
+        column.addWidget(
+            _bar(
+                version,
+                self.rebuild_button,
+                self.update_to_latest_button,
+                self.apply_updates_button,
+            )
+        )
+        # T195 (I3/A10/A23/I4): why a Server version press is greyed -- a job
+        # of ours running, or the databases not reading as an import -- for a
+        # Deck, which has no hover.
+        self.server_version_reasons = ReasonLine(version)
+        column.addWidget(self.server_version_reasons)
+        for watched in (
+            self.rebuild_button,
+            self.update_to_latest_button,
+            self.apply_updates_button,
+        ):
+            self.server_version_reasons.watch(watched)
+        self.advanced_fold = QToolButton(version)
+        self.advanced_fold.setText("Advanced ▸")
+        self.advanced_fold.setCheckable(True)
+        self.advanced_fold.setChecked(False)
+        self.return_to_pin_button = QPushButton(RETURN_TO_PIN_BUTTON_LABEL, version)
+        self.return_to_pin_button.clicked.connect(self.return_to_pin_action.trigger)
+        self._bind_button_to_action(self.return_to_pin_button, self.return_to_pin_action)
+        self.put_the_folders_back_button = QPushButton(PUT_THE_FOLDERS_BACK_BUTTON_LABEL, version)
+        self.put_the_folders_back_button.clicked.connect(self.put_the_folders_back_action.trigger)
+        self._bind_button_to_action(
+            self.put_the_folders_back_button, self.put_the_folders_back_action
+        )
+        self.adopt_button = QPushButton(native.ADOPT_BUTTON_LABEL, version)
+        self.adopt_button.clicked.connect(self.adopt_as_imported)
+        self.adopt_button.setToolTip(
+            "Say that these databases are a finished import, for a server this app did not "
+            "install. Asks first, names the one row it writes, and refuses while the server "
+            "is running. Yu'lon cannot check the import finished -- you are saying so."
+        )
+        advanced_box = QWidget(version)
+        advanced_column = QVBoxLayout(advanced_box)
+        advanced_column.addWidget(
+            _bar(version, self.return_to_pin_button, self.put_the_folders_back_button)
+        )
+        advanced_column.addWidget(_bar(version, self.adopt_button))
+        for watched in (
+            self.return_to_pin_button,
+            self.put_the_folders_back_button,
+            self.adopt_button,
+        ):
+            self.server_version_reasons.watch(watched)
+        advanced_box.setVisible(False)
+        self.advanced_box = advanced_box
+        self.advanced_fold.toggled.connect(self._advanced_toggled)
+        column.addWidget(self.advanced_fold)
+        column.addWidget(advanced_box)
+        self.rebuild_log = _IdleLogPanel(version)
+        self.rebuild_log.run_started.connect(self._rebuild_started)
+        self.rebuild_log.run_finished.connect(self._rebuild_finished)
+        self.rebuild_stop_anyway_button = QPushButton(STOP_ANYWAY_LABEL, version)
+        self.rebuild_stop_anyway_button.setProperty("danger", True)
+        self.rebuild_stop_anyway_button.setToolTip(STOP_ANYWAY_TIP)
+        self.rebuild_stop_anyway_button.setVisible(False)
+        self.rebuild_stop_anyway_button.clicked.connect(self.rebuild_stop_now_anyway)
+        self._rebuild_force: threading.Event | None = None
+        self._rebuild_wait_relay = LineRelay(self)
+        self._rebuild_wait_relay.line.connect(self._rebuild_wait_line)
+        column.addWidget(self.rebuild_stop_anyway_button)
+        column.addWidget(self.rebuild_log)
+        box.addWidget(version)
+
+    @Slot(bool)
+    def _advanced_toggled(self, checked: bool) -> None:
+        """Fold or unfold the Advanced presses, and keep the fold's own label honest."""
+        self.advanced_box.setVisible(checked)
+        self.advanced_fold.setText("Advanced ▾" if checked else "Advanced ▸")
+
     def _build_maintenance_tab(self) -> None:
         """Backups, and a restore that cannot happen without its plan on screen.
 
@@ -16954,6 +18696,8 @@ class ControllerView(QWidget):
         """
         tab = QWidget(self)
         box = QVBoxLayout(tab)
+
+        self._build_server_version_section(tab, box)
 
         self.interrupted_label = QLabel("", tab)
         self.interrupted_label.setWordWrap(True)
@@ -17065,7 +18809,7 @@ class ControllerView(QWidget):
                 parent=tab,
             )
             box.addWidget(self._move_panel)
-        self._add_panel_tab(tab, "maintenance", "Maintenance")
+        self._add_panel_tab(tab, "maintenance", MAINTENANCE_TAB)
         self.refresh_backups()
 
     def _selected_backup(self) -> Path | None:
@@ -17689,6 +19433,9 @@ class ControllerView(QWidget):
                         # T681: the only writer for the whole load; a Modules job's SQL, an
                         # account or a network write of this Yu'lon is refused meanwhile.
                         alone=forgetting.RESTORE_WRITES_ALONE,
+                        # T738 part 4: a Pack or Bring in is told the restore's own move
+                        # sentence, not the Start/Stop one keyed on its text.
+                        for_a_move=forgetting.RESTORE_HOLDS_A_MOVE,
                     )
                 )
             except docker.ServerHeldError as exc:
@@ -17797,8 +19544,7 @@ class ControllerView(QWidget):
         ]
         if result.interrupted is not None and result.interrupted.readable:
             lines.append(
-                "  an earlier restore of "
-                f"{', '.join(result.interrupted.databases)} never finished"
+                f"  an earlier restore of {', '.join(result.interrupted.databases)} never finished"
             )
         if result.refusals:
             lines.append("")
@@ -18005,162 +19751,6 @@ class ControllerView(QWidget):
         self.module_folder_button.clicked.connect(self.install_module_from_folder)
         self.module_sql_button.clicked.connect(self.apply_module_sql)
         self.module_updates_button.clicked.connect(self.check_module_updates)
-        # The action `_format_report` has always named. It sits on THIS tab
-        # because this is the tab that prints "worldserver REBUILD required
-        # before this takes effect" — for 20 of the 41 shipped manifests, every
-        # one of them a `module` — and until 2026-09-08 a grep for a
-        # rebuild/compile/build button across `yulon/ui/` returned nothing at
-        # all, so that sentence named an action this app did not have.
-        #
-        # The ellipsis is the convention for "this opens a dialog first".
-        #
-        # T89: an ENTRY in the "Server build ▾" menu, with the two T64 presses
-        # below it, and no longer a button of its own. Seven buttons wrapped
-        # the bar at the 1280x800 the app opens at; the three are one act --
-        # compile this server again -- at three sources, so they are one
-        # button, on the owner's decision of 2026-09-27. Each is a `QAction`
-        # named `_action` and not `_button`, so a caller that still expects a
-        # widget (`click()`, `isHidden()`) fails at mypy rather than reading
-        # plausibly.
-        self.server_build_button = QPushButton(SERVER_BUILD_LABEL, tab)
-        self.server_build_button.setObjectName(SERVER_BUILD_BUTTON)
-        self.server_build_button.setToolTip(SERVER_BUILD_TIP)
-        self.server_build_menu = QMenu(self.server_build_button)
-        # Off by default on a `QMenu`, and each entry's sentence is the only
-        # place it says what it costs.
-        self.server_build_menu.setToolTipsVisible(True)
-        self.rebuild_action = self.server_build_menu.addAction(REBUILD_BUTTON_LABEL)
-        self.rebuild_action.triggered.connect(self.rebuild_server)
-        self.rebuild_action.setToolTip(
-            "Compile the server again so modules installed since the last build are in it. "
-            "Asks first — it takes as long as an install's compile and the server goes down."
-        )
-        # Beside the Rebuild button and never on the Catalog tab's tile, which
-        # greys to "Installed" the moment the app knows the folder: an
-        # established install is operated from its controller view. The ellipsis
-        # is the same convention — it asks first, and the dialog names every file.
-        #
-        # Dead for three of the four games, and that is the honest state rather
-        # than a gap: only `wow-tortoise`'s plan declares a phase meant to be
-        # re-applied to a server that already exists (T10/T11).
-        self.updates_button = QPushButton(native.UPDATES_BUTTON_LABEL, tab)
-        self.updates_button.clicked.connect(self.apply_database_updates)
-        self.updates_button.setToolTip(
-            "Apply the SQL this server's install plan has gained since it was installed. "
-            "Asks first, names every file, and refuses while the server is running."
-        )
-        # Beside the button it exists for, and dead for almost every install --
-        # by design, and not the same "dead" the updates button carries. That
-        # one is greyed on the CATALOG; this one is greyed until the databases
-        # themselves say `populated`, which is the state of an install this app
-        # did not make. On a server Yu'lon installed it never lights up at all,
-        # because that server already carries the row (T19).
-        self.adopt_button = QPushButton(native.ADOPT_BUTTON_LABEL, tab)
-        self.adopt_button.clicked.connect(self.adopt_as_imported)
-        self.adopt_button.setToolTip(
-            "Say that these databases are a finished import, for a server this app did not "
-            "install. Asks first, names the one row it writes, and refuses while the server "
-            "is running. Yu'lon cannot check the import finished -- you are saying so."
-        )
-        # T64, immediately below Rebuild (right of it, until T89 made the three
-        # one menu), which is what the approved design asks for: the two are
-        # the same act -- compile this server again -- and they differ only in
-        # what is compiled. Put anywhere else, a user looking for "how do I get
-        # the newest code" would find the press that recompiles the same commit.
-        #
-        # ABSENT rather than greyed where there is no route, which is the one
-        # place this tab breaks its own rule (see `ControllerServices.
-        # update_to_latest`): for a WSL-resident server or an entry the catalog
-        # does not offer this for, there is nothing that would ever enable it.
-        self.update_to_latest_action = self.server_build_menu.addAction(
-            UPDATE_TO_LATEST_BUTTON_LABEL
-        )
-        self.update_to_latest_action.triggered.connect(self.update_to_latest)
-        self.update_to_latest_action.setToolTip(
-            "Fetch the newest code from the repositories this server was built from and compile "
-            "it. Asks first, and offers a backup: this is code nobody has tested with this app."
-        )
-        self.update_to_latest_action.setVisible(self.services.update_to_latest is not None)
-        # Hidden until this install has actually been moved off its pins, and
-        # that is not the same rule as the entry above. There is nothing to
-        # return FROM on a server that is still on the commit the gates ran on,
-        # and a live "Return to the tested pin…" there would offer a multi-hour
-        # compile that ends exactly where it started.
-        self.return_to_pin_action = self.server_build_menu.addAction(RETURN_TO_PIN_BUTTON_LABEL)
-        self.return_to_pin_action.triggered.connect(self.return_to_the_tested_pin)
-        self.return_to_pin_action.setToolTip(
-            "Compile the server again from the commit this app was tested against. It does not "
-            "undo anything the newer server wrote into your databases."
-        )
-        self.return_to_pin_action.setVisible(False)
-        # T786: T766's press, the way out of the Start and Rebuild refusals that name it. Hidden
-        # until the engine says the press is offered (`_refresh_put_the_folders_back()`).
-        self._put_back_offered = False
-        self.put_the_folders_back_action = self.server_build_menu.addAction(
-            PUT_THE_FOLDERS_BACK_BUTTON_LABEL
-        )
-        self.put_the_folders_back_action.triggered.connect(self.put_the_folders_back)
-        self.put_the_folders_back_action.setToolTip(
-            "Put the source folders back on the build they were made from and write this app's "
-            "own files back. Asks first; compiles nothing, and the server must be stopped."
-        )
-        self.put_the_folders_back_action.setVisible(False)
-        self.server_build_button.setMenu(self.server_build_menu)
-        # The button greys when every entry it SHOWS is dead, and only then, so
-        # the bar still says "nothing here can act" without a press -- one of
-        # the two things `flow_layout`'s module docstring holds a menu costs
-        # (the other, a tooltip a touch screen cannot reach, it still does). Driven off
-        # each entry's own `changed`, so every place that enables, disables,
-        # shows or hides an entry (the busy lock, T64's backup window, T77's
-        # reading) moves the button without having to know it exists.
-        for action in self.server_build_menu.actions():
-            action.changed.connect(self._set_server_build_button)
-        self._set_server_build_button()
-        # What this install was last built from, in `native.source_revs_line()`'s
-        # words. Blank -- and the whole row hidden -- for a server still on its
-        # pins, which is every install that has never pressed the button above:
-        # a line repeating the catalog would be a reading of `catalog.json`
-        # dressed up as a reading of the folder.
-        self.source_version_label = QLabel("", tab)
-        self.source_version_label.setWordWrap(True)
-        self.source_version_label.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse
-        )
-        self.source_version_label.setVisible(False)
-        # Its own panel, not the report box above it. `module_report` is a
-        # `setPlainText` field that shows the LAST action's result, and a
-        # multi-hour job written into it would show one line and then look
-        # frozen — which is the exact reading that produced this feature's bug
-        # report. `LogPanel` is timestamped, follows the bottom, carries a
-        # ticking elapsed field and owns the Stop button, and it already exists.
-        #
-        # ONE panel for both long jobs on this tab, and shared rather than
-        # doubled: a rebuild and a database update must not run at once — they
-        # want the same containers — and a second panel would have to be locked
-        # against the first, registered with `log_panels()` for the exit path,
-        # and stopped by it. The panel's own `running` flag is that lock already.
-        self.rebuild_log = _IdleLogPanel(tab)
-        # The lock, in both directions. A rebuild replaces the containers the
-        # Server tab's Start/Stop/Remove act on, so those go dead for its
-        # duration; `rebuild_server()` refuses while `_busy` for the mirror
-        # case. Driven off the PANEL's own signals rather than set by hand
-        # around the call, so a job that fails, is stopped, or raises before its
-        # first line still unlocks — the shape `_set_busy(False)` is missed by
-        # is exactly how the Server tab's own buttons were left dead once
-        # before.
-        self.rebuild_log.run_started.connect(self._rebuild_started)
-        self.rebuild_log.run_finished.connect(self._rebuild_finished)
-        # T158: the rebuild panel's own "Stop now anyway", for a rebuild or a
-        # rollback that is waiting to stop a world still loading. Shown only
-        # while the panel's lines say so (`_watch_for_load_wait`).
-        self.rebuild_stop_anyway_button = QPushButton(STOP_ANYWAY_LABEL, tab)
-        self.rebuild_stop_anyway_button.setProperty("danger", True)
-        self.rebuild_stop_anyway_button.setToolTip(STOP_ANYWAY_TIP)
-        self.rebuild_stop_anyway_button.setVisible(False)
-        self.rebuild_stop_anyway_button.clicked.connect(self.rebuild_stop_now_anyway)
-        self._rebuild_force: threading.Event | None = None
-        self._rebuild_wait_relay = LineRelay(self)
-        self._rebuild_wait_relay.line.connect(self._rebuild_wait_line)
         # ONE action bar, where there used to be two toolbars of nine buttons:
         # the two that acted on "the selection" have moved onto the rows
         # themselves and the two custom-module presses have moved into their own
@@ -18178,14 +19768,8 @@ class ControllerView(QWidget):
         actions = self.module_actions.flow()
         actions.addWidget(self.module_updates_button)
         actions.addWidget(self.refresh_modules_button)
-        # Where the `addStretch(1)` was: the gap between the two that only read
-        # this install and the four that change it, drawn while the bar is one
-        # line and spent when it wraps.
         actions.add_gap()
-        actions.addWidget(self.adopt_button)
-        actions.addWidget(self.updates_button)
         actions.addWidget(self.module_sql_button)
-        actions.addWidget(self.server_build_button)
         # The banner, hidden until something owes a rebuild. It is above the
         # cards rather than on each owing row because the ACTION is one action
         # for all of them -- one compile covers every module installed since the
@@ -18197,9 +19781,11 @@ class ControllerView(QWidget):
         self.rebuild_banner_label.setWordWrap(True)
         self.rebuild_banner_label.setStyleSheet(f"color: {COLOR_TEXT_WARNING};")
         self.rebuild_banner_button = QPushButton(REBUILD_BUTTON_LABEL, self.rebuild_banner)
-        # The SAME slot as the toolbar's, not a copy: the dialog, the refusals
+        # The SAME slot as the section's, not a copy: the dialog, the refusals
         # and the busy gate are `rebuild_server()`'s, and a second caller that
         # skipped any of them would be a second rebuild route to keep in step.
+        # T692a: the slot brings the Maintenance tab up once the run starts, so
+        # the log it runs in is seen.
         self.rebuild_banner_button.clicked.connect(self.rebuild_server)
         banner_box.addWidget(self.rebuild_banner_label, 1)
         banner_box.addWidget(self.rebuild_banner_button)
@@ -18269,7 +19855,6 @@ class ControllerView(QWidget):
         # tab's 900 and two whole rows of forty, and at the 1280x800 the app
         # opens at it had 70 -- a scrollbar and the top of a family card.
         box.addWidget(self.module_actions)
-        box.addWidget(self.source_version_label)
         box.addWidget(self.rebuild_banner)
         box.addWidget(self.modules_panel, 1)
         box.addWidget(custom)
@@ -18291,15 +19876,13 @@ class ControllerView(QWidget):
         self.module_details = Details(tab)
         self.module_report.textChanged.connect(lambda: self.module_details.set_text(""))
         box.addWidget(self.module_details)
-        box.addWidget(self.rebuild_stop_anyway_button)
-        box.addWidget(self.rebuild_log)
         self.modules_panel.setMinimumHeight(MODULE_LIST_MIN_HEIGHT)
         # T83: the one place that decides what gives when this tab cannot hold
         # everything on it. Built after every widget above is in `box`, because
         # it walks that layout.
         self.modules_fit = _TabFit(
             tab,
-            self.rebuild_log,
+            None,
             self.module_report_strip,
             self.modules_panel,
             MODULE_LIST_MIN_HEIGHT,
@@ -18365,14 +19948,15 @@ class ControllerView(QWidget):
         # worldservers are still compiled from a checkout somebody may have
         # patched. Tying the rebuild to `store` would have taken the control
         # away from three of the four games for a reason that is about
-        # manifests.
-        self.rebuild_action.setEnabled(self.services.rebuild is not None)
+        # manifests. The press lives on the Maintenance tab now; the banner
+        # beside it reaches the same slot.
+        self._offer_rebuild_button()
         self.rebuild_banner_button.setEnabled(self.services.rebuild is not None)
         # A third gate, separate again and for the mirror reason: this one is
         # about the install PLAN, not about the store and not about the
         # checkout. It is live for the one game whose plan declares a phase to
         # be re-applied to a server that already exists.
-        self.updates_button.setEnabled(self.services.updates is not None)
+        self._offer_updates_button()
         # A fourth gate, and the only one in this method that is not settled
         # here: the reading it also needs has not been taken yet, so the button
         # starts dead and lights up (or does not) the first time the status poll
@@ -18460,6 +20044,11 @@ class ControllerView(QWidget):
         self.maintenance_report.setPlainText(refusal)
         self.module_sql_button.setEnabled(False)
         self.module_sql_button.setToolTip(refusal)
+        # T808: the realm name is a row in the login database; the saved name is still shown.
+        set_enabled_why(self.realm_name_button, refusal)
+        if self.services.realm_name_save is not None:
+            # A realm-type entry's line ("follows the realm type") is not a database press.
+            self.realm_name_report.setText(refusal)
 
     def _installed_clones(self) -> Mapping[str, frozenset[str]] | None:
         """What is in this install's clone folders per family, or `None` for no reader.
@@ -18671,10 +20260,14 @@ class ControllerView(QWidget):
     def _start_filling_versions(self) -> None:
         """Read the clones this tab has not read yet, AFTER the tab is on screen.
 
-        One module per event-loop turn, through `QTimer.singleShot(0, ...)`:
+        One module per event-loop turn (host git) or per job answer (a WSL
+        server), through `QTimer.singleShot(0, ...)` and `self._run()`:
         the reads are subprocesses, and twenty of them in a row on the GUI
         thread is the second of a frozen tab that item 1 forbids. A row that
-        fills in late is fine.
+        fills in late is fine. A WSL server's git is `wsl.exe ... docker run`
+        per module (T774), so those reads go off the GUI thread, one at a
+        time, under the same `_filling_versions` gate; host git keeps the
+        inline walk.
 
         `_filling_versions` keeps one walk running at a time. `reload_modules()`
         is called after every install, every remove and every update check, and
@@ -18690,18 +20283,21 @@ class ControllerView(QWidget):
     def _fill_next_version(self) -> None:
         """Read ONE unread clone, draw it, and come back for the next.
 
-        Every refusal this can meet is already inside the seam
-        (`git.RunnerGit.head_version` answers `None` for a folder with no
-        `.git`, a git that refused and a git that is not there), so there is
-        nothing to catch here and nothing that can turn a reload into a
-        failure.
+        Every refusal this can meet is already inside the seam (the version
+        seam answers `None` for a folder with no `.git`, a git that refused
+        and a git that is not there), so there is nothing to catch here and
+        nothing that can turn a reload into a failure. Host-git servers read
+        inline, one clone per tick; a WSL server's read is a job, one at a
+        time, whose done slot checks `_closed` again (T213) before drawing.
 
         T213: a closed tab ends the walk here. `drop_controller()` in main.py
         runs `shutdown()` and then `deleteLater()`, and a tick already queued
         used to come back after both and call `set_version` on a deleted
         label -- a `RuntimeError` traceback inside a Qt slot. The re-arm
         names `self` as the timer's context object as well, so a tick queued
-        before the delete is dropped by Qt rather than delivered.
+        before the delete is dropped by Qt rather than delivered. The WSL
+        job's done slot is a bound slot of this view, so a job answering
+        after the delete is dropped the same way (`job.py`).
         """
         if getattr(self, "_closed", False):
             self._filling_versions = False
@@ -18715,11 +20311,59 @@ class ControllerView(QWidget):
             row = widget.data
             if not row.installed or self._versions.has(server_dir, row.family, row.id):
                 continue
+            if platform.wsl_location(server_dir) is not None:
+                # T774: `docker run` per module must not run here. The row's
+                # key and clone path are bound now, on the GUI thread: the
+                # worker must not reach back into panel rows it may outlive.
+                self._run(
+                    self._version_job(server_dir, row.family, row.id),
+                    self._version_read,
+                    self._version_read_failed,
+                )
+                return
             self.modules_panel.set_version(
                 row.family, row.id, self._versions.fill(server_dir, row.family, row.id)
             )
             QTimer.singleShot(0, self, self._fill_next_version)
             return
+        self._filling_versions = False
+
+    def _version_job(self, server_dir: Path, family: str, item_id: str) -> Callable[[], object]:
+        """One WSL version read as a job: the row's key plus its cached answer (T774).
+
+        Bound here, on the GUI thread, so the worker takes no widget and no
+        row: `fill()` caches by `(server_dir, family, item_id)` and the done
+        slot draws from the same key.
+        """
+
+        def read() -> tuple[str, str, str | None]:
+            return (family, item_id, self._versions.fill(server_dir, family, item_id))
+
+        return read
+
+    @Slot(object)
+    def _version_read(self, answer: object) -> None:
+        """Draw one WSL version read, and come back for the next (T774).
+
+        The read ran off the GUI thread; the draw runs here. `_closed` ends
+        the walk (T213): the tab was shut down while the job was out.
+        """
+        if getattr(self, "_closed", False):
+            self._filling_versions = False
+            return
+        family, item_id, version = cast(tuple[str, str, str | None], answer)
+        self.modules_panel.set_version(family, item_id, version)
+        QTimer.singleShot(0, self, self._fill_next_version)
+
+    @Slot(object)
+    def _version_read_failed(self, exc: object) -> None:
+        """A WSL version read raised: end the walk, not the tab (T774).
+
+        The seam answers refusals with `None`, so reaching here is the bug
+        this logs rather than draws: the walk stops so one bad clone cannot
+        hold the gate (`_filling_versions`) shut against a later reload.
+        """
+        logger.warning(f"could not read a module version: {exc}")
         self._filling_versions = False
 
     def _forget_what_is_no_longer_installed(self, installed: Mapping[str, frozenset[str]]) -> None:
@@ -20019,7 +21663,7 @@ class ControllerView(QWidget):
         route = self.services.module_updates
         if route is None:
             return
-        self._set_busy(True, "Check for updates")
+        self._set_busy(True, "Check module updates")
         self._module_pending = "check for module updates"
         self.module_report.setPlainText(MODULE_UPDATES_RUNNING)
         self._run_module_job(route, self._module_updates_done, self._module_updates_failed)
@@ -20259,13 +21903,27 @@ class ControllerView(QWidget):
             logger.info(f"rebuild of {self.entry.id} refused before its question: {refused}")
             show_warning(self, f"Rebuild {self.entry.name}", refused)
             return False
-        if not ask_yes_no(
+        as_built = self.services.script_built_rebuild
+        distro = self.services.controller.wsl_distro
+        if as_built is not None and distro is not None and as_built.applies():
+            # T804: the old bash script's server. Its own question, its own press; No is the
+            # default and closing the box declines (`ask_yes_no()`).
+            if not ask_yes_no(
+                self,
+                script_built.QUESTION_TITLE,
+                script_built.question(self.services.controller.server_dir, distro),
+            ):
+                logger.info(f"rebuild of {self.entry.id} declined at the script-built question")
+                return False
+            source = as_built.source
+        elif not ask_yes_no(
             self,
             f"Rebuild {self.entry.name}?",
             rebuild_confirmation(
                 self.entry,
                 self.services.controller.server_dir,
                 kept_build=self.services.kept_build is not None,
+                note=self._rebuild_note(),
             ),
         ):
             logger.info(f"rebuild of {self.entry.id} declined at the confirmation")
@@ -20276,12 +21934,52 @@ class ControllerView(QWidget):
         cancel = self._rebuild_cancel()
         self._rebuild_is_compile = True
         self._rebuild_moves_sources = False
-        return self.rebuild_log.run(
+        started = self.rebuild_log.run(
             lambda: self._watch_for_load_wait(source(cancel)),
             title=f"Rebuilding {self.entry.name}",
             cancel=cancel,
             record_as=self._run_record_kind(),
         )
+        # T692a: the log is on the Maintenance tab, and the banner and a chip's
+        # button press this from the Modules tab: bring the log up once a run
+        # has started, so a declined or refused press leaves the player where
+        # they were.
+        if started:
+            self._show_page_of(self.rebuild_log)
+        return started
+
+    def _rebuild_note(self) -> str:
+        """The wiring's heads-up for the Rebuild question; "" when none, and never raises (T795)."""
+        asked = self.services.rebuild_note
+        if asked is None:
+            return ""
+        try:
+            return asked()
+        except Exception as exc:  # noqa: BLE001 - a guess must never stop the press it warns about
+            logger.warning(f"could not read the rebuild note for {self.entry.id}: {exc}")
+            return ""
+
+    def _offer_rebuild_button(self) -> None:
+        """Show Rebuild while this install has wiring for it, live while no job runs (T692a)."""
+        wired = self.services.rebuild is not None
+        self.rebuild_action.setVisible(wired)
+        if not wired:
+            self.rebuild_action.setEnabled(False)
+        elif not self._busy:
+            self._offer_build_action(self.rebuild_action)
+        else:
+            self._grey_build_action(self.rebuild_action, wait_for(self._busy_job))
+
+    def _offer_updates_button(self) -> None:
+        """Show Apply pending database updates… while this install's plan declares it (T692a)."""
+        phased = self.services.updates is not None
+        self.updates_action.setVisible(phased)
+        if not phased:
+            self.updates_action.setEnabled(False)
+        elif not self._busy:
+            self._offer_build_action(self.updates_action)
+        else:
+            self._grey_build_action(self.updates_action, wait_for(self._busy_job))
 
     def _set_update_buttons(self) -> None:
         """Both T64 presses, back to what this install can do and what is running.
@@ -20290,14 +21988,24 @@ class ControllerView(QWidget):
         these buttons back — a job finishing, a chained backup finishing, and a
         chained backup failing — and a rule spelled three times is a rule that
         drifts. A backup in flight keeps them dead, because `_busy` cannot see
-        one.
+        one; the buttons say so on the section's reason line (T195).
         """
-        offered = self.services.update_to_latest is not None and not self._backup_before_update
-        self.update_to_latest_action.setEnabled(offered)
-        self.return_to_pin_action.setEnabled(offered)
-        self.put_the_folders_back_action.setEnabled(
-            self._put_back_offered and not self._backup_before_update
-        )
+        backed = self._backup_before_update
+        backed_why = wait_for("the backup before the update")
+        # No route: both T64 presses stay as `_build_server_build_actions()` left
+        # them, hidden and dead. The put-back below is not one of them -- it is
+        # offered by the engine, route or none (T786) -- so it is not skipped.
+        if self.services.update_to_latest is not None:
+            if backed:
+                self._grey_build_action(self.update_to_latest_action, backed_why)
+                self._grey_build_action(self.return_to_pin_action, backed_why)
+            else:
+                self._offer_build_action(self.update_to_latest_action)
+                self._offer_build_action(self.return_to_pin_action)
+        if self._put_back_offered and not backed:
+            self._offer_build_action(self.put_the_folders_back_action)
+        elif self._put_back_offered:
+            self._grey_build_action(self.put_the_folders_back_action, backed_why)
 
     def _refresh_put_the_folders_back(self) -> None:
         """Show "Put the folders back…" exactly when the engine offers it, and read it again (T786).
@@ -20320,23 +22028,17 @@ class ControllerView(QWidget):
                 logger.warning(f"could not read whether {self.entry.id} owes a put-back: {exc}")
         self._put_back_offered = offered
         self.put_the_folders_back_action.setVisible(offered)
-        self.put_the_folders_back_action.setEnabled(
-            offered and not self._busy and not self._backup_before_update
-        )
-
-    @Slot()
-    def _set_server_build_button(self) -> None:
-        """Grey "Server build ▾" exactly when no entry it shows can act (T89).
-
-        `isEnabled()` alone is already "shown and enabled": a hidden `QAction`
-        reports itself disabled whatever it was last set to, and gets that
-        setting back when it is shown (measured, PySide6 6.11). So an entry
-        hidden for want of a route or a pin cannot light a button whose menu
-        holds nothing but a dead Rebuild.
-        """
-        self.server_build_button.setEnabled(
-            any(a.isEnabled() for a in self.server_build_menu.actions())
-        )
+        if offered and not self._busy and not self._backup_before_update:
+            self._offer_build_action(self.put_the_folders_back_action)
+        elif offered and self._backup_before_update:
+            self._grey_build_action(
+                self.put_the_folders_back_action, wait_for("the backup before the update")
+            )
+        elif offered:
+            self._grey_build_action(self.put_the_folders_back_action, wait_for(self._busy_job))
+        # T692a: the fold opens by itself while the put-back is offered.
+        if offered and not self.advanced_fold.isChecked():
+            self.advanced_fold.setChecked(True)
 
     @staticmethod
     def _module_report_options(
@@ -20388,9 +22090,16 @@ class ControllerView(QWidget):
         except OSError as exc:
             logger.warning(f"could not read what {self.entry.id} was built from: {exc}")
             said = native.SourceVersion(line="", past_the_pin=False)
+            read = False
+        else:
+            read = True
         self._last_source_version = said
-        self.source_version_label.setText(said.line)
-        self.source_version_label.setVisible(bool(said.line))
+        # T692a: on the pins the label reads ON_THE_TESTED_PIN instead of
+        # hiding. No new reading: what is already carried is the line or not.
+        # A read that failed says nothing -- it does not know the server is on
+        # its pins, and saying so would be a guess dressed up as a reading.
+        self.source_version_label.setText(said.line or (ON_THE_TESTED_PIN if read else ""))
+        self.source_version_label.setVisible(bool(said.line) or read)
         self.return_to_pin_action.setVisible(said.past_the_pin)
 
     def _refresh_upstream_news(self) -> None:
@@ -20428,6 +22137,14 @@ class ControllerView(QWidget):
         self.upstream_label.setText("")
         self.upstream_label.setVisible(False)
 
+    _HOLD_TITLE_BY_PRESS = {
+        forgetting.PRESS_RESTORE: "A restore is running",
+        forgetting.PRESS_BACKUP: "A backup is running",
+        move_flows.PRESS_PACK: "A move is running",
+        move_flows.PRESS_BRING_IN: "A move is running",
+    }
+    """The update refusal's dialog title by the press holding the server (T738)."""
+
     def _update_route_busy(self) -> bool:
         """The two gates both T64 presses share, put to the user and answered True when hit.
 
@@ -20447,13 +22164,21 @@ class ControllerView(QWidget):
         failed — the update was not started" about a backup the user was
         watching succeed.
         """
-        held = docker.held_reason(self.services.controller.server_dir)
-        if self._restore_running or held is not None:
+        hold = docker.holder(self.services.controller.server_dir)
+        if self._restore_running or hold is not None:
             # T681 review: a restore of this server is loading (here, or in another window).
+            # T738: the title names the holder's press, and "Nothing was started." is
+            # added only when the held sentence has no "nothing was" of its own.
+            sentence = hold.reason if hold is not None else forgetting.RESTORE_HOLDS_THE_DATABASES
+            if "nothing was" not in sentence.lower():
+                sentence = f"{sentence} Nothing was started."
             show_information(
                 self,
-                "A restore is running",
-                f"{held or forgetting.RESTORE_HOLDS_THE_DATABASES} Nothing was started.",
+                self._HOLD_TITLE_BY_PRESS.get(
+                    hold.press if hold is not None else forgetting.PRESS_RESTORE,
+                    "A restore is running",
+                ),
+                sentence,
             )
             return True
         if self._backup_before_update:
@@ -20855,6 +22580,112 @@ class ControllerView(QWidget):
         self.corrections_banner.setVisible(True)
         self._refresh_start_reason()
 
+    # ------------------------------------ T822: a crash left a table damaged
+
+    def _refresh_repair_banner(self) -> None:
+        """Show the Repair banner exactly when the verdict names a table and a press exists."""
+        if not hasattr(self, "repair_banner"):
+            return
+        seam = self.services.table_repair
+        verdict = self.last_verdict
+        tables = verdict.crashed if verdict is not None else ()
+        if seam is None or not tables:
+            self.repair_banner.setVisible(False)
+            return
+        self.repair_banner_label.setText(table_repair.repair_banner_text(tables))
+        self.repair_banner_button.setText(table_repair.repair_button_label(tables))
+        self.repair_banner.setVisible(True)
+        log = getattr(self, "rebuild_log", None)
+        if self._busy:
+            set_enabled_why(self.repair_banner_button, wait_for(self._busy_job))
+        elif log is not None and log.running:
+            set_enabled_why(self.repair_banner_button, "Something else is running")
+        else:
+            set_enabled_why(self.repair_banner_button, None)
+
+    @Slot()
+    def repair_damaged_tables(self) -> bool:
+        """Ask, then repair the damaged tables on the job runner. False if nothing started.
+
+        The verdict's tables and the ones a refused backup found are the whole list: a
+        press never repairs a table the player was not shown. The engine takes the hold
+        itself, on the worker, because waiting for it is a Docker question.
+        """
+        seam = self.services.table_repair
+        verdict = self.last_verdict
+        if seam is None:
+            return False
+        tables = table_repair.merge_tables(
+            verdict.crashed if verdict is not None else (), self._repair_extra
+        )
+        if not tables:
+            return False
+        if self._busy or self.rebuild_log.running:
+            show_information(
+                self,
+                "Something else is running",
+                "This server is busy with another action — wait for it to finish, then press "
+                "this again. Nothing was started.",
+            )
+            return False
+        if not ask_yes_no(
+            self,
+            f"Repair the damaged table in {self.entry.name}?",
+            table_repair.confirmation(tables),
+        ):
+            logger.info(f"the table repair of {self.entry.id} was declined at the confirmation")
+            return False
+        self._set_busy(True, table_repair.REPAIR_TABLES_LABEL)
+        self._run(
+            lambda: seam.repair(tables, confirm_without_copy=self._ask_about_the_copy),
+            self._tables_repaired,
+            self._table_repair_failed,
+        )
+        return True
+
+    def _ask_about_the_copy(self, sentence: str) -> bool:
+        """Ask the copy's question on the GUI thread, even from the repair's worker.
+
+        A dialog opened on the worker would be a widget written from the wrong thread. The
+        job's thread is blocked until the GUI answers, which is the one thing it can do:
+        the repair cannot go on without knowing whether the player accepts no copy.
+        """
+        if QThread.currentThread() is self.thread():
+            return ask_yes_no(self, self.entry.name, sentence)
+        self._repair_copy_question = sentence
+        self._repair_copy_answer = False
+        QMetaObject.invokeMethod(
+            self, "_ask_about_the_copy_now", Qt.ConnectionType.BlockingQueuedConnection
+        )
+        return self._repair_copy_answer
+
+    @Slot()
+    def _ask_about_the_copy_now(self) -> None:
+        self._repair_copy_answer = ask_yes_no(self, self.entry.name, self._repair_copy_question)
+
+    @Slot(object)
+    def _tables_repaired(self, result: object) -> None:
+        """Say the one sentence; keep another damaged table for the next press."""
+        self._set_busy(False)
+        if not isinstance(result, table_repair.RepairReport):
+            return
+        if result.found_more:
+            self._repair_extra = table_repair.merge_tables(self._repair_extra, result.found_more)
+        if result.ok:
+            self._repair_extra = ()
+        if result.refused:
+            logger.warning(f"{self.entry.id}: {result.sentence} {result.detail}".strip())
+        show_information(self, self.entry.name, result.sentence)
+        self._refresh_repair_banner()
+
+    @Slot(object)
+    def _table_repair_failed(self, exc: object) -> None:
+        """A repair job that broke, not one that refused: T214's line and Details."""
+        self._set_busy(False)
+        logger.warning(_for_the_log(exc))
+        said = str(exc) if _said_by_yulon(exc) else REPAIR_BROKE
+        show_warning(self, self.entry.name, said)
+
     def apply_database_corrections(self) -> bool:
         """Ask, then apply the corrected steps the banner names (T129). False if not started.
 
@@ -20863,7 +22694,7 @@ class ControllerView(QWidget):
         `apply_database_updates()`'s: the dialog composed before it is shown
         (composing it can refuse), Yes/No with No the default and `said_yes`,
         and the same panel -- the lock that keeps a rebuild, an updates press and
-        this one from running at once. The panel lives on the Modules tab, so
+        this one from running at once. The panel lives on the Maintenance tab, so
         the press brings it forward.
         """
         route = self.services.corrections
@@ -21126,6 +22957,11 @@ class ControllerView(QWidget):
             # counts are still the counts -- unless its new build was KEPT, which
             # keeps its sources too (`sources_kept`, T179 Task 6 fix round 3).
             self._forget_what_the_server_update_moved()
+            # T814: the addon the update's own press moved is not one the
+            # server moved, so its count and version go here rather than there.
+            if tortoise_modules.ADDON_ID in self.services.default_addons:
+                self._behind.pop(("mod", tortoise_modules.ADDON_ID), None)
+                self._versions.forget(tortoise_modules.ADDON_ID)
         # THREE questions, not one, and every one of them has bitten this clause.
         #
         # `ok` alone is not "the server was compiled": `LogPanel` reports a
@@ -21497,7 +23333,7 @@ class ControllerView(QWidget):
         # `reset_defaults.read_only_confs()` is a decision about who owns core configuration,
         # and a second copy of it inside a widget is a second place for it to
         # drift (T44 item 13).
-        self.tuning_panel.set_files(self._tuning_files(), read_only=self._tuning_core_files())
+        self.tuning_panel.set_files(self._tuning_files(), read_only=self._tuning_read_only_files())
         self._set_tuning_revert_all()
         # T94: whether an undo has anything to put back, asked again of the
         # files -- off the GUI thread (final review): it lists up to five
@@ -22143,7 +23979,8 @@ class ControllerView(QWidget):
         with docker.lifecycle(
             controller.server_dir, spec=controller.spec, wsl_distro=controller.wsl_distro
         ):
-            was_up = controller.stop()
+            # T826: a Restart the player pressed, so the "When stopping" choice reaches it.
+            was_up = controller.stop(by_choice=True)
             if stopped is None:
                 controller.start()
                 return was_up
@@ -22299,6 +24136,7 @@ class ControllerView(QWidget):
             # T377: refused before the stop; its ways out are on the Server tab.
             self.problem_label.setText(str(exc))
             self._offer_to_repair_the_database(str(exc))
+        self._offer_the_ways_out(exc)
         self.action_failed.emit(_for_the_log(exc))
 
     # -- T94: Reset to default
@@ -22610,9 +24448,38 @@ class ControllerView(QWidget):
         return tuple(found)
 
     def _tuning_core_files(self) -> tuple[str, ...]:
-        """The server's own confs this tab lists read-only: `TUNING_CORE_FILES` on WotLK,
-        a TrinityCore server's own (T179), `reset_defaults.read_only_confs()`."""
+        """The server's own confs this tab lists: the family's three on AzerothCore (T819),
+        a TrinityCore server's own (T179), else `reset_defaults.read_only_confs()`."""
+        if core_conf.is_editable_core(self.entry):
+            return reset_defaults.core_files(self.entry)[:3]
         return reset_defaults.read_only_confs(self.entry)
+
+    def _tuning_read_only_files(self) -> tuple[str, ...]:
+        """The server's own confs this tab will not write: `reset_defaults.read_only_confs()`."""
+        return reset_defaults.read_only_confs(self.entry)
+
+    def _tuning_core_editable(self, file: str) -> bool:
+        """Whether this core conf opens editable: the family's own spelling (T819, T573 item 3).
+
+        On a case-blind disk a second spelling (`Worldserver.conf`) IS the
+        core's file, and a Save of it would write the core's. `is_one_of` says
+        core for both spellings; the exact match keeps the variant read-only.
+        """
+        server_dir = self.services.controller.server_dir
+        return (
+            tuning.is_one_of(file, self._tuning_core_files(), server_dir)
+            and file in self._tuning_core_files()
+            and core_conf.is_editable_core(self.entry)
+        )
+
+    def _tuning_core_denied(self, file: str) -> bool:
+        """Whether a Save or Revert of `file` is refused without writing (T43, T573, T819)."""
+        server_dir = self.services.controller.server_dir
+        if tuning.is_one_of(file, self._tuning_read_only_files(), server_dir):
+            return True
+        return tuning.is_one_of(
+            file, self._tuning_core_files(), server_dir
+        ) and not self._tuning_core_editable(file)
 
     def _tuning_spec(self, family: str, module_id: str, file: str) -> dict[str, ConfKey]:
         """This module's declared keys for one file, so a value can be type-checked.
@@ -22946,6 +24813,11 @@ class ControllerView(QWidget):
         core = tuning.is_one_of(
             file, self._tuning_core_files(), self.services.controller.server_dir
         )
+        read_only = tuning.is_one_of(
+            file, self._tuning_read_only_files(), self.services.controller.server_dir
+        )
+        editable_core = self._tuning_core_editable(file)
+        read_only = read_only or (core and not editable_core)
         try:
             # A conf that is a link out of the install is another file's text
             # and another file's Save (T573): shown empty and read-only.
@@ -22985,10 +24857,31 @@ class ControllerView(QWidget):
         # `tuning.write()` reads around. `tuning.save_text()` keeps every line
         # the player did not edit as it was (T573).
         self._tuning_raw = raw
-        note = TUNING_CORE_FILE if core else tuning.apply_sentence(tuning.file_rule(file))
+        if core and not editable_core:
+            note = TUNING_CORE_FILE
+        elif editable_core:
+            note = TUNING_CORE_EDITABLE
+        else:
+            note = tuning.apply_sentence(tuning.file_rule(file))
+        if editable_core:
+            # The `.dist` read stays on the GUI thread like the conf read: same
+            # 1 MB cap, and an unreadable one offers no defaults at all.
+            dist_text = self._core_dist_text(file)
+            self.tuning_panel.set_file_text(
+                core_conf.masked_view(raw),
+                read_only=False,
+                note=note,
+                shadowed=composegen.shadowed_by_env(
+                    raw,
+                    composegen.shadowing_env(self.entry, self.services.controller.server_dir),
+                ),
+                locked=core_conf.locked(self.entry, server_dir, file, raw),
+                defaults=core_conf.default_lines(dist_text),
+            )
+            return
         self.tuning_panel.set_file_text(
             tuning.editor_view(raw),
-            read_only=core,
+            read_only=read_only,
             note=note,
             # Which of THIS file's keys the running containers override (T44
             # item 16, round 2). Asked of `composegen`, which is the module
@@ -23001,6 +24894,17 @@ class ControllerView(QWidget):
                 raw, composegen.shadowing_env(self.entry, self.services.controller.server_dir)
             ),
         )
+
+    def _core_dist_text(self, file: str) -> str:
+        """The `.dist` beside an editable core conf, or `""` when it cannot be read."""
+        try:
+            with open(self.services.controller.server_dir / f"{file}.dist", "rb") as handle:
+                blob = handle.read(tuning.MAX_EDIT_BYTES + 1)
+            if len(blob) > tuning.MAX_EDIT_BYTES:
+                return ""
+            return blob.decode("utf-8")
+        except (OSError, UnicodeDecodeError):
+            return ""
 
     @Slot()
     def reload_tuning_file(self) -> None:
@@ -23018,9 +24922,7 @@ class ControllerView(QWidget):
         if self._tuning_write_refused() or self._put_back_refused("Revert"):
             return
         file = self.tuning_panel.current_file()
-        if not file or tuning.is_one_of(
-            file, self._tuning_core_files(), self.services.controller.server_dir
-        ):
+        if not file or self._tuning_core_denied(file):
             return
         path = self.services.controller.server_dir / file
         # The backup the tab names, not merely the newest (T190): a card's Save
@@ -23040,10 +24942,15 @@ class ControllerView(QWidget):
                 return TuningWrite(str(exc), failed=str(exc))
             except OSError as exc:
                 return TuningWrite(TUNING_FILE_FAILED.format(file=file, exc=exc), failed=str(exc))
+            rule = (
+                TUNING_AUTH_RESTART
+                if file.rsplit("/", 1)[-1] == "authserver.conf"
+                else tuning.apply_sentence(tuning.file_rule(file))
+            )
             said = TUNING_REVERTED_FILE.format(
                 file=file,
                 backup=newest.name,
-                rule=tuning.apply_sentence(tuning.file_rule(file)),
+                rule=rule,
             )
             return TuningWrite(
                 f"{said}\n{note}" if note else said, owed=(file,), reopen=file, reload=True
@@ -23057,18 +24964,26 @@ class ControllerView(QWidget):
 
         The guard warns and never blocks (T43 point 4): it is a cheap pass, not
         a parser, and a refusal between a person and their own configuration
-        over a rule this shallow would be worse than the typo it caught.
+        over a rule this shallow would be worse than the typo it caught. An
+        editable core conf (T819) is refused before the job when it touches a
+        locked key, and asks once with the diff otherwise.
         """
         file = self.tuning_panel.current_file()
-        if not file or tuning.is_one_of(
-            file, self._tuning_core_files(), self.services.controller.server_dir
-        ):
+        if not file or self._tuning_core_denied(file):
             return
-        said = tuning.lint_sentence(tuning.lint(text))
+        server_dir = self.services.controller.server_dir
+        entry = self.entry
+        original = self._tuning_raw
+        editable_core = self._tuning_core_editable(file)
+        unmasked = core_conf.unmask(text, original) if editable_core else text
+        # The lint confirm stays first for a core conf too (T819 review): a line
+        # that no longer looks like a setting is the more basic question, and a
+        # core file is held to the same cheap pass a module's is.
+        said = tuning.lint_sentence(tuning.lint(unmasked))
         if said is None:
             # T371: an `int` key typed in the raw box is held to the card's own
             # rule, as a warning on the same confirm and not a refusal.
-            said = tuning.value_sentence(tuning.int_problems(text, self._raw_file_keys(file)))
+            said = tuning.value_sentence(tuning.int_problems(unmasked, self._raw_file_keys(file)))
         if said is not None:
             answer = QMessageBox.question(
                 self,
@@ -23081,31 +24996,91 @@ class ControllerView(QWidget):
             # plain int, so `is StandardButton.Yes` is always False (T33).
             if answer != QMessageBox.StandardButton.Yes:
                 return
+        if editable_core:
+            locked = core_conf.locked(entry, server_dir, file, original, unmasked)
+            refused = core_conf.locked_edits(original, unmasked, locked)
+            if refused:
+                refused_lines = "\n".join(f"{k}: {locked[k]}" for k in refused)
+                report = TUNING_CORE_LOCKED + "\n" + refused_lines
+                self.tuning_report.setPlainText(report)
+                self.action_failed.emit(report)
+                return
+            changed = core_conf.changed_keys(original, unmasked)
+            if not changed:
+                self.tuning_report.setPlainText(
+                    TUNING_NOTHING_CHANGED.format(module=reset_defaults.label(file))
+                )
+                return
+            shown = "\n".join(f"{key}: {old} -> {new}" for key, old, new in changed[:12])
+            more = f"\nand {len(changed) - 12} more" if len(changed) > 12 else ""
+            answer = QMessageBox.question(
+                self,
+                TUNING_LINT_CONFIRM_TITLE,
+                TUNING_CORE_CONFIRM.format(n=len(changed), name=file, lines=shown, more=more),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            # `==` and an int, not `is`: PySide6's static `question()` returns a
+            # plain int, so `is StandardButton.Yes` is always False (T33).
+            if answer != QMessageBox.StandardButton.Yes:
+                return
         if self._tuning_write_refused():
             return
-        server_dir = self.services.controller.server_dir
         path = server_dir / file
-        original = self._tuning_raw
 
         def body() -> TuningWrite:
+            if editable_core:
+                # The text the checks above compared must still be what is on
+                # disk: a module or server update, or another edit, made while
+                # the editor was open would otherwise be erased by this Save
+                # (T819 review). Read inside the hold, where nothing else here
+                # writes it.
+                try:
+                    with open(path, "rb") as handle:
+                        blob = handle.read(tuning.MAX_EDIT_BYTES + 1)
+                except OSError as exc:
+                    return TuningWrite(
+                        TUNING_FILE_FAILED.format(file=file, exc=exc), failed=str(exc)
+                    )
+                if len(blob) > tuning.MAX_EDIT_BYTES or blob != original.encode("utf-8"):
+                    return TuningWrite(TUNING_CORE_CHANGED, failed=TUNING_CORE_CHANGED)
+                # And the last look is against the bytes just read, not the ones
+                # the editor opened: a locked key or a no-op is refused here too.
+                current = blob.decode("utf-8")
+                locked_now = core_conf.locked(entry, server_dir, file, current, unmasked)
+                refused_now = core_conf.locked_edits(current, unmasked, locked_now)
+                if refused_now:
+                    refused_lines = "\n".join(f"{k}: {locked_now[k]}" for k in refused_now)
+                    report = TUNING_CORE_LOCKED + "\n" + refused_lines
+                    return TuningWrite(report, failed=report)
+                if not core_conf.changed_keys(current, unmasked):
+                    return TuningWrite(
+                        TUNING_NOTHING_CHANGED.format(module=reset_defaults.label(file))
+                    )
             try:
                 # Refuses a link out of the server folder, before any byte moves (T573).
-                made = tuning.backup(path, root=server_dir)
-                with open(path, "w", encoding="utf-8", newline="") as handle:
-                    handle.write(tuning.save_text(original, text))
+                made = tuning.write_raw(path, unmasked, original=original, root=server_dir)
             except tuning.TuningError as exc:
                 return TuningWrite(str(exc), failed=str(exc))
             except OSError as exc:
                 return TuningWrite(TUNING_FILE_FAILED.format(file=file, exc=exc), failed=str(exc))
+            rule = (
+                TUNING_AUTH_RESTART
+                if file.rsplit("/", 1)[-1] == "authserver.conf"
+                else tuning.apply_sentence(tuning.file_rule(file))
+            )
             return TuningWrite(
                 TUNING_FILE_SAVED.format(
                     file=file,
                     backup=made.name,
-                    rule=tuning.apply_sentence(tuning.file_rule(file)),
+                    rule=rule,
                 ),
                 backup=made.name,
                 owed=(file,),
                 reload=True,
+                # A core conf re-opens masked: the secret the editor never held
+                # must not be what it holds after the save (T819).
+                reopen=file if editable_core else "",
             )
 
         self._write_tuning("Save a setting file", body)
@@ -23150,6 +25125,33 @@ class ControllerView(QWidget):
         row.flow().addWidget(self.apply_button)
         box.addWidget(row)
         box.addWidget(self.network_reasons)
+        # T808: the realm name players see in the game's realm list. One row, and absent for a
+        # server with no realm row.
+        self.realm_name_row = flow_bar(tab)
+        self.realm_name_edit = QLineEdit(tab)
+        self.realm_name_edit.setPlaceholderText(REALM_NAME_PLACEHOLDER)
+        self.realm_name_edit.setAccessibleName(REALM_NAME_LABEL)
+        self.realm_name_button = QPushButton(REALM_NAME_BUTTON, tab)
+        self.realm_name_label = QLabel(REALM_NAME_LABEL, tab)
+        self.realm_name_label.setBuddy(self.realm_name_edit)
+        self.realm_name_report = QLabel("", tab)
+        self.realm_name_report.setWordWrap(True)
+        self.realm_name_row.flow().addWidget(self.realm_name_label)
+        self.realm_name_row.flow().addWidget(self.realm_name_edit)
+        self.realm_name_row.flow().addWidget(self.realm_name_button)
+        self._realm_name_typed = False
+        self.realm_name_edit.textEdited.connect(self._realm_name_was_typed)
+        self.realm_name_button.clicked.connect(self.save_realm_name)
+        has_name = self.services.realm_name_save is not None
+        self.realm_name_row.setVisible(has_name)
+        # A realm-type entry (CoA) has a realm row, but its realm type decides the name
+        # (`realm_name.follows_realm_type()`): no control, one plain line instead.
+        follows_type = not has_name and realm_name.follows_realm_type(self.entry)
+        if follows_type:
+            self.realm_name_report.setText(REALM_NAME_FOLLOWS_TYPE)
+        self.realm_name_report.setVisible(has_name or follows_type)
+        box.addWidget(self.realm_name_row)
+        box.addWidget(self.realm_name_report)
         box.addWidget(self.network_text, 1)
         box.addWidget(self.network_details)
         self._add_panel_tab(tab, "networking", "Networking")
@@ -23168,6 +25170,72 @@ class ControllerView(QWidget):
         if self.loopback_radio.isChecked():
             return "loopback"
         return "internet" if self.internet_radio.isChecked() else "lan"
+
+    @Slot(str)
+    def _realm_name_was_typed(self, _text: str) -> None:
+        """A reading that lands later must not overwrite what the player is typing."""
+        self._realm_name_typed = True
+
+    @Slot()
+    def refresh_realm_name(self) -> None:
+        """Fill the field with the realm row's name, else the saved one; a job (T808)."""
+        current = self.services.realm_name_current
+        if current is None:
+            return
+        if self._waits_for_the_distro("realm name", self.refresh_realm_name):
+            return
+        self._run(current, self._realm_name_read, self._realm_name_read_failed)
+
+    @Slot(object)
+    def _realm_name_read(self, result: object) -> None:
+        if not isinstance(result, realm_name.NameState):
+            return
+        if not self._realm_name_typed and result.shown:
+            self.realm_name_edit.setText(result.shown)
+        # With no database password the refusal stays: it is why Save is grey (T785).
+        self.realm_name_report.setText(self.services.db_refusal or result.note)
+
+    @Slot(object)
+    def _realm_name_read_failed(self, exc: object) -> None:
+        logger.info(f"the realm name could not be read: {exc}")
+        self.realm_name_report.setText(self.services.db_refusal or REALM_NAME_NOT_READ)
+
+    @Slot()
+    def save_realm_name(self) -> None:
+        """Check the typed name here (a refusal needs no job), then save and apply it (T808)."""
+        save = self.services.realm_name_save
+        if save is None:
+            return
+        if (refusal := self.services.db_refusal) is not None:
+            # The grey button is the sight of it; a press by another road is refused here too.
+            self.realm_name_report.setText(refusal)
+            return
+        typed = self.realm_name_edit.text()
+        try:
+            name = realm_name.check(typed)
+        except realm_name.RealmNameError as exc:
+            self.realm_name_report.setText(str(exc))
+            return
+        self.realm_name_button.setEnabled(False)
+        self.realm_name_report.setText(REALM_NAME_SAVING)
+        self._run(lambda: save(name), self._realm_name_saved, self._realm_name_save_failed)
+
+    @Slot(object)
+    def _realm_name_saved(self, result: object) -> None:
+        self.realm_name_button.setEnabled(True)
+        if isinstance(result, realm_name.SaveResult):
+            self.realm_name_report.setText(result.text)
+            if result.remembered or result.applied:
+                self._realm_name_typed = False
+
+    @Slot(object)
+    def _realm_name_save_failed(self, exc: object) -> None:
+        """Said in words (a held server, say); what broke goes to the app log."""
+        self.realm_name_button.setEnabled(True)
+        logger.info(f"the realm name could not be saved: {exc}")
+        self.realm_name_report.setText(
+            str(exc) if isinstance(exc, docker.ServerHeldError) else REALM_NAME_NOT_SAVED
+        )
 
     @Slot()
     def show_network_plan(self) -> None:
@@ -23581,20 +25649,20 @@ def _format_report(
                 f"  ⚠ {item} is a C++ module: it is off disk now, but the worldserver still "
                 "runs whatever was compiled into it -- worldserver REBUILD required before this "
                 f"takes effect. If {item} was in the last build it is still in there until you "
-                # T89: a removal raises no banner, so the one Rebuild left on
-                # the tab is the entry in the menu, and the sentence says so.
-                f'press "{SERVER_BUILD_LABEL}" and then "{REBUILD_BUTTON_LABEL}".'
+                # T89: a removal raises no banner, so the one Rebuild left is the
+                # section's press on Maintenance, and the sentence says so.
+                f"press {server_build_presses.under_server_build(REBUILD_BUTTON_LABEL)}."
             )
         else:
             lines.append(
                 f"  ⚠ {item} is a C++ module: it does nothing until its code is compiled "
                 "into the worldserver -- worldserver REBUILD required before this takes effect. "
                 # T155: it said "below", and the banner this report raises is
-                # ABOVE the cards and so above this box; the menu entry is the
-                # same slot and is named as the second place to find it.
+                # ABOVE the cards and so above this box; the section's press on
+                # the Maintenance tab is named as the second place to find it.
                 f'Press "{REBUILD_BUTTON_LABEL}" on the banner above the module list (it is '
-                f'also under "{SERVER_BUILD_LABEL}"); until that has run it is on disk and '
-                "inert."
+                f"also {server_build_presses.under_server_build(REBUILD_BUTTON_LABEL)}); until "
+                "that has run it is on disk and inert."
             )
             if server_moves:
                 lines.append(
@@ -23602,7 +25670,7 @@ def _format_report(
                     "server code than this server has: press "
                     f'"{server_build_presses.UPDATE_TO_LATEST}"'
                     + (f' or "{server_build_presses.RETURN_TO_PIN}"' if pin_moved else "")
-                    + f' under "{SERVER_BUILD_LABEL}" instead, which '
+                    + f" under {server_build_presses.SERVER_BUILD_PLACE} instead, which "
                     f"{'build' if pin_moved else 'builds'} the server code with {item}. If "
                     f"Yu'lon put {item} back after that build, update it here again first, without "
                     f'pressing "{REBUILD_BUTTON_LABEL}" in between.'

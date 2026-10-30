@@ -21,6 +21,7 @@ import contextlib
 import dataclasses
 import time
 from collections.abc import Callable
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -32,6 +33,7 @@ from yulon import (
     playerbots_rename,
     seeded_accounts,
     server_build_gone,
+    stop_choice,
     wsl,
 )
 from yulon.catalog import composegen, installer, native, preflight, time_zone, world_data
@@ -246,8 +248,13 @@ class Controller:
         start_guard: Callable[[], str | None] | None = None,
         before_servers: Callable[[], str | None] | None = None,
         safety_copy: Callable[[], str] | None = None,
+        hold_server: Callable[[str], AbstractContextManager[None]] | None = None,
     ) -> None:
         self.spec = spec
+        # T812 C3b: the Server tab's realm-type hold (`coa_switch`, the same `docker.server_hold`
+        # the tab hands every other mutating press). `repair_import()` runs under it, so an
+        # Install/Repair import and a switch can never run at once.
+        self.hold_server = hold_server
         # T678 review round 3: dumps the core databases and says where, before Repair
         # clears what an unfinished first import wrote; that clear is refused without it.
         self.safety_copy = safety_copy
@@ -569,12 +576,59 @@ class Controller:
             # entry, so the lambda that used to be built here was dead code reading
             # like a health wait that no longer happens. Compose does the waiting
             # now, through the project's own `service_healthy` conditions.
-            docker.start_staged(self.spec, self.server_dir, wsl_distro=self.wsl_distro)
+            self._start_servers()
             if self.wsl_distro is not None:
                 # AFTER the start, so a start that failed pins nothing. The distro
                 # would otherwise stop 15-25 s after this app's last call into it,
                 # killing the server it just started (T132, `wsl.hold()`).
                 self._hold = wsl.hold(self.wsl_distro, self.spec.world)
+
+    def _start_servers(self) -> None:
+        """Bring this install's servers up; the ordered start for a CoA server (T812).
+
+        The default is today's single `start_staged` over all three services.
+        When `self.spec.auth_after_world` (set from the entry's
+        `azerothcore.auth_after_world_ready`), instead up db+world, wait the
+        world ready, up auth, wait the auth ready, then open the realm row —
+        with the job's Stop ending the waits (`stop_control.abandon`). A
+        failed open is said, not raised: the Keeper and the uptime tick are
+        the backstop.
+        """
+        from yulon import realm_flag
+        from yulon.catalog import native as native_mod
+        from yulon.catalog import ordered_start
+
+        if not self.spec.auth_after_world:
+            docker.start_staged(self.spec, self.server_dir, wsl_distro=self.wsl_distro)
+            return
+        entry = self.entry or _entry_for(self.spec)
+        if entry is None:  # pragma: no cover - the spec flag came from an entry
+            docker.start_staged(self.spec, self.server_dir, wsl_distro=self.wsl_distro)
+            return
+        # D5: a running auth lists the realm Online for the whole world load
+        # unless it is marked first (the install's `up` does this; T577).
+        # `unless_world_up`: a healthy Start over a running world marks nothing.
+        realm_flag.mark_offline(
+            entry, self.spec, self.server_dir, wsl_distro=self.wsl_distro, unless_world_up=True
+        )
+        cancel = None if self.stop_control is None else self.stop_control.abandon
+        ordered_start.start(
+            self.spec,
+            self.server_dir,
+            entry=entry,
+            start_services=docker.start_staged,
+            wait_world=lambda spec, ready, **kw: native_mod.wait_ready_quietly(
+                spec, ready, wsl_distro=self.wsl_distro, cancel=cancel
+            ),
+            wait_auth=lambda spec, ready, **kw: native_mod.wait_ready_quietly(
+                spec, ready, wsl_distro=self.wsl_distro, cancel=cancel
+            ),
+            open_realm=lambda: realm_flag.open_realm(
+                entry, self.spec, self.server_dir, wsl_distro=self.wsl_distro
+            ),
+            wsl_distro=self.wsl_distro,
+            cancel=cancel,
+        )
 
     def _rename_bot_settings(self) -> str | None:
         """T657: the bot settings under the prefix this server's mod-playerbots reads.
@@ -1071,8 +1125,14 @@ class Controller:
             self.start(asked_before_the_servers=asked and not stopped)
             return stopped
 
-    def stop(self) -> bool:
+    def stop(self, *, by_choice: bool = False) -> bool:
         """Stop the install, keeping its containers so the next start is staged.
+
+        `by_choice` (T826) lets the player's "When stopping" choice reach this stop
+        (`stop_choice.waits_for_bot_saves()`): True only for the Stops the player presses --
+        the Server tab's Stop and Restart, `--server stop`. Every other caller (a move, a
+        realm switch, the Tortoise bot restarts, anything new) keeps the default, so its stop
+        waits for every save whatever the choice says.
 
         Uses `docker.stop_staged()`, which keeps the containers so the next
         start reuses them instead of recreating them.
@@ -1103,10 +1163,32 @@ class Controller:
         self._save_evidence()
         self._fresh_stop()
         stopped = docker.stop_staged(
-            self.spec, self.server_dir, wsl_distro=self.wsl_distro, control=self.stop_control
+            self.spec,
+            self.server_dir,
+            wsl_distro=self.wsl_distro,
+            control=self._control_for(by_choice),
         )
         self._let_the_distro_go(stopped)
         return stopped
+
+    def skips_bot_saves(self) -> bool:
+        """Does the player's choice say this server's Stop does not wait for the bots (T826)?
+
+        False for a game that does not offer it, and for a choice that cannot be read and a
+        catalog default that waits.
+        """
+        skippable = self.spec.bot_saves_skippable
+        if skippable is None:
+            return False
+        return not stop_choice.waits_for_bot_saves(
+            self.server_dir, default=skippable.waits_by_default
+        )
+
+    def _control_for(self, by_choice: bool) -> docker.StopControl | None:
+        """`stop_control`, with the player's "do not wait for the bots" when it reaches here."""
+        if not (by_choice and self.skips_bot_saves()):
+            return self.stop_control
+        return dataclasses.replace(self.stop_control or docker.StopControl(), skip_bot_saves=True)
 
     def remove(self) -> bool:
         """Stop the install and remove its containers, keeping every volume.
@@ -1282,10 +1364,35 @@ class Controller:
         caller in the UI layer hands in something that can cross threads rather
         than something that touches a widget.
 
+        On a realm-types entry this runs under the tab's per-server hold
+        (T812 C3b, `coa_switch.held_repair`): a switch moving the plain schemas
+        refuses with its own sentence instead of racing this import, and a second
+        Repair holds in turn. Other entries run as before.
+
         Raises:
             docker.DockerCommandError: any of those refusals, or an import that
                 ran and left the databases exactly as unimported as they were.
         """
+        from yulon import coa_switch
+
+        def run() -> bool:
+            return self._repair_import(output)
+
+        if self.hold_server is None:
+            return run()
+        return coa_switch.held_repair(self.hold_server, coa_switch.REPAIR_PRESS, run)
+
+    def _repair_import(self, output: docker.OutputSink | None = None) -> bool:
+        """`repair_import()` past the hold; the guards re-checked under it (T812 C3b)."""
+        entry = self.entry or _entry_for(self.spec)
+        if entry is not None:
+            from yulon import coa_realm
+
+            refused = coa_realm.import_refusal(entry, self.server_dir)
+            if refused is not None:
+                # T812 C3a: the plain schemas may be mid-switch; an import would fill
+                # them with a fresh set while the real one sits parked.
+                raise docker.DockerRefusal(refused)
         if self.import_probe is None:
             raise docker.DockerRefusal(
                 "this game cannot be asked what state its databases are in, so its import will "

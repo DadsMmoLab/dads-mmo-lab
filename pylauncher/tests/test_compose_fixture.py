@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
@@ -947,31 +948,246 @@ def test_the_fields_a_service_record_does_not_carry_are_owned_elsewhere() -> Non
 def test_the_replaced_client_data_downloader_is_asserted_here_because_nobody_else_does(
     tmp_path: Path,
 ) -> None:
-    """`ac-client-data-init`'s `entrypoint` + `command` are a ~45-line bash script that REPLACES
+    """`ac-client-data-init`'s `entrypoint` + `command` are a ~55-line bash script that REPLACES
     upstream's `curl -L <url> > data.zip`, which cannot resume and so never finishes on a flaky
     link (it died at 66 MB of 1140 MB on the Ubuntu box, 2026-08-19). It is the largest
     deliberate divergence in the stack and it is invisible to `Service`, so a silent revert to
     upstream's downloader would pass every other test in this file.
 
     Its text IS in the byte snapshot at `tests/data/wotlk-rendered/docker-compose.yml`, so this
-    is not the only thing that would go red. But that snapshot is a CHANGE-DETECTOR whose own
+    is not the only thing that would go red. But that snapshot is a change-detector whose own
     docstring says to regenerate it "when a WotLK template change is the point of the commit" —
     it reports that the file moved, and the documented remedy makes the new text the expected
     text. It cannot say the script has to be able to resume. That is what the assertions below
     say, one per property the replacement exists for: bash (without the `entrypoint` this stops
-    being a script at all and becomes argv for the image's own entrypoint), resume, retry, a
+    being a script at all and becomes argv for the image's own entrypoint), resume, a
     version-keyed partial that can never be spliced across two releases, a refusal to extract a
     truncated archive — and the fallback to upstream's own function when the version cannot be
     read, which is what keeps this never worse than what it replaced.
+
+    T810 adds one more: a certificate/TLS failure (curl 58, 77 —
+    the reporter's own `(77) error setting certificate file`, from its own
+    image's missing ca-certificates.crt) quits WITHOUT retrying. Curl must not
+    do the retrying itself: `--retry-all-errors` re-adds even errors plain
+    `--retry` gives up on (measured with curl 8.5 on 77), so `--retry` is gone
+    from the curl call entirely and the shell loop around it retries — the two
+    shell tests below run that rendered loop with a stub curl; they, not string
+    presence, are what carry the property.
     """
     service = yaml.safe_load(render(tmp_path).base)["services"]["ac-client-data-init"]
     assert service["entrypoint"] == ["/bin/bash", "-c"]
     command = "\n".join(service["command"])
-    assert "--continue-at -" in command
-    assert "--retry 30" in command
+    fetch_line = next(line for line in command.splitlines() if line.strip().startswith("fetch()"))
+    assert "--continue-at -" in fetch_line
+    assert "--retry" not in fetch_line
     assert 'zip="$$data/data-$$ver.zip"' in command
-    assert command.count("unzip -t") == 2
+    assert command.count("unzip -t") == 3
     assert "inst_download_client_data" in command
+    assert "58|77)" in command
+    assert "certificate problem" in command
+
+
+def _client_data_fetch_script(tmp_path: Path) -> Path:
+    """The rendered fetch loop as runnable bash: `$` unescaped, `unzip` stubbed.
+
+    The render doubles every `$` for compose interpolation; outside compose a
+    single `$` is what the shell sees. The script is cut right after the fetch
+    loop's `done`, so the archive tail (extract, write `data-version`) never
+    runs — and `unzip` is a stub on PATH that exits with `$UNZIP_RC` and, when
+    that is unset, with 99 and a loud line: reaching it unasked means the loop
+    did not quit or break where it should.
+    """
+    service = yaml.safe_load(render(tmp_path).base)["services"]["ac-client-data-init"]
+    script = "\n".join(service["command"]).replace("$$", "$")
+    loop, _, _ = script.partition("\n        # Refuse to extract a truncated archive")
+    lines = loop.splitlines()
+    start = next(index for index, line in enumerate(lines) if "downloading client data" in line)
+    end = next(index for index, line in enumerate(lines) if line.strip() == "done")
+    fetch = "\n".join(["ver=vTEST", "zip=$PWD/data.zip", *lines[start : end + 1]]) + "\n"
+    path = tmp_path / "fetch.sh"
+    path.write_text("#!/bin/bash\nset -eu\n" + fetch, encoding="utf-8")
+    (tmp_path / "unzip").write_text(
+        "#!/bin/bash\n"
+        'if [ -z "${UNZIP_RC:-}" ]; then echo UNZIP-MUST-NOT-RUN >&2; exit 99; fi\n'
+        'echo "unzip: $*" >> "$CALLS_LOG.unzip"\n'
+        'exit "$UNZIP_RC"\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "unzip").chmod(0o755)
+    return path
+
+
+def _stub_curl(tmp_path: Path) -> Path:
+    """A `curl` replaying exit codes from a file, counting its calls.
+
+    Each call shifts one code off `exits.txt` (`77`, or `28 28 0`), prints a
+    `curl: (N)` line the way the real one does, and appends one line to
+    `calls.log`. A file carries the state — not the environment, which cannot
+    pass from one `curl` process back to its parent loop. The count is the
+    assertion: a certificate failure must quit after exactly one call; a flaky
+    link must retry to success.
+    """
+    curl = tmp_path / "curl"
+    curl.write_text(
+        "#!/bin/bash\n"
+        'code="$(head -1 "$CURL_STATE")"\n'
+        'tail -n +2 "$CURL_STATE" > "$CURL_STATE.next"\n'
+        'mv "$CURL_STATE.next" "$CURL_STATE"\n'
+        'echo "calls: $code" >> "$CALLS_LOG"\n'
+        'echo "curl: ($code) stubbed curl error" >&2\n'
+        'exit "$code"\n',
+        encoding="utf-8",
+    )
+    curl.chmod(0o755)
+    return curl
+
+
+@pytest.mark.skipif(os.name == "nt", reason="needs POSIX bash")
+@pytest.mark.parametrize("code", [58, 77])
+def test_the_rendered_fetch_quits_a_certificate_failure_without_a_retry(
+    tmp_path: Path, code: int
+) -> None:
+    """T810 shell-level: a 58 or 77 costs exactly one curl call, and the error line is printed.
+
+    The reporter's install burned 16 attempts of 10 s each because `--retry`
+    lived inside the curl call. The loop must fail fast now: one call, a
+    non-zero exit, the curl line plus the certificate-problem line. Deleting
+    the `case` branch turns this red (30 calls instead of 1); putting `--retry`
+    back on the curl call turns it red the other way (the stub is called once
+    per PROCESS, so curl's own retries are invisible — the assertion that
+    `--retry` is absent from the rendered script pins that half).
+    """
+    script = _client_data_fetch_script(tmp_path)
+    _stub_curl(tmp_path)
+    (tmp_path / "exits.txt").write_text(f"{code}\n", encoding="utf-8")
+    env = {
+        **os.environ,
+        "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
+        "CURL_STATE": str(tmp_path / "exits.txt"),
+        "CALLS_LOG": str(tmp_path / "calls.log"),
+        "FETCH_DELAY": "0",
+    }
+    proc = subprocess.run(
+        ["bash", str(script)], capture_output=True, text=True, env=env, cwd=tmp_path
+    )
+    assert proc.returncode != 0, proc.stdout + proc.stderr
+    assert proc.returncode == code, proc.stdout + proc.stderr
+    assert f"curl: ({code})" in proc.stderr, proc.stdout + proc.stderr
+    assert "certificate problem" in proc.stdout + proc.stderr
+    assert (tmp_path / "calls.log").read_text().splitlines() == [f"calls: {code}"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="needs POSIX bash")
+@pytest.mark.parametrize("code", [35, 51, 60])
+def test_the_rendered_fetch_retries_a_remote_tls_error_to_success(
+    tmp_path: Path, code: int
+) -> None:
+    """T810 shell-level: a 35, 51 or 60 can be a proxy or routing, so it is retried.
+
+    Two of them then a 0 succeed after exactly 3 curl calls. Putting the number
+    back into the fast-fail `case` turns this red (one call, non-zero exit).
+    """
+    script = _client_data_fetch_script(tmp_path)
+    _stub_curl(tmp_path)
+    (tmp_path / "exits.txt").write_text(f"{code}\n{code}\n0\n", encoding="utf-8")
+    env = {
+        **os.environ,
+        "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
+        "CURL_STATE": str(tmp_path / "exits.txt"),
+        "CALLS_LOG": str(tmp_path / "calls.log"),
+        "FETCH_DELAY": "0",
+    }
+    proc = subprocess.run(
+        ["bash", str(script)], capture_output=True, text=True, env=env, cwd=tmp_path
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert (tmp_path / "calls.log").read_text().splitlines() == [
+        f"calls: {code}",
+        f"calls: {code}",
+        "calls: 0",
+    ]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="needs POSIX bash")
+def test_the_rendered_fetch_retries_a_flaky_link_to_success(tmp_path: Path) -> None:
+    """T810 shell-level: two 28s then a 0 succeed after exactly 3 curl calls.
+
+    The loop replaced curl's `--retry 30`: transient exits must still be
+    retried for the same 31 tries `--retry 30` made. `FETCH_DELAY=0` keeps this
+    fast; the cap itself is the test after the 416 one below.
+    """
+    script = _client_data_fetch_script(tmp_path)
+    _stub_curl(tmp_path)
+    (tmp_path / "exits.txt").write_text("28\n28\n0\n", encoding="utf-8")
+    env = {
+        **os.environ,
+        "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
+        "CURL_STATE": str(tmp_path / "exits.txt"),
+        "CALLS_LOG": str(tmp_path / "calls.log"),
+        "FETCH_DELAY": "0",
+    }
+    proc = subprocess.run(
+        ["bash", str(script)], capture_output=True, text=True, env=env, cwd=tmp_path
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert (tmp_path / "calls.log").read_text().splitlines() == [
+        "calls: 28",
+        "calls: 28",
+        "calls: 0",
+    ]
+
+
+def _run_fetch(tmp_path: Path, exits: str, **extra: str) -> subprocess.CompletedProcess[str]:
+    script = _client_data_fetch_script(tmp_path)
+    _stub_curl(tmp_path)
+    (tmp_path / "exits.txt").write_text(exits, encoding="utf-8")
+    env = {
+        **os.environ,
+        "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
+        "CURL_STATE": str(tmp_path / "exits.txt"),
+        "CALLS_LOG": str(tmp_path / "calls.log"),
+        "FETCH_DELAY": "0",
+        **extra,
+    }
+    return subprocess.run(
+        ["bash", str(script)], capture_output=True, text=True, env=env, cwd=tmp_path
+    )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="needs POSIX bash")
+def test_the_rendered_fetch_ends_at_once_on_a_416_when_the_zip_is_whole(tmp_path: Path) -> None:
+    """T810 shell-level: curl exit 22 (HTTP 416) with a whole zip is success after ONE call.
+
+    A complete file makes the server answer 416, which `--fail` reports as 22.
+    Waiting out the delay and every remaining attempt for it was the defect;
+    the loop now probes `unzip -t` on a 22 and breaks. Deleting that probe turns
+    this red (it would call curl again, and the exits file only has one line).
+    """
+    proc = _run_fetch(tmp_path, "22\n", UNZIP_RC="0")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "already complete" in proc.stdout, proc.stdout
+    assert (tmp_path / "calls.log").read_text().splitlines() == ["calls: 22"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="needs POSIX bash")
+def test_the_rendered_fetch_keeps_retrying_a_22_when_the_zip_is_not_whole(tmp_path: Path) -> None:
+    """A 22 on a partial zip is a real HTTP error: it retries, and the zip is probed each time."""
+    proc = _run_fetch(tmp_path, "22\n22\n0\n", UNZIP_RC="1")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert (tmp_path / "calls.log").read_text().splitlines() == [
+        "calls: 22",
+        "calls: 22",
+        "calls: 0",
+    ]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="needs POSIX bash")
+def test_the_rendered_fetch_makes_31_tries_then_fails_on_a_bad_zip(tmp_path: Path) -> None:
+    """The cap equals the old `--retry 30`: the first try plus 30 retries, then the probe."""
+    proc = _run_fetch(tmp_path, "28\n" * 40, UNZIP_RC="1")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "client-data download FAILED" in proc.stdout, proc.stdout
+    assert len((tmp_path / "calls.log").read_text().splitlines()) == 31
 
 
 def test_a_stack_without_a_project_name_is_refused(tmp_path: Path) -> None:

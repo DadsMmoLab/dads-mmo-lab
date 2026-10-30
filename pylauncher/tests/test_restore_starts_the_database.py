@@ -1087,7 +1087,7 @@ def test_a_restore_cannot_begin_between_a_restart_s_two_halves(
     view = _view(_real_maintenance(tmp_path, stack, _Mysql(stack)))
     controller = view.services.controller
     refused: list[str] = []
-    monkeypatch.setattr(controller, "stop", lambda: True)
+    monkeypatch.setattr(controller, "stop", lambda **_kw: True)
     monkeypatch.setattr(controller, "remove", lambda: True)
     monkeypatch.setattr(controller, "start", _hold_attempt(controller.server_dir, refused))
 
@@ -1112,7 +1112,7 @@ def test_a_restore_cannot_begin_between_the_bot_rebuild_s_stop_and_start(tmp_pat
         refuse_before_a_stop = refuse_start  # T377: the restart asks this, the database included
         restart = Controller.restart  # T761: the real composite, reserved first, over these steps
 
-        def stop(self) -> bool:
+        def stop(self, **_kw: object) -> bool:
             return True
 
         start = staticmethod(_hold_attempt(tmp_path, refused))
@@ -1137,7 +1137,7 @@ def test_a_held_server_refuses_a_bot_restart_as_a_failed_stop(tmp_path: Path) ->
         refuse_before_a_stop = refuse_start  # T377: the restart asks this, the database included
         restart = Controller.restart  # T761: the real composite, reserved first, over these steps
 
-        def stop(self) -> bool:
+        def stop(self, **_kw: object) -> bool:
             raise AssertionError("stopped a held server")
 
         def start(self) -> None:

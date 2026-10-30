@@ -7767,3 +7767,165 @@ def test_the_windows_listing_leaves_out_virtualbox_host_only_adapters(name: str)
     out = f"{name}|192.168.56.1\nEthernet|192.168.1.5\n"
     found = platform.local_ipv4_addresses(run=_listing_answer(out), system="windows", wsl=False)
     assert {(a.interface, a.address) for a in found} == {("Ethernet", "192.168.1.5")}, found
+
+
+# -- T800: LAN detection prefers an adapter a LAN player can reach ----------------------
+
+T800_SENTINEL = "203.0.113.7"
+"""What the UDP-socket seam answers in these tests, so a fallback is visible as such."""
+
+
+def _pin_t800_seams(
+    monkeypatch: pytest.MonkeyPatch, socket_answer: str | None = T800_SENTINEL
+) -> None:
+    """Stand in for the answers that would read the test host: the UDP socket, and the WSL
+    branch a reverted `detect_lan_ip()` would take on a WSL host (the branch ignores the
+    `wsl` keyword the fix added). Either seam firing means the detection did not settle."""
+    monkeypatch.setattr(platform, "_socket_lan_ip", lambda: socket_answer)
+    monkeypatch.setattr(
+        platform,
+        "_windows_lan_ip_from_wsl",
+        lambda run=None: (_ for _ in ()).throw(AssertionError("the WSL branch was taken")),
+    )
+
+
+T800_LINUX_ROUTES = "default via 192.168.50.1 dev enp0s31f6 proto dhcp metric 100\n"
+T800_LINUX_ADDRESSES = (
+    "2: enp0s31f6    inet 192.168.50.49/24 brd 192.168.50.255 scope global enp0s31f6\n"
+    "5: wg0    inet 10.2.0.2/24 scope global wg0\n"
+    "6: tailscale0    inet 100.64.0.10/32 scope global tailscale0\n"
+    "7: eth2    inet 169.254.7.7/16 brd 169.254.255.255 scope link eth2\n"
+)
+
+
+def test_lan_detection_picks_the_wired_adapter_over_a_full_tunnel_vpn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The report behind the ticket: the VPN (10.2.0.2) held the default route, the wired
+    adapter held 192.168.50.49, and LAN mode advertised the VPN's address. The fix prefers
+    the default route's adapter when its name is not a VPN's or a virtual one, so the route
+    question and the address question are all it needs to ask — the listing is not read."""
+    _pin_t800_seams(monkeypatch)
+    seen: list[list[str]] = []
+
+    def run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        seen.append(argv)
+        joined = " ".join(argv)
+        if joined == "ip -4 route show default":
+            return subprocess.CompletedProcess(argv, 0, T800_LINUX_ROUTES, "")
+        if joined == "ip -4 -o addr show":
+            return subprocess.CompletedProcess(argv, 0, T800_LINUX_ADDRESSES, "")
+        raise AssertionError(f"unexpected command: {joined}")
+
+    assert platform.detect_lan_ip(run=run, system="linux", wsl=False) == "192.168.50.49"
+    assert seen == [
+        ["ip", "-4", "route", "show", "default"],
+        ["ip", "-4", "-o", "addr", "show"],
+    ], seen
+
+
+def test_lan_detection_with_only_a_vpn_keeps_the_answer_it_always_gave(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One VPN adapter and nothing else: no real candidate remains, so the socket answer —
+    today's behaviour, kept by the ticket's own decision — is what a plan advertises."""
+
+    def run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        joined = " ".join(argv)
+        if joined == "ip -4 route show default":
+            return subprocess.CompletedProcess(argv, 0, "default via 10.2.0.1 dev wg0\n", "")
+        if joined == "ip -4 -o addr show":
+            out = "5: wg0    inet 10.2.0.2/24 scope global wg0\n"
+            return subprocess.CompletedProcess(argv, 0, out, "")
+        raise AssertionError(f"unexpected command: {joined}")
+
+    _pin_t800_seams(monkeypatch, socket_answer="10.2.0.2")
+    assert platform.detect_lan_ip(run=run, system="linux", wsl=False) == "10.2.0.2"
+
+
+def test_lan_detection_ignores_a_link_local_address_and_answers_the_one_real_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No default route to be read, and a 169.254.x alongside the wired address: the
+    link-local one is not a candidate, so the single real one is the answer."""
+
+    def run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        joined = " ".join(argv)
+        if joined == "ip -4 route show default":
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if joined == "ip -4 -o addr show":
+            return subprocess.CompletedProcess(argv, 0, T800_LINUX_ADDRESSES, "")
+        raise AssertionError(f"unexpected command: {joined}")
+
+    _pin_t800_seams(monkeypatch)
+    assert platform.detect_lan_ip(run=run, system="linux", wsl=False) == "192.168.50.49"
+
+
+def test_lan_detection_with_two_real_adapters_keeps_the_answer_it_always_gave(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two adapters a LAN player could dial and no route reading to break the tie: the
+    detection does not guess, and the socket answers, as before the fix."""
+
+    def run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        joined = " ".join(argv)
+        if joined == "ip -4 route show default":
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if joined == "ip -4 -o addr show":
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                "2: enp0s31f6    inet 192.168.50.49/24 brd 192.168.50.255 scope global enp0s31f6\n"
+                "3: enp0s9    inet 192.168.1.7/24 brd 192.168.1.255 scope global enp0s9\n",
+                "",
+            )
+        raise AssertionError(f"unexpected command: {joined}")
+
+    _pin_t800_seams(monkeypatch, socket_answer="192.168.50.49")
+    assert platform.detect_lan_ip(run=run, system="linux", wsl=False) == "192.168.50.49"
+
+
+T800_WINDOWS_ROUTE_OUT = (
+    "Wintun|10.2.0.2\n"
+    "Tailscale|100.101.5.6\n"
+    "vEthernet (WSL)|172.24.144.1\n"
+    "Ethernet|192.168.50.49\n"
+)
+
+
+def test_lan_detection_on_windows_passes_over_the_vpn_and_virtual_adapters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A full-tunnel VPN gives Windows a second default-gateway adapter (Wintun), and the
+    host-only ones are in the same reading: every one of those names is passed over, and
+    the wired adapter's address is what the realm is told to advertise."""
+
+    def run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        assert argv[0] == "powershell.exe", argv
+        joined = argv[-1]
+        if "IPv4DefaultGateway" in joined:
+            return subprocess.CompletedProcess(argv, 0, T800_WINDOWS_ROUTE_OUT, "")
+        if "Get-NetIPAddress" in joined:
+            raise AssertionError("the listing was read, though the route reading settled it")
+        raise AssertionError(f"unexpected command: {joined}")
+
+    _pin_t800_seams(monkeypatch)
+    assert platform.detect_lan_ip(run=run, system="windows", wsl=False) == "192.168.50.49"
+
+
+def test_the_wsl_branch_of_lan_detection_passes_over_the_vpn_adapter_too() -> None:
+    """The same question is asked of Windows through the WSL branch, which the fix also
+    answers from named pairs now: the VPN's address is passed over, and with only a VPN
+    present the branch keeps the first default-gateway adapter's address, as it always did."""
+
+    def run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        assert argv[0] == "powershell.exe", argv
+        return subprocess.CompletedProcess(argv, 0, T800_WINDOWS_ROUTE_OUT, "")
+
+    assert platform._windows_lan_ip_from_wsl(run=run) == "192.168.50.49"
+
+    def run_vpn_only(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        assert argv[0] == "powershell.exe", argv
+        return subprocess.CompletedProcess(argv, 0, "Wintun|10.2.0.2\n", "")
+
+    assert platform._windows_lan_ip_from_wsl(run=run_vpn_only) == "10.2.0.2"
