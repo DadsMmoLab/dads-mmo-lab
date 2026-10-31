@@ -11,6 +11,7 @@ loads, so a red names exactly the rule that let it through.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 from typing import Any
 
@@ -25,8 +26,10 @@ from yulon.catalog.catalog import (
     AzerothCoreData,
     Client,
     NativeInstall,
+    load_catalog,
     parse_catalog,
 )
+from yulon.catalog.families import extract
 
 REALM: dict[str, Any] = {
     "id": "coa",
@@ -310,3 +313,82 @@ def test_an_ascension_client_loads() -> None:
         wine_dll_overrides="divxtac=d",
     )
     assert client.exe_names == ("ascension.exe",)
+
+
+# -- T835: the world-data fields sit outside the extraction hashes -----------------------
+
+
+def test_world_data_folders_load_with_client_extract_and_their_size() -> None:
+    """T835: the folders a Windows CoA world reads from its volume, and the room they take."""
+    block = NativeInstall.model_validate(
+        _native(world_data_dirs=["dbc", "maps", "Cameras"], world_data_gb=2.5)
+    ).azerothcore
+    assert block is not None
+    assert block.world_data_dirs == ("dbc", "maps", "Cameras")
+    assert block.world_data_gb == 2.5
+
+
+def test_world_data_folders_without_client_extract_are_refused() -> None:
+    """WotLK and Unbound name none: without an extract stage there is no `data/` to copy."""
+    with pytest.raises(ValidationError, match="needs client_extract"):
+        NativeInstall.model_validate(
+            _native(client_extract=None, world_data_dirs=["dbc"], world_data_gb=1.0)
+        )
+
+
+def test_world_data_folders_without_their_size_are_refused() -> None:
+    with pytest.raises(ValidationError, match="world_data_gb must say how much room"):
+        NativeInstall.model_validate(_native(world_data_dirs=["dbc"], world_data_gb=None))
+
+
+def test_a_world_data_size_without_folders_is_refused() -> None:
+    with pytest.raises(ValidationError, match="needs world_data_dirs"):
+        NativeInstall.model_validate(_native(world_data_gb=2.5))
+
+
+def test_a_coa_world_data_folder_named_twice_is_refused() -> None:
+    """A folder is copied once; two lines for it would be two copies and one fingerprint line."""
+    with pytest.raises(ValidationError, match=r"world_data_dirs names \['maps'\] more than once"):
+        NativeInstall.model_validate(
+            _native(world_data_dirs=["dbc", "maps", "maps"], world_data_gb=2.5)
+        )
+
+
+@pytest.mark.parametrize("name", ["../maps", "a/b", ""])
+def test_a_world_data_folder_must_be_a_plain_name(name: str) -> None:
+    """The name goes into `data/<name>` and into the sync script's own word list."""
+    with pytest.raises(ValidationError, match="world_data_dirs"):
+        NativeInstall.model_validate(_native(world_data_dirs=[name], world_data_gb=2.5))
+
+
+def test_the_shipped_coa_names_its_five_world_folders_and_their_room() -> None:
+    """Read off the CoA pin: `World.cpp`'s DataDir plus `dbc/`, `maps/`, `vmaps`, `mmaps`,
+    `Cameras`."""
+    catalog = load_catalog()
+    coa = catalog.get("wow-coa").install.native.azerothcore  # type: ignore[union-attr]
+    assert coa is not None
+    assert coa.world_data_dirs == ("dbc", "maps", "vmaps", "mmaps", "Cameras")
+    assert coa.world_data_gb == 6.5
+    for game in ("wow-wotlk", "wow-unbound"):
+        block = catalog.get(game).install.native.azerothcore  # type: ignore[union-attr]
+        assert block is not None and block.world_data_dirs == ()
+        assert block.world_data_gb is None
+
+
+def test_the_world_data_fields_leave_the_coa_extraction_hash_alone() -> None:
+    """The extraction evidence hashes the `ExtractPlan` and the mmaps record its argv alone.
+
+    A field added inside `client_extract` would change that digest and make every Linux CoA
+    install extract its client again. `AzerothCoreData.world_data_dirs`/`world_data_gb` sit
+    on the outer block, outside both, which is why these three values are pinned here: they
+    were measured at 2f7e89ae, before T835.
+    """
+    block = load_catalog().get("wow-coa").install.native.azerothcore  # type: ignore[union-attr]
+    assert block is not None and block.client_extract is not None
+    ce = block.client_extract
+    assert extract.plan_hash(ce.extract) == "a8a967884300bd3e"
+    canonical = json.dumps(ce.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
+    assert hashlib.sha256(canonical.encode("utf-8")).hexdigest() == (
+        "951c5d424fc45d2aeaf963c9ba95248aacf32c4cd408d5fe8434e3bc49d8d18e"
+    )
+    assert extract.argv_hash(ce.mmaps.argv) == "e7a3c2f660b5f20b"

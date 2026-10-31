@@ -122,3 +122,54 @@ def write_centurion_snapshots() -> None:
         folder.mkdir(parents=True, exist_ok=True)
         for name, text in centurion_rendered(label).items():
             (folder / name).write_text(text, encoding="utf-8", newline="\n")
+
+
+CENTURION_WINDOWS = "windows"
+"""T835: Centurion's Windows files (no label), written before the sync script moved to `shared/` and
+`_world_data_tokens` learned AzerothCore, so neither can move a byte of them."""
+
+
+def write_centurion_windows_snapshot() -> None:
+    folder = CENTURION_SNAPSHOT_ROOT / CENTURION_WINDOWS
+    folder.mkdir(parents=True, exist_ok=True)
+    for name, text in centurion_rendered("", platform_id="windows").items():
+        (folder / name).write_text(text, encoding="utf-8", newline="\n")
+
+
+# -- T835: Conquest of Azeroth's compose files on Linux, before the Windows world-data volume ------
+
+COA = "wow-coa"
+COA_SNAPSHOT_ROOT = Path(__file__).resolve().parent / "data" / "coa-rendered"
+COA_LABELS = {"linux": "", "linux-z": ":z"}
+"""Written by `write_coa_snapshots()` at 2f7e89ae, before T835 put `WORLD_DATA_*` tokens in
+the wow-coa template. Regenerate only when a wow-coa template change for Linux is the point of
+the commit."""
+
+
+def coa_rendered(bind_label: str, platform_id: str = "linux") -> dict[str, str]:
+    """wow-coa's three compose files for `/home/user/wow-coa-server` on `platform_id`."""
+    entry = load_catalog().get(COA)
+    server_dir = linux_server_dir(COA)
+    plan = composegen.render(
+        entry,
+        server_dir,
+        templates_root=resources.installers_dir(),
+        db_password=PASSWORD,
+        bind_label=bind_label,
+        platform_id=lambda: platform_id,
+    )
+    actual = composegen.install_id(server_dir, platform_id=lambda: platform_id)
+    wanted = linux_install_id(COA)
+    return {
+        composegen.BASE_FILE: plan.base.replace(actual, wanted),
+        composegen.OVERRIDE_FILE: plan.override.replace(actual, wanted),
+        composegen.BUILD_FILE: plan.build.replace(actual, wanted),
+    }
+
+
+def write_coa_snapshots() -> None:
+    for folder_name, label in COA_LABELS.items():
+        folder = COA_SNAPSHOT_ROOT / folder_name
+        folder.mkdir(parents=True, exist_ok=True)
+        for name, text in coa_rendered(label).items():
+            (folder / name).write_text(text, encoding="utf-8", newline="\n")

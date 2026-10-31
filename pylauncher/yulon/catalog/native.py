@@ -15513,8 +15513,8 @@ class StagedInstaller:
         """T219: the room the volume takes, when this repair is the one that adds it; else 0."""
         if not world_data.declares(fresh) or world_data.declares(text):
             return 0.0
-        trinitycore = self._native().trinitycore
-        return (trinitycore.world_data_gb or 0.0) if trinitycore is not None else 0.0
+        block = composegen.world_data_block(self.entry)
+        return (block.world_data_gb or 0.0) if block is not None else 0.0
 
     def _conf_edits(
         self, server_dir: Path, text: str

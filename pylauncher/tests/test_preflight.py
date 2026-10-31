@@ -2438,6 +2438,22 @@ def test_no_other_game_on_windows_is_asked_for_the_volumes_room(game: str) -> No
     assert verdict(report, "Docker's disk") != "refuse"
 
 
+def test_a_windows_coa_needs_room_for_its_map_data_volume_on_dockers_disk() -> None:
+    """T835: the CoA world's map-data copy is 6.5 GB on Docker's disk at its first start, so
+    Windows is refused on a disk that would pass Linux, where the world reads `data/` itself."""
+    coa = load_catalog().get("wow-coa")
+    extra = preflight.world_data_gb(coa, "windows")
+    assert extra == 6.5
+    assert preflight.world_data_gb(coa, "linux") == 0.0
+    native = coa.install.native
+    assert native is not None
+    free = int((native.min_data_root_gb + extra / 2) * GIB)
+    windows = preflight.evaluate(coa, SERVER_DIR, facts(platform_id="windows", data_root_free=free))
+    assert verdict(windows, "Docker's disk") == "refuse"
+    linux = preflight.evaluate(coa, SERVER_DIR, facts(data_root_free=free))
+    assert verdict(linux, "Docker's disk") != "refuse"
+
+
 def test_a_tortoise_client_with_no_dbc_archive_is_refused_by_the_installs_own_gather(
     tmp_path: Path,
 ) -> None:

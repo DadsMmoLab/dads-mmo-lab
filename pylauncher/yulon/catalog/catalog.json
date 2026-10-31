@@ -3161,6 +3161,14 @@
                     ],
                     "default_realm_type": "coa",
                     "auth_after_world_ready": true,
+                    "world_data_dirs": [
+                        "dbc",
+                        "maps",
+                        "vmaps",
+                        "mmaps",
+                        "Cameras"
+                    ],
+                    "world_data_gb": 6.5,
                     "client_extract": {
                         "client": {
                             "required_file": "Data/patch-WB2.MPQ",

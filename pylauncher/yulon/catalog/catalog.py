@@ -602,6 +602,30 @@ class AzerothCoreData(_Strict):
             "server starts. None: the entry has no extract stage and behaves as before."
         ),
     )
+    world_data_dirs: tuple[Annotated[str, Field(pattern=r"^[A-Za-z0-9_]+$")], ...] = Field(
+        default=(),
+        description=(
+            "T835: the folders under `data/` the world server opens, which on Windows are copied "
+            "into the install's `world-data` volume before every start and read from there "
+            "instead of over Docker Desktop's file share (T219's machinery, "
+            "`TrinityCoreData.world_data_dirs`). Read off the CoA pin: `World.cpp` DataDir + "
+            "`dbc/`, `maps/`, `vmaps`, `mmaps`, `Cameras`; `Buildings` is the extractor's. Only "
+            "with `client_extract`: an entry without one (WotLK, Unbound) keeps its client data "
+            "in its own `client-data` volume. Empty: the world binds `data/` on every platform. "
+            "Linux, a WSL-distro install and macOS always bind it."
+        ),
+    )
+    world_data_gb: float | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "T835: what the `world-data` volume adds to Docker's disk on Windows; preflight adds "
+            "it to the Docker's-disk floors there and nowhere else. Required exactly when "
+            "`world_data_dirs` names any. CoA's 6.5: maps 0.51 + vmaps 0.94 + dbc 0.77 + "
+            "Cameras ~0 + mmaps ~3.0 GB (the ~/coa-work/data sizes and the 6.6 GB yulon-ubuntu2 "
+            "folder), plus 1 GB for a folder copied beside its old copy until it is swapped in."
+        ),
+    )
     world_bootstrap_service: str | None = Field(
         default=None,
         min_length=1,
@@ -688,6 +712,32 @@ class AzerothCoreData(_Strict):
                     f"realm type {realm.id!r} repeats world_env keys {repeated}: one key "
                     "has one owner, the block's or the type's, never both"
                 )
+        return self
+
+    @field_validator("world_data_dirs")
+    @classmethod
+    def _each_world_folder_once(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        twice = sorted({name for name in value if value.count(name) > 1})
+        if twice:
+            raise ValueError(f"world_data_dirs names {twice} more than once")
+        return value
+
+    @model_validator(mode="after")
+    def _world_data_needs_an_extract_and_a_size(self) -> AzerothCoreData:
+        if self.world_data_dirs and self.client_extract is None:
+            raise ValueError(
+                "world_data_dirs names folders the extract stage makes, so it needs "
+                "client_extract; an entry without one keeps its client data in its own volume"
+            )
+        if self.world_data_dirs and self.world_data_gb is None:
+            raise ValueError(
+                "world_data_dirs names folders to copy into a volume on Windows, so "
+                "world_data_gb must say how much room that copy takes on Docker's disk"
+            )
+        if self.world_data_gb is not None and not self.world_data_dirs:
+            raise ValueError(
+                "world_data_gb is the room the world-data copy takes, so it needs world_data_dirs"
+            )
         return self
 
 
