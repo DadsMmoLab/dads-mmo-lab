@@ -96,9 +96,9 @@ def test_coa_ports_collide_with_no_other_entry() -> None:
         parse_catalog(data)
 
 
-def test_it_installs_on_linux_only_with_the_coa_floors() -> None:
+def test_it_installs_on_linux_and_windows_with_the_coa_floors() -> None:
     entry = coa()
-    assert entry.install.platforms == ("linux",)
+    assert entry.install.platforms == ("linux", "windows")
     native = entry.install.native
     assert native is not None
     assert (native.min_ram_gb, native.warn_ram_gb) == (8, 12)
