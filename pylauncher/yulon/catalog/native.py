@@ -6084,20 +6084,20 @@ INSTALL_WORLD_NOT_STOPPED = (
 """Said when stopping the failed install's world itself failed (T841)."""
 
 KILLED_LIKELY = (
-    " Its last lines are ordinary ones with no error in them, which is what a world server killed "
-    "from outside looks like: most often the computer ran out of memory."
+    " Its last lines are ordinary ones with no error in them: it either crashed without a word or "
+    "was killed from outside, and the commonest outside kill is the computer running out of memory."
 )
 """The killed-from-outside reading of dying words that hold no crash text (T841)."""
 
 KILLED_IF_ORDINARY = (
-    " If that log ends on ordinary lines with no error in them, the world server was most likely "
-    "killed from outside: most often the computer ran out of memory."
+    " If that log ends on ordinary lines with no error in them, the world server either crashed "
+    "without a word or was killed from outside, most often because the computer ran out of memory."
 )
 """`KILLED_LIKELY` for a run whose dying words are not in reach (T841)."""
 
 KILLED_CHECK_LINUX = (
-    " To check, run this in a terminal before you restart the computer; a line about memory "
-    "running out confirms it:\n"
+    " To check for memory, run this in a terminal before you restart the computer; a line about "
+    "memory running out confirms it, and no line means it was a crash instead:\n"
     'journalctl -k | grep -i -E "out of memory|oom"\n'
     "If it does, close other programs or give the computer more memory or swap, then try again."
 )
@@ -6862,9 +6862,10 @@ _CRASH_TEXT = re.compile(
 
 A kill from outside leaves no such line: the handler a core installs for a
 segfault never runs under SIGKILL, so the log just stops between two ordinary
-lines. The patterns are the words the cores in the catalog actually print
-(`Received SIGSEGV`, `terminate called after throwing`, `+0x...` frames), which
-is what makes "no crash text" a reading rather than a guess.
+lines. Only the Tortoise mangosd is measured printing a crash handler line
+(`Received SIGSEGV` and `+0x...` frames); a PID-1 core with no handler dies of
+a segfault just as silently (extract.py's measurement), so the sentences say
+"crashed without a word or killed from outside", never "killed" alone (T841 review).
 """
 
 
