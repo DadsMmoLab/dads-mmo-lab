@@ -2343,13 +2343,16 @@ def _listing_sites(root: Path) -> set[tuple[str, str]]:
 
 _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
     ("catalog/families/azerothcore.py", "_move_clone_into"): (
-        "T830 fix round 1 (H1). Lists ONLY the sibling staging folder this press's own "
-        "`clone-core` just cloned into (`<server folder>.yulon-clone`), to move its entries "
-        "into the server folder whose start over marker and ownership record must survive. It "
-        "decides where those entries go, never whether the app may write into somebody's "
-        "folder: the folder it writes into is the one this install owns, and a name already "
-        "there is left exactly as it is (the clone's copy is dropped with the staging folder). "
-        "An unreadable staging folder raises, which fails the install rather than guessing"
+        "T830 fix round 1 (H1), round 2 (R2). Lists ONLY the sibling staging folder this "
+        "press's own `clone-core` just cloned into -- `<server folder>.yulon-clone-<8 hex>`, "
+        "made with `mkdir` and marked `.yulon-staging` with this server folder's resolved path "
+        "and this reset's id (`start_over.prepare_staging()`), so it is a folder Yu'lon made "
+        "and nobody else's -- to move its entries into the server folder whose start over "
+        "marker and ownership record must survive. It decides where those entries go, never "
+        "whether the app may write into somebody's folder: the folder it writes into is the "
+        "one this install owns, and a name already there is left exactly as it is (the clone's "
+        "copy is dropped with the staging folder, as is its own marker). An unreadable staging "
+        "folder raises, which fails the install rather than guessing"
     ),
     ("selfupdate/layout.py", "is_empty_work_dir"): (
         "T90 plan 3, cold review 2. Lists ONE of this app's own working directories -- a name "

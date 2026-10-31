@@ -35,9 +35,12 @@ the plain install:
    but those three files, and the bring-in's record is still there.
 6. **Set aside, then installed.** Only then does the bring-in's record move, to a name nobody
    has, in the folder of kept backups beside the server folder (never inside it: the plain
-   install's clone empties the server folder). The reset's record STAYS, as the durable marker
-   an install that never wrote its ownership record is still recognised by, and the plain
-   install runs inside the same reservation.
+   install's clone empties the server folder). The record names the archive before anything is
+   touched (`set_aside_to`), so a death between writing the archive and removing the source is
+   finished by the next press rather than stranding the folder with no bring-in record and no
+   finished step. The reset's record STAYS, as the durable marker an install that never wrote
+   its ownership record is still recognised by, and the plain install runs inside the same
+   reservation.
 
 Every step is recorded in `RESET_FILE` when it is done, so a reset that stopped part-way
 (a crash, a refusal, Stop) is carried on by the next Install press and never repeats its copy.
@@ -50,7 +53,12 @@ exactly as it was. Every failure after removal began keeps the bring-in's record
 the folder is never mistaken for a plain install that finished. The marker goes only once the
 plain install has written an ownership record that survives its first clone (T830 H1): a clone
 made while it is there lands beside the folder and is moved in, so a death at any point in
-that clone leaves a folder Install can carry on rather than one nothing accepts.
+that clone leaves a folder Install can carry on rather than one nothing accepts. That clone
+lands in a folder Yu'lon makes beside the server folder and marks as its own
+(`prepare_staging`, T830 R2: `<server folder>.yulon-clone-<8 hex>` holding `.yulon-staging`
+with this folder's resolved path and this reset's id, recorded in the reset record); it is
+emptied or removed only while that marker matches, and a folder at a recorded path without it
+is refused by name, never touched.
 """
 
 from __future__ import annotations
@@ -59,6 +67,7 @@ import contextlib
 import hashlib
 import json
 import os
+import secrets
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
@@ -85,6 +94,17 @@ MOVE_IN_FILE = move_server.MOVE_IN_FILE
 
 SET_ASIDE_PREFIX = ".yulon-move-in.set-aside-"
 """The bring-in's record, set aside: `<prefix><UTC stamp>[-n].json`, never onto another file."""
+
+STAGING_MARKER = ".yulon-staging"
+"""Inside a folder `clone-core` clones into beside the server folder: whose folder it is.
+
+It names this server folder's resolved path and the id of the reset that made the folder, and
+is the only thing that makes the folder removable (T830 R2): a folder at the recorded path
+without a matching marker is not Yu'lon's to empty or delete.
+"""
+
+STAGING_SUFFIX = ".yulon-clone-"
+"""The staging folder is `<server folder name>` + this + eight random hex digits."""
 
 KEPT_IN_THE_FOLDER = (MOVE_IN_FILE, RESET_FILE, docker.FOLDER_ID_FILE)
 """What the reset leaves in the server folder until its last step: the two records it works from
@@ -164,6 +184,22 @@ def damaged_copy(path: object) -> str:
     )
 
 
+def not_yulons_folder(path: object) -> str:
+    """A folder at a recorded staging path that is not the one this reset made (T830 R2)."""
+    return (
+        f"Yu'lon will not remove {path}: it is not a folder Yu'lon made. Move or rename it, "
+        "then press Install again."
+    )
+
+
+def staging_unmade(server_dir: object, why: object) -> str:
+    """The staging folder for the clone could not be made or recorded (T830 R2)."""
+    return (
+        f"Yu'lon could not make a folder beside {server_dir} to clone this server into ({why}), "
+        "so the folder was not touched. Press Install again to finish it."
+    )
+
+
 def _sha256(path: Path) -> str:
     """The whole file's SHA-256, read in chunks: a dump is far too large to read at once."""
     digest = hashlib.sha256()
@@ -171,6 +207,40 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _is_move_in_record(path: Path) -> bool:
+    """Whether `path` holds what `move_server.read_marker()` would take as a bring-in record.
+
+    The same question, asked of a file rather than a server folder: a JSON object naming its
+    package. A set-aside archive that answers yes is the bring-in's record, written whole.
+    """
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(parsed, dict) and isinstance(parsed.get("package"), str)
+
+
+def _write_whole(target: Path, data: bytes) -> None:
+    """`target`, created exclusively with `data`, mode 0600, fsynced (T830 R1's archive).
+
+    A file at a name this reset recorded that is not a bring-in record is this reset's own
+    write cut off (it took the name when nothing was there): removed and written again. One
+    that is a record is never replaced, and one taken in between is a `FileExistsError` rather
+    than an overwrite.
+    """
+    if os.path.lexists(target) and not _is_move_in_record(target):
+        target.unlink()
+    fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+    except BaseException:
+        target.unlink(missing_ok=True)
+        raise
 
 
 class StartOverError(MoveError):
@@ -222,6 +292,9 @@ class _Reset:
     server_dir: Path
     package: str
     started_at: str
+    id: str = ""
+    """This reset's own id, written with the record: what a staging folder's marker names, so a
+    folder left beside the server folder is only ever emptied by the reset that made it."""
     done: list[str] = field(default_factory=list)
     projects: list[str] = field(default_factory=list)
     copies: list[_Copy] = field(default_factory=list)
@@ -231,6 +304,14 @@ class _Reset:
     """Where the copy step put its dumps, for the refusal when no dump names a missing schema."""
     kept: str | None = None
     set_aside: str | None = None
+    set_aside_to: str | None = None
+    """The archive `_set_aside()` is about to write, saved before the source is touched.
+
+    Written ahead so a death between writing the archive and removing the bring-in's record
+    is finished by the next press instead of leaving a folder with neither (T830 R1)."""
+    staging: str | None = None
+    """The folder beside the server folder `clone-core` clones into, recorded before it clones
+    (T830 R2), so a resumed press reuses the one this reset made."""
     removing: bool = False
     """Set before the first thing is removed: from then on a failure keeps both records."""
 
@@ -257,11 +338,15 @@ class _Reset:
             for raw in (raw_copies if isinstance(raw_copies, list) else [])
             if (copy := _Copy.read(raw)) is not None
         ]
-        kept, aside, copies_dir = body.get("kept"), body.get("set_aside"), body.get("copies_dir")
+        kept, aside = body.get("kept"), body.get("set_aside")
+        copies_dir = body.get("copies_dir")
+        ahead, staging = body.get("set_aside_to"), body.get("staging")
+        ident = body.get("id")
         return cls(
             server_dir=server_dir,
             package=body["package"],
             started_at=str(body.get("started_at") or ""),
+            id=ident if isinstance(ident, str) else "",
             done=strings("done"),
             projects=strings("projects"),
             copies=copies,
@@ -269,6 +354,8 @@ class _Reset:
             copies_dir=copies_dir if isinstance(copies_dir, str) else None,
             kept=kept if isinstance(kept, str) else None,
             set_aside=aside if isinstance(aside, str) else None,
+            set_aside_to=ahead if isinstance(ahead, str) else None,
+            staging=staging if isinstance(staging, str) else None,
             removing=bool(body.get("removing")),
         )
 
@@ -278,6 +365,7 @@ class _Reset:
             "version": 1,
             "package": self.package,
             "started_at": self.started_at,
+            "id": self.id,
             "done": self.done,
             "projects": self.projects,
             "copies": [copy.saved() for copy in self.copies],
@@ -285,6 +373,8 @@ class _Reset:
             "copies_dir": self.copies_dir,
             "kept": self.kept,
             "set_aside": self.set_aside,
+            "set_aside_to": self.set_aside_to,
+            "staging": self.staging,
             "removing": self.removing,
         }
         target = self.server_dir / RESET_FILE
@@ -444,7 +534,12 @@ class StartOver:
                     raise StartOverError(RECORD_CHANGED)
                 self._refuse_a_running_press(marker)
             elif "set-aside" not in existing.done:
-                raise StartOverError(RECORD_GONE)
+                self._finish_set_aside(existing)
+            if not existing.id:
+                # A record written before the reset had an id (T830 R2): one now, so the
+                # staging folder it may make from here on is provably this reset's.
+                existing.id = secrets.token_hex(8)
+                existing.save()
             return existing, True
         if not there:
             raise StartOverError(NOTHING_TO_START_OVER)
@@ -462,6 +557,7 @@ class StartOver:
             server_dir=server_dir,
             package=str(marker["package"]),
             started_at=self._now().isoformat(),
+            id=secrets.token_hex(8),
         )
         reset.save()
         # A bring-in that passed its own look before the record above existed has saved its
@@ -480,6 +576,20 @@ class StartOver:
         said = move_server.press_running(marker.get("pressing"), self.server_dir)
         if said is not None:
             raise StartOverError(said)
+
+    def _finish_set_aside(self, reset: _Reset) -> None:
+        """A reset whose bring-in record is gone: the step is done if its archive is (T830 R1).
+
+        The record named the archive before anything was touched (`set_aside_to`). One there
+        that the bring-in's own reader would take is that archive, so the death was after the
+        source was removed and the step only wants recording. Nothing else can prove the
+        record was kept: the folder is refused as it was before (`RECORD_GONE`).
+        """
+        target = Path(reset.set_aside_to) if reset.set_aside_to else None
+        if target is None or not _is_move_in_record(target):
+            raise StartOverError(RECORD_GONE)
+        reset.set_aside = str(target)
+        reset.finished("set-aside")
 
     def _check(self, held: object, cancel: Any) -> None:
         """Between two steps: Stop pressed, or the reservation lost. Said with what is left."""
@@ -700,13 +810,32 @@ class StartOver:
         return problems
 
     def _set_aside(self, reset: _Reset) -> Path:
-        """The bring-in's record, moved to a new name beside the server folder; never over a file.
+        """The bring-in's record, archived at the name the record named first (T830 R1).
 
-        Created with O_EXCL under a name with the time in it, `-2`, `-3`... when that is taken,
-        written whole, and only then is the record in the server folder removed.
+        The order is the fix: `set_aside_to` is saved (atomically, with the record), then the
+        archive is written whole, then the record in the server folder is removed, and only
+        then is the step recorded. A death between any two is finished by the next press:
+        with the source gone, `_begin()` records the step when the archive is whole; with the
+        source still there, this method writes over a read that is absent or not a record.
         """
         source = self.server_dir / MOVE_IN_FILE
+        target = Path(reset.set_aside_to) if reset.set_aside_to else self._plan_set_aside(reset)
         data = source.read_bytes()
+        if not _is_move_in_record(target):
+            # Not the archive: either a death after the name was chosen and before it was
+            # written, or the write was cut off. The archive; when it is whole, wins.
+            _write_whole(target, data)
+        source.unlink()
+        return target
+
+    def _plan_set_aside(self, reset: _Reset) -> Path:
+        """The archive's name, chosen and recorded before the source is touched (T830 R1).
+
+        A name nobody has: the folder of kept backups beside the server folder (made when the
+        server has none), the UTC time in the name, `-2`, `-3`... when that is taken. The
+        write itself creates the file exclusively, so a name taken in between is a failure
+        rather than an overwrite.
+        """
         folder = Path(reset.kept) if reset.kept else None
         if folder is None or not folder.is_dir():
             folder = _new_kept_folder(self.server_dir)
@@ -716,21 +845,11 @@ class StartOver:
         while True:
             suffix = "" if number == 1 else f"-{number}"
             target = folder / f"{SET_ASIDE_PREFIX}{stamp}{suffix}.json"
-            try:
-                fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            except FileExistsError:
-                number += 1
-                continue
-            break
-        try:
-            with os.fdopen(fd, "wb") as fh:
-                fh.write(data)
-                fh.flush()
-                os.fsync(fh.fileno())
-        except BaseException:
-            target.unlink(missing_ok=True)
-            raise
-        source.unlink()
+            if not os.path.lexists(target):
+                break
+            number += 1
+        reset.set_aside_to = str(target)
+        reset.save()
         return target
 
 
@@ -743,6 +862,125 @@ def _new_kept_folder(server_dir: Path) -> Path:
         except FileExistsError:
             continue
         return folder
+
+
+# -------------------------------------------------------------------- the clone's staging folder
+
+
+def _same_folder(named: str, server_dir: Path) -> bool:
+    """Whether `named` (as a marker recorded it) is `server_dir`, symlinks and case aside."""
+    return os.path.normcase(os.path.realpath(named)) == os.path.normcase(
+        os.path.realpath(server_dir)
+    )
+
+
+def _staged_here(folder: Path, server_dir: Path, reset_id: str) -> bool:
+    """Whether `folder` is the staging folder THIS reset made, by its marker and nothing else.
+
+    An absent or unreadable marker, one naming another server folder, or one naming another
+    reset all answer no: the folder is then somebody's and is never emptied or removed
+    (T830 R2).
+    """
+    try:
+        body = json.loads((folder / STAGING_MARKER).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(body, dict):
+        return False
+    here, ident = body.get("server_dir"), body.get("reset_id")
+    return (
+        isinstance(here, str)
+        and isinstance(ident, str)
+        and bool(reset_id)
+        and ident == reset_id
+        and _same_folder(here, server_dir)
+    )
+
+
+def _write_staging_marker(folder: Path, server_dir: Path, reset_id: str) -> None:
+    """`.yulon-staging` in `folder`, atomic: this server folder's path and this reset's id."""
+    body = {"server_dir": str(server_dir.resolve()), "reset_id": reset_id}
+    target = folder / STAGING_MARKER
+    partial = target.with_name(target.name + ".partial")
+    partial.write_text(json.dumps(body, indent=2) + "\n", encoding="utf-8")
+    os.replace(partial, target)
+
+
+def _new_staging(server_dir: Path) -> Path:
+    """A folder beside `server_dir` under a name nobody has: eight random hex digits."""
+    while True:
+        folder = server_dir.with_name(f"{server_dir.name}{STAGING_SUFFIX}{secrets.token_hex(4)}")
+        try:
+            folder.mkdir(mode=0o700)
+        except FileExistsError:
+            continue
+        return folder
+
+
+def prepare_staging(server_dir: Path) -> tuple[Path, str]:
+    """An empty folder beside `server_dir` for `clone-core`, and the reset id it belongs to.
+
+    T830 R2: the checkout of a folder mid-start-over lands beside it so the marker and the
+    ownership record survive. The folder is one Yu'lon makes -- `<server folder>` + `-` and
+    eight random hex digits, `mkdir` so it cannot be an existing folder -- and it holds
+    `.yulon-staging` naming this server folder and this reset before anything is cloned into
+    it. Its path is recorded in the reset record, so a resumed press reuses the folder it
+    made (emptied first: it is this reset's) rather than piling up folders beside the server.
+
+    Raises:
+        StartOverError: the reset record cannot be read, or a folder at the recorded path is
+            not the one this reset made -- refused by name and never touched.
+    """
+    server_dir = Path(server_dir)
+    reset = _Reset.read(server_dir)
+    if reset is None:
+        raise StartOverError(reset_unreadable(server_dir / RESET_FILE))
+    try:
+        return _prepare_staging(server_dir, reset), reset.id
+    except OSError as exc:
+        raise StartOverError(staging_unmade(server_dir, exc)) from exc
+
+
+def _prepare_staging(server_dir: Path, reset: _Reset) -> Path:
+    if not reset.id:
+        reset.id = secrets.token_hex(8)
+        reset.save()
+    recorded = Path(reset.staging) if reset.staging else None
+    if recorded is None:
+        folder = _new_staging(server_dir)
+        try:
+            _write_staging_marker(folder, server_dir, reset.id)
+            reset.staging = str(folder)
+            reset.save()
+        except OSError:
+            # Ours, made a moment ago and named nowhere yet: a folder no record points at is
+            # one nothing would ever take away.
+            with contextlib.suppress(OSError):
+                rmtree.remove_tree(folder)
+            raise
+        return folder
+    if os.path.lexists(recorded):
+        if not _staged_here(recorded, server_dir, reset.id):
+            raise StartOverError(not_yulons_folder(recorded))
+        # The marker says it is this reset's to empty: a clone that died there leaves a
+        # half checkout the seam would refuse to clone into.
+        rmtree.remove_tree(recorded)
+    recorded.mkdir(mode=0o700)
+    _write_staging_marker(recorded, server_dir, reset.id)
+    return recorded
+
+
+def remove_staging(folder: Path, server_dir: Path, reset_id: str) -> bool:
+    """Remove `folder` only while its marker says this server's reset made it (T830 R2).
+
+    Answers whether it was removed. A folder that is not this reset's is left exactly as it
+    is, contents and all: that is the whole of the ownership rule (the finally of a failed
+    move goes through here too).
+    """
+    if not _staged_here(folder, server_dir, reset_id):
+        return False
+    rmtree.remove_tree(folder)
+    return True
 
 
 # ------------------------------------------------------------------------------ the real seams
@@ -894,5 +1132,9 @@ __all__ = [
     "app_seams",
     "damaged_copy",
     "empty_the_folder",
+    "not_yulons_folder",
+    "prepare_staging",
+    "remove_staging",
     "running_load_refusal",
+    "staging_unmade",
 ]

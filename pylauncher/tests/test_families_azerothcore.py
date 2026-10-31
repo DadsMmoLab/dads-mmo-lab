@@ -46,7 +46,7 @@ from tests.support_native import (
     engine,
     install,
 )
-from yulon import docker, git, module_answers, platform, resources, rmtree, runner
+from yulon import docker, git, module_answers, platform, resources, rmtree, runner, start_over
 from yulon.catalog import composegen, native, preflight
 from yulon.catalog import families as family_registry
 from yulon.catalog import installer as installer_module
@@ -2572,6 +2572,155 @@ def test_a_clone_core_death_keeps_a_start_over_mark_and_the_claim(tmp_path: Path
         "Install would refuse the folder it was building"
     )
     assert not (server_dir / ".git").exists(), "the fixture did not die before the move"
+
+
+def test_a_staging_folder_that_is_not_yulons_is_refused_by_name(tmp_path: Path) -> None:
+    """R2: a folder at the path the reset recorded, marked as ANOTHER server's, is not touched.
+
+    The marker is the whole ownership rule: the folder it names is the player's, so the press
+    refuses with one sentence instead of emptying or deleting it.
+
+    Mutation: `prepare_staging()` reusing whatever is at the recorded path -> `my-notes.txt` is
+    gone.
+    """
+    server_dir = tmp_path / "wow"
+    server_dir.mkdir()
+    theirs = tmp_path / "wow.yulon-clone-0123abcd"
+    theirs.mkdir()
+    (theirs / "my-notes.txt").write_bytes(b"mine")
+    (theirs / start_over.STAGING_MARKER).write_text(
+        json.dumps(
+            {"server_dir": str((tmp_path / "another-server").resolve()), "reset_id": "0f0f0f0f"}
+        ),
+        encoding="utf-8",
+    )
+    (server_dir / native.RESET_FILE).write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "package": "abc",
+                "done": [],
+                "id": "0f0f0f0f",
+                "staging": str(theirs),
+            }
+        ),
+        encoding="utf-8",
+    )
+    url = "https://github.com/mod-playerbots/azerothcore-wotlk.git"
+
+    def clone(spec: git.CloneSpec) -> None:
+        pytest.fail(f"cloned into {spec.dest}")
+
+    with pytest.raises(InstallerError) as refused:
+        install(Recorder(), server_dir, clone=clone, remote_url=lambda _dest: url)
+    assert str(refused.value) == start_over.not_yulons_folder(theirs)
+    notes = theirs / "my-notes.txt"
+    assert notes.read_bytes() == b"mine", "a folder Yu'lon did not make was used"
+
+
+def test_a_failed_move_removes_only_the_staging_folder_yulon_made(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2: the finally after a failed move goes through the same ownership check.
+
+    The folder this reset made is removed; a folder at the old fixed name and one under a
+    staging-shaped name without a marker are left exactly as they are.
+
+    Mutation: the finally deleting whatever is at `staged` -> the player's notes are gone.
+    """
+    server_dir = tmp_path / "wow"
+    server_dir.mkdir()
+    owned = tmp_path / "wow.yulon-clone-0123abcd"
+    owned.mkdir()
+    (owned / start_over.STAGING_MARKER).write_text(
+        json.dumps({"server_dir": str(server_dir.resolve()), "reset_id": "0f0f0f0f"}),
+        encoding="utf-8",
+    )
+    (owned / "half-a-checkout").write_bytes(b"x")
+    theirs = tmp_path / "wow.yulon-clone"
+    theirs.mkdir()
+    (theirs / "my-notes.txt").write_bytes(b"mine")
+    stranger = tmp_path / "wow.yulon-clone-deadbeef"
+    stranger.mkdir()
+    (stranger / "theirs").write_bytes(b"y")
+
+    def refuse(*args: object) -> None:
+        raise OSError("the disk said no")
+
+    monkeypatch.setattr(azerothcore.os, "replace", refuse)
+    with pytest.raises(InstallerError):
+        azerothcore._move_clone_into(owned, server_dir, "0f0f0f0f")
+    with pytest.raises(InstallerError):
+        azerothcore._move_clone_into(stranger, server_dir, "0f0f0f0f")
+    monkeypatch.undo()
+    assert not owned.exists(), "the folder this reset made was not removed"
+    notes = theirs / "my-notes.txt"
+    assert notes.read_bytes() == b"mine", "a folder Yu'lon did not make was used"
+    assert (stranger / "theirs").read_bytes() == b"y", "an unmarked folder was removed"
+
+
+def test_a_resumed_clone_reuses_the_staging_folder_it_recorded(tmp_path: Path) -> None:
+    """R2: the recording is what lets a resumed press find its own folder instead of a second.
+
+    Mutation: `staging` not recorded (a new folder every press) -> the second clone lands
+    somewhere else and the first folder is left beside the server forever.
+    """
+    server_dir = tmp_path / "wow"
+    server_dir.mkdir()
+    (server_dir / native.RESET_FILE).write_text(
+        json.dumps({"version": 1, "package": "abc", "done": [], "id": "0f0f0f0f"}),
+        encoding="utf-8",
+    )
+    url = "https://github.com/mod-playerbots/azerothcore-wotlk.git"
+    rec = Recorder()
+    first: list[Path] = []
+
+    def clone_then_die(spec: git.CloneSpec) -> None:
+        first.append(spec.dest)
+        (spec.dest / ".git").mkdir(parents=True, exist_ok=True)
+        raise InstallerError("killed mid-clone")
+
+    with pytest.raises(InstallerError):
+        install(rec, server_dir, clone=clone_then_die, remote_url=lambda _dest: url)
+    staged = first[0]
+    assert staged.parent == tmp_path, staged
+    assert staged.name.startswith("wow" + start_over.STAGING_SUFFIX), staged
+    record = json.loads((server_dir / native.RESET_FILE).read_text(encoding="utf-8"))
+    assert record["staging"] == str(staged)
+    assert json.loads((staged / start_over.STAGING_MARKER).read_text(encoding="utf-8")) == {
+        "server_dir": str(server_dir.resolve()),
+        "reset_id": record["id"],
+    }
+    # The half checkout the death left: the resumed press empties it and clones in it again.
+    (staged / "half-a-checkout").write_bytes(b"x")
+    real_unmodified = rec.file_unmodified
+
+    def unmodified(dest: Path, relative_path: str) -> bool | None:
+        # The checkout arrives in the server folder through `_move_clone_into()`.
+        if (dest / relative_path) in rec.tracked:
+            return real_unmodified(dest, relative_path)
+        path = dest / relative_path
+        return (
+            relative_path == composegen.BASE_FILE
+            and path.is_file()
+            and path.read_text(encoding="utf-8") == UPSTREAM_COMPOSE
+        )
+
+    rec.file_unmodified = unmodified  # type: ignore[method-assign]
+    again: list[Path] = []
+
+    def clone(spec: git.CloneSpec) -> None:
+        again.append(spec.dest)
+        (spec.dest / ".git").mkdir(parents=True, exist_ok=True)
+        (spec.dest / composegen.BASE_FILE).write_text(UPSTREAM_COMPOSE, encoding="utf-8")
+
+    install(rec, server_dir, clone=clone, remote_url=lambda _dest: url)
+    # The core's clone, and only the core's, is the one that lands beside the folder.
+    beside = [path for path in again if path.parent == tmp_path]
+    assert beside == [staged], "the resumed press made a new staging folder"
+    assert not (staged / "half-a-checkout").exists(), "the recorded folder was not emptied first"
+    assert not staged.exists(), "the staging folder outlived the move"
+    assert (server_dir / ".git").is_dir()
 
 
 def test_a_claimed_folder_whose_leftovers_are_not_a_checkout_is_still_refused(

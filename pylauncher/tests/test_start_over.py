@@ -526,6 +526,182 @@ def test_a_reset_that_stopped_after_setting_the_record_aside_only_finishes(
     assert len(list(_kept_folder(mv).glob(f"{start_over.SET_ASIDE_PREFIX}*"))) == 1
 
 
+def test_a_users_own_clone_folder_survives_a_start_over_and_the_install(
+    cut_off: tuple[Move, Volumes, Plain],
+) -> None:
+    """R2: `<server folder>.yulon-clone` was a fixed name Yu'lon never made, and the old clone
+    step deleted whatever was there. It is never touched now, and the clone lands in a folder
+    Yu'lon made and marked.
+
+    Mutation: the staging name back to the fixed one (or the removal without the marker check)
+    -> `my-notes.txt` is gone.
+    """
+    mv, vols, plain = cut_off
+    server_dir = mv.target.server_dir
+    theirs = server_dir.with_name(server_dir.name + ".yulon-clone")
+    theirs.mkdir()
+    (theirs / "my-notes.txt").write_bytes(b"mine")
+
+    class Killed(BaseException):
+        pass
+
+    class Dying(Plain):
+        def run(self, options=None, *, cancel=None, ask=None):  # type: ignore[no-untyped-def]
+            self.runs += 1
+            raise Killed  # the plain install stopped; its marker is still there
+
+    with pytest.raises(Killed):
+        _press(mv, vols, Dying(vols))
+    assert (server_dir / start_over.RESET_FILE).exists(), "the marker the install needs is gone"
+    rec = Recorder()
+    real_unmodified = rec.file_unmodified
+
+    def unmodified(dest: Path, relative_path: str) -> bool | None:
+        # The checkout arrives in the server folder through `_move_clone_into()`.
+        if (dest / relative_path) in rec.tracked:
+            return real_unmodified(dest, relative_path)
+        path = dest / relative_path
+        return (
+            relative_path == composegen.BASE_FILE
+            and path.is_file()
+            and path.read_text(encoding="utf-8") == UPSTREAM_COMPOSE
+        )
+
+    rec.file_unmodified = unmodified  # type: ignore[method-assign]
+    lines = native_install(rec, server_dir)
+    assert lines.count(native.CONTINUING_START_OVER) == 1, lines
+    assert (server_dir / native.STATE_FILE).is_file()
+    notes = theirs / "my-notes.txt"
+    assert notes.read_bytes() == b"mine", "Yu'lon removed a folder it did not make"
+    staged = [spec.dest for spec in rec.clones if spec.dest.parent == server_dir.parent]
+    assert staged and all(path != theirs for path in staged), staged
+    assert all(
+        path.name.startswith(server_dir.name + start_over.STAGING_SUFFIX) for path in staged
+    ), staged
+    assert not [path for path in staged if path.exists()], "a staging folder was left beside it"
+
+
+def test_a_death_after_the_bring_in_record_was_removed_is_carried_on(
+    cut_off: tuple[Move, Volumes, Plain],
+) -> None:
+    """R1: the archive is named in the record BEFORE the source is removed.
+
+    A death between removing `.yulon-move-in.json` and recording the step used to leave a
+    folder with no bring-in record and no finished step, which every later press refused as
+    `RECORD_GONE`. The next press now finds the archive the record named, records the step and
+    starts the plain install.
+
+    Mutation: `set_aside_to` not saved ahead (the name chosen only when writing) -> the resume
+    has no archive to point at and refuses.
+    """
+    mv, vols, plain = cut_off
+    server_dir = mv.target.server_dir
+    record_before = (server_dir / move_server.MOVE_IN_FILE).read_bytes()
+    real_finished = start_over._Reset.finished
+
+    class Killed(BaseException):
+        pass
+
+    def die_at_set_aside(self: start_over._Reset, step: str) -> None:
+        if step == "set-aside":
+            raise Killed  # the record is saved with the step; the death is just before that
+        real_finished(self, step)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(start_over._Reset, "finished", die_at_set_aside)
+        with pytest.raises(Killed):
+            _press(mv, vols, plain)
+    assert not (server_dir / move_server.MOVE_IN_FILE).exists(), "the crash is after the removal"
+    reset = json.loads((server_dir / start_over.RESET_FILE).read_text(encoding="utf-8"))
+    assert "set-aside" not in reset["done"]
+    archive = Path(reset["set_aside_to"])
+    assert archive.read_bytes() == record_before
+    assert plain.runs == 0
+    lines = _press(mv, vols, plain, expected=None)
+    assert lines[0] == "Carrying on starting this folder over with a plain install."
+    assert plain.runs == 1 and plain.started_on == {s: "fresh" for s in SCHEMAS}
+    assert not (server_dir / start_over.RESET_FILE).exists()
+    assert [p.name for p in _kept_folder(mv).glob(f"{start_over.SET_ASIDE_PREFIX}*")] == [
+        archive.name
+    ], "a second archive was made"
+
+
+def test_a_death_between_the_archive_and_the_source_removal_only_finishes_the_move(
+    cut_off: tuple[Move, Volumes, Plain],
+) -> None:
+    """R1: with the archive written and the source still there, the archive wins.
+
+    The archive already holds the record's bytes; the next press removes the source and
+    records the step, without writing a second archive or reading a name nobody wrote.
+
+    Mutation: `_set_aside()` writing the archive again from the source (no such check) -> the
+    archive is replaced under a second name.
+    """
+    mv, vols, plain = cut_off
+    server_dir = mv.target.server_dir
+    record_before = (server_dir / move_server.MOVE_IN_FILE).read_bytes()
+    real_write = start_over._write_whole
+
+    class Killed(BaseException):
+        pass
+
+    def write_then_die(target: Path, data: bytes) -> None:
+        real_write(target, data)
+        raise Killed
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(start_over, "_write_whole", write_then_die)
+        with pytest.raises(Killed):
+            _press(mv, vols, plain)
+    assert (server_dir / move_server.MOVE_IN_FILE).read_bytes() == record_before
+    reset = json.loads((server_dir / start_over.RESET_FILE).read_text(encoding="utf-8"))
+    archive = Path(reset["set_aside_to"])
+    assert archive.read_bytes() == record_before and "set-aside" not in reset["done"]
+    dumps = len([e for e in mv.events if e.startswith("dump:")])
+    lines = _press(mv, vols, plain, expected=None)
+    assert plain.runs == 1 and start_over.READY in lines
+    assert not (server_dir / move_server.MOVE_IN_FILE).exists()
+    assert archive.read_bytes() == record_before
+    assert [p.name for p in _kept_folder(mv).glob(f"{start_over.SET_ASIDE_PREFIX}*")] == [
+        archive.name
+    ], "a second archive was made"
+    assert len([e for e in mv.events if e.startswith("dump:")]) == dumps, "copied twice"
+    assert not (server_dir / start_over.RESET_FILE).exists()
+
+
+def test_a_resumed_reset_whose_archive_is_gone_still_refuses(
+    cut_off: tuple[Move, Volumes, Plain],
+) -> None:
+    """R1: the archive is the only proof the bring-in's record was kept; without it, RECORD_GONE.
+
+    Mutation: `_finish_set_aside()` recording the step without looking at the archive -> a
+    reset goes on with no copy of the record it was made from.
+    """
+    mv, vols, plain = cut_off
+    server_dir = mv.target.server_dir
+    real_finished = start_over._Reset.finished
+
+    class Killed(BaseException):
+        pass
+
+    def die_at_set_aside(self: start_over._Reset, step: str) -> None:
+        if step == "set-aside":
+            raise Killed
+        real_finished(self, step)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(start_over._Reset, "finished", die_at_set_aside)
+        with pytest.raises(Killed):
+            _press(mv, vols, plain)
+    reset = json.loads((server_dir / start_over.RESET_FILE).read_text(encoding="utf-8"))
+    Path(reset["set_aside_to"]).unlink()
+    before = _snapshot(server_dir)
+    with pytest.raises(start_over.StartOverError) as refused:
+        _press(mv, vols, plain, expected=None)
+    assert str(refused.value) == start_over.RECORD_GONE
+    assert plain.runs == 0 and _snapshot(server_dir) == before
+
+
 def test_the_set_aside_record_never_overwrites_a_file(
     cut_off: tuple[Move, Volumes, Plain],
 ) -> None:
@@ -1009,6 +1185,8 @@ SENTENCES = (
     start_over.READY,
     start_over.reset_unreadable(Path("/srv/wow/.yulon-start-over.json")),
     start_over.damaged_copy(Path("/srv/wow/backups/copy.sql")),
+    start_over.not_yulons_folder(Path("/srv/wow.yulon-clone-0123abcd")),
+    start_over.staging_unmade(Path("/srv/wow"), OSError("no space left on device")),
     native.CONTINUING_START_OVER,
     move_server.START_OVER_UNFINISHED,
     move_server.STARTING_OVER_NOW,
