@@ -6064,6 +6064,51 @@ INSTALL_LEFT_RUNNING = (
 """`INSTALL_LEFT_LOADING` for a Stop inside the watch after the banner (Codex review, T247):
 the world HAD reported ready, so it is not "left to finish starting"."""
 
+WORLD_RESTARTS_ITSELF = (
+    "Docker starts it again by itself, so it may be running again now, but a world server that "
+    "stops like this usually stops again."
+)
+"""What a world that stopped after its banner will do (T841): Docker restarts it unseen."""
+
+INSTALL_WORLD_STOPPED = (
+    "Yu'lon has stopped the world server, so it does not go on starting and stopping with "
+    "nothing watching it: an install that has not finished has no Server tab yet. Fix what "
+    "stopped it, then press Install again; the steps already done are not done again."
+)
+"""Said when a failed install's world was stopped (T841): nothing watches it, so it is down."""
+
+INSTALL_WORLD_NOT_STOPPED = (
+    "Yu'lon could not stop the world server ({why}), so Docker may go on starting it again by "
+    "itself. Check that Docker is answering, then press Install again."
+)
+"""Said when stopping the failed install's world itself failed (T841)."""
+
+KILLED_LIKELY = (
+    " Its last lines are ordinary ones with no error in them, which is what a world server killed "
+    "from outside looks like: most often the computer ran out of memory."
+)
+"""The killed-from-outside reading of dying words that hold no crash text (T841)."""
+
+KILLED_IF_ORDINARY = (
+    " If that log ends on ordinary lines with no error in them, the world server was most likely "
+    "killed from outside: most often the computer ran out of memory."
+)
+"""`KILLED_LIKELY` for a run whose dying words are not in reach (T841)."""
+
+KILLED_CHECK_LINUX = (
+    " To check, run this in a terminal before you restart the computer; a line about memory "
+    "running out confirms it:\n"
+    'journalctl -k | grep -i -E "out of memory|oom"\n'
+    "If it does, close other programs or give the computer more memory or swap, then try again."
+)
+"""How a Linux player checks the kernel log for a kill for memory (T841)."""
+
+KILLED_CHECK_DESKTOP = (
+    " On Windows and macOS the servers get only the memory Docker Desktop (or WSL) is given: "
+    "give it more, or close other programs, then try again."
+)
+"""`KILLED_CHECK_LINUX` for the desktop platforms, whose memory is Docker Desktop's (T841)."""
+
 READY_WAIT_STOP_HINT = (
     '"Stop now anyway" ends this wait now and puts the build from before back at once: the new '
     "world may then be force-stopped in the middle of its load, and its database left "
@@ -6807,6 +6852,33 @@ def _missing_table_hint(words: str, entry: CatalogEntry) -> str:
     if not _MISSING_TABLE.search(words):
         return ""
     return _corrections_hint(entry, words) or MODULE_SQL_HINT
+
+
+_CRASH_TEXT = re.compile(
+    r"(?i)\bSIG[A-Z]{2,}\b|segmentation fault|core dumped|\babort|assert|terminate called|"
+    r"exception|\bfatal\b|\berror\b|backtrace|stack trace|\+0x[0-9a-f]+\)"
+)
+"""What a world server's dying words hold when it died of something it could name (T841).
+
+A kill from outside leaves no such line: the handler a core installs for a
+segfault never runs under SIGKILL, so the log just stops between two ordinary
+lines. The patterns are the words the cores in the catalog actually print
+(`Received SIGSEGV`, `terminate called after throwing`, `+0x...` frames), which
+is what makes "no crash text" a reading rather than a guess.
+"""
+
+
+def _killed_hint(words: str, platform_id: str) -> str:
+    """Name a kill from outside as the likely cause when the dying words hold no error (T841).
+
+    `KILLED_LIKELY` when there are words to read, `KILLED_IF_ORDINARY` when the
+    dying run's log is not in reach (the watch may have looked only after Docker
+    restarted it), followed by the platform's own way to check.
+    """
+    if _CRASH_TEXT.search(words):
+        return ""
+    check = KILLED_CHECK_LINUX if platform_id == "linux" else KILLED_CHECK_DESKTOP
+    return (KILLED_LIKELY if words.strip() else KILLED_IF_ORDINARY) + check
 
 
 _MISSING_TABLE_NAMED = re.compile(r"[Tt]able\s+'([^'\s]+)'\s+(?:doesn't|does not) exist")
@@ -8556,6 +8628,13 @@ class StagedInstaller:
             else:
                 yield INSTALL_LEFT_LOADING
             raise
+        except WorldStoppedAfterReadyError as exc:
+            # T841: the install never finished, so nothing in the app ever looks
+            # at this world again -- no Server tab, no badge, no verdict. Docker's
+            # `restart: unless-stopped` goes on bringing it back, which is how a
+            # real world looped unseen for hours, and came back after a restart.
+            said = yield from self._stop_the_world_a_failed_install_left(ctx)
+            raise carry_detail(exc, WorldStoppedAfterReadyError(f"{exc} {said}")) from exc
         # OUTSIDE the staged loop, and after the last stage, on purpose. Outside,
         # because everything in there is a reason to fail the install and this
         # is not one — a realm row that could not be written is a sentence, not
@@ -8580,6 +8659,54 @@ class StagedInstaller:
         logger.info(f"install of {self.entry.id} finished")
         self._clear_error(server_dir, state)
         yield f"{self.entry.name} is installed and running in {server_dir}"
+
+    def _stop_the_world_a_failed_install_left(self, ctx: StageContext) -> Generator[str, None, str]:
+        """Stop the world a failed install left restarting, and say what that means (T841).
+
+        The install was pressed, not Start: an unfinished install is never
+        remembered, so nothing in the app -- no Server tab, no realm badge, no
+        tray row, no dashboard -- ever reads this container again. Docker's
+        `restart: unless-stopped` brings it back regardless: the live failure
+        this ticket is about ran a world that reached ready, died, and looped
+        for nineteen hours (still cycling 8.5 h and 3 h later, and again after a
+        host restart), most likely killed by the OOM killer because the world
+        was never meant to keep loading bots it had no memory for. Stopping it
+        ends the loop and makes the install's own sentence true.
+
+        `rollback=True` because this stop is the app's cleanup, not the press's:
+        a Stop that landed before this point must not make it give up (the
+        `_stop_control` docstring); only "Stop now anyway" forces it.
+        `restart_ends_the_wait=True`: a run that restarts during the wait is the
+        loop, and its database updates were already applied by the run that
+        reached ready, so stopping the new run's load is safe (the T159
+        argument, applied to an install). Only the world is stopped; the
+        database and login containers are left as they are. This method never
+        raises: the install's own failure is the one the dialog shows.
+        """
+        container = self.entry.container_spec().world
+        try:
+            running = self._seams.ask_world_running(container)
+        except Exception:  # noqa: BLE001 - asked again by the stop itself
+            running = None
+        if running is False:
+            return INSTALL_WORLD_STOPPED
+        spec = self.entry.container_spec()
+        control = replace(_stop_control(ctx, rollback=True), restart_ends_the_wait=True)
+
+        def stop_it(say: docker.OutputSink) -> None:
+            self._seams.stop_world(
+                [container],
+                known=(spec,),
+                control=replace(control, say=say),
+                deadline=docker.STOP_PROCESS_DEADLINE_SECONDS,
+            )
+
+        try:
+            yield from _speaking(stop_it, control.abandon)
+        except Exception as failure:  # noqa: BLE001 - never hide the install's own failure
+            logger.warning(f"could not stop {container} after its install failed: {failure}")
+            return INSTALL_WORLD_NOT_STOPPED.format(why=str(failure) or "Docker did not answer")
+        return INSTALL_WORLD_STOPPED
 
     def _staged(
         self, stages: Sequence[Stage], ctx: StageContext, *, run: str = ""
@@ -10585,8 +10712,9 @@ class StagedInstaller:
                 kept_build = (
                     f"{exc} The build from this rebuild was KEPT and is what the containers "
                     f"are running: the compile finished and the server it made did start, so "
-                    f"there is nothing wrong with the build to undo. Fix what stopped it and "
-                    f"press Start.{also}"
+                    f"there is nothing wrong with the build to undo. Fix what stopped it; the "
+                    f"Server tab shows whether the world server is up now or keeps crashing."
+                    f"{also}"
                 )
                 self._record_error(server_dir, ctx.state, kept_build)
                 raise carry_detail(exc, WorldStoppedAfterReadyError(kept_build)) from exc
@@ -16678,12 +16806,13 @@ class StagedInstaller:
                     raise CrashedAfterStop(
                         f"{READY_CRASHED_AFTER_STOP} {logs} has the rest.{kept}{said}"
                     )
+                hint = _missing_table_hint(after.words, self.entry)
+                killed = "" if hint else _killed_hint(after.words, self._seams.platform_id())
                 raise WorldStoppedAfterReadyError(
                     f"The world server came up and then stopped. {container} printed its "
                     f"ready marker and was gone again inside "
-                    f"{_spell_seconds(READY_GRACE_SECONDS)}, so the server is not running "
-                    f"even though it started. {logs} has the rest.{kept}"
-                    f"{_missing_table_hint(after.words, self.entry)}{said}",
+                    f"{_spell_seconds(READY_GRACE_SECONDS)}. {WORLD_RESTARTS_ITSELF} {logs} "
+                    f"has the rest.{kept}{hint}{killed}{said}",
                     detail=read_it,
                 )
             now = self._seams.world_output(spec)
