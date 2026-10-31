@@ -14,6 +14,14 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ## Unreleased
 
 ### New
+
+### Fixed
+
+### Changed
+
+## v0.9.22-Public — 2026-10-31
+
+### New
 - Conquest of Azeroth installs on Windows with Docker Desktop.
 - **Install** on a folder whose bring-in did not finish offers to start over with a plain install, keeping a copy first.
 
@@ -26,12 +34,6 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A Conquest of Azeroth server extracts its map data again when its map archive changes (once after this update, up to 2 h).
 - An install whose world server starts and then stops now stops it, instead of leaving it restarting unseen.
 - Bring in on a stopped server accepts files a few updates behind, as it already did on a running one.
-
-### Changed
-
-## v0.9.22-Public — 2026-10-30
-
-### Fixed
 - An update or backup stopped by a damaged database table now names it and offers **Repair the damaged table…**.
 - **Update client** now finishes on the Conquest of Azeroth client files; it used to stop on four empty files and never record the update.
 
