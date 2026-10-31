@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import BinaryIO
 
-from yulon import database_presence, docker, git, platform, resources
+from yulon import database_presence, docker, git, platform, resources, rmtree
 from yulon.catalog import composegen, native, preflight, snapshot
 from yulon.catalog.catalog import CatalogEntry, load_catalog
 from yulon.catalog.families import extract, patch, scriptdeploy
@@ -461,6 +461,12 @@ class Recorder:
 
     on_clone: Callable[[Path], None] | None = None
     """Called with the dest after each clone — the CMaNGOS tests lay SQL fixtures with it."""
+
+    clone_wipes_leftovers: bool = False
+    """Whether `clone()` opens like both real seams, removing a destination that is not a
+    checkout (T830 M1). Off by default because a PLAIN install's destination is the server
+    folder itself, and several tests seed it before the press; the start over tests turn it on
+    so the wipe that used to take a staging folder's marker is the one being exercised."""
 
     # -- what T64's update route asks git, modelled as a machine ------------
 
@@ -954,6 +960,19 @@ class Recorder:
             # onto `rev` otherwise. A double that moved the head only when a rev
             # was asked for could not show an update happening at all, and one
             # that moved it unconditionally could not show a re-pin.
+            #
+            # And WHERE A LEFTOVER GOES, for the same reason: both real seams open
+            # by removing a destination that is not a checkout
+            # (`git.RunnerGit.clone` and `git.ContainerGit.clone`). A double that
+            # kept the leftover could not show a start over's clone landing in
+            # `<staging>/checkout` rather than in the marked folder itself (T830 M1),
+            # which is the wipe that used to take the marker. Opt-in, because a plain
+            # install's destination IS the server folder and tests that seed a folder
+            # before pressing Install (a module answers record, for one) seed it the
+            # way the engine does, not the way the seam would leave it.
+            if self.clone_wipes_leftovers and not (spec.dest / ".git").is_dir():
+                if spec.dest.exists():
+                    rmtree.remove_tree(spec.dest)
             if (spec.dest / ".git").is_dir():
                 self.heads[spec.dest] = self.upstream.get(
                     spec.dest, self.heads.get(spec.dest, "0" * 40)

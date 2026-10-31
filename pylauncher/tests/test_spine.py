@@ -2342,6 +2342,18 @@ def _listing_sites(root: Path) -> set[tuple[str, str]]:
 
 
 _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
+    ("catalog/families/azerothcore.py", "_move_clone_into"): (
+        "T830 fix round 1 (H1), round 2 (R2). Lists ONLY the sibling staging folder this "
+        "press's own `clone-core` just cloned into -- `<server folder>.yulon-clone-<8 hex>`, "
+        "made with `mkdir` and marked `.yulon-staging` with this server folder's resolved path "
+        "and this reset's id (`start_over.prepare_staging()`), so it is a folder Yu'lon made "
+        "and nobody else's -- to move its entries into the server folder whose start over "
+        "marker and ownership record must survive. It decides where those entries go, never "
+        "whether the app may write into somebody's folder: the folder it writes into is the "
+        "one this install owns, and a name already there is left exactly as it is (the clone's "
+        "copy is dropped with the staging folder, as is its own marker). An unreadable staging "
+        "folder raises, which fails the install rather than guessing"
+    ),
     ("selfupdate/layout.py", "is_empty_work_dir"): (
         "T90 plan 3, cold review 2. Lists ONE of this app's own working directories -- a name "
         "it spells itself, under the install -- to answer whether it holds anything. It decides "
@@ -2736,6 +2748,12 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "names the caller wants last (the install record a second Uninstall proves ownership "
         "from, T682). It decides no write on its own; a link at the top is unlinked, never "
         "entered, and a root that is a link is `remove_tree()`'s to refuse"
+    ),
+    ("rmtree.py", "empty_tree_last"): (
+        "lists the top of a server folder a start over is emptying (T830) only to ORDER the "
+        "deletion as `remove_tree_last()` does and to leave the names the caller keeps (the "
+        "folder id and the two records). Whether the folder may be emptied was decided before "
+        "(the Uninstall's own refusals); a root that is a link, or not a folder, is refused"
     ),
     ("rmtree.py", "_empty_stoppably"): (
         "walks the tree a press is deleting (the old map data, the pathfinding tiles) so it "

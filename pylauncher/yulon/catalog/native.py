@@ -222,6 +222,14 @@ STATE_VERSION = 1
 MOVE_IN_FILE = ".yulon-move-in.json"
 """A server being built from another computer's package records its steps here (T601 level 2)."""
 
+RESET_FILE = ".yulon-start-over.json"
+"""`move_server.RESET_FILE` (pinned equal by a test): a folder whose unfinished bring-in is being
+started over with a plain install (T830). It lasts until the plain install has written an
+ownership record that survives its first clone, and is removed right after such a write."""
+
+CONTINUING_START_OVER = "Continuing the plain install that Start over began."
+"""What Install says on a folder holding `RESET_FILE` and no ownership record (T830 H1)."""
+
 OUR_OWN_FILES = (
     STATE_FILE,
     networking.INTENT_FILE,
@@ -229,6 +237,7 @@ OUR_OWN_FILES = (
     realm_name.REALM_NAME_FILE,
     docker.FOLDER_ID_FILE,
     MOVE_IN_FILE,
+    RESET_FILE,
 )
 """Every file this app writes into a server directory as its OWN bookkeeping.
 
@@ -246,7 +255,9 @@ which is a folder this app had written every byte of being refused by its own
 guard. A tuple with a name, so the next file this app learns to write is added
 in one place rather than in the five call sites that ask the question. The third
 is T104's record of the answers a player gave a module's questions. The fourth is T601's
-move-in record, written before the install of a server brought from another computer.
+move-in record, written before the install of a server brought from another computer. The last
+is T830's record of a start over of such a folder, which a crash can leave in a folder whose
+reset was done.
 """
 
 OPENING_NOTE = (
@@ -5480,6 +5491,16 @@ def write_state(server_dir: Path, state: InstallState) -> None:
     except OSError as exc:
         tmp.unlink(missing_ok=True)
         logger.warning(f"could not record install progress in {path}: {exc}")
+        return
+    if state.completed or state.unknown:
+        # T830 H1: an install that has recorded a stage has an ownership record that outlives
+        # its first clone (a start over's folder is not emptied by that clone), so the marker
+        # that protects a folder with no record has done its work. Not before: a claim written
+        # ahead of the first stage is exactly what a clone that dies must still find.
+        try:
+            (server_dir / RESET_FILE).unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning(f"could not remove {server_dir / RESET_FILE}: {exc}")
 
 
 BUILD_CACHE_FILE = ".yulon-build-cache.json"
@@ -8585,6 +8606,10 @@ class StagedInstaller:
         self._check_cancel(cancel)
 
         state = self._guard(server_dir)
+        if (server_dir / RESET_FILE).exists() and not (server_dir / STATE_FILE).exists():
+            # T830 H1: the folder is ours, mid-start-over, and the record below is the one the
+            # marker is waiting for. Said once, before anything is written.
+            yield CONTINUING_START_OVER
         # Whether this folder was OURS TO FILL when the guard accepted it, which
         # is the only fact that distinguishes the two ways a failed first stage
         # can leave a non-empty directory. See `_claim_before_writing()`.

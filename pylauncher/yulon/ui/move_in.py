@@ -9,12 +9,13 @@ will get (the module applier, the rebuild, the Maintenance engine).
 from __future__ import annotations
 
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
-from yulon import apply, module_source, move, move_server, platform
-from yulon.catalog import native, upstream
+from yulon import apply, module_source, move, move_server, platform, start_over
+from yulon.catalog import composegen, native, upstream
 from yulon.catalog.catalog import Catalog, CatalogEntry
 from yulon.log import get_logger
 from yulon.manifest import Manifest, ManifestType
@@ -38,6 +39,12 @@ class MoveIn:
     T702: judged before any folder is asked for. It reads the file and nothing else: no
     folder, no GitHub.
     """
+    start_over: (
+        Callable[[CatalogEntry, Path, Path | None, Any, Mapping[str, object] | None], Any] | None
+    ) = None
+    """`(entry, server_dir, client_dir, plain engine, record as asked about) -> engine` for
+    "Start over with a plain install" on a folder a bring-in did not finish (T830); None draws
+    only the old sentence (press Bring from another computer… again)."""
 
 
 def _commit_known(repo: str, sha: str) -> bool | None:
@@ -126,6 +133,48 @@ def _server_for(entry: CatalogEntry) -> Callable[[Path, Path | None], move_serve
     return build
 
 
+def _start_over_seams(
+    entry: CatalogEntry, server_dir: Path, client_dir: Path | None
+) -> Callable[[], start_over.ResetSeams]:
+    """The reset's seams, built on the job's thread over the Maintenance tab's own engine."""
+
+    def build() -> start_over.ResetSeams:
+        from yulon.ui.controller_view import ControllerServices
+
+        services = ControllerServices.for_entry(entry, server_dir, client_dir)
+        if services.move is None or services.move.world is None:
+            raise MoveError(
+                f"{entry.name} has no {MAINTENANCE_TAB} engine here, so Yu'lon cannot keep a copy "
+                "of its databases first. Nothing was changed."
+            )
+        return start_over.app_seams(
+            entry,
+            server_dir,
+            world=services.move.world,
+            image_refs=composegen.built_image_refs(entry, server_dir),
+            # The Modules tab's applier knows the ready-to-play client and the player's own.
+            take_back_client_files=getattr(services.uninstall, "take_back_client_files", None),
+        )
+
+    return build
+
+
+def start_over_for_app(
+    entry: CatalogEntry,
+    server_dir: Path,
+    client_dir: Path | None,
+    plain: Any,
+    expected: Mapping[str, object] | None,
+) -> start_over.StartOver:
+    """The real "Start over with a plain install" engine for one Catalog folder (T830)."""
+    return start_over.StartOver(
+        server_dir,
+        plain=plain,
+        seams=_start_over_seams(entry, server_dir, client_dir),
+        expected=expected,
+    )
+
+
 def _one_read() -> Callable[[Path], move.Package]:
     """`move.read_package`, remembering the last file it opened (T702).
 
@@ -210,7 +259,7 @@ def move_in_for_app(catalog: Catalog) -> MoveIn:
             return "Another game", another_game_message(looked.entry.name)
         return None
 
-    return MoveIn(plan=plan, installer=installer, check=check)
+    return MoveIn(plan=plan, installer=installer, check=check, start_over=start_over_for_app)
 
 
-__all__ = ["MoveIn", "move_in_for_app"]
+__all__ = ["MoveIn", "move_in_for_app", "start_over_for_app"]
