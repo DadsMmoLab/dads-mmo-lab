@@ -205,6 +205,10 @@ EXCEPTIONS: dict[tuple[str, str], tuple[str, frozenset[str]]] = {
         f"removing a clone's container that Stop could not remove: {_TYPED}",
         frozenset({"docker rm -f {…}"}),
     ),
+    ("yulon/catalog/native.py", "_killed_hint"): (
+        f"checking the kernel log for a world server killed for memory: {_TYPED}",
+        frozenset({'journalctl -k | grep -i -E "out of memory|oom"'}),
+    ),
     **{
         ("yulon/catalog/native.py", owner): (
             f"removing a database importer a Stop or a retry could not end (T539): {_TYPED}",

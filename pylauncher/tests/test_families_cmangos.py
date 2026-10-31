@@ -32,6 +32,7 @@ import subprocess
 import threading
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, fields, is_dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO
@@ -64,6 +65,7 @@ from yulon.catalog.families.cmangos import CmangosInstaller
 from yulon.catalog.installer import (
     InstallerError,
     InstallOptions,
+    WorldStoppedAfterReadyError,
     cancelled_install_message,
     installer_for,
 )
@@ -256,6 +258,7 @@ def install(
     client_dir: Path,
     *,
     entry: CatalogEntry = ENTRY,
+    cancel: threading.Event | None = None,
     **overrides: object,
 ) -> list[str]:
     """A finished install of `entry` (TBC unless named) through the real `run()`."""
@@ -271,7 +274,7 @@ def install(
     rec.on_clone = on_clone
     return list(
         engine(rec, entry=entry, **overrides).run(
-            InstallOptions(server_dir=server_dir, client_dir=client_dir)
+            InstallOptions(server_dir=server_dir, client_dir=client_dir), cancel=cancel
         )
     )
 
@@ -4915,9 +4918,15 @@ class _CrashLoopingWorld:
     def __init__(self, rec: Recorder) -> None:
         self.rec = rec
         self.running = True
+        self.starts_with_up = False
+        """T841: `running` only once `up` has started it, so the import guard sees it down."""
         self.stopped: list[list[str]] = []
 
     def world_running(self, container: str) -> bool | None:
+        if self.stopped:
+            return False
+        if self.starts_with_up:
+            return "start" in self.rec.calls
         return self.running
 
     def stop_world(self, containers: list[str], **_kw: object) -> None:
@@ -5032,6 +5041,254 @@ def test_pressing_install_again_after_a_crash_looping_install_finishes_it(
     )
     assert world.stopped == [[ENTRY.container_spec().world]]
     assert said[-1].endswith(f"is installed and running in {server_dir}"), said[-1]
+
+
+def _a_world_that_stopped_after_its_banner_reading() -> native.WorldOutput:
+    """What an install's watch reads after the restarted run has lost the banner (T841)."""
+    return native.WorldOutput(text=">> Loading again", restarts=1, status="running")
+
+
+def test_an_install_whose_world_stops_after_ready_has_it_stopped_not_left_looping(
+    tmp_path: Path,
+) -> None:
+    """T841: an unfinished install is never remembered, so nothing watches its world.
+
+    The install reached ready, then the world was gone again -- a restarted run
+    with no banner -- and Docker's `restart: unless-stopped` would go on
+    bringing it back unseen. The press stops it, so the dialog's sentence is
+    true and the hidden loop ends.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = ready_to_import(IMPORTED_OLDER_PLAN)
+    world = _CrashLoopingWorld(rec)
+    world.running = False
+    world.starts_with_up = True
+    client = client_folder(tmp_path)
+    with pytest.raises(WorldStoppedAfterReadyError) as raised:
+        install(
+            rec,
+            server_dir,
+            client,
+            world_running=world.world_running,
+            stop_world=world.stop_world,
+            world_output=lambda spec: _a_world_that_stopped_after_its_banner_reading(),
+        )
+    said = str(raised.value)
+    assert world.stopped == [[ENTRY.container_spec().world]], "the world was left looping"
+    assert native.INSTALL_WORLD_STOPPED in said, said
+    assert "not running even though" not in said, said
+
+
+def test_a_world_already_down_after_a_failed_install_is_not_stopped_again(
+    tmp_path: Path,
+) -> None:
+    """T841: a world that is already down is not asked to stop, and the sentence still says so."""
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = ready_to_import(IMPORTED_OLDER_PLAN)
+    world = _CrashLoopingWorld(rec)
+    world.running = False
+    client = client_folder(tmp_path)
+    with pytest.raises(WorldStoppedAfterReadyError) as raised:
+        install(
+            rec,
+            server_dir,
+            client,
+            world_running=world.world_running,
+            stop_world=world.stop_world,
+            world_output=lambda spec: _a_world_that_stopped_after_its_banner_reading(),
+        )
+    assert world.stopped == []
+    assert native.INSTALL_WORLD_STOPPED in str(raised.value)
+
+
+def test_a_stop_that_fails_after_a_failed_install_keeps_the_install_s_own_failure(
+    tmp_path: Path,
+) -> None:
+    """T841: the cleanup's own failure is a sentence, never a replacement for the install's.
+
+    The dialog must still say the world came up and then stopped -- that is what
+    the player has to fix -- and add that the stop could not be made.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = ready_to_import(IMPORTED_OLDER_PLAN)
+    world = _CrashLoopingWorld(rec)
+    world.running = False
+    world.starts_with_up = True
+
+    def refuses(containers: list[str], **_kw: object) -> None:
+        raise docker.DockerCommandError("no such container")
+
+    client = client_folder(tmp_path)
+    with pytest.raises(WorldStoppedAfterReadyError) as raised:
+        install(
+            rec,
+            server_dir,
+            client,
+            world_running=world.world_running,
+            stop_world=refuses,
+            world_output=lambda spec: _a_world_that_stopped_after_its_banner_reading(),
+        )
+    said = str(raised.value)
+    assert "could not stop the world server" in said, said
+    assert "came up and then stopped" in said, said
+
+
+def test_a_stop_pressed_just_before_the_cleanup_does_not_give_the_cleanup_up(
+    tmp_path: Path,
+) -> None:
+    """T841: the cleanup stop is the app's, so the press's Stop cannot abandon it.
+
+    At this point the install has already failed and this stop exists to end a
+    hidden loop; giving it up would leave exactly the crash loop the ticket
+    found. Only "Stop now anyway" may force it (`_stop_control`'s rollback
+    branch). The Stop is set when the cleanup asks whether the world is up.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = ready_to_import(IMPORTED_OLDER_PLAN)
+    world = _CrashLoopingWorld(rec)
+    world.running = False
+    world.starts_with_up = True
+    cancel = threading.Event()
+
+    def world_running(container: str) -> bool | None:
+        if "start" in rec.calls and not world.stopped:
+            cancel.set()
+        return world.world_running(container)
+
+    def stop_it(containers: list[str], *, control: object = None, **_kw: object) -> None:
+        abandon = getattr(control, "abandon", None)
+        if abandon is not None and abandon.is_set():
+            raise docker.StopAbandoned()
+        world.stop_world(containers)
+
+    client = client_folder(tmp_path)
+    with pytest.raises(WorldStoppedAfterReadyError) as raised:
+        install(
+            rec,
+            server_dir,
+            client,
+            cancel=cancel,
+            world_running=world_running,
+            stop_world=stop_it,
+            world_output=lambda spec: _a_world_that_stopped_after_its_banner_reading(),
+        )
+    said = str(raised.value)
+    assert world.stopped == [[ENTRY.container_spec().world]], "the cleanup was given up"
+    assert native.INSTALL_WORLD_STOPPED in said, said
+
+
+def test_the_next_install_press_after_the_stop_has_no_world_to_stop(tmp_path: Path) -> None:
+    """T841 then T206: the world the first press stopped is down, so the rerun stops nothing."""
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = ready_to_import(IMPORTED_OLDER_PLAN, IMPORTED_OLDER_PLAN)
+    world = _CrashLoopingWorld(rec)
+    world.running = False
+    world.starts_with_up = True
+    client = client_folder(tmp_path)
+    with pytest.raises(WorldStoppedAfterReadyError):
+        install(
+            rec,
+            server_dir,
+            client,
+            world_running=world.world_running,
+            stop_world=world.stop_world,
+            world_output=lambda spec: _a_world_that_stopped_after_its_banner_reading(),
+        )
+    assert world.stopped == [[ENTRY.container_spec().world]]
+    said = install(
+        rec,
+        server_dir,
+        client,
+        world_running=world.world_running,
+        stop_world=world.stop_world,
+    )
+    assert world.stopped == [[ENTRY.container_spec().world]], "T206 had a world to stop again"
+    assert said[-1].endswith(f"is installed and running in {server_dir}"), said[-1]
+
+
+class _OneReservation:
+    """A server reservation that refuses a second taker, which `docker.server_claim()` does
+    only across processes: in THIS process it is re-entrant by design (T681), and the race
+    T841's review found is between two presses."""
+
+    def __init__(self) -> None:
+        self._held = threading.Lock()
+
+    @contextmanager
+    def claim(self, server_dir: Path, **_kw: object) -> Iterator[docker.ClaimHeld]:
+        if not self._held.acquire(blocking=False):
+            raise docker.ServerHeldError(
+                "Another Yu'lon is using this server (Installing), so nothing was changed. "
+                "Wait for it to finish, then press Install again."
+            )
+        try:
+            yield docker.ClaimHeld("test-reservation", threading.Event())
+        finally:
+            self._held.release()
+
+
+def test_the_cleanup_stop_keeps_the_reservation_it_stops_under(tmp_path: Path) -> None:
+    """T841 review: the safe stop can wait minutes for a load, so it must not run unwatched.
+
+    It used to run after `_staged()` unwound, which let go of this folder's
+    reservation first: another Install could take it, start a new world run, and
+    this cleanup would then stop THAT run mid-load. It now runs while the
+    reservation is still held, so a second press is refused for as long as the
+    stop blocks, and granted only once the first press has ended.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = ready_to_import(IMPORTED_OLDER_PLAN)
+    world = _CrashLoopingWorld(rec)
+    world.running = False
+    world.starts_with_up = True
+    client = client_folder(tmp_path)
+    one = _OneReservation()
+    stopping = threading.Event()
+    release = threading.Event()
+    failures: list[BaseException] = []
+
+    def stop_blocking(containers: list[str], **_kw: object) -> None:
+        stopping.set()
+        assert release.wait(HANG_BOUND), "the cleanup stop was never released"
+        world.stop_world(containers)
+
+    def press() -> None:
+        try:
+            install(
+                rec,
+                server_dir,
+                client,
+                server_claim=one.claim,
+                world_running=world.world_running,
+                stop_world=stop_blocking,
+                world_output=lambda spec: _a_world_that_stopped_after_its_banner_reading(),
+            )
+        except BaseException as exc:  # noqa: BLE001 - what the press raised is the assertion
+            failures.append(exc)
+
+    thread = threading.Thread(target=press, name="the-first-press", daemon=True)
+    thread.start()
+    try:
+        assert stopping.wait(HANG_BOUND), f"the cleanup stop never began: {failures}"
+        with pytest.raises(InstallerError, match="Another Yu'lon is using this server"):
+            with engine(rec, server_claim=one.claim)._reservation(server_dir, native.INSTALL_PRESS):
+                pass
+    finally:
+        release.set()
+        thread.join(HANG_BOUND)
+    assert not thread.is_alive(), "the first press did not end after the stop was released"
+    assert len(failures) == 1, failures
+    assert isinstance(failures[0], WorldStoppedAfterReadyError), failures
+    assert native.INSTALL_WORLD_STOPPED in str(failures[0]), failures
+    assert world.stopped == [[ENTRY.container_spec().world]], world.stopped
+    with engine(rec, server_claim=one.claim)._reservation(server_dir, native.INSTALL_PRESS):
+        pass  # the reservation the first press held is free only now
 
 
 def test_a_failed_rebuild_then_install_refuses_the_running_world_instead_of_stopping_it(

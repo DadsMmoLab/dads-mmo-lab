@@ -559,6 +559,29 @@ def test_a_rebuild_whose_world_aborts_after_its_banner_keeps_the_new_build(
     assert "put back" not in said, said
 
 
+def test_a_rebuild_whose_world_stops_after_ready_is_left_to_the_server_tab(tmp_path: Path) -> None:
+    """T841: a remembered server's world is NOT stopped, and the words say where to look.
+
+    The Server tab polls status and verdict every five seconds, so it already
+    shows up / starting / crash loop truthfully; stopping here would take away
+    the thing the player is meant to watch. Only the install route stops, where
+    there is no Server tab at all.
+    """
+    rec = Recorder(images=True)
+    server_dir = a_finished_install(rec, tmp_path)
+    with pytest.raises(WorldStoppedAfterReadyError) as raised:
+        list(
+            engine(rec, world_output=lambda spec: ABORTED_AFTER_READY).rebuild(
+                InstallOptions(server_dir=server_dir)
+            )
+        )
+
+    assert not [c for c in rec.calls if c.startswith("stop-world:")], rec.calls
+    said = str(raised.value)
+    assert "press Start." not in said, said
+    assert "Server tab shows whether" in said, said
+
+
 def test_a_world_that_never_came_up_at_all_still_puts_the_old_build_back(
     tmp_path: Path,
 ) -> None:
