@@ -29,6 +29,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
@@ -40,6 +41,7 @@ from yulon.catalog.catalog import (
     ExtractPlan,
     ExtractTool,
 )
+from yulon.catalog.installer import InstallerError
 from yulon.catalog.preflight import Check
 from yulon.log import get_logger
 
@@ -108,6 +110,21 @@ def selected_archive(spec: AcSurgicalMap, client_dir: Path) -> Path | None:
     return None
 
 
+@dataclass(frozen=True)
+class ArchiveStamp:
+    """The archive's identity facts taken just BEFORE its bytes were hashed (T837).
+
+    `size` and `mtime_ns` are what `map_data_sentence()` compares without ever
+    reading the file, and what `refuse_changed_archive()` checks after the tools:
+    a stat taken after the hash could not tell a replacement that happened while
+    the hash was reading the old bytes.
+    """
+
+    path: Path
+    size: int
+    mtime_ns: int
+
+
 def _sha256_file(path: Path) -> str:
     """The whole file's sha256, streamed in `SHA_CHUNK` reads: ~2 GB is never held in memory."""
     digest = hashlib.sha256()
@@ -117,8 +134,8 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def archive_identity(block: AzerothCoreData, client_dir: Path) -> str:
-    """What a changed map archive must change: the bytes the extraction reads (T837).
+def measure_identity(block: AzerothCoreData, client_dir: Path) -> tuple[str, ArchiveStamp | None]:
+    """The identity, plus the sidecar archive's facts taken before the hash (T837).
 
     The evidence identified a client by `required_file` (`Data/patch-WB2.MPQ`)
     and the plan, and `effective_plan()` differs only by layout — so the
@@ -129,13 +146,24 @@ def archive_identity(block: AzerothCoreData, client_dir: Path) -> str:
     only by the extract stage, which runs when a press asks it to.
 
     One `<map_id>:<layout>:<sha256>` per surgical map, sorted by id, joined by
-    `;`; a layout that finds no archive says `missing` in place of the hash,
-    and an archive that could not be read says `unreadable` — neither is a
-    hash, so either forces the extraction rather than vouching for it.
+    `;`; a layout that finds no archive says `missing` in place of the hash.
+
+    An archive the layout selects but that cannot be read (`stat` or the hash)
+    refuses this press here, before any tool runs: turning the failure into a
+    digest (`unreadable` was T837 round 1's finding) would let two presses that
+    could not read the file vouch for each other and skip every tool. Nothing
+    has been extracted and no evidence has been written at that point.
+
+    The stamp is for the archive `write_sidecar()` records (the lowest map id),
+    measured BEFORE the hash; None when that layout selects no archive.
     """
     plan = block.client_extract
     assert plan is not None
     parts: list[str] = []
+    stamp: ArchiveStamp | None = None
+    sidecar_id = (
+        min(plan.surgical_maps, key=lambda one: one.map_id).map_id if plan.surgical_maps else None
+    )
     for spec in sorted(plan.surgical_maps, key=lambda one: one.map_id):
         found = layout(spec, client_dir)
         chosen = selected_archive(spec, client_dir)
@@ -143,39 +171,71 @@ def archive_identity(block: AzerothCoreData, client_dir: Path) -> str:
             digest = "missing"
         else:
             try:
+                stat = chosen.stat()
                 digest = _sha256_file(chosen)
             except OSError as exc:
-                logger.warning(
-                    f"could not read the map archive {chosen} ({exc}), so this run cannot say "
-                    "which bytes the extraction read; it is extracted again"
-                )
-                digest = "unreadable"
+                raise InstallerError(
+                    f"Yu'lon could not read {chosen.name} to check whether it changed ({exc}). "
+                    "If the game or another program has it open, close it, then press it again. "
+                    "Nothing was extracted."
+                ) from exc
+            if spec.map_id == sidecar_id:
+                stamp = ArchiveStamp(chosen, stat.st_size, stat.st_mtime_ns)
         parts.append(f"{spec.map_id}:{found}:{digest}")
-    return ";".join(parts)
+    return ";".join(parts), stamp
 
 
-def write_sidecar(block: AzerothCoreData, client_dir: Path, data_dir: Path) -> None:
+def archive_identity(block: AzerothCoreData, client_dir: Path) -> str:
+    """The salt `run_plan()` folds into the plan hash: `measure_identity()`'s `;` line."""
+    identity, _ = measure_identity(block, client_dir)
+    return identity
+
+
+def refuse_changed_archive(stamp: ArchiveStamp | None) -> None:
+    """Refuse a run whose archive changed while the tools were reading it (T837).
+
+    The tools hashed the archive before they ran, and their per-tool records
+    carry that hash in the plan salt. A size or date that differs now (or a
+    file that is gone) means the extracted data may mix the old file with the
+    new one, so this press writes no sidecar and records no "finished" line.
+    The next press hashes the new file, so its plan hash differs from every
+    record this run wrote and all tools run again — those records can never
+    vouch for bytes the tools did not read from start to finish.
+    """
+    if stamp is None:
+        return
+    try:
+        now = stamp.path.stat()
+    except OSError:
+        changed = True
+    else:
+        changed = now.st_size != stamp.size or now.st_mtime_ns != stamp.mtime_ns
+    if changed:
+        raise InstallerError(
+            f"{stamp.path.name} changed while the map data was being extracted from it, so that "
+            "data may be from the old file. Press it again to extract from the new one."
+        )
+
+
+def write_sidecar(client_dir: Path, data_dir: Path, stamp: ArchiveStamp | None) -> None:
     """Record the map archive a finished extraction read, for `map_data_sentence()` (T837).
 
     Size and date, never the hash: the UI asks that question every time the
-    client tab is drawn and must not read ~2 GB. The entry has one surgical map
-    archive; a second would need a key of its own here. A sidecar that cannot be
-    written is logged, not fatal — the extraction it describes has succeeded.
+    client tab is drawn and must not read ~2 GB. The facts are `measure_identity()`'s,
+    taken BEFORE the hash — never a new stat, which could describe an archive
+    that replaced the bytes the tools read (round 1's finding). The entry has
+    one surgical map archive; a second would need a key of its own here. A
+    sidecar that cannot be written is logged, not fatal — the extraction it
+    describes has succeeded.
     """
-    plan = block.client_extract
-    assert plan is not None
-    if not plan.surgical_maps:
-        return
-    chosen = selected_archive(min(plan.surgical_maps, key=lambda one: one.map_id), client_dir)
-    if chosen is None:
+    if stamp is None:
         return
     try:
-        stat = chosen.stat()
-        name = chosen.relative_to(client_dir).as_posix()
-    except (OSError, ValueError) as exc:
-        logger.warning(f"could not record the map archive {chosen}: {exc}")
+        name = stamp.path.relative_to(client_dir).as_posix()
+    except ValueError as exc:
+        logger.warning(f"could not record the map archive {stamp.path}: {exc}")
         return
-    payload = {"name": name, "size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
+    payload = {"name": name, "size": stamp.size, "mtime_ns": stamp.mtime_ns}
     data_dir.mkdir(parents=True, exist_ok=True)
     path = data_dir / SIDECAR_NAME
     tmp = path.with_name(path.name + ".yulon-new")
@@ -184,7 +244,7 @@ def write_sidecar(block: AzerothCoreData, client_dir: Path, data_dir: Path) -> N
         os.replace(tmp, path)  # atomic on POSIX and on Windows
     except OSError as exc:
         tmp.unlink(missing_ok=True)
-        logger.warning(f"could not record the map archive {chosen} in {path}: {exc}")
+        logger.warning(f"could not record the map archive {stamp.path} in {path}: {exc}")
 
 
 def read_sidecar(data_dir: Path) -> tuple[str, int, int] | None:

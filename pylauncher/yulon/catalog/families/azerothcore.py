@@ -1763,7 +1763,7 @@ class AzerothCoreInstaller(StagedInstaller):
                     f"Checking the map archive {chosen.name} (about 2 GB) so a changed one is "
                     "extracted again."
                 )
-        identity = surgical.archive_identity(self._block(), client_dir)
+        identity, stamp = surgical.measure_identity(self._block(), client_dir)
         view = ctx.server_dir / extract.CASE_VIEW_DIR
         read_from = client_dir
         try:
@@ -1802,9 +1802,16 @@ class AzerothCoreInstaller(StagedInstaller):
                 f"({'; '.join(missing)}). The extract stage made it from {client_dir}: check "
                 "that it is a complete Ascension 3.3.5a client. Nothing was started."
             )
+        # T837 round 1: the hash was taken before the tools; if the archive changed
+        # while they read it, the data may mix both files. Refuse before the sidecar
+        # and before the stage counts as finished, and write no evidence of a
+        # finished extraction. The tools' per-tool records still carry this run's
+        # old salt, so the next press' new salt makes every one of them re-run.
+        surgical.refuse_changed_archive(stamp)
         # T837: after the tools, never before -- `map_data_sentence()` reads this
-        # to say a changed archive without reading 2 GB itself.
-        surgical.write_sidecar(self._block(), client_dir, data_dir)
+        # to say a changed archive without reading 2 GB itself. The facts are the
+        # ones taken before the hash, not a fresh stat.
+        surgical.write_sidecar(client_dir, data_dir, stamp)
         yield "Extraction finished."
 
     def _mmaps(self, ctx: StageContext) -> Iterator[str]:

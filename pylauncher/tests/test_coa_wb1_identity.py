@@ -175,6 +175,124 @@ def test_no_sidecar_is_left_when_the_extraction_fails(tmp_path: Path) -> None:
     assert not (folder / "data" / surgical.SIDECAR_NAME).exists()
 
 
+UNREADABLE = (
+    "Yu'lon could not read patch-WB1.MPQ to check whether it changed "
+    "([Errno 13] Permission denied). If the game or another program has it open, close it, "
+    "then press it again. Nothing was extracted."
+)
+"""F1: the refusal an archive that cannot be read earns, word for word."""
+
+CHANGED = (
+    "patch-WB1.MPQ changed while the map data was being extracted from it, so that data may be "
+    "from the old file. Press it again to extract from the new one."
+)
+"""F2: the refusal an archive replaced under the tools earns, word for word."""
+
+
+def test_an_archive_the_stage_cannot_read_refuses_before_any_tool(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F1: `unreadable` was reusable evidence; an OSError refuses the press instead."""
+    client = coa_client(tmp_path, "enabled")
+    folder = server(tmp_path, client)
+    rec = coa_produce(Recorder())
+    real = surgical._sha256_file
+    failing = [True]
+
+    def reader(path: Path) -> str:
+        if failing[0]:
+            raise OSError(13, "Permission denied")
+        return real(path)
+
+    monkeypatch.setattr(surgical, "_sha256_file", reader)
+    with pytest.raises(InstallerError) as caught:
+        list(engine(rec)._extract_maps(context(folder, client)))
+    assert str(caught.value) == UNREADABLE
+    assert rec.container_runs == []
+    assert not (folder / "data" / extract.EVIDENCE_FILE).exists()
+    assert not (folder / "data" / surgical.SIDECAR_NAME).exists()
+
+    failing[0] = False
+    said = list(engine(rec)._extract_maps(context(folder, client)))
+    assert said[-1] == "Extraction finished.", said
+    assert len(rec.container_runs) == len(plan_for(client).tools)
+    assert (folder / "data" / surgical.SIDECAR_NAME).exists()
+
+
+def test_an_archive_replaced_during_the_tools_refuses_and_reruns_everything(
+    tmp_path: Path,
+) -> None:
+    """F2: the sidecar and the finished line are claims about the bytes the tools read."""
+    client = coa_client(tmp_path, "enabled")
+    path = client / "Data" / "patch-WB1.MPQ"
+    folder = server(tmp_path, client)
+    rec = coa_produce(Recorder())
+    run_tool = rec.run_container
+    changed: list[bool] = []
+
+    def replace_during_the_tools(spec: object, *, sink: object, cancel: object = None) -> object:
+        run = run_tool(spec, sink=sink, cancel=cancel)
+        if not changed:
+            changed.append(True)
+            path.write_bytes(b"MPQ\x1a" * 4)
+        return run
+
+    with pytest.raises(InstallerError) as caught:
+        list(
+            engine(rec, run_container=replace_during_the_tools)._extract_maps(
+                context(folder, client)
+            )
+        )
+    assert str(caught.value) == CHANGED
+    assert not (folder / "data" / surgical.SIDECAR_NAME).exists()
+    written = extract.read_evidence(folder / "data")
+    assert written is not None and written.tools, "the tools' records were written"
+
+    first = len(rec.container_runs)
+    said = list(engine(rec)._extract_maps(context(folder, client)))
+    assert any("extracting everything again" in line for line in said), said
+    assert len(rec.container_runs) == first + len(plan_for(client).tools), said
+    assert (folder / "data" / surgical.SIDECAR_NAME).exists()
+
+
+def test_the_sidecar_holds_the_facts_taken_before_the_hash(tmp_path: Path) -> None:
+    """An unchanged archive: the sidecar is the stat the hash was taken from."""
+    client = coa_client(tmp_path, "enabled")
+    path = client / "Data" / "patch-WB1.MPQ"
+    grow(path)
+    before = path.stat()
+    folder = server(tmp_path, client)
+    list(engine(coa_produce(Recorder()))._extract_maps(context(folder, client)))
+    payload = json.loads((folder / "data" / surgical.SIDECAR_NAME).read_text())
+    assert payload == {
+        "name": "Data/patch-WB1.MPQ",
+        "size": before.st_size,
+        "mtime_ns": before.st_mtime_ns,
+    }
+
+
+def test_the_archive_facts_are_measured_before_its_bytes_are_hashed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A date that moves while the hash reads is caught only by a pre-hash stamp."""
+    client = coa_client(tmp_path, "enabled")
+    path = client / "Data" / "patch-WB1.MPQ"
+    grow(path)
+    folder = server(tmp_path, client)
+    real = surgical._sha256_file
+
+    def hash_then_touch(archive: Path) -> str:
+        digest = real(archive)
+        os.utime(archive, ns=(1, 1))
+        return digest
+
+    monkeypatch.setattr(surgical, "_sha256_file", hash_then_touch)
+    with pytest.raises(InstallerError) as caught:
+        list(engine(coa_produce(Recorder()))._extract_maps(context(folder, client)))
+    assert str(caught.value) == CHANGED
+    assert not (folder / "data" / surgical.SIDECAR_NAME).exists()
+
+
 @pytest.mark.parametrize("platform_id", ["linux", "windows"])
 def test_the_identity_is_the_salt_on_every_platform(tmp_path: Path, platform_id: str) -> None:
     """The salt is passed on Linux and on Windows (the T840 scratch path is not a gate)."""
@@ -239,7 +357,8 @@ def recorded(tmp_path: Path, client: Path) -> tuple[Path, Path]:
     folder = tmp_path / "server"
     evidence = extract.expected_evidence(block().extract, client, block().client.required_file)
     extract.write_evidence(folder / "data", evidence)
-    surgical.write_sidecar(data_block(), client, folder / "data")
+    _, stamp = surgical.measure_identity(data_block(), client)
+    surgical.write_sidecar(client, folder / "data", stamp)
     return entry, folder
 
 
