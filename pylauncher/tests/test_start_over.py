@@ -1008,6 +1008,8 @@ SENTENCES = (
     start_over.UNCHANGED,
     start_over.READY,
     start_over.reset_unreadable(Path("/srv/wow/.yulon-start-over.json")),
+    start_over.damaged_copy(Path("/srv/wow/backups/copy.sql")),
+    native.CONTINUING_START_OVER,
     move_server.START_OVER_UNFINISHED,
     move_server.STARTING_OVER_NOW,
     move_server.BRINGING_IN_NOW,
