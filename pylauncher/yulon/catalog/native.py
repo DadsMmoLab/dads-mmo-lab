@@ -17637,7 +17637,7 @@ def _one_shot_left_sentence(left: docker.OneShotLeft, *, earlier: bool) -> str:
         )
     if not left.names:
         return said
-    return f"{said} To end it, run this in a terminal:\ndocker rm -f {' '.join(left.names)}"
+    return f"{said} To end it, run this in a terminal:\ndocker rm -f -v {' '.join(left.names)}"
 
 
 def download_left_sentence(left: docker.OneShotLeft, *, earlier: bool) -> str:
@@ -17657,7 +17657,7 @@ def download_left_sentence(left: docker.OneShotLeft, *, earlier: bool) -> str:
         )
     if not left.names:
         return said
-    return f"{said} To end it, run this in a terminal:\ndocker rm -f {' '.join(left.names)}"
+    return f"{said} To end it, run this in a terminal:\ndocker rm -f -v {' '.join(left.names)}"
 
 
 def _cancelled_message(what: str, note: str = "") -> str:

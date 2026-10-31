@@ -393,7 +393,7 @@ class FakeMmapsDocker:
     under a name in use is refused with Docker's own conflict, which is how a
     second job at once would show. `answers=False` is a daemon that does not
     answer an inspect (`ContainerExit()` with nothing in it); `refuse_remove` makes
-    every `docker rm -f` fail. The world server's start time is `world_started_at`.
+    every `docker rm -f -v` fail. The world server's start time is `world_started_at`.
     """
 
     def __init__(self) -> None:

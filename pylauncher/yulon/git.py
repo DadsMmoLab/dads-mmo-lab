@@ -3654,7 +3654,7 @@ class ContainerGit:
             if refused_late is not None:
                 yield container_left_line(name, dest, refused_late, stopped=False)
                 # Only a create that timed out hands back a refusal: a daemon that
-                # hangs, which hung the `rm -f -v` too (cold review), so it says what helps.
+                # hangs, which hung the `rm -f` too (cold review), so it says what helps.
                 raise GitContainerLeft(
                     f"docker create exited {made.returncode}: {said}; its container {name} "
                     "could not be removed. Docker did not answer in time: restart Docker, "

@@ -3177,7 +3177,7 @@ def test_the_refusal_names_where_this_platform_removes_the_container(
 
         said = str(refused.value)
         assert ("Docker Desktop's Containers list" in said) is desktop, said
-        assert (f"docker rm -f {name}" in said) is not desktop, said
+        assert (f"docker rm -f -v {name}" in said) is not desktop, said
     finally:
         end_fake_containers(state)
 
@@ -3367,7 +3367,7 @@ def test_a_reextract_with_no_claim_of_its_own_stops_before_anything_moves(
             assert said.startswith(f"Yu'lon could not reserve {data} for this extraction"), said
         else:
             assert said.startswith("An earlier run of this Yu'lon left its reservation"), said
-            assert said.splitlines()[-1] == f"docker rm -f {name}", said
+            assert said.splitlines()[-1] == f"docker rm -f -v {name}", said
             assert not [call for call in fake_calls(state) if call.startswith("rm ")]
         assert "Nothing was changed." in said, said
         assert not [call for call in fake_calls(state) if call.startswith("create ")]

@@ -2163,7 +2163,7 @@ class TrinityCoreInstaller(CmangosInstaller):
                 f"An earlier run of this Yu'lon left its reservation of {data_dir} in Docker "
                 f"({claimed.name}), so {self.entry.name}'s map data was not extracted again. "
                 f"Remove it with the command below, then {again}\n"
-                f"docker rm -f {claimed.name}"
+                f"docker rm -f -v {claimed.name}"
             )
         if not claimed.known:
             return (
@@ -2508,7 +2508,7 @@ class TrinityCoreInstaller(CmangosInstaller):
         # on a line of its own (T296).
         raise InstallerError(
             f"{said} Remove it with the command below, then {again}\n"
-            f"docker rm -f {' '.join(running.ours)}"
+            f"docker rm -f -v {' '.join(running.ours)}"
         )
 
     def _refuse_a_running_world_for_maps(self) -> None:

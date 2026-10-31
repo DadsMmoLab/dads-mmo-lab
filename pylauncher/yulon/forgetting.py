@@ -268,7 +268,7 @@ def server_reservation_left(label: str, name: str, this_press: str) -> str:
     return (
         f"An earlier run of this Yu'lon left its reservation of {label} in Docker ({name}), "
         f"so nothing was changed. Remove it with the command below, then press "
-        f"\u201c{this_press}\u201d again.\ndocker rm -f {name}"
+        f"\u201c{this_press}\u201d again.\ndocker rm -f -v {name}"
     )
 
 

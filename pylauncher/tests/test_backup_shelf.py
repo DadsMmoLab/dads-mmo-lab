@@ -571,7 +571,7 @@ def test_a_leftover_reservation_refuses_with_the_remove_command(server: Path, ca
     put(server, "20261003_100000")
     plan = backup_shelf.plan_delete(shelf(server), old.name)
     calls.holder = docker.ServerHolder("yulon-busy-x", "abc", ours=True, here=False, host="")
-    with pytest.raises(ShelfRefusal, match="docker rm -f yulon-busy-x"):
+    with pytest.raises(ShelfRefusal, match="docker rm -f -v yulon-busy-x"):
         carry(server, plan)
     assert old.exists()
 

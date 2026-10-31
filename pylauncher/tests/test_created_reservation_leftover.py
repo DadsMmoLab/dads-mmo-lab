@@ -158,7 +158,7 @@ def test_a_leftover_that_will_not_go_is_refused_as_before(
     with pytest.raises(docker.ServerReserved) as refused:
         with docker.server_claim(server, press="Start", images=[IMAGE]):
             pytest.fail("went ahead")
-    assert str(refused.value).endswith(f"docker rm -f {name}")
+    assert str(refused.value).endswith(f"docker rm -f -v {name}")
     assert sum(1 for line in fake_calls(fake_docker) if line.startswith("rm -f")) == 1
 
 

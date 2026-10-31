@@ -127,7 +127,7 @@ def test_with_both_only_ours_is_named_for_removal(
 
     said = _press(tmp_path)
 
-    assert said.splitlines()[-1] == f"docker rm -f {OURS}", said
+    assert said.splitlines()[-1] == f"docker rm -f -v {OURS}", said
     assert THEIRS not in said.splitlines()[-1]
     assert "Another Yu'lon on this computer is extracting" in said, said
 
@@ -716,7 +716,7 @@ def test_a_claim_that_ends_while_its_press_holds_it_says_it_was_lost(
     """T549: Docker Desktop restarted, or the container removed: the claim's CLI exits.
 
     The press must hear it: a second Yu'lon can claim the folder from then on.
-    Ended here as `docker rm -f` ends it, by ending the CLI attached to it.
+    Ended here as `docker rm -f -v` ends it, by ending the CLI attached to it.
 
     Mutation this catches: nothing watching the claim's CLI (`lost` never set).
     """

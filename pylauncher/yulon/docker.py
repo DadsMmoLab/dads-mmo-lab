@@ -3917,7 +3917,7 @@ def importer_left_sentence(left: OneShotLeft, nothing_done: str) -> str:
     )
     if not left.names:
         return said
-    return f"{said} To end it, run this in a terminal:\ndocker rm -f {' '.join(left.names)}"
+    return f"{said} To end it, run this in a terminal:\ndocker rm -f -v {' '.join(left.names)}"
 
 
 def one_shot_ended_marker(server_dir: Path, service: str) -> Path:
@@ -8024,14 +8024,20 @@ def compose_up_service(
 def compose_remove_service(
     server_dir: Path, service: str, *, wsl_distro: str | None = None
 ) -> None:
-    """Stop and remove ONE service's container (`compose rm --stop --force`). No volumes (T127).
+    """Stop and remove ONE service's container (`compose rm -v --stop --force`, T846).
 
-    Meant to be idempotent: compose v2 treats a service that has no container as
-    nothing to remove and exits 0, which the bot dashboard's switch-off relies on
-    when a second press repeats this step. Expected from compose, not measured in
-    this repository; a non-zero exit still raises, and then the switch stays On.
+    `-v` removes only that service container's OWN anonymous volumes, never a
+    named one. Meant to be idempotent: compose v2 treats a service that has no
+    container as nothing to remove and exits 0, which the bot dashboard's
+    switch-off relies on when a second press repeats this step. Expected from
+    compose, not measured in this repository; a non-zero exit still raises, and
+    then the switch stays On.
     """
-    _run(["compose", "rm", "--stop", "--force", service], cwd=server_dir, wsl_distro=wsl_distro)
+    _run(
+        ["compose", "rm", "-v", "--stop", "--force", service],
+        cwd=server_dir,
+        wsl_distro=wsl_distro,
+    )
 
 
 def container_ip(container: str, *, wsl_distro: str | None = None) -> str | None:

@@ -2443,21 +2443,32 @@ def test_remove_staged_never_passes_a_flag_that_would_delete_a_volume(
 
     The database is a named volume (`ac-database:/var/lib/mysql`), so
     `compose down` keeps every character. `compose down -v` deletes them. There
-    is no legitimate reason for the `down` argv to grow a `-v`, and a test is
-    cheaper than finding out. The by-name `rm -f -v` fallback is NOT covered
-    here: it removes only each container's OWN anonymous volumes, never a named
-    one (T846).
+    is no legitimate reason for ANY `remove_staged` argv to grow a `-v`, and a
+    test is cheaper than finding out. The single exception is the by-name
+    `rm -f -v` fallback, whose `-v` takes only each container's OWN anonymous
+    volumes, never a named one (T846: `docker rm -f -v <name>` where <name> is
+    one of this install's census names).
     """
+    allowed = {SPEC.db, SPEC.auth, SPEC.world}
     calls: list[list[str]] = []
     monkeypatch.setattr(docker.runner, "run", _remove_runner(calls, present={SPEC.db, SPEC.world}))
     assert docker.remove_staged(SPEC, Path("/tmp/wow")) is True
 
+    assert calls, "nothing was asked of Docker"
     down = [cmd for cmd in calls if cmd[:3] == ["docker", "compose", "down"]]
     assert down, "nothing was taken down"
     assert "--remove-orphans" in down[0], down[0]
-    for cmd in down:
-        assert "-v" not in cmd, cmd
+    for cmd in calls:
         assert "--volumes" not in cmd, cmd
+        assert "volume" not in cmd[1:2], cmd
+        if cmd[:3] == ["docker", "compose", "rm"]:
+            assert "-v" not in cmd, cmd
+            continue
+        if cmd[:2] == ["docker", "rm"]:
+            assert cmd[:4] == ["docker", "rm", "-f", "-v"], cmd
+            assert len(cmd) == 5 and cmd[4] in allowed, cmd
+            continue
+        assert "-v" not in cmd, cmd
 
 
 def test_remove_staged_asks_by_project_label_not_by_container_name(
@@ -3132,7 +3143,7 @@ def test_the_teardown_gives_a_populated_server_the_same_grace_a_stop_does(
 def test_the_teardowns_by_name_fallback_stops_before_it_removes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`docker rm -f` is a SIGKILL with no grace at all.
+    """`docker rm -f -v` is a SIGKILL with no grace at all.
 
     Putting the grace on `compose down` alone left a hard-kill path reachable
     from the same button, in exactly the case that reaches it: a moved install
