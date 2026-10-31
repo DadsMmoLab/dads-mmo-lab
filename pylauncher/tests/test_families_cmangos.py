@@ -32,6 +32,7 @@ import subprocess
 import threading
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, fields, is_dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO
@@ -5208,6 +5209,86 @@ def test_the_next_install_press_after_the_stop_has_no_world_to_stop(tmp_path: Pa
     )
     assert world.stopped == [[ENTRY.container_spec().world]], "T206 had a world to stop again"
     assert said[-1].endswith(f"is installed and running in {server_dir}"), said[-1]
+
+
+class _OneReservation:
+    """A server reservation that refuses a second taker, which `docker.server_claim()` does
+    only across processes: in THIS process it is re-entrant by design (T681), and the race
+    T841's review found is between two presses."""
+
+    def __init__(self) -> None:
+        self._held = threading.Lock()
+
+    @contextmanager
+    def claim(self, server_dir: Path, **_kw: object) -> Iterator[docker.ClaimHeld]:
+        if not self._held.acquire(blocking=False):
+            raise docker.ServerHeldError(
+                "Another Yu'lon is using this server (Installing), so nothing was changed. "
+                "Wait for it to finish, then press Install again."
+            )
+        try:
+            yield docker.ClaimHeld("test-reservation", threading.Event())
+        finally:
+            self._held.release()
+
+
+def test_the_cleanup_stop_keeps_the_reservation_it_stops_under(tmp_path: Path) -> None:
+    """T841 review: the safe stop can wait minutes for a load, so it must not run unwatched.
+
+    It used to run after `_staged()` unwound, which let go of this folder's
+    reservation first: another Install could take it, start a new world run, and
+    this cleanup would then stop THAT run mid-load. It now runs while the
+    reservation is still held, so a second press is refused for as long as the
+    stop blocks, and granted only once the first press has ended.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = ready_to_import(IMPORTED_OLDER_PLAN)
+    world = _CrashLoopingWorld(rec)
+    world.running = False
+    world.starts_with_up = True
+    client = client_folder(tmp_path)
+    one = _OneReservation()
+    stopping = threading.Event()
+    release = threading.Event()
+    failures: list[BaseException] = []
+
+    def stop_blocking(containers: list[str], **_kw: object) -> None:
+        stopping.set()
+        assert release.wait(HANG_BOUND), "the cleanup stop was never released"
+        world.stop_world(containers)
+
+    def press() -> None:
+        try:
+            install(
+                rec,
+                server_dir,
+                client,
+                server_claim=one.claim,
+                world_running=world.world_running,
+                stop_world=stop_blocking,
+                world_output=lambda spec: _a_world_that_stopped_after_its_banner_reading(),
+            )
+        except BaseException as exc:  # noqa: BLE001 - what the press raised is the assertion
+            failures.append(exc)
+
+    thread = threading.Thread(target=press, name="the-first-press", daemon=True)
+    thread.start()
+    try:
+        assert stopping.wait(HANG_BOUND), f"the cleanup stop never began: {failures}"
+        with pytest.raises(InstallerError, match="Another Yu'lon is using this server"):
+            with engine(rec, server_claim=one.claim)._reservation(server_dir, native.INSTALL_PRESS):
+                pass
+    finally:
+        release.set()
+        thread.join(HANG_BOUND)
+    assert not thread.is_alive(), "the first press did not end after the stop was released"
+    assert len(failures) == 1, failures
+    assert isinstance(failures[0], WorldStoppedAfterReadyError), failures
+    assert native.INSTALL_WORLD_STOPPED in str(failures[0]), failures
+    assert world.stopped == [[ENTRY.container_spec().world]], world.stopped
+    with engine(rec, server_claim=one.claim)._reservation(server_dir, native.INSTALL_PRESS):
+        pass  # the reservation the first press held is free only now
 
 
 def test_a_failed_rebuild_then_install_refuses_the_running_world_instead_of_stopping_it(

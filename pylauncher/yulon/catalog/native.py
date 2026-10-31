@@ -8628,13 +8628,9 @@ class StagedInstaller:
             else:
                 yield INSTALL_LEFT_LOADING
             raise
-        except WorldStoppedAfterReadyError as exc:
-            # T841: the install never finished, so nothing in the app ever looks
-            # at this world again -- no Server tab, no badge, no verdict. Docker's
-            # `restart: unless-stopped` goes on bringing it back, which is how a
-            # real world looped unseen for hours, and came back after a restart.
-            said = yield from self._stop_the_world_a_failed_install_left(ctx)
-            raise carry_detail(exc, WorldStoppedAfterReadyError(f"{exc} {said}")) from exc
+        # T841's cleanup stop (a world the failed install left restarting) is NOT
+        # caught here: it must run while `_staged()` still holds the server
+        # reservation, so it lives in that loop's own handler.
         # OUTSIDE the staged loop, and after the last stage, on purpose. Outside,
         # because everything in there is a reason to fail the install and this
         # is not one — a realm row that could not be written is a sentence, not
@@ -8744,6 +8740,15 @@ class StagedInstaller:
         `test_a_moved_upstream_refuses_by_file_and_line_before_anything_is_built`
         during the extraction, 2026-09-08. The record belongs to whoever holds
         the current state, and after this change that is exactly one function.
+
+        **T841's cleanup stop is HERE for the same reason, and for its own.**
+        An install whose world came up and then stopped must stop that world
+        (nothing watches an unfinished install, and `restart: unless-stopped`
+        brings it back). That stop waits out a load, which can be minutes, so
+        it runs before this loop's reservation is let go: a `try` in `run()`
+        released the folder first, letting another Install take it and start a
+        new world run that the old cleanup then stopped mid-load. Only
+        `ERROR_RUN_INSTALL` stops anything -- a rebuild keeps its build (T71).
         """
         state = ctx.state
         # T568: an install has no database, and no containers to race on, until `start-db`;
@@ -8756,36 +8761,48 @@ class StagedInstaller:
             with reservation, self._held_awake() as note:
                 if note:
                     yield note
-                for number, stage in enumerate(stages, start=1):
-                    self._check_cancel(ctx.cancel)
-                    if stage.name == "start-db" and not reserved:
-                        reserved = True
-                        held = reservation.enter_context(
-                            self._reservation(
-                                ctx.server_dir,
-                                INSTALL_PRESS,
-                                ctx.cancel,
-                                images=self.image_refs_at(ctx.server_dir),
+                try:
+                    for number, stage in enumerate(stages, start=1):
+                        self._check_cancel(ctx.cancel)
+                        if stage.name == "start-db" and not reserved:
+                            reserved = True
+                            held = reservation.enter_context(
+                                self._reservation(
+                                    ctx.server_dir,
+                                    INSTALL_PRESS,
+                                    ctx.cancel,
+                                    images=self.image_refs_at(ctx.server_dir),
+                                )
                             )
+                            if held is not None:
+                                # Codex review: a reservation another Yu'lon's "Stop anyway"
+                                # removed ends the install at its next check, as a Stop does.
+                                over = threading.Event()
+                                reservation.callback(over.set)
+                                ctx = replace(ctx, cancel=_end_on_loss(held, ctx.cancel, over))
+                        # WHERE THE USER IS, on its own line and never folded into
+                        # the `--- <name>` marker. A format everything greps is not
+                        # a place to add fields.
+                        yield (
+                            f"Step {number} of {len(stages)} "
+                            f"({number * 100 // len(stages)}%): {stage.name}"
                         )
-                        if held is not None:
-                            # Codex review: a reservation another Yu'lon's "Stop anyway"
-                            # removed ends the install at its next check, as a Stop does.
-                            over = threading.Event()
-                            reservation.callback(over.set)
-                            ctx = replace(ctx, cancel=_end_on_loss(held, ctx.cancel, over))
-                    # WHERE THE USER IS, on its own line and never folded into
-                    # the `--- <name>` marker. A format everything greps is not
-                    # a place to add fields.
-                    yield (
-                        f"Step {number} of {len(stages)} "
-                        f"({number * 100 // len(stages)}%): {stage.name}"
-                    )
-                    yield f"--- {stage.name}"
-                    if stage.cancel_note:
-                        # The spine says it, once, here (A4); no body yields its own.
-                        yield stage.cancel_note
-                    state = yield from self._run_one(stage, replace(ctx, state=state))
+                        yield f"--- {stage.name}"
+                        if stage.cancel_note:
+                            # The spine says it, once, here (A4); no body yields its own.
+                            yield stage.cancel_note
+                        state = yield from self._run_one(stage, replace(ctx, state=state))
+                except WorldStoppedAfterReadyError as exc:
+                    # T841 review: the cleanup stop runs HERE, inside the reservation,
+                    # and that is the point of it. The safe stop waits out a load, which
+                    # can be minutes: let go of the folder first and another Install takes
+                    # it, starts a new world run, and this stop then ends THAT run
+                    # mid-load. Only an INSTALL stops: a rebuild keeps its build and the
+                    # Server tab's verdict shows the rest (T71).
+                    if run != ERROR_RUN_INSTALL:
+                        raise
+                    said = yield from self._stop_the_world_a_failed_install_left(ctx)
+                    raise carry_detail(exc, WorldStoppedAfterReadyError(f"{exc} {said}")) from exc
         except InstallerError as exc:
             # Recorded only into a state file that already exists — which, since
             # the claim moved ahead of stage one, is every install that started
