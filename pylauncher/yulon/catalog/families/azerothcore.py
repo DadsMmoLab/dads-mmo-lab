@@ -1754,6 +1754,16 @@ class AzerothCoreInstaller(StagedInstaller):
         # a new field would make every install everywhere extract again.
         scratch_off_bind = self._seams.platform_id() in ("windows", "macos")
         yield f"Extracting server data from {client_dir} into {data_dir} (the client is read-only)."
+        # T837: say so before the hash is taken, because reading the archive is
+        # the first thing that takes a while and nothing has been run yet.
+        for spec in plan_block.surgical_maps:
+            chosen = surgical.selected_archive(spec, client_dir)
+            if chosen is not None:
+                yield (
+                    f"Checking the map archive {chosen.name} (about 2 GB) so a changed one is "
+                    "extracted again."
+                )
+        identity, stamp = surgical.measure_identity(self._block(), client_dir)
         view = ctx.server_dir / extract.CASE_VIEW_DIR
         read_from = client_dir
         try:
@@ -1772,6 +1782,7 @@ class AzerothCoreInstaller(StagedInstaller):
                     client_build=self.entry.client.build,
                     selinux_enforcing=self._seams.ask_selinux,
                     evidence_client_dir=client_dir,
+                    evidence_salt=identity,
                     client_files=None if read_from == client_dir else client_dir,
                     scratch_off_bind=scratch_off_bind,
                 ),
@@ -1791,6 +1802,16 @@ class AzerothCoreInstaller(StagedInstaller):
                 f"({'; '.join(missing)}). The extract stage made it from {client_dir}: check "
                 "that it is a complete Ascension 3.3.5a client. Nothing was started."
             )
+        # T837 round 1: the hash was taken before the tools; if the archive changed
+        # while they read it, the data may mix both files. Refuse before the sidecar
+        # and before the stage counts as finished, and write no evidence of a
+        # finished extraction. The tools' per-tool records still carry this run's
+        # old salt, so the next press' new salt makes every one of them re-run.
+        surgical.refuse_changed_archive(stamp)
+        # T837: after the tools, never before -- `map_data_sentence()` reads this
+        # to say a changed archive without reading 2 GB itself. The facts are the
+        # ones taken before the hash, not a fresh stat.
+        surgical.write_sidecar(client_dir, data_dir, stamp)
         yield "Extraction finished."
 
     def _mmaps(self, ctx: StageContext) -> Iterator[str]:
@@ -1803,6 +1824,11 @@ class AzerothCoreInstaller(StagedInstaller):
         (`PathGenerator.cpp:169`), and the workdir here is `/out` = `data/`.
         Copied from the checkout the install was built from (the core source),
         refused by name when it is not there.
+
+        T837: a changed map archive moves the extract stage's salt, and
+        `run_plan()` rewrites the evidence from scratch — this stage's record
+        with it — so the movement maps made from the old maps are regenerated
+        instead of skipped.
         """
         plan_block = self._block().client_extract
         if plan_block is None:  # unreachable: the stage is only in the tuple with one

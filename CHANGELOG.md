@@ -20,6 +20,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A world server that keeps restarting on a damaged table now names it and offers Repair or a backup.
 - Start is no longer refused by a leftover reservation from a Stop that ran while Docker was slow.
 - A build that fails on damaged Docker data or a crashing compiler now says what to do instead of quoting Docker's last line.
+- A Conquest of Azeroth server extracts its map data again when its map archive changes (once after this update, up to 2 h).
 
 ### Changed
 

@@ -26,6 +26,10 @@ neither name is refused before anything is extracted (`archive_checks()`).
 
 from __future__ import annotations
 
+import hashlib
+import json
+import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
@@ -37,7 +41,11 @@ from yulon.catalog.catalog import (
     ExtractPlan,
     ExtractTool,
 )
+from yulon.catalog.installer import InstallerError
 from yulon.catalog.preflight import Check
+from yulon.log import get_logger
+
+logger = get_logger(__name__)
 
 TOOL_PREFIX = "map "
 """The appended tool's name: `map <id> from <archive>`, so the log says what it did."""
@@ -47,6 +55,15 @@ SURGICAL_DIR = ".yulon-surgical-"
 
 FAILED_EXIT = 3
 """The script's status when the archive is not there or fewer than `min_maps` maps came out."""
+
+SIDECAR_NAME = ".yulon-wb1.json"
+"""Beside the extracted data: the size and date of the map archive the last extraction read.
+
+`map_data_sentence()` is asked every time the client tab is drawn, so it must not read ~2 GB;
+it compares these two facts with the archive that is there now (T837)."""
+
+SHA_CHUNK = 8 * 1024 * 1024
+"""How much of an archive `archive_identity()` reads at a time: the whole file, streamed."""
 
 ARCHIVE_CHECK = "map archive"
 """The preflight row naming which archive a surgical map is read from (T836)."""
@@ -81,6 +98,167 @@ def layout(spec: AcSurgicalMap, client_dir: Path) -> Layout:
     if _real_archive(client_dir / spec.archive):
         return "disabled"
     return "missing"
+
+
+def selected_archive(spec: AcSurgicalMap, client_dir: Path) -> Path | None:
+    """The file the layout selects for `spec`: the one an extraction actually reads (T837)."""
+    found = layout(spec, client_dir)
+    if found == "enabled":
+        return client_names.find(client_dir, spec.link_as)
+    if found == "disabled":
+        return client_dir / spec.archive
+    return None
+
+
+@dataclass(frozen=True)
+class ArchiveStamp:
+    """The archive's identity facts taken just BEFORE its bytes were hashed (T837).
+
+    `size` and `mtime_ns` are what `map_data_sentence()` compares without ever
+    reading the file, and what `refuse_changed_archive()` checks after the tools:
+    a stat taken after the hash could not tell a replacement that happened while
+    the hash was reading the old bytes.
+    """
+
+    path: Path
+    size: int
+    mtime_ns: int
+
+
+def _sha256_file(path: Path) -> str:
+    """The whole file's sha256, streamed in `SHA_CHUNK` reads: ~2 GB is never held in memory."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(SHA_CHUNK), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def measure_identity(block: AzerothCoreData, client_dir: Path) -> tuple[str, ArchiveStamp | None]:
+    """The identity, plus the sidecar archive's facts taken before the hash (T837).
+
+    The evidence identified a client by `required_file` (`Data/patch-WB2.MPQ`)
+    and the plan, and `effective_plan()` differs only by layout — so the
+    Update client replacing `Data/patch-WB1.MPQ` (or its `.DISABLED` twin) in
+    place changed neither, every tool was skipped, and stale terrain and map
+    936 stayed. The bytes are hashed rather than size and date for exactly
+    that case: a replacement keeps both. The cost (~2 GB, 10-20 s) is paid
+    only by the extract stage, which runs when a press asks it to.
+
+    One `<map_id>:<layout>:<sha256>` per surgical map, sorted by id, joined by
+    `;`; a layout that finds no archive says `missing` in place of the hash.
+
+    An archive the layout selects but that cannot be read (`stat` or the hash)
+    refuses this press here, before any tool runs: turning the failure into a
+    digest (`unreadable` was T837 round 1's finding) would let two presses that
+    could not read the file vouch for each other and skip every tool. Nothing
+    has been extracted and no evidence has been written at that point.
+
+    The stamp is for the archive `write_sidecar()` records (the lowest map id),
+    measured BEFORE the hash; None when that layout selects no archive.
+    """
+    plan = block.client_extract
+    assert plan is not None
+    parts: list[str] = []
+    stamp: ArchiveStamp | None = None
+    sidecar_id = (
+        min(plan.surgical_maps, key=lambda one: one.map_id).map_id if plan.surgical_maps else None
+    )
+    for spec in sorted(plan.surgical_maps, key=lambda one: one.map_id):
+        found = layout(spec, client_dir)
+        chosen = selected_archive(spec, client_dir)
+        if chosen is None:
+            digest = "missing"
+        else:
+            try:
+                stat = chosen.stat()
+                digest = _sha256_file(chosen)
+            except OSError as exc:
+                raise InstallerError(
+                    f"Yu'lon could not read {chosen.name} to check whether it changed ({exc}). "
+                    "If the game or another program has it open, close it, then press it again. "
+                    "Nothing was extracted."
+                ) from exc
+            if spec.map_id == sidecar_id:
+                stamp = ArchiveStamp(chosen, stat.st_size, stat.st_mtime_ns)
+        parts.append(f"{spec.map_id}:{found}:{digest}")
+    return ";".join(parts), stamp
+
+
+def archive_identity(block: AzerothCoreData, client_dir: Path) -> str:
+    """The salt `run_plan()` folds into the plan hash: `measure_identity()`'s `;` line."""
+    identity, _ = measure_identity(block, client_dir)
+    return identity
+
+
+def refuse_changed_archive(stamp: ArchiveStamp | None) -> None:
+    """Refuse a run whose archive changed while the tools were reading it (T837).
+
+    The tools hashed the archive before they ran, and their per-tool records
+    carry that hash in the plan salt. A size or date that differs now (or a
+    file that is gone) means the extracted data may mix the old file with the
+    new one, so this press writes no sidecar and records no "finished" line.
+    The next press hashes the new file, so its plan hash differs from every
+    record this run wrote and all tools run again — those records can never
+    vouch for bytes the tools did not read from start to finish.
+    """
+    if stamp is None:
+        return
+    try:
+        now = stamp.path.stat()
+    except OSError:
+        changed = True
+    else:
+        changed = now.st_size != stamp.size or now.st_mtime_ns != stamp.mtime_ns
+    if changed:
+        raise InstallerError(
+            f"{stamp.path.name} changed while the map data was being extracted from it, so that "
+            "data may be from the old file. Press it again to extract from the new one."
+        )
+
+
+def write_sidecar(client_dir: Path, data_dir: Path, stamp: ArchiveStamp | None) -> None:
+    """Record the map archive a finished extraction read, for `map_data_sentence()` (T837).
+
+    Size and date, never the hash: the UI asks that question every time the
+    client tab is drawn and must not read ~2 GB. The facts are `measure_identity()`'s,
+    taken BEFORE the hash — never a new stat, which could describe an archive
+    that replaced the bytes the tools read (round 1's finding). The entry has
+    one surgical map archive; a second would need a key of its own here. A
+    sidecar that cannot be written is logged, not fatal — the extraction it
+    describes has succeeded.
+    """
+    if stamp is None:
+        return
+    try:
+        name = stamp.path.relative_to(client_dir).as_posix()
+    except ValueError as exc:
+        logger.warning(f"could not record the map archive {stamp.path}: {exc}")
+        return
+    payload = {"name": name, "size": stamp.size, "mtime_ns": stamp.mtime_ns}
+    data_dir.mkdir(parents=True, exist_ok=True)
+    path = data_dir / SIDECAR_NAME
+    tmp = path.with_name(path.name + ".yulon-new")
+    try:
+        tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8", newline="\n")
+        os.replace(tmp, path)  # atomic on POSIX and on Windows
+    except OSError as exc:
+        tmp.unlink(missing_ok=True)
+        logger.warning(f"could not record the map archive {stamp.path} in {path}: {exc}")
+
+
+def read_sidecar(data_dir: Path) -> tuple[str, int, int] | None:
+    """`write_sidecar()`'s facts, or None when absent, unreadable or not the three of them."""
+    try:
+        raw = json.loads((data_dir / SIDECAR_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    name, size, mtime_ns = raw.get("name"), raw.get("size"), raw.get("mtime_ns")
+    if not isinstance(name, str) or not isinstance(size, int) or not isinstance(mtime_ns, int):
+        return None
+    return name, size, mtime_ns
 
 
 def archive_checks(entry: CatalogEntry, client_dir: Path) -> tuple[Check, ...]:
