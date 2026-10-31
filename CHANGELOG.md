@@ -23,6 +23,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A build that fails on damaged Docker data or a crashing compiler now says what to do instead of quoting Docker's last line.
 - A Conquest of Azeroth server extracts its map data again when its map archive changes (once after this update, up to 2 h).
 - An install whose world server starts and then stops now stops it, instead of leaving it restarting unseen.
+- Bring in on a stopped server accepts files a few updates behind, as it already did on a running one.
 
 ### Changed
 

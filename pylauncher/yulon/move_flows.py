@@ -1566,6 +1566,16 @@ def plan_import(world: MoveWorld, path: Path) -> ImportPlan:
             here = _read_versions(world, roles)
             counts = _survey_counts(world, roles)
             uncovered = _data_the_file_does_not_cover(world, manifest, roles)
+            said = _tail_marker_refusal(world, here)
+            tails: dict[str, move.Tail] | None = None
+            if said is None:
+                said = _version_problem(world, manifest, roles, here, package)
+                if said:
+                    tails = tail_updates(world, manifest, here, package)
+                    if tails is not None:
+                        said = _one_shot_scope_problem(world, package, tails)
+                        if said is not None:
+                            tails = None
     except MaintenanceError as exc:
         return ImportPlan(path=path, manifest=manifest, refusals=(str(exc),), schemas=schemas)
     except Exception as exc:  # noqa: BLE001 - Docker not answering is a refusal
@@ -1575,16 +1585,6 @@ def plan_import(world: MoveWorld, path: Path) -> ImportPlan:
             refusals=(f"Yu'lon could not look at this server: {exc}",),
             schemas=schemas,
         )
-    said = _tail_marker_refusal(world, here)
-    tails: dict[str, move.Tail] | None = None
-    if said is None:
-        said = _version_problem(world, manifest, roles, here, package)
-        if said:
-            tails = tail_updates(world, manifest, here, package)
-            if tails is not None:
-                said = _one_shot_scope_problem(world, package, tails)
-                if said is not None:
-                    tails = None
     if counts is None:
         refusals.append(_COUNT_UNKNOWN)
     if uncovered:
