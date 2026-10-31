@@ -23,6 +23,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.support_native import UPSTREAM_COMPOSE, Recorder
+from tests.support_native import install as native_install
 from tests.support_player_text import command_faults, text_faults
 from tests.test_move_server_flow import Move, _cut_off_move, plan_for
 from tests.test_move_server_flow import reservations as reservations  # noqa: F401 - a fixture
@@ -211,8 +213,12 @@ def test_a_cut_off_bring_in_starts_over_on_fresh_databases(
     lines = _press(mv, vols, plain)
     assert plain.runs == 1
     assert plain.started_on == {s: "fresh" for s in SCHEMAS}, plain.started_on
-    # The folder the plain install was handed: the bring-in's records and files all gone.
-    assert set(plain.folder_then) <= {docker.FOLDER_ID_FILE}, plain.folder_then
+    # The folder the plain install was handed: the bring-in's records and files all gone; the
+    # reset's marker is still there until the plain install writes its own record (T830 H1).
+    assert set(plain.folder_then) <= {
+        docker.FOLDER_ID_FILE,
+        start_over.RESET_FILE,
+    }, plain.folder_then
     assert start_over.READY in lines
     kept = _kept_folder(mv)
     aside = sorted(kept.glob(f"{start_over.SET_ASIDE_PREFIX}*.json"))
@@ -322,28 +328,201 @@ def test_a_reset_killed_part_way_is_carried_on_and_copies_once(
     assert not (server_dir / start_over.RESET_FILE).exists()
 
 
-def test_a_reset_that_stopped_after_setting_the_record_aside_only_finishes(
-    cut_off: tuple[Move, Volumes, Plain], monkeypatch: pytest.MonkeyPatch
+def _copies(mv: Move) -> list[Path]:
+    """The dumps the copy step made, still in the server folder's backups (nothing removed)."""
+    return sorted(
+        maintenance.backups_dir(mv.target.server_dir).glob(
+            f"*_{backup_shelf.START_OVER_LABEL}_*.sql"
+        )
+    )
+
+
+def _crash_before_removal(mv: Move, vols: Volumes, plain: Plain) -> list[Path]:
+    """Stop a reset dead inside its first volume removal, having copied and not moved backups."""
+
+    class Killed(BaseException):
+        pass
+
+    vols.fail_volume_rm = Killed()
+    with pytest.raises(Killed):
+        _press(mv, vols, plain)
+    dumps = _copies(mv)
+    assert len(dumps) == len(SCHEMAS), dumps
+    return dumps
+
+
+def _resume(mv: Move, vols: Volumes, plain: Plain) -> start_over.StartOverError:
+    """Press Install again on the stopped reset, expecting the refused copy."""
+    with pytest.raises(start_over.StartOverError) as refused:
+        _press(mv, vols, plain, expected=None)
+    return refused.value
+
+
+def test_a_resumed_reset_refuses_a_copy_file_that_is_gone(
+    cut_off: tuple[Move, Volumes, Plain],
 ) -> None:
-    """The reset's record is the last of the reset to go: a press after that runs the install."""
+    """H2: nothing is removed on the strength of a dump that is no longer there.
+
+    Mutation: `_revalidate()` skipped -> the removal goes ahead and the volume is gone, with
+    the dump it was meant to protect already missing.
+    """
+    mv, vols, plain = cut_off
+    dumps = _crash_before_removal(mv, vols, plain)
+    dumps[0].unlink()
+    events, volumes = list(mv.events), json.dumps(vols.volumes, sort_keys=True)
+    refused = _resume(mv, vols, plain)
+    assert str(refused) == start_over.damaged_copy(dumps[0])
+    assert mv.events == events and json.dumps(vols.volumes, sort_keys=True) == volumes
+    assert plain.runs == 0
+    reset = json.loads((mv.target.server_dir / start_over.RESET_FILE).read_text(encoding="utf-8"))
+    assert reset["done"] == ["project", "stopped"], reset["done"]
+    assert reset["copies"] == [] and reset["removing"] is False
+
+
+def test_a_resumed_reset_refuses_a_copy_file_that_was_cut_short(
+    cut_off: tuple[Move, Volumes, Plain],
+) -> None:
+    """H2: a dump whose size is not the recorded one is not the copy that was made.
+
+    Mutation: the size comparison dropped -> the shortened dump passes and volumes go.
+    """
+    mv, vols, plain = cut_off
+    dumps = _crash_before_removal(mv, vols, plain)
+    cut = dumps[1]
+    cut.write_bytes(cut.read_bytes()[:-10])
+    volumes = json.dumps(vols.volumes, sort_keys=True)
+    refused = _resume(mv, vols, plain)
+    assert str(refused) == start_over.damaged_copy(cut)
+    assert json.dumps(vols.volumes, sort_keys=True) == volumes
+    assert plain.runs == 0
+
+
+def test_a_resumed_reset_refuses_a_copy_file_whose_contents_changed(
+    cut_off: tuple[Move, Volumes, Plain],
+) -> None:
+    """H2: same size, different bytes — only the recorded sha256 tells it apart.
+
+    Mutation: the sha256 comparison dropped -> this passes and volumes are removed in favour
+    of a dump that is not the one written.
+    """
+    mv, vols, plain = cut_off
+    dumps = _crash_before_removal(mv, vols, plain)
+    changed = bytearray(dumps[2].read_bytes())
+    changed[-1] ^= 0xFF
+    dumps[2].write_bytes(bytes(changed))
+    volumes = json.dumps(vols.volumes, sort_keys=True)
+    refused = _resume(mv, vols, plain)
+    assert str(refused) == start_over.damaged_copy(dumps[2])
+    assert json.dumps(vols.volumes, sort_keys=True) == volumes
+    assert plain.runs == 0
+
+
+def test_a_resumed_reset_refuses_a_copy_that_does_not_cover_every_database(
+    cut_off: tuple[Move, Volumes, Plain],
+) -> None:
+    """H2: the recorded dumps must cover every schema the copy step was asked to copy.
+
+    Mutation: the coverage check dropped -> a reset with no dump of the auth database removes
+    the volume that held it.
+    """
+    mv, vols, plain = cut_off
+    _crash_before_removal(mv, vols, plain)
+    path = mv.target.server_dir / start_over.RESET_FILE
+    body = json.loads(path.read_text(encoding="utf-8"))
+    body["copies"] = [copy for copy in body["copies"] if copy["database"] != "acore_auth"]
+    path.write_text(json.dumps(body), encoding="utf-8")
+    volumes = json.dumps(vols.volumes, sort_keys=True)
+    refused = _resume(mv, vols, plain)
+    assert str(refused) == start_over.damaged_copy(Path(body["copies_dir"]))
+    assert json.dumps(vols.volumes, sort_keys=True) == volumes
+    assert plain.runs == 0
+
+
+def test_the_marker_outlives_a_death_in_the_plain_installs_first_stage(
+    cut_off: tuple[Move, Volumes, Plain],
+) -> None:
+    """H1: a folder whose plain install died before writing any record is still ours.
+
+    Start over keeps `.yulon-start-over.json` until the plain install has written an ownership
+    record. A real Install accepts the folder (marker, nothing else of the bring-in), says it is
+    continuing, and removes the marker — while this press's own clone has not happened yet.
+
+    Mutation: `reset.forget()` left at the end of `_reset()` -> the marker is gone and the
+    folder below has only the bring-in's set-aside and no record, so Install refuses it; and no
+    `CONTINUING_START_OVER` line can be said.
+    """
     mv, vols, plain = cut_off
     server_dir = mv.target.server_dir
-    real_forget = start_over._Reset.forget
 
-    def crash(self: start_over._Reset) -> None:
-        if "set-aside" in self.done:
-            raise KeyboardInterrupt
-        real_forget(self)
+    class Killed(BaseException):
+        pass
 
-    monkeypatch.setattr(start_over._Reset, "forget", crash)
-    with pytest.raises(KeyboardInterrupt):
-        _press(mv, vols, plain)
-    monkeypatch.setattr(start_over._Reset, "forget", real_forget)
+    class Dying(Plain):
+        def run(self, options=None, *, cancel=None, ask=None):  # type: ignore[no-untyped-def]
+            self.runs += 1
+            raise Killed  # the process died before Install wrote anything at all
+
+    with pytest.raises(Killed):
+        _press(mv, vols, Dying(vols))
+    assert (server_dir / start_over.RESET_FILE).exists()
+    assert not (server_dir / native.STATE_FILE).exists()
+    # Bring-in refuses it, with the sentence that sends the player to Install.
+    assert plan_for(mv.path, server_dir).refusals == (move_server.START_OVER_UNFINISHED,)
+    assert move_server.START_OVER_UNFINISHED == (
+        "This folder is being reinstalled from scratch (Start over); press Install to finish it."
+    )
+    # Install accepts it, says so once, and a finished install never leaves the marker.
+    rec = Recorder()
+    real_unmodified = rec.file_unmodified
+
+    def unmodified(dest: Path, relative_path: str) -> bool | None:
+        # The double keys `tracked` by the destination it was handed; the checkout arrives in
+        # the server folder through `_move_clone_into()`, so answer for the file it moved, with
+        # the content the double wrote — the real `git status` knows it at either path.
+        if (dest / relative_path) in rec.tracked:
+            return real_unmodified(dest, relative_path)
+        path = dest / relative_path
+        return (
+            relative_path == composegen.BASE_FILE
+            and path.is_file()
+            and path.read_text(encoding="utf-8") == UPSTREAM_COMPOSE
+        )
+
+    rec.file_unmodified = unmodified  # type: ignore[method-assign]
+    lines = native_install(rec, server_dir)
+    assert lines.count(native.CONTINUING_START_OVER) == 1, lines
+    assert (server_dir / native.STATE_FILE).is_file()
+    assert not (server_dir / start_over.RESET_FILE).exists()
+
+
+def test_a_reset_that_stopped_after_setting_the_record_aside_only_finishes(
+    cut_off: tuple[Move, Volumes, Plain],
+) -> None:
+    """The marker outlives the reset: a death in the plain install's first stage is carried on
+    by the next press, which runs the install again without recopying or removing anything."""
+    mv, vols, plain = cut_off
+    server_dir = mv.target.server_dir
+
+    class Killed(BaseException):
+        pass
+
+    class Dying(Plain):
+        def run(self, options=None, *, cancel=None, ask=None):  # type: ignore[no-untyped-def]
+            self.runs += 1
+            assert (server_dir / start_over.RESET_FILE).exists(), "the marker left with the record"
+            raise Killed
+
+    dying = Dying(vols)
+    with pytest.raises(Killed):
+        _press(mv, vols, dying)
     assert not (server_dir / move_server.MOVE_IN_FILE).exists()
     assert (server_dir / start_over.RESET_FILE).exists()
-    assert plain.runs == 0
+    assert dying.runs == 1
+    dumps = len([e for e in mv.events if e.startswith("dump:")])
     lines = _press(mv, vols, plain, expected=None)
     assert plain.runs == 1 and start_over.READY in lines
+    assert len([e for e in mv.events if e.startswith("dump:")]) == dumps, "copied twice"
+    assert not (server_dir / start_over.RESET_FILE).exists()
     assert len(list(_kept_folder(mv).glob(f"{start_over.SET_ASIDE_PREFIX}*"))) == 1
 
 
@@ -435,7 +614,10 @@ def test_a_bring_in_stopped_before_its_install_made_anything_starts_over_without
     vols.containers.clear()
     lines = _press(mv, vols, plain)
     assert "This server has no database yet, so there is nothing to copy." in lines
-    assert plain.runs == 1 and set(plain.folder_then) <= {docker.FOLDER_ID_FILE}
+    assert plain.runs == 1 and set(plain.folder_then) <= {
+        docker.FOLDER_ID_FILE,
+        start_over.RESET_FILE,
+    }
     assert not [e for e in mv.events if e.startswith("rm-")]
 
 

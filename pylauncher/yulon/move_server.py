@@ -642,14 +642,15 @@ STEPS = ("revs", "answers", "modules", "rebuild", "confs", "data")
 RESET_FILE = ".yulon-start-over.json"  # == native.RESET_FILE (one of its OUR_OWN_FILES)
 """In a folder a bring-in did not finish: "Start over with a plain install" is under way (T830).
 
-Written by `start_over` before it changes anything and removed as its last step before the plain
-install, so a reset that stopped part-way is carried on by the next Install press and is never
-read as a bring-in to carry on (`folder_refusal`) or as a finished plain install.
+Written by `start_over` before it changes anything and removed once the plain install it hands
+off to has written its ownership record (T830 H1), so a reset that stopped part-way is carried on
+by the next Install press, a plain install killed before it wrote that record is still this
+folder's, and the folder is never read as a bring-in to carry on (`folder_refusal`) or as a
+finished plain install.
 """
 
 START_OVER_UNFINISHED = (
-    "Starting this folder over with a plain install did not finish. Press Install on this tile "
-    "to finish it, or pick another folder."
+    "This folder is being reinstalled from scratch (Start over); press Install to finish it."
 )
 STARTING_OVER_NOW = (
     "This folder is being started over with a plain install right now. Wait for that to finish. "

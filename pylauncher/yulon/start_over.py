@@ -35,20 +35,28 @@ the plain install:
    but those three files, and the bring-in's record is still there.
 6. **Set aside, then installed.** Only then does the bring-in's record move, to a name nobody
    has, in the folder of kept backups beside the server folder (never inside it: the plain
-   install's clone empties the server folder). The reset's record goes last, and the plain
+   install's clone empties the server folder). The reset's record STAYS, as the durable marker
+   an install that never wrote its ownership record is still recognised by, and the plain
    install runs inside the same reservation.
 
 Every step is recorded in `RESET_FILE` when it is done, so a reset that stopped part-way
 (a crash, a refusal, Stop) is carried on by the next Install press and never repeats its copy.
-While that record is there, Bring-in refuses the folder (`move_server.folder_refusal`), and a
-reset that stopped before anything was removed takes its record away again, leaving the
-bring-in exactly as it was. Every failure after removal began keeps the bring-in's record where
-it is: the folder is never mistaken for a plain install that finished.
+A resumed reset proves every recorded dump is still there, uncut and the bytes it wrote, and
+that together they cover every database the copy was for, before it removes a volume; a copy
+that fails that proof refuses with nothing removed and is made again by the next press. While
+the record is there, Bring-in refuses the folder (`move_server.folder_refusal`), and a reset
+that stopped before anything was removed takes the record away again, leaving the bring-in
+exactly as it was. Every failure after removal began keeps the bring-in's record where it is:
+the folder is never mistaken for a plain install that finished. The marker goes only once the
+plain install has written an ownership record that survives its first clone (T830 H1): a clone
+made while it is there lands beside the folder and is moved in, so a death at any point in
+that clone leaves a folder Install can carry on rather than one nothing accepts.
 """
 
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -148,11 +156,63 @@ def reset_unreadable(path: Path) -> str:
     )
 
 
+def damaged_copy(path: object) -> str:
+    """A resumed reset's copy is missing, unreadable or not what was written (T830 H2)."""
+    return (
+        f"The copy Start over made of your databases is missing or damaged ({path}), so nothing "
+        "was removed. Press Start over again to make a new copy first."
+    )
+
+
+def _sha256(path: Path) -> str:
+    """The whole file's SHA-256, read in chunks: a dump is far too large to read at once."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 class StartOverError(MoveError):
     """A start over refused or stopped, in the sentence the player reads."""
 
 
 # ------------------------------------------------------------------------------ the record
+
+
+@dataclass(frozen=True)
+class _Copy:
+    """One dump the copy step made: where it is, what it holds, and what it was.
+
+    `size` and `sha256` are recorded when the dump is written, so a resumed reset can prove
+    the file it is about to remove databases in favour of is still the one it copied (T830 H2).
+    """
+
+    path: Path
+    database: str
+    size: int
+    sha256: str
+
+    def saved(self) -> dict[str, object]:
+        return {
+            "path": str(self.path),
+            "database": self.database,
+            "size": self.size,
+            "sha256": self.sha256,
+        }
+
+    @classmethod
+    def read(cls, raw: object) -> _Copy | None:
+        """One saved copy, or None for an entry this build cannot vouch for."""
+        if not isinstance(raw, dict):
+            return None
+        path, database = raw.get("path"), raw.get("database")
+        size, digest = raw.get("size"), raw.get("sha256")
+        if not isinstance(path, str) or not isinstance(database, str):
+            return None
+        if isinstance(size, bool) or not isinstance(size, int) or not isinstance(digest, str):
+            return None
+        return cls(path=Path(path), database=database, size=size, sha256=digest)
 
 
 @dataclass
@@ -164,7 +224,11 @@ class _Reset:
     started_at: str
     done: list[str] = field(default_factory=list)
     projects: list[str] = field(default_factory=list)
-    copies: list[str] = field(default_factory=list)
+    copies: list[_Copy] = field(default_factory=list)
+    schemas: list[str] = field(default_factory=list)
+    """The databases the copy step was asked to copy; every one must have a recorded dump."""
+    copies_dir: str | None = None
+    """Where the copy step put its dumps, for the refusal when no dump names a missing schema."""
     kept: str | None = None
     set_aside: str | None = None
     removing: bool = False
@@ -187,14 +251,22 @@ class _Reset:
             value = body.get(key)
             return [v for v in value if isinstance(v, str)] if isinstance(value, list) else []
 
-        kept, aside = body.get("kept"), body.get("set_aside")
+        raw_copies = body.get("copies")
+        copies = [
+            copy
+            for raw in (raw_copies if isinstance(raw_copies, list) else [])
+            if (copy := _Copy.read(raw)) is not None
+        ]
+        kept, aside, copies_dir = body.get("kept"), body.get("set_aside"), body.get("copies_dir")
         return cls(
             server_dir=server_dir,
             package=body["package"],
             started_at=str(body.get("started_at") or ""),
             done=strings("done"),
             projects=strings("projects"),
-            copies=strings("copies"),
+            copies=copies,
+            schemas=strings("schemas"),
+            copies_dir=copies_dir if isinstance(copies_dir, str) else None,
             kept=kept if isinstance(kept, str) else None,
             set_aside=aside if isinstance(aside, str) else None,
             removing=bool(body.get("removing")),
@@ -208,7 +280,9 @@ class _Reset:
             "started_at": self.started_at,
             "done": self.done,
             "projects": self.projects,
-            "copies": self.copies,
+            "copies": [copy.saved() for copy in self.copies],
+            "schemas": self.schemas,
+            "copies_dir": self.copies_dir,
             "kept": self.kept,
             "set_aside": self.set_aside,
             "removing": self.removing,
@@ -319,11 +393,23 @@ class StartOver:
             yield from self._reset(seams, held, cancel)
             yield READY
             yield from self._plain.run(options, cancel=cancel, ask=ask)
+            # A finished plain install has its own ownership record, so the marker that guards
+            # an install which never wrote one has done its work (T830 H1). The install's own
+            # record writer removes it sooner; this is for an engine that finished without one.
+            try:
+                (self.server_dir / RESET_FILE).unlink(missing_ok=True)
+            except OSError as exc:
+                logger.warning(f"could not remove {self.server_dir / RESET_FILE}: {exc}")
 
     # -- the reset -----------------------------------------------------------------------
 
     def _reset(self, seams: ResetSeams, held: object, cancel: Any) -> Iterator[str]:
         reset, resuming = self._begin()
+        if resuming:
+            # Before any volume goes: a resumed reset trusts nothing it recorded about the
+            # copy (T830 H2). Outside the try below, so the rewound record a failure writes
+            # is not forgotten by the "nothing was removed" path.
+            self._revalidate(seams, reset)
         yield (
             "Carrying on starting this folder over with a plain install."
             if resuming
@@ -343,7 +429,8 @@ class StartOver:
                 f"Starting over stopped part-way. {exc} {KEPT_RECORD}",
                 detail=str(getattr(exc, "detail", "") or ""),
             ) from exc
-        reset.forget()
+        # The record stays: it is the durable marker that keeps a plain install's first clone
+        # from stranding the folder, and is removed once that install has written its record.
 
     def _begin(self) -> tuple[_Reset, bool]:
         """The reset's record: carried on when there is one, else written after the checks."""
@@ -494,13 +581,75 @@ class StartOver:
                     return
                 yield f"Keeping a copy of {', '.join(schemas)} first."
                 report = seams.copy()
+                copies = [
+                    _Copy(
+                        path=dump.path,
+                        database=dump.database,
+                        size=dump.size_bytes,
+                        sha256=_sha256(dump.path),
+                    )
+                    for dump in report.dumps
+                ]
         except Exception as exc:  # noqa: BLE001 - any failure to copy refuses, in one sentence
             raise StartOverError(COPY_FAILED, detail=str(exc)) from exc
         missing = sorted(set(schemas) - set(report.databases))
         if missing:
             raise StartOverError(COPY_FAILED, detail=f"not copied: {', '.join(missing)}")
-        reset.copies = [str(d.path) for d in report.dumps]
+        reset.copies = copies
+        reset.schemas = list(schemas)
+        reset.copies_dir = str(report.directory)
         yield f"A copy of {', '.join(report.databases)} is kept first."
+
+    def _revalidate(self, seams: ResetSeams, reset: _Reset) -> None:
+        """A resumed reset proves its copy is still whole before it removes a volume (H2).
+
+        Nothing is trusted from before the stop: every recorded dump must be there, readable,
+        the size and hash it was written with, and together they must cover every database the
+        copy step was asked for. Any failure refuses with nothing removed and rewinds the record
+        to the copy step, so the next press makes a new copy first.
+        """
+        if "copy" not in reset.done or "removed" in reset.done:
+            return
+        if not self._volumes_left(seams, reset):
+            # Nothing left for the removal to take: no volume can be lost in favour of a copy.
+            return
+        problem = self._copy_problem(reset)
+        if problem is None:
+            return
+        reset.done = [step for step in reset.done if step != "copy"]
+        reset.copies = []
+        reset.schemas = []
+        reset.copies_dir = None
+        reset.removing = False
+        reset.save()
+        raise StartOverError(damaged_copy(problem))
+
+    def _volumes_left(self, seams: ResetSeams, reset: _Reset) -> bool:
+        """Whether Docker still has a volume of the reset's projects (unknown counts as yes)."""
+        for project in reset.projects:
+            volumes = seams.volumes_of(project)
+            if volumes is None or volumes:
+                return True
+        return False
+
+    def _copy_problem(self, reset: _Reset) -> object | None:
+        """What is wrong with the recorded copy, or None when it is whole and covers everything."""
+        for copy in reset.copies:
+            try:
+                if not copy.path.is_file():
+                    return copy.path
+                size = copy.path.stat().st_size
+                digest = _sha256(copy.path)
+            except OSError:
+                return copy.path
+            if size != copy.size or digest != copy.sha256:
+                return copy.path
+        missing = sorted(set(reset.schemas) - {copy.database for copy in reset.copies})
+        if missing:
+            if reset.copies_dir is not None:
+                return Path(reset.copies_dir)
+            return reset.server_dir / RESET_FILE
+        return None
 
     def _refuse_removal(self, seams: ResetSeams, reset: _Reset, *, recorded: bool) -> None:
         """Every refusal of the removal, asked before its first step (it reads only)."""
@@ -743,6 +892,7 @@ __all__ = [
     "StartOver",
     "StartOverError",
     "app_seams",
+    "damaged_copy",
     "empty_the_folder",
     "running_load_refusal",
 ]

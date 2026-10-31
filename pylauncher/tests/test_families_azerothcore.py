@@ -2540,6 +2540,40 @@ def test_the_clone_that_fills_the_server_dir_takes_the_ownership_record_with_it(
     assert "carries on" not in note, "the copy promised a resume the engine refuses: " + note
 
 
+def test_a_clone_core_death_keeps_a_start_over_mark_and_the_claim(tmp_path: Path) -> None:
+    """T830 H1: while the marker is there, clone-core clones beside the folder, so a death in
+    the clone leaves both the marker and the ownership record written before stage one."""
+    server_dir = tmp_path / "wow"
+    server_dir.mkdir()
+    marker = server_dir / native.RESET_FILE
+    marker.write_text('{"package": "abc"}', encoding="utf-8")
+    rec = Recorder()
+    url = "https://github.com/mod-playerbots/azerothcore-wotlk.git"
+
+    def clone_then_die(spec: git.CloneSpec) -> None:
+        cloned.append(spec.dest)
+        # The seam empties its destination, exactly as both real seams do.
+        as_the_clone_seam_does(spec.dest)
+        (spec.dest / ".git").mkdir(parents=True, exist_ok=True)
+        (spec.dest / "half-a-checkout").write_bytes(b"x")
+        raise InstallerError("killed mid-clone")
+
+    cloned: list[Path] = []
+    with pytest.raises(InstallerError):
+        install(rec, server_dir, clone=clone_then_die, remote_url=lambda _dest: url)
+
+    assert cloned and cloned[0] != server_dir, (
+        "clone-core cloned into the folder that holds the start over marker, so the seam's "
+        "wipe took it: " + str(cloned)
+    )
+    assert marker.is_file(), "the start over marker did not survive the clone"
+    assert (server_dir / native.STATE_FILE).is_file(), (
+        "the ownership record written before stage one did not survive the clone, so the next "
+        "Install would refuse the folder it was building"
+    )
+    assert not (server_dir / ".git").exists(), "the fixture did not die before the move"
+
+
 def test_a_claimed_folder_whose_leftovers_are_not_a_checkout_is_still_refused(
     tmp_path: Path,
 ) -> None:

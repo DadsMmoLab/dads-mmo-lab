@@ -42,6 +42,7 @@ from yulon import (
     networking,
     party,
     platform,
+    rmtree,
     server_build_presses,
 )
 from yulon.catalog import composegen, snapshot
@@ -59,6 +60,7 @@ from yulon.catalog.native import (
     DOWNLOAD_CANCEL_NOTE,
     IMPORT_STAGE_CANCEL_NOTE,
     OUR_OWN_FILES,
+    RESET_FILE,
     CallableGate,
     ConfCheck,
     ConfRepaired,
@@ -1398,10 +1400,18 @@ class AzerothCoreInstaller(StagedInstaller):
         yield f"Cloning {source.repo} into {server_dir} (this is a large repository)"
         if existing is not None:
             yield "A previous run of this install left it part-way through; finishing it off."
+        # T830 H1: a start over's mark (and the ownership record written before this stage) are
+        # in the server folder, and the seam empties a destination it is about to clone into.
+        # While the mark is there the checkout lands beside the folder and is moved in, so the
+        # folder keeps both no matter when the process dies.
+        beside = (server_dir / RESET_FILE).exists() and not has_git
+        dest = _clone_staging(server_dir) if beside else server_dir
+        if beside and dest.exists():
+            rmtree.remove_tree(dest)
         yield from self._clone_lines(
             git.CloneSpec(
                 url=source.url,
-                dest=server_dir,
+                dest=dest,
                 branch=source.branch,
                 sparse_path=source.sparse_path,
                 # Data, not a constant: the core repo says `null` in
@@ -1412,6 +1422,8 @@ class AzerothCoreInstaller(StagedInstaller):
             ),
             "clone-core",
         )
+        if beside:
+            _move_clone_into(dest, server_dir)
         yield f"{source.repo} is in place."
 
     def _clone_modules(self, ctx: StageContext) -> Iterator[str]:
@@ -2285,6 +2297,44 @@ class AzerothCoreInstaller(StagedInstaller):
             yield f"The databases are already marked as the {held} realm type."
             return
         yield f"The databases are marked as the {file_type} realm type."
+
+
+def _clone_staging(server_dir: Path) -> Path:
+    """Where `clone-core` clones beside a server folder whose start over mark must survive.
+
+    T830 H1: both clone seams empty the destination they are about to clone into, and for
+    `clone-core` that destination is the server folder itself. A folder holding
+    `.yulon-start-over.json` has a mark and an ownership record that must outlive the clone,
+    so while the mark is there the checkout lands at this sibling path and is moved in by
+    `_move_clone_into()`. Never inside the server folder: that is what is being kept.
+    """
+    return server_dir.with_name(server_dir.name + ".yulon-clone")
+
+
+def _move_clone_into(staged: Path, server_dir: Path) -> None:
+    """Move the checkout cloned at `staged` into `server_dir`, keeping what is already there.
+
+    `.git` goes first, so a death during the move leaves a checkout the next press updates in
+    place rather than a folder of files with no `.git` (which the guard would refuse). A name
+    that already exists in the folder is this install's own bookkeeping — the mark, the
+    ownership record, the id — and is never replaced; the clone's copy of that name is dropped
+    with the staging folder.
+    """
+    try:
+        children = sorted(staged.iterdir(), key=lambda child: (child.name != ".git", child.name))
+        for child in children:
+            target = server_dir / child.name
+            if os.path.lexists(target):
+                continue
+            os.replace(child, target)
+    except OSError as exc:
+        raise InstallerError(
+            f"The checkout of this server was made in {staged} but could not be moved into "
+            f"{server_dir} ({exc}). Press Install again to finish it."
+        ) from exc
+    finally:
+        if staged.exists():
+            rmtree.remove_tree(staged)
 
 
 def _sql_of(lines: Sequence[str]) -> tuple[str, ...]:
