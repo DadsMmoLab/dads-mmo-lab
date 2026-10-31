@@ -390,6 +390,9 @@ descriptions are written by hand.
 | `catalog/families/extract.py::write_evidence::os.replace` | that evidence file renamed into place | install time |
 | `catalog/families/extract.py::write_evidence::unlink` | the temp evidence file after a failure | install time |
 | `catalog/families/extract.py::write_evidence::write_text` | the extraction evidence file, to a temp name | install time |
+| `catalog/families/surgical.py::write_sidecar::os.replace` | **T837** `data/.yulon-wb1.json` (the WB1 archive's name, size and mtime taken before its hash) renamed into place, after a whole extraction | install time |
+| `catalog/families/surgical.py::write_sidecar::unlink` | **T837** the temp sidecar after a failed write | install time |
+| `catalog/families/surgical.py::write_sidecar::write_text` | **T837** the WB1 sidecar, to a temp name | install time |
 | `catalog/families/extract.py::overlay_files::shutil.copy2` | **new (T179 Task 3)** one file of the server's own DBC folder (Centurion's `centurion/dbc`, from its checkout), copied to `data/dbc/<name>.yulon-new` under the install's `data/` -- a file whose copy is already there (same size and modification time) is not copied again | install time (the `client-data` stage, before `up`) |
 | `catalog/families/extract.py::overlay_files::os.replace` | **new (T179 Task 3)** that temporary copy renamed over `data/dbc/<name>`, so a stop part way leaves each file whole, the old or the new; the extracted files the folder does not ship are kept | install time (as above) |
 | `catalog/families/extract.py::set_map_aside::write_text` | **new (T811)** under `data/mmaps.t811-backup/`: `offmesh.sha` (the off-mesh hash the tiles being replaced were built from) and `<map>/.names` (the list of files being replaced), both written BEFORE the first rename, so a press that crashed half way can finish the put-back and restore the record with the tiles | the update press's rebuild window, with the world server stopped |
