@@ -14,6 +14,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ## Unreleased
 
 ### New
+- Conquest of Azeroth installs on Windows with Docker Desktop.
 
 ### Fixed
 - Bringing in a packed server no longer refuses a bot database update that was released out of date order.

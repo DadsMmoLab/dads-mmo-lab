@@ -3002,7 +3002,8 @@
         },
         "install": {
             "platforms": [
-                "linux"
+                "linux",
+                "windows"
             ],
             "default_server_dir": "yulon-coa",
             "requires_client_dir": true,
