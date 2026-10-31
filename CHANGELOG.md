@@ -16,6 +16,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ### New
 
 ### Fixed
+- Installs no longer leave unnamed Docker volumes behind (one per Conquest of Azeroth install, and one after a tool run was cut off).
 
 ### Changed
 

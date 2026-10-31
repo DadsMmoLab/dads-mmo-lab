@@ -2427,9 +2427,9 @@ def _remove_runner(
             return _completed(stdout="".join(n + "\n" for n in sorted(exists)))
         if cmd[:2] == ["docker", "ps"]:
             return _completed(stdout="".join(n + "\n" for n in sorted(live)))
-        if cmd[:3] == ["docker", "rm", "-f"]:
+        if cmd[:4] == ["docker", "rm", "-f", "-v"]:
             if rm_works:
-                exists.discard(cmd[3])
+                exists.discard(cmd[4])
             return _completed()
         return _completed()
 
@@ -2443,8 +2443,10 @@ def test_remove_staged_never_passes_a_flag_that_would_delete_a_volume(
 
     The database is a named volume (`ac-database:/var/lib/mysql`), so
     `compose down` keeps every character. `compose down -v` deletes them. There
-    is no legitimate reason for this argv to grow a `-v`, and a test is cheaper
-    than finding out.
+    is no legitimate reason for the `down` argv to grow a `-v`, and a test is
+    cheaper than finding out. The by-name `rm -f -v` fallback is NOT covered
+    here: it removes only each container's OWN anonymous volumes, never a named
+    one (T846).
     """
     calls: list[list[str]] = []
     monkeypatch.setattr(docker.runner, "run", _remove_runner(calls, present={SPEC.db, SPEC.world}))
@@ -2453,7 +2455,7 @@ def test_remove_staged_never_passes_a_flag_that_would_delete_a_volume(
     down = [cmd for cmd in calls if cmd[:3] == ["docker", "compose", "down"]]
     assert down, "nothing was taken down"
     assert "--remove-orphans" in down[0], down[0]
-    for cmd in calls:
+    for cmd in down:
         assert "-v" not in cmd, cmd
         assert "--volumes" not in cmd, cmd
 
@@ -2530,7 +2532,7 @@ def test_remove_staged_finishes_the_job_when_compose_down_removed_nothing(
         _remove_runner(calls, present={SPEC.db, SPEC.world}, down_removes=False),
     )
     assert docker.remove_staged(SPEC, Path("/tmp/wow")) is True
-    removed = {c[3] for c in calls if c[:3] == ["docker", "rm", "-f"]}
+    removed = {c[4] for c in calls if c[:4] == ["docker", "rm", "-f", "-v"]}
     assert removed == {SPEC.db, SPEC.world}
 
 
@@ -3146,11 +3148,13 @@ def test_the_teardowns_by_name_fallback_stops_before_it_removes(
     assert docker.remove_staged(SPEC, Path("/tmp/wow")) is True
 
     order = [
-        cmd for cmd in calls if cmd[:2] == ["docker", "stop"] or cmd[:3] == ["docker", "rm", "-f"]
+        cmd
+        for cmd in calls
+        if cmd[:2] == ["docker", "stop"] or cmd[:4] == ["docker", "rm", "-f", "-v"]
     ]
     for name in (SPEC.db, SPEC.world):
         stopped = order.index(["docker", "stop", "-t", _GRACE, name])
-        removed = order.index(["docker", "rm", "-f", name])
+        removed = order.index(["docker", "rm", "-f", "-v", name])
         assert stopped < removed, f"{name} was removed before it was stopped: {order}"
 
 
@@ -5725,7 +5729,7 @@ def test_copy_from_image_creates_copies_and_removes_in_that_order(
         # ENTRYPOINT nor a CMD, and nothing is ever started.
         ["docker", "create", "--entrypoint", "true", "yulon.local/x:t"],
         ["docker", "cp", "0123456789abcdef:/opt/etc", str(tmp_path / "etc")],
-        ["docker", "rm", "-f", "0123456789abcdef"],
+        ["docker", "rm", "-f", "-v", "0123456789abcdef"],
     ]
 
 
@@ -5746,7 +5750,7 @@ def test_the_container_id_is_the_last_stdout_line_not_the_whole_of_it(
     monkeypatch.setattr(docker.platform, "docker_program", lambda: "docker")
     docker.copy_from_image("yulon.local/x:t", "/opt/etc", tmp_path / "etc")
     assert calls[1] == ["docker", "cp", "abc123def456:/opt/etc", str(tmp_path / "etc")]
-    assert _rm_calls(calls) == [["docker", "rm", "-f", "abc123def456"]]
+    assert _rm_calls(calls) == [["docker", "rm", "-f", "-v", "abc123def456"]]
 
 
 def test_a_failed_copy_still_removes_the_container_it_created(
@@ -5758,7 +5762,7 @@ def test_a_failed_copy_still_removes_the_container_it_created(
     monkeypatch.setattr(docker.platform, "docker_program", lambda: "docker")
     with pytest.raises(docker.DockerCommandError, match="No such container:path"):
         docker.copy_from_image("yulon.local/x:t", "/nope", tmp_path / "nope")
-    assert calls[-1] == ["docker", "rm", "-f", "0123456789abcdef"]
+    assert calls[-1] == ["docker", "rm", "-f", "-v", "0123456789abcdef"]
 
 
 def test_a_create_that_prints_no_id_is_an_error_and_removes_nothing(
@@ -5778,7 +5782,7 @@ def test_a_create_that_fails_outright_removes_nothing_and_names_the_image(
 ) -> None:
     """No container was made, so a removal would be the only mistake left to make.
 
-    `docker rm -f ""` is not harmless noise: it exits non-zero, and the warning
+    `docker rm -f -v ""` is not harmless noise: it exits non-zero, and the warning
     it produces would blame the removal for an image that was never pulled.
     """
     calls: list[list[str]] = []
@@ -5811,7 +5815,7 @@ def test_an_interrupted_copy_still_removes_the_container(
     monkeypatch.setattr(docker.platform, "docker_program", lambda: "docker")
     with pytest.raises(KeyboardInterrupt):
         docker.copy_from_image("yulon.local/x:t", "/opt/etc", tmp_path / "etc")
-    assert _rm_calls(calls) == [["docker", "rm", "-f", "0123456789abcdef"]]
+    assert _rm_calls(calls) == [["docker", "rm", "-f", "-v", "0123456789abcdef"]]
 
 
 def test_an_unexpected_error_during_the_copy_is_not_dressed_up_as_a_copy_failure(
@@ -5824,7 +5828,7 @@ def test_an_unexpected_error_during_the_copy_is_not_dressed_up_as_a_copy_failure
     monkeypatch.setattr(docker.platform, "docker_program", lambda: "docker")
     with pytest.raises(MemoryError):
         docker.copy_from_image("yulon.local/x:t", "/opt/etc", tmp_path / "etc")
-    assert _rm_calls(calls) == [["docker", "rm", "-f", "0123456789abcdef"]]
+    assert _rm_calls(calls) == [["docker", "rm", "-f", "-v", "0123456789abcdef"]]
 
 
 def test_a_removal_that_fails_is_logged_and_does_not_replace_the_copys_error(
@@ -5838,7 +5842,7 @@ def test_a_removal_that_fails_is_logged_and_does_not_replace_the_copys_error(
     with caplog.at_level("WARNING"):
         with pytest.raises(docker.DockerCommandError, match="No such container:path"):
             docker.copy_from_image("yulon.local/x:t", "/nope", tmp_path / "nope")
-    assert _rm_calls(calls) == [["docker", "rm", "-f", "0123456789abcdef"]]
+    assert _rm_calls(calls) == [["docker", "rm", "-f", "-v", "0123456789abcdef"]]
     assert "removal already in progress" in caplog.text
     assert "0123456789ab" in caplog.text
 

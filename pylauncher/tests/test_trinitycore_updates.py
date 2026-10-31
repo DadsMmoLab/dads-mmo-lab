@@ -1290,7 +1290,7 @@ def test_a_stopped_reextract_starts_no_tool_after_the_stop_ends_its_container_an
         else:
             assert len(runs) == 1, "a further tool was started after the Stop"
             name = runs[0].split()[runs[0].split().index("--name") + 1]
-            assert f"rm -f {name}" in fake_calls(state)
+            assert f"rm -f -v {name}" in fake_calls(state)
         assert fake_containers(state) == [], "a tool container is still running"
         assert seen_at_put_back == [[]], "the old data came back while a tool could still write"
         assert data_files(box) == before, "the old map data, its record and the movement maps"

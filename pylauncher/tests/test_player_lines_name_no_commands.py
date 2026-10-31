@@ -210,7 +210,7 @@ EXCEPTIONS: dict[tuple[str, str], tuple[str, frozenset[str]]] = {
     ),
     ("yulon/git.py", "_streamed_capture"): (
         f"removing a clone's container that Stop could not remove: {_TYPED}",
-        frozenset({"docker rm -f {…}"}),
+        frozenset({"docker rm -f -v {…}"}),
     ),
     ("yulon/catalog/native.py", "_killed_hint"): (
         f"checking the kernel log for a world server killed for memory: {_TYPED}",

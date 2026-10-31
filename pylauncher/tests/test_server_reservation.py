@@ -332,7 +332,7 @@ def test_stop_anyway_removes_exactly_the_shown_id_then_stops(
         assert docker.end_reservation(holder) is True
 
         (removal,) = [c for c in fake_calls(fake_docker) if c.startswith("rm ")][removals:]
-        assert removal == f"rm -f {name}-id", "removed by name, not by the id it was read with"
+        assert removal == f"rm -f -v {name}-id", "removed by name, not by the id it was read with"
         assert name not in fake_containers(fake_docker)
         stop_staged(SPEC, server)
         assert ran == ["stop"]

@@ -758,7 +758,7 @@ def test_removing_a_container_that_is_already_gone_is_not_a_failure(
 ) -> None:
     asked = _answer(monkeypatch, 1, err=f"Error response from daemon: No such container: {NAME}")
     docker.remove_container(NAME)
-    assert asked == [["rm", "-f", NAME]]
+    assert asked == [["rm", "-f", "-v", NAME]]
     _answer(monkeypatch, 1, err="permission denied")
     with pytest.raises(docker.DockerCommandError, match="permission denied"):
         docker.remove_container(NAME)

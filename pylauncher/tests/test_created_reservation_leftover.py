@@ -63,7 +63,7 @@ def test_a_created_leftover_of_a_dead_process_of_ours_is_removed_and_the_start_g
         assert held.name == name
         assert name in fake_containers(fake_docker)
         assert _labels_of(fake_docker, name)[docker.PID_LABEL] == str(os.getpid())
-    assert f"rm -f {name}-id" in fake_calls(fake_docker)
+    assert f"rm -f -v {name}-id" in fake_calls(fake_docker)
 
 
 def test_a_created_leftover_of_this_process_is_removed_when_it_is_not_taking_it(
@@ -81,7 +81,7 @@ def test_a_created_leftover_of_this_process_is_removed_when_it_is_not_taking_it(
     with docker.server_claim(server, press="Start", images=[IMAGE]) as held:
         assert held.name == name
         assert name in fake_containers(fake_docker)
-    assert f"rm -f {name}-id" in fake_calls(fake_docker)
+    assert f"rm -f -v {name}-id" in fake_calls(fake_docker)
 
 
 def test_a_created_one_of_another_live_process_is_never_removed(

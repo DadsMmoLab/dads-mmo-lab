@@ -2146,7 +2146,8 @@ def remove_volume(name: str, *, wsl_distro: str | None = None) -> None:
     that, because it cannot: a volume name carries no reference to the folder it
     belongs to. What it does check is the ONE thing it can — that the volume is
     actually gone afterwards, rather than trusting an exit code, the same way
-    `remove_staged()` re-censuses.
+    `remove_staged()` re-censuses. An already orphaned ANONYMOUS volume is not
+    purged here: it carries no project label, so it cannot be attributed safely (T846).
 
     Raises:
         DockerCommandError: The volume is still in use, or the removal could not
@@ -2524,7 +2525,9 @@ def remove_staged(
     # reverse, so the servers close their database connections before the
     # database goes. `--remove-orphans` clears services dropped from the compose
     # file, which are exactly the leftovers that make a project need recreating.
-    # No `-v`, ever.
+    # No `-v` on `down`, ever: that flag removes the project's NAMED volumes
+    # (the characters). The `rm -f -v` fallback below removes only each
+    # container's OWN anonymous volumes, never a named one (T846).
     # The grace matters here as much as it does on the stop path, and it was
     # missed the first time round: this button is offered on a RUNNING server,
     # under copy that says the characters are not affected. At Docker's 10s
@@ -2563,9 +2566,10 @@ def remove_staged(
             # Stopped with the full grace BEFORE it is removed. `rm -f` is a
             # SIGKILL with no grace at all, so leaving it as the only fallback
             # left a hard-kill path reachable from the same button whose copy
-            # promises the characters survive (review, 2026-08-23).
+            # promises the characters survive (review, 2026-08-23). `-v` takes
+            # only the container's own anonymous volumes, never a named one (T846).
             _run_docker_stop(name, wsl_distro=wsl_distro)
-            _docker(["rm", "-f", name], wsl_distro=wsl_distro)
+            _docker(["rm", "-f", "-v", name], wsl_distro=wsl_distro)
         after = _project_containers(project, wsl_distro=wsl_distro) or []
     if after:
         raise DockerCommandError(f"still present after remove: {', '.join(after)}")
@@ -9609,8 +9613,11 @@ def _end_claim_cli(proc: subprocess.Popen[bytes], *, wait: float = _CLAIM_RELEAS
 def _remove_claim(
     container: str, timeout: float = _CLAIM_ASK_TIMEOUT, *, wsl_distro: str | None = None
 ) -> bool:
-    """`docker rm -f` a claim by its container id; True once it is gone (already gone counts)."""
-    proc = _docker(["rm", "-f", container], timeout=timeout, wsl_distro=wsl_distro)
+    """`docker rm -f -v` a claim by its container id; True once it is gone (already gone counts).
+
+    `-v` (T846) takes only the claim's own anonymous volumes, never a named one.
+    """
+    proc = _docker(["rm", "-f", "-v", container], timeout=timeout, wsl_distro=wsl_distro)
     if proc.returncode != 0 and not _NO_SUCH_CONTAINER.search(proc.stderr):
         logger.warning(f"the claim {container} could not be removed: {proc.stderr.strip()}")
         return False
@@ -10451,7 +10458,7 @@ def tool_container_left_line(name: str, reason: str, *, stopped: bool = True) ->
     return (
         f"The extraction tool's container {name} could not be removed{after} ({reason}), "
         f"so it may still be writing into the server's data folder. "
-        f"{container_end.remove_it()}\ndocker rm -f {name}"
+        f"{container_end.remove_it()}\ndocker rm -f -v {name}"
     )
 
 
@@ -10629,20 +10636,22 @@ def daemon_arch(
 def remove_container(
     container: str, *, timeout: float | None = None, wsl_distro: str | None = None
 ) -> None:
-    """`docker rm -f <container>`; a container that is already gone is not a failure.
+    """`docker rm -f -v <container>`; a container that is already gone is not a failure.
+
+    `-v` (T846) takes only the container's own anonymous volumes, never a named one.
 
     Raises:
         DockerCliMissingError: there is no docker CLI.
         DockerCommandError: docker refused for any other reason, or did not answer in time.
     """
-    proc = _docker(["rm", "-f", container], timeout=timeout, wsl_distro=wsl_distro)
+    proc = _docker(["rm", "-f", "-v", container], timeout=timeout, wsl_distro=wsl_distro)
     if proc.returncode == 0:
         return
     if _cli_missing(proc):
         raise DockerCliMissingError(platform.DOCKER_CLI_MISSING_HELP)
     if _NO_SUCH_CONTAINER.search(proc.stderr):
         return
-    raise DockerCommandError(f"docker rm -f {container} exited {proc.returncode}: {proc.stderr}")
+    raise DockerCommandError(f"docker rm -f -v {container} exited {proc.returncode}: {proc.stderr}")
 
 
 _MISSING_IN_IMAGE = re.compile(r"No such container:path|Could not find the file", re.IGNORECASE)
@@ -10744,7 +10753,9 @@ def copy_from_image(image: str, src: str, dest: Path) -> None:
             raise DockerCommandError(f"{image} has no {src} to copy out: {exc}") from exc
         raise DockerCommandError(f"could not copy {src} out of {image}: {exc}") from exc
     finally:
-        removal = _docker(["rm", "-f", container])
+        # `-v` (T846): the image may declare VOLUME paths of its own, and a
+        # throwaway container that only ever held a `cp` must not leave them.
+        removal = _docker(["rm", "-f", "-v", container])
         if removal.returncode != 0:
             if _cli_missing(removal):
                 # `removal.stderr` here is the whole install-Docker help text,
@@ -10753,7 +10764,7 @@ def copy_from_image(image: str, src: str, dest: Path) -> None:
                 # now genuinely stranded, by name.
                 logger.warning(
                     f"no docker CLI left to remove {container[:12]} with; it is still "
-                    f"there, and `docker rm -f {container[:12]}` clears it once docker is back"
+                    f"there, and `docker rm -f -v {container[:12]}` clears it once docker is back"
                 )
             else:
                 logger.warning(

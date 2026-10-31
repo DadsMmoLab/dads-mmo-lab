@@ -381,7 +381,8 @@ def test_a_holder_that_is_being_removed_is_waited_for_not_refused_for(
     theirs = _another_process_holds(fake_docker, name, owner=docker.owner_id())
     try:
         removing = subprocess.run(
-            [str(fake_docker.parent / "fake-docker"), "rm", "-f", name + "-id"], capture_output=True
+            [str(fake_docker.parent / "fake-docker"), "rm", "-f", "-v", name + "-id"],
+            capture_output=True,
         )
         assert removing.returncode == 1  # "already in progress": it is `removing` now
         assert (fake_docker / "containers" / name).read_text(encoding="utf-8") == "removing"
