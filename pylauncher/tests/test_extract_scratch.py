@@ -459,6 +459,112 @@ def test_a_staging_folder_a_killed_run_left_is_removed_and_the_run_succeeds(
     assert staging(out) == []
 
 
+def test_a_failed_swap_puts_the_old_folder_back_and_leaves_no_aside(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The old folder is set aside by rename, never deleted first (T845 fix round 1).
+
+    A rename cannot half-remove. When the staging folder cannot be moved in, the
+    set-aside old folder is renamed back, so a locked file or a failed replace
+    leaves `data/<name>` exactly as it was instead of half or wholly gone.
+    """
+    out = tmp_path / "out"
+    (out / "Buildings").mkdir(parents=True)
+    (out / "Buildings" / "old").write_bytes(b"o")
+    stage(out, {"Buildings": 1})
+    (out / ".yulon-copy-Buildings" / "new").write_bytes(b"n")
+    (out / ".yulon-copy-Buildings" / ".yulon-copied").touch()
+    real_replace = extract.os.replace
+
+    def replace(source: object, target: object) -> None:
+        if Path(str(source)).name == ".yulon-copy-Buildings":
+            raise OSError("the folder is locked")
+        real_replace(source, target)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(extract.os, "replace", replace)
+    with pytest.raises(InstallerError, match="could not be moved into data/Buildings"):
+        promote(out, {"Buildings": 1})
+    assert sorted(path.name for path in (out / "Buildings").iterdir()) == ["old"]
+    assert [path.name for path in out.iterdir() if path.name.startswith(".yulon-old-")] == []
+
+
+def test_a_successful_swap_leaves_no_aside_and_no_marker_in_the_folder(tmp_path: Path) -> None:
+    """The old folder goes only once the new one is in, and the marker stays behind.
+
+    `.yulon-copied` says the copy finished, so it must not travel into
+    `data/<name>`, and the set-aside folder is removed after the swap.
+    """
+    out = tmp_path / "out"
+    (out / "vmaps").mkdir(parents=True)
+    (out / "vmaps" / "old").write_bytes(b"o")
+    stage(out, {"vmaps": 1})
+    result = run_scratched(tmp_path, out, "echo v > vmaps/v1\n", "vmaps")
+    assert result.returncode == 0, result.stdout + result.stderr
+    promote(out, {"vmaps": 1})
+    assert sorted(path.name for path in (out / "vmaps").iterdir()) == ["v1"]
+    assert [path.name for path in out.iterdir() if path.name.startswith(".yulon-old-")] == []
+    assert not (out / "vmaps" / ".yulon-copied").exists()
+
+
+def test_a_set_aside_folder_a_crashed_swap_left_is_removed_before_the_next_run(
+    tmp_path: Path,
+) -> None:
+    """A run killed between the two renames leaves `.yulon-old-<name>` and no `data/<name>`.
+
+    No evidence was written, so the tool runs again; the leftover is only the
+    interrupted swap's and must not be promoted or kept.
+    """
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / ".yulon-old-vmaps").mkdir()
+    (out / ".yulon-old-vmaps" / "old").write_bytes(b"o")
+    stage(out, {"vmaps": 1})
+    assert not (out / ".yulon-old-vmaps").exists()
+    assert (out / ".yulon-copy-vmaps").is_dir()
+
+
+def test_a_container_a_stop_left_running_keeps_the_staging_folder_and_the_old_data(
+    tmp_path: Path,
+) -> None:
+    """It may still be copying into the staging folder, so promote touches nothing.
+
+    `_conclude()` raises `ContainerLeftRunning` after this, and the next run's
+    `make_copy_dirs()` clears the staging folder.
+    """
+    out = tmp_path / "out"
+    (out / "vmaps").mkdir(parents=True)
+    (out / "vmaps" / "old").write_bytes(b"o")
+    stage(out, {"vmaps": 1})
+    (out / ".yulon-copy-vmaps" / "partial").write_bytes(b"p")
+    (out / ".yulon-copy-vmaps" / ".yulon-copied").touch()
+    tool = ExtractTool(name="tool", argv=("/opt/bin/tool",), produces={"vmaps": 1})
+    run = docker.AttachedRun(0, ("ran",), container_left="yulon-tool")
+    extract.promote_copies(tool, run, out)
+    assert (out / ".yulon-copy-vmaps" / "partial").is_file(), "the container may still fill it"
+    assert (out / ".yulon-copy-vmaps" / ".yulon-copied").is_file()
+    assert sorted(path.name for path in (out / "vmaps").iterdir()) == ["old"]
+
+
+def test_a_stop_that_lands_as_the_tool_exits_promotes_nothing(tmp_path: Path) -> None:
+    """A Stop while the tool was finishing: `_conclude()` says Stopped, and the copy is dropped.
+
+    The staging folder is removed best effort, as on a failed run; the old
+    folder is untouched.
+    """
+    out = tmp_path / "out"
+    (out / "vmaps").mkdir(parents=True)
+    (out / "vmaps" / "old").write_bytes(b"o")
+    stage(out, {"vmaps": 1})
+    (out / ".yulon-copy-vmaps" / "new").write_bytes(b"n")
+    (out / ".yulon-copy-vmaps" / ".yulon-copied").touch()
+    tool = ExtractTool(name="tool", argv=("/opt/bin/tool",), produces={"vmaps": 1})
+    cancel = threading.Event()
+    cancel.set()
+    extract.promote_copies(tool, docker.AttachedRun(0, ("ran",)), out, cancel)
+    assert sorted(path.name for path in (out / "vmaps").iterdir()) == ["old"]
+    assert staging(out) == []
+
+
 def test_the_script_is_its_own_home_for_its_paths_and_constants() -> None:
     """One home per name: a script that hard-coded a third spelling would drift silently."""
     assert extract.SCRATCH_MOUNT == "/tmp/yulon-scratch"
@@ -592,9 +698,14 @@ def test_both_loops_stage_before_and_promote_after_every_run_only_off_the_bind(
             events.append(("make", " ".join(produces), 0))
             real_make(produces, data_dir)
 
-        def promote_copies(tool: ExtractTool, run: docker.AttachedRun, data_dir: Path) -> None:
+        def promote_copies(
+            tool: ExtractTool,
+            run: docker.AttachedRun,
+            data_dir: Path,
+            cancel: threading.Event | None = None,
+        ) -> None:
             events.append(("promote", tool.name, run.returncode))
-            real_promote(tool, run, data_dir)
+            real_promote(tool, run, data_dir, cancel)
 
         monkeypatch.setattr(extract, "make_copy_dirs", make_copy_dirs)
         monkeypatch.setattr(extract, "promote_copies", promote_copies)
