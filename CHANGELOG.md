@@ -14,6 +14,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ## Unreleased
 
 ### New
+- Conquest of Azeroth installs on Windows with Docker Desktop.
 - **Install** on a folder whose bring-in did not finish offers to start over with a plain install, keeping a copy first.
 
 ### Fixed
