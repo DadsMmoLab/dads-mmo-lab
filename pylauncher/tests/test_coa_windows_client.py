@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import errno
 import os
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 import pytest
 
@@ -111,10 +111,10 @@ def test_hard_link_plan_links_disabled_mpq_and_dll_and_copies_the_exe(
     orig = _coa_client(tmp_path)
     target = tmp_path / "Ascension (Yu'lon – Conquest of Azeroth)"
     build = play_client.plan(orig, target, server_dir=_server(tmp_path))
-    assert PurePosixPath("Data/patch-WB1.MPQ.DISABLED") in build.linked
-    assert PurePosixPath("Data/common.MPQ") in build.linked
-    assert PurePosixPath("DivxDecoder.dll") in build.linked
-    assert PurePosixPath("Ascension.exe") in build.copied
+    assert Path("Data/patch-WB1.MPQ.DISABLED") in build.linked
+    assert Path("Data/common.MPQ") in build.linked
+    assert Path("DivxDecoder.dll") in build.linked
+    assert Path("Ascension.exe") in build.copied
     folded = [rel.as_posix().casefold() for rel in (*build.linked, *build.copied)]
     assert len(set(folded)) == len(folded)
 
