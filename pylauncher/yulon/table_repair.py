@@ -273,7 +273,7 @@ def damaged_refusal(
         dbs = ", ".join(dict.fromkeys(table.db for table in other))
         said += (
             f" Repair on the server card cannot fix {dbs}: restore it from a backup on the"
-            " Maintenance tab, or ask for help."
+            f" {MAINTENANCE_TAB} tab, or ask for help."
         )
         if fixable:
             fixed = ", ".join(table.qualified for table in fixable)

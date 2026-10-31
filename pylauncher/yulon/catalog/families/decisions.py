@@ -811,12 +811,12 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         "the update copy names a crashed MyISAM table and checks for one before the build "
         "(T839), for T822's Repair the damaged table… press",
         {
-            "azerothcore": not_available(
+            "azerothcore": not_applicable(
                 "its tables are InnoDB, which a crash does not leave marked as crashed, and it "
                 "has no Repair the damaged table… press (T822); its copy is as it was"
             ),
             "cmangos": supported(),
-            "trinitycore": not_available(
+            "trinitycore": not_applicable(
                 "it has no Repair the damaged table… press (T822); its copy is as it was"
             ),
         },
