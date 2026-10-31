@@ -328,6 +328,21 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         },
         hits=(".azerothcore",),
     ),
+    Site(
+        "yulon.dashboard",
+        "Dashboard.__init__",
+        "a world that crash-loops on a damaged MyISAM table names it from its own log (T823)",
+        {
+            "azerothcore": not_applicable(
+                "scoped like T839's checks_damage: crashed tables were seen only on CMaNGOS"
+            ),
+            "cmangos": supported(),
+            "trinitycore": not_applicable(
+                "scoped like T839's checks_damage: crashed tables were seen only on CMaNGOS"
+            ),
+        },
+        hits=("'cmangos'",),
+    ),
     # -- engine dispatch ---------------------------------------------------------------
     Site(
         "yulon.catalog.families.__init__",
