@@ -2627,6 +2627,49 @@ def test_a_staging_folder_that_is_not_yulons_is_refused_by_name(tmp_path: Path) 
     assert notes.read_bytes() == b"mine", "a folder Yu'lon did not make was used"
 
 
+def test_a_resume_cut_off_mid_delete_still_leaves_a_folder_that_is_yulons(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T830 final review: the resume empties only `checkout`, never the marker.
+
+    On Windows a folder listing puts `.yulon-staging` first, so deleting the whole staging
+    folder takes the marker before the checkout; a file Windows holds open then cuts the delete
+    off and every later press refuses the folder as not Yu'lon's.
+
+    Mutation: the resume deletes the whole recorded folder again -> the marker is gone and
+    the delete error escapes.
+    """
+    server_dir = tmp_path / "wow"
+    server_dir.mkdir()
+    staged = tmp_path / "wow.yulon-clone-0123abcd"
+    (staged / "checkout").mkdir(parents=True)
+    (staged / "checkout" / "half-a-checkout").write_bytes(b"x")
+    marker = staged / start_over.STAGING_MARKER
+    marker.write_text(
+        json.dumps({"server_dir": str(server_dir.resolve()), "reset_id": "0f0f0f0f"}),
+        encoding="utf-8",
+    )
+    (server_dir / native.RESET_FILE).write_text(
+        json.dumps(
+            {"version": 1, "package": "abc", "done": [], "id": "0f0f0f0f", "staging": str(staged)}
+        ),
+        encoding="utf-8",
+    )
+    real_remove = start_over.rmtree.remove_tree
+
+    def held_open(path: Path) -> None:
+        if Path(path) == staged:
+            marker.unlink()  # NTFS lists the marker first
+            raise OSError("The process cannot access the file because it is being used")
+        real_remove(path)
+
+    monkeypatch.setattr(start_over.rmtree, "remove_tree", held_open)
+    folder, _reset_id = start_over.prepare_staging(server_dir)
+    assert folder == staged
+    assert marker.is_file(), "the resume dropped the marker"
+    assert not (staged / "checkout" / "half-a-checkout").exists()
+
+
 def test_a_failed_move_removes_only_the_staging_folder_yulon_made(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2729,6 +2772,10 @@ def test_a_resumed_clone_reuses_the_staging_folder_it_recorded(tmp_path: Path) -
 
     def clone(spec: git.CloneSpec) -> None:
         again.append(spec.dest)
+        if spec.dest.parent == staged:
+            # T830 final review: the resume empties only `checkout`; the marker was never off
+            # disk, so a delete cut short there would still leave a folder that is Yu'lon's.
+            assert (staged / start_over.STAGING_MARKER).is_file(), "the resume dropped the marker"
         as_the_clone_seam_does(spec.dest)
         (spec.dest / ".git").mkdir(parents=True, exist_ok=True)
         (spec.dest / composegen.BASE_FILE).write_text(UPSTREAM_COMPOSE, encoding="utf-8")

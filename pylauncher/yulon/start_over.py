@@ -1023,9 +1023,14 @@ def _prepare_staging(server_dir: Path, reset: _Reset) -> Path:
     if os.path.lexists(recorded):
         if not _staged_here(recorded, server_dir, reset.id):
             raise StartOverError(not_yulons_folder(recorded))
-        # The marker says it is this reset's to empty: a clone that died in the checkout
-        # (`staging_checkout()`) leaves a half one behind, and the seam would wipe it anyway.
-        rmtree.remove_tree(recorded)
+        # The marker says it is this reset's: a clone that died in the checkout
+        # (`staging_checkout()`) leaves a half one behind. Only that checkout goes; the marker
+        # stays, so a delete cut off part-way (a file Windows holds open) is still ours next
+        # press instead of a folder Yu'lon refuses to touch (T830 final review).
+        checkout = staging_checkout(recorded)
+        if os.path.lexists(checkout):
+            rmtree.remove_tree(checkout)
+        return recorded
     recorded.mkdir(mode=0o700)
     _write_staging_marker(recorded, server_dir, reset.id)
     return recorded
