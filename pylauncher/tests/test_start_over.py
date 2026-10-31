@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.support_native import UPSTREAM_COMPOSE, Recorder
+from tests.support_native import UPSTREAM_COMPOSE, Recorder, engine
 from tests.support_native import install as native_install
 from tests.support_player_text import command_faults, text_faults
 from tests.test_move_server_flow import Move, _cut_off_move, plan_for
@@ -376,7 +376,10 @@ def test_a_resumed_reset_refuses_a_copy_file_that_is_gone(
     assert plain.runs == 0
     reset = json.loads((mv.target.server_dir / start_over.RESET_FILE).read_text(encoding="utf-8"))
     assert reset["done"] == ["project", "stopped"], reset["done"]
-    assert reset["copies"] == [] and reset["removing"] is False
+    assert reset["copies"] == []
+    # T830 S1: the removal had begun before the crash, and a rewound record keeps saying so:
+    # a later copy failure must never forget the record of a half-removed folder.
+    assert reset["removing"] is True
 
 
 def test_a_resumed_reset_refuses_a_copy_file_that_was_cut_short(
@@ -438,6 +441,53 @@ def test_a_resumed_reset_refuses_a_copy_that_does_not_cover_every_database(
     assert plain.runs == 0
 
 
+def test_a_copy_that_fails_after_the_removal_began_keeps_the_record(
+    cut_off: tuple[Move, Volumes, Plain],
+) -> None:
+    """S1: a rewound record keeps `removing`, so a later copy failure never takes it away.
+
+    The crash lands inside the first volume removal, so part of the server may already be
+    gone. A changed dump rewinds the record to the copy step; the copy then fails. The record
+    must stay, the refusal must not claim the bring-in is as it was, and Bring-in must still
+    refuse the folder.
+
+    Mutation: `_revalidate()` setting `removing = False` again -> the copy failure takes the
+    `forget()` path, deletes the record and says "Nothing was removed and the bring-in is as
+    it was", and Bring-in accepts a half-removed folder.
+    """
+    mv, vols, plain = cut_off
+    server_dir = mv.target.server_dir
+    dumps = _crash_before_removal(mv, vols, plain)
+    changed = bytearray(dumps[2].read_bytes())
+    changed[-1] ^= 0xFF
+    dumps[2].write_bytes(bytes(changed))
+    # The rewind itself: outside the reset's own handling, so its sentence is the copy's own.
+    rewound = _resume(mv, vols, plain)
+    assert str(rewound) == start_over.damaged_copy(dumps[2])
+    reset = json.loads((server_dir / start_over.RESET_FILE).read_text(encoding="utf-8"))
+    assert reset["removing"] is True, "the rewind forgot that the removal began"
+
+    # The copy step runs again and cannot make the copy.
+    mv.target.db.fail_dump_of = "acore_world"
+    volumes = json.dumps(vols.volumes, sort_keys=True)
+    with pytest.raises(start_over.StartOverError) as refused:
+        _press(mv, vols, plain, expected=None)
+    said = str(refused.value)
+    assert said.startswith(
+        "Start over had already removed part of this server, and the new copy of your "
+        "databases could not be made ("
+    ), said
+    assert said.endswith("Nothing more was removed; press Start over again."), said
+    assert start_over.UNCHANGED not in said, said
+    assert json.dumps(vols.volumes, sort_keys=True) == volumes
+    assert plain.runs == 0
+    assert (server_dir / start_over.RESET_FILE).exists(), "the record of a half-removed folder"
+    kept = json.loads((server_dir / start_over.RESET_FILE).read_text(encoding="utf-8"))
+    assert kept["removing"] is True and "removed" not in kept["done"]
+    assert (server_dir / move_server.MOVE_IN_FILE).exists()
+    assert plan_for(mv.path, server_dir).refusals == (move_server.START_OVER_UNFINISHED,)
+
+
 def test_the_marker_outlives_a_death_in_the_plain_installs_first_stage(
     cut_off: tuple[Move, Volumes, Plain],
 ) -> None:
@@ -473,6 +523,9 @@ def test_the_marker_outlives_a_death_in_the_plain_installs_first_stage(
     )
     # Install accepts it, says so once, and a finished install never leaves the marker.
     rec = Recorder()
+    # The clone opens by removing its destination, as both real seams do (T830 M1): mid-start
+    # over that destination is `<staging>/checkout` and not the marked folder.
+    rec.clone_wipes_leftovers = True
     real_unmodified = rec.file_unmodified
 
     def unmodified(dest: Path, relative_path: str) -> bool | None:
@@ -554,6 +607,8 @@ def test_a_users_own_clone_folder_survives_a_start_over_and_the_install(
         _press(mv, vols, Dying(vols))
     assert (server_dir / start_over.RESET_FILE).exists(), "the marker the install needs is gone"
     rec = Recorder()
+    # The clone opens by removing its destination, as both real seams do (T830 M1).
+    rec.clone_wipes_leftovers = True
     real_unmodified = rec.file_unmodified
 
     def unmodified(dest: Path, relative_path: str) -> bool | None:
@@ -573,12 +628,64 @@ def test_a_users_own_clone_folder_survives_a_start_over_and_the_install(
     assert (server_dir / native.STATE_FILE).is_file()
     notes = theirs / "my-notes.txt"
     assert notes.read_bytes() == b"mine", "Yu'lon removed a folder it did not make"
-    staged = [spec.dest for spec in rec.clones if spec.dest.parent == server_dir.parent]
+    # M1: the clone lands in `<staging>/checkout`, so the clone's destination names the
+    # staging folder one level up.
+    staged = [
+        spec.dest.parent for spec in rec.clones if spec.dest.parent.parent == server_dir.parent
+    ]
     assert staged and all(path != theirs for path in staged), staged
     assert all(
         path.name.startswith(server_dir.name + start_over.STAGING_SUFFIX) for path in staged
     ), staged
+    assert all(
+        spec.dest == start_over.staging_checkout(spec.dest.parent)
+        for spec in rec.clones
+        if spec.dest.parent.parent == server_dir.parent
+    ), rec.clones
     assert not [path for path in staged if path.exists()], "a staging folder was left beside it"
+
+
+def test_a_finished_start_over_leaves_no_clone_folder_beside_the_server(
+    cut_off: tuple[Move, Volumes, Plain],
+) -> None:
+    """M1: a whole Start over, with the real install as the plain install it hands off to.
+
+    The checkout is cloned into `<staging>/checkout`, moved into the server folder by
+    `_move_clone_into()`, and the staging folder -- marker and all -- goes with that move. No
+    `*.yulon-clone-*` is left beside the server folder.
+
+    Mutation: the clone dest back to the staging folder -> the seam's wipe takes the marker,
+    the install refuses the recorded folder by name, and the folder is left beside the server.
+    """
+    mv, vols, _plain = cut_off
+    server_dir = mv.target.server_dir
+    rec = Recorder()
+    # The clone opens by removing its destination, as both real seams do (T830 M1).
+    rec.clone_wipes_leftovers = True
+    real_unmodified = rec.file_unmodified
+
+    def unmodified(dest: Path, relative_path: str) -> bool | None:
+        # The checkout arrives in the server folder through `_move_clone_into()`.
+        if (dest / relative_path) in rec.tracked:
+            return real_unmodified(dest, relative_path)
+        path = dest / relative_path
+        return (
+            relative_path == composegen.BASE_FILE
+            and path.is_file()
+            and path.read_text(encoding="utf-8") == UPSTREAM_COMPOSE
+        )
+
+    rec.file_unmodified = unmodified  # type: ignore[method-assign]
+    lines = _press(mv, vols, engine(rec), expected="read")
+    assert start_over.READY in lines
+    assert (server_dir / native.STATE_FILE).is_file()
+    assert not (server_dir / start_over.RESET_FILE).exists()
+    assert (server_dir / ".git").is_dir()
+    beside = sorted(
+        path.name
+        for path in server_dir.parent.glob(f"{server_dir.name}{start_over.STAGING_SUFFIX}*")
+    )
+    assert not beside, f"Start over left a clone folder beside the server: {beside}"
 
 
 def test_a_death_after_the_bring_in_record_was_removed_is_carried_on(
@@ -1185,6 +1292,7 @@ SENTENCES = (
     start_over.READY,
     start_over.reset_unreadable(Path("/srv/wow/.yulon-start-over.json")),
     start_over.damaged_copy(Path("/srv/wow/backups/copy.sql")),
+    start_over.half_removed_copy_failed(OSError("the disk said no")),
     start_over.not_yulons_folder(Path("/srv/wow.yulon-clone-0123abcd")),
     start_over.staging_unmade(Path("/srv/wow"), OSError("no space left on device")),
     native.CONTINUING_START_OVER,

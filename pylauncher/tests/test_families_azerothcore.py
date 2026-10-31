@@ -2345,10 +2345,12 @@ def as_the_clone_seam_does(dest: Path) -> None:
 
     `git.RunnerGit.clone()` and `git.ContainerGit.clone()` open the same way: an
     existing `.git` means update-in-place and return, and otherwise
-    `if spec.dest.exists(): shutil.rmtree(spec.dest)`. For `clone-core`
+    `if spec.dest.exists(): shutil.rmtree(spec.dest)`. For `clone-core` on a plain install
     `spec.dest` IS the server dir — `families/azerothcore.py`'s `_clone_core()`
     passes `dest=server_dir` — so that one line removes the server dir and
-    every byte in it, `.yulon-install.json` included.
+    every byte in it, `.yulon-install.json` included. Mid-start-over it is
+    `<staging>/checkout` instead (T830 M1), one level below the staging folder's
+    `.yulon-staging` marker, so the wipe takes an unfinished checkout and never the folder.
 
     Named rather than cited by line, and checked rather than either. Four line
     numbers for these two seams were in the tree at once on 2026-09-05 —
@@ -2566,6 +2568,13 @@ def test_a_clone_core_death_keeps_a_start_over_mark_and_the_claim(tmp_path: Path
         "clone-core cloned into the folder that holds the start over marker, so the seam's "
         "wipe took it: " + str(cloned)
     )
+    assert cloned[0] == start_over.staging_checkout(
+        cloned[0].parent
+    ), "the clone's destination is not the checkout under the staging folder: " + str(cloned[0])
+    assert (cloned[0].parent / start_over.STAGING_MARKER).is_file(), (
+        "the seam's wipe took the staging folder's marker, so nothing may remove the folder "
+        "it left beside the server"
+    )
     assert marker.is_file(), "the start over marker did not survive the clone"
     assert (server_dir / native.STATE_FILE).is_file(), (
         "the ownership record written before stage one did not survive the clone, so the next "
@@ -2624,7 +2633,8 @@ def test_a_failed_move_removes_only_the_staging_folder_yulon_made(
     """R2: the finally after a failed move goes through the same ownership check.
 
     The folder this reset made is removed; a folder at the old fixed name and one under a
-    staging-shaped name without a marker are left exactly as they are.
+    staging-shaped name without a marker are left exactly as they are. M1: the clone's
+    destination is `<staging>/checkout`, one level below the marker.
 
     Mutation: the finally deleting whatever is at `staged` -> the player's notes are gone.
     """
@@ -2636,7 +2646,9 @@ def test_a_failed_move_removes_only_the_staging_folder_yulon_made(
         json.dumps({"server_dir": str(server_dir.resolve()), "reset_id": "0f0f0f0f"}),
         encoding="utf-8",
     )
-    (owned / "half-a-checkout").write_bytes(b"x")
+    checkout = start_over.staging_checkout(owned)
+    checkout.mkdir()
+    (checkout / "half-a-checkout").write_bytes(b"x")
     theirs = tmp_path / "wow.yulon-clone"
     theirs.mkdir()
     (theirs / "my-notes.txt").write_bytes(b"mine")
@@ -2662,6 +2674,9 @@ def test_a_failed_move_removes_only_the_staging_folder_yulon_made(
 def test_a_resumed_clone_reuses_the_staging_folder_it_recorded(tmp_path: Path) -> None:
     """R2: the recording is what lets a resumed press find its own folder instead of a second.
 
+    M1: the folder recorded is the staging folder and the clone lands in its `checkout`, so the
+    marker survives the seam's wipe (both clones below call it, as both real seams do).
+
     Mutation: `staging` not recorded (a new folder every press) -> the second clone lands
     somewhere else and the first folder is left beside the server forever.
     """
@@ -2677,12 +2692,14 @@ def test_a_resumed_clone_reuses_the_staging_folder_it_recorded(tmp_path: Path) -
 
     def clone_then_die(spec: git.CloneSpec) -> None:
         first.append(spec.dest)
+        as_the_clone_seam_does(spec.dest)
         (spec.dest / ".git").mkdir(parents=True, exist_ok=True)
         raise InstallerError("killed mid-clone")
 
     with pytest.raises(InstallerError):
         install(rec, server_dir, clone=clone_then_die, remote_url=lambda _dest: url)
-    staged = first[0]
+    staged = first[0].parent
+    assert first[0] == start_over.staging_checkout(staged), first[0]
     assert staged.parent == tmp_path, staged
     assert staged.name.startswith("wow" + start_over.STAGING_SUFFIX), staged
     record = json.loads((server_dir / native.RESET_FILE).read_text(encoding="utf-8"))
@@ -2691,8 +2708,9 @@ def test_a_resumed_clone_reuses_the_staging_folder_it_recorded(tmp_path: Path) -
         "server_dir": str(server_dir.resolve()),
         "reset_id": record["id"],
     }
+    assert (staged / start_over.STAGING_MARKER).is_file(), "the seam wiped the marker"
     # The half checkout the death left: the resumed press empties it and clones in it again.
-    (staged / "half-a-checkout").write_bytes(b"x")
+    (start_over.staging_checkout(staged) / "half-a-checkout").write_bytes(b"x")
     real_unmodified = rec.file_unmodified
 
     def unmodified(dest: Path, relative_path: str) -> bool | None:
@@ -2711,16 +2729,95 @@ def test_a_resumed_clone_reuses_the_staging_folder_it_recorded(tmp_path: Path) -
 
     def clone(spec: git.CloneSpec) -> None:
         again.append(spec.dest)
+        as_the_clone_seam_does(spec.dest)
         (spec.dest / ".git").mkdir(parents=True, exist_ok=True)
         (spec.dest / composegen.BASE_FILE).write_text(UPSTREAM_COMPOSE, encoding="utf-8")
 
     install(rec, server_dir, clone=clone, remote_url=lambda _dest: url)
     # The core's clone, and only the core's, is the one that lands beside the folder.
-    beside = [path for path in again if path.parent == tmp_path]
+    beside = [path.parent for path in again if path.parent.parent == tmp_path]
     assert beside == [staged], "the resumed press made a new staging folder"
-    assert not (staged / "half-a-checkout").exists(), "the recorded folder was not emptied first"
+    assert not (
+        staged / "checkout" / "half-a-checkout"
+    ).exists(), "the recorded folder was not emptied first"
     assert not staged.exists(), "the staging folder outlived the move"
     assert (server_dir / ".git").is_dir()
+
+
+def test_a_kill_after_the_seam_wiped_the_checkout_is_finished_by_the_next_press(
+    tmp_path: Path,
+) -> None:
+    """M1: the seam wipes its destination, and the destination is not the staging folder.
+
+    A kill in the clone leaves `<staging>` with its marker and a half checkout; a marker that
+    the seam's wipe had taken would make the recorded folder refuse as "not a folder Yu'lon
+    made", stranding the server folder for good. Here the wipe takes only `checkout`, and the
+    next Install reuses the recorded folder, empties what the death left and finishes.
+
+    Mutation: the clone dest put back to the staging folder -> the marker is gone after the
+    kill, the next press refuses by name, and no checkout is ever moved in.
+    """
+    server_dir = tmp_path / "wow"
+    server_dir.mkdir()
+    (server_dir / native.RESET_FILE).write_text(
+        json.dumps({"version": 1, "package": "abc", "done": [], "id": "0f0f0f0f"}),
+        encoding="utf-8",
+    )
+    url = "https://github.com/mod-playerbots/azerothcore-wotlk.git"
+    rec = Recorder()
+    killed_in: list[Path] = []
+
+    def clone_then_die(spec: git.CloneSpec) -> None:
+        # The seam opens by removing a destination that is not a checkout (T49), and then
+        # dies; the wipe is the half that matters here.
+        as_the_clone_seam_does(spec.dest)
+        killed_in.append(spec.dest)
+        (spec.dest / ".git").mkdir(parents=True, exist_ok=True)
+        (spec.dest / "half-a-checkout").write_bytes(b"x")
+        raise InstallerError("killed mid-clone")
+
+    with pytest.raises(InstallerError):
+        install(rec, server_dir, clone=clone_then_die, remote_url=lambda _dest: url)
+    staging = killed_in[0].parent
+    assert killed_in[0] == start_over.staging_checkout(staging), killed_in[0]
+    assert (staging / start_over.STAGING_MARKER).is_file(), (
+        "the seam's wipe took the staging folder's marker, so the next press may not remove "
+        "or reuse the folder it left"
+    )
+    record = json.loads((server_dir / native.RESET_FILE).read_text(encoding="utf-8"))
+    assert record["staging"] == str(staging)
+    real_unmodified = rec.file_unmodified
+
+    def unmodified(dest: Path, relative_path: str) -> bool | None:
+        if (dest / relative_path) in rec.tracked:
+            return real_unmodified(dest, relative_path)
+        path = dest / relative_path
+        return (
+            relative_path == composegen.BASE_FILE
+            and path.is_file()
+            and path.read_text(encoding="utf-8") == UPSTREAM_COMPOSE
+        )
+
+    rec.file_unmodified = unmodified  # type: ignore[method-assign]
+    again: list[Path] = []
+
+    def clone(spec: git.CloneSpec) -> None:
+        again.append(spec.dest)
+        as_the_clone_seam_does(spec.dest)
+        assert not (
+            spec.dest / "half-a-checkout"
+        ).exists(), "the half checkout the death left was cloned over, not removed first"
+        (spec.dest / ".git").mkdir(parents=True, exist_ok=True)
+        (spec.dest / composegen.BASE_FILE).write_text(UPSTREAM_COMPOSE, encoding="utf-8")
+
+    install(rec, server_dir, clone=clone, remote_url=lambda _dest: url)
+    assert again and again[0].parent == staging, (again, staging)
+    assert not staging.exists(), "the staging folder outlived the move"
+    assert (server_dir / ".git").is_dir()
+    assert (server_dir / composegen.BASE_FILE).is_file()
+    assert not list(
+        tmp_path.glob(f"{server_dir.name}{start_over.STAGING_SUFFIX}*")
+    ), "a clone folder was left beside the server"
 
 
 def test_a_claimed_folder_whose_leftovers_are_not_a_checkout_is_still_refused(

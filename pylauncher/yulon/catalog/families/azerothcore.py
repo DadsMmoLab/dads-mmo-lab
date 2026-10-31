@@ -1416,7 +1416,10 @@ class AzerothCoreInstaller(StagedInstaller):
                 staged, owner = start_over.prepare_staging(server_dir)
             except start_over.StartOverError as exc:
                 raise InstallerError(str(exc)) from exc
-            dest = staged
+            # T830 M1: the clone's own destination is one level below the marker, so the seam's
+            # rmtree of a destination without `.git` takes an unfinished checkout and never the
+            # `.yulon-staging` that makes this folder Yu'lon's to remove.
+            dest = start_over.staging_checkout(staged)
         else:
             dest = server_dir
         yield from self._clone_lines(
@@ -2311,32 +2314,40 @@ class AzerothCoreInstaller(StagedInstaller):
 
 
 def _move_clone_into(staged: Path, server_dir: Path, reset_id: str) -> None:
-    """Move the checkout cloned at `staged` into `server_dir`, keeping what is already there.
+    """Move the checkout cloned at `<staged>/checkout` into `server_dir`, keeping what is there.
 
     `.git` goes first, so a death during the move leaves a checkout the next press updates in
     place rather than a folder of files with no `.git` (which the guard would refuse). A name
     that already exists in the folder is this install's own bookkeeping — the mark, the
     ownership record, the id — and is never replaced; the clone's copy of that name is dropped
-    with the staging folder. The staging folder's own marker (`.yulon-staging`, T830 R2) is
-    never moved: it is what makes the folder this reset's to remove, here in the finally and
-    after a death. The staging folder is removed only while that marker says this server's
-    reset made it (`start_over.remove_staging`), so a folder that is not Yu'lon's is never
-    taken away, here or anywhere else.
+    with the staging folder. `staged` is the staging folder itself, not the clone's destination:
+    the checkout is one level down (`start_over.staging_checkout`, T830 M1) so the clone seam's
+    own wipe never takes the marker (`.yulon-staging`, T830 R2) that makes the folder this
+    reset's to remove, here in the finally and after a death. The staging folder is removed only
+    while that marker says this server's reset made it (`start_over.remove_staging`), so a
+    folder that is not Yu'lon's is never taken away, here or anywhere else.
+
+    **A documented limit: a death in the middle of this move leaves the staging folder behind.**
+    Nothing collects it. If the death is before `.git` moved, the next press finds `.git` still
+    absent and calls `prepare_staging()` again, which empties and reuses the recorded folder;
+    if it is after, the next press finds the checkout in the server folder and finishes it in
+    place, and the reset record that names the staging folder is gone with the install. What is
+    left is Yu'lon's own marked, empty-of-user-data folder beside the server folder. Removing it
+    later would mean remembering it past the reset, which this does not do.
     """
     from yulon import start_over
 
+    checkout = start_over.staging_checkout(staged)
     try:
-        children = sorted(staged.iterdir(), key=lambda child: (child.name != ".git", child.name))
+        children = sorted(checkout.iterdir(), key=lambda child: (child.name != ".git", child.name))
         for child in children:
-            if child.name == start_over.STAGING_MARKER:
-                continue
             target = server_dir / child.name
             if os.path.lexists(target):
                 continue
             os.replace(child, target)
     except OSError as exc:
         raise InstallerError(
-            f"The checkout of this server was made in {staged} but could not be moved into "
+            f"The checkout of this server was made in {checkout} but could not be moved into "
             f"{server_dir} ({exc}). Press Install again to finish it."
         ) from exc
     finally:

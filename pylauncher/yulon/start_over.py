@@ -46,19 +46,25 @@ Every step is recorded in `RESET_FILE` when it is done, so a reset that stopped 
 (a crash, a refusal, Stop) is carried on by the next Install press and never repeats its copy.
 A resumed reset proves every recorded dump is still there, uncut and the bytes it wrote, and
 that together they cover every database the copy was for, before it removes a volume; a copy
-that fails that proof refuses with nothing removed and is made again by the next press. While
-the record is there, Bring-in refuses the folder (`move_server.folder_refusal`), and a reset
-that stopped before anything was removed takes the record away again, leaving the bring-in
-exactly as it was. Every failure after removal began keeps the bring-in's record where it is:
-the folder is never mistaken for a plain install that finished. The marker goes only once the
-plain install has written an ownership record that survives its first clone (T830 H1): a clone
-made while it is there lands beside the folder and is moved in, so a death at any point in
-that clone leaves a folder Install can carry on rather than one nothing accepts. That clone
-lands in a folder Yu'lon makes beside the server folder and marks as its own
-(`prepare_staging`, T830 R2: `<server folder>.yulon-clone-<8 hex>` holding `.yulon-staging`
+that fails that proof (or one made again after the proof failed) refuses with nothing more
+removed and is made again by the next press. While the record is there, Bring-in refuses the
+folder (`move_server.folder_refusal`), and a reset that stopped before anything was removed
+takes the record away again, leaving the bring-in exactly as it was. Every failure after
+removal began keeps the bring-in's record where it is: the folder is never mistaken for a
+plain install that finished, and a record rewound to the copy step keeps its `removing` flag
+for the same reason (T830 S1: a copy that fails after part of the server was removed never
+claims "the bring-in is as it was"). The marker goes only once the plain install has written
+an ownership record that survives its first clone (T830 H1): a clone made while it is there
+lands beside the folder and is moved in, so a death at any point in that clone leaves a folder
+Install can carry on rather than one nothing accepts. That clone lands in a folder Yu'lon
+makes beside the server folder and marks as its own (`prepare_staging`, T830 R2:
+`<server folder>.yulon-clone-<8 hex>` holding `.yulon-staging`
 with this folder's resolved path and this reset's id, recorded in the reset record); it is
 emptied or removed only while that marker matches, and a folder at a recorded path without it
-is refused by name, never touched.
+is refused by name, never touched. What the clone itself lands in is `<staging>/checkout`
+(`staging_checkout`, T830 M1), one level below the marker: both clone seams delete their
+destination before cloning, so the seam's wipe takes an unfinished checkout and never the
+marker that makes the staging folder Yu'lon's.
 """
 
 from __future__ import annotations
@@ -105,6 +111,16 @@ without a matching marker is not Yu'lon's to empty or delete.
 
 STAGING_SUFFIX = ".yulon-clone-"
 """The staging folder is `<server folder name>` + this + eight random hex digits."""
+
+STAGING_CHECKOUT = "checkout"
+"""Inside the staging folder: the destination `clone-core` is given (T830 M1).
+
+Both real clone seams DELETE a destination that is not a checkout before cloning
+(`git.RunnerGit.clone`, `git.ContainerGit.clone`), and the marker at the staging folder's top is
+the only thing that makes the folder Yu'lon's to remove. So the clone lands one level down, at
+`<staging>/checkout`: the seam's own wipe takes the checkout -- an unfinished one included --
+and never the marker beside it.
+"""
 
 KEPT_IN_THE_FOLDER = (MOVE_IN_FILE, RESET_FILE, docker.FOLDER_ID_FILE)
 """What the reset leaves in the server folder until its last step: the two records it works from
@@ -184,6 +200,19 @@ def damaged_copy(path: object) -> str:
     )
 
 
+def half_removed_copy_failed(reason: object) -> str:
+    """A copy that could not be made after the removal began (T830 S1).
+
+    The record stays: part of the server is gone, so the folder cannot go back to being the
+    bring-in's, and nothing here says it was.
+    """
+    return (
+        f"Start over had already removed part of this server, and the new copy of your "
+        f"databases could not be made ({reason}). Nothing more was removed; press Start over "
+        "again."
+    )
+
+
 def not_yulons_folder(path: object) -> str:
     """A folder at a recorded staging path that is not the one this reset made (T830 R2)."""
     return (
@@ -245,6 +274,19 @@ def _write_whole(target: Path, data: bytes) -> None:
 
 class StartOverError(MoveError):
     """A start over refused or stopped, in the sentence the player reads."""
+
+
+class _CopyFailed(StartOverError):
+    """The copy of the databases could not be made, and why (T830 S1).
+
+    A kind of its own because what happens to it depends on how far the reset got: before the
+    removal it is refused and the record goes (the bring-in is as it was), and after it began
+    the record must stay and the refusal must not claim nothing was removed.
+    """
+
+    def __init__(self, message: str, *, reason: object, detail: str = "") -> None:
+        super().__init__(message, detail=detail)
+        self.reason = reason
 
 
 # ------------------------------------------------------------------------------ the record
@@ -515,9 +557,13 @@ class StartOver:
                 if isinstance(exc, StartOverError):
                     raise
                 raise StartOverError(f"{exc} {UNCHANGED}") from exc
+            detail = str(getattr(exc, "detail", "") or "")
+            if isinstance(exc, _CopyFailed):
+                # Part of this server was already removed, so the record must stay (T830 S1).
+                # Its own "nothing was removed, the bring-in is as it was" is false here.
+                raise StartOverError(half_removed_copy_failed(exc.reason), detail=detail) from exc
             raise StartOverError(
-                f"Starting over stopped part-way. {exc} {KEPT_RECORD}",
-                detail=str(getattr(exc, "detail", "") or ""),
+                f"Starting over stopped part-way. {exc} {KEPT_RECORD}", detail=detail
             ) from exc
         # The record stays: it is the durable marker that keeps a plain install's first clone
         # from stranding the folder, and is removed once that install has written its record.
@@ -701,10 +747,11 @@ class StartOver:
                     for dump in report.dumps
                 ]
         except Exception as exc:  # noqa: BLE001 - any failure to copy refuses, in one sentence
-            raise StartOverError(COPY_FAILED, detail=str(exc)) from exc
+            raise _CopyFailed(COPY_FAILED, reason=exc, detail=str(exc)) from exc
         missing = sorted(set(schemas) - set(report.databases))
         if missing:
-            raise StartOverError(COPY_FAILED, detail=f"not copied: {', '.join(missing)}")
+            not_copied = f"not copied: {', '.join(missing)}"
+            raise _CopyFailed(COPY_FAILED, reason=not_copied, detail=not_copied)
         reset.copies = copies
         reset.schemas = list(schemas)
         reset.copies_dir = str(report.directory)
@@ -717,6 +764,11 @@ class StartOver:
         the size and hash it was written with, and together they must cover every database the
         copy step was asked for. Any failure refuses with nothing removed and rewinds the record
         to the copy step, so the next press makes a new copy first.
+
+        `removing` is NOT cleared by the rewind (T830 S1). The removal began before this record
+        was left, and a record that forgot it would let the next copy failure take the
+        `forget()` path -- deleting the record of a folder part of which is already gone, which
+        Bring-in would then accept.
         """
         if "copy" not in reset.done or "removed" in reset.done:
             return
@@ -730,9 +782,8 @@ class StartOver:
         reset.copies = []
         reset.schemas = []
         reset.copies_dir = None
-        reset.removing = False
         reset.save()
-        raise StartOverError(damaged_copy(problem))
+        raise _CopyFailed(damaged_copy(problem), reason=problem)
 
     def _volumes_left(self, seams: ResetSeams, reset: _Reset) -> bool:
         """Whether Docker still has a volume of the reset's projects (unknown counts as yes)."""
@@ -918,7 +969,7 @@ def _new_staging(server_dir: Path) -> Path:
 
 
 def prepare_staging(server_dir: Path) -> tuple[Path, str]:
-    """An empty folder beside `server_dir` for `clone-core`, and the reset id it belongs to.
+    """An empty folder beside `server_dir` to clone into, and the reset id it belongs to.
 
     T830 R2: the checkout of a folder mid-start-over lands beside it so the marker and the
     ownership record survive. The folder is one Yu'lon makes -- `<server folder>` + `-` and
@@ -926,6 +977,11 @@ def prepare_staging(server_dir: Path) -> tuple[Path, str]:
     `.yulon-staging` naming this server folder and this reset before anything is cloned into
     it. Its path is recorded in the reset record, so a resumed press reuses the folder it
     made (emptied first: it is this reset's) rather than piling up folders beside the server.
+
+    T830 M1: what is cloned into is `staging_checkout()` under this folder, not the folder
+    itself. The folder's marker is at its top, where this function and `remove_staging()` look
+    for it, and the clone seams empty their destination before cloning: given the folder they
+    would take the marker with everything else, and the folder would stop being Yu'lon's.
 
     Raises:
         StartOverError: the reset record cannot be read, or a folder at the recorded path is
@@ -939,6 +995,11 @@ def prepare_staging(server_dir: Path) -> tuple[Path, str]:
         return _prepare_staging(server_dir, reset), reset.id
     except OSError as exc:
         raise StartOverError(staging_unmade(server_dir, exc)) from exc
+
+
+def staging_checkout(staging: Path) -> Path:
+    """`<staging>/checkout`: the destination a clone into a staging folder is given (T830 M1)."""
+    return Path(staging) / STAGING_CHECKOUT
 
 
 def _prepare_staging(server_dir: Path, reset: _Reset) -> Path:
@@ -962,8 +1023,8 @@ def _prepare_staging(server_dir: Path, reset: _Reset) -> Path:
     if os.path.lexists(recorded):
         if not _staged_here(recorded, server_dir, reset.id):
             raise StartOverError(not_yulons_folder(recorded))
-        # The marker says it is this reset's to empty: a clone that died there leaves a
-        # half checkout the seam would refuse to clone into.
+        # The marker says it is this reset's to empty: a clone that died in the checkout
+        # (`staging_checkout()`) leaves a half one behind, and the seam would wipe it anyway.
         rmtree.remove_tree(recorded)
     recorded.mkdir(mode=0o700)
     _write_staging_marker(recorded, server_dir, reset.id)
@@ -1132,9 +1193,11 @@ __all__ = [
     "app_seams",
     "damaged_copy",
     "empty_the_folder",
+    "half_removed_copy_failed",
     "not_yulons_folder",
     "prepare_staging",
     "remove_staging",
     "running_load_refusal",
+    "staging_checkout",
     "staging_unmade",
 ]
