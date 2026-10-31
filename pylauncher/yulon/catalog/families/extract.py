@@ -437,8 +437,10 @@ def _remove_tree(path: Path, stop: Callable[[], bool] | None = None) -> bool:
 
     Its callers are the removals in this module: `empty_out_dirs()` below,
     `run_mmaps()`'s wipe, the re-extraction's kept-aside data (`put_back()`,
-    `supersede()`, `drop_superseded()`, T241), and the case view
-    (`remove_case_view()`, T260).
+    `supersede()`, `drop_superseded()`, T241), the case view
+    (`remove_case_view()`, T260), and since T845 the copy staging folders —
+    a leftover in `make_copy_dirs()`, the partial copy `promote_copies()`
+    refuses to promote, and `data/<name>` itself just before it is replaced.
     """
     if stop is not None:
         # File by file, asked before each (T549): `rmtree.StoppedPartWay` between two.
@@ -488,6 +490,43 @@ def make_out_dirs(produces: Iterable[str], data_dir: Path) -> None:
                 f"{target} could not be created ({exc}), and the tool that writes into it does "
                 "not create it either. Nothing was run. Free up the folder above, or pick a "
                 "different server folder, then try again."
+            ) from exc
+
+
+def make_copy_dirs(produces: Iterable[str], data_dir: Path) -> None:
+    """Make the staging folder each of a tool's copies lands in, on the HOST.
+
+    `SCRATCH_SCRIPT` cannot do this itself on a `data/` Docker created: the bind
+    source exists before Yu'lon's first `mkdir`, so Docker makes it root's 0755,
+    and the tools image's uid 1000 may not create, delete or rename anything at
+    its top. A folder made from the host inside a Windows folder is 0777 inside
+    the container, which is why `map_extractor -o /out` has always worked into
+    `make_out_dirs()`'s folders. Measured on yulon-win11 through Docker Desktop,
+    2026-10-31: the live CoA install failed with `cp: cannot create directory
+    '/out/.yulon-copy-Buildings/': Permission denied` (T845).
+
+    The leftover of a killed run is removed first rather than copied over: a
+    second run that added to it would copy a merge of two extractions and then
+    promote the merge. `_remove_tree()` is the same removal `empty_out_dirs()`
+    uses, and "nothing there" is not an error.
+
+    Called before EVERY tool of `run_plan()`, in both loops, when the run is off
+    the bind -- a staging folder is only made for a tool that is about to run,
+    and a tool is never left with the one an earlier tool used.
+
+    Raises:
+        InstallerError: the leftover would not go or the folder would not be
+            made. Nothing has run yet, so the sentence says so.
+    """
+    for folder in produces:
+        target = data_dir / f".yulon-copy-{folder}"
+        try:
+            _remove_tree(target)
+            target.mkdir(parents=True)
+        except OSError as exc:
+            raise InstallerError(
+                f"{target} could not be prepared ({exc}). Nothing was run. "
+                "Free up the folder above, then try again."
             ) from exc
 
 
@@ -1038,19 +1077,14 @@ SCRATCH_SCRIPT = (
     '[ "$status" -eq 0 ] || exit "$status"; '
     "for name in $YULON_OUT_DIRS; do "
     '[ -n "$(ls -A "$name" 2>/dev/null)" ] || continue; '
-    'rm -rf "/out/.yulon-copy-$name"; '
-    'cp -r --update=none "$name/." "/out/.yulon-copy-$name/" || '
-    '{ rm -rf "/out/.yulon-copy-$name"; '
-    'echo "yulon: the tool\'s output could not be copied into data/: $name"; '
-    "status=94; continue; }; "
-    'rm -rf "/out/$name" && mv "/out/.yulon-copy-$name" "/out/$name" || '
-    '{ rm -rf "/out/.yulon-copy-$name"; '
-    'echo "yulon: the tool\'s output could not be copied into data/: $name"; '
+    'cp -r --update=none "$name/." "/out/.yulon-copy-$name/" && '
+    'touch "/out/.yulon-copy-$name/.yulon-copied" || '
+    '{ echo "yulon: the tool\'s output could not be copied into data/: $name"; '
     "status=94; }; "
     "done; "
     "exit $status"
 )
-"""The off-the-bind wrapper: the tool writes in scratch, then its folders are copied to `/out`.
+"""The off-the-bind wrapper: the tool writes in scratch, then fills a folder the host made.
 
 Data, not code — no catalog field names it and no evidence hash covers it (T840
 decision 1): `plan_hash()` hashes `plan.model_dump()`, so a new field would make
@@ -1083,13 +1117,23 @@ Six details are load-bearing:
   in the old folder was never vouched for (a re-run costs only the time), but a
   crash must not replace it with a half extraction. A tool's own failing status
   is the one `_conclude()` reports.
-* **The copy is staged, then moved into place.** Each non-empty folder is copied
-  to `/out/.yulon-copy-<name>` first (`rm -rf` of a leftover from a killed run
-  first), and only a complete copy is moved over the old folder. Any failure in
-  that chain removes the staging folder (best effort), prints the marker with
-  the folder's name, sets `COPY_FAILED_RETURNCODE` and continues with the next
-  folder — the old `/out/<name>` is still there when the copy never finished.
-  `mv` of a folder inside one bind is a rename, so it cannot half-fail.
+* **The copy lands in a folder the HOST made.** `run_plan()` calls
+  `make_copy_dirs()` before this script runs: it removes a leftover
+  `/out/.yulon-copy-<name>` and makes a fresh one, then the script copies the
+  non-empty scratch folder into it and touches `.yulon-copied` as the last
+  thing that lands. The container never creates, removes or renames anything at
+  the top of `/out` — on a `data/` Docker itself created, `/out` is root's 0755
+  and the tools image's uid 1000 cannot do any of those there (measured on
+  yulon-win11 through Docker Desktop, 2026-10-31: the live CoA install died on
+  `cp: cannot create directory '/out/.yulon-copy-Buildings/': Permission
+  denied`). A folder the host made in a Windows folder is 0777 inside the
+  container, which is why the tool CAN write into it. The host promotes it —
+  `promote_copies()` — only when the tool exited 0 AND `.yulon-copied` is
+  there, so a partial copy never replaces the old folder. A copy failure prints
+  the marker with the folder's name and sets `COPY_FAILED_RETURNCODE`; the
+  staging folder and its partial copy are removed by the host, best effort.
+  Both `rm -rf` and `mv` are absent from `/out` for that reason — this script
+  cannot reach the permissions to use them.
 * **`--update=none`** (GNU coreutils >= 9.3; the tools image is Ubuntu 24.04 =
   9.4, verified on 9.4: exit 0, the existing file is kept) makes a case twin
   on a case-insensitive bind a skip rather than a failure, and the staging
@@ -1100,7 +1144,8 @@ Six details are load-bearing:
 An EMPTY produces folder is skipped (`ls -A`), so a tool that writes straight
 to `/out` (`map_extractor -o /out`) leaves its scratch `maps/ dbc/ Cameras/`
 empty and its real `/out` folders are never touched: it already wrote them, in
-the one place it was told to.
+the one place it was told to. The staging folder it was given stays empty and
+carries no `.yulon-copied`, so the host removes it without promoting anything.
 
 `$status` is the tool's for the whole run: saved before the copy loop, so a
 failed copy cannot turn a crashed extraction into a success, and the loop's
@@ -1346,6 +1391,53 @@ def _copy_failed_folders(run: docker.AttachedRun) -> list[str]:
     return folders
 
 
+def promote_copies(tool: ExtractTool, run: docker.AttachedRun, data_dir: Path) -> None:
+    """Move each folder the container filled into `data/<name>`, or clear what it left.
+
+    The container cannot do this itself (T845): on a Docker-made `data/` the top
+    of the bind is root's 0755 and the tools image's uid 1000 may not delete or
+    rename there. `make_copy_dirs()` made the staging folder, `SCRATCH_SCRIPT`
+    filled it, and this is the swap — the host moves a whole folder in one
+    rename, so it cannot half-fail, and `data/<name>` keeps what it had until
+    the replacement is complete.
+
+    A folder is promoted only when the TOOL SUCCEEDED and the script's
+    `.yulon-copied` is there. Everything else — a failed tool, a failed copy
+    (`COPY_FAILED_RETURNCODE`), a Stop, a tool that wrote straight to `/out` so
+    its scratch folder was empty and got no marker — leaves `data/<name>`
+    exactly as it was, the same promise the copy-back has always made, and only
+    the staging folder goes. Those removals are best effort and logged: the
+    next run's `make_copy_dirs()` clears a leftover anyway, so a refused
+    removal must not turn a Stop or a tool's own failure into another one.
+
+    Called right after EVERY `run_container()` in `run_plan()`, in both loops,
+    and BEFORE `_conclude()` — whose count gate must see the promoted folder.
+
+    Raises:
+        InstallerError: the folder was copied but could not be moved into
+            `data/<name>`. The evidence is only written by `_conclude()`, so
+            nothing has been recorded yet.
+    """
+    for name in tool.produces:
+        staging = data_dir / f".yulon-copy-{name}"
+        target = data_dir / name
+        if run.returncode == 0 and (staging / ".yulon-copied").is_file():
+            try:
+                (staging / ".yulon-copied").unlink()
+                _remove_tree(target)
+                os.replace(staging, target)
+            except OSError as exc:
+                raise InstallerError(
+                    f"{tool.name} finished, but its output could not be moved into data/{name} "
+                    f"({exc}). Nothing was recorded; press Install again."
+                ) from exc
+        else:
+            try:
+                _remove_tree(staging)
+            except OSError as exc:
+                logger.warning(f"{staging} could not be removed, best effort: {exc}")
+
+
 class ContainerLeftRunning(InstallerError, TrueAfterStop):
     """A stopped tool whose container Docker would not remove (T303, Codex adversarial review).
 
@@ -1460,12 +1552,18 @@ def run_plan(
 
     `scratch_off_bind` is the T840 switch, for a `data/` that is a bind into a
     Windows or macOS folder: every tool is wrapped in `SCRATCH_SCRIPT` instead,
-    writes in the container's own layer, and has its finished folders copied
-    into `data/` — which is still the place this function's evidence, counts and
-    retry read afterwards. It is a keyword and not a catalog field because the
-    evidence hashes the plan, and a new field would make every install, on every
-    platform, extract everything again. Said once, before the first tool that
-    actually runs, and never on Linux (whose callers do not pass it).
+    writes in the container's own layer, and every tool gets a staging folder
+    under `data/` BEFORE it runs (`make_copy_dirs()` — which is also how a
+    leftover of a killed run goes) that the wrapper fills. `promote_copies()`
+    then moves it over `data/<name>` right after the run, only when the tool
+    succeeded and the wrapper's marker is there, so the container never creates
+    or renames anything at the top of the bind — a `data/` Docker made is root's
+    0755, and the tools image's uid 1000 cannot (T845). `data/` stays the place
+    this function's evidence, counts and retry read afterwards. It is a keyword
+    and not a catalog field because the evidence hashes the plan, and a new
+    field would make every install, on every platform, extract everything
+    again. Said once, before the first tool that actually runs, and never on
+    Linux (whose callers do not pass it).
 
     `selinux_enforcing` is the seam for the one question here that is asked of
     the machine. It is resolved at call time rather than bound as a default, so
@@ -1581,8 +1679,12 @@ def run_plan(
                 "finishes."
             )
         make_out_dirs(tool.produces, data_dir)
+        if scratch_off_bind:
+            make_copy_dirs(tool.produces, data_dir)
         yield f"{tool.name}: running {' '.join(tool.argv)}"
         run = run_container(spec_for(tool), sink=sink, cancel=cancel)
+        if scratch_off_bind:
+            promote_copies(tool, run, data_dir)
         if not retried and plan.retry is not None and _retry_applies(plan.retry, tool, run, cancel):
             # The vanilla extractors crash on some maps and succeed on the next
             # attempt; the recipe (data) names which tools to run again, once.
@@ -1660,8 +1762,12 @@ def run_plan(
                 # recipe's output is NOT taken here in one go.
                 empty_out_dirs(again.produces, data_dir)
                 make_out_dirs(again.produces, data_dir)
+                if scratch_off_bind:
+                    make_copy_dirs(again.produces, data_dir)
                 yield f"{again.name}: retrying {' '.join(again.argv)}"
                 run = run_container(spec_for(again), sink=sink, cancel=cancel)
+                if scratch_off_bind:
+                    promote_copies(again, run, data_dir)
                 current, seen = _conclude(
                     again,
                     run,

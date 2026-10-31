@@ -17,6 +17,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - **Install** on a folder whose bring-in did not finish offers to start over with a plain install, keeping a copy first.
 
 ### Fixed
+- Conquest of Azeroth map data on Windows is copied into the server folder even when Docker made that folder.
 - Bringing in a packed server no longer refuses a bot database update that was released out of date order.
 - A world server that keeps restarting on a damaged table now names it and offers Repair or a backup.
 - Start is no longer refused by a leftover reservation from a Stop that ran while Docker was slow.

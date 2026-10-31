@@ -33,6 +33,7 @@ from yulon.catalog.catalog import (
     CatalogEntry,
     ExtractPlan,
     ExtractTool,
+    RetrySpec,
     load_catalog,
 )
 from yulon.catalog.families import extract, surgical
@@ -201,12 +202,55 @@ def staging(out: Path) -> list[str]:
     return sorted(p.name for p in out.iterdir() if p.name.startswith(".yulon-copy-"))
 
 
+NOT_ROOT = pytest.mark.skipif(
+    getattr(os, "geteuid", lambda: -1)() == 0,
+    reason="root can write into an 0555 folder, so a Docker-made data/ cannot be imitated",
+)
+
+
+@NOT_ROOT
+def test_the_copy_back_works_when_the_container_cannot_write_the_top_of_data(
+    tmp_path: Path,
+) -> None:
+    """A Docker-made `data/` is root's 0755 inside the container, so uid 1000 cannot
+    create anything at its top -- which is what refused the live CoA install (T845).
+
+    The host makes the staging folder, so the container only writes INSIDE a folder
+    it owns, and the host moves the finished copy into place afterwards.
+    """
+    out = tmp_path / "out"
+    out.mkdir()
+    extract.make_copy_dirs(["Buildings"], out)
+    tool = ExtractTool(name="vmap extract", argv=("/opt/bin/x",), produces={"Buildings": 1})
+    try:
+        out.chmod(0o555)
+        result = run_scratched(tmp_path, out, 'echo x > "Buildings/x"\n', "Buildings")
+    finally:
+        out.chmod(0o755)
+    assert result.returncode == 0, result.stdout + result.stderr
+    extract.promote_copies(tool, docker.AttachedRun(0, ("ran",)), out)
+    assert (out / "Buildings" / "x").is_file()
+    assert staging(out) == [], "no .yulon-copy-* left after the host promoted"
+
+
+def stage(out: Path, produces: Mapping[str, int]) -> None:
+    """The host's half before a run: the staging folder a tool fills."""
+    extract.make_copy_dirs(produces, out)
+
+
+def promote(out: Path, produces: Mapping[str, int], *, returncode: int = 0) -> None:
+    """The host's half after a run: promote the filled folder, or clear the staging one."""
+    tool = ExtractTool(name="tool", argv=("/opt/bin/tool",), produces=dict(produces))
+    extract.promote_copies(tool, docker.AttachedRun(returncode, ("ran",)), out)
+
+
 def test_a_scratched_tool_writes_into_the_scratch_folder_and_its_output_is_copied_out(
     tmp_path: Path,
 ) -> None:
     """The point of the whole ticket: the bytes land on the bind once, at the end, flat."""
     out = tmp_path / "out"
     out.mkdir()
+    stage(out, {"Buildings": 1})
     result = run_scratched(
         tmp_path,
         out,
@@ -214,9 +258,18 @@ def test_a_scratched_tool_writes_into_the_scratch_folder_and_its_output_is_copie
         "Buildings",
     )
     assert result.returncode == 0, result.stderr
+    staging_dir = out / ".yulon-copy-Buildings"
+    assert (staging_dir / ".yulon-copied").is_file(), "the container filled the host's folder"
+    assert sorted(path.name for path in staging_dir.iterdir() if path.name != ".yulon-copied") == [
+        "f1",
+        "f2",
+        "f3",
+    ]
+    assert not (out / "Buildings").exists(), "the container never renames anything in /out"
+    promote(out, {"Buildings": 1})
     assert sorted(path.name for path in (out / "Buildings").iterdir()) == ["f1", "f2", "f3"]
     assert not (out / "Buildings" / "Buildings").exists(), "copied by content, never nested"
-    assert staging(out) == [], "the complete copy was moved, not left behind"
+    assert staging(out) == [], "the host moved the complete copy into place"
 
 
 def test_a_scratched_tool_reads_an_earlier_tools_output_through_a_link(tmp_path: Path) -> None:
@@ -229,6 +282,7 @@ def test_a_scratched_tool_reads_an_earlier_tools_output_through_a_link(tmp_path:
     out = tmp_path / "out"
     (out / "Buildings").mkdir(parents=True)
     (out / "Buildings" / "f1").write_bytes(b"x")
+    stage(out, {"vmaps": 1})
     result = run_scratched(
         tmp_path,
         out,
@@ -236,6 +290,7 @@ def test_a_scratched_tool_reads_an_earlier_tools_output_through_a_link(tmp_path:
         "vmaps",
     )
     assert result.returncode == 0, result.stdout + result.stderr
+    promote(out, {"vmaps": 1})
     assert (out / "vmaps" / "v1").is_file()
     assert [path.name for path in (out / "Buildings").iterdir()] == ["f1"], "untouched"
     assert staging(out) == []
@@ -246,22 +301,31 @@ def test_a_tool_that_fails_leaves_the_old_folder_alone(tmp_path: Path) -> None:
 
     The old folder is never vouched for (the evidence did not accept it), so
     losing it would cost only a re-run -- but a crash must not put a half
-    extraction in its place. The scratch is discarded with the container.
+    extraction in its place. The scratch is discarded with the container, and
+    the host clears the staging folder it made.
     """
     out = tmp_path / "out"
     (out / "vmaps").mkdir(parents=True)
     (out / "vmaps" / "old").write_bytes(b"o")
+    stage(out, {"vmaps": 1})
     result = run_scratched(tmp_path, out, "echo new > vmaps/new\nexit 3\n", "vmaps")
     assert result.returncode == 3
     assert sorted(path.name for path in (out / "vmaps").iterdir()) == ["old"]
-    assert staging(out) == []
+    promote(out, {"vmaps": 1}, returncode=3)
+    assert sorted(path.name for path in (out / "vmaps").iterdir()) == ["old"]
+    assert staging(out) == [], "the staging folder the failed run did not fill is removed"
 
 
 def test_a_tool_that_writes_straight_to_out_is_left_alone_by_the_copy_loop(tmp_path: Path) -> None:
-    """`map_extractor -o /out` leaves its scratch folders empty, so nothing is copied over it."""
+    """`map_extractor -o /out` leaves its scratch folders empty, so nothing is copied over it.
+
+    The staging folder it was given stays empty and gets no marker, so the host
+    removes it rather than promoting an empty folder over real data.
+    """
     out = tmp_path / "out"
     (out / "maps").mkdir(parents=True)
     (out / "maps" / "keep").write_bytes(b"k")
+    stage(out, {"maps": 1})
     result = run_scratched(
         tmp_path,
         out,
@@ -273,6 +337,9 @@ def test_a_tool_that_writes_straight_to_out_is_left_alone_by_the_copy_loop(tmp_p
     scratch_maps = tmp_path / "scratch" / "maps"
     assert scratch_maps.is_dir(), "the produces folder was made in scratch before the tool ran"
     assert list(scratch_maps.iterdir()) == [], "and it stayed empty, so it was skipped"
+    assert not (out / ".yulon-copy-maps" / ".yulon-copied").exists()
+    promote(out, {"maps": 1})
+    assert sorted(path.name for path in (out / "maps").iterdir()) == ["keep", "straight"]
     assert staging(out) == []
 
 
@@ -281,8 +348,10 @@ def test_an_old_folder_is_replaced_by_the_tools_output_not_merged(tmp_path: Path
     out = tmp_path / "out"
     (out / "vmaps").mkdir(parents=True)
     (out / "vmaps" / "stale").write_bytes(b"old")
+    stage(out, {"vmaps": 1})
     result = run_scratched(tmp_path, out, "echo v > vmaps/new\n", "vmaps")
     assert result.returncode == 0, result.stdout + result.stderr
+    promote(out, {"vmaps": 1})
     assert sorted(path.name for path in (out / "vmaps").iterdir()) == ["new"]
     assert staging(out) == []
 
@@ -307,10 +376,15 @@ def failing_cp(folder: Path, *, only: str | None = None) -> Path:
 def test_a_copy_that_cannot_be_made_is_exit_94_named_and_leaves_the_old_folder(
     tmp_path: Path,
 ) -> None:
-    """Disk full or permissions: say which folder, keep the old one, and do not claim success."""
+    """Disk full or permissions: say which folder, keep the old one, and do not claim success.
+
+    Also the whole path a user sees: the script's own marker, `_conclude()`'s
+    copy sentence, and the host clearing the partial staging copy afterwards.
+    """
     out = tmp_path / "out"
     (out / "vmaps").mkdir(parents=True)
     (out / "vmaps" / "old").write_bytes(b"o")
+    stage(out, {"vmaps": 1})
     result = run_scratched(
         tmp_path,
         out,
@@ -321,6 +395,22 @@ def test_a_copy_that_cannot_be_made_is_exit_94_named_and_leaves_the_old_folder(
     assert result.returncode == 94, result.stdout + result.stderr
     assert f"{extract.COPY_FAILED_MARKER} vmaps" in result.stdout
     assert sorted(path.name for path in (out / "vmaps").iterdir()) == ["old"]
+    assert (
+        out / ".yulon-copy-vmaps" / "partial"
+    ).is_file(), "the partial copy is what the host clears"
+
+    def replay(
+        spec: docker.ContainerRun,
+        *,
+        sink: docker.OutputSink,
+        cancel: threading.Event | None = None,
+    ) -> docker.AttachedRun:
+        return docker.AttachedRun(result.returncode, tuple(result.stdout.splitlines()))
+
+    with pytest.raises(InstallerError, match="could not be copied into data/vmaps"):
+        run_said(tmp_path, replay)
+    promote(out, {"vmaps": 1}, returncode=94)
+    assert sorted(path.name for path in (out / "vmaps").iterdir()) == ["old"]
     assert staging(out) == [], "the partial staging copy was removed, best effort"
 
 
@@ -329,6 +419,7 @@ def test_one_failed_copy_does_not_stop_the_folders_after_it(tmp_path: Path) -> N
     out = tmp_path / "out"
     (out / "vmaps").mkdir(parents=True)
     (out / "vmaps" / "old").write_bytes(b"o")
+    stage(out, {"maps": 1, "vmaps": 1})
     result = run_scratched(
         tmp_path,
         out,
@@ -338,20 +429,32 @@ def test_one_failed_copy_does_not_stop_the_folders_after_it(tmp_path: Path) -> N
     )
     assert result.returncode == 94, result.stdout + result.stderr
     assert f"{extract.COPY_FAILED_MARKER} vmaps" in result.stdout
-    assert sorted(path.name for path in (out / "maps").iterdir()) == ["m1"]
+    assert (out / ".yulon-copy-maps" / "m1").is_file(), "the folder after the failure was filled"
     assert sorted(path.name for path in (out / "vmaps").iterdir()) == ["old"]
+    promote(out, {"maps": 1, "vmaps": 1}, returncode=94)
+    assert sorted(path.name for path in (out / "vmaps").iterdir()) == ["old"]
+    assert not (out / "maps").exists(), "a failed run promotes nothing, even a complete folder"
     assert staging(out) == []
 
 
 def test_a_staging_folder_a_killed_run_left_is_removed_and_the_run_succeeds(
     tmp_path: Path,
 ) -> None:
-    """A leftover `/out/.yulon-copy-<name>` must not be copied from and must not survive."""
+    """A leftover `/out/.yulon-copy-<name>` is removed by the host before the next run.
+
+    It must not be copied from or into: a merge of two extractions would then be
+    promoted as one.
+    """
     out = tmp_path / "out"
+    (out / "vmaps").mkdir(parents=True)
     (out / ".yulon-copy-vmaps").mkdir(parents=True)
     (out / ".yulon-copy-vmaps" / "junk").write_bytes(b"j")
+    stage(out, {"vmaps": 1})
+    assert staging(out) == [".yulon-copy-vmaps"]
+    assert list((out / ".yulon-copy-vmaps").iterdir()) == [], "the leftover was cleared"
     result = run_scratched(tmp_path, out, "echo v > vmaps/v1\n", "vmaps")
     assert result.returncode == 0, result.stdout + result.stderr
+    promote(out, {"vmaps": 1})
     assert sorted(path.name for path in (out / "vmaps").iterdir()) == ["v1"]
     assert staging(out) == []
 
@@ -368,12 +471,15 @@ def test_the_script_is_its_own_home_for_its_paths_and_constants() -> None:
     assert '"$@"; status=$?;' in extract.SCRATCH_SCRIPT
     assert '[ "$status" -eq 0 ] || exit "$status";' in extract.SCRATCH_SCRIPT
     assert extract.SCRATCH_SCRIPT.endswith("exit $status")
-    assert '"/out/.yulon-copy-$name"' in extract.SCRATCH_SCRIPT
+    assert 'cp -r --update=none "$name/." "/out/.yulon-copy-$name/"' in extract.SCRATCH_SCRIPT
+    assert 'touch "/out/.yulon-copy-$name/.yulon-copied"' in extract.SCRATCH_SCRIPT
     assert extract.SCRATCH_FAILED_MARKER in extract.SCRATCH_SCRIPT
     assert f"exit {extract.SCRATCH_FAILED_RETURNCODE}" in extract.SCRATCH_SCRIPT
     assert extract.COPY_FAILED_MARKER in extract.SCRATCH_SCRIPT
     assert "status=94" in extract.SCRATCH_SCRIPT
     assert "--update=none" in extract.SCRATCH_SCRIPT
+    assert "rm -rf" not in extract.SCRATCH_SCRIPT, "the container cannot touch the top of /out"
+    assert " mv " not in extract.SCRATCH_SCRIPT, "the host does the swap, not the container"
 
 
 # -- run_plan: the line, and the two refusals ---------------------------------
@@ -437,6 +543,86 @@ def test_the_scratch_line_is_said_once_before_the_first_tool_and_is_plain_words(
 def test_off_the_bind_nothing_new_is_said(tmp_path: Path) -> None:
     said = run_said(tmp_path, filling(tmp_path / "data", {"dbc": 3, "maps": 2}), scratch=False)
     assert SCRATCH_SENTENCE not in said
+
+
+def test_both_loops_stage_before_and_promote_after_every_run_only_off_the_bind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The staging folder is the host's on BOTH paths, and promotion is before `_conclude()`.
+
+    A retry recipe re-runs a tool the main loop already ran, from the second
+    loop — the one the `make_out_dirs()` fix missed once — so both loops are
+    walked here, in order around each `run_container`. Off the bind neither
+    helper may run: Linux keeps today's run byte for byte, and no
+    `.yulon-copy-*` may ever appear under its data folder.
+    """
+    plan = ExtractPlan(
+        image="server",
+        tools=(AD,),
+        retry=RetrySpec(when_log_matches="boom", when_returncode_in=(139,), tools=(AD.name,)),
+    )
+    events: list[tuple[str, str, int]] = []
+    client_dir = client(tmp_path)
+    real_make = extract.make_copy_dirs
+    real_promote = extract.promote_copies
+
+    def drive(data: Path, scratch: bool) -> list[tuple[str, str, int]]:
+        events.clear()
+
+        def run_container(
+            spec: docker.ContainerRun,
+            *,
+            sink: docker.OutputSink,
+            cancel: threading.Event | None = None,
+        ) -> docker.AttachedRun:
+            runs = len([event for event in events if event[0] == "run"])
+            events.append(("run", "", runs))
+            if runs == 0:
+                return docker.AttachedRun(139, ("boom",))
+            for name, count in AD.produces.items():
+                folder = (data / f".yulon-copy-{name}") if scratch else (data / name)
+                folder.mkdir(parents=True, exist_ok=True)
+                for index in range(count):
+                    (folder / f"{index:05d}.bin").write_bytes(b"x")
+                if scratch:
+                    (folder / ".yulon-copied").touch()
+            return docker.AttachedRun(0, ("ran",))
+
+        def make_copy_dirs(produces: Iterable[str], data_dir: Path) -> None:
+            events.append(("make", " ".join(produces), 0))
+            real_make(produces, data_dir)
+
+        def promote_copies(tool: ExtractTool, run: docker.AttachedRun, data_dir: Path) -> None:
+            events.append(("promote", tool.name, run.returncode))
+            real_promote(tool, run, data_dir)
+
+        monkeypatch.setattr(extract, "make_copy_dirs", make_copy_dirs)
+        monkeypatch.setattr(extract, "promote_copies", promote_copies)
+        list(
+            extract.run_plan(
+                plan,
+                image_ref="yulon.local/tools:1",
+                client_dir=client_dir,
+                data_dir=data,
+                run_container=run_container,
+                user_args=(),
+                sink=lambda line: None,
+                cancel=None,
+                scratch_off_bind=scratch,
+            )
+        )
+        return list(events)
+
+    assert drive(tmp_path / "data", True) == [
+        ("make", "dbc maps", 0),
+        ("run", "", 0),
+        ("promote", AD.name, 139),
+        ("make", "dbc maps", 0),
+        ("run", "", 1),
+        ("promote", AD.name, 0),
+    ]
+    assert drive(tmp_path / "plain", False) == [("run", "", 0), ("run", "", 1)]
+    assert list((tmp_path / "plain").rglob(".yulon-copy-*")) == []
 
 
 def test_a_scratch_folder_that_could_not_be_made_is_the_tool_never_running(
