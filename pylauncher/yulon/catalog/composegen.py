@@ -33,6 +33,7 @@ twice.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import posixpath
 import re
@@ -46,6 +47,7 @@ from yulon import platform, playerbots_keys, tuning
 from yulon.catalog import bot_dashboard, time_zone
 from yulon.catalog.catalog import (
     NATIVE_DEFAULT_DB_PORT,
+    AzerothCoreData,
     CatalogEntry,
     CmangosData,
     NativeInstall,
@@ -732,7 +734,7 @@ def render(
             # T169: the ones the install's confs name, when they are there to ask.
             **_folder_binds(entry, bind_label, server_dir),
             # T219: the world server's map data, a volume on Windows and the bind elsewhere.
-            **_world_data_tokens(entry, bind_label, platform_id, templates),
+            **_world_data_tokens(entry, bind_label, platform_id, templates_root),
             # The catalog facts (contract A6), last so the install-identity keys
             # above stay the authority on any name the two sets ever share. A
             # token no template uses costs nothing — `fill()` minds unfilled
@@ -1420,8 +1422,8 @@ def _folder_binds(entry: CatalogEntry, bind_label: str, server_dir: Path) -> dic
 
 
 WORLD_DATA_VOLUME = "world-data"
-"""T219: the named volume a Windows TrinityCore world server reads its map data from;
-Docker names it `<project>_world-data`. Uninstall removes it with or without "Keep my
+"""T219: the named volume a Windows TrinityCore or AzerothCore world server reads its map data
+from; Docker names it `<project>_world-data`. Uninstall removes it with or without "Keep my
 characters" (`purge` keeps only `_db-data` and `_client-data`): what it holds is a copy
 of the server folder's `data/`, which Uninstall deletes anyway."""
 
@@ -1429,40 +1431,72 @@ WORLD_DATA_SOURCE = "data-src"
 """Where the server folder's `data/` is mounted read-only beside the volume, for the copy."""
 
 WORLD_DATA_SCRIPT = "world-data-sync.sh"
-"""The world container's entrypoint on Windows, in the family's templates folder."""
+"""The world container's entrypoint on Windows, in `WORLD_DATA_SCRIPT_DIR` (both families)."""
+
+WORLD_DATA_SCRIPT_DIR = "shared"
+"""Below the installers root: the script is the TrinityCore and the AzerothCore world's alike."""
+
+AC_DIST_DIR = "/azerothcore/env/dist"
+"""Where an AzerothCore image keeps bin, etc, logs and data (the template's `AC_DATA_DIR` is its
+`data`)."""
+
+AC_WORLD_COMMAND = ("/usr/bin/env", "bash", "/azerothcore/entrypoint.sh", "worldserver")
+"""The CoA worldserver image's own ENTRYPOINT + CMD (`apps/docker/Dockerfile:148,192` at 98570f24).
+A compose `entrypoint:` drops the image's CMD, so the Windows sync renders this as `command:` and
+`exec`s it; `tests/test_coa_world_data.py` reads it off a copy of that Dockerfile."""
+
+
+def world_data_block(entry: CatalogEntry) -> TrinityCoreData | AzerothCoreData | None:
+    """The family block that carries this entry's `world_data_dirs`/`world_data_gb` (T219, T835).
+
+    TrinityCore's, else AzerothCore's (whose folders are only ever named with `client_extract`:
+    WotLK and Unbound name none), else None. The one place the world-data sites branch on a family.
+    """
+    native = entry.install.native
+    if native is None:
+        return None
+    if (trinitycore := native.trinitycore) is not None:
+        return trinitycore
+    return native.azerothcore
 
 
 def world_data_dirs(entry: CatalogEntry, platform_id: Callable[[], str]) -> tuple[str, ...]:
     """The `data/` folders this render copies into the `world-data` volume; () when it binds.
 
-    Windows and the TrinityCore family only (T219, owner decision 2): Docker Desktop
-    serves a Windows folder to a container over a file share at about 12 ms per file
-    opened, and the world server opens thousands of terrain files while it makes its
-    first bots (58.9 s over the share against 1.81 s from a volume, yulon-win11
-    2026-10-04). A WSL-distro install renders as `linux` (`native.Seams.in_wsl`) and
-    reads its own disk. macOS and the CMaNGOS family are not measured and keep the bind.
+    Windows and the TrinityCore and AzerothCore families only (T219 owner decision 2; T835 for
+    CoA): Docker Desktop serves a Windows folder to a container over a file share at about 12 ms
+    per file opened, and the world server opens thousands of terrain files while it makes its
+    first bots (58.9 s over the share against 1.81 s from a volume, yulon-win11 2026-10-04). A
+    WSL-distro install renders as `linux` (`native.Seams.in_wsl`) and reads its own disk. macOS
+    and the CMaNGOS family are not measured and keep the bind.
     """
-    trinitycore = _native_of(entry).trinitycore
-    if trinitycore is None or platform_id() != "windows":
+    block = world_data_block(entry)
+    if block is None or platform_id() != "windows":
         return ()
-    return trinitycore.world_data_dirs
+    return block.world_data_dirs
 
 
 def _world_data_tokens(
-    entry: CatalogEntry, bind_label: str, platform_id: Callable[[], str], templates: Path
+    entry: CatalogEntry, bind_label: str, platform_id: Callable[[], str], templates_root: Path
 ) -> dict[str, str]:
-    """The TrinityCore base template's three `WORLD_DATA_*` tokens (T219).
+    """The base template's three `WORLD_DATA_*` tokens (T219; the AzerothCore arm is T835).
 
     Off Windows -- or for an entry that names no `world_data_dirs` -- the mount is the
     `./data` bind it always was and the other two are empty, so those files render byte
-    for byte as before (`tests/data/centurion-rendered/`). On Windows the world server
-    mounts the `world-data` volume where `DataDir` points, the server folder's `data/`
-    read-only beside it, and runs `WORLD_DATA_SCRIPT` as its entrypoint: it copies what
-    changed (by the fingerprint `families.world_data` writes before every start) and
-    `exec`s the `command`. The entrypoint, and not a one-shot service, because
-    `docker.start_staged()` runs `compose up --no-deps` with the three services named,
-    which never starts anything they depend on; the entrypoint also runs on a restart
-    by Docker's policy and on a hand-run `compose up`.
+    for byte as before (`tests/data/centurion-rendered/`, `tests/data/coa-rendered/`). On
+    Windows the world server mounts the `world-data` volume where `DataDir` points, the
+    server folder's `data/` read-only beside it, and runs `WORLD_DATA_SCRIPT` as its
+    entrypoint: it copies what changed (by the fingerprint `families.world_data` writes
+    before every start) and `exec`s the `command`. The entrypoint, and not a one-shot
+    service, because `docker.start_staged()` runs `compose up --no-deps` with the three
+    services named, which never starts anything they depend on; the entrypoint also runs
+    on a restart by Docker's policy and on a hand-run `compose up`.
+
+    The two families differ in three places. TrinityCore's `CORE_DIR` is the token's, the
+    AzerothCore one's is `AC_DIST_DIR`; the AzerothCore bind keeps `:ro`, the template's own
+    (a CoA world never writes its map data); and an AzerothCore service also renders
+    `command:`, because its image's ENTRYPOINT and CMD are two lines and a compose
+    `entrypoint:` drops the second (`AC_WORLD_COMMAND`).
 
     The label goes on the binds only: a named volume is Docker's own and is never
     relabelled. Beside `ro` it is a second option (`ro,z`), the one spelling compose reads.
@@ -1471,22 +1505,34 @@ def _world_data_tokens(
     Raises:
         ComposeGenError: the script template is missing, or a token in it is not filled.
     """
-    if _native_of(entry).trinitycore is None:
+    block = world_data_block(entry)
+    if block is None:
         return {}
+    is_ac = isinstance(block, AzerothCoreData)
+    if is_ac and not block.world_data_dirs:
+        return {}  # WotLK, Unbound: their templates name no WORLD_DATA_* token
     tokens = entry_tokens(entry)
-    core = tokens["CORE_DIR"]
+    core = AC_DIST_DIR if is_ac else tokens["CORE_DIR"]
+    data_mode = ":ro" if is_ac else ""
     dirs = world_data_dirs(entry, platform_id)
     if not dirs:
         return {
-            "WORLD_DATA_MOUNTS": f"./data:{core}/data{bind_label}",
+            "WORLD_DATA_MOUNTS": f"./data:{core}/data{data_mode}{bind_label}",
             "WORLD_DATA_ENTRYPOINT": "",
             "WORLD_DATA_VOLUME": "",
         }
     script = fill(
-        _read_template(templates / WORLD_DATA_SCRIPT),
-        {**tokens, "WORLD_DATA_DIRS": " ".join(dirs)},
+        _read_template(templates_root / WORLD_DATA_SCRIPT_DIR / WORLD_DATA_SCRIPT),
+        {**tokens, "CORE_DIR": core, "WORLD_DATA_DIRS": " ".join(dirs)},
     ).replace("$", "$$")
     body = "".join(f"        {line}\n" if line else "\n" for line in script.splitlines())
+    command = (
+        "\n    # The image's own ENTRYPOINT and CMD (apps/docker/Dockerfile at the pin), which the"
+        "\n    # entrypoint above runs once the copy is done."
+        f"\n    command: {json.dumps(list(AC_WORLD_COMMAND))}"
+        if is_ac
+        else ""
+    )
     return {
         "WORLD_DATA_MOUNTS": (
             f"{WORLD_DATA_VOLUME}:{core}/data\n"
@@ -1501,6 +1547,7 @@ def _world_data_tokens(
             "\n      - -c"
             "\n      - |"
             f"\n{body}      - yulon-world"
+            f"{command}"
         ),
         "WORLD_DATA_VOLUME": f"\n  {WORLD_DATA_VOLUME}:",
     }

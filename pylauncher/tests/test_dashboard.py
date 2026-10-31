@@ -22,6 +22,7 @@ import pytest
 from yulon import dashboard, docker
 from yulon.catalog import catalog as catalog_module
 from yulon.catalog import native
+from yulon.catalog.catalog import CatalogEntry
 
 WOTLK = catalog_module.load_catalog().get("wow-wotlk")
 SPEC = WOTLK.container_spec()
@@ -2125,19 +2126,23 @@ def _loop_watch(
     tmp_path: Path,
     logs: dict[str, str],
     states: list[docker.ContainerState],
+    *,
+    sql: _FakeSql | None = None,
+    entry: CatalogEntry | None = None,
 ) -> Callable[[], dashboard.Verdict]:
     """A Tortoise dashboard that answers `states` in turn; each run's log is `logs[run]`,
     looked up at read time so a test can let a run's log grow between two ticks."""
     remaining = list(states)
+    by = entry if entry is not None else TORTOISE
 
     def log_of(_container: str, since: str) -> str:
         return logs.get(since, "")
 
     watch = dashboard.Dashboard(
-        TORTOISE.container_spec(),
-        TORTOISE,
+        by.container_spec(),
+        by,
         _install(tmp_path),
-        sql=_FakeSql(),
+        sql=sql if sql is not None else _FakeSql(),
         state_of=lambda _c: remaining.pop(0),
         daemon_of=lambda: "bridge-before",
         log_of=log_of,

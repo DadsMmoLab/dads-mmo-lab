@@ -51,7 +51,7 @@ COMMAND_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
         "docker command",
         re.compile(
             r"\bdocker\s+(?:compose|ps|logs|exec|run|start|stop|restart|rm|volume|image|"
-            r"info|version|system|attach|inspect|cp|pull|build|create|kill|network)\b"
+            r"info|version|system|attach|inspect|cp|pull|build|create|kill|network|builder)\b"
         ),
     ),
     ("compose command", re.compile(r"\bcompose\s+(?:logs|up|down|ps|run|build|ls|exec)\b")),

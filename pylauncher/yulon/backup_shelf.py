@@ -72,6 +72,13 @@ _STAMP_NAME = re.compile(r"^(?P<stamp>\d{8}_\d{6})_(?P<rest>.+)$")
 _STEM = re.compile(r"^(?P<stamp>\d{8}_\d{6})(?:_(?P<rest>.*))?$")
 _STAMP_FORMAT = "%Y%m%d_%H%M%S"
 
+START_OVER_LABEL = "before-start-over"
+"""The copy "Start over with a plain install" takes of an unfinished bring-in's databases (T830).
+
+Fixed, so it is not read as an item called "start-over"; never a good copy (what a bring-in left
+part-way may be half-written), and kept beside the server folder with the other backups.
+"""
+
 # Labels with a fixed spelling. `before-new-build` is matched here, BEFORE the
 # `before-<id>` shape, or an update's copy would read as an item called "new-build".
 _FIXED_LABELS = (
@@ -82,6 +89,7 @@ _FIXED_LABELS = (
     "before-move-load",
     "before-move",
     "move",
+    START_OVER_LABEL,
 )
 # What a move into this server writes (T601): the copy taken first, and the copies taken
 # before each load. Read before the `before-<id>` shape, or a move would read as an item
@@ -485,7 +493,7 @@ def _a_good_copy(r: ShelfRow, game_id: str | None) -> bool:
         r.kind == "dump"
         and r.usable
         and r.database is not None
-        and r.label != maintenance.HALF_RESTORED_LABEL
+        and r.label not in (maintenance.HALF_RESTORED_LABEL, START_OVER_LABEL)
         and not _foreign(r, game_id)
     )
 
@@ -1020,6 +1028,9 @@ _MADE_BY = {
     "before-move": "taken before moving accounts and characters in",
     "before-move-load": "taken before one step of moving in",
     "move": "left over from making a move package",
+    START_OVER_LABEL: (
+        "taken before an unfinished bring-in was started over (it may be half-written)"
+    ),
 }
 
 

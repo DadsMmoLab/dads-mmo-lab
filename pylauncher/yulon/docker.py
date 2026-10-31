@@ -7037,6 +7037,79 @@ def builder_connection_lost(tail: Sequence[str]) -> bool:
     return any(_BUILDER_GONE.search(line) and not _STEP_OUTPUT.match(line) for line in tail)
 
 
+_BUILD_DATA_DAMAGED = re.compile(
+    r"failed to extract layer[^\n]*(?:crc32 mismatch|checksum mismatch|corrupted)",
+    re.IGNORECASE,
+)
+"""Docker's stored copy of a finished build step is damaged (T842).
+
+Measured on a player's own Docker Desktop 29.9.2 log: the un-prefixed
+`failed to solve: failed to extract layer sha256:...: exit status 1: unpigz:
+skipping: <stdin>: corrupted -- crc32 mismatch`. A match needs BOTH
+`failed to extract layer` AND a corruption word (`crc32 mismatch`, `checksum
+mismatch`, `corrupted`) on the same line: a bare extract failure is anyone's
+(`no space left on device`, `permission denied`, a truncated stream's
+`unexpected end of file`), and only corruption points at Docker's storage or
+the computer's memory. Only the un-prefixed form counts: a step line starting
+`#<n>` is skipped, like T202, because what a step prints is that program's,
+not Docker's word on its storage. A registry `unexpected EOF` on a pull has
+no `failed to extract layer` and matches none.
+"""
+
+_COMPILER_CRASHED = re.compile(
+    r"clang(?:\+\+)?: (?:fatal )?error: clang frontend command failed with exit code 139"
+    r"|clang(?:\+\+)?: (?:fatal )?error: clang frontend command failed due to signal"
+    r"|clang(?:\+\+)?: error: unable to execute command: segmentation fault"
+    r"|(?:g\+\+|gcc|c\+\+|cc|cc1plus|cc1): internal compiler error: segmentation fault"
+    r"|(?:g\+\+|gcc|c\+\+|cc1plus|cc1)(?:: fatal error)?"
+    r": killed signal terminated program cc1plus"
+    r"|cc1plus: (?:fatal )?error: .*segmentation fault"
+    r"|(?:clang|cc1plus|cc1|gcc|g\+\+)[^\n]*segmentation fault\s*\(core dumped\)"
+    r"|(?:gcc|g\+\+|c\+\+|cc1plus|cc1|clang(?:\+\+)?)\b[^\n]*exit (?:code|status):? 139\b",
+    re.IGNORECASE,
+)
+"""The compiler itself crashed instead of reporting a compile error (T842).
+
+These words ARE a step's own output (`#18 110.6 clang++: fatal error: ...`),
+so step lines are read here, not skipped: the `#<n> <secs>` prefix is
+stripped first, and the match is case-insensitive. It covers clang's frontend
+failing with exit code 139 or `due to signal`, clang being unable to run a
+command that segfaults, gcc's `internal compiler error: Segmentation fault`,
+the OOM killer's `Killed signal terminated program cc1plus` (the memory ran
+short, which the sentence already says), a `cc1plus: ... error: ...
+Segmentation fault`, and a bare `Segmentation fault (core dumped)` on a line
+that also names the compiler. A frontend failure with exit code 1, an
+`error: no member named ...`, or a linker's `ld returned 1` is a mistake in
+the code, not a crash.
+"""
+
+
+def build_data_damaged(tail: Sequence[str]) -> bool:
+    """Did this build end because Docker's stored layer copy is damaged? (T842)
+
+    The whole tail is read: the line is the last one Docker prints, but blank
+    lines may follow it. A step's own output lines are skipped, like T202:
+    what a RUN step prints is that program's, not Docker's word on its storage.
+    """
+    return any(_BUILD_DATA_DAMAGED.search(line) and not _STEP_OUTPUT.match(line) for line in tail)
+
+
+def compiler_crashed(tail: Sequence[str]) -> bool:
+    """Did this build end because the compiler itself crashed? (T842)
+
+    Step lines ARE read here: the crash line is the step's own output. The
+    `#<n> <secs>` BuildKit prefix (`#18 110.6 `, `#9 ERROR: `) is stripped
+    first, so it never stands in the way of the match. Only the last crash
+    line counts, and only inside the last 60 lines of the tail: a crash from
+    a step that was later retried does not decide the message.
+    """
+    last = -1
+    for index, line in enumerate(tail):
+        if _COMPILER_CRASHED.search(_STEP_OUTPUT.sub("", line)):
+            last = index
+    return last >= 0 and len(tail) - 1 - last < 60
+
+
 def _build_log_elsewhere(said: list[str]) -> str:
     """The URL Docker Desktop printed instead of the build's output, or `""`.
 
@@ -9991,7 +10064,8 @@ def _server_claim(
 
     Re-entrant in this process: a nested take (Update -> its own Rebuild, a press's own stop
     and recreate) shares the one container, its press label and its `lost` event; the last
-    exit releases it. A reservation found in place is never removed here, whoever's.
+    exit releases it. A reservation found in place is never removed here, whoever's; only a
+    container this Yu'lon began and never started (Created, its process gone) is (T831).
 
     Yields a `ClaimHeld`; its `lost` is set by a watcher if the container ends before the
     press lets it go (Docker restarted, `docker rm -f` from elsewhere).
@@ -10113,6 +10187,32 @@ def _let_go(
         lock.release()
 
 
+def _left_unstarted_here(name: str, facts: _ClaimFacts, holder: ServerHolder) -> bool:
+    """Whether the reservation `name` is one this Yu'lon began and never started (T831).
+
+    A Stop gives Docker five seconds to make its reservation and then goes on without it; a
+    daemon that finishes the make later leaves the container Created, with no CLI to start it,
+    and `--rm` never removes a container that did not run. A live reservation is always
+    running, so a Created one is nobody's hold -- but only ours, on this computer, from a
+    process that is gone (or from this process, which is not taking it) is removed.
+    """
+    if facts.status != "created":
+        return False
+    if facts.owner != owner_id():
+        return False
+    if holder.host != socket.gethostname() or not holder.pid.isdigit():
+        return False
+    if int(holder.pid) == os.getpid():
+        with _CLAIMS_LOCK:
+            held = name in _CLAIMS_HELD
+        self_free = not held and name not in _RESERVATIONS
+    else:
+        self_free = holder.live_here() is False
+    if not self_free:
+        return False
+    return holder.container == facts.container
+
+
 def _new_reservation(
     name: str,
     press: str,
@@ -10158,6 +10258,7 @@ def _new_reservation(
             )
     chain = _reservation_images(spec, images, wsl_distro, budget_end, avoid_images)
     waited_for_a_dying_one = False
+    cleared_a_leftover = False
     while True:
         try:
             image = next(chain, None)
@@ -10201,6 +10302,46 @@ def _new_reservation(
                 raise ServerReservationUnavailable(
                     forgetting.server_reservation_unavailable(label, str(silent))
                 ) from silent
+            if (
+                facts is not None
+                and facts.status == "created"
+                and facts.owner == owner_id()
+                and not claimed.here
+                and not cleared_a_leftover
+            ):
+                cleared_a_leftover = True
+                try:
+                    left = _server_holder(
+                        name,
+                        here=False,
+                        ours=True,
+                        known=True,
+                        wsl_distro=wsl_distro,
+                        timeout=_ask_budget(budget_end, _CLAIM_ASK_TIMEOUT),
+                    )
+                    if _left_unstarted_here(name, facts, left):
+                        logger.info(
+                            f"removing {name}: a reservation this Yu'lon began and never started"
+                            f" (Created), left by process {left.pid}"
+                        )
+                        if _remove_claim(
+                            facts.container,
+                            timeout=_ask_budget(budget_end, _CLAIM_ASK_TIMEOUT),
+                            wsl_distro=wsl_distro,
+                        ) and _wait_gone(
+                            name,
+                            wsl_distro,
+                            None if budget_end is None else max(0.0, budget_end - time.monotonic()),
+                            container=facts.container,
+                        ):
+                            chain = _reservation_images(
+                                spec, images, wsl_distro, budget_end, avoid_images
+                            )
+                            continue
+                except ClaimDockerSilent as silent:
+                    raise ServerReservationUnavailable(
+                        forgetting.server_reservation_unavailable(label, str(silent))
+                    ) from silent
             if (
                 facts is not None
                 and facts.status not in ("running", "created")

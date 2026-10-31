@@ -104,6 +104,9 @@ class Db:
         self.queries: list[str] = []
         self.executed: list[str] = []
         self.ignored: dict[str, tuple[str, ...]] = {}
+        self.database_up = True
+        """Whether the tail reads answer (T844): the box sets it from `running_now`
+        and the session's `bring_up` sets it while the database is up."""
 
     def databases(self) -> tuple[str, ...]:
         return self.present
@@ -165,6 +168,10 @@ class Db:
         return (*own, *extra, *realm)
 
     def query(self, sql: str) -> str:
+        if not self.database_up and (
+            "`name`, `hash`, `state`" in sql or "`updates_include`" in sql
+        ):
+            raise MaintenanceError("container ac-database is not running")
         self.queries.append(sql)
         rows = re.fullmatch(r"SELECT COUNT\(\*\) FROM `([^`]+)`\.`([^`]+)`;", sql)
         if rows is not None:
@@ -225,6 +232,7 @@ class Box:
         self.db = db or Db(self.events)
         self.db.events = self.events
         self.up: list[str] = list(running_now)
+        self.db.database_up = self.spec.db in self.up
         self.ownership = ownership
         self.stop_fails = False
         self.start_fails = False
@@ -238,6 +246,7 @@ class Box:
                 self.up.remove(self.spec.world)  # half-way: the world is down, the rest is not
                 raise RuntimeError("docker stop failed")
             self.up.clear()
+            self.db.database_up = self.spec.db in self.up
             return True
 
         def start_server() -> None:
@@ -245,17 +254,20 @@ class Box:
             if self.start_fails:
                 raise RuntimeError("compose could not start")
             self.up.extend([self.spec.db, self.spec.auth, self.spec.world])
+            self.db.database_up = self.spec.db in self.up
 
         def bring_up(because: str) -> bool:
             if self.spec.db in self.up:
                 return False
             self.events.append("db-up")
             self.up.append(self.spec.db)
+            self.db.database_up = True
             return True
 
         def take_down() -> None:
             self.events.append("db-down")
             self.up.remove(self.spec.db)
+            self.db.database_up = False
 
         backup, plan_restore, restore = move_flows.engine_for(
             self.entry, self.server_dir, self.db, running=running, wsl_distro=None
@@ -2205,6 +2217,30 @@ def test_a_tail_behind_is_allowed_and_runs_the_one_shot(
     assert "applied after the load" in result.text()
 
 
+def test_a_tail_on_a_stopped_server_is_read_while_the_database_is_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The tail reads belong inside the session (T844): outside, the fake's
+    container is down and its ledger answers fail like a stopped one."""
+    monkeypatch.setattr(docker, "importer_sees_modules", lambda *a, **k: True)
+    auth = _tail_names("auth", 23)
+    chars = ("2024_01_a", "2024_01_b")
+    box, package = _tail_box(
+        tmp_path,
+        {"acore_auth": auth[:22], "acore_characters": chars},
+        {"acore_auth": auth, "acore_characters": chars},
+    )
+    box.up.clear()
+    box.db.database_up = False
+    plan = move_flows.plan_import(box.world, package)
+    assert plan.allowed, plan.refusals
+    assert plan.updates_to_apply == {"acore_auth": (auth[22],)}
+    assert box.events == ["db-up", "db-down"], box.events
+    rows = [q for q in box.db.queries if "`name`, `hash`, `state`" in q]
+    includes = [q for q in box.db.queries if "`updates_include`" in q]
+    assert rows and includes, "the row reads ran while the database was up"
+
+
 def test_a_tail_without_the_seam_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2900,6 +2936,109 @@ def test_a_playerbots_only_tail_needs_no_one_shot(
     )
     assert seen == []
     assert "next Start" in result.text()
+
+
+def test_a_bot_ledger_gap_of_released_hash_equal_files_is_a_tail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(docker, "importer_sees_modules", lambda *a, **k: True)
+    bots = _tail_names("bots", 36)
+    gap = bots[:30] + bots[31:]
+    here = {
+        "acore_auth": _tail_names("auth", 5),
+        "acore_characters": ("2024_01_a", "2024_01_b"),
+        "acore_playerbots": bots,
+    }
+    box, package = _tail_box(tmp_path, dict(here, acore_playerbots=gap), here)
+    from dataclasses import replace
+
+    seen: list[str] = []
+    box.world = replace(
+        box.world, apply_updates=lambda sink: seen.append("ran") or docker.AttachedRun(0, ())
+    )
+    plan = move_flows.plan_import(box.world, package)
+    assert plan.allowed, plan.refusals
+    assert plan.updates_to_apply == {"acore_playerbots": (bots[30],)}
+    result = move_flows.run_import(
+        box.world, plan, confirm=None, use_old_realm_name=False, stop_allowed=False
+    )
+    assert seen == []
+    assert "next Start" in result.text()
+    assert "acore_playerbots (1)" in result.text()
+
+
+def test_a_core_ledger_gap_is_still_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(docker, "importer_sees_modules", lambda *a, **k: True)
+    auth = _tail_names("auth", 23)
+    chars = ("2024_01_a", "2024_01_b")
+    box, package = _tail_box(
+        tmp_path,
+        {"acore_auth": auth[:10] + auth[11:], "acore_characters": chars},
+        {"acore_auth": auth, "acore_characters": chars},
+    )
+    plan = move_flows.plan_import(box.world, package)
+    assert not plan.allowed
+    assert "The file is behind this server" in " ".join(plan.refusals)
+
+
+def test_a_bot_ledger_gap_whose_file_differs_on_disk_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(docker, "importer_sees_modules", lambda *a, **k: True)
+    bots = _tail_names("bots", 36)
+    here = {
+        "acore_auth": _tail_names("auth", 5),
+        "acore_characters": ("2024_01_a", "2024_01_b"),
+        "acore_playerbots": bots,
+    }
+    box, package = _tail_box(tmp_path, dict(here, acore_playerbots=bots[:30] + bots[31:]), here)
+    move.tail_update_path(box.server_dir, "acore_playerbots", bots[30]).write_bytes(b"changed")
+    plan = move_flows.plan_import(box.world, package)
+    assert not plan.allowed
+    assert "The file is behind this server" in " ".join(plan.refusals)
+
+
+def test_a_bot_ledger_gap_whose_file_is_missing_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(docker, "importer_sees_modules", lambda *a, **k: True)
+    bots = _tail_names("bots", 36)
+    here = {
+        "acore_auth": _tail_names("auth", 5),
+        "acore_characters": ("2024_01_a", "2024_01_b"),
+        "acore_playerbots": bots,
+    }
+    box, package = _tail_box(tmp_path, dict(here, acore_playerbots=bots[:30] + bots[31:]), here)
+    move.tail_update_path(box.server_dir, "acore_playerbots", bots[30]).unlink()
+    plan = move_flows.plan_import(box.world, package)
+    assert not plan.allowed
+    assert "The file is behind this server" in " ".join(plan.refusals)
+
+
+def test_a_bot_ledger_gap_with_an_archived_row_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(docker, "importer_sees_modules", lambda *a, **k: True)
+    bots = _tail_names("bots", 36)
+    here = {
+        "acore_auth": _tail_names("auth", 5),
+        "acore_characters": ("2024_01_a", "2024_01_b"),
+        "acore_playerbots": bots,
+    }
+    box, package = _tail_box(tmp_path, dict(here, acore_playerbots=bots[:30] + bots[31:]), here)
+    box.db.tail_rows["acore_playerbots"] = tuple(
+        (
+            n,
+            hashlib.sha1(n.encode()).hexdigest().upper(),
+            "ARCHIVED" if n == bots[30] else "RELEASED",
+        )
+        for n in bots
+    )
+    plan = move_flows.plan_import(box.world, package)
+    assert not plan.allowed
+    assert "The file is behind this server" in " ".join(plan.refusals)
 
 
 # ------------------------------------- T802 round 2: marker states and one-shot scope

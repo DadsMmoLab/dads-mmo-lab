@@ -1,10 +1,12 @@
 """The fingerprint a Windows world server's map-data copy is brought up to date by (T219).
 
-On Windows a TrinityCore world server reads its map data from the install's
-`world-data` volume instead of from the server folder's `data/` over Docker
-Desktop's file share (`composegen.world_data_dirs()`), and its entrypoint copies
-into the volume each folder whose line in `data/.yulon-world-data` differs from
-the line the volume kept (`world-data-sync.sh`). This module writes that file.
+On Windows a TrinityCore or AzerothCore (CoA, T835) world server reads its map
+data from the install's `world-data` volume instead of from the server folder's
+`data/` over Docker Desktop's file share (`composegen.world_data_dirs()`), and its
+entrypoint copies into the volume each folder whose line in `data/.yulon-world-data`
+differs from the line the volume kept (`world-data-sync.sh`). This module writes
+that file. For AzerothCore `mmaps` is an install stage, so "done" is that stage's
+own evidence rather than a background job's record.
 
 `data/` stays the one place everything writes and checks -- the client-data stage,
 the DBC overlay, the start check, the extraction evidence, the pathfinding job
@@ -41,7 +43,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from yulon.catalog import composegen
-from yulon.catalog.catalog import CatalogEntry, TrinityCoreData
+from yulon.catalog.catalog import AzerothCoreData, CatalogEntry, TrinityCoreData
 from yulon.log import get_logger
 from yulon.said import SaidByYulon
 
@@ -145,24 +147,23 @@ def refresh(entry: CatalogEntry, server_dir: Path) -> str | None:
         FingerprintNotRecorded: the old file could not be removed either, so the copy
             would trust it; the start must not go on.
     """
-    native = entry.install.native
-    trinitycore = native.trinitycore if native is not None else None
-    if trinitycore is None:
+    block = composegen.world_data_block(entry)
+    if block is None:
         return None
-    return refresh_for(trinitycore, server_dir)
+    return refresh_for(block, server_dir)
 
 
-def refresh_for(trinitycore: TrinityCoreData, server_dir: Path) -> str | None:
+def refresh_for(block: TrinityCoreData | AzerothCoreData, server_dir: Path) -> str | None:
     """`refresh()` from the family block alone: the pathfinding job knows no entry, and it
     writes the fingerprint again when a run turns `done` (Codex review), so a world that
     Docker restarts before the next Start from Yu'lon copies the finished set."""
-    if not trinitycore.world_data_dirs or not mirrored(server_dir):
+    if not block.world_data_dirs or not mirrored(server_dir):
         return None
     path = server_dir / DATA_DIR / FINGERPRINT_FILE
     staged = path.with_name(path.name + ".yulon-new")
     try:
         text = fingerprint(
-            server_dir / DATA_DIR, trinitycore.world_data_dirs, _mmaps_done(server_dir)
+            server_dir / DATA_DIR, block.world_data_dirs, _mmaps_done(block, server_dir)
         )
         body = text.encode("utf-8")
         try:
@@ -203,8 +204,25 @@ def refresh_for(trinitycore: TrinityCoreData, server_dir: Path) -> str | None:
     return None
 
 
-def _mmaps_done(server_dir: Path) -> bool:
-    """Has a pathfinding run finished, by its record? Imported here: `mmaps` calls `refresh`."""
+def _mmaps_done(block: TrinityCoreData | AzerothCoreData, server_dir: Path) -> bool:
+    """Is the pathfinding data finished? TrinityCore: the background job's record says `done`.
+    AzerothCore (T835): the mmaps install stage's own evidence vouches for it, the check
+    `extract.run_mmaps()` skips itself on. Imported here: `mmaps` calls `refresh`, and the
+    families package imports `native`."""
+    if isinstance(block, AzerothCoreData):
+        plan = block.client_extract
+        if plan is None:
+            return False
+        from yulon.catalog.families import extract
+
+        data_dir = server_dir / DATA_DIR
+        current = extract.read_evidence(data_dir)
+        if current is None:
+            return False
+        produces = {extract.MMAPS_DIR: plan.mmaps.min_files if plan.mmaps.required else 0}
+        return extract.satisfied(
+            extract.MMAPS_TOOL, plan.mmaps.argv, produces, data_dir, current, current
+        )
     from yulon.catalog.families import mmaps
 
     record = mmaps.read_record(server_dir)

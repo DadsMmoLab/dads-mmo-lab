@@ -33,7 +33,7 @@ from collections.abc import Callable, Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, TypeVar
 
 from yulon import docker
 from yulon.server_build_presses import MAINTENANCE_TAB
@@ -191,6 +191,262 @@ def merge_tables(
         seen.add(table.sql_name)
         merged.append(table)
     return tuple(merged)
+
+
+DAMAGED_ATTRIBUTE = "damaged_tables"
+"""What a refusal carries its damaged tables on, so the view can offer the press (T839).
+
+An attribute and not an exception class: the refusal crosses `catalog/` (an
+`InstallerError` wrapped by the rebuild's rollback) and the controller packages (a
+`MaintenanceError`), and neither may import the other's types. `damaged_in()` reads it
+anywhere on the exception's cause chain.
+"""
+
+_ErrorT = TypeVar("_ErrorT", bound=BaseException)
+
+
+def mark_damaged(error: _ErrorT, tables: Sequence[CrashedTable]) -> _ErrorT:
+    """`error`, carrying `tables` for `damaged_in()`."""
+    setattr(error, DAMAGED_ATTRIBUTE, tuple(tables))
+    return error
+
+
+def damaged_in(exc: BaseException | None) -> tuple[CrashedTable, ...]:
+    """The damaged tables a refusal (or anything it was raised from) carries; () when none."""
+    seen: set[int] = set()
+    current = exc
+    while current is not None and id(current) not in seen and len(seen) < 32:
+        seen.add(id(current))
+        found = getattr(current, DAMAGED_ATTRIBUTE, ())
+        if found:
+            return tuple(table for table in found if isinstance(table, CrashedTable))
+        current = current.__cause__ or current.__context__
+    return ()
+
+
+def repairable_only(
+    tables: Sequence[CrashedTable], schemas: Sequence[str]
+) -> tuple[CrashedTable, ...]:
+    """The tables the Repair press may touch: those in its own `schemas` (T822, T839)."""
+    return tuple(table for table in tables if table.db in schemas)
+
+
+def damaged_in_dump(text: str, database: str, schemas: Sequence[str]) -> tuple[CrashedTable, ...]:
+    """The tables a failed dump of `database` names as crashed (T839).
+
+    mysqldump prints `Got error: 1194: Table 'character_honor_cp' is marked as crashed and
+    should be repaired when using LOCK TABLES`: the bare table, and a dump of one schema
+    reads only that schema's tables, so a bare name is `database`'s own -- known, not
+    provisional. A qualified name must still be one of `schemas` (or `database`).
+    """
+    ordered = tuple(dict.fromkeys(name for name in (database, *schemas) if name))
+    if not ordered:
+        return ()
+    return tuple(
+        CrashedTable(table.db, table.table) for table in crashed_tables(text, ordered).tables
+    )
+
+
+def damaged_refusal(
+    tables: Sequence[CrashedTable],
+    *,
+    repairable: Sequence[str],
+    what: str = "the update",
+    again: str = "update again",
+    nothing_changed: bool = True,
+    ended: str = "did not start",
+) -> str:
+    """The plain sentence for a press a damaged table stopped (T839); names every table.
+
+    Only a table in `repairable` (the Repair press's own schemas) is sent to that press;
+    any other -- the world database's -- is pointed at a backup instead.
+    """
+    names = ", ".join(table.qualified for table in tables)
+    if len(tables) == 1:
+        lead = f"Table {names} is damaged (a crash left it half-written)"
+    else:
+        lead = f"Tables {names} are damaged (a crash left them half-written)"
+    said = f"{lead}, so a complete copy of your databases cannot be made and {what} {ended}."
+    fixable = repairable_only(tables, repairable)
+    other = [table for table in tables if table not in fixable]
+    if other:
+        dbs = ", ".join(dict.fromkeys(table.db for table in other))
+        said += (
+            f" Repair on the server card cannot fix {dbs}: restore it from a backup on the"
+            f" {MAINTENANCE_TAB} tab, or ask for help."
+        )
+        if fixable:
+            fixed = ", ".join(table.qualified for table in fixable)
+            said += f" Use {repair_button_label(fixable)} on the server card for {fixed}."
+        said += f" Then {again}."
+    else:
+        said += f" Use {repair_button_label(tables)} on the server card, then {again}."
+    return f"{said} Nothing was changed." if nothing_changed else said
+
+
+def resolve_bare(found: Crashed, schemas: Sequence[str], query: Callable[[str], str]) -> Crashed:
+    """`found` with every bare table name resolved to the ONE schema of `schemas` holding it.
+
+    A world's own log names the table only (`Table 'characters' is marked as crashed`), and
+    at load time the world reads all three of its databases, so the statement's first schema
+    -- the provisional answer `crashed_tables()` gives -- is a guess that is wrong more often
+    than right. One read of `information_schema` over `schemas` says which database really
+    holds it, and only that answer is shown.
+
+    A name no schema holds, a name two schemas hold, and a read that failed all drop the
+    table and make the answer `unnamed`: the card then says Yu'lon cannot tell which table,
+    which is true, instead of naming one it would repair blind.
+    """
+    wanted = tuple(name for name in schemas if _IDENTIFIER.fullmatch(name))
+    bare = [table for table in found.tables if table.bare]
+    if not bare:
+        return found
+    names = ", ".join(f"'{name}'" for name in dict.fromkeys(table.table for table in bare))
+    if not wanted:
+        return Crashed(tuple(table for table in found.tables if not table.bare), unnamed=True)
+    known = ", ".join(f"'{name}'" for name in wanted)
+    statement = (
+        "SELECT TABLE_SCHEMA, TABLE_NAME FROM information_schema.TABLES "
+        f"WHERE TABLE_NAME IN ({names}) AND TABLE_SCHEMA IN ({known});"
+    )
+    try:
+        raw = query(statement)
+    except Exception as exc:  # noqa: BLE001 - a read that failed is an answer, not a crash
+        logger.warning(f"could not tell which database holds the damaged table: {exc}")
+        return Crashed(tuple(table for table in found.tables if not table.bare), unnamed=True)
+    holders: dict[str, set[str]] = {}
+    for line in raw.splitlines():
+        fields = line.split("\t")
+        if len(fields) < 2:
+            continue
+        db, held = fields[0].strip(), fields[1].strip()
+        if db in wanted and _IDENTIFIER.fullmatch(db) and _IDENTIFIER.fullmatch(held):
+            holders.setdefault(held, set()).add(db)
+    result: list[CrashedTable] = []
+    dropped = False
+    for table in found.tables:
+        if not table.bare:
+            result.append(table)
+            continue
+        dbs = holders.get(table.table, set())
+        if len(dbs) == 1:
+            result.append(CrashedTable(next(iter(dbs)), table.table))
+        else:
+            dropped = True
+    return Crashed(merge_tables((), result), unnamed=found.unnamed or dropped)
+
+
+def damaged_at_start(crashed: Crashed, *, repairable: Sequence[str]) -> str:
+    """The realm line's words for a world that dies at start on a damaged table (T823).
+
+    One part of the realm line, joined with " · " by `dashboard.line()`, so it starts
+    lower-case. A table the Repair press covers is sent to it; any other -- the world
+    database's -- is pointed at a backup, the same rule a refused update follows (T839).
+    """
+    opening = "the world server stops while it starts because"
+    if not crashed.tables:
+        return (
+            f"{opening} a database table is damaged, most likely from the computer stopping "
+            "suddenly; Yu'lon cannot tell which one, so press Save logs for support… and ask "
+            "for help"
+        )
+    names = ", ".join(table.qualified for table in crashed.tables)
+    if len(crashed.tables) == 1:
+        lead = f"{opening} a database table is damaged ({names})"
+    else:
+        lead = f"{opening} database tables are damaged ({names})"
+    said = f"{lead}, most likely from the computer stopping suddenly"
+    fixable = repairable_only(crashed.tables, repairable)
+    other = [table for table in crashed.tables if table not in fixable]
+    if not other:
+        return f"{said}; use {repair_button_label(fixable)} on the server card"
+    dbs = ", ".join(dict.fromkeys(table.db for table in other))
+    said += (
+        f"; Repair on the server card cannot fix {dbs}, so restore it from a backup on the"
+        f" {MAINTENANCE_TAB} tab, or ask for help"
+    )
+    if fixable:
+        fixed = ", ".join(table.qualified for table in fixable)
+        said += f"; use {repair_button_label(fixable)} on the server card for {fixed}"
+    return said
+
+
+CHECK_SECONDS = 60
+"""How long the pre-check's `CHECK TABLE` may run before the server aborts it (T839)."""
+
+
+def _check_targets_statement(schemas: Sequence[str]) -> str:
+    known = ", ".join(f"'{name}'" for name in schemas)
+    # A table the server cannot open reports no engine, and that is the table wanted most.
+    return (
+        "SELECT TABLE_SCHEMA, TABLE_NAME FROM information_schema.TABLES "
+        f"WHERE TABLE_SCHEMA IN ({known}) AND TABLE_TYPE = 'BASE TABLE' "
+        "AND (ENGINE IS NULL OR UPPER(ENGINE) IN ('MYISAM', 'ARIA'));"
+    )
+
+
+def check_statement(tables: Sequence[CrashedTable]) -> str:
+    """One bounded `CHECK TABLE … FAST QUICK` over `tables` (all already validated)."""
+    names = ", ".join(table.sql_name for table in tables)
+    return f"SET SESSION max_statement_time = {CHECK_SECONDS};\n" f"CHECK TABLE {names} FAST QUICK;"
+
+
+_GOOD_STATUS = frozenset({"ok", "table is already up to date"})
+
+
+def damaged_in_check(raw: str, schemas: Sequence[str]) -> tuple[CrashedTable, ...]:
+    """The tables `CHECK TABLE`'s rows (`Table, Op, Msg_type, Msg_text`) call damaged.
+
+    Damaged is an `error` row, or no `status` row saying OK. A `warning` alone ("1 client
+    is using or hasn't closed the table properly") is a running server, not damage.
+    """
+    rows: dict[str, list[tuple[str, str]]] = {}
+    for line in raw.splitlines():
+        fields = line.split("\t")
+        if len(fields) < 4:
+            continue
+        rows.setdefault(fields[0].strip(), []).append(
+            (fields[2].strip().lower(), fields[3].strip().lower())
+        )
+    damaged: list[CrashedTable] = []
+    for name, said in rows.items():
+        bad = any(kind == "error" for kind, _ in said) or not any(
+            kind == "status" and text in _GOOD_STATUS for kind, text in said
+        )
+        if not bad:
+            continue
+        table = _table_from(name, schemas)
+        if table is None or table.bare:
+            logger.warning(f"CHECK TABLE called a table damaged that Yu'lon cannot name: {name}")
+            continue
+        damaged.append(table)
+        if len(damaged) == MAX_TABLES:
+            break
+    return tuple(damaged)
+
+
+def find_damaged(query: Callable[[str], str], schemas: Sequence[str]) -> tuple[CrashedTable, ...]:
+    """Ask the server which MyISAM/Aria tables of `schemas` are damaged; read-only (T839).
+
+    Two reads: the tables a crash can mark (`information_schema`), then one `CHECK TABLE
+    … FAST QUICK` over them, which checks only tables not closed properly and is bounded
+    by `CHECK_SECONDS`. Raises whatever `query` raises; the caller decides what a check
+    that could not run means.
+    """
+    wanted = tuple(name for name in schemas if _IDENTIFIER.fullmatch(name))
+    if not wanted:
+        return ()
+    targets: list[CrashedTable] = []
+    for line in query(_check_targets_statement(wanted)).splitlines():
+        fields = line.split("\t")
+        if len(fields) < 2:
+            continue
+        db, table = fields[0].strip(), fields[1].strip()
+        if db in wanted and _IDENTIFIER.fullmatch(db) and _IDENTIFIER.fullmatch(table):
+            targets.append(CrashedTable(db, table))
+    if not targets:
+        return ()
+    return damaged_in_check(query(check_statement(targets)), wanted)
 
 
 def damaged_sentence(crashed: Crashed) -> str:
@@ -383,7 +639,8 @@ def repair(
     cannot be taken and an engine this MariaDB cannot repair refuse before the
     first write.
     """
-    wanted = _validated(tables)
+    # T839: a name outside `schemas` (the world database's) is dropped, never repaired.
+    wanted = _validated(repairable_only(tables, schemas))
     if not wanted:
         return RepairReport(
             sentence="Yu'lon cannot tell which table to repair; nothing was changed.",
@@ -551,7 +808,8 @@ def _backed_up(
         except Exception as exc:  # noqa: BLE001 - a failed dump is a refusal
             text = f"{exc}\n{_detail(exc)}".strip()
             logger.warning(f"the backup before a repair did not finish: {text}")
-            found = crashed_tables(text, schemas).tables
+            # T839: the dump was of `db` alone, so a bare name is `db`'s own table.
+            found = damaged_in_dump(text, db, schemas)
             known = {table.sql_name for table in tables}
             more = tuple(one for one in found if one.sql_name not in known)
             if more:

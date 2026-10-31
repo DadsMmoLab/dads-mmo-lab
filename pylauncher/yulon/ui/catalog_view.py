@@ -10,6 +10,7 @@ into the `LogPanel`. No Docker, no subprocess, no business logic here
 
 from __future__ import annotations
 
+import os
 import re
 import threading
 from collections.abc import Callable, Mapping
@@ -81,6 +82,9 @@ MOVE_IN_FILE = ".yulon-move-in.json"
 
 Spelled here, not imported, so this view does not import the install engine at module scope.
 """
+RESET_FILE = ".yulon-start-over.json"
+"""`catalog.native.RESET_FILE` (pinned equal by a test): a start over of an unfinished bring-in
+did not finish in this folder (T830). Spelled here for `MOVE_IN_FILE`'s reason."""
 MOVE_PACKAGE_FILTER = "Move packages (*.zip)"
 
 PackagePicker = Callable[[QWidget, str, Path], Path | None]
@@ -100,9 +104,18 @@ def _unfinished_move_in(server_dir: Path) -> bool:
     return move_server.unfinished_move_in(server_dir)
 
 
+def _start_over_under_way(server_dir: Path) -> bool:
+    """A "Start over with a plain install" began in `server_dir` and did not finish (T830)."""
+    return os.path.lexists(server_dir / RESET_FILE)
+
+
 def _unfinished_move(server_dir: Path) -> str:
     # `server_dir` is the folder just picked; the sentence says "this folder" (T829 wording).
-    del server_dir
+    if _start_over_under_way(server_dir):
+        # T830: Bring-in refuses such a folder; Install finishes the start over.
+        from yulon import move_server  # noqa: PLC0415
+
+        return move_server.START_OVER_UNFINISHED
     return (
         f"A bring-in on this folder is not finished. Press {BRING_FROM_ANOTHER} again with the "
         "same file and folder to carry on (nothing is lost)."
@@ -1031,7 +1044,7 @@ class CatalogView(QWidget):
         )
         if server_dir is None:
             return False
-        if _unfinished_move_in(server_dir):
+        if _unfinished_move_in(server_dir) or _start_over_under_way(server_dir):
             show_information(self, "A move that did not finish", _unfinished_move(server_dir))
             return False
         if compose_file(server_dir) is None:
@@ -1290,13 +1303,49 @@ class CatalogView(QWidget):
         if folders is None:
             return False
         server_dir, client_dir = folders
-        if _unfinished_move_in(server_dir):
-            # T601 level 2: a plain install would finish the build and never put the modules,
-            # settings or data in, and then the tile could no longer bring the server in.
-            show_information(self, "A move that did not finish", _unfinished_move(server_dir))
-            return False
+        if _unfinished_move_in(server_dir) or _start_over_under_way(server_dir):
+            # T601 level 2: a plain install would carry on from what the bring-in left -- its
+            # build, and databases its data step may have half-replaced (T830) -- so it is never
+            # run here as it is. The way out is a reset of the folder, then the plain install.
+            return self._offer_start_over(entry, server_dir, client_dir)
         return self._run_install(
             entry, server_dir, client_dir, self._make_installer(entry), first_install=True
+        )
+
+    def _offer_start_over(
+        self, entry: CatalogEntry, server_dir: Path, client_dir: Path | None
+    ) -> bool:
+        """Ask once, then run "Start over with a plain install" in the log panel (T830).
+
+        Without a wired start over (`MoveIn.start_over`), the old sentence: press Bring from
+        another computer… again. The record the player is asked about is read before the
+        question, so the press refuses one that changed while the question was open.
+        """
+        make = getattr(self._move_in, "start_over", None)
+        if make is None:
+            show_information(self, "A move that did not finish", _unfinished_move(server_dir))
+            return False
+        # The engine's modules, imported where they are used (see MOVE_IN_FILE).
+        from yulon import move_server, start_over
+
+        resuming = not _unfinished_move_in(server_dir)
+        expected = None if resuming else move_server.read_marker(server_dir)
+        title, question = (
+            (start_over.FINISH_TITLE, start_over.FINISH_QUESTION)
+            if resuming
+            else (start_over.QUESTION_TITLE, start_over.QUESTION)
+        )
+        if not self._ask_yes(self, title, question):
+            logger.info(f"{entry.id}: start over of {server_dir} declined; nothing changed")
+            return False
+        engine = make(entry, server_dir, client_dir, self._make_installer(entry), expected)
+        return self._run_install(
+            entry,
+            server_dir,
+            client_dir,
+            engine,
+            title=f"Starting {entry.name} over with a plain install",
+            first_install=True,
         )
 
     def start_single_install(self, entry: SingleEntry) -> bool:

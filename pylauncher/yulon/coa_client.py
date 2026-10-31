@@ -48,7 +48,7 @@ import threading
 from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import asdict, dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Any, Literal, TypeGuard
+from typing import Any, BinaryIO, Literal, TypeGuard
 from urllib.error import HTTPError
 from urllib.parse import urlsplit
 
@@ -741,6 +741,19 @@ class _Mismatch(ClientUpdateError):
 _CONTENT_RANGE = re.compile(r"^\s*bytes\s+(\d+)-(\d+)/(\d+|\*)\s*$")
 
 
+def _open_part(part: Path, *, append: bool) -> BinaryIO:
+    """`part` opened for writing, never through a link where the OS can refuse one.
+
+    `O_NOFOLLOW` (POSIX) makes a link planted after `_download`'s check fail the
+    open instead of writing to what it points at; Windows has no such flag, so
+    there the check before the open is what stands.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    flags |= os.O_APPEND if append else os.O_TRUNC
+    fd = os.open(part, flags, 0o666)
+    return os.fdopen(fd, "ab" if append else "wb")
+
+
 def _download(
     url: str,
     part: Path,
@@ -751,7 +764,21 @@ def _download(
     cancelled: Callable[[], bool],
     progress: Callable[[int], None],
 ) -> None:
-    """Bring `part` to `size` bytes, resuming from what it holds (HTTP Range)."""
+    """Bring `part` to `size` bytes, resuming from what it holds (HTTP Range).
+
+    A file the manifest lists with size 0 has nothing to fetch: `part` is made
+    empty here, without asking the site, and `_prove` checks its digest like any
+    other (T838: before, nothing was made and the file stayed missing forever).
+    """
+    if os.path.lexists(part) and _is_link(part):
+        # Left for the player: neither the link nor what it points at is touched.
+        raise ClientUpdateError(
+            f"a link is in the way at {part.name}; nothing was written. Remove it, then "
+            "choose Update client again."
+        )
+    if size == 0:
+        _open_part(part, append=False).close()
+        return
     have = part.stat().st_size if part.is_file() else 0
     if have > size:
         part.unlink()
@@ -774,7 +801,7 @@ def _download(
                 mode = "ab"
             else:
                 done, mode = 0, "wb"
-            with part.open(mode) as handle:
+            with _open_part(part, append=mode == "ab") as handle:
                 while True:
                     if cancelled():
                         raise Cancelled(
@@ -1257,12 +1284,48 @@ def rollback(client_dir: Path, version: str) -> Undone:
 # --- After an update: the server's map data --------------------------------------------------
 
 
+def _changed_map_file_sentence(name: str) -> str:
+    """The one sentence both map-data questions end in, with the file that changed."""
+    return (
+        f"The client update changed {name}, a file the server's map data was extracted from, so "
+        "the server's map data no longer matches your client. The server keeps working with the "
+        "map data it has; extract it again from the updated client to use what the update changed."
+    )
+
+
+def _map_archive_sentence(client_dir: Path, data_dir: Path) -> str | None:
+    """The map archive the last extraction read changed since, by size and date (T837).
+
+    `surgical.read_sidecar()` records what the extract stage actually read; a
+    replaced archive with the same size and date is not caught here on purpose —
+    the stage's own hash catches that one, and this question is asked by the UI
+    on every draw. None: no sidecar (an install from before it), or a match.
+    """
+    from yulon.catalog.families import surgical
+
+    recorded = surgical.read_sidecar(data_dir)
+    if recorded is None:
+        return None
+    name, size, mtime_ns = recorded
+    try:
+        stat = client_dir.joinpath(*name.split("/")).stat()
+    except OSError:
+        return None
+    if stat.st_size == size and stat.st_mtime_ns == mtime_ns:
+        return None
+    return _changed_map_file_sentence(PurePosixPath(name).name)
+
+
 def map_data_sentence(entry: Any, server_dir: Path, client_dir: Path) -> str | None:
     """Say so when the server's map data was extracted from this client before it changed.
 
     The extract stage's own evidence (`extract.read_evidence`), compared on the
     client facts it records (the folder, and the required file's size and date)
-    against what the folder holds now. None: no evidence, another folder, or a match.
+    against what the folder holds now. T837: the map archive the extraction read
+    (`surgical.SIDECAR_NAME`) is part of the question too — its size and date, not
+    its bytes, because this is drawn by the UI and reading ~2 GB would freeze it;
+    the extract stage's hash is what catches a replacement that keeps both.
+    None: no evidence, another folder, or a match.
     Never runs anything: re-extracting takes hours and is the player's call.
     """
     from yulon.catalog.families import extract
@@ -1277,11 +1340,6 @@ def map_data_sentence(entry: Any, server_dir: Path, client_dir: Path) -> str | N
     now = extract.expected_evidence(block.extract, client_dir, block.client.required_file)
     if evidence.client_path != now.client_path:
         return None
-    if now.client_facts_complete and extract._same_required_file(evidence, now):
-        return None
-    return (
-        f"The client update changed {block.client.required_file}, a file the server's map data "
-        "was extracted from, so the server's map data no longer matches your client. The "
-        "server keeps working with the map data it has; extract it again from the updated "
-        "client to use what the update changed."
-    )
+    if not (now.client_facts_complete and extract._same_required_file(evidence, now)):
+        return _changed_map_file_sentence(block.client.required_file)
+    return _map_archive_sentence(client_dir, server_dir / "data")

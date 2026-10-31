@@ -153,10 +153,6 @@ _DASHBOARD_REASON = (
     "The bot dashboard belongs to the Tortoise bot module, which this server does not run."
 )
 
-_WORLD_DATA_ELSEWHERE = (
-    "WotLK keeps its client data in a named volume of its own on every platform already "
-    "(`client-data`), so there is no `./data` bind for the world to read over a file share"
-)
 _WORLD_DATA_NOT_MEASURED = (
     "the CMaNGOS template binds `./data` the same way, and keeps it until it is measured on "
     "Windows (T219 owner decision 2)"
@@ -331,6 +327,21 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
             ),
         },
         hits=(".azerothcore",),
+    ),
+    Site(
+        "yulon.dashboard",
+        "Dashboard.__init__",
+        "a world that crash-loops on a damaged MyISAM table names it from its own log (T823)",
+        {
+            "azerothcore": not_applicable(
+                "scoped like T839's checks_damage: crashed tables were seen only on CMaNGOS"
+            ),
+            "cmangos": supported(),
+            "trinitycore": not_applicable(
+                "scoped like T839's checks_damage: crashed tables were seen only on CMaNGOS"
+            ),
+        },
+        hits=("'cmangos'",),
     ),
     # -- engine dispatch ---------------------------------------------------------------
     Site(
@@ -796,6 +807,23 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
     ),
     Site(
         "yulon.install_wiring",
+        "database_snapshot_for",
+        "the update copy names a crashed MyISAM table and checks for one before the build "
+        "(T839), for T822's Repair the damaged table… press",
+        {
+            "azerothcore": not_applicable(
+                "its tables are InnoDB, which a crash does not leave marked as crashed, and it "
+                "has no Repair the damaged table… press (T822); its copy is as it was"
+            ),
+            "cmangos": supported(),
+            "trinitycore": not_applicable(
+                "it has no Repair the damaged table… press (T822); its copy is as it was"
+            ),
+        },
+        hits=("'cmangos'",),
+    ),
+    Site(
+        "yulon.install_wiring",
         "repair_confs_for_app",
         "Repair server files: missing module confs (T137, via confs_from_dist)",
         {
@@ -1154,39 +1182,69 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         },
         scanned=False,
     ),
-    # -- the Windows world server's map data in a volume (T219) --------------------------
+    # -- the Windows world server's map data in a volume (T219, T835) ---------------------
+    Site(
+        "yulon.catalog.composegen",
+        "world_data_block",
+        "the family block that carries the world-data folders and their room",
+        {
+            "azerothcore": supported(
+                "`AzerothCoreData.world_data_dirs`, only with `client_extract`; WotLK and "
+                "Unbound name none (T835)"
+            ),
+            "cmangos": not_available(_WORLD_DATA_NOT_MEASURED),
+            "trinitycore": supported("`TrinityCoreData.world_data_dirs` (T219)"),
+        },
+        hits=(".azerothcore", ".trinitycore"),
+    ),
     Site(
         "yulon.catalog.composegen",
         "world_data_dirs",
         "which renders copy the world server's map data into a volume (Windows only)",
         {
-            "azerothcore": not_applicable(_WORLD_DATA_ELSEWHERE),
+            "azerothcore": supported("on Windows, through `world_data_block` (T835)"),
             "cmangos": not_available(_WORLD_DATA_NOT_MEASURED),
             "trinitycore": supported("`TrinityCoreData.world_data_dirs`, on Windows (T219)"),
         },
-        hits=(".trinitycore",),
+        scanned=False,
     ),
     Site(
         "yulon.catalog.composegen",
         "_world_data_tokens",
-        "the TrinityCore base template's `WORLD_DATA_*` tokens: the bind, or the volume and sync",
+        "a base template's `WORLD_DATA_*` tokens: the bind, or the volume and sync",
         {
-            "azerothcore": not_applicable(_WORLD_DATA_ELSEWHERE),
+            "azerothcore": supported(
+                "the AzerothCore template spells the tokens; its bind keeps `:ro` and Windows "
+                "adds `command:` (T835)"
+            ),
             "cmangos": not_available(_WORLD_DATA_NOT_MEASURED),
             "trinitycore": supported("its template alone spells the tokens (T219)"),
         },
-        hits=(".trinitycore",),
+        hits=("isinstance AzerothCoreData",),
     ),
     Site(
         "yulon.catalog.world_data",
         "refresh",
         "the map-data fingerprint every start writes for the volume's copy",
         {
-            "azerothcore": not_applicable(_WORLD_DATA_ELSEWHERE),
+            "azerothcore": supported("on an install whose compose file declares the volume (T835)"),
             "cmangos": not_available(_WORLD_DATA_NOT_MEASURED),
             "trinitycore": supported("on an install whose compose file declares the volume (T219)"),
         },
-        hits=(".trinitycore",),
+        scanned=False,
+    ),
+    Site(
+        "yulon.catalog.world_data",
+        "_mmaps_done",
+        "when the fingerprint lets the pathfinding data into the copy",
+        {
+            "azerothcore": supported(
+                "the mmaps install stage's own evidence vouches for it (T835)"
+            ),
+            "cmangos": not_available(_WORLD_DATA_NOT_MEASURED),
+            "trinitycore": supported("the pathfinding job's record says done (T219)"),
+        },
+        hits=("isinstance AzerothCoreData",),
     ),
     Site(
         "yulon.catalog.installer",
@@ -1206,22 +1264,22 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         "world_data_gb",
         "the room the map-data volume takes on Docker's disk, added to its floors on Windows",
         {
-            "azerothcore": not_applicable(_WORLD_DATA_ELSEWHERE),
+            "azerothcore": supported("its block's `world_data_gb` (T835)"),
             "cmangos": not_available(_WORLD_DATA_NOT_MEASURED),
             "trinitycore": supported("`TrinityCoreData.world_data_gb` (T219)"),
         },
-        hits=(".trinitycore",),
+        scanned=False,
     ),
     Site(
         "yulon.catalog.native",
         "StagedInstaller._world_data_added",
         "the Repair confirmation's paragraph when a repair adds the map-data volume",
         {
-            "azerothcore": not_applicable(_WORLD_DATA_ELSEWHERE),
+            "azerothcore": supported("its block's `world_data_gb` (T835)"),
             "cmangos": not_available(_WORLD_DATA_NOT_MEASURED),
             "trinitycore": supported("its block's `world_data_gb` (T219)"),
         },
-        hits=(".trinitycore",),
+        scanned=False,
     ),
     # -- movement maps in the background (T179 Task 4) ------------------------------------
     Site(

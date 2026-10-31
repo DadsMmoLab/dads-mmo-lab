@@ -283,3 +283,11 @@ def test_the_server_tab_warns_for_a_stock_client_and_play_stays_open(
     assert control.kind_label.text() == coa_client.STOCK_WARNING
     assert control.fix_button.isVisibleTo(view)
     assert view.play_button is not None and view.play_button.isEnabled()
+
+
+def test_missing_zero_byte_files_do_not_make_the_coa_client_stock(tmp_path: Path) -> None:
+    """T838: the manifest's empty files are not key files; only `KEY_FILES` decide."""
+    empty = {"Data/Content/TransmogrificationItemData.json": b"", "HD_Patches_Description.txt": b""}
+    assert not set(empty) & set(coa_client.KEY_FILES)
+    client = _client(tmp_path, COA)
+    assert _kind(client, _parsed({**COA, **empty})) == "coa"

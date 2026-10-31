@@ -28,12 +28,20 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
-from yulon import dbreads, docker, module_health, realm_flag, unbound_settings, update_failure
+from yulon import (
+    dbreads,
+    docker,
+    module_health,
+    realm_flag,
+    table_repair,
+    unbound_settings,
+    update_failure,
+)
 from yulon.catalog import native
 from yulon.catalog.catalog import CatalogEntry
 from yulon.catalog.installer import InstallerError
 from yulon.log import get_logger
-from yulon.table_repair import CrashedTable
+from yulon.table_repair import Crashed, CrashedTable
 
 logger = get_logger(__name__)
 
@@ -232,9 +240,12 @@ class Verdict:
     database that is up. Set means `ready` is False and `stable` is False.
     """
     crashed: tuple[CrashedTable, ...] = ()
-    """Damaged tables the population read named (T822): what the Repair banner offers."""
+    """Damaged tables the population read (T822) or a looping world's own log (T823) named;
+    the view offers the Repair press only for its own schemas."""
     crash_unnamed: bool = False
     """A storage-engine crash error that named no usable table (T822): no banner, no press."""
+    damaged_line: str = ""
+    """A loop whose last dead run named a damaged table at load: the realm line's words (T823)."""
     module_line: str = ""
     """A module's own health sentence (`module_health`), once this run is ready; empty before
     that, for an entry whose catalog has no `health` block, and for a run that is not up (T555 T5).
@@ -360,6 +371,8 @@ def line(verdict: Verdict) -> str:
                 f"restarted after a crash loop — not called steady until this run "
                 f"has lasted {minutes}m"
             )
+    if verdict.state == "restart_loop" and verdict.damaged_line:
+        parts.append(verdict.damaged_line)
     if verdict.warning:
         parts.append(verdict.warning)
     if verdict.problem and verdict.players is not None:
@@ -445,6 +458,10 @@ class Dashboard:
         self._hint = False
         self._honor_run: str | None = None
         self._honor = False
+        self._crash_run: str | None = None
+        self._crash = table_repair.Crashed()
+        native_block = entry.install.native
+        self._checks_damage = native_block is not None and native_block.family == "cmangos"
         self._login_run: str | None = None
         self._login_read_at: datetime | None = None
         self._wrong_client_at: datetime | None = None
@@ -612,6 +629,7 @@ class Dashboard:
         if state.status == "restarting" or (
             self._looping and self._loop_is_current and state.status == "running"
         ):
+            crash = self._crashed_at_load(state.started_at, state.status)
             return Verdict(
                 "restart_loop",
                 state.restart_count,
@@ -619,11 +637,22 @@ class Dashboard:
                 uptime,
                 warning=self._foreign_data_hint(state.started_at, state.status),
                 honor_copy_missing=self._honor_copy_missing(state.started_at, state.status),
+                crashed=crash.tables,
+                crash_unnamed=crash.unnamed,
+                damaged_line=(
+                    table_repair.damaged_at_start(
+                        crash,
+                        repairable=(self.entry.databases.characters, self.entry.databases.auth),
+                    )
+                    if crash.tables or crash.unnamed
+                    else ""
+                ),
                 failure=self._update_failure(
                     state.started_at, uptime, dead=state.status == "restarting"
                 ),
             )
         self._honor_run, self._honor = None, False  # a loop that ended takes its cause with it
+        self._crash_run, self._crash = None, Crashed()  # T823: a loop that ended takes its table
         if state.status != "running":
             return Verdict(
                 "stopped",
@@ -662,6 +691,36 @@ class Dashboard:
             self._honor_run = run
             self._honor = died_on_the_honor_copy(log)
         return self._honor
+
+    def _crashed_at_load(self, run: str, status: str) -> Crashed:
+        """The damaged tables the loop's last dead run named in its own log (T823).
+
+        Read like `_honor_copy_missing()`: once per run, and only once the run is dead,
+        because a read of a running run lands mid-load. The answer stands through the running
+        run Docker starts between two crashes; the next dead run's log replaces it.
+
+        CMaNGOS family only, the same rule T839's snapshot follows: the other families' worlds
+        do not die on a MyISAM table this press can repair, so they read nothing new.
+        """
+        if not self._checks_damage:
+            return Crashed()
+        if not run or status == "running":
+            return self._crash
+        if self._crash_run != run:
+            try:
+                log = self._run_log(run)
+            except Exception as exc:  # noqa: BLE001 - an unreadable log is an answer, not a crash
+                logger.warning(f"could not read {self.entry.id}'s world log for a loop: {exc}")
+                return self._crash
+            dbs = self.entry.databases
+            schemas = (dbs.world, dbs.characters, dbs.auth)
+            found = table_repair.crashed_tables(log, schemas)
+            if found.tables or found.unnamed:
+                found = table_repair.resolve_bare(
+                    found, schemas, lambda statement: self.sql.query("world", statement)
+                )
+            self._crash_run, self._crash = run, found
+        return self._crash
 
     def _foreign_data_hint(self, run: str, status: str) -> str:
         """The sentence blaming the client's data files for a loop, or "" (T593).

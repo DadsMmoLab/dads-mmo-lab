@@ -59,6 +59,7 @@ from yulon.catalog.native import (
     DOWNLOAD_CANCEL_NOTE,
     IMPORT_STAGE_CANCEL_NOTE,
     OUR_OWN_FILES,
+    RESET_FILE,
     CallableGate,
     ConfCheck,
     ConfRepaired,
@@ -1398,10 +1399,33 @@ class AzerothCoreInstaller(StagedInstaller):
         yield f"Cloning {source.repo} into {server_dir} (this is a large repository)"
         if existing is not None:
             yield "A previous run of this install left it part-way through; finishing it off."
+        # T830 H1: a start over's mark (and the ownership record written before this stage) are
+        # in the server folder, and the seam empties a destination it is about to clone into.
+        # While the mark is there the checkout lands beside the folder and is moved in, so the
+        # folder keeps both no matter when the process dies.
+        beside = (server_dir / RESET_FILE).exists() and not has_git
+        staged: Path | None = None
+        owner = ""
+        if beside:
+            # T830 R2: the folder beside the server folder is one Yu'lon MAKES and marks, and
+            # the only one this stage ever empties; a folder at the recorded path without that
+            # mark is somebody's and is refused by name, never removed (`prepare_staging`).
+            from yulon import start_over
+
+            try:
+                staged, owner = start_over.prepare_staging(server_dir)
+            except start_over.StartOverError as exc:
+                raise InstallerError(str(exc)) from exc
+            # T830 M1: the clone's own destination is one level below the marker, so the seam's
+            # rmtree of a destination without `.git` takes an unfinished checkout and never the
+            # `.yulon-staging` that makes this folder Yu'lon's to remove.
+            dest = start_over.staging_checkout(staged)
+        else:
+            dest = server_dir
         yield from self._clone_lines(
             git.CloneSpec(
                 url=source.url,
-                dest=server_dir,
+                dest=dest,
                 branch=source.branch,
                 sparse_path=source.sparse_path,
                 # Data, not a constant: the core repo says `null` in
@@ -1412,6 +1436,8 @@ class AzerothCoreInstaller(StagedInstaller):
             ),
             "clone-core",
         )
+        if staged is not None:
+            _move_clone_into(staged, server_dir, owner)
         yield f"{source.repo} is in place."
 
     def _clone_modules(self, ctx: StageContext) -> Iterator[str]:
@@ -1745,7 +1771,25 @@ class AzerothCoreInstaller(StagedInstaller):
                 logger.warning(f"the scratch in {left} could not be removed: {exc}")
         image_ref = self._image_ref(ctx, plan_block.extract.image)
         user_args = self._user_args()
+        # T840: on Docker Desktop `data/` is a bind into a Windows or macOS
+        # folder where small-file writes are ~10x slower than in the container's
+        # own layer, so there each tool writes inside its container and only the
+        # finished folders are copied into `data/`. Linux passes nothing and
+        # keeps today's argv, mounts, workdir and env byte for byte. The switch
+        # is decided here, not in the catalog: the evidence hashes the plan, and
+        # a new field would make every install everywhere extract again.
+        scratch_off_bind = self._seams.platform_id() in ("windows", "macos")
         yield f"Extracting server data from {client_dir} into {data_dir} (the client is read-only)."
+        # T837: say so before the hash is taken, because reading the archive is
+        # the first thing that takes a while and nothing has been run yet.
+        for spec in plan_block.surgical_maps:
+            chosen = surgical.selected_archive(spec, client_dir)
+            if chosen is not None:
+                yield (
+                    f"Checking the map archive {chosen.name} (about 2 GB) so a changed one is "
+                    "extracted again."
+                )
+        identity, stamp = surgical.measure_identity(self._block(), client_dir)
         view = ctx.server_dir / extract.CASE_VIEW_DIR
         read_from = client_dir
         try:
@@ -1764,7 +1808,9 @@ class AzerothCoreInstaller(StagedInstaller):
                     client_build=self.entry.client.build,
                     selinux_enforcing=self._seams.ask_selinux,
                     evidence_client_dir=client_dir,
+                    evidence_salt=identity,
                     client_files=None if read_from == client_dir else client_dir,
+                    scratch_off_bind=scratch_off_bind,
                 ),
                 cancel=ctx.cancel,
                 stage="extract",
@@ -1782,6 +1828,16 @@ class AzerothCoreInstaller(StagedInstaller):
                 f"({'; '.join(missing)}). The extract stage made it from {client_dir}: check "
                 "that it is a complete Ascension 3.3.5a client. Nothing was started."
             )
+        # T837 round 1: the hash was taken before the tools; if the archive changed
+        # while they read it, the data may mix both files. Refuse before the sidecar
+        # and before the stage counts as finished, and write no evidence of a
+        # finished extraction. The tools' per-tool records still carry this run's
+        # old salt, so the next press' new salt makes every one of them re-run.
+        surgical.refuse_changed_archive(stamp)
+        # T837: after the tools, never before -- `map_data_sentence()` reads this
+        # to say a changed archive without reading 2 GB itself. The facts are the
+        # ones taken before the hash, not a fresh stat.
+        surgical.write_sidecar(client_dir, data_dir, stamp)
         yield "Extraction finished."
 
     def _mmaps(self, ctx: StageContext) -> Iterator[str]:
@@ -1794,6 +1850,11 @@ class AzerothCoreInstaller(StagedInstaller):
         (`PathGenerator.cpp:169`), and the workdir here is `/out` = `data/`.
         Copied from the checkout the install was built from (the core source),
         refused by name when it is not there.
+
+        T837: a changed map archive moves the extract stage's salt, and
+        `run_plan()` rewrites the evidence from scratch — this stage's record
+        with it — so the movement maps made from the old maps are regenerated
+        instead of skipped.
         """
         plan_block = self._block().client_extract
         if plan_block is None:  # unreachable: the stage is only in the tuple with one
@@ -2276,6 +2337,48 @@ class AzerothCoreInstaller(StagedInstaller):
             yield f"The databases are already marked as the {held} realm type."
             return
         yield f"The databases are marked as the {file_type} realm type."
+
+
+def _move_clone_into(staged: Path, server_dir: Path, reset_id: str) -> None:
+    """Move the checkout cloned at `<staged>/checkout` into `server_dir`, keeping what is there.
+
+    `.git` goes first, so a death during the move leaves a checkout the next press updates in
+    place rather than a folder of files with no `.git` (which the guard would refuse). A name
+    that already exists in the folder is this install's own bookkeeping — the mark, the
+    ownership record, the id — and is never replaced; the clone's copy of that name is dropped
+    with the staging folder. `staged` is the staging folder itself, not the clone's destination:
+    the checkout is one level down (`start_over.staging_checkout`, T830 M1) so the clone seam's
+    own wipe never takes the marker (`.yulon-staging`, T830 R2) that makes the folder this
+    reset's to remove, here in the finally and after a death. The staging folder is removed only
+    while that marker says this server's reset made it (`start_over.remove_staging`), so a
+    folder that is not Yu'lon's is never taken away, here or anywhere else.
+
+    **A documented limit: a death in the middle of this move leaves the staging folder behind.**
+    Nothing collects it. If the death is before `.git` moved, the next press finds `.git` still
+    absent and calls `prepare_staging()` again, which empties and reuses the recorded folder;
+    if it is after, the next press finds the checkout in the server folder and finishes it in
+    place, and the reset record that names the staging folder is gone with the install. What is
+    left is Yu'lon's own marked, empty-of-user-data folder beside the server folder. Removing it
+    later would mean remembering it past the reset, which this does not do.
+    """
+    from yulon import start_over
+
+    checkout = start_over.staging_checkout(staged)
+    try:
+        children = sorted(checkout.iterdir(), key=lambda child: (child.name != ".git", child.name))
+        for child in children:
+            target = server_dir / child.name
+            if os.path.lexists(target):
+                continue
+            os.replace(child, target)
+    except OSError as exc:
+        raise InstallerError(
+            f"The checkout of this server was made in {checkout} but could not be moved into "
+            f"{server_dir} ({exc}). Press Install again to finish it."
+        ) from exc
+    finally:
+        if staged.exists() and not start_over.remove_staging(staged, server_dir, reset_id):
+            logger.warning(f"{staged} is not a folder this server's start over made; left as is")
 
 
 def _sql_of(lines: Sequence[str]) -> tuple[str, ...]:

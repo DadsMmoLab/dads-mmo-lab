@@ -99,6 +99,22 @@ the shape is the point: the line that says WHY is the FIRST of the four, and the
 last one is a source location.
 """
 
+ORDINARY_LINES = (
+    "SPECROLL: factory picked survival for class 3 (3 paths, weight 300)",
+    "SPECROLL: factory picked frost for class 8 (3 paths, weight 300)",
+    "SPECROLL: factory picked assassination for class 4 (3 paths, weight 300)",
+    "TortoiseBots: level ladder pass: online 210/500, added 30, offline eligible 320, "
+    "skipped: session 0, lease 0, add refused 0, held 0, tracked 180, stale holds 0",
+    "TortoiseBots: SLOWBOT Fizzie took 92 ms (state 2, last action spirit healer, map 0)",
+)
+"""The player's last lines from the T841 incident (yulon.log, 2026-10-29 10:03), verbatim.
+
+The world reached ready, printed a pass of the bot ladder, and stopped between
+two ordinary lines: no SIGSEGV, no ABORTED, nothing a core's handler wrote. That
+is what a SIGKILL from the kernel's OOM killer leaves, and nothing else in the
+log says so -- which is why the sentence about it can only be a HINT.
+"""
+
 
 @dataclass
 class FakeWorld:
@@ -135,6 +151,13 @@ class FakeWorld:
     one line later `[1146] Table 'acore_world.city_bot_poi' doesn't exist`, then
     `>> ABORTED`, then the container restarts and does it again. `None` is the
     world every other test in this file drives: it says ready and stays up.
+    """
+
+    abort_lines: tuple[str, ...] = ABORT_LINES
+    """The lines it prints at `aborts_after_ready_s` (T841: a world killed from outside).
+
+    `ABORT_LINES` by default; `ORDINARY_LINES` is the T841 log, whose last lines
+    hold no error at all, which is what makes "killed from outside" the reading.
     """
 
     dies_by: str = "restart"
@@ -224,7 +247,7 @@ class FakeWorld:
         if self.fatal_after_s is not None and self.elapsed >= self.fatal_after_s:
             lines.extend(self.fatal_text.splitlines())
         if abort_at is not None and self.elapsed >= abort_at:
-            lines += list(ABORT_LINES)
+            lines += list(self.abort_lines)
         restarts = 0 if self.restart_every_s is None else int(self.elapsed / self.restart_every_s)
         status = ("exited" if self.dies_by == "exit" else "restarting") if gone else self.status
         return native.WorldOutput(text="\n".join(lines), restarts=restarts, status=status)
@@ -491,6 +514,93 @@ def test_a_world_that_exits_after_its_banner_is_quoted_from_its_own_dead_run() -
 
     assert "came up and then stopped" in message
     assert ABORT_LINES[0] in message
+
+
+# -- T841: a world killed from outside --------------------------------------
+
+_JOURNALCTL = 'journalctl -k | grep -i -E "out of memory|oom"'
+
+
+def test_a_world_that_dies_on_ordinary_lines_is_said_to_be_likely_killed_for_memory() -> None:
+    """T841: the live log ended between two ordinary lines, which no handler wrote.
+
+    A SIGKILL leaves no `SIGSEGV`, no `ABORTED`, no backtrace: the kernel's OOM
+    killer is the likely cause, and the sentence says so and names how to check
+    on Linux. The command is on its own line so it can be copied (T296).
+    """
+    world = FakeWorld(
+        boot_s=81.0, aborts_after_ready_s=1.0, dies_by="exit", abort_lines=ORDINARY_LINES
+    )
+    message = _refusal(world, platform_id=lambda: "linux")
+
+    assert native.KILLED_LIKELY in message
+    assert _JOURNALCTL in message.splitlines(), message
+
+
+@pytest.mark.parametrize("platform_id", ["windows", "macos"])
+def test_the_memory_hint_off_linux_names_docker_desktop_and_no_command(platform_id: str) -> None:
+    """T841: off Linux the memory is Docker Desktop's to give, and no shell is assumed."""
+    world = FakeWorld(
+        boot_s=81.0, aborts_after_ready_s=1.0, dies_by="exit", abort_lines=ORDINARY_LINES
+    )
+    message = _refusal(world, platform_id=lambda: platform_id)
+
+    assert native.KILLED_CHECK_DESKTOP in message
+    assert "journalctl" not in message, message
+
+
+@pytest.mark.parametrize(
+    "lines",
+    [
+        ABORT_LINES,
+        (
+            "Received SIGSEGV",
+            "./mangosd(_ZN15MangosSocketMgr9StopNetworkEv+0x5a) [0x5620b1c2d3e4]",
+        ),
+    ],
+    ids=["missing-table", "sigsegv"],
+)
+def test_a_world_that_died_with_crash_text_gets_no_memory_hint(lines: tuple[str, ...]) -> None:
+    """T841: a crash the core could name is not the silent kill this hint is about.
+
+    The missing-table abort is the T63 shape, whose own remedy already follows;
+    the SIGSEGV is the same player's separate upstream bug at stop.
+    """
+    world = FakeWorld(boot_s=81.0, aborts_after_ready_s=1.0, dies_by="exit", abort_lines=lines)
+    message = _refusal(world)
+
+    assert "ran out of memory" not in message, message
+    assert "killed from outside" not in message, message
+
+
+def test_a_world_already_restarted_gets_the_conditional_memory_hint() -> None:
+    """T841: when the dying run's log is gone, the hint is conditional on what it held."""
+    world = FakeWorld(boot_s=81.0, aborts_after_ready_s=-3.0)
+    message = _refusal(world)
+
+    assert native.KILLED_IF_ORDINARY in message
+
+
+@pytest.mark.parametrize(
+    "world",
+    [
+        FakeWorld(boot_s=81.0, aborts_after_ready_s=1.0),
+        FakeWorld(
+            boot_s=81.0, aborts_after_ready_s=1.0, dies_by="exit", abort_lines=ORDINARY_LINES
+        ),
+    ],
+    ids=["restarted", "exited-on-ordinary-lines"],
+)
+def test_the_sentence_no_longer_says_the_server_is_not_running(world: FakeWorld) -> None:
+    """T841: Docker brings the world back by itself, so "not running" would be false.
+
+    The player's probe of the truth is the container log, which kept growing;
+    the sentence now says what Docker does and what that usually means.
+    """
+    message = _refusal(world)
+
+    assert native.WORLD_RESTARTS_ITSELF in message
+    assert "not running even though" not in message, message
 
 
 def test_a_world_already_restarted_by_the_time_the_watch_first_looks_is_still_caught() -> None:

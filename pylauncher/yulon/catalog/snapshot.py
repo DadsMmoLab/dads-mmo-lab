@@ -26,10 +26,13 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from yulon.catalog.installer import InstallerError
 from yulon.log import get_logger
+
+if TYPE_CHECKING:
+    from yulon.table_repair import CrashedTable
 
 logger = get_logger(__name__)
 
@@ -125,6 +128,17 @@ class DatabaseSnapshot(Protocol):
 
     def prune(self, server_dir: Path, snapshot: Snapshot) -> tuple[Path, ...]:
         """Remove every older copy the update took; keep `snapshot`. Returns what was removed."""
+        ...
+
+    def damaged_tables(
+        self, server_dir: Path, databases: Sequence[str]
+    ) -> tuple[CrashedTable, ...] | None:
+        """The tables of `databases` a crash left damaged, asked before the build (T839).
+
+        Read-only. None when nothing was checked (a family with no Repair press, a database
+        that is not running, a check that could not run); the copy's own failure is then the
+        backstop. Never raises.
+        """
         ...
 
 
