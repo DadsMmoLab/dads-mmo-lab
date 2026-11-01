@@ -475,16 +475,27 @@ class TopMenuBar(QWidget):
         self.servers_menu.clear()
         indices = self.server_indices()
         views: list[object] = [self._tabs.widget(idx) for idx in indices]
-        pairs = [
-            (view.entry.name, view.services.controller.server_dir)
-            for view in views
+        ctrl_views = [
+            (pos, view)
+            for pos, view in enumerate(views)
             if isinstance(view, _ControllerManagedServerView)
         ]
-        titles = (
-            controller_tab_titles(pairs)
-            if len(pairs) == len(indices)
-            else [self._tabs.tabText(idx) for idx in indices]
+        pairs = [(view.entry.name, view.services.controller.server_dir) for _, view in ctrl_views]
+        ctrl_titles = dict(
+            zip((pos for pos, _ in ctrl_views), controller_tab_titles(pairs), strict=False)
         )
+        titles = [
+            (
+                ctrl_titles[pos]
+                if pos in ctrl_titles
+                else (
+                    view.entry.name
+                    if isinstance(view, ManagedServerView)
+                    else self._tabs.tabText(idx)
+                )
+            )
+            for pos, (idx, view) in enumerate(zip(indices, views, strict=False))
+        ]
         current = self._tabs.currentIndex()
         for idx, title in zip(indices, titles, strict=False):
             action = self.servers_menu.addAction(self._tabs.tabIcon(idx), title)
@@ -521,6 +532,8 @@ class TopMenuBar(QWidget):
 
     @Slot(int)
     def _sync(self, current: int) -> None:
+        for stale_idx in [k for k, btn in self.buttons.items() if btn is self.settings_button]:
+            self.buttons.pop(stale_idx, None)
         settings_idx = (
             self._tabs.indexOf(self._settings_widget) if self._settings_widget is not None else -1
         )
@@ -533,7 +546,6 @@ class TopMenuBar(QWidget):
                 self._settings_widget.setParent(self._settings_holder)
                 self._settings_widget.hide()
             self._tabs.blockSignals(False)
-            self.buttons.pop(settings_idx, None)
             settings_idx = -1
         elif settings_idx >= 0:
             self.buttons[settings_idx] = self.settings_button

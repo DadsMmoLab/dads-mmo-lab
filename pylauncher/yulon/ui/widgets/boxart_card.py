@@ -26,6 +26,7 @@ from PySide6.QtWidgets import QPushButton, QSizePolicy, QWidget
 from yulon.ui.icons import dadcraft_icon
 from yulon.ui.theme import (
     FONT_TITLE_SINGLE,
+    MIN_FONT_PX,
     get_theme,
     normalize_theme_name,
     resolve_widget_theme,
@@ -258,7 +259,7 @@ class GameBoxartCard(QPushButton):
 
         # Server count / edition subtitle
         sub_font = QFont(self.font())
-        sub_font.setPixelSize(max(11, int(h * 0.043)))
+        sub_font.setPixelSize(max(MIN_FONT_PX, int(h * 0.043)))
         sub_font.setBold(False)
         painter.setFont(sub_font)
         painter.setPen(QColor(spec.tile_subtitle))
@@ -284,7 +285,7 @@ class GameBoxartCard(QPushButton):
             painter.drawRoundedRect(pill_rect, 10.0, 10.0)
 
             pill_font = QFont(self.font())
-            pill_font.setPixelSize(11)
+            pill_font.setPixelSize(MIN_FONT_PX)
             pill_font.setBold(True)
             painter.setFont(pill_font)
             painter.setPen(QColor(spec.uncommon))

@@ -148,6 +148,7 @@ def _out_of_reach(where: str, buttons: list[QAbstractButton], window: QWidget) -
 
 def measure(window: QMainWindow) -> dict[str, Any]:
     """Where the window is, and every control of every main tab a player cannot reach."""
+    from yulon.ui.catalog_view import CatalogView
     from yulon.ui.controller_view import ControllerView
 
     screen = window.screen()
@@ -176,6 +177,37 @@ def measure(window: QMainWindow) -> dict[str, Any]:
                 unreachable.extend(_out_of_reach(where, _buttons_shown_in(page), window))
         else:
             unreachable.extend(_out_of_reach(title, _buttons_shown_in(page), window))
+            catalog_view = page.findChild(CatalogView) if page is not None else None
+            if catalog_view is not None:
+                for group in catalog_view.game_groups:
+                    card = catalog_view.boxart_card_for(group.id)
+                    if not _reachable(card, window):
+                        unreachable.append(f"{title}: {_name(card)} is off screen")
+                        continue
+                    card.click()
+                    QTest.qWait(30)
+                    unreachable.extend(
+                        _out_of_reach(
+                            f"{title} / {group.title}",
+                            _buttons_shown_in(page),
+                            window,
+                        )
+                    )
+                    catalog_view.back_button.click()
+                    QTest.qWait(30)
+    top_menu = window.property("top_menu")
+    if isinstance(top_menu, QWidget):
+        unreachable.extend(_out_of_reach("TopMenu", _buttons_shown_in(top_menu), window))
+        settings_btn = getattr(top_menu, "settings_button", None)
+        if isinstance(settings_btn, QAbstractButton) and _reachable(settings_btn, window):
+            QTest.mouseClick(settings_btn, Qt.MouseButton.LeftButton)
+            QTest.qWait(40)
+            settings_page = tabs.currentWidget()
+            if isinstance(settings_page, QWidget):
+                unreachable.extend(
+                    _out_of_reach("Settings", _buttons_shown_in(settings_page), window)
+                )
+            _choose_tab(window, tabs, 0)
     check_button = window.findChild(QAbstractButton, CHECK_UPDATES_BUTTON)
     if (
         check_button is not None

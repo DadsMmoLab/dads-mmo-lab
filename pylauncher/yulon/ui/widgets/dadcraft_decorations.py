@@ -35,8 +35,11 @@ from yulon.ui.theme import (
     COLOR_LEGENDARY,
     FONT_FAMILY_BODY,
     FONT_FAMILY_TITLE,
+    TOP_MENU_BAR,
+    _px,
     get_theme,
     normalize_theme_name,
+    resolve_widget_scale,
     resolve_widget_theme,
 )
 
@@ -132,12 +135,10 @@ class DadcraftRealmBadge(QWidget):
         super().__init__(parent)
         self._status = status
         self._theme_name = resolve_widget_theme(parent)
+        self._scale: float | None = None
         self._label = QLabel(self)
+        self._label.setObjectName("realm-badge-label")
         self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._label.setStyleSheet(
-            f"font-family: {FONT_FAMILY_TITLE}; font-size: 11px; font-weight: bold; "
-            f"padding: 2px 8px; border-radius: 3px;"
-        )
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self._label)
@@ -148,9 +149,11 @@ class DadcraftRealmBadge(QWidget):
         """The status last set, lower-cased (`running`, `starting`, `stopped`, ...)."""
         return self._status
 
-    def set_theme(self, theme_name: str | None = None) -> None:
-        """Restyle the badge for `theme_name` without emitting a status change."""
+    def set_theme(self, theme_name: str | None = None, *, scale: float | None = None) -> None:
+        """Restyle the badge for `theme_name` (and optional `scale`) without emitting."""
         self._theme_name = normalize_theme_name(theme_name)
+        if scale is not None:
+            self._scale = scale
         self._apply_status_style()
 
     def set_status(self, status: str) -> None:
@@ -163,6 +166,7 @@ class DadcraftRealmBadge(QWidget):
 
     def _apply_status_style(self) -> None:
         spec = get_theme(self._theme_name)
+        scale = self._scale if self._scale is not None else resolve_widget_scale(self)
         tone = realm_tone(self._status)
         if tone == "up":
             bg_color = "qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1E824C, stop:1 #145A32)"
@@ -214,7 +218,7 @@ class DadcraftRealmBadge(QWidget):
             f"border: 1.5px solid {border_color}; "
             f"color: {text_color}; "
             f"font-family: {FONT_FAMILY_TITLE}; "
-            f"font-size: 11px; font-weight: bold; "
+            f"font-size: {_px(12, scale)}; font-weight: bold; "
             f"padding: 3px 8px; border-radius: 3px;"
         )
 
@@ -373,7 +377,9 @@ class DadcraftHeader(QFrame):
         left_col = QVBoxLayout()
         left_col.setSpacing(0)
         self._title_label = QLabel(f"⚔ {title} ⚔", self)
+        self._title_label.setObjectName("header-title")
         self._sub_label = QLabel(subtitle, self)
+        self._sub_label.setObjectName("header-subtitle")
         left_col.addWidget(self._title_label)
         left_col.addWidget(self._sub_label)
         layout.addLayout(left_col, 0)
@@ -402,15 +408,18 @@ class DadcraftHeader(QFrame):
                 Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
             )
         self._followed: DadcraftRealmBadge | None = None
+        self._scale: float = 1.0
         self.set_theme(self._theme_name)
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
         self._timer.start(33)
 
-    def set_theme(self, theme_name: str | None = None) -> None:
-        """Apply `theme_name` to the header's labels, embedded badge, and backdrop."""
+    def set_theme(self, theme_name: str | None = None, *, scale: float | None = None) -> None:
+        """Apply `theme_name` (and optional `scale`) to header labels, badge, and backdrop."""
         self._theme_name = normalize_theme_name(theme_name)
+        resolved_scale = scale if scale is not None else resolve_widget_scale(self)
+        self._scale = resolved_scale
         spec = get_theme(self._theme_name)
         title_color = (
             "#FFFFFF"
@@ -428,19 +437,20 @@ class DadcraftHeader(QFrame):
             else (spec.accent_bright if spec.is_light else spec.accent_light)
         )
         self._title_label.setStyleSheet(
-            f"font-family: {FONT_FAMILY_TITLE}; font-size: 20px;"
+            f"font-family: {FONT_FAMILY_TITLE}; font-size: {_px(20, resolved_scale)};"
             f"font-weight: bold; color: {title_color}; background: transparent;"
         )
         self._sub_label.setStyleSheet(
-            f"font-family: {FONT_FAMILY_BODY}; font-size: 11px; color: {sub_color}; "
-            "background: transparent;"
+            f"font-family: {FONT_FAMILY_BODY}; font-size: {_px(12, resolved_scale)}; "
+            f"color: {sub_color}; background: transparent;"
         )
         self._realm_title.setStyleSheet(
-            f"font-family: {FONT_FAMILY_TITLE}; font-size: 13px; font-weight: bold; "
-            f"color: {realm_color}; background: transparent;"
+            f"font-family: {FONT_FAMILY_TITLE}; font-size: {_px(13, resolved_scale)}; "
+            f"font-weight: bold; color: {realm_color}; background: transparent;"
         )
-        self._badge.set_theme(self._theme_name)
+        self._badge.set_theme(self._theme_name, scale=resolved_scale)
         self._reserve_badge_width()
+        self._fit_title()
         self.update()
 
     def set_realm_status(self, status: str) -> None:
@@ -455,7 +465,7 @@ class DadcraftHeader(QFrame):
         width of a hidden badge is the one it last had. Its text stays right-aligned in the room.
         """
         probe = DadcraftRealmBadge("stopped")
-        probe.set_theme(self._theme_name)
+        probe.set_theme(self._theme_name, scale=self._scale)
         widest = 0
         for status in BADGE_STATUSES:
             probe.set_status(status)
@@ -502,7 +512,7 @@ class DadcraftHeader(QFrame):
     def add_action(self, widget: QWidget) -> None:
         """Mount `TopMenuBar` flush right on the header row, or place an action left of badge."""
         widget.setParent(self)
-        if widget.objectName() == "top-menu-bar":
+        if widget.objectName() == TOP_MENU_BAR:
             self._row.addWidget(
                 widget, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
             )
@@ -567,6 +577,7 @@ class DadcraftHeader(QFrame):
             self._timer.start(33)
 
     def paintEvent(self, event: QPaintEvent) -> None:
+        del event
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         w, h = self.width(), self.height()
@@ -1395,9 +1406,11 @@ class DadcraftCampaignCard(QFrame):
                 if p.y < 0.0:
                     p.y = self._rng.uniform(0.92, 1.0)
                     p.x = self._rng.uniform(0.02, 0.98)
-        self.update()
+        if self.isVisible():
+            self.update()
 
     def paintEvent(self, event: QPaintEvent) -> None:
+        del event
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         w, h = self.width(), self.height()

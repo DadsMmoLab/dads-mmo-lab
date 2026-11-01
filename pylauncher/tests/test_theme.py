@@ -812,3 +812,45 @@ def test_dark_theme_cards_and_tile_buttons_use_spec_tokens_and_tooltips_respect_
     assert light_spec.text_primary in light_tip
     assert "#FFFFFF" not in light_tip
 
+
+def test_k4_header_and_badge_typography_scale_and_focus_highlights_across_themes(
+    qapp: QApplication,
+) -> None:
+    """Phase K4.1: `DadcraftHeader` and `DadcraftRealmBadge` scale via `_px(..., scale)`."""
+    from yulon.ui.theme import BUNDLED_THEME_ORDER, _build_qss, get_theme, scale_for_width
+
+    window = QMainWindow()
+    header = DadcraftHeader("Dad's MMO Lab", "Yu'lon", window)
+    window.setProperty("header", header)
+    badge = DadcraftRealmBadge("running", window)
+    try:
+        apply_dadcraft_theme(window, width=960, theme_name="arthas")
+        assert window.property("yulon_scale") == scale_for_width(960)
+        assert "font-size: 15px;" in header._title_label.styleSheet()
+        assert "font-size: 12px;" in header._sub_label.styleSheet()
+        assert "font-size: 12px;" in header._realm_title.styleSheet()
+        assert "font-size: 12px;" in badge._label.styleSheet()
+
+        apply_dadcraft_theme(window, width=1280, theme_name="arthas")
+        assert window.property("yulon_scale") == 1.0
+        assert "font-size: 20px;" in header._title_label.styleSheet()
+        assert "font-size: 12px;" in header._sub_label.styleSheet()
+        assert "font-size: 13px;" in header._realm_title.styleSheet()
+        assert "font-size: 12px;" in badge._label.styleSheet()
+
+        apply_dadcraft_theme(window, width=1920, theme_name="arthas")
+        assert window.property("yulon_scale") == 1.0
+        assert "font-size: 20px;" in header._title_label.styleSheet()
+    finally:
+        window.close()
+        window.deleteLater()
+
+    for theme_id in BUNDLED_THEME_ORDER:
+        spec = get_theme(theme_id)
+        qss = _build_qss(1.0, theme_name=theme_id)
+        tile_focus = qss.split('QFrame[objectName^="catalog-tile-"] QPushButton:focus {')[1].split(
+            "}"
+        )[0]
+        assert f"border: 1px solid {spec.accent_bright};" in tile_focus
+        back_focus = qss.split("QPushButton#catalog-back-button:focus {")[1].split("}")[0]
+        assert f"border: 2px solid {spec.accent_bright};" in back_focus

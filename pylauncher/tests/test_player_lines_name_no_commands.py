@@ -60,7 +60,12 @@ SHOWN_LISTS = frozenset({"warnings", "refusals", "notes", "manual_steps"})
 """Lists whose items a tab shows line by line: `warnings.append(UFW_ENABLE_WITHHELD)`."""
 
 NOT_LABELS: frozenset[str] = frozenset(
-    {"yulon/ui/theme.py", "yulon/ui/theme_spec.py", "yulon/ui/theme_widgets.py"}
+    {
+        "yulon/ui/theme.py",
+        "yulon/ui/theme_qss.py",
+        "yulon/ui/theme_spec.py",
+        "yulon/ui/theme_widgets.py",
+    }
 )
 """Modules under `yulon/ui` whose capital-named strings are not words: Qt style sheets."""
 

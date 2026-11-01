@@ -65,7 +65,11 @@ class TraySwitches(QWidget):
     tray's compact panel (design C). Each switch acts the moment it is clicked.
     """
 
-    def __init__(self, tray: YulonTray, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        tray: YulonTray | _WindowTrayAdapter,
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
         self.tray = tray
         column = QVBoxLayout(self)
@@ -335,6 +339,8 @@ class SettingsView(QWidget):
 
         card = QFrame(self)
         card.setObjectName("panel")
+        card.setMaximumWidth(960)
+        self._card = card
         card_layout = QVBoxLayout(card)
         card_layout.setContentsMargins(16, 14, 16, 14)
         card_layout.setSpacing(12)
@@ -370,7 +376,7 @@ class SettingsView(QWidget):
 
         self._switches_box = QVBoxLayout()
         self._switches_box.setContentsMargins(0, 0, 0, 0)
-        self.switches = TraySwitches(self._tray, card)  # type: ignore[arg-type]
+        self.switches = TraySwitches(self._tray, card)
         self._switches_box.addWidget(self.switches)
         card_layout.addLayout(self._switches_box)
 
@@ -478,7 +484,7 @@ class SettingsView(QWidget):
             self.switches.hide()
             self.switches.deleteLater()
         self._tray = tray if tray is not None else self._adapter
-        self.switches = TraySwitches(self._tray, self)  # type: ignore[arg-type]
+        self.switches = TraySwitches(self._tray, self._card)
         self._switches_box.addWidget(self.switches)
         self.keep = self.switches.keep
         self.sign_in = self.switches.sign_in

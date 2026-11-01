@@ -3476,3 +3476,68 @@ def test_two_stage_catalog_drill_down_and_upper_left_back_button(
     finally:
         window.close()
         window.deleteLater()
+
+
+@pytest.mark.parametrize("size", [(960, 640), (1280, 800), (1920, 1080)])
+def test_k4_viewport_fit_across_stage1_boxart_stage2_server_cards_and_topbar(
+    qapp: object, tmp_path: Path, size: tuple[int, int]
+) -> None:
+    """Phase K4.2: Stage 1 boxart cards, Stage 2 server cards, and topbar fit at every size."""
+    from yulon.ui.theme import apply_dadcraft_theme
+
+    panel = LogPanel()
+    view = CatalogView(
+        CATALOG,
+        lambda e: _FakeInstaller(e, []),
+        panel,
+        pick_dir=lambda *_: None,
+        installed_games={"wow-wotlk": tmp_path / "wotlk"},
+        single_installer_factory=_no_single_engine,
+    )
+    window, scroll, _splitter = _catalog_in_the_default_window(view, panel)
+    try:
+        window.resize(*size)
+        apply_dadcraft_theme(window, width=size[0])
+        process_events(30)
+
+        top_menu = window.property("top_menu")
+        assert top_menu is not None
+        for btn in (
+            top_menu.catalog_button,
+            top_menu.servers_button,
+            top_menu.settings_button,
+            top_menu.log_button,
+            top_menu.launcher_button,
+        ):
+            assert btn.isVisible()
+            assert btn.width() >= btn.sizeHint().width()
+
+        # Stage 1 boxart cards fit inside the Catalog viewport without clipping
+        assert view.current_stage == 0
+        for group in view.game_groups:
+            card = view.boxart_card_for(group.id)
+            assert card.isVisibleTo(view)
+            assert card.width() >= card.minimumSizeHint().width()
+            assert card.height() >= card.minimumSizeHint().height()
+            top_left = card.mapTo(window, card.rect().topLeft())
+            bottom_right = card.mapTo(window, card.rect().bottomRight())
+            assert window.rect().contains(top_left), (size, group.id, top_left)
+            assert window.rect().contains(bottom_right), (size, group.id, bottom_right)
+
+        # Drill down into each group: Back button is upper-left and Stage 2 cards fit width
+        for group in view.game_groups:
+            view.boxart_card_for(group.id).click()
+            process_events(20)
+            assert view.current_stage == 1
+            assert view.back_button.isVisibleTo(view)
+            assert scroll.horizontalScrollBar().maximum() == 0, (size, group.id)
+            for entry in group.entries:
+                tile = view.findChild(QWidget, f"catalog-tile-{entry.id}")
+                assert tile is not None and tile.isVisibleTo(view)
+                assert tile.width() >= tile.minimumWidth()
+            view.back_button.click()
+            process_events(20)
+            assert view.current_stage == 0
+    finally:
+        window.close()
+        window.deleteLater()

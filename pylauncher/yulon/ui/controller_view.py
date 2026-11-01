@@ -7397,6 +7397,8 @@ class _TabFit(QObject):
         super().__init__(tab)
         # T613: the add-on box keeps its sentence exactly where the card keeps its own.
         self._addon_box = addon_box
+        self._addon_available = addon_box is not None and not addon_box.isHidden()
+        self.submenu_open = False
         self._tab = tab
         # T692a: None where the tab holds no log panel -- the rebuild log lives
         # on Maintenance now, so Modules folds only its report. A foreign log
@@ -7510,6 +7512,8 @@ class _TabFit(QObject):
             return
         self._settling = True
         try:
+            if self.submenu_open and self._card.isHidden() and self._card_line.isHidden():
+                self._card.setVisible(True)
             height = page_room(self._tab)
             open_now = self._fold_until_it_fits(self._floor)
             asked = self._asked_for
@@ -7545,8 +7549,16 @@ class _TabFit(QObject):
             # form is showing, so the answer cannot depend on its own result.
             rows = height - self._owed(log_open=False, report_open=False, list_floor=0)
             card_whole = rows >= self._rows_floor
-            self._show_the_card(whole=card_whole)
-            self._show_the_addon_sentence(card_whole)
+            if self.submenu_open:
+                if self._addon_box is not None and self._addon_available:
+                    self._addon_box.setVisible(True)
+                self._show_the_card(whole=card_whole)
+                self._show_the_addon_sentence(card_whole)
+            elif self._tab.isVisible():
+                self._card.setVisible(False)
+                self._card_line.setVisible(False)
+                if self._addon_box is not None:
+                    self._addon_box.setVisible(False)
             spare = height - self._owed(
                 log_open=log_room, report_open=report_room, card_whole=card_whole
             )
@@ -7667,7 +7679,9 @@ class _TabFit(QObject):
         # Whether the card's slot is on screen at all, read off either form: a
         # tab that is not showing has nothing visible, and every other widget
         # below is skipped by the same test.
-        card_on_screen = self._card.isVisible() or self._card_line.isVisible()
+        card_on_screen = self.submenu_open and (
+            self._card.isVisible() or self._card_line.isVisible()
+        )
         shown = 0
         for index in range(box.count()):
             item = box.itemAt(index)
@@ -7690,6 +7704,8 @@ class _TabFit(QObject):
                 continue
             if not widget.isVisible():
                 continue
+            if widget is self._addon_box and not self.submenu_open:
+                continue
             shown += 1
             if widget is self._addon_box:
                 owed += self._addon_box.minimum_for(inner, card_whole)
@@ -7698,21 +7714,6 @@ class _TabFit(QObject):
             elif widget is self._listing:
                 owed += list_floor
             else:
-                # The item's minimum at THIS WIDTH, which is the quantity
-                # `QBoxLayout` shares out, and asked for the way it asks:
-                # `minimumHeightForWidth()` where the item has one and
-                # `minimumSize()` where it does not. Neither shortcut works.
-                # `minimumSizeHint()` alone under-counts every widget whose
-                # height is a function of its width -- the custom-module card
-                # says 122 and needs 136 at 1000x700, because the sentence in it
-                # wraps to a third line there, and the sum came out 522 against
-                # a tab of 525 while the layout wanted 538, so nothing folded
-                # and the card was drawn 109. `heightForWidth()` is the other
-                # way wrong: it is the PREFERRED height, which over-counts, and
-                # a tab that thinks it is short folds things it did not need to.
-                # (The card itself is counted above since T153, by
-                # `card_minimum()`, which asks its own layout the same question
-                # because a hidden card's item answers nothing.)
                 need = item.minimumSize().height()
                 if item.hasHeightForWidth():
                     need = max(need, item.minimumHeightForWidth(inner))
@@ -19802,6 +19803,15 @@ class ControllerView(QWidget):
         actions.addWidget(self.refresh_modules_button)
         actions.add_gap()
         actions.addWidget(self.module_sql_button)
+        self.bring_own_button = QPushButton("Bring your own…", tab)
+        self.bring_own_button.setObjectName("module-bring-own-button")
+        self.bring_own_button.setCheckable(True)
+        self.bring_own_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.bring_own_button.setToolTip(
+            "Open the sub-menu to install a module from a link/folder or bring your own add-ons."
+        )
+        self.bring_own_button.toggled.connect(self.set_bring_own_submenu_open)
+        actions.addWidget(self.bring_own_button)
         # The banner, hidden until something owes a rebuild. It is above the
         # cards rather than on each owing row because the ACTION is one action
         # for all of them -- one compile covers every module installed since the
@@ -19877,15 +19887,6 @@ class ControllerView(QWidget):
         # under it is as tall as it has something to say -- the report a line
         # per line to a ceiling of six, the log its strip until a job writes to
         # it -- and every pixel left over is the list's.
-        #
-        # It used to be 3:1:2 between the list, the report and the log, which
-        # sounds like the list wins and does not: `QVBoxLayout` hands every
-        # widget its `sizeHint` before it shares the SURPLUS by stretch, and
-        # both text boxes' hints are twelve lines of nothing. Measured in the
-        # themed window (the fonts scale with its width, so nothing here can be
-        # measured without the theme on): at 1920x1080 the list had 311px of the
-        # tab's 900 and two whole rows of forty, and at the 1280x800 the app
-        # opens at it had 70 -- a scrollbar and the top of a family card.
         box.addWidget(self.module_actions)
         box.addWidget(self.rebuild_banner)
         box.addWidget(self.modules_panel, 1)
@@ -20836,6 +20837,24 @@ class ControllerView(QWidget):
         )
         self.module_link_button.setToolTip(link_tip if link else MODULE_CUSTOM_NO_ROUTE)
         self.module_folder_button.setToolTip(folder_tip if folder else MODULE_CUSTOM_NO_ROUTE)
+
+    @Slot(bool)
+    def set_bring_own_submenu_open(self, is_open: bool) -> None:
+        """Toggle the 'Bring your own' module & add-on sub-menu on the Modules tab."""
+        self.bring_own_button.blockSignals(True)
+        self.bring_own_button.setChecked(is_open)
+        self.bring_own_button.blockSignals(False)
+        if hasattr(self, "modules_fit"):
+            self.modules_fit.submenu_open = is_open
+            if is_open:
+                self.custom_module_card.setVisible(True)
+                self.custom_module_line.setVisible(False)
+                self.addon_box.setVisible(self.services.client_addons is not None)
+            elif self.modules_fit._tab.isVisible():
+                self.custom_module_card.setVisible(False)
+                self.custom_module_line.setVisible(False)
+                self.addon_box.setVisible(False)
+            self.modules_fit.settle()
 
     def _say_where_the_custom_route_is_absent(self, absent: bool) -> None:
         """T596: a game with no route has a sentence in the box and no presses in it.

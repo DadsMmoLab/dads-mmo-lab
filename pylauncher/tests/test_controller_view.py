@@ -20898,6 +20898,7 @@ def test_the_report_box_is_what_gives_before_the_card_and_the_list(
     import main
 
     view = ControllerView(WOTLK, _services_with_the_card_buttons(ps, tmp_path), status_poll_ms=0)
+    view.set_bring_own_submenu_open(True)
     window, _tab = _controller_in_the_real_window(view, "Modules")
     _at(window, DESKTOP_1080P)
     _ran_a_job(view)
@@ -21216,6 +21217,7 @@ def test_at_the_smallest_window_the_card_keeps_its_sentence_with_a_jobs_row(
     import main
 
     view = _past_its_pin(ps, tmp_path)
+    view.set_bring_own_submenu_open(True)
     window, _tab = _controller_in_the_real_window(view, "Modules")
     _at(window, main.MINIMUM_WINDOW_SIZE)
     assert view.custom_module_card.isVisible(), "the card folded with the list's rows to spare"
@@ -21255,6 +21257,7 @@ def test_the_card_keeps_its_sentence_and_both_presses_at_the_smallest_window(
         link_asker=lambda parent, title: asked.append(title),
         folder_asker=lambda parent, title: asked.append(title),
     )
+    view.set_bring_own_submenu_open(True)
     window, _tab = _controller_in_the_real_window(view, "Modules")
     _the_list_needs_the_cards_sentence(view)
 
@@ -21309,6 +21312,7 @@ def test_the_one_line_cards_presses_are_greyed_by_the_cards_own_gate(
     )
     spy.revs = (native.SourceRev("a/b", "7bae1b5 · 2026-09-20", pin=_PIN, ahead=2),)
     view._refresh_source_version()
+    view.set_bring_own_submenu_open(True)
     window, _tab = _controller_in_the_real_window(view, "Modules")
     _at(window, main.MINIMUM_WINDOW_SIZE)
     # The form the ladder would choose if the tab were short: put on by hand,
@@ -21541,6 +21545,7 @@ def test_a_taller_window_never_takes_back_what_a_shorter_one_showed(
     view = _past_its_pin(ps, tmp_path) if state != "on-the-pins" else None
     if view is None:
         view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    view.set_bring_own_submenu_open(True)
     window, _tab = _controller_in_the_real_window(view, "Modules")
     _at(window, DESKTOP_1080P)
     if state == "past-the-pins-with-a-rebuild-owed":
@@ -21659,6 +21664,7 @@ def test_the_pad_reaches_the_cards_presses_at_the_smallest_window(
         link_asker=lambda parent, title: asked.append(title),
         folder_asker=lambda parent, title: asked.append(title),
     )
+    view.set_bring_own_submenu_open(True)
     window, _tab = _controller_in_the_real_window(view, "Modules")
     _the_list_needs_the_cards_sentence(view)
     _at(window, main.DEFAULT_WINDOW_SIZE)
@@ -22630,6 +22636,7 @@ def test_the_card_keeps_its_form_through_a_drag_at_the_smallest_heights(
     from yulon.ui.theme import apply_dadcraft_theme
 
     view = _past_its_pin(ps, tmp_path)
+    view.set_bring_own_submenu_open(True)
     window, _tab = _controller_in_the_real_window(view, "Modules")
     _the_list_needs_the_cards_sentence(view)
     _at(window, (960, 640))
@@ -22668,6 +22675,7 @@ def test_the_cards_minimum_taken_while_it_is_folded_is_the_one_it_has_whole(
     import main
 
     view = _past_its_pin(ps, tmp_path)
+    view.set_bring_own_submenu_open(True)
     window, tab = _controller_in_the_real_window(view, "Modules")
     _the_list_needs_the_cards_sentence(view)
     _at(window, main.MINIMUM_WINDOW_SIZE)
@@ -22682,9 +22690,11 @@ def test_the_cards_minimum_taken_while_it_is_folded_is_the_one_it_has_whole(
         view.custom_module_line.setVisible(False)
         view.custom_module_card.setVisible(True)
         process_events()
-        box = tab.layout()
-        item = box.itemAt(_index_of(tab, view.custom_module_card))
-        margins = box.contentsMargins()
+        parent_widget = view.custom_module_card.parentWidget() or tab
+        box = parent_widget.layout()
+        assert box is not None
+        item = box.itemAt(_index_of(parent_widget, view.custom_module_card))
+        margins = tab.layout().contentsMargins()
         really = item.minimumHeightForWidth(tab.width() - margins.left() - margins.right())
     finally:
         tab.installEventFilter(view.modules_fit)
@@ -22780,6 +22790,7 @@ def test_a_press_on_the_report_reopens_it_spending_the_lists_floor(
     import main
 
     view = ControllerView(WOTLK, _services_with_the_card_buttons(ps, tmp_path), status_poll_ms=0)
+    view.set_bring_own_submenu_open(True)
     window, _tab = _controller_in_the_real_window(view, "Modules")
     _at(window, DESKTOP_1080P)
     _ran_a_job(view)
@@ -22879,6 +22890,7 @@ def test_a_restyle_at_an_unchanged_width_folds_nothing(
     from yulon.ui.theme import apply_dadcraft_theme
 
     view = ControllerView(WOTLK, _services_with_the_card_buttons(ps, tmp_path), status_poll_ms=0)
+    view.set_bring_own_submenu_open(True)
     window, _tab = _controller_in_the_real_window(view, "Modules")
     _at(window, DESKTOP_1080P)
     _ran_a_job(view)
