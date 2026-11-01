@@ -711,3 +711,34 @@ def test_a_stop_after_the_first_chunk_ends_the_fetch_and_deletes_the_part(tmp_pa
     assert not (server_dir / f"{DEST}.download.zip").exists()
     assert not (server_dir / f"{DEST}.download.zip.part").exists()
     assert not dest_of(server_dir).exists()
+
+
+def test_a_zip_that_finished_before_a_stop_is_proved_and_reused_not_fetched_again(
+    tmp_path: Path,
+) -> None:
+    """Codex round 2: the bounded fetcher hands back a finished `.download.zip`, so
+    `download_verified()` proves it by sha256 and the opener is never asked."""
+    server_dir = tmp_path / "srv"
+    zip_path = server_dir / f"{DEST}.download.zip"
+    zip_path.parent.mkdir(parents=True, exist_ok=True)
+    zip_path.write_bytes(DATABASE_ZIP)
+    opener = ServingOpener(DATABASE_ZIP)
+    fetch(mop_like(), server_dir, opener=opener)
+    assert opener.requests == [], "a proved zip already on disk is not downloaded again"
+    assert (dest_of(server_dir) / "world.sql").is_file()
+    assert not zip_path.exists(), "deleted once unpacked"
+
+
+def test_a_stale_zip_on_disk_is_deleted_and_fetched_once_through_the_fence(
+    tmp_path: Path,
+) -> None:
+    """The reuse never trusts the file: a wrong one fails the sha256, is deleted, and the
+    second call fetches it through the bounded opener."""
+    server_dir = tmp_path / "srv"
+    zip_path = server_dir / f"{DEST}.download.zip"
+    zip_path.parent.mkdir(parents=True, exist_ok=True)
+    zip_path.write_bytes(b"not the pinned zip")
+    opener = ServingOpener(DATABASE_ZIP)
+    fetch(mop_like(), server_dir, opener=opener)
+    assert len(opener.requests) == 1
+    assert (dest_of(server_dir) / "auth.sql").is_file()

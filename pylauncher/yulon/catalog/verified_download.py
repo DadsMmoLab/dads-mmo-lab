@@ -116,7 +116,14 @@ def fetch_bounded(
     redirect a second request cannot resume, so a half file is worth nothing (MoP's
     zip is 142 MB). `cancelled()` is asked between chunks and raises the stage's stop
     the way `_check_cancel` does, the part deleted for the same reason.
+
+    A file already at `path` is handed back unread: `download_verified()` proves it
+    by size and sha256 and, if it fails, deletes it and calls here again, which then
+    fetches. So a zip that finished before a Stop, a failed unpack or a closed app
+    is not downloaded again (Codex review round 2).
     """
+    if path.is_file():
+        return path
     part = path.with_name(path.name + ".part")
     path.parent.mkdir(parents=True, exist_ok=True)
     done = 0
