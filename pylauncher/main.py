@@ -200,6 +200,9 @@ def build_catalog_tab(
     column.addWidget(header)
     window.setProperty("header", header)
     top_menu = TopMenuBar(tabs, parent=central)
+    if isinstance(win_theme, str) and win_theme:
+        top_menu.apply_theme(win_theme)
+        catalog_view.apply_theme(win_theme)
     header.add_action(top_menu)
     window.setProperty("top_menu", top_menu)
     update_bar = UpdateBar(central)
@@ -1629,6 +1632,9 @@ def build_window() -> object:
         view.action_failed.connect(
             lambda message, name=entry.name: logger.warning(f"{name}: {message}")
         )
+        win_theme = window.property("yulon_theme")
+        if isinstance(win_theme, str) and win_theme:
+            view.apply_theme(win_theme)
         single_views[key] = view
         single_view_list.append(view)
         panels.extend(view.log_panels())

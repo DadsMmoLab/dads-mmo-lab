@@ -22,7 +22,8 @@ Three things a plain `QTabBar` gets wrong once its current tab is hidden, and
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any
+from pathlib import Path
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from PySide6.QtCore import QEvent, QObject, QPointF, QSize, Qt, Slot
 from PySide6.QtGui import QBrush, QColor, QIcon, QKeyEvent, QPainter, QPaintEvent, QPen
@@ -52,8 +53,38 @@ from yulon.ui.theme import (
     SIDEBAR_RAIL_WIDTH,
     TOP_MENU_BAR,
     TOP_MENU_BUTTON,
+    get_theme,
+    normalize_theme_name,
+    resolve_widget_theme,
 )
 from yulon.ui.widgets.dadcraft_decorations import realm_tone
+
+if TYPE_CHECKING:
+    from yulon.catalog.catalog import CatalogEntry, SingleEntry
+
+
+class _HasServerDir(Protocol):
+    @property
+    def server_dir(self) -> Path: ...
+
+
+class _HasController(Protocol):
+    @property
+    def controller(self) -> _HasServerDir: ...
+
+
+@runtime_checkable
+class ManagedServerView(Protocol):
+    """Typed contract for a server management tab (`ControllerView` | `SingleServerView`)."""
+
+    @property
+    def entry(self) -> CatalogEntry | SingleEntry: ...
+
+
+@runtime_checkable
+class _ControllerManagedServerView(ManagedServerView, Protocol):
+    @property
+    def services(self) -> _HasController: ...
 
 RAIL_MIN_WIDTH = SIDEBAR_RAIL_WIDTH
 """The rail's thickness floor (px): a server tab's styled width, so the rail is
@@ -315,7 +346,6 @@ class TopMenuBar(QWidget):
         # needs ("WoW Wo…" at the 960px window), and the name must stay readable.
         self.launcher_button = self._make_button("", TOP_MENU_BUTTON)
         self.launcher_button.setCheckable(False)
-        self.launcher_button.setIcon(dadcraft_icon("play", COLOR_GOLD_BRIGHT, 16))
         self.launcher_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
         self.launcher_button.setAccessibleName("Launcher")
         self.launcher_button.setStyleSheet("QToolButton { min-width: 0px; padding: 0px 6px; }")
@@ -347,6 +377,14 @@ class TopMenuBar(QWidget):
         tabs.currentChanged.connect(self._sync)
         tabs.installEventFilter(self)
         self.refresh_servers()
+        self.apply_theme(resolve_widget_theme(self))
+
+    def apply_theme(self, theme_name: str | None = None) -> None:
+        """Re-tint the top menu bar's icon buttons for `theme_name`."""
+        resolved = normalize_theme_name(theme_name or resolve_widget_theme(self))
+        spec = get_theme(resolved)
+        self.setProperty("yulon_theme", resolved)
+        self.launcher_button.setIcon(dadcraft_icon("play", spec.accent_bright, 16))
 
     @staticmethod
     def _make_button(text: str, object_name: str) -> QToolButton:
@@ -390,11 +428,11 @@ class TopMenuBar(QWidget):
 
         self.servers_menu.clear()
         indices = self.server_indices()
-        views: list[Any] = [self._tabs.widget(idx) for idx in indices]
+        views: list[QWidget | None] = [self._tabs.widget(idx) for idx in indices]
         pairs = [
             (view.entry.name, view.services.controller.server_dir)
             for view in views
-            if hasattr(view, "entry") and hasattr(view, "services")
+            if isinstance(view, _ControllerManagedServerView)
         ]
         titles = (
             controller_tab_titles(pairs)

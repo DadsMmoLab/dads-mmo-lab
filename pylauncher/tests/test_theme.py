@@ -753,3 +753,62 @@ def test_the_header_names_the_server_it_follows(qapp: QApplication) -> None:
     header.follow(badge)
     assert header._realm_title.isHidden() is True
     header.close()
+
+
+def test_bundled_themes_match_json_files() -> None:
+    """K1: every `.json` file in `yulon/ui/themes/` matches its `BUNDLED_THEMES` baseline."""
+    import dataclasses
+    import json
+
+    from yulon import resources
+    from yulon.ui.theme_spec import BUNDLED_THEME_ORDER, BUNDLED_THEMES
+
+    assert tuple(BUNDLED_THEMES) == BUNDLED_THEME_ORDER
+    json_files = sorted(resources.themes_dir().glob("*.json"))
+    assert {p.stem for p in json_files} == set(BUNDLED_THEMES)
+    for path in json_files:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        spec_dict = dataclasses.asdict(BUNDLED_THEMES[path.stem])
+        assert raw == spec_dict, f"{path.name} drifted from BUNDLED_THEMES[{path.stem!r}]"
+
+
+def test_dark_theme_cards_and_tile_buttons_use_spec_tokens_and_tooltips_respect_theme(
+    qapp: QApplication,
+) -> None:
+    """K1: dark themes paint `spec` surfaces on cards/buttons; light tooltips use dark text."""
+    from yulon.ui.theme import _build_qss, get_theme
+
+    for theme_id in ("gruvbox-dark", "dracula-dark", "floral-dark"):
+        spec = get_theme(theme_id)
+        qss = _build_qss(1.0, theme_name=theme_id)
+        tile_btn = qss.split('QFrame[objectName^="catalog-tile-"] QPushButton {')[1].split("}")[0]
+        assert f"background-color: {spec.bg_panel};" in tile_btn
+        assert f"color: {spec.text_primary};" in tile_btn
+        assert "rgba(11, 17, 27, 0.86)" not in tile_btn
+
+    host = QWidget()
+    card = DadcraftCampaignCard("wow-wotlk", host)
+    card.resize(300, 370)
+    host.show()
+    try:
+        apply_dadcraft_theme(host, theme_name="arthas")
+        arthas_px = card.grab().toImage().pixelColor(150, 260)
+        apply_dadcraft_theme(host, theme_name="gruvbox-dark")
+        gruvbox_px = card.grab().toImage().pixelColor(150, 260)
+        assert arthas_px != gruvbox_px
+        assert gruvbox_px.red() >= gruvbox_px.blue()
+    finally:
+        host.close()
+        host.deleteLater()
+
+    light_tip = format_dadcraft_tooltip(
+        "Realm Status",
+        "Online",
+        quality="common",
+        flavor_text="Ready",
+        theme_name="gruvbox-light",
+    )
+    light_spec = get_theme("gruvbox-light")
+    assert light_spec.text_primary in light_tip
+    assert "#FFFFFF" not in light_tip
+

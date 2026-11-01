@@ -16,6 +16,7 @@ import threading
 from collections.abc import Callable, Mapping
 from enum import Enum
 from pathlib import Path
+from typing import TYPE_CHECKING, Protocol
 
 from PySide6.QtCore import QPoint, Qt, Signal
 from PySide6.QtGui import QGuiApplication
@@ -55,10 +56,41 @@ from yulon.ui.answers import said_yes
 from yulon.ui.folder_picker import pick_folder
 from yulon.ui.icons import dadcraft_icon
 from yulon.ui.message_box import FittedMessageBox, ask_yes_no, show_information, show_warning
-from yulon.ui.theme import COLOR_TEXT_GOLD
+from yulon.ui.theme import (
+    get_theme,
+    normalize_theme_name,
+    resolve_widget_theme,
+)
 from yulon.ui.widgets.dadcraft_decorations import DadcraftCampaignCard
 from yulon.ui.widgets.log_panel import LogPanel
 from yulon.ui.widgets.prompt import InputPrompter
+
+if TYPE_CHECKING:
+    from yulon.move_server import ServerImportPlan
+
+
+class MoveInProtocol(Protocol):
+    """Typed contract for `ui.move_in.MoveIn` (`style-guide.md` §2)."""
+
+    @property
+    def plan(self) -> Callable[[Path, Path], ServerImportPlan]: ...
+
+    @property
+    def installer(self) -> Callable[[ServerImportPlan], InstallRun]: ...
+
+    @property
+    def check(self) -> Callable[[Path, CatalogEntry], tuple[str, str] | None] | None: ...
+
+    @property
+    def start_over(
+        self,
+    ) -> (
+        Callable[
+            [CatalogEntry, Path, Path | None, InstallEngine, Mapping[str, object] | None],
+            InstallRun,
+        ]
+        | None
+    ): ...
 
 logger = get_logger(__name__)
 
@@ -440,7 +472,7 @@ _CAMPAIGN_SUBTITLES = {
     "wow-coa": "Wrath of the Lich King, Conquest of Azeroth classes",
     "wow-tbc": "The Burning Crusade",
     "wow-vanilla": "Classic Vanilla",
-    "wow-tortoise": "Turtle WoW Solo",
+    "wow-tortoise": "WoW Tortoise",
     "wow-centurion": "Level-60 PvP with bots",
     "ddon": "Dragon's Dogma Online",
     "dfo": "Dungeon Fighter Online",
@@ -535,7 +567,7 @@ class CatalogView(QWidget):
         pick_wsl_server: WslServerPicker = _qt_wsl_server_picker,
         wsl_distros: Callable[[], tuple[str, ...]] = platform.wsl_distros,
         dir_problem: Callable[[Path], str | None] = platform.server_dir_problem,
-        move_in: object | None = None,
+        move_in: MoveInProtocol | None = None,
         pick_package: PackagePicker = _qt_package_picker,
         ask_yes: YesNo = ask_yes_no,
         ready_check: Callable[[CatalogEntry, Path], str | None] | None = None,
@@ -585,7 +617,6 @@ class CatalogView(QWidget):
         # (`main.build_catalog_tab`): before any install there is no log to show.
         self.toggle_console_button = QPushButton("▼ Hide install log", self)
         self.toggle_console_button.setObjectName("toggle-console-btn")
-        self.toggle_console_button.setIcon(dadcraft_icon("console", COLOR_TEXT_GOLD, 14))
         self.toggle_console_button.setVisible(False)
         header_row.addWidget(self.toggle_console_button)
 
@@ -633,6 +664,24 @@ class CatalogView(QWidget):
         layout.addWidget(welcome)
         layout.addWidget(scroll, 1)
         self._log.run_finished.connect(self._on_run_finished)
+        self.apply_theme(resolve_widget_theme(self))
+
+    def apply_theme(self, theme_name: str | None = None) -> None:
+        """Re-tint the catalog's `dadcraft_icon()` buttons and repaint cards for `theme_name`."""
+        resolved = normalize_theme_name(theme_name or resolve_widget_theme(self))
+        spec = get_theme(resolved)
+        self.setProperty("yulon_theme", resolved)
+        self.toggle_console_button.setIcon(dadcraft_icon("console", spec.text_gold, 14))
+        for button in self._buttons.values():
+            button.setIcon(dadcraft_icon("download", spec.primary_btn_text, 16))
+        for existing in self._existing_buttons.values():
+            existing.setIcon(dadcraft_icon("folder", spec.text_gold, 14))
+        for bring in self._move_buttons.values():
+            bring.setIcon(dadcraft_icon("download", spec.text_gold, 14))
+        for adopt in self._adopt_buttons.values():
+            adopt.setIcon(dadcraft_icon("network", spec.text_gold, 14))
+        for card in self.findChildren(DadcraftCampaignCard):
+            card.update()
 
     # -- tiles ----------------------------------------------------------
 
@@ -742,7 +791,6 @@ class CatalogView(QWidget):
         box.addLayout(meta_box)
 
         button = QPushButton("Install", frame)
-        button.setIcon(dadcraft_icon("download", "#FFF1A8", 16))
         button.setObjectName(f"install-{entry.id}")
         button.setProperty("primary", True)
         button.setToolTip(f"Install {entry.name} server into your chosen directory.")
@@ -766,7 +814,6 @@ class CatalogView(QWidget):
             self._gated.add(entry.id)
         self._show_installed(entry.id)
         existing = QPushButton("Use existing…", frame)
-        existing.setIcon(dadcraft_icon("folder", COLOR_TEXT_GOLD, 14))
         existing.setObjectName(f"existing-{entry.id}")
         existing.setToolTip(
             "Manage a server that is already installed (by a script, or before this app)."
@@ -776,7 +823,6 @@ class CatalogView(QWidget):
         self._existing_buttons[entry.id] = existing
         if self._move_in is not None:
             bring = QPushButton(BRING_FROM_ANOTHER, frame)
-            bring.setIcon(dadcraft_icon("download", COLOR_TEXT_GOLD, 14))
             bring.setObjectName(f"move-in-{entry.id}")
             bring.setToolTip(
                 f"Build a {entry.name} server from a file packed on another computer with Pack "
@@ -796,7 +842,6 @@ class CatalogView(QWidget):
         # one check covers every case.
         if self._wsl_distros():
             adopt = QPushButton("Find in WSL…", frame)
-            adopt.setIcon(dadcraft_icon("network", COLOR_TEXT_GOLD, 14))
             adopt.setObjectName(f"adopt-wsl-{entry.id}")
             adopt.setToolTip(
                 "Adopt a server that lives inside a WSL distro — for example one the "
@@ -857,7 +902,6 @@ class CatalogView(QWidget):
         box.addLayout(meta_box)
 
         button = QPushButton("Install", frame)
-        button.setIcon(dadcraft_icon("download", "#FFF1A8", 16))
         button.setObjectName(f"install-{entry.id}")
         button.setProperty("primary", True)
         button.setToolTip(f"Install {entry.name} server into your chosen directory.")
@@ -878,7 +922,6 @@ class CatalogView(QWidget):
             self._gated.add(entry.id)
         self._show_installed(entry.id)
         existing = QPushButton("Use existing…", frame)
-        existing.setIcon(dadcraft_icon("folder", COLOR_TEXT_GOLD, 14))
         existing.setObjectName(f"existing-{entry.id}")
         existing.setToolTip(f"Manage a {entry.name} server Yu'lon already installed.")
         existing.clicked.connect(lambda _checked=False, e=entry: self.attach_existing_single(e))
@@ -1321,7 +1364,7 @@ class CatalogView(QWidget):
         another computer… again. The record the player is asked about is read before the
         question, so the press refuses one that changed while the question was open.
         """
-        make = getattr(self._move_in, "start_over", None)
+        make = self._move_in.start_over if self._move_in is not None else None
         if make is None:
             show_information(self, "A move that did not finish", _unfinished_move(server_dir))
             return False
@@ -1437,7 +1480,7 @@ class CatalogView(QWidget):
             return False
         # T702: the file itself is judged before either folder is asked for. A wrong file
         # used to be reported only after both pickers.
-        check = getattr(self._move_in, "check", None)
+        check = self._move_in.check
         if check is not None:
             refused = check(path, entry)
             if refused is not None:
@@ -1447,7 +1490,7 @@ class CatalogView(QWidget):
         if folders is None:
             return False
         server_dir, client_dir = folders
-        plan = self._move_in.plan(path, server_dir)  # type: ignore[attr-defined]
+        plan = self._move_in.plan(path, server_dir)
         if not plan.allowed:
             show_information(self, "This server cannot be brought in", plan.text())
             return False
@@ -1457,7 +1500,7 @@ class CatalogView(QWidget):
             return False
         if not self._ask_yes(self, "Bring this server in?", plan.text()):
             return False
-        installer = self._move_in.installer(plan)  # type: ignore[attr-defined]
+        installer = self._move_in.installer(plan)
         return self._run_install(
             entry,
             server_dir,
