@@ -688,7 +688,7 @@ class CatalogView(QWidget):
         self._switching_stage: bool = False
 
         header_row = QHBoxLayout()
-        self.back_button = QPushButton("← Back", self)
+        self.back_button = QPushButton("Back", self)
         self.back_button.setObjectName("catalog-back-button")
         self.back_button.setProperty(BACK_ACTION_PROPERTY, True)
         self.back_button.setToolTip("Return to game selection")
@@ -696,7 +696,7 @@ class CatalogView(QWidget):
         self.back_button.clicked.connect(self.show_boxart_grid)
         header_row.addWidget(self.back_button)
 
-        header_label = QLabel("Choose a game to install", self)
+        header_label = QLabel("Choose a server to install", self)
         header_label.setObjectName("section-title")
         header_row.addWidget(header_label)
 

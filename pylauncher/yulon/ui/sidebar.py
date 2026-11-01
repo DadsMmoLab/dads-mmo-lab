@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from PySide6.QtCore import QEvent, QObject, QPointF, QSize, Qt, Slot
 from PySide6.QtGui import QBrush, QColor, QIcon, QKeyEvent, QPainter, QPaintEvent, QPen
 from PySide6.QtWidgets import (
+    QFrame,
     QHBoxLayout,
     QMenu,
     QStyle,
@@ -305,7 +306,7 @@ class SidebarPins(QWidget):
 
 
 class TopMenuBar(QWidget):
-    """Centered horizontal top menu bar below the banner: Catalog, Servers, Log, Settings."""
+    """Right-aligned module topbar: secondary utilities plus Catalog, Servers, and Settings."""
 
     def __init__(
         self,
@@ -321,13 +322,51 @@ class TopMenuBar(QWidget):
         self._tabs = tabs
         self._catalog_index = catalog_index
         self._logs_index = logs_index
+        self._settings_holder = QWidget(self)
+        self._settings_holder.setObjectName("settings-view-holder")
+        self._settings_holder.hide()
         self._settings_widget = settings_widget
+        if settings_widget is not None:
+            settings_widget.setParent(self._settings_holder)
+            settings_widget.hide()
 
         row = QHBoxLayout(self)
         row.setContentsMargins(2, 0, 2, 0)
-        row.setSpacing(2)
-        row.addStretch(1)
+        row.setSpacing(4)
 
+        # Secondary utility toolbar (separate from the three primary module buttons on the right)
+        self.secondary_toolbar = QFrame(self)
+        self.secondary_toolbar.setObjectName("top-secondary-toolbar")
+        sec_row = QHBoxLayout(self.secondary_toolbar)
+        sec_row.setContentsMargins(2, 0, 2, 0)
+        sec_row.setSpacing(2)
+
+        # T807: reachable with an empty server list too — the launcher window is
+        # for exactly the machine that has no server installed yet.
+        self.launcher_button = self._make_button("", TOP_MENU_BUTTON, icon_only=True)
+        self.launcher_button.setCheckable(False)
+        self.launcher_button.setAccessibleName("Launcher")
+        self.launcher_button.setStyleSheet("QToolButton { min-width: 0px; padding: 0px 6px; }")
+        self.launcher_button.setToolTip(
+            "Launcher: play on a friend's server without installing one here"
+        )
+        sec_row.addWidget(self.launcher_button)
+
+        self.log_button = self._make_button("Log", TOP_MENU_BUTTON)
+        self.log_button.setToolTip(
+            "Yu'lon's own logs, and a file to send when something goes wrong"
+        )
+        self.log_button.clicked.connect(lambda _c=False: self.show_logs())
+        sec_row.addWidget(self.log_button)
+        row.addWidget(self.secondary_toolbar, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        self.toolbar_separator = QFrame(self)
+        self.toolbar_separator.setObjectName("top-menu-separator")
+        self.toolbar_separator.setFrameShape(QFrame.Shape.VLine)
+        self.toolbar_separator.setFixedHeight(22)
+        row.addWidget(self.toolbar_separator, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        # Primary three-button module cluster aligned flush right: Catalog, Servers, Settings
         self.catalog_button = self._make_button("Catalog", TOP_MENU_BUTTON)
         self.catalog_button.setToolTip("Browse and install server emulators")
         self.catalog_button.clicked.connect(lambda _c=False: self.show_catalog())
@@ -339,28 +378,8 @@ class TopMenuBar(QWidget):
         self.servers_menu.aboutToShow.connect(self._populate_servers_menu)
         self.servers_button.setMenu(self.servers_menu)
         self.servers_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.servers_button.clicked.connect(lambda _c=False: self.show_server())
         row.addWidget(self.servers_button)
-
-        # T807: reachable with an empty server list too — the launcher window is
-        # for exactly the machine that has no server installed yet.
-        # An icon, not a word: a word-wide button took the room the header's server name
-        # needs ("WoW Wo…" at the 960px window), and the name must stay readable.
-        self.launcher_button = self._make_button("", TOP_MENU_BUTTON)
-        self.launcher_button.setCheckable(False)
-        self.launcher_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
-        self.launcher_button.setAccessibleName("Launcher")
-        self.launcher_button.setStyleSheet("QToolButton { min-width: 0px; padding: 0px 6px; }")
-        self.launcher_button.setToolTip(
-            "Launcher: play on a friend's server without installing one here"
-        )
-        row.addWidget(self.launcher_button)
-
-        self.log_button = self._make_button("Log", TOP_MENU_BUTTON)
-        self.log_button.setToolTip(
-            "Yu'lon's own logs, and a file to send when something goes wrong"
-        )
-        self.log_button.clicked.connect(lambda _c=False: self.show_logs())
-        row.addWidget(self.log_button)
 
         self.settings_button = self._make_button("Settings", SETTINGS_BUTTON)
         self.settings_button.setToolTip(
@@ -368,8 +387,6 @@ class TopMenuBar(QWidget):
         )
         self.settings_button.clicked.connect(lambda _c=False: self.show_settings())
         row.addWidget(self.settings_button)
-
-        row.addStretch(1)
 
         self.buttons: dict[int, QToolButton] = {
             self._catalog_index: self.catalog_button,
@@ -383,21 +400,49 @@ class TopMenuBar(QWidget):
     def apply_theme(self, theme_name: str | None = None) -> None:
         """Re-tint the top menu bar's icon buttons for `theme_name`."""
         resolved = normalize_theme_name(theme_name or resolve_widget_theme(self))
-        spec = get_theme(resolved)
         self.setProperty("yulon_theme", resolved)
-        self.launcher_button.setIcon(dadcraft_icon("play", spec.accent_bright, 16))
+        self._update_button_icons(resolved)
+
+    def _update_button_icons(self, theme_name: str | None = None) -> None:
+        resolved = normalize_theme_name(
+            theme_name or self.property("yulon_theme") or resolve_widget_theme(self)
+        )
+        spec = get_theme(resolved)
+        inactive_color = spec.text_primary if spec.is_light else spec.text_gold
+        self.launcher_button.setIcon(dadcraft_icon("play", spec.accent_bright, 14))
+        for button, icon_name in (
+            (self.catalog_button, "catalog"),
+            (self.servers_button, "server"),
+            (self.settings_button, "wrench"),
+            (self.log_button, "terminal"),
+        ):
+            if not button.isEnabled():
+                color = spec.tab_disabled
+            elif button.isChecked():
+                color = spec.accent_bright
+            else:
+                color = inactive_color
+            button.setIcon(dadcraft_icon(icon_name, color, 14))
 
     @staticmethod
-    def _make_button(text: str, object_name: str) -> QToolButton:
+    def _make_button(text: str, object_name: str, *, icon_only: bool = False) -> QToolButton:
         button = QToolButton()
         button.setObjectName(object_name)
         button.setText(text)
         button.setCheckable(True)
-        button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        button.setIconSize(QSize(14, 14))
+        button.setToolButtonStyle(
+            Qt.ToolButtonStyle.ToolButtonIconOnly
+            if icon_only
+            else Qt.ToolButtonStyle.ToolButtonTextBesideIcon
+        )
         return button
 
     def set_settings_widget(self, widget: QWidget) -> None:
         self._settings_widget = widget
+        if self._tabs.indexOf(widget) < 0:
+            widget.setParent(self._settings_holder)
+            widget.hide()
         self._sync(self._tabs.currentIndex())
 
     def server_indices(self) -> list[int]:
@@ -451,6 +496,15 @@ class TopMenuBar(QWidget):
         self._tabs.setCurrentIndex(self._catalog_index)
         self._sync(self._tabs.currentIndex())
 
+    def show_server(self) -> None:
+        indices = self.server_indices()
+        if not indices:
+            return
+        current = self._tabs.currentIndex()
+        if current not in indices:
+            self._tabs.setCurrentIndex(indices[0])
+        self._sync(self._tabs.currentIndex())
+
     def show_logs(self) -> None:
         if 0 <= self._logs_index < self._tabs.count():
             self._tabs.setCurrentIndex(self._logs_index)
@@ -471,12 +525,12 @@ class TopMenuBar(QWidget):
             self._tabs.indexOf(self._settings_widget) if self._settings_widget is not None else -1
         )
         if settings_idx >= 0 and current != settings_idx:
-            # Remove the Settings panel from `tabs` when leaving it so tabs 0..N
-            # stay [Catalog, Logs, *servers] for bumper/Ctrl+Tab ring navigation.
+            # Park the Settings panel in `self._settings_holder` when leaving it so tabs 0..N
+            # stay [Catalog, Logs, *servers] without reaching up into `self._tabs.window()`.
             self._tabs.blockSignals(True)
             self._tabs.removeTab(settings_idx)
             if self._settings_widget is not None:
-                self._settings_widget.setParent(self._tabs.window())
+                self._settings_widget.setParent(self._settings_holder)
                 self._settings_widget.hide()
             self._tabs.blockSignals(False)
             self.buttons.pop(settings_idx, None)
@@ -493,6 +547,7 @@ class TopMenuBar(QWidget):
             button.blockSignals(True)
             button.setChecked(active)
             button.blockSignals(False)
+        self._update_button_icons()
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
         if (

@@ -30,12 +30,15 @@ from PySide6.QtWidgets import (
 from yulon import autostart, ui_settings
 from yulon.log import get_logger
 from yulon.ui.gamepad import BACK_CLOSES
+from yulon.ui.icons import dadcraft_icon
 from yulon.ui.theme import (
     OPEN_THEMES_FOLDER_BUTTON,
     THEME_COMBO,
     apply_dadcraft_theme,
     available_theme_choices,
+    get_theme,
     normalize_theme_name,
+    resolve_widget_theme,
     sync_user_themes,
 )
 
@@ -255,16 +258,17 @@ class _WindowTrayAdapter(QWidget):
 
     def __init__(
         self,
-        window: QWidget,
+        parent: QWidget | None = None,
         on_theme_changed: Callable[[str], bool] | None = None,
+        *,
+        initial_theme: str | None = None,
     ) -> None:
-        super().__init__(window)
-        self._window = window
+        super().__init__(parent)
         self._on_theme_changed = on_theme_changed
         self.icon: object = None
         saved = ui_settings.load_ui_settings()
         self.keep_in_tray: bool = saved.keep_in_tray
-        self.theme: str = saved.theme
+        self.theme: str = normalize_theme_name(initial_theme or saved.theme)
 
     def remember_keep_in_tray(self, keep: bool) -> bool:
         self.keep_in_tray = keep
@@ -278,9 +282,6 @@ class _WindowTrayAdapter(QWidget):
         if self._on_theme_changed is not None:
             saved = self._on_theme_changed(normalized)
         else:
-            apply_dadcraft_theme(
-                self._window, width=self._window.width() or None, theme_name=normalized
-            )
             saved = ui_settings.remember_theme(normalized)
         self.settings_changed.emit()
         return saved
@@ -289,17 +290,39 @@ class _WindowTrayAdapter(QWidget):
 class SettingsView(QWidget):
     """In-window Settings submenu panel opened by the top menu bar's Settings item."""
 
+    theme_selected = Signal(str)
+    logs_requested = Signal()
+
     def __init__(
         self,
-        window: QWidget,
+        initial_theme: str | QWidget | None = None,
         *,
         on_theme_changed: Callable[[str], bool] | None = None,
         parent: QWidget | None = None,
     ) -> None:
-        super().__init__(parent)
+        resolved_parent = (
+            parent
+            if parent is not None
+            else (initial_theme if isinstance(initial_theme, QWidget) else None)
+        )
+        super().__init__(resolved_parent)
         self.setObjectName("settings-view")
-        self._window = window
-        self._adapter = _WindowTrayAdapter(window, on_theme_changed)
+        if isinstance(initial_theme, str) and initial_theme:
+            start_theme = normalize_theme_name(initial_theme)
+        elif initial_theme is not None and not isinstance(initial_theme, str):
+            prop_getter = getattr(initial_theme, "property", None)
+            win_theme = prop_getter("yulon_theme") if callable(prop_getter) else None
+            start_theme = normalize_theme_name(
+                win_theme if isinstance(win_theme, str) else ui_settings.load_ui_settings().theme
+            )
+        else:
+            start_theme = normalize_theme_name(ui_settings.load_ui_settings().theme)
+        self._current_theme_id: str = start_theme
+        self._adapter = _WindowTrayAdapter(
+            self,
+            on_theme_changed,
+            initial_theme=start_theme,
+        )
         self._tray: YulonTray | _WindowTrayAdapter = self._adapter
 
         outer = QVBoxLayout(self)
@@ -331,6 +354,20 @@ class SettingsView(QWidget):
         theme_row.addWidget(self.open_themes_button, 0)
         card_layout.addLayout(theme_row)
 
+        # Live color swatch strip previewing the active theme's primary tokens
+        swatch_row = QHBoxLayout()
+        swatch_row.setContentsMargins(0, 0, 0, 2)
+        swatch_row.setSpacing(6)
+        self.theme_swatches: list[QFrame] = []
+        for role in ("bg_dark", "bg_panel", "accent_bright", "uncommon", "danger"):
+            swatch = QFrame(card)
+            swatch.setObjectName(f"theme-swatch-{role}")
+            swatch.setFixedSize(22, 10)
+            swatch_row.addWidget(swatch)
+            self.theme_swatches.append(swatch)
+        swatch_row.addStretch(1)
+        card_layout.addLayout(swatch_row)
+
         self._switches_box = QVBoxLayout()
         self._switches_box.setContentsMargins(0, 0, 0, 0)
         self.switches = TraySwitches(self._tray, card)  # type: ignore[arg-type]
@@ -339,6 +376,13 @@ class SettingsView(QWidget):
 
         self._actions_row = QHBoxLayout()
         self._actions_row.setContentsMargins(0, 4, 0, 0)
+        self.open_logs_button = QPushButton("Diagnostic logs…", card)
+        self.open_logs_button.setObjectName("settings-open-logs")
+        self.open_logs_button.setToolTip(
+            "Open Yu'lon's diagnostic logs and save a support file when something goes wrong"
+        )
+        self.open_logs_button.clicked.connect(self.logs_requested.emit)
+        self._actions_row.addWidget(self.open_logs_button)
         self._actions_row.addStretch(1)
         card_layout.addLayout(self._actions_row)
 
@@ -353,11 +397,44 @@ class SettingsView(QWidget):
         self.theme_combo.currentIndexChanged.connect(self._theme_changed)
         self._tray.settings_changed.connect(self._read_theme)
         self._read_theme()
+        self.apply_theme(self._current_theme_id)
 
     def add_action(self, widget: QWidget) -> None:
         """Place an action button (such as 'Check for updates') inside the Settings panel."""
         widget.setParent(self)
         self._actions_row.insertWidget(0, widget)
+
+    def set_current_theme(self, theme_id: str) -> None:
+        """Update the selected theme and live swatches without emitting `theme_selected`."""
+        normalized = normalize_theme_name(theme_id)
+        self._current_theme_id = normalized
+        self._adapter.theme = normalized
+        index = self.theme_combo.findData(normalized)
+        if index >= 0 and index != self.theme_combo.currentIndex():
+            self.theme_combo.blockSignals(True)
+            self.theme_combo.setCurrentIndex(index)
+            self.theme_combo.blockSignals(False)
+        self._update_swatches_and_icons(normalized)
+
+    def apply_theme(self, theme_name: str | None = None) -> None:
+        """Apply `theme_name` to the Settings panel's swatches, icons, and selector."""
+        resolved = normalize_theme_name(
+            theme_name or self._current_theme_id or resolve_widget_theme(self)
+        )
+        self.setProperty("yulon_theme", resolved)
+        self.set_current_theme(resolved)
+
+    def _update_swatches_and_icons(self, theme_name: str) -> None:
+        spec = get_theme(theme_name)
+        icon_color = spec.text_primary if spec.is_light else spec.text_gold
+        self.open_themes_button.setIcon(dadcraft_icon("folder", icon_color, 14))
+        self.open_logs_button.setIcon(dadcraft_icon("terminal", icon_color, 14))
+        tokens = (spec.bg_dark, spec.bg_panel, spec.accent_bright, spec.uncommon, spec.danger)
+        for swatch, color in zip(self.theme_swatches, tokens, strict=False):
+            swatch.setStyleSheet(
+                f"background-color: {color}; border: 1px solid {spec.border_dark}; "
+                "border-radius: 2px;"
+            )
 
     def showEvent(self, event: QShowEvent) -> None:  # noqa: N802 - Qt's own name
         super().showEvent(event)
@@ -373,7 +450,7 @@ class SettingsView(QWidget):
         """Reload the theme dropdown from bundled and user `.json` theme files."""
         current = (
             getattr(self._tray, "theme", None)
-            or self._window.property("yulon_theme")
+            or self._current_theme_id
             or ui_settings.load_ui_settings().theme
         )
         choices = available_theme_choices(seed_user_dir=seed_user_dir)
@@ -386,6 +463,7 @@ class SettingsView(QWidget):
         if index >= 0:
             self.theme_combo.setCurrentIndex(index)
         self.theme_combo.blockSignals(False)
+        self._update_swatches_and_icons(normalized)
 
     def bind_tray(self, tray: YulonTray | None) -> None:
         """Bind a live `YulonTray` (or revert to the window adapter on uninstall)."""
@@ -417,23 +495,21 @@ class SettingsView(QWidget):
     def _read_theme(self) -> None:
         current = (
             getattr(self._tray, "theme", None)
-            or self._window.property("yulon_theme")
+            or self._current_theme_id
             or ui_settings.load_ui_settings().theme
         )
-        normalized = normalize_theme_name(current)
-        index = self.theme_combo.findData(normalized)
-        if index >= 0 and index != self.theme_combo.currentIndex():
-            self.theme_combo.blockSignals(True)
-            self.theme_combo.setCurrentIndex(index)
-            self.theme_combo.blockSignals(False)
+        self.set_current_theme(current)
 
     def _theme_changed(self, _index: int) -> None:
         chosen = self.current_theme()
+        self._current_theme_id = chosen
+        self._update_swatches_and_icons(chosen)
         remember = getattr(self._tray, "remember_theme", None)
         if callable(remember):
             ok = bool(remember(chosen))
         else:
             ok = ui_settings.remember_theme(chosen)
+        self.theme_selected.emit(chosen)
         if not ok:
             self.switches._said_problem = (
                 "This setting could not be saved, so it lasts only until Yu'lon closes."

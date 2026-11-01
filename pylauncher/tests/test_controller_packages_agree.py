@@ -325,7 +325,7 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
     the schema and container it addressed. So the sixteenth capability is
     required by this test to be present, and required by those tests to be the
     right one; neither half is the other, and a reader who takes this file for
-    the whole answer will wire a game to its neighbour's database.
+    the whole answer will wire a server to its neighbour's database.
     """
     from dataclasses import fields
 

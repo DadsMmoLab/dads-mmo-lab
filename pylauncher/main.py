@@ -838,7 +838,11 @@ def build_window() -> object:
                 launcher.apply_theme(resolved)
         return ui_settings.remember_theme(resolved)
 
-    settings_view = SettingsView(window, on_theme_changed=_apply_window_theme, parent=window)
+    settings_view = SettingsView(
+        ui_settings.load_ui_settings().theme,
+        on_theme_changed=_apply_window_theme,
+        parent=window,
+    )
     settings_view.hide()
     window.yulon_settings_view = settings_view
     tabs.tabBar().setTabVisible(0, False)
@@ -1011,6 +1015,7 @@ def build_window() -> object:
         _bring_to_front(window)
 
     window.yulon_show_logs = show_logs
+    settings_view.logs_requested.connect(show_logs)
 
     def show_friend_launcher() -> None:
         """The top bar's **Launcher** (T807): the friend-server window, one at a time.

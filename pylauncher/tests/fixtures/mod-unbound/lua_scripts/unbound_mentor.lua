@@ -430,7 +430,7 @@ local function ShowBrowsePage(player, creature, classId, page)
                 "You already know all available " .. CLASS_NAMES[classId] .. " abilities.",
                 0, 99, false)
         end
-        player:GossipMenuAddItem(0, "← Back", 99, 0, false)
+        player:GossipMenuAddItem(0, "Back", 99, 0, false)
         player:GossipSendMenu(100, creature)
         return
     end
@@ -466,7 +466,7 @@ local function ShowBrowsePage(player, creature, classId, page)
         player:GossipMenuAddItem(0, "Next page →", 24, classId*1000+(page+1), false)
     end
 
-    player:GossipMenuAddItem(0, "← Back to menu", 99, 0, false)
+    player:GossipMenuAddItem(0, "Back to menu", 99, 0, false)
     player:GossipSendMenu(100, creature)
 end
 
@@ -502,7 +502,7 @@ local function ShowTalentPointMenu(player, creature)
             "You have bought every talent point I can grant.", 0, 99, false)
     end
 
-    player:GossipMenuAddItem(0, "← Back", 32, 0, false)
+    player:GossipMenuAddItem(0, "Back", 32, 0, false)
     player:GossipSendMenu(100, creature)
 end
 

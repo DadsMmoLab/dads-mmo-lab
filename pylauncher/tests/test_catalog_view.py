@@ -3412,7 +3412,7 @@ def test_game_boxart_card_renders_theme_tokens_and_emits_group_selected(qapp: ob
 def test_two_stage_catalog_drill_down_and_upper_left_back_button(
     qapp: object, tmp_path: Path
 ) -> None:
-    """Phase K2.3: Stage 0 boxart drill-down filters Stage 1 tiles and `← Back` returns."""
+    """Phase K2.3: Stage 0 boxart drill-down filters Stage 1 tiles and `Back` returns."""
     panel = LogPanel()
     view = CatalogView(
         CATALOG,

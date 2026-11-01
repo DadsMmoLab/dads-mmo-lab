@@ -610,10 +610,21 @@ QToolButton#{SIDEBAR_PIN_BUTTON}:focus {{
     border-left: 3px solid {spec.accent_bright};
 }}
 
-/* Centered horizontal top menu bar below the header banner */
+/* Right-aligned horizontal module topbar & secondary utility cluster */
 QWidget#{TOP_MENU_BAR} {{
     background-color: {spec.bg_panel};
     border-bottom: 1px solid {spec.border_dark};
+}}
+
+QFrame#top-secondary-toolbar {{
+    background-color: transparent;
+    border: none;
+}}
+
+QFrame#top-menu-separator {{
+    background-color: {spec.border_dark};
+    border: none;
+    max-width: 1px;
 }}
 
 QToolButton#{TOP_MENU_BUTTON},
@@ -624,12 +635,12 @@ QToolButton#{SETTINGS_BUTTON} {{
     border: 1px solid transparent;
     border-bottom: 2px solid transparent;
     border-radius: 3px;
-    padding: 0px 8px;
+    padding: 0px 6px;
     font-family: {FONT_TITLE_SINGLE};
     font-size: {_px(13, scale)};
     font-weight: bold;
     min-height: {_touch(28, scale)};
-    min-width: 64px;
+    min-width: 52px;
 }}
 
 QToolButton#{TOP_MENU_BUTTON}:hover,

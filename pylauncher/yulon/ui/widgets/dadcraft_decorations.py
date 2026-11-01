@@ -376,10 +376,11 @@ class DadcraftHeader(QFrame):
         self._sub_label = QLabel(subtitle, self)
         left_col.addWidget(self._title_label)
         left_col.addWidget(self._sub_label)
-        layout.addLayout(left_col, 1)
+        layout.addLayout(left_col, 0)
 
-        # T192's game strip: the whole name of the server the badge is about,
-        # right beside it. The rail shows only "WotLK"; this says which one.
+        # T192's game strip + K3 left-cluster status placement: the server's name
+        # and realm badge sit right beside the title cluster on the left side of the
+        # header, followed by a central stretch so `TopMenuBar` aligns flush right.
         self._realm_title = _RealmTitle(self)
         self._realm_title.setObjectName("realm-title")
         self._realm_title.hide()
@@ -388,12 +389,12 @@ class DadcraftHeader(QFrame):
         self._badge = DadcraftRealmBadge("stopped", self)
         layout.addWidget(self._badge, 0, Qt.AlignmentFlag.AlignVCenter)
         # The name and the badge keep their places when hidden (the Catalog, the Logs tab):
-        # hiding them would hand their room to the stretch and move the top menu sideways
-        # each time a server page opened or closed.
+        # hiding them would hand their room to the stretch and move the slot reading.
         for kept in (self._realm_title, self._badge):
             policy = kept.sizePolicy()
             policy.setRetainSizeWhenHidden(True)
             kept.setSizePolicy(policy)
+        layout.addStretch(1)
         badge_layout = self._badge.layout()
         if badge_layout is not None:
             badge_layout.setAlignment(
@@ -499,15 +500,13 @@ class DadcraftHeader(QFrame):
             self._realm_title.hide()
 
     def add_action(self, widget: QWidget) -> None:
-        """Place a small control left of the realm badge and its name (the update check, T90).
-
-        There is no menu bar in this app, so the header is where a control that
-        belongs to the whole window goes. Left of the badge rather than right:
-        the badge is the rightmost thing in every screenshot of this app, and
-        moving it would move the one element a user looks for by position.
-        Left of the server's name too (T192), which belongs to the badge.
-        """
+        """Mount `TopMenuBar` flush right on the header row, or place an action left of badge."""
         widget.setParent(self)
+        if widget.objectName() == "top-menu-bar":
+            self._row.addWidget(
+                widget, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+            )
+            return
         self._row.insertWidget(
             self._row.indexOf(self._realm_title), widget, 0, Qt.AlignmentFlag.AlignVCenter
         )

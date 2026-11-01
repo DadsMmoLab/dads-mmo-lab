@@ -156,7 +156,7 @@ Rather than breaking `window.property("header")` and `window.property("top_menu"
 
 ```text
 +-----------------------------------------------------------------------------------+
-|  [ ← Back to Catalog ]   WoW — Choose a Server Emulator     [▲ Show install log] |
+|  [ Back to Catalog ]   WoW — Choose a Server Emulator     [▲ Show install log] |
 |  Yu'lon downloads and builds the server for you. Nothing changes until Install.   |
 +-----------------------------------------------------------------------------------+
 |  +-----------------------------------+   +-----------------------------------+    |
@@ -173,7 +173,7 @@ Rather than breaking `window.property("header")` and `window.property("top_menu"
 ```
 
 - **Upper-Left Back Button (`QPushButton#catalog-back-button`)**:
-  - Positioned in the **upper-left corner** of the Stage 2 header row (`← Back`).
+  - Positioned in the **upper-left corner** of the Stage 2 header row (`Back`).
   - Styled via QSS with `min-height: _touch(34, scale)`, `padding: 6px 16px`, and a theme-tinted left-arrow icon (`dadcraft_icon("arrow-left", ...)` / `icons.py`).
   - Clicking it (or pressing `B` / `Escape` / `Backspace` when no modal, popup menu, or `InputPrompter` is active) returns `CatalogView._stack` to Stage 1 (`CatalogBoxartGrid`) and restores focus to the `GameBoxartCard` that opened Stage 2.
 - **Eager Tile Construction & Contract Preservation**:
@@ -260,7 +260,7 @@ Steam Big Picture inspiration requires every screen, card, back transition, and 
 
 1. **Open Popup / Menu**: If a `QMenu` or combo popup is open, `B` closes the popup (existing behavior).
 2. **Active Input Prompt Guard**: If an inline `InputPrompter` is visible inside `CatalogView` (e.g., asking for a sudo password during Docker setup), `B` / `Escape` cancels the prompt (`prompter.cancel()`) rather than navigating away from Stage 2 mid-prompt.
-3. **Active Panel Back Stack (`BACK_ACTION_PROPERTY = "yulon_back_button"`)**: If the active page contains a visible, enabled button carrying `setProperty(BACK_ACTION_PROPERTY, True)` (specifically `CatalogView`'s upper-left `← Back` button when viewing Stage 2 `CatalogGameServersView`), `Navigator._back()` clicks that button to return to Stage 1 (`CatalogBoxartGrid`).
+3. **Active Panel Back Stack (`BACK_ACTION_PROPERTY = "yulon_back_button"`)**: If the active page contains a visible, enabled button carrying `setProperty(BACK_ACTION_PROPERTY, True)` (specifically `CatalogView`'s upper-left `Back` button when viewing Stage 2 `CatalogGameServersView`), `Navigator._back()` clicks that button to return to Stage 1 (`CatalogBoxartGrid`).
 4. **Secondary Window / Dialog (`BACK_CLOSES`)**: If the active window carries `BACK_CLOSES` (`LauncherWindow`, `TraySettingsDialog`, `FittedMessageBox`), `B` closes the window (existing behavior).
 5. **Main Window Root**: At the top-level root view (Stage 1 of Catalog, Server, or Settings), `B` is a safe no-op.
 
@@ -342,7 +342,7 @@ class CatalogView(QWidget):
 | **Topbar Module Buttons** | Min-Height / Padding / Gap | `38px` / `8px 20px` / `8px` | `34px` / `6px 14px` / `6px` | Exceeds `TOUCH_TARGET_PX` (`32px`) and clearly separates **Catalog**, **Server**, and **Settings**. |
 | **Panel Content Viewport** | Outer Margin / Section Gap | `16px 20px` / `14px` | `10px 14px` / `10px` | Gives Big Picture breathing room around cards while preserving vertical budget at `640px` height (`T85` floor). |
 | **Stage 1 `GameBoxartCard`** | Card Size / Grid Spacing | `220×300px` / `18px` | `180×240px` / `12px` | Pleasant 2:3 vertical boxart proportions; fits 3–4 across comfortably with zero horizontal scrolling. |
-| **Stage 2 Back Button** | Position / Min-Height / Padding | Upper-left / `34px` / `6px 14px` | Upper-left / `32px` / `5px 12px` | Consistent upper-left return anchor (`← Back`), paired with `B` / `Escape` controller navigation. |
+| **Stage 2 Back Button** | Position / Min-Height / Padding | Upper-left / `34px` / `6px 14px` | Upper-left / `32px` / `5px 12px` | Consistent upper-left return anchor (`Back`), paired with `B` / `Escape` controller navigation. |
 | **Stage 2 Server Cards** | Inner Padding / Grid Gap | `14px` / `12px` | `12px` / `10px` | Preserves `_CATALOG_MIN_WIDTH` (`420px`) and ensures `Install` buttons never clip at `960×640`. |
 
 ---
@@ -376,7 +376,7 @@ To keep every commit small, verifiable, and green across `pytest -m "not integra
 3. **Two-Stage `CatalogView` Stack with Upper-Left Back Navigation**:
    - Build a two-page `QStackedWidget` inside `CatalogView`:
      - **Stage 0 (`CatalogBoxartGrid`)**: Responsive grid of `GameBoxartCard`s.
-     - **Stage 1 (`CatalogGameServersView`)**: Upper-left `← Back` button (`QPushButton#catalog-back-button`, carrying `BACK_ACTION_PROPERTY`), game group heading, and the eagerly constructed server tiles filtered to the chosen `GameGroup`.
+     - **Stage 1 (`CatalogGameServersView`)**: Upper-left `Back` button (`QPushButton#catalog-back-button`, carrying `BACK_ACTION_PROPERTY`), game group heading, and the eagerly constructed server tiles filtered to the chosen `GameGroup`.
    - Keep `QSplitter#catalog-splitter` and `LogPanel` in `main.build_catalog_tab()` below `CatalogView` so install logs remain visible across both stages.
 
 ### Phase K3 — Right-Aligned Three-Module Topbar (`DadcraftHeader` + `TopMenuBar`)

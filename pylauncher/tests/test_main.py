@@ -6459,7 +6459,7 @@ def test_the_first_run_catalog_says_what_to_do_and_hides_the_empty_log(
     view = _catalog_view(shown_window)
     heading = view.findChild(QLabel, "section-title")
     welcome = view.findChild(QLabel, "catalog-welcome")
-    assert heading is not None and heading.text() == "Choose a game to install"
+    assert heading is not None and heading.text() == "Choose a server to install"
     assert welcome is not None and welcome.isVisibleTo(shown_window)
     assert welcome.text() == (
         "Yu'lon downloads and builds the server for you. Nothing changes on this "
