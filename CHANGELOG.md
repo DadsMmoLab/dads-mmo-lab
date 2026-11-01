@@ -19,6 +19,19 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 
 ### Changed
 
+## v0.9.30-Public — 2026-11-01
+
+### New
+- The catalog opens on one box-art card per game; pick a game to see its servers, and **← Catalog** goes back.
+- **Bring your own…** on the Modules tab opens the custom module and add-on options.
+
+### Fixed
+- Every dark and light theme now colours cards, tooltips and icons, and a theme change shows at once.
+- Gamepad and keyboard Back steps out one level at a time, and returning to the catalog keeps your place.
+
+### Changed
+- The top bar puts **Catalog**, **Server** and **Settings** on the right; Settings now holds Logs and the friend launcher.
+
 ## v0.9.22-Public — 2026-10-31
 
 ### New
