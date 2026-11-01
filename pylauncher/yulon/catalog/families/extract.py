@@ -1089,7 +1089,9 @@ SCRATCH_SCRIPT = (
     'ln -s -- "$entry" "$name" && [ -L "$name" ] || '
     '{ echo "yulon: the scratch folder inside the container could not be made"; exit 93; }; '
     "fi; "
-    'else ln -s "$entry" "$name"; fi; '
+    'else ln -s -- "$entry" "$name" && [ -L "$name" ] || '
+    '{ echo "yulon: the scratch folder inside the container could not be made"; exit 93; }; '
+    "fi; "
     "done; "
     'for name in $YULON_OUT_DIRS; do mkdir -p "$name"; done; '
     '"$@"; status=$?; '

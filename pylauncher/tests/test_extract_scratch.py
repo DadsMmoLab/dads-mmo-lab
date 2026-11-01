@@ -436,6 +436,28 @@ def test_a_copy_that_fails_inside_a_read_only_folder_never_leaves_a_partial_tree
     assert "contents" in result.stdout
 
 
+def test_an_entry_whose_name_starts_with_a_dash_is_linked_not_read_as_an_option(
+    tmp_path: Path,
+) -> None:
+    """Codex, T847 round 2: `ln -s -- ...`, so `/out/-odd` is linked like any other entry."""
+    out = tmp_path / "out"
+    (out / "-odd").mkdir(parents=True)
+    (out / "-odd" / "f1").write_bytes(b"contents\n")
+    stage(out, {"vmaps": 1})
+    result = run_scratched(
+        tmp_path,
+        out,
+        "if [ -L ./-odd ]; then echo LINK; else echo NOTLINK; fi\ncat ./-odd/f1\nexit 0\n",
+        "vmaps",
+        "vmaps",
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert extract.SCRATCH_FAILED_MARKER not in result.stdout
+    assert "NOTLINK" not in result.stdout, result.stdout
+    assert "LINK" in result.stdout
+    assert "contents" in result.stdout
+
+
 def test_a_scratched_tool_reads_an_earlier_tools_output_through_a_link(tmp_path: Path) -> None:
     """`vmap assemble` reads `Buildings` from cwd: it is a link to `/out/Buildings`.
 
