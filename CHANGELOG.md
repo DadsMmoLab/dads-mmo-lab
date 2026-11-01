@@ -17,6 +17,8 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 
 ### Fixed
 
+- The Conquest of Azeroth install on Windows no longer stops at the map step with "Permission denied" on a stock Ascension client (#459).
+
 ### Changed
 
 ## v0.9.30-Public — 2026-11-01

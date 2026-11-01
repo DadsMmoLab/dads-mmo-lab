@@ -51,7 +51,20 @@ TOOL_PREFIX = "map "
 """The appended tool's name: `map <id> from <archive>`, so the log says what it did."""
 
 SURGICAL_DIR = ".yulon-surgical-"
-"""Scratch under the container's `/out`: wiped before and after, never recorded."""
+"""The side run's scratch, under `SCRATCH_ROOT`: wiped before and after, never recorded.
+
+Before T849 it lay under `/out`, and `data/` can still hold one an older run left
+(`azerothcore.py` removes it without following a link)."""
+
+SCRATCH_ROOT = "/tmp"
+"""Where the scratch lies: the container's own writable layer, never the `/out` bind.
+
+On Docker Desktop the tools run as the image's USER (uid 1000), and a `data/` that
+Docker created is root's 0755 at `/out`, so `mkdir /out/.yulon-surgical-936` was
+refused (#459, T849: "Permission denied" on a stock Ascension client). `/tmp` is in
+every image, mode 1777, and the extraction there also stays off the slow bind.
+Only the finished files are copied into `/out/maps` and `/out/vmaps`, folders the
+host made."""
 
 FAILED_EXIT = 3
 """The script's status when the archive is not there or fewer than `min_maps` maps came out."""
@@ -341,6 +354,9 @@ def script(spec: AcSurgicalMap, tools_bin: str) -> str:
     directory ... check your permissions" (three Linux Mint installs, v0.9.19;
     the stub in the test used to `mkdir -p` the parent and hid it).
 
+    `$w` is under `SCRATCH_ROOT`, not `/out`: the script never creates anything at
+    the top of `/out`, which the tools' user may not write (T849).
+
     Layout inside `$w`: `view/` is the farm (`cp -rs /client/.` — links only,
     nothing copied; the disabled archive arrives as `ln -sfn`), `map_extractor`
     writes `out/`, and `vmap4_extractor`/`vmap4_assembler` run with cwd `$w` so
@@ -376,7 +392,7 @@ def script(spec: AcSurgicalMap, tools_bin: str) -> str:
     return (
         "set -eu\n"
         + archive_check
-        + f'w="/out/{SURGICAL_DIR}{map_id}"\n'
+        + f'w="{SCRATCH_ROOT}/{SURGICAL_DIR}{map_id}"\n'
         + "trap 'rm -rf \"$w\"' EXIT\n"
         + 'rm -rf "$w"\n'
         + 'mkdir -p "$w/view" "$w/out"\n'
