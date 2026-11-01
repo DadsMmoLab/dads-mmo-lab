@@ -189,7 +189,7 @@ def test_the_script_copies_only_the_named_map_and_vmo(tmp_path: Path) -> None:
         "Ns_Inquisitorial_Dungeon.wmo.vmo",
     ]
     assert not (out / f"{surgical.SURGICAL_DIR}936").exists(), "nothing at the top of /out"
-    assert not (_scratch(tmp_path)).exists(), "the scratch is removed"
+    assert not _scratch(tmp_path).exists(), "the scratch is removed"
 
 
 @needs_bash
@@ -208,7 +208,12 @@ def test_a_data_folder_the_tools_user_may_not_write_at_its_top_still_gets_the_ma
     (out / "vmaps").mkdir(parents=True)
     out.chmod(0o555)
     try:
-        proc = _run_script(tmp_path, surgical.script(spec936(), "/x/bin"), client, out)
+        proc = _run_script(
+            tmp_path,
+            surgical.script(spec936(), "/x/bin", scratch_root=surgical.SCRATCH_ROOT),
+            client,
+            out,
+        )
     finally:
         out.chmod(0o755)
     assert proc.returncode == 0, (proc.stdout, proc.stderr)
@@ -247,7 +252,7 @@ def test_too_few_936_maps_fails_the_tool(tmp_path: Path) -> None:
     assert list((out / "maps").iterdir()) == []
     assert "fake vmap_extractor" not in (tmp_path / "marker.txt").read_text(encoding="utf-8")
     assert not (out / f"{surgical.SURGICAL_DIR}936").exists(), "nothing at the top of /out"
-    assert not (_scratch(tmp_path)).exists(), "the trap removes the scratch"
+    assert not _scratch(tmp_path).exists(), "the trap removes the scratch"
 
 
 @needs_bash
@@ -267,7 +272,7 @@ def test_a_missing_archive_stops_the_script_before_any_tool(tmp_path: Path, dang
     assert "patch-WB1.MPQ.DISABLED is missing or empty" in proc.stdout
     assert (tmp_path / "marker.txt").read_text(encoding="utf-8") == ""
     assert not (out / f"{surgical.SURGICAL_DIR}936").exists()
-    assert not (_scratch(tmp_path)).exists()
+    assert not _scratch(tmp_path).exists()
 
 
 # -- T836: which layout the plan and the preflight see ------------------------

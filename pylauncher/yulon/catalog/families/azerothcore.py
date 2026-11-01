@@ -1752,7 +1752,22 @@ class AzerothCoreInstaller(StagedInstaller):
             if row.verdict == "refuse":
                 raise InstallerError(row.sentence())
             yield f"{row.detail[:1].upper()}{row.detail[1:]}."
-        plan = surgical.effective_plan(self._block(), tools_bin, client_dir)
+        # T840: on Docker Desktop `data/` is a bind into a Windows or macOS
+        # folder where small-file writes are ~10x slower than in the container's
+        # own layer, so there each tool writes inside its container and only the
+        # finished folders are copied into `data/`. Linux passes nothing and
+        # keeps today's argv, mounts, workdir and env byte for byte. The switch
+        # is decided here, not in the catalog: the evidence hashes the plan, and
+        # a new field would make every install everywhere extract again.
+        scratch_off_bind = self._seams.platform_id() in ("windows", "macos")
+        # T849: the map 936 side run keeps its scratch off the top of `data/` there
+        # too, where the tools' user may not create anything.
+        plan = surgical.effective_plan(
+            self._block(),
+            tools_bin,
+            client_dir,
+            scratch_root=surgical.SCRATCH_ROOT if scratch_off_bind else surgical.BIND_ROOT,
+        )
         data_dir = self._data_dir(ctx)
         # T836: v0.9.20's side run died on the launcher's client before its own
         # cleanup and left its scratch (1.9 GB, a farm of links into the client
@@ -1771,14 +1786,6 @@ class AzerothCoreInstaller(StagedInstaller):
                 logger.warning(f"the scratch in {left} could not be removed: {exc}")
         image_ref = self._image_ref(ctx, plan_block.extract.image)
         user_args = self._user_args()
-        # T840: on Docker Desktop `data/` is a bind into a Windows or macOS
-        # folder where small-file writes are ~10x slower than in the container's
-        # own layer, so there each tool writes inside its container and only the
-        # finished folders are copied into `data/`. Linux passes nothing and
-        # keeps today's argv, mounts, workdir and env byte for byte. The switch
-        # is decided here, not in the catalog: the evidence hashes the plan, and
-        # a new field would make every install everywhere extract again.
-        scratch_off_bind = self._seams.platform_id() in ("windows", "macos")
         yield f"Extracting server data from {client_dir} into {data_dir} (the client is read-only)."
         # T837: say so before the hash is taken, because reading the archive is
         # the first thing that takes a while and nothing has been run yet.
