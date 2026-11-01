@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import errno
 import fnmatch
+import functools
 import hashlib
 import json
 import os
@@ -76,6 +77,7 @@ from yulon import (
 )
 from yulon.catalog import bot_count, verified_download
 from yulon.catalog.catalog import (
+    RELEASE_HOSTS,
     CatalogEntry,
     ClientPack,
     CmangosData,
@@ -385,6 +387,7 @@ class TrinityCoreInstaller(CmangosInstaller):
         importer_modules: Callable[[Path], str] | None = None,
         import_gate: ImportGateFor | None = None,
         release_download: Callable[[str, Path], Path] | None = None,
+        release_opener: client_packs.Opener | None = None,
     ) -> None:
         """The spine's constructor, plus the seams of the release asset and the movement maps.
 
@@ -393,10 +396,13 @@ class TrinityCoreInstaller(CmangosInstaller):
         (`Seams.in_wsl`, T179 final round): an update of a server inside a WSL distro
         asks about and stops the job through that distro's Docker, never this host's.
 
-        `release_download` is the same shape for the `fetch-release` stage (T850-B):
-        `platform.download_verified` unless a test hands in its own bytes, because
-        the stage's whole job is what happens around that call and no test may
-        reach a network.
+        `release_download` is a test's whole download for the `fetch-release` stage
+        (T850-B): when given, it IS what the stage calls, so a test can hand in its own
+        bytes and never reach a network. `release_opener` is the other half of the same
+        seam, and the one the stage's DEFAULT path uses: with no `release_download`, the
+        stage fetches through `verified_download.fetch_bounded` and this opener --
+        `client_packs._open` unless a test names its own, so a test can exercise the
+        real bounded fetch against a fake response and never reach a network either.
         """
         super().__init__(
             entry,
@@ -413,9 +419,8 @@ class TrinityCoreInstaller(CmangosInstaller):
             if mmaps_runner is not None
             else mmaps.DockerRunner(wsl_distro=self._seams.distro)
         )
-        self._release_download = (
-            release_download if release_download is not None else platform.download_verified
-        )
+        self._release_download = release_download
+        self._release_opener = release_opener if release_opener is not None else client_packs._open
 
     def stages(self) -> tuple[Stage, ...]:
         """This entry's stage tuple, in `STAGE_NAMES` order (T179 spec §1, steps 1-9).
@@ -523,19 +528,21 @@ class TrinityCoreInstaller(CmangosInstaller):
            between two members leaves the partial, which the next run removes; a zip
            missing a listed member is refused by name before anything is written.
 
-        The hosts are the entry's own (`TrinityCoreData.release_hosts()`): the
-        assets' urls plus GitHub's two release-asset hosts, the same fence a client
-        pack's `redirect_hosts` is.
+        The download goes through `verified_download.fetch_bounded` and the entry's
+        opener (`release_opener`; `client_packs._open` in the app), held to the asset's
+        own `size` and to a Stop. The hosts are `RELEASE_HOSTS` -- github.com and the
+        two hosts GitHub redirects a release download to, the same fence a client
+        pack's `redirect_hosts` is -- fixed data, never the assets' own urls.
         """
         tc = self._tc()
-        hosts = tc.release_hosts()
         for asset in tc.release_assets:
             host = urlsplit(asset.url).hostname or ""
-            if host not in hosts:
+            if host not in RELEASE_HOSTS:
                 raise InstallerError(
                     f"{self.entry.name}'s catalog fetches {asset.dest} from {host}, which is not "
-                    f"one of this entry's own download hosts ({', '.join(sorted(hosts))}), so "
-                    f"nothing was downloaded. {CATALOG_ERROR_TAIL}"
+                    f"one of this entry's own download hosts "
+                    f"({', '.join(sorted(RELEASE_HOSTS))}), so nothing was downloaded. "
+                    f"{CATALOG_ERROR_TAIL}"
                 )
             dest = ctx.server_dir / asset.dest
             zip_path = ctx.server_dir / f"{asset.dest}.download.zip"
@@ -551,12 +558,21 @@ class TrinityCoreInstaller(CmangosInstaller):
             partial = dest.with_name(dest.name + RELEASE_PARTIAL_SUFFIX)
             if partial.exists():
                 rmtree.remove_tree(partial)
+            download = self._release_download
+            if download is None:
+                download = functools.partial(
+                    verified_download.fetch_bounded,
+                    size=asset.size,
+                    hosts=RELEASE_HOSTS,
+                    opener=self._release_opener,
+                    cancelled=lambda: ctx.cancel is not None and ctx.cancel.is_set(),
+                )
             yield from verified_download.download_verified(
                 asset.url,
                 zip_path,
                 size=asset.size,
                 sha256=asset.sha256,
-                download=self._release_download,
+                download=download,
             )
             try:
                 verified_download.unzip_members(

@@ -412,7 +412,7 @@ MOP_DATABASE_URL = (
     "v1.0.4/LoA-Pandaria-Playerbots-v1.0.4-win64-database.zip"
 )
 """The real asset's url (GAP §0, GitHub API 2026-11-01): a github.com host, so the
-entry's `release_hosts()` fence is exercised on the url it will really fetch."""
+`RELEASE_HOSTS` fence is exercised on the url it will really fetch."""
 
 
 def database_zip(

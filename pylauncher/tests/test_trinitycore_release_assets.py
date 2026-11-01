@@ -19,7 +19,8 @@ import json
 import re
 import shutil
 import threading
-from collections.abc import Callable, Iterator
+import urllib.request
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -34,13 +35,16 @@ from tests.support_trinitycore import (
     database_zip,
     release_asset,
 )
+from yulon import client_packs, platform
 from yulon.catalog import native, verified_download
-from yulon.catalog.catalog import CatalogEntry, parse_catalog
+from yulon.catalog.catalog import RELEASE_HOSTS, CatalogEntry, parse_catalog
 from yulon.catalog.families.trinitycore import (
     RELEASE_PARTIAL_SUFFIX,
     TrinityCoreInstaller,
 )
 from yulon.catalog.installer import InstallerError, InstallStopped
+from yulon.selfupdate import fetch as selfupdate_fetch
+from yulon.update import _Deadline
 
 CENTURION_STAGES = (
     "clone-sources",
@@ -96,13 +100,22 @@ def a_served_file(tmp_path: Path, name: str, body: bytes) -> Path:
 
 
 def engine(
-    entry: CatalogEntry, *, download: Callable[[str, Path], Path] | None = None
+    entry: CatalogEntry,
+    *,
+    download: Callable[[str, Path], Path] | None = None,
+    opener: client_packs.Opener | None = None,
 ) -> TrinityCoreInstaller:
-    """A real engine for `entry`, its download seam faked so nothing leaves this machine."""
+    """A real engine for `entry`, its download seam faked so nothing leaves this machine.
+
+    `download` replaces the whole fetch; `opener` leaves the stage's real fetcher
+    (`verified_download.fetch_bounded`) in place and fakes only its `Opener`, so the
+    bounded fetch itself is exercised with no network.
+    """
     return TrinityCoreInstaller(
         entry,
         seams=native.Seams(platform_id=lambda: "linux"),
         release_download=download,
+        release_opener=opener,
     )
 
 
@@ -114,12 +127,13 @@ def mop_like(*, assets: list[dict[str, Any]] | None = None) -> CatalogEntry:
 def fetch_lines(
     entry: CatalogEntry,
     server_dir: Path,
-    download: Callable[[str, Path], Path],
+    download: Callable[[str, Path], Path] | None = None,
     *,
     cancel: threading.Event | None = None,
+    opener: client_packs.Opener | None = None,
 ) -> Iterator[str]:
     """The `fetch-release` stage of `entry`, run alone on `server_dir`, as it yields."""
-    made = engine(entry, download=download)
+    made = engine(entry, download=download, opener=opener)
     ctx = native.StageContext(
         server_dir=server_dir,
         client_dir=None,
@@ -133,12 +147,13 @@ def fetch_lines(
 def fetch(
     entry: CatalogEntry,
     server_dir: Path,
-    download: Callable[[str, Path], Path],
+    download: Callable[[str, Path], Path] | None = None,
     *,
     cancel: threading.Event | None = None,
+    opener: client_packs.Opener | None = None,
 ) -> list[str]:
     """`fetch_lines()`, run to the end: the stage finished."""
-    return list(fetch_lines(entry, server_dir, download, cancel=cancel))
+    return list(fetch_lines(entry, server_dir, download, cancel=cancel, opener=opener))
 
 
 def dest_of(server_dir: Path) -> Path:
@@ -163,6 +178,10 @@ REFUSALS: dict[str, tuple[dict[str, Any], str]] = {
     "a url with credentials": (
         _document(url="https://user:pw@github.com/x/db.zip"),
         "credentials",
+    ),
+    "a url on another host": (
+        _document(url="https://example.com/x/db.zip"),
+        "must be on github.com",
     ),
     "a sha256 that is not 64 hex": (
         _document(sha256="abc123"),
@@ -196,22 +215,19 @@ def test_each_rule_refuses_its_one_bad_input(name: str) -> None:
         parse_catalog({"schema_version": 1, "games": [document]})
 
 
-def test_the_hosts_a_release_asset_may_be_fetched_from_are_the_entrys_own() -> None:
-    """The asset's own host, plus GitHub's two release-asset hosts, and nothing else.
+def test_the_release_fence_is_fixed_data_github_and_the_two_hosts_it_redirects_to() -> None:
+    """`RELEASE_HOSTS` is the same for every entry: github.com and GitHub's two asset hosts.
 
-    Each url's host is what the catalog names and GitHub's two are what it redirects
-    to -- the fence `Client.hosts()` is for the client's downloads, over the server
-    side (T850-B): never a wildcard, and never a host nobody named.
+    Fixed, never derived from an asset's own url (review round 1): a fence built from
+    the addresses it is meant to bound can refuse nothing. `ReleaseAsset`'s validator
+    keeps each url on github.com, and the download's redirect may land only on the two.
     """
-    assert mop_like().install.native.trinitycore.release_hosts() == frozenset(
+    assert RELEASE_HOSTS == frozenset(
         {
             "github.com",
             "objects.githubusercontent.com",
             "release-assets.githubusercontent.com",
         }
-    )
-    assert centurion_like().install.native.trinitycore.release_hosts() == frozenset(
-        {"objects.githubusercontent.com", "release-assets.githubusercontent.com"}
     )
 
 
@@ -526,3 +542,172 @@ def test_a_stop_after_the_download_renames_nothing_into_place(tmp_path: Path) ->
         partial.exists() and list(partial.iterdir()) == []
     ), "the folder the unpack had just made, with no member in it"
     assert (server_dir / f"{DEST}.download.zip").is_file(), "the zip a resume reuses is kept"
+
+
+# -- the bounded fetch, through the stage's real opener seam (T850-E) ----------------------------
+
+
+class ServingOpener:
+    """A fake `client_packs.Opener`: serves one body in small pieces, counting what it reads."""
+
+    def __init__(
+        self,
+        body: bytes,
+        *,
+        chunk: int = 64,
+        after_first_read: Callable[[], None] | None = None,
+    ) -> None:
+        self.body = body
+        self.chunk = chunk
+        self.after_first_read = after_first_read
+        self.reads = 0
+        """Body bytes handed out, across every response this opener has served."""
+        self.requests: list[tuple[str, frozenset[str]]] = []
+        self.closed = False
+
+    def __call__(
+        self,
+        url: str,
+        watcher: _Deadline,
+        *,
+        method: str,
+        headers: Mapping[str, str],
+        hosts: frozenset[str],
+    ) -> _Served:
+        self.requests.append((url, hosts))
+        return _Served(self)
+
+
+class _Served:
+    """One response: `read1` answers at most `chunk` bytes, the way a socket does."""
+
+    def __init__(self, opener: ServingOpener) -> None:
+        self.status = 200
+        self._opener = opener
+        self._pos = 0
+        self._served = False
+
+    def read1(self, amount: int, /) -> bytes:
+        opener = self._opener
+        data = opener.body[self._pos : self._pos + min(amount, opener.chunk)]
+        self._pos += len(data)
+        opener.reads += len(data)
+        if not self._served and data:
+            self._served = True
+            if opener.after_first_read is not None:
+                opener.after_first_read()
+        return data
+
+    def getheader(self, name: str, default: str | None = None, /) -> str | None:
+        return None
+
+    def close(self) -> None:
+        self._opener.closed = True
+
+
+class RedirectingOpener:
+    """A fake opener that refuses a redirect off the fence before a body byte exists.
+
+    Models `client_packs._open` exactly: the redirect is judged inside `urlopen`, so
+    no response is returned and the body (the `ServingOpener` here) is never read.
+    """
+
+    def __init__(self, sentence: str, body: bytes) -> None:
+        self.sentence = sentence
+        self.inner = ServingOpener(body)
+
+    def __call__(
+        self,
+        url: str,
+        watcher: _Deadline,
+        *,
+        method: str,
+        headers: Mapping[str, str],
+        hosts: frozenset[str],
+    ) -> _Served:
+        raise selfupdate_fetch.UpdateError(self.sentence)
+
+
+def test_the_real_fetcher_downloads_through_a_fake_opener_and_the_stage_unpacks(
+    tmp_path: Path,
+) -> None:
+    """The stage's default path: `fetch_bounded` through the entry's opener, then the unpack."""
+    server_dir = tmp_path / "srv"
+    opener = ServingOpener(DATABASE_ZIP, chunk=1 << 16)
+    said = fetch(mop_like(), server_dir, opener=opener)
+    assert opener.requests == [(MOP_DATABASE_URL, RELEASE_HOSTS)]
+    assert unpacked(server_dir) == UNPACKED_NAMES
+    assert "Unpacked 4 files" in said[-1]
+
+
+def test_a_redirect_off_the_release_hosts_is_refused_before_any_body_byte(tmp_path: Path) -> None:
+    """The opener refuses the redirect, so the fetcher surfaces it with nothing on disk."""
+    opener = RedirectingOpener(
+        "The download was redirected to 'evil.example', which this server's catalog entry "
+        "does not name as a plain https address (no port, no login), so Yu'lon did not follow it.",
+        DATABASE_ZIP,
+    )
+    path = tmp_path / "db.download.zip"
+    with pytest.raises(InstallerError, match=re.escape("does not name as a plain https address")):
+        verified_download.fetch_bounded(
+            MOP_DATABASE_URL,
+            path,
+            size=1 << 30,
+            hosts=RELEASE_HOSTS,
+            opener=opener,
+            cancelled=lambda: False,
+        )
+    assert opener.inner.reads == 0, "the body was never read"
+    assert not path.exists()
+    assert not (tmp_path / "db.download.zip.part").exists()
+
+
+def test_the_real_opener_refuses_a_release_redirect_to_a_host_the_fence_does_not_name() -> None:
+    """The other half: `_https_only_opener` itself, held to `RELEASE_HOSTS`."""
+    opener = selfupdate_fetch._https_only_opener(
+        _Deadline(1.0), platform.verify_context(), hosts=RELEASE_HOSTS
+    )
+    handler = next(h for h in opener.handlers if isinstance(h, urllib.request.HTTPRedirectHandler))
+    request = urllib.request.Request(MOP_DATABASE_URL, method="GET")
+
+    with pytest.raises(selfupdate_fetch.UpdateError, match="does not name"):
+        handler.redirect_request(request, None, 302, "Found", {}, "https://evil.example/x.zip")
+
+    followed = handler.redirect_request(
+        request, None, 302, "Found", {}, "https://objects.githubusercontent.com/x.zip"
+    )
+    assert followed is not None, "a redirect to a host the fence names IS followed"
+
+
+def test_a_body_larger_than_the_pin_stops_at_size_plus_one_and_deletes_the_part(
+    tmp_path: Path,
+) -> None:
+    opener = ServingOpener(DATABASE_ZIP + b"more bytes than the pin allows\n")
+    path = tmp_path / "db.download.zip"
+    with pytest.raises(
+        InstallerError, match=re.escape(f"sent more than the {len(DATABASE_ZIP)} bytes")
+    ):
+        verified_download.fetch_bounded(
+            MOP_DATABASE_URL,
+            path,
+            size=len(DATABASE_ZIP),
+            hosts=RELEASE_HOSTS,
+            opener=opener,
+            cancelled=lambda: False,
+        )
+    assert opener.reads == len(DATABASE_ZIP) + 1, "stopped the moment size + 1 had arrived"
+    assert not path.exists()
+    assert not (tmp_path / "db.download.zip.part").exists()
+
+
+def test_a_stop_after_the_first_chunk_ends_the_fetch_and_deletes_the_part(tmp_path: Path) -> None:
+    """The stage's cancel, read between chunks by the fetcher, reported as a stop."""
+    server_dir = tmp_path / "srv"
+    stop = threading.Event()
+    opener = ServingOpener(DATABASE_ZIP, after_first_read=stop.set)
+    with pytest.raises(InstallStopped, match="the install was stopped"):
+        fetch(mop_like(), server_dir, opener=opener, cancel=stop)
+    assert opener.reads == 64, "the first chunk arrived, then the cancel was seen"
+    assert not (server_dir / f"{DEST}.download.zip").exists()
+    assert not (server_dir / f"{DEST}.download.zip.part").exists()
+    assert not dest_of(server_dir).exists()

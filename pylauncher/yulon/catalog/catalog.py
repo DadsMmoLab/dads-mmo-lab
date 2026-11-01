@@ -1938,6 +1938,16 @@ these, so anything that bounds a download's hosts has to be told both.
 """
 
 
+RELEASE_HOSTS: frozenset[str] = frozenset({"github.com"}) | GITHUB_RELEASE_HOSTS
+"""Every host a release-asset download may go to: github.com, and the two it redirects to.
+
+Fixed data, never derived from an asset's own url (T850-B, review round 1): a fence
+built from the addresses it is meant to bound can refuse nothing. `ReleaseAsset`'s
+validator keeps every asset url on `github.com`, and a redirect off `github.com` may
+land only on the two hosts above -- never a wildcard, and never a host nobody named.
+"""
+
+
 class ReleaseAsset(_Strict):
     """One zip a release page serves, used only at exactly this size and sha256 (T850-B).
 
@@ -1969,8 +1979,18 @@ class ReleaseAsset(_Strict):
 
     @field_validator("url")
     @classmethod
-    def _url_is_https(cls, value: str) -> str:
-        return _https_url(value, "release asset url")
+    def _url_is_https_on_github(cls, value: str) -> str:
+        """An https url on `github.com`, the only host `RELEASE_HOSTS` fetches these from.
+
+        A release asset is pinned by size and sha256 as well, so a wrong host is not
+        a way to install something else -- but it is a url this app would fetch from
+        and this catalog never chose, so it is refused where it is written down.
+        """
+        value = _https_url(value, "release asset url")
+        host = urlsplit(value).hostname
+        if host != "github.com":
+            raise ValueError(f"release asset url must be on github.com, got {host!r} in {value!r}")
+        return value
 
     @field_validator("dest")
     @classmethod
@@ -2102,18 +2122,6 @@ class TrinityCoreData(_Strict):
             "that names none behaves exactly as it did before the stage existed."
         ),
     )
-
-    def release_hosts(self) -> frozenset[str]:
-        """Every host one of this entry's release assets may be fetched from (T850-B).
-
-        Each asset's own host, plus GitHub's two release-asset hosts: github.com
-        answers a release download with a redirect to one of them, and a download
-        that follows it lands somewhere the catalog has to have named. `Client.hosts()`
-        has this shape for the client's downloads and this property for the same
-        reason -- the set is exactly what the catalog names, never a wildcard.
-        """
-        hosts = {urlsplit(asset.url).hostname for asset in self.release_assets}
-        return frozenset(host for host in hosts if host) | GITHUB_RELEASE_HOSTS
 
     @model_validator(mode="after")
     def _the_update_rules_name_what_the_plan_imports(self) -> TrinityCoreData:

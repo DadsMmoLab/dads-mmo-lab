@@ -1,7 +1,12 @@
 """A pinned download, and an unpack of exactly the files a catalog names.
 
-Two steps more than one engine runs, kept in one place so they cannot drift:
+Three steps more than one engine runs, kept in one place so they cannot drift:
 
+* `fetch_bounded()` -- stream a url to a path through a caller's `Opener`, held to a
+  byte bound and a Stop. `platform.download_verified` is the wrong tool for a release
+  asset (T850-B, review round 1): its `curl --location` follows a redirect to ANY
+  https host and reads without a bound, where this goes through `client_packs._open`
+  (verified TLS, the stall watchdog, redirects only to the hosts the caller names).
 * `download_verified()` -- fetch a url to a path and refuse it unless its size and
   sha256 are the pin's, with the retry-once rule `ProcessInstaller` carried (T850-B
   lifted it here): a file already at the path that fails the check is deleted and
@@ -12,7 +17,7 @@ Two steps more than one engine runs, kept in one place so they cannot drift:
   four `.sql` files, which is why T850-B exists) has no top-level folder to filter
   on, so the member list IS the fence and a name nobody listed is never written.
 
-Both are plain functions whose seams are handed in, the shape `platform`'s own
+All are plain functions whose seams are handed in, the shape `platform`'s own
 helpers use: the caller owns the network call and the cancellation, this module
 owns the checking.
 """
@@ -26,7 +31,10 @@ import zipfile
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path, PurePosixPath
 
-from yulon.catalog.installer import InstallerError
+from yulon.catalog.installer import InstallerError, InstallStopped
+from yulon.catalog.native import _cancelled_message
+from yulon.client_packs import STALL_SECONDS, Opener
+from yulon.update import _Deadline
 
 CHUNK = 1 << 20
 """Bytes copied at a time: hashing and unpacking both stream, and these files are hundreds of MB."""
@@ -82,6 +90,79 @@ def download_verified(
                 "was unpacked."
             )
         yield "The download did not match its pinned sha256; fetching it again."
+
+
+def fetch_bounded(
+    url: str,
+    path: Path,
+    *,
+    size: int,
+    hosts: frozenset[str],
+    opener: Opener,
+    cancelled: Callable[[], bool],
+    progress: Callable[[int, int], None] | None = None,
+) -> Path:
+    """Stream `url` to `path` through `opener`, held to `size` bytes and a Stop.
+
+    The download a release asset needs and `platform.download_verified` cannot give
+    it (T850-B, review round 1): that one's `curl --location` follows a redirect to
+    ANY https host and reads without a byte bound. Here the opener is
+    `client_packs._open`, so TLS is verified, the stall watchdog rides each connection
+    (`_Deadline`, restarted on every chunk), and a redirect may go only to `hosts`.
+
+    The bytes land in `<path>.part` and are renamed onto `path` only when the body
+    ends. A body of MORE than `size` bytes stops the fetch the moment `size + 1` have
+    arrived, and the part is DELETED: GitHub answers a release download with a signed
+    redirect a second request cannot resume, so a half file is worth nothing (MoP's
+    zip is 142 MB). `cancelled()` is asked between chunks and raises the stage's stop
+    the way `_check_cancel` does, the part deleted for the same reason.
+    """
+    part = path.with_name(path.name + ".part")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    done = 0
+    try:
+        with _Deadline(STALL_SECONDS) as watcher:
+            try:
+                response = opener(url, watcher, method="GET", headers={}, hosts=hosts)
+            except InstallerError:
+                raise
+            except Exception as exc:  # noqa: BLE001 -- worded for the player just below
+                raise InstallerError(f"{url} could not be downloaded: {exc}") from exc
+            try:
+                with part.open("wb") as out:
+                    while True:
+                        if cancelled():
+                            raise InstallStopped(_cancelled_message("the install"))
+                        try:
+                            chunk = response.read1(min(CHUNK, size - done + 1))
+                        except Exception as exc:  # noqa: BLE001 -- the same wording
+                            raise InstallerError(f"{url} could not be downloaded: {exc}") from exc
+                        if watcher.fired:
+                            raise InstallerError(
+                                f"{url} sent nothing for {STALL_SECONDS:.0f}s and the download "
+                                "was stopped; nothing was unpacked."
+                            )
+                        if not chunk:
+                            break
+                        watcher.restart(STALL_SECONDS)
+                        out.write(chunk)
+                        done += len(chunk)
+                        if done > size:
+                            raise InstallerError(
+                                f"{url} sent more than the {size} bytes this version of Yu'lon "
+                                "pins; nothing was unpacked."
+                            )
+                        if progress is not None:
+                            progress(done, size)
+            finally:
+                close = getattr(response, "close", None)
+                if close is not None:
+                    close()
+    except BaseException:
+        part.unlink(missing_ok=True)
+        raise
+    part.replace(path)
+    return path
 
 
 def unzip_members(

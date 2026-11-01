@@ -754,13 +754,22 @@ def test_uninstall_leaves_a_container_another_folder_named(tmp_path: Path) -> No
 # -- what it is offered for ---------------------------------------------------------------
 
 
-def test_only_a_background_trinitycore_block_has_a_job(tmp_path: Path) -> None:
+def test_the_background_job_is_exactly_the_shipped_entries_whose_block_sets_it(
+    tmp_path: Path,
+) -> None:
+    """A job exists precisely for a shipped trinitycore entry with `mmaps.background` set.
+
+    Today that is centurion (T179 Task 7) and mop (T850-D); no other shipped entry
+    sets it, and a non-trinitycore block cannot (`background_block` reads the
+    trinitycore block alone). Pinned as the set, so a new background entry is a
+    deliberate change to this line rather than a silent one.
+    """
     from yulon.catalog.catalog import load_catalog
 
-    for entry in load_catalog().games:
-        # Centurion, the one shipped TrinityCore entry (T179 Task 7), and no other.
-        has_job = mmaps.background_block(entry) is not None
-        assert has_job is (entry.id == "wow-centurion"), entry.id
+    with_job = {
+        entry.id for entry in load_catalog().games if mmaps.background_block(entry) is not None
+    }
+    assert with_job == {"wow-centurion", "wow-mop"}
     assert mmaps.background_block(ENTRY) is not None
     wotlk = load_catalog().get("wow-wotlk")
     with pytest.raises(mmaps.MmapsError, match="during the install"):
