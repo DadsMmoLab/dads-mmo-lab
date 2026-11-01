@@ -2753,7 +2753,10 @@ class AccountLevel(_Strict):
 class Accounts(_Strict):
     """Whether this app can create an account on this core by writing the row itself.
 
-    Three shapes, one per core family. AzerothCore uses `salt`/`verifier` with
+    Four shapes across five schemes: the trinitycore family carries two. The
+    credential and the GM level are independent halves, and exactly one scheme
+    mixes them — which is why `scheme` names a core's row shape rather than a
+    family. AzerothCore uses `salt`/`verifier` with
     the level in `account_access`. Tortoise uses `sha_pass_hash` with the level
     in `account.rank` — measured against a live server on 2026-08-26, where the
     core logged its own INSERT and `SHA1(UPPER(user):UPPER(pass))` matched it
@@ -2762,13 +2765,18 @@ class Accounts(_Strict):
     real clients (8.3b, 8.3c): `x = SHA1(reverse(s) + SHA1(UPPER(user:pass)))`
     little-endian, `v = 7^x mod N`, recomputed by hand and matching the row.
     This paragraph said "has not been measured, so it is declared unsupported"
-    for a day after it was (audit, 2026-09-08).
+    for a day after it was (audit, 2026-09-08). `trinitycore_sha` (T850-C) is
+    the TrinityCore family's Mists of Pandaria line: `mangos_sha`'s one
+    `sha_pass_hash` column (folded the same way, so the same recipe) with
+    `azerothcore`'s `account_access(id, gmlevel, RealmID)` for the level.
 
     Getting this wrong does not fail loudly — it inserts a row that looks
     correct and can never log in.
     """
 
-    scheme: Literal["azerothcore", "mangos_sha", "mangos_srp6", "trinitycore"] | None = Field(
+    scheme: (
+        Literal["azerothcore", "mangos_sha", "mangos_srp6", "trinitycore", "trinitycore_sha"] | None
+    ) = Field(
         default="azerothcore",
         description=(
             "How this core stores an account: `azerothcore` is SRP6 in binary salt/verifier "
@@ -2776,7 +2784,10 @@ class Accounts(_Strict):
             "in account.rank; `mangos_srp6` is the same SRP6 as AzerothCore stored as hex "
             "text in v/s with the level in account.gmlevel; `trinitycore` is TrinityCore's "
             "salt/verifier with the level in account_access(AccountID, SecurityLevel, RealmID) "
-            "with RealmID -1 (T179). None means this app does not "
+            "with RealmID -1 (T179); `trinitycore_sha` (T850-C) is that family's other shape, "
+            "which its Mists of Pandaria line writes: sha_pass_hash with v/s left '' for the "
+            "authserver to derive, and the level in account_access(id, gmlevel, RealmID). "
+            "None means this app does not "
             "write accounts for this core and "
             "the Accounts tab points at `console_command` instead. Never defaulted onto a "
             "core that has not been measured — a wrong scheme inserts a row that looks "
@@ -4253,8 +4264,9 @@ class CatalogEntry(_Strict):
         `databases` would point the dumps' triggers and procedures at somebody
         else's database (import.sh:41-43). And `accounts.scheme` defaults to
         AzerothCore's, whose `account_access(id, gmlevel)` is not TrinityCore's
-        `(AccountID, SecurityLevel)` (facts §5), so the entry must declare
-        `trinitycore` or no scheme at all.
+        `(AccountID, SecurityLevel)` (facts §5), so the entry must declare one
+        of this family's own schemes -- `trinitycore` (TrinityCore112/Centurion)
+        or `trinitycore_sha` (the MoP line, T850-C) -- or no scheme at all.
         """
         native = self.install.native
         block = native.trinitycore if native is not None else None
@@ -4266,9 +4278,10 @@ class CatalogEntry(_Strict):
                 f"trinitycore.checkout is {block.checkout!r}, which is not a dest of any of "
                 f"this entry's sources {sorted(dests)}"
             )
-        if self.accounts.scheme not in ("trinitycore", None):
+        if self.accounts.scheme not in ("trinitycore", "trinitycore_sha", None):
             raise ValueError(
-                f"a trinitycore entry's accounts.scheme must be 'trinitycore' or null, got "
+                f"a trinitycore entry's accounts.scheme must be 'trinitycore' or "
+                f"'trinitycore_sha' or null, got "
                 f"{self.accounts.scheme!r}: another core's columns write rows that look right "
                 "and grant nothing (an omitted accounts block inherits 'azerothcore')"
             )

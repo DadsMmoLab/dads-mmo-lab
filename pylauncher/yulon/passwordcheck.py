@@ -18,9 +18,10 @@ whatever the server said.
 through this app with a known password on the live Vanilla server (m910q,
 2026-09-07), its `s` and `v` read back, and every candidate byte order computed
 until one reproduced the stored verifier. Exactly one did, and the wrong password
-reproduced none. A scheme that has not been through that is absent from the table
-below, and this module answers `None` for it: a password change this app cannot
-confirm is a smaller answer, not a wrong one.
+reproduced none. The one entry that instead rests on read source argues for
+itself in `COLUMNS` below. A scheme that has been through neither is absent from
+the table below, and this module answers `None` for it: a password change this
+app cannot confirm is a smaller answer, not a wrong one.
 """
 
 from __future__ import annotations
@@ -36,14 +37,23 @@ _G = 7
 COLUMNS: dict[str, tuple[str, ...]] = {
     "mangos_srp6": ("s", "v"),
     "mangos_sha": ("sha_pass_hash",),
+    "trinitycore_sha": ("sha_pass_hash",),
 }
-"""The columns each measured scheme keeps its credential in, IN RECIPE ORDER.
+"""The columns each scheme keeps its credential in, IN RECIPE ORDER.
 
 The order is the point and the trees disagree about it: AzerothCore names its
 pair `salt`, `verifier` and the CMaNGOS trees name the same pair `s`, `v` -- so
 a pair read in a table's own column order would be back to front on one of them
-and would answer "no" for every correct password. `mangos_sha` has ONE column
-and no salt at all, which is why this is a tuple rather than a pair.
+and would answer "no" for every correct password. `mangos_sha` and
+`trinitycore_sha` have ONE column and no salt at all, which is why this is a
+tuple rather than a pair.
+
+`trinitycore_sha` (MoP, T850-C) is the one row here that rests on read source
+rather than on a row this app wrote and read back, and it says so: it is
+`mangos_sha`'s recipe because MoP's core hashes the SAME way -- one SHA1 over
+the folded `name` + `":"` + password, printed uppercase (`AccountMgr.cpp:345-355`
+`CalculateShaPassHash`, `Util.cpp:614` `%02X`) -- and its `sha_pass_hash` is also
+`utf8mb4_bin` (`auth.sql:19`), so the comparison is case-sensitive on both.
 
 `azerothcore` is deliberately absent, and so is any scheme nobody has created a
 known-password account under and read back: that tree answers its own commands
@@ -84,7 +94,7 @@ def _verifier(scheme: str, account: str, password: str, salt: str) -> str | None
 
 
 def sha_hash(account: str, password: str) -> str:
-    """`SHA1(UPPER(user):UPPER(pass))`, which is what the Tortoise fork stores.
+    """`SHA1(UPPER(user):UPPER(pass))`, which is what the Tortoise fork and MoP store.
 
     Measured on the live server, 2026-09-07: an account created through this app
     held exactly this in `sha_pass_hash`, and after the SERVER changed the
@@ -119,7 +129,9 @@ def matches(scheme: str, account: str, password: str, values: Sequence[str]) -> 
     columns = COLUMNS.get(scheme)
     if columns is None or len(values) != len(columns):
         return None
-    if scheme == "mangos_sha":
+    if scheme in ("mangos_sha", "trinitycore_sha"):
+        # One column, one unsalted hash, on both trees: `sha_hash` is MoP's own
+        # `CalculateShaPassHash` to the byte, uppercase hex included.
         return _same(values[0], sha_hash(account, password))
     salt, stored = values
     expected = _verifier(scheme, account, password, salt)

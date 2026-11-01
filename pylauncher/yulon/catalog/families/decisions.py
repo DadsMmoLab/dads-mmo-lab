@@ -652,7 +652,8 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
             "azerothcore": supported("the default is its scheme"),
             "cmangos": supported("its entries declare mangos_srp6 / mangos_sha"),
             "trinitycore": supported(
-                "CatalogEntry refuses any scheme but trinitycore or null on its entries"
+                "CatalogEntry refuses any scheme but trinitycore / trinitycore_sha or null on "
+                "its entries"
             ),
         },
         hits=("'azerothcore'",),
@@ -989,7 +990,10 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         {
             "azerothcore": supported(),
             "cmangos": supported("mangos_srp6 / mangos_sha"),
-            "trinitycore": supported("salt/verifier, as its own LOGIN_UPD_LOGON writes them"),
+            "trinitycore": supported(
+                "trinitycore: salt/verifier, as its own LOGIN_UPD_LOGON writes them; "
+                "trinitycore_sha: sha_pass_hash with v/s cleared, as ChangePassword leaves them"
+            ),
         },
         hits=("'azerothcore'", "'azerothcore'", "'trinitycore'"),
     ),
@@ -1011,7 +1015,10 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         {
             "azerothcore": supported(),
             "cmangos": supported("mangos_srp6 / mangos_sha"),
-            "trinitycore": supported("its own LOGIN_INS_ACCOUNT: salt, verifier, reg_mail, email"),
+            "trinitycore": supported(
+                "trinitycore: its own LOGIN_INS_ACCOUNT, salt, verifier, reg_mail, email; "
+                "trinitycore_sha: the family's other LOGIN_INS_ACCOUNT, sha_pass_hash and email"
+            ),
         },
         hits=("'azerothcore'", "'trinitycore'"),
     ),
@@ -1022,7 +1029,10 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         {
             "azerothcore": supported(),
             "cmangos": supported("mangos_srp6 / mangos_sha"),
-            "trinitycore": supported("account_access(AccountID, SecurityLevel, RealmID) -1"),
+            "trinitycore": supported(
+                "trinitycore: account_access(AccountID, SecurityLevel, RealmID) -1; "
+                "trinitycore_sha: the same write as azerothcore's, account_access(id, gmlevel)"
+            ),
         },
         hits=("'azerothcore'", "'trinitycore'"),
     ),
@@ -1033,7 +1043,10 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         {
             "azerothcore": supported(),
             "cmangos": supported("mangos_srp6 / mangos_sha"),
-            "trinitycore": supported("account_access(AccountID, SecurityLevel, RealmID) -1"),
+            "trinitycore": supported(
+                "trinitycore: account_access(AccountID, SecurityLevel, RealmID) -1; "
+                "trinitycore_sha: the same read as azerothcore's, account_access(id, gmlevel)"
+            ),
         },
         hits=("'azerothcore'", "'trinitycore'"),
     ),
@@ -1044,7 +1057,7 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         {
             "azerothcore": supported("its MAX_ACCOUNT_STR, 17"),
             "cmangos": supported("mangos_srp6 / mangos_sha, 16"),
-            "trinitycore": supported("its MAX_ACCOUNT_STR, 16"),
+            "trinitycore": supported("trinitycore / trinitycore_sha, its MAX_ACCOUNT_STR, 16"),
         },
         hits=("'azerothcore'", "'trinitycore'"),
     ),

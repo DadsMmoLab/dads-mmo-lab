@@ -897,7 +897,9 @@ def test_yulon_makes_an_all_digit_account_only_where_the_server_looks_names_up(
             services.create_account("123", "pw1234", 0)
 
 
-@pytest.mark.parametrize("scheme", ["azerothcore", "trinitycore", "mangos_srp6", "mangos_sha"])
+@pytest.mark.parametrize(
+    "scheme", ["azerothcore", "trinitycore", "trinitycore_sha", "mangos_srp6", "mangos_sha"]
+)
 def test_a_caller_that_does_not_say_the_tree_looks_names_up_gets_a_refusal(
     scheme: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:

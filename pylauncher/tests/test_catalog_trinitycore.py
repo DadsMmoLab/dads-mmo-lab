@@ -176,6 +176,8 @@ def test_a_whole_entry_with_a_trinitycore_block_loads() -> None:
 def test_trinitycore_is_a_family_and_an_account_scheme_the_models_name() -> None:
     assert "trinitycore" in get_args(NativeInstall.model_fields["family"].annotation)
     assert Accounts(scheme="trinitycore").scheme == "trinitycore"
+    # The family's second shape (T850-C), which its MoP line declares.
+    assert Accounts(scheme="trinitycore_sha").scheme == "trinitycore_sha"
 
 
 def test_the_shipped_catalog_has_one_trinitycore_entry_and_it_is_centurion() -> None:
@@ -462,6 +464,30 @@ def test_a_trinitycore_entry_cannot_take_another_cores_account_scheme(scheme: st
 def test_a_trinitycore_entry_may_declare_no_scheme() -> None:
     entry = parse_catalog({"schema_version": 1, "games": [_entry(accounts={"scheme": None})]})
     assert entry.get("wow-example").accounts.scheme is None
+
+
+def test_a_trinitycore_entry_may_declare_the_familys_second_scheme() -> None:
+    """`trinitycore_sha` (T850-C): MoP's sha_pass_hash rows with AzerothCore's level table.
+
+    One family, two shapes: the credential and the GM level are separate halves,
+    and the Mists of Pandaria line takes one from each. Refusing it would send
+    that entry to the worldserver console for no reason.
+    """
+    entry = parse_catalog(
+        {"schema_version": 1, "games": [_entry(accounts={"scheme": "trinitycore_sha"})]}
+    )
+    assert entry.get("wow-example").accounts.scheme == "trinitycore_sha"
+
+
+def test_the_trinitycore_scheme_refusal_names_both_shapes_the_family_writes() -> None:
+    """`mangos_sha` is still refused, and the sentence now says what IS accepted.
+
+    Tortoise's shape is the same hash with the level in `account.rank` — a table
+    and a column MoP does not have, so accepting it would write a level nowhere.
+    """
+    with pytest.raises(ValidationError) as caught:
+        parse_catalog({"schema_version": 1, "games": [_entry(accounts={"scheme": "mangos_sha"})]})
+    assert "'trinitycore' or 'trinitycore_sha' or null" in str(caught.value)
 
 
 def test_a_rename_must_land_on_one_of_the_entrys_own_schemas() -> None:
