@@ -1079,7 +1079,14 @@ SCRATCH_SCRIPT = (
     '{ echo "yulon: the scratch folder inside the container could not be made"; exit 93; }; '
     "for entry in /out/*; do "
     'name=${entry#/out/}; case " $YULON_OUT_DIRS " in *" $name "*) continue;; esac; '
-    '[ -e "$entry" ] && ln -s "$entry" "$name"; '
+    '[ -e "$entry" ] || continue; '
+    'copy=""; for arg in "$@"; do [ "$arg" = "$name" ] && copy=1; done; '
+    'if [ -n "$copy" ] && [ -d "$entry" ]; then '
+    'cp -r "$entry" "$name" || { rm -rf "$name"; '
+    'echo "yulon: copying $name into the container failed; '
+    'the tool reads it from data/ instead (slower)."; '
+    'ln -s "$entry" "$name"; }; '
+    'else ln -s "$entry" "$name"; fi; '
     "done; "
     'for name in $YULON_OUT_DIRS; do mkdir -p "$name"; done; '
     '"$@"; status=$?; '
@@ -1109,11 +1116,17 @@ Six details are load-bearing:
 * **The link loop.** A tool that reads an earlier tool's output (`vmap assemble`
   reads `Buildings`) opens it by a relative name in its cwd, and the cwd is
   now the scratch folder, which starts empty. Every entry of `/out` that the
-  tool does NOT itself produce is linked in under its own name, so the earlier
-  output is read through the bind and nothing is copied in. The `case` skip is
-  what keeps a STALE `vmaps/` from an earlier run from being linked where this
-  run is about to write: without it the tool would write through the link
-  straight into `/out`, and the copy-back would then meet a dangling link.
+  tool does NOT itself produce is linked in under its own name — except an
+  entry the tool names on its own argv (`vmap4_assembler Buildings vmaps`
+  names `Buildings`), which is copied in when it is a directory, so the tool
+  reads it from the container's own layer instead of through the bind (S1
+  4e/4f: the assembler takes 55-65 s there but ~4h25m through the bind in W6;
+  T847). The `case` skip is what keeps a STALE `vmaps/` from an earlier run
+  from being linked where this run is about to write: without it the tool
+  would write through the link straight into `/out`, and the copy-back would
+  then meet a dangling link. A copy that fails is not fatal: the partial copy
+  is removed and the entry is linked after all, with a line saying so, and the
+  tool's own status is what the run reports.
 * **The produces folders are made in scratch before the tool runs.** Not every
   tool creates its own output folder: CMaNGOS's `vmap_assembler Buildings vmaps`
   opens `vmaps/000.vmtree` for writing and fails on a missing `vmaps/`

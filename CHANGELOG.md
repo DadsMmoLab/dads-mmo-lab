@@ -16,6 +16,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ### New
 
 ### Fixed
+- Conquest of Azeroth on Windows builds its map data hours faster: the last map step no longer reads through the Windows folder share.
 
 ### Changed
 
