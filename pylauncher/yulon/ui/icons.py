@@ -19,6 +19,9 @@ from yulon.ui.theme import (
     COLOR_RARE,
     COLOR_TEXT_GOLD,
     COLOR_UNCOMMON,
+    DEFAULT_THEME,
+    get_theme,
+    normalize_theme_name,
 )
 
 # Standard FontAwesome 6 SVG path definitions (viewBox="0 0 512 512" or "0 0 640 512")
@@ -376,25 +379,38 @@ def dadcraft_icon(name: str, color: str = COLOR_GOLD_BRIGHT, size: int = 16) -> 
     return QIcon(pixmap)
 
 
-def get_tab_icon(tab_name: str) -> QIcon:
+def get_tab_icon(tab_name: str, *, theme_name: str | None = None) -> QIcon:
     """Retrieve the authentic Dadcraft icon for standard launcher tabs."""
+    if theme_name is None or normalize_theme_name(theme_name) == DEFAULT_THEME:
+        bright = COLOR_GOLD_BRIGHT
+        light = COLOR_GOLD_LIGHT
+        gold = COLOR_TEXT_GOLD
+        rare = COLOR_RARE
+        uncommon = COLOR_UNCOMMON
+    else:
+        spec = get_theme(theme_name)
+        bright = spec.accent_bright
+        light = spec.accent_light
+        gold = spec.text_primary if spec.is_light else spec.text_gold
+        rare = spec.rare
+        uncommon = spec.uncommon
     mapping = {
-        "catalog": ("catalog", COLOR_GOLD_BRIGHT),
-        "server": ("server", COLOR_GOLD_BRIGHT),
-        "console": ("terminal", COLOR_RARE),
-        "accounts": ("users", COLOR_UNCOMMON),
-        "play": ("sword", COLOR_GOLD_BRIGHT),
-        "characters": ("sword", COLOR_GOLD_BRIGHT),
-        "bots": ("robot", COLOR_RARE),
-        "maintenance": ("database", COLOR_GOLD_LIGHT),
-        "modules": ("puzzle", COLOR_TEXT_GOLD),
-        "networking": ("network", COLOR_RARE),
+        "catalog": ("catalog", bright),
+        "server": ("server", bright),
+        "console": ("terminal", rare),
+        "accounts": ("users", uncommon),
+        "play": ("sword", bright),
+        "characters": ("sword", bright),
+        "bots": ("robot", rare),
+        "maintenance": ("database", light),
+        "modules": ("puzzle", gold),
+        "networking": ("network", rare),
     }
     low = tab_name.lower().strip()
     for key, (icon_name, color) in mapping.items():
         if key in low:
             return dadcraft_icon(icon_name, color=color, size=16)
-    return dadcraft_icon("server", color=COLOR_GOLD_BRIGHT, size=16)
+    return dadcraft_icon("server", color=bright, size=16)
 
 
 def get_app_icon() -> QIcon:

@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
 from PySide6.QtCore import QEvent, QObject, QPoint, Qt, Signal
-from PySide6.QtGui import QGuiApplication, QResizeEvent, QShowEvent
+from PySide6.QtGui import QFocusEvent, QGuiApplication, QResizeEvent, QShowEvent
 from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
@@ -944,9 +944,15 @@ class CatalogView(QWidget):
             and self._stack.currentIndex() == 0
             and isinstance(watched, QWidget)
         ):
-            group_id = watched.property("yulon_group_id")
-            if isinstance(group_id, str) and group_id in self._group_by_id:
-                self.show_game_servers(group_id, preserve_focus=watched)
+            reason = (
+                event.reason()
+                if isinstance(event, QFocusEvent)
+                else Qt.FocusReason.OtherFocusReason
+            )
+            if reason != Qt.FocusReason.ActiveWindowFocusReason:
+                group_id = watched.property("yulon_group_id")
+                if isinstance(group_id, str) and group_id in self._group_by_id:
+                    self.show_game_servers(group_id, preserve_focus=watched)
         return super().eventFilter(watched, event)
 
     def show_game_servers(

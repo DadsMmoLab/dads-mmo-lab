@@ -254,6 +254,7 @@ from yulon.ui.widgets.modules_panel import (
 )
 from yulon.ui.widgets.move_panel import MovePanel
 from yulon.ui.widgets.page import (
+    DANGER_ZONE_NAME,
     RowsList,
     RowsScroll,
     ScrollPage,
@@ -9660,7 +9661,12 @@ class ControllerView(QWidget):
         drawn through `_drawn_title`; the tooltip keeps the plain title.
         """
         page = tab if title in _PAGES_THAT_FIT_THEMSELVES else ScrollPage(tab)
-        index = self._tabs.addTab(page, get_tab_icon(icon_name), _drawn_title(title))
+        page.setProperty("yulon_tab_icon", icon_name)
+        index = self._tabs.addTab(
+            page,
+            get_tab_icon(icon_name, theme_name=resolve_widget_theme(self)),
+            _drawn_title(title),
+        )
         self._tabs.setTabToolTip(index, title)
 
     def _show_page_of(self, widget: QWidget) -> None:
@@ -18937,6 +18943,7 @@ class ControllerView(QWidget):
     def _fill_the_shelf(self, shelf: backup_shelf.Shelf) -> None:
         """Fill the Backups list from the shelf: date, database, size, what made it, game."""
         self._shelf = shelf
+        muted_color = get_theme(resolve_widget_theme(self)).text_muted
         for r in shelf.rows:
             text = backup_shelf.describe(r, shelf.game_id)
             item = QListWidgetItem(f"{text} \u00b7 kept" if r.kept_because else text)
@@ -18946,7 +18953,8 @@ class ControllerView(QWidget):
                 f"{r.name}\n{r.kept_because or r.cannot_delete or r.problem or ''}".strip()
             )
             if r.kept_because or r.cannot_delete:
-                item.setForeground(QColor(COLOR_TEXT_MUTED))
+                item.setData(Qt.ItemDataRole.UserRole + 3, True)
+                item.setForeground(QColor(muted_color))
             self.backup_list.addItem(item)
         # T677: what earlier uninstalls kept beside the server folder, for Restore only.
         for index, earlier in enumerate(shelf.kept):
@@ -18955,8 +18963,9 @@ class ControllerView(QWidget):
                 item = QListWidgetItem(f"{text} \u00b7 kept from an earlier uninstall")
                 item.setData(Qt.ItemDataRole.UserRole, str(earlier.folder / r.name))
                 item.setData(Qt.ItemDataRole.UserRole + 2, [index, r.name])
+                item.setData(Qt.ItemDataRole.UserRole + 3, True)
                 item.setToolTip(f"{earlier.folder / r.name}\n{r.cannot_delete or ''}".strip())
-                item.setForeground(QColor(COLOR_TEXT_MUTED))
+                item.setForeground(QColor(muted_color))
                 self.backup_list.addItem(item)
 
     def _selected_row(self) -> backup_shelf.ShelfRow | None:
@@ -23352,7 +23361,7 @@ class ControllerView(QWidget):
         self.tuning_panel.set_enabled_actions(self._module_actions_allowed())
 
     def apply_theme(self, theme_name: str | None = None) -> None:
-        """Restyle inline banners, labels, badges, and child panels for `theme_name`."""
+        """Restyle inline banners, labels, badges, icons, and child panels for `theme_name`."""
         resolved = normalize_theme_name(theme_name or resolve_widget_theme(self))
         spec = get_theme(resolved)
         self.setProperty("yulon_theme", resolved)
@@ -23360,9 +23369,38 @@ class ControllerView(QWidget):
             self.realm_badge.set_theme(resolved)
         if hasattr(self, "docker_banner") and hasattr(self.docker_banner, "apply_theme"):
             self.docker_banner.apply_theme(resolved)
+        secondary_icon = spec.text_primary if spec.is_light else spec.text_gold
+        start_btn = getattr(self, "start_button", None)
+        if start_btn is not None:
+            start_color = (
+                spec.primary_btn_text if start_btn.property("primary") is True else secondary_icon
+            )
+            start_btn.setIcon(dadcraft_icon("play", start_color, 14))
+        stop_btn = getattr(self, "stop_button", None)
+        if stop_btn is not None:
+            stop_btn.setIcon(dadcraft_icon("stop", spec.danger_text, 14))
+        restart_btn = getattr(self, "restart_button", None)
+        if restart_btn is not None:
+            restart_btn.setIcon(dadcraft_icon("restart", secondary_icon, 14))
+        refresh_btn = getattr(self, "refresh_button", None)
+        if refresh_btn is not None:
+            refresh_btn.setIcon(dadcraft_icon("refresh", secondary_icon, 14))
+        remove_btn = getattr(self, "remove_server_button", None)
+        if remove_btn is not None:
+            remove_btn.setIcon(dadcraft_icon("trash", spec.danger_text, 14))
+        play_btn = getattr(self, "play_button", None)
+        if play_btn is not None and not play_btn.icon().isNull():
+            play_btn.setIcon(dadcraft_icon("play", spec.primary_btn_text, 14))
+        if hasattr(self, "_tabs"):
+            for idx in range(self._tabs.count()):
+                page = self._tabs.widget(idx)
+                icon_name = page.property("yulon_tab_icon") if page is not None else None
+                if isinstance(icon_name, str) and icon_name:
+                    self._tabs.setTabIcon(idx, get_tab_icon(icon_name, theme_name=resolved))
         for banner in (
             getattr(self, "compose_banner", None),
             getattr(self, "corrections_banner", None),
+            getattr(self, "repair_banner", None),
             getattr(self, "rebuild_banner", None),
             getattr(self, "tuning_banner", None),
             getattr(self, "tuning_log_offer", None),
@@ -23375,6 +23413,7 @@ class ControllerView(QWidget):
             getattr(self, "danger_label", None),
             getattr(self, "compose_banner_label", None),
             getattr(self, "corrections_banner_label", None),
+            getattr(self, "repair_banner_label", None),
             getattr(self, "rebuild_banner_label", None),
             getattr(self, "tuning_banner_label", None),
         ):
@@ -23383,6 +23422,7 @@ class ControllerView(QWidget):
         for muted_lbl in (
             getattr(self, "addon_pointer", None),
             getattr(self, "uninstall_absent_label", None),
+            getattr(self, "stop_choice_note", None),
             getattr(self, "custom_module_line_note", None),
         ):
             if muted_lbl is not None:
@@ -23390,6 +23430,17 @@ class ControllerView(QWidget):
         line_title = getattr(self, "custom_module_line_title", None)
         if line_title is not None:
             line_title.setStyleSheet(f"color: {spec.text_muted}; font-weight: bold;")
+        danger_box = self.findChild(QGroupBox, DANGER_ZONE_NAME)
+        if danger_box is not None:
+            danger_box.setStyleSheet(
+                f"QGroupBox#{DANGER_ZONE_NAME} {{ border: 1px solid {spec.danger}; }}"
+            )
+        backup_list = getattr(self, "backup_list", None)
+        if backup_list is not None:
+            for row_idx in range(backup_list.count()):
+                item = backup_list.item(row_idx)
+                if item is not None and item.data(Qt.ItemDataRole.UserRole + 3):
+                    item.setForeground(QColor(spec.text_muted))
         for panel in (
             getattr(self, "modules_panel", None),
             getattr(self, "tuning_panel", None),

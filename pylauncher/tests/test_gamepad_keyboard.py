@@ -1558,6 +1558,10 @@ def test_k5_back_action_hierarchy_prompter_then_back_button_then_root_noop(
         assert nav.perform(Action.BACK) is True
         assert prompter.is_active() is False
         assert prompter._answered.is_set() is True
+        assert prompter._cancelled_before_show is True
+        # A queued `_show()` arriving after `cancel()` is a no-op and never opens a modal
+        prompter._show("Password:", True)
+        assert prompter._cancelled_before_show is False
         assert back_clicks == []
 
         # 2. With no active prompt, B triggers the visible BACK_ACTION_PROPERTY button

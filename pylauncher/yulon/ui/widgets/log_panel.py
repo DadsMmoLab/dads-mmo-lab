@@ -46,6 +46,7 @@ from yulon.log import get_logger
 from yulon.said import split_details, with_details
 from yulon.support import runlog
 from yulon.ui import lines
+from yulon.ui.theme import build_dadcraft_palette, normalize_theme_name, resolve_widget_theme
 from yulon.ui.widgets.job import in_flight
 
 logger = get_logger(__name__)
@@ -794,6 +795,32 @@ class LogPanel(QWidget):
         # and closed ONLY on the GUI thread -- from `append()`, `run()` and
         # `_on_finished()` -- because `RunLog` has no lock.
         self._record: runlog.RunLog | None = None
+        self._line_kinds: list[str] = []
+        inherited_theme = self.property("yulon_theme") or (
+            parent.property("yulon_theme") if parent is not None else None
+        )
+        if isinstance(inherited_theme, str) and inherited_theme.strip():
+            self.apply_theme(inherited_theme)
+
+    def apply_theme(self, theme_name: str | None = None) -> None:
+        """Update the log text palette, appended line tones, and failure bar for `theme_name`."""
+        resolved = normalize_theme_name(theme_name or resolve_widget_theme(self))
+        self.setProperty("yulon_theme", resolved)
+        palette = build_dadcraft_palette(resolved)
+        self._text.setPalette(palette)
+        doc = self._text.document()
+        for idx, kind in enumerate(self._line_kinds):
+            block = doc.findBlockByNumber(idx)
+            if not block.isValid():
+                break
+            cursor = QTextCursor(block)
+            cursor.setPosition(block.position())
+            cursor.setPosition(
+                block.position() + block.length() - 1, QTextCursor.MoveMode.KeepAnchor
+            )
+            cursor.setCharFormat(line_format(kind, palette))
+        if self._bar.styleSheet():
+            self._bar.setStyleSheet(_bar_style(palette))
 
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
@@ -879,6 +906,7 @@ class LogPanel(QWidget):
     def clear(self) -> None:
         """Empty the panel."""
         self._text.clear()
+        self._line_kinds.clear()
 
     def append(self, line: str) -> None:
         """Append one line, without its terminal colour codes.
@@ -977,6 +1005,9 @@ class LogPanel(QWidget):
         back at `NoBrush`.
         """
         self._text.appendPlainText(stamped)
+        self._line_kinds.append(kind)
+        if len(self._line_kinds) > _MAX_BLOCKS:
+            del self._line_kinds[: len(self._line_kinds) - _MAX_BLOCKS]
         block = self._text.document().lastBlock()
         cursor = QTextCursor(block)
         cursor.setPosition(block.position())

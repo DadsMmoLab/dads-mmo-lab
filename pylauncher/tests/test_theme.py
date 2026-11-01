@@ -854,3 +854,123 @@ def test_k4_header_and_badge_typography_scale_and_focus_highlights_across_themes
         assert f"border: 1px solid {spec.accent_bright};" in tile_focus
         back_focus = qss.split("QPushButton#catalog-back-button:focus {")[1].split("}")[0]
         assert f"border: 2px solid {spec.accent_bright};" in back_focus
+
+
+def test_apply_dadcraft_theme_propagates_to_modules_and_tuning_rows(
+    qapp: QApplication,
+) -> None:
+    """`apply_dadcraft_theme` calls `apply_theme` on descendant `ModulesPanel` and `RowWidget`."""
+    from yulon import tuning
+    from yulon.ui.theme import get_theme
+    from yulon.ui.widgets.modules_panel import BADGE_INSTALLED, ModuleRow, ModulesPanel
+    from yulon.ui.widgets.tuning_panel import TuningPanel, build_tuning_cards
+
+    host = QWidget()
+    apply_dadcraft_theme(host, theme_name="gruvbox-dark")
+    panel = ModulesPanel(host)
+    panel.set_rows(
+        [
+            ModuleRow(
+                "mod-aoe-loot",
+                "module",
+                "AoE Loot",
+                "Loot nearby corpses at once.",
+                "https://github.com/azerothcore/mod-aoe-loot",
+                True,
+                True,
+                (),
+                (),
+                True,
+                None,
+                badge=BADGE_INSTALLED,
+            )
+        ]
+    )
+    spec = get_theme("gruvbox-dark")
+    row = panel.row("mod-aoe-loot")
+    # Even on initial `set_rows()` under a themed parent, `RowWidget` and `_FamilyCard` inherit it
+    assert spec.text_gold in row.name_label.styleSheet()
+    assert spec.uncommon in row.badge_label.styleSheet()
+    assert spec.uncommon in panel._cards["module"].installed_header.styleSheet()
+
+    # And switching the parent's theme updates `ModulesPanel`, `TuningPanel`, and `file_title`
+    tpanel = TuningPanel(host)
+    trow = tuning.TuningRow(
+        module_id="mod-aoe-loot",
+        module_name="AoE Loot",
+        family="module",
+        file="env/dist/etc/modules/aoe_loot.conf",
+        key="AoELoot.Enable",
+        label="Enable AoE Loot",
+        explain="Loot nearby corpses.",
+        type="bool",
+        min=None,
+        max=None,
+        default="1",
+        current="1",
+        installed=True,
+        backend="conf",
+        read_only_reason=None,
+    )
+    tpanel.set_cards(build_tuning_cards((trow,)))
+    tpanel.set_files(["env/dist/etc/modules/aoe_loot.conf"])
+    assert spec.text_primary in tpanel.file_title.text()
+
+    apply_dadcraft_theme(host, theme_name="dracula-light")
+    light_spec = get_theme("dracula-light")
+    assert light_spec.text_gold in row.name_label.styleSheet()
+    assert light_spec.uncommon in row.badge_label.styleSheet()
+    assert light_spec.text_primary in tpanel.file_title.text()
+    assert light_spec.text_primary in tpanel.card("mod-aoe-loot").title_label.styleSheet()
+    host.deleteLater()
+
+
+def test_friend_launcher_logs_view_and_tray_flyout_follow_theme_changes(
+    qapp: QApplication,
+) -> None:
+    """`FriendLauncher`, `LogsView`, `LogPanel`, and `TrayFlyout` re-theme all child elements."""
+    from yulon.ui.friend_launcher import FriendLauncher
+    from yulon.ui.logs_view import LogsView
+    from yulon.ui.theme import get_theme
+    from yulon.ui.tray_flyout import ServerCard, TrayFlyout
+
+    catalog = load_catalog()
+    launcher = FriendLauncher(catalog)
+    logs_view = LogsView(lambda: (), catalog)
+    log_panel = LogPanel()
+    flyout_card = ServerCard()
+    try:
+        for theme_id in ("gruvbox-dark", "dracula-light"):
+            spec = get_theme(theme_id)
+            launcher.apply_theme(theme_id)
+            assert launcher.property("yulon_theme") == theme_id
+            assert spec.text_muted in launcher.note_label.styleSheet()
+            assert spec.bg_dark in launcher.styleSheet()
+            assert not launcher.make_button.icon().isNull()
+            assert not launcher.play_button.icon().isNull()
+            assert not launcher.remove_button.icon().isNull()
+
+            logs_view.apply_theme(theme_id)
+            assert logs_view.property("yulon_theme") == theme_id
+            assert (
+                logs_view.viewer.palette().color(QPalette.ColorRole.Base).name().lower()
+                == spec.bg_input.lower()
+            )
+            assert not logs_view.save_button.icon().isNull()
+
+            log_panel.apply_theme(theme_id)
+            assert log_panel.property("yulon_theme") == theme_id
+            assert (
+                log_panel._text.palette().color(QPalette.ColorRole.Base).name().lower()
+                == spec.bg_input.lower()
+            )
+
+            flyout_card.apply_theme(theme_id)
+            assert flyout_card.property("yulon_theme") == theme_id
+            assert not flyout_card.start.icon().isNull()
+            assert not flyout_card.stop.icon().isNull()
+    finally:
+        for w in (launcher, logs_view, log_panel, flyout_card):
+            w.close()
+            w.deleteLater()
+        _ = TrayFlyout

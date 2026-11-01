@@ -58,6 +58,7 @@ from yulon.ui.theme import (
     DEFAULT_THEME,
     get_theme,
     normalize_theme_name,
+    resolve_widget_theme,
 )
 from yulon.ui.widgets.dadcraft_decorations import realm_tone
 from yulon.ui.widgets.reasons import reason_of
@@ -210,7 +211,14 @@ class StatusDot(QWidget):
     def paintEvent(self, _event: object) -> None:  # noqa: N802 - Qt's own name
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        colour = QColor(DOT_COLOURS.get(self.tone, COLOR_TEXT_MUTED))
+        spec = get_theme(resolve_widget_theme(self))
+        tone_colors = {
+            "up": spec.uncommon,
+            "between": spec.accent_bright,
+            "attention": spec.danger,
+            "down": spec.text_muted,
+        }
+        colour = QColor(tone_colors.get(self.tone, spec.text_muted))
         if self.tone == "between":
             painter.setPen(QPen(colour, 2.0))
             painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -282,12 +290,26 @@ class ServerCard(QFrame):
         row.addWidget(self.action, 0, Qt.AlignmentFlag.AlignVCenter)
         self.presses_armed: dict[str, Any] = {}
         """Per press, the server it was pressed on (the same check as `armed`)."""
+        self.apply_theme(resolve_widget_theme(self))
 
     armed: tuple[Any, str] | None = None
     """(server, action) as they were when the icon button was pressed."""
 
     dashboard_armed: tuple[Any, str] | None = None
     """(server, dashboard kind) as they were when the dashboard icon was pressed."""
+
+    def apply_theme(self, theme_name: str | None = None) -> None:
+        """Re-tint the server row's icons and status dot for `theme_name`."""
+        resolved = normalize_theme_name(theme_name or resolve_widget_theme(self))
+        spec = get_theme(resolved)
+        self.setProperty("yulon_theme", resolved)
+        accent = spec.accent_bright
+        self.dashboard.setIcon(dadcraft_icon("robot", accent))
+        self.stop.setIcon(dadcraft_icon("stop", spec.danger_text))
+        self.restart.setIcon(dadcraft_icon("restart", accent))
+        self.start.setIcon(power_icon(accent))
+        self.action.setIcon(dadcraft_icon(_ICONS[self.which], accent) if self.which else QIcon())
+        self.dot.update()
 
     def arm(self) -> None:
         self.armed = (self.view, self.which)
@@ -327,7 +349,8 @@ class ServerCard(QFrame):
         which = first.name if first is not None else ""
         self.which = which
         self._fill(self.action, first, title)
-        self.action.setIcon(dadcraft_icon(_ICONS[which]) if which else QIcon())
+        spec = get_theme(resolve_widget_theme(self))
+        self.action.setIcon(dadcraft_icon(_ICONS[which], spec.accent_bright) if which else QIcon())
         for name, press in self.presses.items():
             self._fill(press, offered.get(name), title)
         self.dashboard.setVisible(entry is not None)
@@ -358,7 +381,7 @@ Restart the Server tab's own icons."""
 
 
 @functools.cache
-def power_icon() -> QIcon:
+def power_icon(color: str = COLOR_GOLD_BRIGHT) -> QIcon:
     """Start's icon: the power symbol, an open ring with a line through its top (lead,
     T551: the server glyph's two bars did not read as Start, and ▶ is Play's)."""
     icon = QIcon()
@@ -367,7 +390,7 @@ def power_icon() -> QIcon:
         pixmap.fill(Qt.GlobalColor.transparent)
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        pen = QPen(QColor(COLOR_GOLD_BRIGHT), max(1.5, size * 0.11))
+        pen = QPen(QColor(color), max(1.5, size * 0.11))
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         painter.setPen(pen)
         inset = size * 0.14
@@ -455,6 +478,7 @@ class TrayFlyout(QWidget):
     def set_theme(self, theme_name: str | None = None) -> None:
         """Restyle the flyout panel for `theme_name`."""
         self._theme_name = normalize_theme_name(theme_name)
+        self.setProperty("yulon_theme", self._theme_name)
         spec = get_theme(self._theme_name)
         self.setStyleSheet(f"""
             QWidget#tray-flyout {{
@@ -484,6 +508,8 @@ class TrayFlyout(QWidget):
                 border: 2px solid {spec.accent_bright};
             }}
             """)
+        for card in getattr(self, "_cards", ()):
+            card.apply_theme(self._theme_name)
 
     def cards(self) -> list[ServerCard]:
         return [card for card in self._cards if not card.isHidden()]

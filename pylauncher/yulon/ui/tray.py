@@ -856,6 +856,13 @@ class YulonTray(QObject):
         for launcher in getattr(self.window, "yulon_launchers", {}).values():
             if shiboken6.isValid(launcher) and hasattr(launcher, "apply_theme"):
                 launcher.apply_theme(resolved)
+        friend_launcher = getattr(self.window, "yulon_friend_launcher", None)
+        if (
+            friend_launcher is not None
+            and shiboken6.isValid(friend_launcher)
+            and hasattr(friend_launcher, "apply_theme")
+        ):
+            friend_launcher.apply_theme(resolved)
         if self.flyout is not None and shiboken6.isValid(self.flyout):
             apply_dadcraft_theme(self.flyout, theme_name=resolved)
             self.flyout.set_theme(resolved)

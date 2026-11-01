@@ -36,9 +36,9 @@ import re
 import shutil
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any
 
 from PySide6.QtCore import Qt, Signal, Slot
+from PySide6.QtGui import QCloseEvent, QResizeEvent
 from PySide6.QtWidgets import (
     QComboBox,
     QHBoxLayout,
@@ -57,7 +57,15 @@ from yulon.log import get_logger
 from yulon.play_client import PlayClientError
 from yulon.play_launch import LaunchRefusal
 from yulon.ui.catalog_view import DirPicker, _qt_dir_picker
+from yulon.ui.gamepad import BACK_CLOSES
+from yulon.ui.icons import dadcraft_icon
 from yulon.ui.message_box import ask_yes_no, show_information, show_warning
+from yulon.ui.theme import (
+    apply_dadcraft_theme,
+    get_theme,
+    normalize_theme_name,
+    resolve_widget_theme,
+)
 from yulon.ui.widgets.job import JobRunner, threaded_job_runner
 from yulon.ui_settings import FriendServer
 
@@ -349,6 +357,7 @@ class FriendLauncher(QWidget):
         super().__init__(parent)
         self.setWindowTitle("Launcher — play on a friend's server")
         self.setObjectName("friend-launcher")
+        self.setProperty(BACK_CLOSES, True)
         self._os_name = os_name if os_name is not None else _detect_os_name
         self._home = home if home is not None else Path.home()
         self._config_dir = config_dir if config_dir is not None else _config_dir_of()
@@ -365,6 +374,21 @@ class FriendLauncher(QWidget):
         """The job under way as (what, name), so a second press waits instead of doubling."""
         self._build()
         self.refresh_saved()
+        self.apply_theme(resolve_widget_theme(self))
+
+    def apply_theme(self, theme_name: str | None = None) -> None:
+        """Apply `theme_name` to the friend launcher window, buttons, and labels."""
+        resolved = normalize_theme_name(theme_name or resolve_widget_theme(self))
+        spec = get_theme(resolved)
+        self.setProperty("yulon_theme", resolved)
+        icon_color = spec.text_primary if spec.is_light else spec.text_gold
+        self.browse_button.setIcon(dadcraft_icon("folder", icon_color, 14))
+        self.make_button.setIcon(dadcraft_icon("download", spec.primary_btn_text, 14))
+        self.play_button.setIcon(dadcraft_icon("play", spec.primary_btn_text, 14))
+        self.remove_button.setIcon(dadcraft_icon("trash", spec.danger_text, 14))
+        self.note_label.setStyleSheet(f"color: {spec.text_muted};")
+        self.status.setStyleSheet(f"color: {spec.text_primary};")
+        apply_dadcraft_theme(self, width=self.width() or None, theme_name=resolved)
 
     # -- building ----------------------------------------------------------
 
@@ -379,6 +403,7 @@ class FriendLauncher(QWidget):
         )
         intro.setWordWrap(True)
         intro.setObjectName("friend-launcher-intro")
+        self.intro_label = intro
         box.addWidget(intro)
 
         row = QHBoxLayout()
@@ -392,6 +417,7 @@ class FriendLauncher(QWidget):
         note = QLabel(_NOT_OFFERED, self)
         note.setWordWrap(True)
         note.setObjectName("friend-launcher-note")
+        self.note_label = note
         box.addWidget(note)
 
         name_row = QHBoxLayout()
@@ -418,11 +444,13 @@ class FriendLauncher(QWidget):
         browse = QPushButton("Browse…", self)
         browse.setObjectName("friend-launcher-browse")
         browse.clicked.connect(self._browse_for_client)
+        self.browse_button = browse
         client_row.addWidget(browse)
         box.addLayout(client_row)
 
         self.make_button = QPushButton("Make client", self)
         self.make_button.setObjectName("friend-launcher-make")
+        self.make_button.setProperty("primary", True)
         self.make_button.setToolTip(
             "Make this friend server's ready-to-play client from your own client. "
             "The game files are shared with your own client where the drive allows, "
@@ -438,11 +466,13 @@ class FriendLauncher(QWidget):
         saved_row = QHBoxLayout()
         self.play_button = QPushButton("Play", self)
         self.play_button.setObjectName("friend-launcher-play")
+        self.play_button.setProperty("primary", True)
         self.play_button.setToolTip("Start the game against this friend server's realm.")
         self.play_button.clicked.connect(self.play_selected)
         saved_row.addWidget(self.play_button)
         self.remove_button = QPushButton("Remove", self)
         self.remove_button.setObjectName("friend-launcher-remove")
+        self.remove_button.setProperty("danger", True)
         self.remove_button.setToolTip(
             "Forget this friend server and delete the ready-to-play client Yu'lon made "
             "for it. Your own client folder is never touched."
@@ -509,10 +539,18 @@ class FriendLauncher(QWidget):
         self.play_button.setEnabled(idle and has_saved)
         self.remove_button.setEnabled(idle and has_saved)
 
+    def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802 - Qt's name
+        super().resizeEvent(event)
+        apply_dadcraft_theme(
+            self,
+            width=self.width(),
+            theme_name=resolve_widget_theme(self),
+        )
+
     # -- make ---------------------------------------------------------------
 
     def _browse_for_client(self) -> None:
-        chosen = self._pick_dir(self, "Select your own World of Warcraft client folder", self._home)
+        chosen = self._pick_dir(self, "Select your own WoW client folder", self._home)
         if chosen is not None:
             self.client_field.setText(str(chosen))
 
@@ -555,9 +593,7 @@ class FriendLauncher(QWidget):
             return
         original = Path(self.client_field.text().strip())
         if not original.is_dir():
-            picked = self._pick_dir(
-                self, "Select your own World of Warcraft client folder", self._home
-            )
+            picked = self._pick_dir(self, "Select your own WoW client folder", self._home)
             if picked is None:
                 return
             original = picked
@@ -778,7 +814,7 @@ class FriendLauncher(QWidget):
             self._say(result.said or f"{result.name} was removed.")
         self.refresh_saved()
 
-    def closeEvent(self, event: Any) -> None:  # noqa: N802 - Qt's name
+    def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qt's name
         self.closed.emit()
         super().closeEvent(event)
 

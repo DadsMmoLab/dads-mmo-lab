@@ -826,32 +826,48 @@ def sync_user_themes(user_dir: Path | None = None) -> Path:
     return target_dir
 
 
+_ThemeDirSignature = tuple[tuple[str, int, int], ...]
+_AVAILABLE_THEMES_CACHE: dict[Path, tuple[_ThemeDirSignature, dict[str, ThemeSpec]]] = {}
+
+
 def load_available_themes(
     user_dir: Path | None = None,
     *,
     seed_user_dir: bool = False,
 ) -> dict[str, ThemeSpec]:
     """Return all available themes (bundled themes + any `.json` files in `user_dir`)."""
-    catalog = dict(THEMES)
     if seed_user_dir:
         folder = sync_user_themes(user_dir)
     else:
         folder = user_dir if user_dir is not None else user_themes_dir()
+    paths: list[Path] = []
+    signature: list[tuple[str, int, int]] = []
     if folder.is_dir():
         try:
-            paths = sorted(folder.glob("*.json"))
+            for path in sorted(folder.glob("*.json")):
+                st = path.stat()
+                paths.append(path)
+                signature.append((path.name, st.st_mtime_ns, st.st_size))
         except OSError:
             paths = []
-        for path in paths:
-            spec = load_theme_file(path)
-            if spec is not None:
-                catalog[spec.id] = spec
+            signature = []
+    sig_tuple = tuple(signature)
+    cached = _AVAILABLE_THEMES_CACHE.get(folder)
+    if cached is not None and cached[0] == sig_tuple:
+        return dict(cached[1])
+
+    catalog = dict(THEMES)
+    for path in paths:
+        spec = load_theme_file(path)
+        if spec is not None:
+            catalog[spec.id] = spec
     ordered: dict[str, ThemeSpec] = {}
     for theme_id in BUNDLED_THEME_ORDER:
         if theme_id in catalog:
             ordered[theme_id] = catalog.pop(theme_id)
     for theme_id in sorted(catalog):
         ordered[theme_id] = catalog[theme_id]
+    _AVAILABLE_THEMES_CACHE[folder] = (sig_tuple, dict(ordered))
     return ordered
 
 

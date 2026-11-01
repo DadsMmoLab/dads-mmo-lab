@@ -200,12 +200,24 @@ def _px(base: int, scale: float) -> str:
     return f"{max(MIN_FONT_PX, round(base * scale))}px"
 
 
+_TINTED_SVG_CACHE: dict[tuple[str, str, str, str, str], Path] = {}
+
+
 def _theme_images_dir_for(spec: ThemeSpec) -> Path:
     """Return the SVG directory for `spec`, generating tinted assets for non-default themes."""
     base_dir = resources.theme_images_dir()
     if spec.id == DEFAULT_THEME:
         return base_dir
     target_dir = Path(tempfile.gettempdir()) / "yulon-theme-images" / spec.id
+    cache_key = (
+        spec.id,
+        spec.primary_btn_text,
+        spec.text_muted,
+        spec.accent_bright,
+        spec.text_primary,
+    )
+    if _TINTED_SVG_CACHE.get(cache_key) == target_dir and (target_dir / "check.svg").is_file():
+        return target_dir
     svgs: dict[str, str] = {
         "check.svg": (
             '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">'
@@ -290,6 +302,7 @@ def _theme_images_dir_for(spec: ThemeSpec) -> Path:
             svg_path = target_dir / filename
             if not svg_path.exists() or svg_path.read_text(encoding="utf-8") != content:
                 svg_path.write_text(content + "\n", encoding="utf-8")
+        _TINTED_SVG_CACHE[cache_key] = target_dir
         return target_dir
     except OSError:
         return base_dir

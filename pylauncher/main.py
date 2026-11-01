@@ -829,6 +829,13 @@ def build_window() -> object:
         for launcher in getattr(window, "yulon_launchers", {}).values():
             if shiboken6.isValid(launcher) and hasattr(launcher, "apply_theme"):
                 launcher.apply_theme(resolved)
+        friend_launcher = getattr(window, "yulon_friend_launcher", None)
+        if (
+            friend_launcher is not None
+            and shiboken6.isValid(friend_launcher)
+            and hasattr(friend_launcher, "apply_theme")
+        ):
+            friend_launcher.apply_theme(resolved)
         return ui_settings.remember_theme(resolved)
 
     settings_view = SettingsView(
@@ -1020,6 +1027,10 @@ def build_window() -> object:
         launcher = getattr(window, "yulon_friend_launcher", None)
         if launcher is None or not shiboken6.isValid(launcher):
             launcher = FriendLauncher(catalog)
+            launcher.setWindowIcon(get_app_icon())
+            win_theme = window.property("yulon_theme")
+            if isinstance(win_theme, str) and win_theme:
+                launcher.apply_theme(win_theme)
             launcher.closed.connect(lambda: setattr(window, "yulon_friend_launcher", None))
             window.yulon_friend_launcher = launcher
         # The launcher is a top-level window of its own (no parent): it is the one

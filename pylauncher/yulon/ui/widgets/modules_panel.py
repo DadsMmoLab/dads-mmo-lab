@@ -1722,12 +1722,12 @@ class RowWidget(QFrame):
         self.set_enabled_actions(True)
         self._selected = False
         self._hovered = False
-        self._theme_name = DEFAULT_THEME
-        self.apply_theme(DEFAULT_THEME)
+        self._theme_name = resolve_widget_theme(self)
+        self.apply_theme(self._theme_name)
 
     def apply_theme(self, theme_name: str | None = None) -> None:
         """Restyle the module row and its child labels/chips for `theme_name`."""
-        self._theme_name = normalize_theme_name(theme_name)
+        self._theme_name = normalize_theme_name(theme_name or resolve_widget_theme(self))
         spec = get_theme(self._theme_name)
         self.name_label.setStyleSheet(f"color: {spec.text_gold}; font-weight: bold;")
         self.version_label.setStyleSheet(f"color: {spec.text_muted};")
@@ -1936,11 +1936,11 @@ class _FamilyCard(QGroupBox):
         self._available_layout.setContentsMargins(0, 0, 0, 0)
         self._available_layout.setSpacing(ROW_GAP)
         self._box = box
-        self.apply_theme(DEFAULT_THEME)
+        self.apply_theme(resolve_widget_theme(self))
 
     def apply_theme(self, theme_name: str | None = None) -> None:
         """Restyle the family card's hint, installed header, and available toggle."""
-        spec = get_theme(normalize_theme_name(theme_name))
+        spec = get_theme(normalize_theme_name(theme_name or resolve_widget_theme(self)))
         self.hint_label.setStyleSheet(
             f"color: {spec.text_muted}; font-style: italic; padding: 0px 2px;"
         )
@@ -2137,9 +2137,7 @@ class ModulesPanel(QWidget):
         self._selected = keep if keep in self._rows else None
         for key, widget in self._rows.items():
             widget.set_selected(key == self._selected)
-        active = self._theme_name or resolve_widget_theme(self)
-        if active != DEFAULT_THEME or self._theme_name is not None:
-            self.apply_theme(active)
+        self.apply_theme(self._theme_name or resolve_widget_theme(self))
 
     def apply_theme(self, theme_name: str | None = None) -> None:
         """Restyle the panel, its family cards, and its rows for `theme_name`."""

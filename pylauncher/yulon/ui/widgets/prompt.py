@@ -90,6 +90,7 @@ class InputPrompter(QObject):
         self._answered = threading.Event()
         self._cancel: threading.Event | None = None
         self._active: bool = False
+        self._cancelled_before_show: bool = False
         self._active_dialog: QInputDialog | None = None
         self.requested.connect(self._show, Qt.ConnectionType.QueuedConnection)
 
@@ -109,6 +110,7 @@ class InputPrompter(QObject):
         if not self.is_active():
             return False
         self._active = False
+        self._cancelled_before_show = True
         self._answer = None
         self._answered.set()
         dlg = self._active_dialog
@@ -127,6 +129,7 @@ class InputPrompter(QObject):
         """
         self._answer = None
         self._answered.clear()
+        self._cancelled_before_show = False
         self._active = True
         secret = is_secret(prompt)
         logger.info(f"asking the user for input: {'<secret prompt>' if secret else prompt!r}")
@@ -161,7 +164,8 @@ class InputPrompter(QObject):
         dismissed. What made modality harmful before was opening it over
         ordinary build output, which the marker gate ended.
         """
-        if self._cancel is not None and self._cancel.is_set():
+        if self._cancelled_before_show or (self._cancel is not None and self._cancel.is_set()):
+            self._cancelled_before_show = False
             self._active = False
             self._answered.set()
             return
