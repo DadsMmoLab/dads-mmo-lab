@@ -18795,7 +18795,7 @@ def test_the_shorter_modules_toolbar_never_shrinks_its_buttons(
     _at(window, main.MINIMUM_WINDOW_SIZE)
 
     buttons = _module_toolbar_buttons(view)
-    assert len(buttons) == 3, f"the Modules bar lost a button: {[b.text() for b in buttons]}"
+    assert len(buttons) == 4, f"the Modules bar lost a button: {[b.text() for b in buttons]}"
     shrunk = [
         f"{b.text()!r}: {b.width()} < {b.sizeHint().width()}"
         for b in buttons
@@ -20929,7 +20929,7 @@ def test_the_report_box_is_what_gives_before_the_card_and_the_list(
         _at(window, (960, 620))
         assert view.module_report_strip.collapsed, "the report stayed open on a short tab"
         assert view.custom_module_card.isVisible(), "the card folded before the report did"
-        _at(window, (960, 580))
+        _at(window, (960, 560))
         assert view.module_report_strip.collapsed, "the report came back on a shorter tab"
         assert view.custom_module_line.isVisible(), "the card kept its sentence past the report"
         floor = controller_view_module.MODULE_LIST_MIN_HEIGHT
@@ -22916,11 +22916,13 @@ def test_a_restyle_at_an_unchanged_width_folds_nothing(
 
             worst: list[str] = []
             moved = 0
-            # At this height the report's fold boundary crosses the sweep: wide
-            # windows grow the theme's fonts until the report no longer fits.
+            # A corner drag: the height climbs across the report's fold boundary
+            # (between 620 and 630 at every width since #457, whose fonts no longer
+            # push it with the width) while the width sweeps, so the strip has a
+            # transition to make and "at most one per step" bounds something.
             for width in range(940, 1201, 10):
                 seen.clear()
-                window.resize(width, 635)
+                window.resize(width, 600 + (width - 940) * 60 // 260)
                 apply_dadcraft_theme(window, width=window.width())
                 process_events()
                 moved += len(seen)
@@ -22969,6 +22971,9 @@ def test_opening_the_report_by_hand_cannot_cut_the_tab(
     import main
 
     view = ControllerView(WOTLK, _services_with_the_card_buttons(ps, tmp_path), status_poll_ms=0)
+    # #457: the custom-module card lives in the "Bring your own" sub-menu; open, it is the
+    # load that lets the report fold on a short tab, as before.
+    view.set_bring_own_submenu_open(True)
     window, tab = _controller_in_the_real_window(view, "Modules")
     _at(window, DESKTOP_1080P)
     _ran_a_job(view)

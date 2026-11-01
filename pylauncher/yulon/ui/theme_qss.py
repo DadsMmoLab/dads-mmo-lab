@@ -450,7 +450,7 @@ QTabBar::tab:focus, QTabBar::tab:top:focus {{
 }}
 
 /* Server sub-tabs (Server, Console, Accounts, Characters, Bots, Modules, Tuning,
-   Maintenance, Networking): centered horizontally and descending from the top banner. */
+   Backups & updates, Networking): centered horizontally and descending from the top banner. */
 QTabWidget#server-sub-tabs::tab-bar {{
     alignment: center;
 }}
