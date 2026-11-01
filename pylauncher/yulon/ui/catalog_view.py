@@ -56,6 +56,7 @@ from yulon.log import get_logger
 from yulon.ui import folder_picker, single_instance
 from yulon.ui.answers import said_yes
 from yulon.ui.folder_picker import pick_folder
+from yulon.ui.gamepad import BACK_ACTION_PROPERTY
 from yulon.ui.icons import dadcraft_icon
 from yulon.ui.message_box import FittedMessageBox, ask_yes_no, show_information, show_warning
 from yulon.ui.theme import (
@@ -458,42 +459,71 @@ def _identify(entry: CatalogEntry, server_dir: Path) -> Identification:
     return Identification.DIFFERENT
 
 
-_CAMPAIGN_GLYPHS = {
-    "wow-wotlk": "❄️",
-    "wow-unbound": "🌀",
-    "wow-coa": "⚔",
-    "wow-tbc": "🔥",
-    "wow-vanilla": "⚔️",
-    "wow-tortoise": "🐢",
-    "wow-centurion": "🛡️",
-    "ddon": "🐉",
-    "dfo": "👊",
+@dataclass(frozen=True, slots=True)
+class _CampaignPresentation:
+    """Unified typed presentation metadata for a catalog server entry (`kael.md` §2.3)."""
+
+    glyph: str
+    subtitle: str
+    software: str | None = None
+
+
+_CAMPAIGN_PRESENTATION: dict[str, _CampaignPresentation] = {
+    "wow-wotlk": _CampaignPresentation(
+        glyph="❄️",
+        subtitle="Wrath of the Lich King",
+        software="AzerothCore with mod-playerbots",
+    ),
+    "wow-unbound": _CampaignPresentation(
+        glyph="🌀",
+        subtitle="Wrath of the Lich King, multi-class",
+        software="AzerothCore with mod-playerbots and Wrath Unbound",
+    ),
+    "wow-coa": _CampaignPresentation(
+        glyph="⚔",
+        subtitle="Wrath of the Lich King, Conquest of Azeroth classes",
+        software="AzerothCore CoA fork with SquidBots playerbots",
+    ),
+    "wow-tbc": _CampaignPresentation(
+        glyph="🔥",
+        subtitle="The Burning Crusade",
+        software="CMaNGOS TBC with playerbots",
+    ),
+    "wow-vanilla": _CampaignPresentation(
+        glyph="⚔️",
+        subtitle="Classic Vanilla",
+        software="CMaNGOS Classic with playerbots",
+    ),
+    "wow-tortoise": _CampaignPresentation(
+        glyph="🐢",
+        subtitle="WoW Tortoise",
+        software="the Tortoise WoW core with TortoiseBots",
+    ),
+    "wow-centurion": _CampaignPresentation(
+        glyph="🛡️",
+        subtitle="Level-60 PvP with bots",
+        software="Centurion, a TrinityCore with its own playerbots",
+    ),
+    "ddon": _CampaignPresentation(
+        glyph="🐉",
+        subtitle="Dragon's Dogma Online",
+    ),
+    "dfo": _CampaignPresentation(
+        glyph="👊",
+        subtitle="Dungeon Fighter Online",
+    ),
 }
 
-_CAMPAIGN_SUBTITLES = {
-    "wow-wotlk": "Wrath of the Lich King",
-    "wow-unbound": "Wrath of the Lich King, multi-class",
-    "wow-coa": "Wrath of the Lich King, Conquest of Azeroth classes",
-    "wow-tbc": "The Burning Crusade",
-    "wow-vanilla": "Classic Vanilla",
-    "wow-tortoise": "WoW Tortoise",
-    "wow-centurion": "Level-60 PvP with bots",
-    "ddon": "Dragon's Dogma Online",
-    "dfo": "Dungeon Fighter Online",
-}
+_CAMPAIGN_GLYPHS: dict[str, str] = {k: v.glyph for k, v in _CAMPAIGN_PRESENTATION.items()}
+
+_CAMPAIGN_SUBTITLES: dict[str, str] = {k: v.subtitle for k, v in _CAMPAIGN_PRESENTATION.items()}
 """The tile's second line; the client version in brackets comes from the entry (T194 C18).
 
 Typed here, the Tortoise tile said 1.17.2 for a server whose client must be 1.18.1.
 """
 
-_SERVER_SOFTWARE = {
-    "wow-wotlk": "AzerothCore with mod-playerbots",
-    "wow-unbound": "AzerothCore with mod-playerbots and Wrath Unbound",
-    "wow-coa": "AzerothCore CoA fork with SquidBots playerbots",
-    "wow-tbc": "CMaNGOS TBC with playerbots",
-    "wow-vanilla": "CMaNGOS Classic with playerbots",
-    "wow-tortoise": "the Tortoise WoW core with TortoiseBots",
-    "wow-centurion": "Centurion, a TrinityCore with its own playerbots",
+_SERVER_SOFTWARE: dict[str, str] = {
+    k: v.software for k, v in _CAMPAIGN_PRESENTATION.items() if v.software is not None
 }
 """What a tile's tooltip names as its server software (T194 F8).
 
@@ -526,9 +556,6 @@ WELCOME = (
     "computer until you press Install."
 )
 """The line under the Catalog heading (T195 C23)."""
-
-BACK_ACTION_PROPERTY = "yulon_back_button"
-"""Qt dynamic property marking an active in-panel Back button (`style-guide.md` §5)."""
 
 _SINGLE_GROUP_TITLES: dict[str, str] = {
     "ddon": "DDON",

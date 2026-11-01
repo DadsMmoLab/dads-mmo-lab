@@ -358,18 +358,21 @@ def apply_dadcraft_theme(
             header.set_theme(resolved_theme, scale=scale)
         if type(target).__name__ != "LauncherWindow" and hasattr(target, "apply_theme"):
             target.apply_theme(resolved_theme)
+        from yulon.ui.widgets.panel_style import panel_qss
+
         for card in target.findChildren(QWidget):
-            if card.objectName().startswith(("catalog-tile-", "boxart-card-")):
+            if card is target:
+                continue
+            card_type = type(card).__name__
+            if hasattr(card, "set_theme") and card_type == "DadcraftRealmBadge":
+                card.set_theme(resolved_theme, scale=scale)
+            elif card_type in ("ModulesPanel", "TuningPanel"):
+                card.setStyleSheet(panel_qss(resolved_theme))
+            elif card_type in ("CatalogView", "TopMenuBar", "SingleServerView", "SettingsView"):
+                if hasattr(card, "apply_theme"):
+                    card.apply_theme(resolved_theme)
+            elif card.objectName().startswith(("catalog-tile-", "boxart-card-")):
                 if hasattr(card, "apply_theme"):
                     card.apply_theme(resolved_theme)
                 else:
                     card.update()
-            if hasattr(card, "set_theme") and type(card).__name__ == "DadcraftRealmBadge":
-                card.set_theme(resolved_theme, scale=scale)
-            elif (
-                card is not target
-                and type(card).__name__
-                in ("CatalogView", "TopMenuBar", "SingleServerView", "SettingsView")
-                and hasattr(card, "apply_theme")
-            ):
-                card.apply_theme(resolved_theme)

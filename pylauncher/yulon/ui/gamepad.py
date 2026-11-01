@@ -542,6 +542,9 @@ BACK_CLOSES = "yulonBackCloses"
 The client launcher sets it. Not the main window: B there would quit the app.
 """
 
+BACK_ACTION_PROPERTY = "yulon_back_button"
+"""Qt dynamic property marking an active in-panel Back button (Project Kael §5.2)."""
+
 
 class Navigator(QObject):
     """The directional focus engine: resolves movement and executes actions.
@@ -652,8 +655,9 @@ class Navigator(QObject):
         return found
 
     def invalidate(self) -> None:
-        """Drop the focus-chain caches; call after the widget tree changes."""
+        """Drop the focus-chain caches and last-move memory; call after the widget tree changes."""
         self._cache.clear()
+        self._last_move = None
 
     # -- directional resolution ------------------------------------------
 
@@ -969,10 +973,13 @@ class Navigator(QObject):
         return True
 
     def _back(self) -> bool:
-        # Back is "close the thing I am in": a popup, then a modal, then a window
-        # that says B closes it (`BACK_CLOSES`: the client launcher, T187). If
-        # none is open, it does nothing rather than yanking focus unpredictably
-        # -- the main window never closes on B.
+        # Back is "close the thing I am in":
+        # 1. An open popup / menu.
+        # 2. An active InputPrompter (cancels the prompt rather than leaving Stage 2).
+        # 3. An open modal dialog.
+        # 4. A visible, enabled in-panel back button (`BACK_ACTION_PROPERTY`, e.g. Catalog Stage 2).
+        # 5. A secondary window that says B closes it (`BACK_CLOSES`: the client launcher, T187).
+        # At the main window root, B is a safe no-op.
         app = QApplication.instance()
         if isinstance(app, QApplication):
             popup = app.activePopupWidget()
@@ -985,14 +992,36 @@ class Navigator(QObject):
                 if QApplication.activeWindow() is None and owner is not None:
                     owner.window().activateWindow()
                 return True
+            active = app.activeWindow()
+            if active is None:
+                focused = QApplication.focusWidget()
+                parent = self.parent()
+                if focused is not None:
+                    active = focused.window()
+                elif isinstance(parent, QWidget):
+                    active = parent.window()
+            if active is not None:
+                from yulon.ui.widgets.prompt import InputPrompter
+
+                for prompter in active.findChildren(InputPrompter):
+                    if prompter.is_active() and prompter.cancel():
+                        return True
             modal = app.activeModalWidget()
             if modal is not None:
                 modal.close()
                 return True
-            active = app.activeWindow()
-            if active is not None and active.property(BACK_CLOSES) is True:
-                active.close()
-                return True
+            if active is not None:
+                for btn in active.findChildren(QAbstractButton):
+                    if (
+                        btn.property(BACK_ACTION_PROPERTY) is True
+                        and btn.isVisibleTo(active)
+                        and btn.isEnabled()
+                    ):
+                        btn.click()
+                        return True
+                if active.property(BACK_CLOSES) is True:
+                    active.close()
+                    return True
         return False
 
     def _cycle(self, action: Action) -> bool:
@@ -1123,6 +1152,10 @@ def install_gamepad_navigation(window: QWidget) -> tuple[Navigator, KeyboardSour
     `window` so Qt owns their lifetime.
     """
     navigator = Navigator(window)
+    for child in window.findChildren(QWidget):
+        stage_sig = getattr(child, "stage_changed", None)
+        if stage_sig is not None and hasattr(stage_sig, "connect"):
+            stage_sig.connect(lambda _stage=0: navigator.invalidate())
     keyboard = KeyboardSource(navigator, window)
     gamepad = GamepadSource(navigator, window)
     keyboard.start()

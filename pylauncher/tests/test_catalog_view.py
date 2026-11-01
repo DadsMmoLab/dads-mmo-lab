@@ -3541,3 +3541,70 @@ def test_k4_viewport_fit_across_stage1_boxart_stage2_server_cards_and_topbar(
     finally:
         window.close()
         window.deleteLater()
+
+
+def test_k5_controller_dpad_confirm_back_and_focus_restoration_across_catalog_stages(
+    qapp: object, tmp_path: Path
+) -> None:
+    """Phase K5: D-pad + A drills into Stage 2, invalidates `_last_move`, and B restores focus."""
+    from PySide6.QtWidgets import QApplication
+
+    from yulon.ui.gamepad import Action, Direction, install_gamepad_navigation
+    from yulon.ui.widgets.prompt import InputPrompter
+
+    panel = LogPanel()
+    view = CatalogView(
+        CATALOG,
+        lambda e: _FakeInstaller(e, []),
+        panel,
+        pick_dir=lambda *_: None,
+        installed_games={"wow-wotlk": tmp_path / "wotlk"},
+        single_installer_factory=_no_single_engine,
+    )
+    window, _scroll, _splitter = _catalog_in_the_default_window(view, panel)
+    nav, keyboard, gamepad = install_gamepad_navigation(window)
+    try:
+        window.show()
+        window.activateWindow()
+        process_events(20)
+
+        wow_card = view.boxart_card_for("wow")
+        ddon_card = view.boxart_card_for("ddon")
+        wow_card.setFocus()
+        process_events()
+        assert QApplication.focusWidget() is wow_card
+
+        # D-pad Right moves from WoW boxart card to DDON boxart card
+        assert nav.navigate(Direction.RIGHT) is True
+        process_events()
+        assert QApplication.focusWidget() is ddon_card
+        assert nav._last_move is not None
+
+        # Pressing A (Action.CONFIRM) drills down into DDON Stage 2 and clears `_last_move`
+        assert nav.perform(Action.CONFIRM) is True
+        process_events()
+        assert view.current_stage == 1
+        assert view.active_group_id == "ddon"
+        assert nav._last_move is None
+
+        # Active InputPrompter guard: B cancels the prompt first without leaving Stage 2
+        if view._prompter is None:
+            view._prompter = InputPrompter(view)
+        view._prompter._active = True
+        assert nav.perform(Action.BACK) is True
+        assert view._prompter.is_active() is False
+        assert view.current_stage == 1
+
+        # Pressing B again returns from Stage 2 to Stage 1 and restores focus to `ddon_card`
+        assert nav.perform(Action.BACK) is True
+        process_events()
+        assert view.current_stage == 0
+        assert view.active_group_id is None
+        assert QApplication.focusWidget() is ddon_card
+        assert nav._last_move is None
+    finally:
+        keyboard.stop()
+        gamepad.stop()
+        window.close()
+        window.deleteLater()
+        process_events()

@@ -188,6 +188,7 @@ def build_catalog_tab(
     tabs.setElideMode(Qt.TextElideMode.ElideNone)
     central = QWidget(window)
     column = QVBoxLayout(central)
+    column.setSpacing(0)
     # The app's identity banner, styled like a Dadcraft title bar
     # with golden filigree and a realm gem. `DadcraftHeader` was authored as a
     # decoration but was only ever exercised by tests; this is its home.
@@ -622,10 +623,8 @@ def build_window() -> object:
         normalize_theme_name,
     )
     from yulon.ui.tray_settings import SettingsView
-    from yulon.ui.widgets.dadcraft_decorations import DadcraftRealmBadge
     from yulon.ui.widgets.job import threaded_job_runner
     from yulon.ui.widgets.log_panel import LogPanel
-    from yulon.ui.widgets.panel_style import panel_qss
     from yulon.ui.widgets.update_dialog import UpdateChoice, UpdateDialog, default_open_url
     from yulon.ui.widgets.update_progress import UpdateProgressDialog
     from yulon.update import (
@@ -804,6 +803,7 @@ def build_window() -> object:
         # The single-container servers' tiles (DDON), and the engine their Install drives.
         single_installer_factory=single_installer_for_app,
     )
+    catalog_view.stage_changed.connect(lambda _stage: navigator.invalidate())
     tabs, update_bar, _splitter = build_catalog_tab(window, catalog_view, log_panel)
     # T388: where the screen is smaller than the 960x640 floor the contents
     # scroll inside the window. Here and not in `build_catalog_tab`, whose
@@ -826,13 +826,6 @@ def build_window() -> object:
     def _apply_window_theme(theme_name: str) -> bool:
         resolved = normalize_theme_name(theme_name)
         apply_dadcraft_theme(window, width=window.width() or None, theme_name=resolved)
-        for badge in window.findChildren(DadcraftRealmBadge):
-            badge.set_theme(resolved)
-        for widget in window.findChildren(QWidget):
-            if hasattr(widget, "apply_theme") and widget is not window:
-                widget.apply_theme(resolved)
-            elif type(widget).__name__ in ("ModulesPanel", "TuningPanel"):
-                widget.setStyleSheet(panel_qss(resolved))
         for launcher in getattr(window, "yulon_launchers", {}).values():
             if shiboken6.isValid(launcher) and hasattr(launcher, "apply_theme"):
                 launcher.apply_theme(resolved)

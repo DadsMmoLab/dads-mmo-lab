@@ -17,6 +17,7 @@ from PySide6.QtCore import QEvent, QPointF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QColor,
     QEnterEvent,
+    QFocusEvent,
     QFontMetricsF,
     QHideEvent,
     QLinearGradient,
@@ -1360,10 +1361,20 @@ class DadcraftCampaignCard(QFrame):
     def enterEvent(self, event: QEnterEvent) -> None:
         super().enterEvent(event)
         self._hovered = True
+        self.update()
 
     def leaveEvent(self, event: QEvent) -> None:
         super().leaveEvent(event)
         self._hovered = False
+        self.update()
+
+    def focusInEvent(self, event: QFocusEvent) -> None:
+        super().focusInEvent(event)
+        self.update()
+
+    def focusOutEvent(self, event: QFocusEvent) -> None:
+        super().focusOutEvent(event)
+        self.update()
 
     def hideEvent(self, event: QHideEvent) -> None:
         super().hideEvent(event)
@@ -1489,8 +1500,34 @@ class DadcraftCampaignCard(QFrame):
                 sheen.setColorAt(1.0, QColor(200, 220, 245, 0))
                 painter.fillRect(0, 0, w, int(h * 0.35), sheen)
 
+        elif self._theme in ("wow-unbound", "wow-coa"):
+            # Arcane Nether & Prismatic Crest blended with active theme accent
+            motif_hi = _blend_color(QColor(165, 110, 255), accent_bright, 0.50)
+            motif_mid = _blend_color(QColor(95, 50, 175), ember_col, 0.50)
+            pulse = 0.5 + 0.5 * math.sin(t * 2.5) * math.cos(t * 1.5)
+            g1 = QRadialGradient(w * 0.5 + 22 * math.sin(t * 1.1), h * 0.45, max(w, h) * 0.68)
+            a0 = int((40 + 22 * pulse + 28 * hp) if spec.is_light else (50 + 28 * pulse + 38 * hp))
+            a1 = int((18 + 10 * pulse) if spec.is_light else (28 + 15 * pulse))
+            g1.setColorAt(0.0, QColor(motif_hi.red(), motif_hi.green(), motif_hi.blue(), a0))
+            g1.setColorAt(0.5, QColor(motif_mid.red(), motif_mid.green(), motif_mid.blue(), a1))
+            g1.setColorAt(1.0, QColor(0, 0, 0, 0))
+            painter.fillRect(0, 0, w, h, g1)
+
+        elif self._theme in ("wow-centurion", "dfo"):
+            # Arena Bronze & Crimson Ember blended with active theme accent
+            motif_hi = _blend_color(QColor(255, 155, 65), accent_bright, 0.48)
+            motif_mid = _blend_color(QColor(185, 70, 30), ember_col, 0.48)
+            pulse = 0.5 + 0.5 * math.sin(t * 3.0) * math.cos(t * 1.6)
+            g1 = QRadialGradient(w * 0.5 + 18 * math.sin(t * 1.2), h * 0.85, w * 0.65)
+            a0 = int((40 + 22 * pulse + 28 * hp) if spec.is_light else (52 + 26 * pulse + 36 * hp))
+            a1 = int((18 + 10 * pulse) if spec.is_light else (28 + 14 * pulse))
+            g1.setColorAt(0.0, QColor(motif_hi.red(), motif_hi.green(), motif_hi.blue(), a0))
+            g1.setColorAt(0.45, QColor(motif_mid.red(), motif_mid.green(), motif_mid.blue(), a1))
+            g1.setColorAt(1.0, QColor(0, 0, 0, 0))
+            painter.fillRect(0, 0, w, h, g1)
+
         else:
-            # WoW Tortoise Mystic Jade & Forest blended with active theme accent
+            # WoW Tortoise & DDON Mystic Jade & Forest blended with active theme accent
             motif_hi = _blend_color(QColor(70, 230, 140), accent_bright, 0.45)
             motif_mid = _blend_color(QColor(35, 150, 85), ember_col, 0.45)
             pulse = 0.5 + 0.5 * math.sin(t * 2.0)

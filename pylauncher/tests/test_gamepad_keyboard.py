@@ -1506,3 +1506,73 @@ def test_no_up_or_down_press_passes_over_a_row_in_any_layout(placed: QWidget) ->
     assert from_a_list >= 20, f"only {from_a_list} presses from a list had a row to jump over"
     assert unseen == [], f"{len(unseen)} presses left the focus out of sight: {unseen[:5]}"
     assert passed == [], f"{len(passed)} presses passed over a row: " + "; ".join(passed[:5])
+
+
+# -- Project Kael Phase K5: Controller Navigation & Back-Stack Parity ----------
+
+
+def test_k5_navigator_invalidate_clears_cache_and_last_move(window: QWidget) -> None:
+    """Phase K5.1: `Navigator.invalidate()` resets `_last_move` alongside `_cache.clear()`."""
+    from yulon.ui.gamepad import Direction, Navigator
+
+    nav = Navigator(window)
+    btn = _focus(window, "button")
+    field = window.findChild(QWidget, "field")
+    assert field is not None
+    _ = nav._focusable(window)
+    nav._last_move = (btn, field, Direction.UP)
+    assert nav._cache
+
+    nav.invalidate()
+    assert nav._cache == {}
+    assert nav._last_move is None
+
+
+def test_k5_back_action_hierarchy_prompter_then_back_button_then_root_noop(
+    qapp: object,
+) -> None:
+    """Phase K5.1: `Navigator._back()` cancels `InputPrompter` before `BACK_ACTION_PROPERTY`."""
+    from PySide6.QtWidgets import QHBoxLayout, QMainWindow
+
+    from yulon.ui.gamepad import BACK_ACTION_PROPERTY, Action, install_gamepad_navigation
+    from yulon.ui.widgets.prompt import InputPrompter
+
+    win = QMainWindow()
+    central = QWidget(win)
+    row = QHBoxLayout(central)
+    back_btn = QPushButton("Back", central)
+    back_btn.setProperty(BACK_ACTION_PROPERTY, True)
+    back_clicks: list[int] = []
+    back_btn.clicked.connect(lambda: back_clicks.append(1))
+    row.addWidget(back_btn)
+    win.setCentralWidget(central)
+    prompter = InputPrompter(central)
+    nav, keyboard, gamepad = install_gamepad_navigation(win)
+    win.show()
+    win.activateWindow()
+    process_events()
+    try:
+        # 1. With an active InputPrompter, B cancels the prompt instead of clicking Back
+        prompter._active = True
+        assert prompter.is_active() is True
+        assert nav.perform(Action.BACK) is True
+        assert prompter.is_active() is False
+        assert prompter._answered.is_set() is True
+        assert back_clicks == []
+
+        # 2. With no active prompt, B triggers the visible BACK_ACTION_PROPERTY button
+        assert nav.perform(Action.BACK) is True
+        assert back_clicks == [1]
+
+        # 3. When the back button is hidden (Stage 1 root), B is a safe no-op
+        back_btn.setVisible(False)
+        process_events()
+        assert nav.perform(Action.BACK) is False
+        assert back_clicks == [1]
+        assert win.isVisible() is True
+    finally:
+        keyboard.stop()
+        gamepad.stop()
+        win.close()
+        win.deleteLater()
+        process_events()

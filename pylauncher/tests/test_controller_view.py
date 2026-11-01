@@ -20474,11 +20474,19 @@ def test_every_sub_tab_name_is_whole_and_the_open_one_is_on_screen(
             rect
         ), f"{bar.tabText(index)!r} at {rect.getRect()} is not whole in a {bar.width()}px bar"
         assert _scroll_arrows_over(bar, rect) == [], f"{bar.tabText(index)!r} is under an arrow"
+    header = window.property("header")
+    assert header is not None
+    bar_top_in_window = bar.mapTo(window, bar.rect().topLeft()).y()
+    assert bar_top_in_window == header.geometry().bottom() + 1, (
+        bar_top_in_window,
+        header.geometry(),
+    )
     if size == T191_SIZES[2]:
-        last = bar.tabRect(bar.count() - 1)
         assert (
-            last.right() < bar.width() - 100
-        ), f"the tabs are spread across the bar: the last ends at {last.right()} of {bar.width()}"
+            bar.width() < view._tabs.width() - 100
+        ), f"the tabs are spread across the bar: {bar.width()} of {view._tabs.width()}"
+        assert bar.geometry().x() > 50, f"the sub-tab bar is not centered: {bar.geometry()}"
+        assert abs((bar.geometry().left() + bar.geometry().right()) - view._tabs.width()) <= 4
 
 
 def _overflowing_tab_bar(tmp_path: Path) -> tuple[ControllerView, Any]:

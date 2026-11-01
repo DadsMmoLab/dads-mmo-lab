@@ -9372,7 +9372,7 @@ class ControllerView(QWidget):
         # nine tabs across 1,800 px. Where they do not fit, the bar's arrows
         # scroll them.
         self._tabs.setElideMode(Qt.TextElideMode.ElideNone)
-        self._tabs.setDocumentMode(True)
+        self._tabs.setDocumentMode(False)
         self._tabs.tabBar().setExpanding(False)
         # And no width cap. The rail's rule (`QTabWidget#sidebar-tabs
         # QTabBar::tab`, theme.py) is a descendant selector, so it reaches this
@@ -9383,6 +9383,7 @@ class ControllerView(QWidget):
         # under it).
         self._tabs.setObjectName(SUB_TABS_NAME)
         self._tabs.setStyleSheet(
+            f"QTabWidget#{SUB_TABS_NAME}::tab-bar {{ alignment: center; }} "
             f"QTabWidget#{SUB_TABS_NAME} > QTabBar::tab {{ max-width: 16777215px; }}"
         )
         # The bar's scroll arrows, now that a narrow window shows them: a mouse's,

@@ -14,7 +14,6 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 from yulon import platform, resources
 from yulon.log import get_logger
@@ -734,7 +733,7 @@ def user_themes_dir(config_dir: Path | None = None) -> Path:
     return base / "themes"
 
 
-def parse_theme_dict(raw: Mapping[str, Any], *, fallback_id: str | None = None) -> ThemeSpec:
+def parse_theme_dict(raw: Mapping[str, object], *, fallback_id: str | None = None) -> ThemeSpec:
     """Validate and merge a raw JSON theme mapping onto its base or `arthas` `ThemeSpec`."""
     theme_id = str(raw.get("id") or fallback_id or "").strip().lower()
     if not _THEME_ID_RE.match(theme_id):

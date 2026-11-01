@@ -380,6 +380,16 @@ QTabWidget::pane {{
     padding: 8px;
 }}
 
+/* The main window tab pane descends directly from `DadcraftHeader` with zero top gap,
+   so a server panel's centered sub-tab bar hangs flush beneath the top banner bar. */
+QTabWidget#sidebar-tabs::pane {{
+    top: 0px;
+    border-top: none;
+    border-top-left-radius: 0px;
+    border-top-right-radius: 0px;
+    padding: 0px 8px 8px 8px;
+}}
+
 /* The tab text font must be set on the QTabBar WIDGET, not on `::tab`: the
    `::tab` sub-control does not honour `font-family`/`font-weight` (measured), so
    a rule there leaves tab text at the default font. */
@@ -424,6 +434,32 @@ QTabBar::tab:selected, QTabBar::tab:top:selected {{
    on all four sides, so a controller user can see which tab will activate. */
 QTabBar::tab:focus, QTabBar::tab:top:focus {{
     border: 1px solid {spec.accent_bright};
+}}
+
+/* Server sub-tabs (Server, Console, Accounts, Characters, Bots, Modules, Tuning,
+   Maintenance, Networking): centered horizontally and descending from the top banner. */
+QTabWidget#server-sub-tabs::tab-bar {{
+    alignment: center;
+}}
+
+QTabWidget#server-sub-tabs::pane {{
+    top: 0px;
+}}
+
+QTabWidget#server-sub-tabs > QTabBar::tab {{
+    border-top: none;
+    border-bottom-left-radius: 4px;
+    border-bottom-right-radius: 4px;
+}}
+
+QTabWidget#server-sub-tabs > QTabBar::tab:hover {{
+    border-top: none;
+    border-bottom: 2px solid {spec.accent_brass};
+}}
+
+QTabWidget#server-sub-tabs > QTabBar::tab:selected {{
+    border-top: none;
+    border-bottom: 2px solid {spec.accent_bright};
 }}
 
 /* West (left sidebar) tabs — the realm rail.
