@@ -36,7 +36,15 @@ from pathlib import Path, PurePosixPath
 from typing import Literal
 
 from PySide6.QtCore import QEvent, QPoint, QSize, Qt, Signal, Slot
-from PySide6.QtGui import QFont, QFontMetricsF, QMouseEvent, QPaintEvent, QResizeEvent, QShowEvent
+from PySide6.QtGui import (
+    QEnterEvent,
+    QFont,
+    QFontMetricsF,
+    QMouseEvent,
+    QPaintEvent,
+    QResizeEvent,
+    QShowEvent,
+)
 from PySide6.QtWidgets import (
     QFrame,
     QGroupBox,
@@ -59,13 +67,8 @@ from yulon.git import Behind, is_behind
 from yulon.manifest import Manifest, ManifestType
 from yulon.manifest_store import FAMILY_FILES
 from yulon.ui.theme import (
-    COLOR_BG_PARCHMENT_LIGHT,
     COLOR_BRASS_DARK,
-    COLOR_TEXT_GOLD,
     COLOR_TEXT_MUTED,
-    COLOR_TEXT_PRIMARY,
-    COLOR_TEXT_WARNING,
-    COLOR_UNCOMMON,
     DEFAULT_THEME,
     TOUCH_TARGET_PX,
     get_theme,
@@ -1029,25 +1032,18 @@ down the card.
 """
 
 ROW_VERTICAL_PADDING = 2
-"""The pixels above and below a row's content (T75). Eight before.
+"""The pixels above and below a row's content (T75).
 
 Here beside `BUTTON_COLUMN_WIDTH` rather than in `theme.py`, for the reason that
 one is: these are this widget's own geometry and no stylesheet reads them. T45's
 rule is about what the THEME authors -- fonts, colours, `min-height`s, the touch
-floor -- and nothing here renders larger than the theme says. It renders in less
-space around it.
+floor -- and nothing here renders larger than the theme says.
 """
 
-ROW_LINE_SPACING = 0
-"""Between the row's name line and its description line.
+ROW_LINE_SPACING = 1
+"""Between the row's name line and its description line."""
 
-Nothing, and the two lines still read apart: the name is gold and bold and the
-description is muted, which is a stronger separator than two pixels ever were.
-Two pixels here is two pixels off the height of every row in the list, and the
-row's total is what T75 is about.
-"""
-
-DETAIL_SPACING = 4
+DETAIL_SPACING = 6
 """Between the row proper and the subpanel an owed chip opens under it.
 
 Not `ROW_LINE_SPACING`: this gap is only ever drawn on the ONE row whose chip is
@@ -1055,25 +1051,14 @@ open, so it costs the list nothing, and the panel it separates is a different
 thing from the row rather than a second line of it.
 """
 
-ROW_GAP = 1
-"""Between one row and the next inside a card. Two before.
-
-The gap the eye reads between two rows is not this: it is this plus the two
-rows' own `ROW_VERTICAL_PADDING`, so five pixels of sheet still separate one
-module's button from the next one's. What this number alone decides is how many
-rows a screen holds -- it is paid 40 times on the shipped WotLK catalog.
-"""
+ROW_GAP = 3
+"""Between one row card and the next inside a family card."""
 
 CARD_SPACING = 6
-"""Between one family card and the next, and under a card's last row. Eight before."""
+"""Between one family card and the next, and under a card's last row."""
 
-CARD_LINE_SPACING = 2
-"""Between a card's hint, its headers, its toggle and its rows. Four before.
-
-Four of these gaps stand above the first row of the list -- the hint, the
-installed header, the toggle -- so halving them is 8px off where the rows start
-on every window, paid once rather than per row.
-"""
+CARD_LINE_SPACING = 3
+"""Between a card's hint, its headers, its toggle and its rows."""
 
 CHIP_SPACING = 4
 """Between the badge, the chips, and the overflow chip after them."""
@@ -1538,11 +1523,11 @@ class RowWidget(QFrame):
         # would open under whatever the card laid out next, which after a
         # reload is not necessarily the same module.
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(10, ROW_VERTICAL_PADDING, 10, ROW_VERTICAL_PADDING)
+        outer.setContentsMargins(12, ROW_VERTICAL_PADDING, 12, ROW_VERTICAL_PADDING)
         outer.setSpacing(DETAIL_SPACING)
         box = QHBoxLayout()
         box.setContentsMargins(0, 0, 0, 0)
-        box.setSpacing(10)
+        box.setSpacing(12)
         outer.addLayout(box)
 
         # The text column lives in a widget whose WIDTH the row decides (T193).
@@ -1560,7 +1545,6 @@ class RowWidget(QFrame):
         title_row = QHBoxLayout()
         title_row.setSpacing(8)
         self.name_label = _ElidedLabel(data.name, self)
-        self.name_label.setStyleSheet(f"color: {COLOR_TEXT_GOLD}; font-weight: bold;")
         # First claim on the line (T193 review): its hint is the whole name, and
         # the version and the conf paths after it ask for nothing (`Ignored`),
         # so they share only what the name and the link leave. The name is cut
@@ -1580,7 +1564,6 @@ class RowWidget(QFrame):
         # user their selection or their open sections (T44 item 1).
         self.version_label = _ElidedLabel(data.version or "", self)
         self.version_label.setFont(QFont("monospace"))
-        self.version_label.setStyleSheet(f"color: {COLOR_TEXT_MUTED};")
         # The first thing on this line to give way when the column is narrow
         # (T193). The text column is GIVEN its width now, and at 960 that does
         # not hold a name, the link and `7c02b1d · 2026-09-01` side by side.
@@ -1599,7 +1582,6 @@ class RowWidget(QFrame):
         if data.paths:
             self.paths_label: _ElidedLabel | None = _ElidedLabel(", ".join(data.paths), self)
             self.paths_label.setFont(QFont("monospace"))
-            self.paths_label.setStyleSheet(f"color: {COLOR_TEXT_MUTED};")
             # Behind the name, like the version (T193 review): a long list of
             # paths must not cut the name it is about.
             self.paths_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
@@ -1613,7 +1595,6 @@ class RowWidget(QFrame):
         # windows -- the 105px rows measured at 1280x800 before T75 -- and it was
         # the one thing on the row whose height nobody could predict.
         self.description_label = _ElidedLabel(data.description, self)
-        self.description_label.setStyleSheet(f"color: {COLOR_TEXT_MUTED};")
         left.addWidget(self.description_label)
         # T126's plain extra line, only where there is one to say.
         self.note_label: QLabel | None = None
@@ -1631,17 +1612,6 @@ class RowWidget(QFrame):
         middle.setContentsMargins(0, 0, 0, 0)
         middle.setSpacing(CHIP_SPACING)
         self.badge_label = QLabel(data.badge, self)
-        # Three tones, and the pairing is by what the badge ASKS OF THE READER
-        # rather than by its text: green for a module that is here and working,
-        # amber for one that is here and not finished or whose state nobody can
-        # say (T121: its Remove is owed), muted for the ones that ask nothing.
-        if data.badge in (BADGE_SQL_NOT_APPLIED, BADGE_STATE_UNKNOWN):
-            badge_colour = COLOR_TEXT_WARNING
-        elif data.installed:
-            badge_colour = COLOR_UNCOMMON
-        else:
-            badge_colour = COLOR_TEXT_MUTED
-        self.badge_label.setStyleSheet(f"color: {badge_colour}; font-weight: bold;")
         if data.state_detail:
             self.badge_label.setToolTip(data.state_detail)
         middle.addWidget(self.badge_label)
@@ -1653,11 +1623,6 @@ class RowWidget(QFrame):
             button = _ChipButton(chip.label, self)
             button.setFlat(True)
             button.setToolTip(chip.detail)
-            colour = COLOR_TEXT_WARNING if chip.kind == "owed" else COLOR_TEXT_MUTED
-            button.setStyleSheet(
-                f"color: {colour}; border: 1px solid {COLOR_BRASS_DARK}; padding: 0px 6px; "
-                f"min-height: {TOUCH_TARGET_PX}px;"
-            )
             if chip.kind == "owed":
                 # Only an owed chip is a press: a fact chip names something no
                 # press can change, and wiring it would put a sentence in the
@@ -1692,6 +1657,7 @@ class RowWidget(QFrame):
         # themed at every width from 960 to 2560, where the two text columns
         # varied and this one did not.
         column.setContentsMargins(0, 0, 0, 0)
+        column.addStretch(1)
         # T68: a clone whose install never finished keeps Install, even though
         # the folder is there. The refusal that produced that state says "Press
         # Stop, then install again", and before this the only "again" on offer
@@ -1738,16 +1704,11 @@ class RowWidget(QFrame):
         self._actions_enabled = True
         self.detail = QFrame(self)
         self.detail.setObjectName("moduleRowDetail")
-        self.detail.setStyleSheet(
-            f"QFrame#moduleRowDetail {{ background-color: {COLOR_BG_PARCHMENT_LIGHT}; "
-            f"border-left: 3px solid {COLOR_TEXT_WARNING}; }}"
-        )
         detail_box = QVBoxLayout(self.detail)
         detail_box.setContentsMargins(10, 6, 10, 6)
         detail_box.setSpacing(4)
         self.detail_label = QLabel("", self.detail)
         self.detail_label.setWordWrap(True)
-        self.detail_label.setStyleSheet(f"color: {COLOR_TEXT_PRIMARY};")
         detail_box.addWidget(self.detail_label)
         detail_actions = QHBoxLayout()
         detail_actions.addStretch(1)
@@ -1760,18 +1721,21 @@ class RowWidget(QFrame):
 
         self.set_enabled_actions(True)
         self._selected = False
-        self._theme_name = DEFAULT_THEME
-        self.apply_theme(DEFAULT_THEME)
+        self._hovered = False
+        self._theme_name = resolve_widget_theme(self)
+        self.apply_theme(self._theme_name)
 
     def apply_theme(self, theme_name: str | None = None) -> None:
         """Restyle the module row and its child labels/chips for `theme_name`."""
-        self._theme_name = normalize_theme_name(theme_name)
+        self._theme_name = normalize_theme_name(theme_name or resolve_widget_theme(self))
         spec = get_theme(self._theme_name)
         self.name_label.setStyleSheet(f"color: {spec.text_gold}; font-weight: bold;")
         self.version_label.setStyleSheet(f"color: {spec.text_muted};")
         if self.paths_label is not None:
             self.paths_label.setStyleSheet(f"color: {spec.text_muted};")
         self.description_label.setStyleSheet(f"color: {spec.text_muted};")
+        if self.note_label is not None:
+            self.note_label.setStyleSheet(f"color: {spec.text_primary};")
         if self.data.badge in (BADGE_SQL_NOT_APPLIED, BADGE_STATE_UNKNOWN):
             badge_colour = spec.text_warning
         elif self.data.installed:
@@ -1780,19 +1744,29 @@ class RowWidget(QFrame):
             badge_colour = spec.text_muted
         self.badge_label.setStyleSheet(f"color: {badge_colour}; font-weight: bold;")
         for button, chip in zip(self.chip_buttons, self.data.chips, strict=False):
-            colour = spec.text_warning if chip.kind == "owed" else spec.text_muted
+            if chip.kind == "owed":
+                colour = spec.text_warning
+                border_col = spec.text_warning
+            elif chip.kind == "lock":
+                colour = spec.text_primary
+                border_col = spec.accent_brass
+            else:
+                colour = spec.text_muted
+                border_col = spec.border_dark
             button.setStyleSheet(
-                f"color: {colour}; border: 1px solid {spec.border_dark}; padding: 0px 6px; "
+                f"background-color: {spec.bg_panel}; color: {colour}; "
+                f"border: 1px solid {border_col}; border-radius: 3px; padding: 0px 6px; "
                 f"min-height: {TOUCH_TARGET_PX}px;"
             )
         if self.chip_strip.overflow is not None:
             self.chip_strip.overflow.setStyleSheet(
-                f"color: {spec.text_muted}; border: 1px solid {spec.border_dark}; "
+                f"background-color: {spec.bg_panel}; color: {spec.text_muted}; "
+                f"border: 1px solid {spec.border_dark}; border-radius: 3px; "
                 f"padding: 0px 6px; min-height: {TOUCH_TARGET_PX}px;"
             )
         self.detail.setStyleSheet(
             f"QFrame#moduleRowDetail {{ background-color: {spec.bg_hover}; "
-            f"border-left: 3px solid {spec.text_warning}; }}"
+            f"border-left: 3px solid {spec.text_warning}; border-radius: 3px; }}"
         )
         self.detail_label.setStyleSheet(f"color: {spec.text_primary};")
         self.set_selected(self._selected)
@@ -1826,16 +1800,34 @@ class RowWidget(QFrame):
         """Highlight, through the theme's own constants (T42 forbids touching `theme.py`)."""
         self._selected = selected
         spec = get_theme(getattr(self, "_theme_name", DEFAULT_THEME))
+        hovered = getattr(self, "_hovered", False)
         if selected:
-            self.setStyleSheet(
-                f"QFrame#moduleRow {{ background-color: {spec.bg_hover}; "
-                f"border-left: 3px solid {spec.accent_border}; }}"
-            )
+            left_bar = spec.accent_bright
+            bg = spec.bg_hover
         else:
-            self.setStyleSheet(
-                f"QFrame#moduleRow {{ background-color: {spec.bg_panel}; "
-                f"border-left: 3px solid transparent; }}"
-            )
+            bg = spec.bg_hover if hovered else spec.bg_container
+            if self.data.badge in (BADGE_SQL_NOT_APPLIED, BADGE_STATE_UNKNOWN):
+                left_bar = spec.text_warning
+            elif self.data.installed:
+                left_bar = spec.uncommon
+            else:
+                left_bar = spec.accent_brass if hovered else spec.border_dark
+        self.setStyleSheet(
+            f"QFrame#moduleRow {{ background-color: {bg}; "
+            f"border-left: 3px solid {left_bar}; border-radius: 4px; }}"
+        )
+
+    def enterEvent(self, event: QEnterEvent) -> None:  # noqa: N802  (Qt's own name)
+        super().enterEvent(event)
+        if not self._hovered:
+            self._hovered = True
+            self.set_selected(self._selected)
+
+    def leaveEvent(self, event: QEvent) -> None:  # noqa: N802  (Qt's own name)
+        super().leaveEvent(event)
+        if self._hovered:
+            self._hovered = False
+            self.set_selected(self._selected)
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802  (Qt's own name)
         """A click on the row's BODY selects it — the mockup's rule, and T42's.
@@ -1930,10 +1922,8 @@ class _FamilyCard(QGroupBox):
         # the narrow card the mockup draws.
         self.hint_label = QLabel(hint, self)
         self.hint_label.setWordWrap(True)
-        self.hint_label.setStyleSheet(f"color: {COLOR_TEXT_MUTED}; font-style: italic;")
         box.addWidget(self.hint_label)
         self.installed_header = QLabel("Installed (0)", self)
-        self.installed_header.setStyleSheet(f"color: {COLOR_TEXT_PRIMARY}; font-weight: bold;")
         box.addWidget(self.installed_header)
         self.installed_box = QWidget(self)
         self._installed_layout = QVBoxLayout(self.installed_box)
@@ -1946,6 +1936,21 @@ class _FamilyCard(QGroupBox):
         self._available_layout.setContentsMargins(0, 0, 0, 0)
         self._available_layout.setSpacing(ROW_GAP)
         self._box = box
+        self.apply_theme(resolve_widget_theme(self))
+
+    def apply_theme(self, theme_name: str | None = None) -> None:
+        """Restyle the family card's hint, installed header, and available toggle."""
+        spec = get_theme(normalize_theme_name(theme_name or resolve_widget_theme(self)))
+        self.hint_label.setStyleSheet(
+            f"color: {spec.text_muted}; font-style: italic; padding: 0px 2px;"
+        )
+        self.installed_header.setStyleSheet(
+            f"color: {spec.uncommon}; font-weight: bold; padding: 2px 2px 0px 2px;"
+        )
+        if self.toggle is not None:
+            self.toggle.setStyleSheet(
+                f"color: {spec.accent_light}; font-weight: bold; border: none; padding: 1px 4px;"
+            )
 
     def fill(self, installed: Sequence[RowWidget], available: Sequence[RowWidget]) -> None:
         self.installed_header.setText(f"Installed ({len(installed)})")
@@ -1958,13 +1963,13 @@ class _FamilyCard(QGroupBox):
             self.toggle.setCheckable(True)
             self.toggle.setText(f"Available {len(available)} — not installed")
             self.toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-            self.toggle.setStyleSheet(f"color: {COLOR_TEXT_MUTED}; border: none;")
             self._box.addWidget(self.toggle)
             for row in available:
                 self._available_layout.addWidget(row)
             self._box.addWidget(self.available_box)
         else:
             self.available_box.setVisible(False)
+        self.apply_theme(resolve_widget_theme(self))
 
     def laid_out_hint(self) -> QLabel | None:
         """The hint label only if this card really LAYS IT OUT, else `None`.
@@ -2132,9 +2137,7 @@ class ModulesPanel(QWidget):
         self._selected = keep if keep in self._rows else None
         for key, widget in self._rows.items():
             widget.set_selected(key == self._selected)
-        active = self._theme_name or resolve_widget_theme(self)
-        if active != DEFAULT_THEME or self._theme_name is not None:
-            self.apply_theme(active)
+        self.apply_theme(self._theme_name or resolve_widget_theme(self))
 
     def apply_theme(self, theme_name: str | None = None) -> None:
         """Restyle the panel, its family cards, and its rows for `theme_name`."""
@@ -2144,10 +2147,7 @@ class ModulesPanel(QWidget):
         self.setStyleSheet(panel_qss(resolved))
         self.empty_label.setStyleSheet(f"color: {spec.text_muted};")
         for card in self._cards.values():
-            card.hint_label.setStyleSheet(f"color: {spec.text_muted}; font-style: italic;")
-            card.installed_header.setStyleSheet(f"color: {spec.text_primary}; font-weight: bold;")
-            if card.toggle is not None:
-                card.toggle.setStyleSheet(f"color: {spec.text_muted}; border: none;")
+            card.apply_theme(resolved)
         for row_widget in self._rows.values():
             row_widget.apply_theme(resolved)
 

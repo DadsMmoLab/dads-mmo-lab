@@ -12,11 +12,11 @@ import tempfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 from yulon import apply, module_source, move, move_server, platform, start_over
 from yulon.catalog import composegen, native, upstream
 from yulon.catalog.catalog import Catalog, CatalogEntry
+from yulon.catalog.installer import InstallEngine
 from yulon.log import get_logger
 from yulon.manifest import Manifest, ManifestType
 from yulon.manifest_store import ManifestStore
@@ -40,7 +40,11 @@ class MoveIn:
     folder, no GitHub.
     """
     start_over: (
-        Callable[[CatalogEntry, Path, Path | None, Any, Mapping[str, object] | None], Any] | None
+        Callable[
+            [CatalogEntry, Path, Path | None, InstallEngine, Mapping[str, object] | None],
+            start_over.StartOver,
+        ]
+        | None
     ) = None
     """`(entry, server_dir, client_dir, plain engine, record as asked about) -> engine` for
     "Start over with a plain install" on a folder a bring-in did not finish (T830); None draws
@@ -163,7 +167,7 @@ def start_over_for_app(
     entry: CatalogEntry,
     server_dir: Path,
     client_dir: Path | None,
-    plain: Any,
+    plain: InstallEngine,
     expected: Mapping[str, object] | None,
 ) -> start_over.StartOver:
     """The real "Start over with a plain install" engine for one Catalog folder (T830)."""

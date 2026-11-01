@@ -45,7 +45,11 @@ from yulon.ui.folder_picker import pick_folder
 from yulon.ui.help_places import HELP_BUTTON, HelpPlacesBox
 from yulon.ui.icons import dadcraft_icon
 from yulon.ui.message_box import show_information, show_warning
-from yulon.ui.theme import COLOR_TEXT_GOLD
+from yulon.ui.theme import (
+    get_theme,
+    normalize_theme_name,
+    resolve_widget_theme,
+)
 from yulon.ui.widgets.dadcraft_decorations import DadcraftRealmBadge
 from yulon.ui.widgets.job import JobRunner, ThreadedJobRunner, threaded_job_runner
 from yulon.ui.widgets.log_panel import LogPanel
@@ -135,6 +139,7 @@ class SingleServerView(QWidget):
         self._address = LOOPBACK  # the address the Apply in flight is setting
 
         layout = QVBoxLayout(self)
+        self.choose_client_button: QPushButton | None = None
         layout.addLayout(self._build_head())
         layout.addLayout(self._build_server_buttons())
         layout.addWidget(self._section("Who can connect"))
@@ -155,6 +160,7 @@ class SingleServerView(QWidget):
         layout.addWidget(self.console, 1)
 
         self._set_buttons(self.realm_badge.status)
+        self.apply_theme(resolve_widget_theme(self))
         self._timer = QTimer(self)
         self._timer.setInterval(poll_ms)
         self._timer.timeout.connect(self.poll)
@@ -162,6 +168,16 @@ class SingleServerView(QWidget):
         QTimer.singleShot(0, self.poll)
         if entry.advertise is not None:
             QTimer.singleShot(0, self.read_address)
+
+    def apply_theme(self, theme_name: str | None = None) -> None:
+        """Re-tint the view's `dadcraft_icon()` buttons and realm badge for `theme_name`."""
+        resolved = normalize_theme_name(theme_name or resolve_widget_theme(self))
+        spec = get_theme(resolved)
+        self.setProperty("yulon_theme", resolved)
+        self.realm_badge.set_theme(resolved)
+        self.open_folder_button.setIcon(dadcraft_icon("folder", spec.text_gold, 14))
+        if self.choose_client_button is not None:
+            self.choose_client_button.setIcon(dadcraft_icon("folder", spec.text_gold, 14))
 
     # -- building ----------------------------------------------------------------
 
@@ -186,8 +202,8 @@ class SingleServerView(QWidget):
         head.addWidget(self.realm_badge)
 
         open_folder = QPushButton("Open folder", self)
-        open_folder.setIcon(dadcraft_icon("folder", COLOR_TEXT_GOLD, 14))
         open_folder.clicked.connect(self._open_folder)
+        self.open_folder_button = open_folder
         folder_row = QHBoxLayout()
         folder_row.addWidget(self._meta(f"Server folder: {self.controller.server_dir}"), 1)
         folder_row.addWidget(open_folder)
@@ -256,8 +272,8 @@ class SingleServerView(QWidget):
         assert self.entry.play is not None
         self.client_label = self._meta(self._client_text())
         choose = QPushButton("Choose client folder…", self)
-        choose.setIcon(dadcraft_icon("folder", COLOR_TEXT_GOLD, 14))
         choose.clicked.connect(self.choose_client_dir)
+        self.choose_client_button = choose
         client_row = QHBoxLayout()
         client_row.addWidget(self.client_label, 1)
         client_row.addWidget(choose)

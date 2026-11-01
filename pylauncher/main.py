@@ -188,6 +188,7 @@ def build_catalog_tab(
     tabs.setElideMode(Qt.TextElideMode.ElideNone)
     central = QWidget(window)
     column = QVBoxLayout(central)
+    column.setSpacing(0)
     # The app's identity banner, styled like a Dadcraft title bar
     # with golden filigree and a realm gem. `DadcraftHeader` was authored as a
     # decoration but was only ever exercised by tests; this is its home.
@@ -200,6 +201,9 @@ def build_catalog_tab(
     column.addWidget(header)
     window.setProperty("header", header)
     top_menu = TopMenuBar(tabs, parent=central)
+    if isinstance(win_theme, str) and win_theme:
+        top_menu.apply_theme(win_theme)
+        catalog_view.apply_theme(win_theme)
     header.add_action(top_menu)
     window.setProperty("top_menu", top_menu)
     update_bar = UpdateBar(central)
@@ -619,10 +623,8 @@ def build_window() -> object:
         normalize_theme_name,
     )
     from yulon.ui.tray_settings import SettingsView
-    from yulon.ui.widgets.dadcraft_decorations import DadcraftRealmBadge
     from yulon.ui.widgets.job import threaded_job_runner
     from yulon.ui.widgets.log_panel import LogPanel
-    from yulon.ui.widgets.panel_style import panel_qss
     from yulon.ui.widgets.update_dialog import UpdateChoice, UpdateDialog, default_open_url
     from yulon.ui.widgets.update_progress import UpdateProgressDialog
     from yulon.update import (
@@ -801,6 +803,7 @@ def build_window() -> object:
         # The single-container servers' tiles (DDON), and the engine their Install drives.
         single_installer_factory=single_installer_for_app,
     )
+    catalog_view.stage_changed.connect(lambda _stage: navigator.invalidate())
     tabs, update_bar, _splitter = build_catalog_tab(window, catalog_view, log_panel)
     # T388: where the screen is smaller than the 960x640 floor the contents
     # scroll inside the window. Here and not in `build_catalog_tab`, whose
@@ -823,19 +826,23 @@ def build_window() -> object:
     def _apply_window_theme(theme_name: str) -> bool:
         resolved = normalize_theme_name(theme_name)
         apply_dadcraft_theme(window, width=window.width() or None, theme_name=resolved)
-        for badge in window.findChildren(DadcraftRealmBadge):
-            badge.set_theme(resolved)
-        for widget in window.findChildren(QWidget):
-            if hasattr(widget, "apply_theme") and widget is not window:
-                widget.apply_theme(resolved)
-            elif type(widget).__name__ in ("ModulesPanel", "TuningPanel"):
-                widget.setStyleSheet(panel_qss(resolved))
         for launcher in getattr(window, "yulon_launchers", {}).values():
             if shiboken6.isValid(launcher) and hasattr(launcher, "apply_theme"):
                 launcher.apply_theme(resolved)
+        friend_launcher = getattr(window, "yulon_friend_launcher", None)
+        if (
+            friend_launcher is not None
+            and shiboken6.isValid(friend_launcher)
+            and hasattr(friend_launcher, "apply_theme")
+        ):
+            friend_launcher.apply_theme(resolved)
         return ui_settings.remember_theme(resolved)
 
-    settings_view = SettingsView(window, on_theme_changed=_apply_window_theme, parent=window)
+    settings_view = SettingsView(
+        ui_settings.load_ui_settings().theme,
+        on_theme_changed=_apply_window_theme,
+        parent=window,
+    )
     settings_view.hide()
     window.yulon_settings_view = settings_view
     tabs.tabBar().setTabVisible(0, False)
@@ -1008,6 +1015,7 @@ def build_window() -> object:
         _bring_to_front(window)
 
     window.yulon_show_logs = show_logs
+    settings_view.logs_requested.connect(show_logs)
 
     def show_friend_launcher() -> None:
         """The top bar's **Launcher** (T807): the friend-server window, one at a time.
@@ -1019,6 +1027,10 @@ def build_window() -> object:
         launcher = getattr(window, "yulon_friend_launcher", None)
         if launcher is None or not shiboken6.isValid(launcher):
             launcher = FriendLauncher(catalog)
+            launcher.setWindowIcon(get_app_icon())
+            win_theme = window.property("yulon_theme")
+            if isinstance(win_theme, str) and win_theme:
+                launcher.apply_theme(win_theme)
             launcher.closed.connect(lambda: setattr(window, "yulon_friend_launcher", None))
             window.yulon_friend_launcher = launcher
         # The launcher is a top-level window of its own (no parent): it is the one
@@ -1629,6 +1641,9 @@ def build_window() -> object:
         view.action_failed.connect(
             lambda message, name=entry.name: logger.warning(f"{name}: {message}")
         )
+        win_theme = window.property("yulon_theme")
+        if isinstance(win_theme, str) and win_theme:
+            view.apply_theme(win_theme)
         single_views[key] = view
         single_view_list.append(view)
         panels.extend(view.log_panels())

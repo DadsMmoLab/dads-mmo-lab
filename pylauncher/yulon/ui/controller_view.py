@@ -254,6 +254,7 @@ from yulon.ui.widgets.modules_panel import (
 )
 from yulon.ui.widgets.move_panel import MovePanel
 from yulon.ui.widgets.page import (
+    DANGER_ZONE_NAME,
     RowsList,
     RowsScroll,
     ScrollPage,
@@ -7397,6 +7398,8 @@ class _TabFit(QObject):
         super().__init__(tab)
         # T613: the add-on box keeps its sentence exactly where the card keeps its own.
         self._addon_box = addon_box
+        self._addon_available = addon_box is not None and not addon_box.isHidden()
+        self.submenu_open = False
         self._tab = tab
         # T692a: None where the tab holds no log panel -- the rebuild log lives
         # on Maintenance now, so Modules folds only its report. A foreign log
@@ -7510,6 +7513,8 @@ class _TabFit(QObject):
             return
         self._settling = True
         try:
+            if self.submenu_open and self._card.isHidden() and self._card_line.isHidden():
+                self._card.setVisible(True)
             height = page_room(self._tab)
             open_now = self._fold_until_it_fits(self._floor)
             asked = self._asked_for
@@ -7545,8 +7550,16 @@ class _TabFit(QObject):
             # form is showing, so the answer cannot depend on its own result.
             rows = height - self._owed(log_open=False, report_open=False, list_floor=0)
             card_whole = rows >= self._rows_floor
-            self._show_the_card(whole=card_whole)
-            self._show_the_addon_sentence(card_whole)
+            if self.submenu_open:
+                if self._addon_box is not None and self._addon_available:
+                    self._addon_box.setVisible(True)
+                self._show_the_card(whole=card_whole)
+                self._show_the_addon_sentence(card_whole)
+            elif self._tab.isVisible():
+                self._card.setVisible(False)
+                self._card_line.setVisible(False)
+                if self._addon_box is not None:
+                    self._addon_box.setVisible(False)
             spare = height - self._owed(
                 log_open=log_room, report_open=report_room, card_whole=card_whole
             )
@@ -7667,7 +7680,9 @@ class _TabFit(QObject):
         # Whether the card's slot is on screen at all, read off either form: a
         # tab that is not showing has nothing visible, and every other widget
         # below is skipped by the same test.
-        card_on_screen = self._card.isVisible() or self._card_line.isVisible()
+        card_on_screen = self.submenu_open and (
+            self._card.isVisible() or self._card_line.isVisible()
+        )
         shown = 0
         for index in range(box.count()):
             item = box.itemAt(index)
@@ -7690,6 +7705,8 @@ class _TabFit(QObject):
                 continue
             if not widget.isVisible():
                 continue
+            if widget is self._addon_box and not self.submenu_open:
+                continue
             shown += 1
             if widget is self._addon_box:
                 owed += self._addon_box.minimum_for(inner, card_whole)
@@ -7698,21 +7715,6 @@ class _TabFit(QObject):
             elif widget is self._listing:
                 owed += list_floor
             else:
-                # The item's minimum at THIS WIDTH, which is the quantity
-                # `QBoxLayout` shares out, and asked for the way it asks:
-                # `minimumHeightForWidth()` where the item has one and
-                # `minimumSize()` where it does not. Neither shortcut works.
-                # `minimumSizeHint()` alone under-counts every widget whose
-                # height is a function of its width -- the custom-module card
-                # says 122 and needs 136 at 1000x700, because the sentence in it
-                # wraps to a third line there, and the sum came out 522 against
-                # a tab of 525 while the layout wanted 538, so nothing folded
-                # and the card was drawn 109. `heightForWidth()` is the other
-                # way wrong: it is the PREFERRED height, which over-counts, and
-                # a tab that thinks it is short folds things it did not need to.
-                # (The card itself is counted above since T153, by
-                # `card_minimum()`, which asks its own layout the same question
-                # because a hidden card's item answers nothing.)
                 need = item.minimumSize().height()
                 if item.hasHeightForWidth():
                     need = max(need, item.minimumHeightForWidth(inner))
@@ -9371,7 +9373,7 @@ class ControllerView(QWidget):
         # nine tabs across 1,800 px. Where they do not fit, the bar's arrows
         # scroll them.
         self._tabs.setElideMode(Qt.TextElideMode.ElideNone)
-        self._tabs.setDocumentMode(True)
+        self._tabs.setDocumentMode(False)
         self._tabs.tabBar().setExpanding(False)
         # And no width cap. The rail's rule (`QTabWidget#sidebar-tabs
         # QTabBar::tab`, theme.py) is a descendant selector, so it reaches this
@@ -9382,6 +9384,7 @@ class ControllerView(QWidget):
         # under it).
         self._tabs.setObjectName(SUB_TABS_NAME)
         self._tabs.setStyleSheet(
+            f"QTabWidget#{SUB_TABS_NAME}::tab-bar {{ alignment: center; }} "
             f"QTabWidget#{SUB_TABS_NAME} > QTabBar::tab {{ max-width: 16777215px; }}"
         )
         # The bar's scroll arrows, now that a narrow window shows them: a mouse's,
@@ -9658,7 +9661,12 @@ class ControllerView(QWidget):
         drawn through `_drawn_title`; the tooltip keeps the plain title.
         """
         page = tab if title in _PAGES_THAT_FIT_THEMSELVES else ScrollPage(tab)
-        index = self._tabs.addTab(page, get_tab_icon(icon_name), _drawn_title(title))
+        page.setProperty("yulon_tab_icon", icon_name)
+        index = self._tabs.addTab(
+            page,
+            get_tab_icon(icon_name, theme_name=resolve_widget_theme(self)),
+            _drawn_title(title),
+        )
         self._tabs.setTabToolTip(index, title)
 
     def _show_page_of(self, widget: QWidget) -> None:
@@ -18935,6 +18943,7 @@ class ControllerView(QWidget):
     def _fill_the_shelf(self, shelf: backup_shelf.Shelf) -> None:
         """Fill the Backups list from the shelf: date, database, size, what made it, game."""
         self._shelf = shelf
+        muted_color = get_theme(resolve_widget_theme(self)).text_muted
         for r in shelf.rows:
             text = backup_shelf.describe(r, shelf.game_id)
             item = QListWidgetItem(f"{text} \u00b7 kept" if r.kept_because else text)
@@ -18944,7 +18953,8 @@ class ControllerView(QWidget):
                 f"{r.name}\n{r.kept_because or r.cannot_delete or r.problem or ''}".strip()
             )
             if r.kept_because or r.cannot_delete:
-                item.setForeground(QColor(COLOR_TEXT_MUTED))
+                item.setData(Qt.ItemDataRole.UserRole + 3, True)
+                item.setForeground(QColor(muted_color))
             self.backup_list.addItem(item)
         # T677: what earlier uninstalls kept beside the server folder, for Restore only.
         for index, earlier in enumerate(shelf.kept):
@@ -18953,8 +18963,9 @@ class ControllerView(QWidget):
                 item = QListWidgetItem(f"{text} \u00b7 kept from an earlier uninstall")
                 item.setData(Qt.ItemDataRole.UserRole, str(earlier.folder / r.name))
                 item.setData(Qt.ItemDataRole.UserRole + 2, [index, r.name])
+                item.setData(Qt.ItemDataRole.UserRole + 3, True)
                 item.setToolTip(f"{earlier.folder / r.name}\n{r.cannot_delete or ''}".strip())
-                item.setForeground(QColor(COLOR_TEXT_MUTED))
+                item.setForeground(QColor(muted_color))
                 self.backup_list.addItem(item)
 
     def _selected_row(self) -> backup_shelf.ShelfRow | None:
@@ -19802,6 +19813,15 @@ class ControllerView(QWidget):
         actions.addWidget(self.refresh_modules_button)
         actions.add_gap()
         actions.addWidget(self.module_sql_button)
+        self.bring_own_button = QPushButton("Bring your own…", tab)
+        self.bring_own_button.setObjectName("module-bring-own-button")
+        self.bring_own_button.setCheckable(True)
+        self.bring_own_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.bring_own_button.setToolTip(
+            "Open the sub-menu to install a module from a link/folder or bring your own add-ons."
+        )
+        self.bring_own_button.toggled.connect(self.set_bring_own_submenu_open)
+        actions.addWidget(self.bring_own_button)
         # The banner, hidden until something owes a rebuild. It is above the
         # cards rather than on each owing row because the ACTION is one action
         # for all of them -- one compile covers every module installed since the
@@ -19877,15 +19897,6 @@ class ControllerView(QWidget):
         # under it is as tall as it has something to say -- the report a line
         # per line to a ceiling of six, the log its strip until a job writes to
         # it -- and every pixel left over is the list's.
-        #
-        # It used to be 3:1:2 between the list, the report and the log, which
-        # sounds like the list wins and does not: `QVBoxLayout` hands every
-        # widget its `sizeHint` before it shares the SURPLUS by stretch, and
-        # both text boxes' hints are twelve lines of nothing. Measured in the
-        # themed window (the fonts scale with its width, so nothing here can be
-        # measured without the theme on): at 1920x1080 the list had 311px of the
-        # tab's 900 and two whole rows of forty, and at the 1280x800 the app
-        # opens at it had 70 -- a scrollbar and the top of a family card.
         box.addWidget(self.module_actions)
         box.addWidget(self.rebuild_banner)
         box.addWidget(self.modules_panel, 1)
@@ -20836,6 +20847,24 @@ class ControllerView(QWidget):
         )
         self.module_link_button.setToolTip(link_tip if link else MODULE_CUSTOM_NO_ROUTE)
         self.module_folder_button.setToolTip(folder_tip if folder else MODULE_CUSTOM_NO_ROUTE)
+
+    @Slot(bool)
+    def set_bring_own_submenu_open(self, is_open: bool) -> None:
+        """Toggle the 'Bring your own' module & add-on sub-menu on the Modules tab."""
+        self.bring_own_button.blockSignals(True)
+        self.bring_own_button.setChecked(is_open)
+        self.bring_own_button.blockSignals(False)
+        if hasattr(self, "modules_fit"):
+            self.modules_fit.submenu_open = is_open
+            if is_open:
+                self.custom_module_card.setVisible(True)
+                self.custom_module_line.setVisible(False)
+                self.addon_box.setVisible(self.services.client_addons is not None)
+            elif self.modules_fit._tab.isVisible():
+                self.custom_module_card.setVisible(False)
+                self.custom_module_line.setVisible(False)
+                self.addon_box.setVisible(False)
+            self.modules_fit.settle()
 
     def _say_where_the_custom_route_is_absent(self, absent: bool) -> None:
         """T596: a game with no route has a sentence in the box and no presses in it.
@@ -23332,7 +23361,7 @@ class ControllerView(QWidget):
         self.tuning_panel.set_enabled_actions(self._module_actions_allowed())
 
     def apply_theme(self, theme_name: str | None = None) -> None:
-        """Restyle inline banners, labels, badges, and child panels for `theme_name`."""
+        """Restyle inline banners, labels, badges, icons, and child panels for `theme_name`."""
         resolved = normalize_theme_name(theme_name or resolve_widget_theme(self))
         spec = get_theme(resolved)
         self.setProperty("yulon_theme", resolved)
@@ -23340,9 +23369,38 @@ class ControllerView(QWidget):
             self.realm_badge.set_theme(resolved)
         if hasattr(self, "docker_banner") and hasattr(self.docker_banner, "apply_theme"):
             self.docker_banner.apply_theme(resolved)
+        secondary_icon = spec.text_primary if spec.is_light else spec.text_gold
+        start_btn = getattr(self, "start_button", None)
+        if start_btn is not None:
+            start_color = (
+                spec.primary_btn_text if start_btn.property("primary") is True else secondary_icon
+            )
+            start_btn.setIcon(dadcraft_icon("play", start_color, 14))
+        stop_btn = getattr(self, "stop_button", None)
+        if stop_btn is not None:
+            stop_btn.setIcon(dadcraft_icon("stop", spec.danger_text, 14))
+        restart_btn = getattr(self, "restart_button", None)
+        if restart_btn is not None:
+            restart_btn.setIcon(dadcraft_icon("restart", secondary_icon, 14))
+        refresh_btn = getattr(self, "refresh_button", None)
+        if refresh_btn is not None:
+            refresh_btn.setIcon(dadcraft_icon("refresh", secondary_icon, 14))
+        remove_btn = getattr(self, "remove_server_button", None)
+        if remove_btn is not None:
+            remove_btn.setIcon(dadcraft_icon("trash", spec.danger_text, 14))
+        play_btn = getattr(self, "play_button", None)
+        if play_btn is not None and not play_btn.icon().isNull():
+            play_btn.setIcon(dadcraft_icon("play", spec.primary_btn_text, 14))
+        if hasattr(self, "_tabs"):
+            for idx in range(self._tabs.count()):
+                page = self._tabs.widget(idx)
+                icon_name = page.property("yulon_tab_icon") if page is not None else None
+                if isinstance(icon_name, str) and icon_name:
+                    self._tabs.setTabIcon(idx, get_tab_icon(icon_name, theme_name=resolved))
         for banner in (
             getattr(self, "compose_banner", None),
             getattr(self, "corrections_banner", None),
+            getattr(self, "repair_banner", None),
             getattr(self, "rebuild_banner", None),
             getattr(self, "tuning_banner", None),
             getattr(self, "tuning_log_offer", None),
@@ -23355,6 +23413,7 @@ class ControllerView(QWidget):
             getattr(self, "danger_label", None),
             getattr(self, "compose_banner_label", None),
             getattr(self, "corrections_banner_label", None),
+            getattr(self, "repair_banner_label", None),
             getattr(self, "rebuild_banner_label", None),
             getattr(self, "tuning_banner_label", None),
         ):
@@ -23363,6 +23422,7 @@ class ControllerView(QWidget):
         for muted_lbl in (
             getattr(self, "addon_pointer", None),
             getattr(self, "uninstall_absent_label", None),
+            getattr(self, "stop_choice_note", None),
             getattr(self, "custom_module_line_note", None),
         ):
             if muted_lbl is not None:
@@ -23370,6 +23430,17 @@ class ControllerView(QWidget):
         line_title = getattr(self, "custom_module_line_title", None)
         if line_title is not None:
             line_title.setStyleSheet(f"color: {spec.text_muted}; font-weight: bold;")
+        danger_box = self.findChild(QGroupBox, DANGER_ZONE_NAME)
+        if danger_box is not None:
+            danger_box.setStyleSheet(
+                f"QGroupBox#{DANGER_ZONE_NAME} {{ border: 1px solid {spec.danger}; }}"
+            )
+        backup_list = getattr(self, "backup_list", None)
+        if backup_list is not None:
+            for row_idx in range(backup_list.count()):
+                item = backup_list.item(row_idx)
+                if item is not None and item.data(Qt.ItemDataRole.UserRole + 3):
+                    item.setForeground(QColor(spec.text_muted))
         for panel in (
             getattr(self, "modules_panel", None),
             getattr(self, "tuning_panel", None),

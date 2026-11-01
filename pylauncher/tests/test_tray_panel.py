@@ -348,8 +348,11 @@ def test_start_is_a_power_symbol_not_the_server_glyph(tray: YulonTray, window: F
     row = _row(_open(tray), "Vanilla")
     assert row.start.accessibleName() == "Start Vanilla"
     assert row.start.toolTip() == "Start Vanilla"
-    assert row.start.icon().cacheKey() == tray_flyout.power_icon().cacheKey()
-    image = tray_flyout.power_icon().pixmap(32, 32).toImage()
+    # The row tints its icons with its theme's accent (#457), so the power icon is the
+    # one drawn in that colour.
+    accent = tray_flyout.get_theme(tray_flyout.resolve_widget_theme(row)).accent_bright
+    assert row.start.icon().cacheKey() == tray_flyout.power_icon(accent).cacheKey()
+    image = tray_flyout.power_icon(accent).pixmap(32, 32).toImage()
     amber = [
         image.pixelColor(x, y).alpha() > 0
         for x, y in ((16, 4), (4, 18), (28, 18), (16, 29))  # the line's top, the ring's sides

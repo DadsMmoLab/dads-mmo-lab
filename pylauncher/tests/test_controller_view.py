@@ -18795,7 +18795,7 @@ def test_the_shorter_modules_toolbar_never_shrinks_its_buttons(
     _at(window, main.MINIMUM_WINDOW_SIZE)
 
     buttons = _module_toolbar_buttons(view)
-    assert len(buttons) == 3, f"the Modules bar lost a button: {[b.text() for b in buttons]}"
+    assert len(buttons) == 4, f"the Modules bar lost a button: {[b.text() for b in buttons]}"
     shrunk = [
         f"{b.text()!r}: {b.width()} < {b.sizeHint().width()}"
         for b in buttons
@@ -20474,11 +20474,19 @@ def test_every_sub_tab_name_is_whole_and_the_open_one_is_on_screen(
             rect
         ), f"{bar.tabText(index)!r} at {rect.getRect()} is not whole in a {bar.width()}px bar"
         assert _scroll_arrows_over(bar, rect) == [], f"{bar.tabText(index)!r} is under an arrow"
+    header = window.property("header")
+    assert header is not None
+    bar_top_in_window = bar.mapTo(window, bar.rect().topLeft()).y()
+    assert bar_top_in_window == header.geometry().bottom() + 1, (
+        bar_top_in_window,
+        header.geometry(),
+    )
     if size == T191_SIZES[2]:
-        last = bar.tabRect(bar.count() - 1)
         assert (
-            last.right() < bar.width() - 100
-        ), f"the tabs are spread across the bar: the last ends at {last.right()} of {bar.width()}"
+            bar.width() < view._tabs.width() - 100
+        ), f"the tabs are spread across the bar: {bar.width()} of {view._tabs.width()}"
+        assert bar.geometry().x() > 50, f"the sub-tab bar is not centered: {bar.geometry()}"
+        assert abs((bar.geometry().left() + bar.geometry().right()) - view._tabs.width()) <= 4
 
 
 def _overflowing_tab_bar(tmp_path: Path) -> tuple[ControllerView, Any]:
@@ -20898,6 +20906,7 @@ def test_the_report_box_is_what_gives_before_the_card_and_the_list(
     import main
 
     view = ControllerView(WOTLK, _services_with_the_card_buttons(ps, tmp_path), status_poll_ms=0)
+    view.set_bring_own_submenu_open(True)
     window, _tab = _controller_in_the_real_window(view, "Modules")
     _at(window, DESKTOP_1080P)
     _ran_a_job(view)
@@ -20920,7 +20929,7 @@ def test_the_report_box_is_what_gives_before_the_card_and_the_list(
         _at(window, (960, 620))
         assert view.module_report_strip.collapsed, "the report stayed open on a short tab"
         assert view.custom_module_card.isVisible(), "the card folded before the report did"
-        _at(window, (960, 580))
+        _at(window, (960, 560))
         assert view.module_report_strip.collapsed, "the report came back on a shorter tab"
         assert view.custom_module_line.isVisible(), "the card kept its sentence past the report"
         floor = controller_view_module.MODULE_LIST_MIN_HEIGHT
@@ -21216,6 +21225,7 @@ def test_at_the_smallest_window_the_card_keeps_its_sentence_with_a_jobs_row(
     import main
 
     view = _past_its_pin(ps, tmp_path)
+    view.set_bring_own_submenu_open(True)
     window, _tab = _controller_in_the_real_window(view, "Modules")
     _at(window, main.MINIMUM_WINDOW_SIZE)
     assert view.custom_module_card.isVisible(), "the card folded with the list's rows to spare"
@@ -21255,6 +21265,7 @@ def test_the_card_keeps_its_sentence_and_both_presses_at_the_smallest_window(
         link_asker=lambda parent, title: asked.append(title),
         folder_asker=lambda parent, title: asked.append(title),
     )
+    view.set_bring_own_submenu_open(True)
     window, _tab = _controller_in_the_real_window(view, "Modules")
     _the_list_needs_the_cards_sentence(view)
 
@@ -21309,6 +21320,7 @@ def test_the_one_line_cards_presses_are_greyed_by_the_cards_own_gate(
     )
     spy.revs = (native.SourceRev("a/b", "7bae1b5 · 2026-09-20", pin=_PIN, ahead=2),)
     view._refresh_source_version()
+    view.set_bring_own_submenu_open(True)
     window, _tab = _controller_in_the_real_window(view, "Modules")
     _at(window, main.MINIMUM_WINDOW_SIZE)
     # The form the ladder would choose if the tab were short: put on by hand,
@@ -21541,6 +21553,7 @@ def test_a_taller_window_never_takes_back_what_a_shorter_one_showed(
     view = _past_its_pin(ps, tmp_path) if state != "on-the-pins" else None
     if view is None:
         view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    view.set_bring_own_submenu_open(True)
     window, _tab = _controller_in_the_real_window(view, "Modules")
     _at(window, DESKTOP_1080P)
     if state == "past-the-pins-with-a-rebuild-owed":
@@ -21659,6 +21672,7 @@ def test_the_pad_reaches_the_cards_presses_at_the_smallest_window(
         link_asker=lambda parent, title: asked.append(title),
         folder_asker=lambda parent, title: asked.append(title),
     )
+    view.set_bring_own_submenu_open(True)
     window, _tab = _controller_in_the_real_window(view, "Modules")
     _the_list_needs_the_cards_sentence(view)
     _at(window, main.DEFAULT_WINDOW_SIZE)
@@ -22630,6 +22644,7 @@ def test_the_card_keeps_its_form_through_a_drag_at_the_smallest_heights(
     from yulon.ui.theme import apply_dadcraft_theme
 
     view = _past_its_pin(ps, tmp_path)
+    view.set_bring_own_submenu_open(True)
     window, _tab = _controller_in_the_real_window(view, "Modules")
     _the_list_needs_the_cards_sentence(view)
     _at(window, (960, 640))
@@ -22668,6 +22683,7 @@ def test_the_cards_minimum_taken_while_it_is_folded_is_the_one_it_has_whole(
     import main
 
     view = _past_its_pin(ps, tmp_path)
+    view.set_bring_own_submenu_open(True)
     window, tab = _controller_in_the_real_window(view, "Modules")
     _the_list_needs_the_cards_sentence(view)
     _at(window, main.MINIMUM_WINDOW_SIZE)
@@ -22682,9 +22698,11 @@ def test_the_cards_minimum_taken_while_it_is_folded_is_the_one_it_has_whole(
         view.custom_module_line.setVisible(False)
         view.custom_module_card.setVisible(True)
         process_events()
-        box = tab.layout()
-        item = box.itemAt(_index_of(tab, view.custom_module_card))
-        margins = box.contentsMargins()
+        parent_widget = view.custom_module_card.parentWidget() or tab
+        box = parent_widget.layout()
+        assert box is not None
+        item = box.itemAt(_index_of(parent_widget, view.custom_module_card))
+        margins = tab.layout().contentsMargins()
         really = item.minimumHeightForWidth(tab.width() - margins.left() - margins.right())
     finally:
         tab.installEventFilter(view.modules_fit)
@@ -22780,6 +22798,7 @@ def test_a_press_on_the_report_reopens_it_spending_the_lists_floor(
     import main
 
     view = ControllerView(WOTLK, _services_with_the_card_buttons(ps, tmp_path), status_poll_ms=0)
+    view.set_bring_own_submenu_open(True)
     window, _tab = _controller_in_the_real_window(view, "Modules")
     _at(window, DESKTOP_1080P)
     _ran_a_job(view)
@@ -22879,6 +22898,7 @@ def test_a_restyle_at_an_unchanged_width_folds_nothing(
     from yulon.ui.theme import apply_dadcraft_theme
 
     view = ControllerView(WOTLK, _services_with_the_card_buttons(ps, tmp_path), status_poll_ms=0)
+    view.set_bring_own_submenu_open(True)
     window, _tab = _controller_in_the_real_window(view, "Modules")
     _at(window, DESKTOP_1080P)
     _ran_a_job(view)
@@ -22896,11 +22916,13 @@ def test_a_restyle_at_an_unchanged_width_folds_nothing(
 
             worst: list[str] = []
             moved = 0
-            # At this height the report's fold boundary crosses the sweep: wide
-            # windows grow the theme's fonts until the report no longer fits.
+            # A corner drag: the height climbs across the report's fold boundary
+            # (between 620 and 630 at every width since #457, whose fonts no longer
+            # push it with the width) while the width sweeps, so the strip has a
+            # transition to make and "at most one per step" bounds something.
             for width in range(940, 1201, 10):
                 seen.clear()
-                window.resize(width, 635)
+                window.resize(width, 600 + (width - 940) * 60 // 260)
                 apply_dadcraft_theme(window, width=window.width())
                 process_events()
                 moved += len(seen)
@@ -22949,6 +22971,9 @@ def test_opening_the_report_by_hand_cannot_cut_the_tab(
     import main
 
     view = ControllerView(WOTLK, _services_with_the_card_buttons(ps, tmp_path), status_poll_ms=0)
+    # #457: the custom-module card lives in the "Bring your own" sub-menu; open, it is the
+    # load that lets the report fold on a short tab, as before.
+    view.set_bring_own_submenu_open(True)
     window, tab = _controller_in_the_real_window(view, "Modules")
     _at(window, DESKTOP_1080P)
     _ran_a_job(view)

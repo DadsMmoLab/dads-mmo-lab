@@ -19,6 +19,9 @@ from yulon.ui.theme import (
     COLOR_RARE,
     COLOR_TEXT_GOLD,
     COLOR_UNCOMMON,
+    DEFAULT_THEME,
+    get_theme,
+    normalize_theme_name,
 )
 
 # Standard FontAwesome 6 SVG path definitions (viewBox="0 0 512 512" or "0 0 640 512")
@@ -246,6 +249,33 @@ _FA_PATHS: dict[str, tuple[str, int, int]] = {
         448,
         512,
     ),
+    "arrow-left": (
+        "M9.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 "
+        "0-45.3L109.2 288 416 288c17.7 0 32-14.3 32-32s-14.3-32-32-32l-306.7 0L214.6 118.6c12.5"
+        "-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z",
+        448,
+        512,
+    ),
+    "console": (
+        "M0 96C0 60.7 28.7 32 64 32l384 0c35.3 0 64 28.7 64 64l0 320c0 35.3-28.7 "
+        "64-64 64L64 480c-35.3 0-64-28.7-64-64L0 96zM137 185c-9.4-9.4-24.6-9.4-33.9 "
+        "0s-9.4 24.6 0 33.9l55 55-55 55c-9.4 9.4-9.4 24.6 0 33.9s24.6 9.4 33.9 0l72-72c9.4-9.4 "
+        "9.4-24.6 0-33.9l-72-72zm119 151l112 0c13.3 0 24-10.7 24-24s-10.7-24-24-24l-112 "
+        "0c-13.3 0-24 10.7-24 24s10.7 24 24 24z",
+        512,
+        512,
+    ),
+    "dragon": (
+        "M352 124.5l-51.9-13c-6.5-1.6-11.3-7.1-12-13.8s2.8-13.1 8.7-16.1l40.8-20.4L294.4 28.8"
+        "c-5.5-4.1-7.8-11.3-5.6-17.9S297.1 0 304 0L416 0l32 0 16 0c30.2 0 58.7 14.2 76.8 38.4"
+        "l57.6 76.8c6.2 8.3 9.6 18.4 9.6 28.8c0 26.5-21.5 48-48 48l-21.5 0c-17 0-33.3-6.7-45.3"
+        "-18.7L480 160l-32 0 0 21.5c0 24.7 12.8 47.6 33.8 60.6l106.6 66.6c12.8 8 20.6 22.1 "
+        "20.6 37.2c0 24.3-19.7 44-44 44l-56.2 0c-22.2 0-43.5 8.8-59.2 24.5L384 480l-96 0 0-80"
+        "c0-26.5-21.5-48-48-48l-80 0 0 128-96 0 0-160c0-53 43-96 96-96l144 0c26.5 0 48-21.5 "
+        "48-48l0-51.5z",
+        640,
+        512,
+    ),
 }
 
 
@@ -349,25 +379,38 @@ def dadcraft_icon(name: str, color: str = COLOR_GOLD_BRIGHT, size: int = 16) -> 
     return QIcon(pixmap)
 
 
-def get_tab_icon(tab_name: str) -> QIcon:
+def get_tab_icon(tab_name: str, *, theme_name: str | None = None) -> QIcon:
     """Retrieve the authentic Dadcraft icon for standard launcher tabs."""
+    if theme_name is None or normalize_theme_name(theme_name) == DEFAULT_THEME:
+        bright = COLOR_GOLD_BRIGHT
+        light = COLOR_GOLD_LIGHT
+        gold = COLOR_TEXT_GOLD
+        rare = COLOR_RARE
+        uncommon = COLOR_UNCOMMON
+    else:
+        spec = get_theme(theme_name)
+        bright = spec.accent_bright
+        light = spec.accent_light
+        gold = spec.text_primary if spec.is_light else spec.text_gold
+        rare = spec.rare
+        uncommon = spec.uncommon
     mapping = {
-        "catalog": ("catalog", COLOR_GOLD_BRIGHT),
-        "server": ("server", COLOR_GOLD_BRIGHT),
-        "console": ("terminal", COLOR_RARE),
-        "accounts": ("users", COLOR_UNCOMMON),
-        "play": ("sword", COLOR_GOLD_BRIGHT),
-        "characters": ("sword", COLOR_GOLD_BRIGHT),
-        "bots": ("robot", COLOR_RARE),
-        "maintenance": ("database", COLOR_GOLD_LIGHT),
-        "modules": ("puzzle", COLOR_TEXT_GOLD),
-        "networking": ("network", COLOR_RARE),
+        "catalog": ("catalog", bright),
+        "server": ("server", bright),
+        "console": ("terminal", rare),
+        "accounts": ("users", uncommon),
+        "play": ("sword", bright),
+        "characters": ("sword", bright),
+        "bots": ("robot", rare),
+        "maintenance": ("database", light),
+        "modules": ("puzzle", gold),
+        "networking": ("network", rare),
     }
     low = tab_name.lower().strip()
     for key, (icon_name, color) in mapping.items():
         if key in low:
             return dadcraft_icon(icon_name, color=color, size=16)
-    return dadcraft_icon("server", color=COLOR_GOLD_BRIGHT, size=16)
+    return dadcraft_icon("server", color=bright, size=16)
 
 
 def get_app_icon() -> QIcon:

@@ -3356,3 +3356,255 @@ def test_a_dfo_install_is_remembered_by_its_record_and_never_pinned_as_compose(
         assert got == []
         assert "did not finish" in warned[0]
     assert the_compose_project_is_not_pinned == [], "a process install has no compose project"
+
+
+# -- Project Kael Phase K2: GameGroup, GameBoxartCard & two-stage CatalogView ----
+
+
+def test_group_catalog_entries_groups_wow_and_single_franchises_by_acronym() -> None:
+    """Phase K2.1: `Catalog.games` and `Catalog.single` group into WoW, DDON, and DFO."""
+    groups = catalog_view.group_catalog_entries(CATALOG, include_single=True)
+    assert [g.id for g in groups] == ["wow", "ddon", "dfo"]
+    assert [g.title for g in groups] == ["WoW", "DDON", "DFO"]
+    assert len(groups[0].entries) == len(CATALOG.games)
+    assert groups[0].subtitle == f"{len(CATALOG.games)} Server Cores"
+    assert groups[1].entries == (CATALOG.get_single("ddon"),)
+    assert groups[2].entries == (CATALOG.get_single("dfo"),)
+    assert "Beta" in groups[2].subtitle
+
+    wow_only = catalog_view.group_catalog_entries(CATALOG, include_single=False)
+    assert [g.id for g in wow_only] == ["wow"]
+
+
+def test_game_boxart_card_renders_theme_tokens_and_emits_group_selected(qapp: object) -> None:
+    """Phase K2.2: `GameBoxartCard` paints with `ThemeSpec` tokens and emits `group_selected`."""
+    from PySide6.QtCore import QSize
+
+    from yulon.ui.theme import apply_dadcraft_theme, get_theme
+    from yulon.ui.widgets.boxart_card import GameBoxartCard
+
+    card = GameBoxartCard("wow", "WoW", "7 Server Cores", "sword", total_servers=7)
+    assert card.objectName() == "boxart-card-wow"
+    assert card.sizeHint() == QSize(220, 300)
+    assert card.minimumSizeHint() == QSize(180, 240)
+    assert card.total_servers == 7
+    assert card.installed_servers == 0
+
+    selected: list[str] = []
+    card.group_selected.connect(selected.append)
+    card.click()
+    assert selected == ["wow"]
+
+    card.set_server_counts(7, 2)
+    assert card.installed_servers == 2
+    assert "2 installed" in card.toolTip()
+
+    card.resize(220, 300)
+    for theme_id in ("arthas", "gruvbox-dark", "gruvbox-light", "dracula-light"):
+        apply_dadcraft_theme(card, theme_name=theme_id)
+        shot = card.grab().toImage()
+        assert not shot.isNull()
+        center_top = shot.pixelColor(110, 12)
+        bg = get_theme(theme_id).bg_panel
+        assert center_top.alpha() == 255, (theme_id, bg)
+
+
+def test_two_stage_catalog_drill_down_and_upper_left_back_button(
+    qapp: object, tmp_path: Path
+) -> None:
+    """Phase K2.3: Stage 0 boxart drill-down filters Stage 1 tiles and `Back` returns."""
+    panel = LogPanel()
+    view = CatalogView(
+        CATALOG,
+        lambda e: _FakeInstaller(e, []),
+        panel,
+        pick_dir=lambda *_: None,
+        installed_games={"wow-wotlk": tmp_path / "wotlk"},
+        single_installer_factory=_no_single_engine,
+    )
+    window, _scroll, _splitter = _catalog_in_the_default_window(view, panel)
+    try:
+        stages: list[int] = []
+        view.stage_changed.connect(stages.append)
+
+        assert view.current_stage == 0
+        assert view.active_group_id is None
+        assert view.back_button.isVisibleTo(view) is False
+        assert view.back_button.property(catalog_view.BACK_ACTION_PROPERTY) is True
+        assert [g.id for g in view.game_groups] == ["wow", "ddon", "dfo"]
+
+        wow_card = view.boxart_card_for("wow")
+        ddon_card = view.boxart_card_for("ddon")
+        assert wow_card.installed_servers == 1
+        assert ddon_card.installed_servers == 0
+
+        # Drill down into WoW
+        wow_card.click()
+        process_events()
+        assert view.current_stage == 1
+        assert view.active_group_id == "wow"
+        assert stages == [1]
+        assert view.back_button.isVisibleTo(view) is True
+        for entry in CATALOG.games:
+            tile = view.findChild(QWidget, f"catalog-tile-{entry.id}")
+            assert tile is not None and tile.isVisibleTo(view) is True
+        for single in CATALOG.single:
+            tile = view.findChild(QWidget, f"catalog-tile-{single.id}")
+            assert tile is not None and tile.isVisibleTo(view) is False
+
+        # Return to Stage 0 via upper-left Back button
+        view.back_button.click()
+        process_events()
+        assert view.current_stage == 0
+        assert view.active_group_id is None
+        assert stages == [1, 0]
+        assert view.back_button.isVisibleTo(view) is False
+
+        # Drill down into DDON
+        ddon_card.click()
+        process_events()
+        assert view.current_stage == 1
+        assert view.active_group_id == "ddon"
+        ddon_tile = view.findChild(QWidget, "catalog-tile-ddon")
+        wotlk_tile = view.findChild(QWidget, "catalog-tile-wow-wotlk")
+        assert ddon_tile is not None and ddon_tile.isVisibleTo(view) is True
+        assert wotlk_tile is not None and wotlk_tile.isVisibleTo(view) is False
+
+        # Forgetting an installed server updates the boxart card count
+        view.forget_installed("wow-wotlk", {})
+        assert wow_card.installed_servers == 0
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+@pytest.mark.parametrize("size", [(960, 640), (1280, 800), (1920, 1080)])
+def test_k4_viewport_fit_across_stage1_boxart_stage2_server_cards_and_topbar(
+    qapp: object, tmp_path: Path, size: tuple[int, int]
+) -> None:
+    """Phase K4.2: Stage 1 boxart cards, Stage 2 server cards, and topbar fit at every size."""
+    from yulon.ui.theme import apply_dadcraft_theme
+
+    panel = LogPanel()
+    view = CatalogView(
+        CATALOG,
+        lambda e: _FakeInstaller(e, []),
+        panel,
+        pick_dir=lambda *_: None,
+        installed_games={"wow-wotlk": tmp_path / "wotlk"},
+        single_installer_factory=_no_single_engine,
+    )
+    window, scroll, _splitter = _catalog_in_the_default_window(view, panel)
+    try:
+        window.resize(*size)
+        apply_dadcraft_theme(window, width=size[0])
+        process_events(30)
+
+        top_menu = window.property("top_menu")
+        assert top_menu is not None
+        for btn in (
+            top_menu.catalog_button,
+            top_menu.servers_button,
+            top_menu.settings_button,
+            top_menu.log_button,
+            top_menu.launcher_button,
+        ):
+            assert btn.isVisible()
+            assert btn.width() >= btn.sizeHint().width()
+
+        # Stage 1 boxart cards fit inside the Catalog viewport without clipping
+        assert view.current_stage == 0
+        for group in view.game_groups:
+            card = view.boxart_card_for(group.id)
+            assert card.isVisibleTo(view)
+            assert card.width() >= card.minimumSizeHint().width()
+            assert card.height() >= card.minimumSizeHint().height()
+            top_left = card.mapTo(window, card.rect().topLeft())
+            bottom_right = card.mapTo(window, card.rect().bottomRight())
+            assert window.rect().contains(top_left), (size, group.id, top_left)
+            assert window.rect().contains(bottom_right), (size, group.id, bottom_right)
+
+        # Drill down into each group: Back button is upper-left and Stage 2 cards fit width
+        for group in view.game_groups:
+            view.boxart_card_for(group.id).click()
+            process_events(20)
+            assert view.current_stage == 1
+            assert view.back_button.isVisibleTo(view)
+            assert scroll.horizontalScrollBar().maximum() == 0, (size, group.id)
+            for entry in group.entries:
+                tile = view.findChild(QWidget, f"catalog-tile-{entry.id}")
+                assert tile is not None and tile.isVisibleTo(view)
+                assert tile.width() >= tile.minimumWidth()
+            view.back_button.click()
+            process_events(20)
+            assert view.current_stage == 0
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_k5_controller_dpad_confirm_back_and_focus_restoration_across_catalog_stages(
+    qapp: object, tmp_path: Path
+) -> None:
+    """Phase K5: D-pad + A drills into Stage 2, invalidates `_last_move`, and B restores focus."""
+    from PySide6.QtWidgets import QApplication
+
+    from yulon.ui.gamepad import Action, Direction, install_gamepad_navigation
+    from yulon.ui.widgets.prompt import InputPrompter
+
+    panel = LogPanel()
+    view = CatalogView(
+        CATALOG,
+        lambda e: _FakeInstaller(e, []),
+        panel,
+        pick_dir=lambda *_: None,
+        installed_games={"wow-wotlk": tmp_path / "wotlk"},
+        single_installer_factory=_no_single_engine,
+    )
+    window, _scroll, _splitter = _catalog_in_the_default_window(view, panel)
+    nav, keyboard, gamepad = install_gamepad_navigation(window)
+    try:
+        window.show()
+        window.activateWindow()
+        process_events(20)
+
+        wow_card = view.boxart_card_for("wow")
+        ddon_card = view.boxart_card_for("ddon")
+        wow_card.setFocus()
+        process_events()
+        assert QApplication.focusWidget() is wow_card
+
+        # D-pad Right moves from WoW boxart card to DDON boxart card
+        assert nav.navigate(Direction.RIGHT) is True
+        process_events()
+        assert QApplication.focusWidget() is ddon_card
+        assert nav._last_move is not None
+
+        # Pressing A (Action.CONFIRM) drills down into DDON Stage 2 and clears `_last_move`
+        assert nav.perform(Action.CONFIRM) is True
+        process_events()
+        assert view.current_stage == 1
+        assert view.active_group_id == "ddon"
+        assert nav._last_move is None
+
+        # Active InputPrompter guard: B cancels the prompt first without leaving Stage 2
+        if view._prompter is None:
+            view._prompter = InputPrompter(view)
+        view._prompter._active = True
+        assert nav.perform(Action.BACK) is True
+        assert view._prompter.is_active() is False
+        assert view.current_stage == 1
+
+        # Pressing B again returns from Stage 2 to Stage 1 and restores focus to `ddon_card`
+        assert nav.perform(Action.BACK) is True
+        process_events()
+        assert view.current_stage == 0
+        assert view.active_group_id is None
+        assert QApplication.focusWidget() is ddon_card
+        assert nav._last_move is None
+    finally:
+        keyboard.stop()
+        gamepad.stop()
+        window.close()
+        window.deleteLater()
+        process_events()

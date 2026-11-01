@@ -358,3 +358,81 @@ def test_top_menu_bar_disables_servers_when_none_installed_and_opens_dropdown_fo
     process_events(10)
     assert tabs.currentIndex() == wotlk_idx
     assert top_menu.servers_button.isChecked()
+
+
+def test_k3_header_right_aligns_top_menu_opposite_left_status_cluster(rail) -> None:
+    """Phase K3.1: `_realm_title` and `_badge` sit left; `TopMenuBar` is flush right."""
+    from yulon.ui.sidebar import TopMenuBar
+    from yulon.ui.widgets.dadcraft_decorations import DadcraftHeader, DadcraftRealmBadge
+
+    window, tabs = rail
+    _pinned_pair(tabs)
+    header = DadcraftHeader()
+    top_menu = TopMenuBar(tabs, parent=header)
+    header.add_action(top_menu)
+    badge = DadcraftRealmBadge("running")
+    header.follow(badge, title="WoW WotLK — DadsMmoLab")
+    header.resize(1280, 50)
+    header.show()
+    process_events(20)
+
+    # Realm title and badge sit in the left half of the header, left of the central stretch
+    assert header._realm_title.geometry().right() < header._badge.geometry().left()
+    assert header._badge.geometry().right() < top_menu.geometry().left()
+    # TopMenuBar is flush against the right margin of DadcraftHeader
+    right_margin = header._row.contentsMargins().right()
+    assert abs(top_menu.geometry().right() - (header.width() - right_margin - 1)) <= 2
+
+    # Secondary toolbar (launcher + log) sits left of the three primary module buttons
+    assert top_menu.secondary_toolbar.isAncestorOf(top_menu.launcher_button)
+    assert top_menu.secondary_toolbar.isAncestorOf(top_menu.log_button)
+    assert top_menu.secondary_toolbar.geometry().right() < top_menu.catalog_button.geometry().left()
+    assert top_menu.catalog_button.geometry().left() < top_menu.servers_button.geometry().left()
+    assert top_menu.servers_button.geometry().left() < top_menu.settings_button.geometry().left()
+
+    # Every button carries a non-null function icon and re-tints on theme change
+    for btn in (
+        top_menu.catalog_button,
+        top_menu.servers_button,
+        top_menu.settings_button,
+        top_menu.log_button,
+        top_menu.launcher_button,
+    ):
+        assert not btn.icon().isNull(), btn.text() or btn.accessibleName()
+    header.close()
+
+
+def test_k3_settings_view_signals_up_without_parent_window_ref(rail) -> None:
+    """Phase K3.2: `SettingsView` holds no `_window` ref, emits signals, and parks in holder."""
+    from yulon.ui.sidebar import TopMenuBar
+    from yulon.ui.tray_settings import SettingsView
+
+    window, tabs = rail
+    _pinned_pair(tabs)
+    settings_view = SettingsView("arthas", parent=window)
+    assert not hasattr(settings_view, "_window")
+    assert len(settings_view.theme_swatches) == 5
+
+    top_menu = TopMenuBar(tabs, settings_widget=settings_view, parent=window)
+    assert settings_view.parentWidget() is top_menu._settings_holder
+
+    selected: list[str] = []
+    logs_asked: list[int] = []
+    settings_view.theme_selected.connect(selected.append)
+    settings_view.logs_requested.connect(lambda: logs_asked.append(1))
+
+    top_menu.show_settings()
+    assert tabs.currentWidget() is settings_view
+    assert top_menu.settings_button.isChecked()
+
+    idx = settings_view.theme_combo.findData("gruvbox-dark")
+    assert idx >= 0
+    settings_view.theme_combo.setCurrentIndex(idx)
+    assert selected == ["gruvbox-dark"]
+
+    settings_view.open_logs_button.click()
+    assert logs_asked == [1]
+
+    top_menu.show_catalog()
+    assert tabs.indexOf(settings_view) == -1
+    assert settings_view.parentWidget() is top_menu._settings_holder

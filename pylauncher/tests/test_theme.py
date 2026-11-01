@@ -753,3 +753,224 @@ def test_the_header_names_the_server_it_follows(qapp: QApplication) -> None:
     header.follow(badge)
     assert header._realm_title.isHidden() is True
     header.close()
+
+
+def test_bundled_themes_match_json_files() -> None:
+    """K1: every `.json` file in `yulon/ui/themes/` matches its `BUNDLED_THEMES` baseline."""
+    import dataclasses
+    import json
+
+    from yulon import resources
+    from yulon.ui.theme_spec import BUNDLED_THEME_ORDER, BUNDLED_THEMES
+
+    assert tuple(BUNDLED_THEMES) == BUNDLED_THEME_ORDER
+    json_files = sorted(resources.themes_dir().glob("*.json"))
+    assert {p.stem for p in json_files} == set(BUNDLED_THEMES)
+    for path in json_files:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        spec_dict = dataclasses.asdict(BUNDLED_THEMES[path.stem])
+        assert raw == spec_dict, f"{path.name} drifted from BUNDLED_THEMES[{path.stem!r}]"
+
+
+def test_dark_theme_cards_and_tile_buttons_use_spec_tokens_and_tooltips_respect_theme(
+    qapp: QApplication,
+) -> None:
+    """K1: dark themes paint `spec` surfaces on cards/buttons; light tooltips use dark text."""
+    from yulon.ui.theme import _build_qss, get_theme
+
+    for theme_id in ("gruvbox-dark", "dracula-dark", "floral-dark"):
+        spec = get_theme(theme_id)
+        qss = _build_qss(1.0, theme_name=theme_id)
+        tile_btn = qss.split('QFrame[objectName^="catalog-tile-"] QPushButton {')[1].split("}")[0]
+        assert f"background-color: {spec.bg_panel};" in tile_btn
+        assert f"color: {spec.text_primary};" in tile_btn
+        assert "rgba(11, 17, 27, 0.86)" not in tile_btn
+
+    host = QWidget()
+    card = DadcraftCampaignCard("wow-wotlk", host)
+    card.resize(300, 370)
+    host.show()
+    try:
+        apply_dadcraft_theme(host, theme_name="arthas")
+        arthas_px = card.grab().toImage().pixelColor(150, 260)
+        apply_dadcraft_theme(host, theme_name="gruvbox-dark")
+        gruvbox_px = card.grab().toImage().pixelColor(150, 260)
+        assert arthas_px != gruvbox_px
+        assert gruvbox_px.red() >= gruvbox_px.blue()
+    finally:
+        host.close()
+        host.deleteLater()
+
+    light_tip = format_dadcraft_tooltip(
+        "Realm Status",
+        "Online",
+        quality="common",
+        flavor_text="Ready",
+        theme_name="gruvbox-light",
+    )
+    light_spec = get_theme("gruvbox-light")
+    assert light_spec.text_primary in light_tip
+    assert "#FFFFFF" not in light_tip
+
+
+def test_k4_header_and_badge_typography_scale_and_focus_highlights_across_themes(
+    qapp: QApplication,
+) -> None:
+    """Phase K4.1: `DadcraftHeader` and `DadcraftRealmBadge` scale via `_px(..., scale)`."""
+    from yulon.ui.theme import BUNDLED_THEME_ORDER, _build_qss, get_theme, scale_for_width
+
+    window = QMainWindow()
+    header = DadcraftHeader("Dad's MMO Lab", "Yu'lon", window)
+    window.setProperty("header", header)
+    badge = DadcraftRealmBadge("running", window)
+    try:
+        apply_dadcraft_theme(window, width=960, theme_name="arthas")
+        assert window.property("yulon_scale") == scale_for_width(960)
+        assert "font-size: 15px;" in header._title_label.styleSheet()
+        assert "font-size: 12px;" in header._sub_label.styleSheet()
+        assert "font-size: 12px;" in header._realm_title.styleSheet()
+        assert "font-size: 12px;" in badge._label.styleSheet()
+
+        apply_dadcraft_theme(window, width=1280, theme_name="arthas")
+        assert window.property("yulon_scale") == 1.0
+        assert "font-size: 20px;" in header._title_label.styleSheet()
+        assert "font-size: 12px;" in header._sub_label.styleSheet()
+        assert "font-size: 13px;" in header._realm_title.styleSheet()
+        assert "font-size: 12px;" in badge._label.styleSheet()
+
+        apply_dadcraft_theme(window, width=1920, theme_name="arthas")
+        assert window.property("yulon_scale") == 1.0
+        assert "font-size: 20px;" in header._title_label.styleSheet()
+    finally:
+        window.close()
+        window.deleteLater()
+
+    for theme_id in BUNDLED_THEME_ORDER:
+        spec = get_theme(theme_id)
+        qss = _build_qss(1.0, theme_name=theme_id)
+        tile_focus = qss.split('QFrame[objectName^="catalog-tile-"] QPushButton:focus {')[1].split(
+            "}"
+        )[0]
+        assert f"border: 1px solid {spec.accent_bright};" in tile_focus
+        back_focus = qss.split("QPushButton#catalog-back-button:focus {")[1].split("}")[0]
+        assert f"border: 2px solid {spec.accent_bright};" in back_focus
+
+
+def test_apply_dadcraft_theme_propagates_to_modules_and_tuning_rows(
+    qapp: QApplication,
+) -> None:
+    """`apply_dadcraft_theme` calls `apply_theme` on descendant `ModulesPanel` and `RowWidget`."""
+    from yulon import tuning
+    from yulon.ui.theme import get_theme
+    from yulon.ui.widgets.modules_panel import BADGE_INSTALLED, ModuleRow, ModulesPanel
+    from yulon.ui.widgets.tuning_panel import TuningPanel, build_tuning_cards
+
+    host = QWidget()
+    apply_dadcraft_theme(host, theme_name="gruvbox-dark")
+    panel = ModulesPanel(host)
+    panel.set_rows(
+        [
+            ModuleRow(
+                "mod-aoe-loot",
+                "module",
+                "AoE Loot",
+                "Loot nearby corpses at once.",
+                "https://github.com/azerothcore/mod-aoe-loot",
+                True,
+                True,
+                (),
+                (),
+                True,
+                None,
+                badge=BADGE_INSTALLED,
+            )
+        ]
+    )
+    spec = get_theme("gruvbox-dark")
+    row = panel.row("mod-aoe-loot")
+    # Even on initial `set_rows()` under a themed parent, `RowWidget` and `_FamilyCard` inherit it
+    assert spec.text_gold in row.name_label.styleSheet()
+    assert spec.uncommon in row.badge_label.styleSheet()
+    assert spec.uncommon in panel._cards["module"].installed_header.styleSheet()
+
+    # And switching the parent's theme updates `ModulesPanel`, `TuningPanel`, and `file_title`
+    tpanel = TuningPanel(host)
+    trow = tuning.TuningRow(
+        module_id="mod-aoe-loot",
+        module_name="AoE Loot",
+        family="module",
+        file="env/dist/etc/modules/aoe_loot.conf",
+        key="AoELoot.Enable",
+        label="Enable AoE Loot",
+        explain="Loot nearby corpses.",
+        type="bool",
+        min=None,
+        max=None,
+        default="1",
+        current="1",
+        installed=True,
+        backend="conf",
+        read_only_reason=None,
+    )
+    tpanel.set_cards(build_tuning_cards((trow,)))
+    tpanel.set_files(["env/dist/etc/modules/aoe_loot.conf"])
+    assert spec.text_primary in tpanel.file_title.text()
+
+    apply_dadcraft_theme(host, theme_name="dracula-light")
+    light_spec = get_theme("dracula-light")
+    assert light_spec.text_gold in row.name_label.styleSheet()
+    assert light_spec.uncommon in row.badge_label.styleSheet()
+    assert light_spec.text_primary in tpanel.file_title.text()
+    assert light_spec.text_primary in tpanel.card("mod-aoe-loot").title_label.styleSheet()
+    host.deleteLater()
+
+
+def test_friend_launcher_logs_view_and_tray_flyout_follow_theme_changes(
+    qapp: QApplication,
+) -> None:
+    """`FriendLauncher`, `LogsView`, `LogPanel`, and `TrayFlyout` re-theme all child elements."""
+    from yulon.ui.friend_launcher import FriendLauncher
+    from yulon.ui.logs_view import LogsView
+    from yulon.ui.theme import get_theme
+    from yulon.ui.tray_flyout import ServerCard, TrayFlyout
+
+    catalog = load_catalog()
+    launcher = FriendLauncher(catalog)
+    logs_view = LogsView(lambda: (), catalog)
+    log_panel = LogPanel()
+    flyout_card = ServerCard()
+    try:
+        for theme_id in ("gruvbox-dark", "dracula-light"):
+            spec = get_theme(theme_id)
+            launcher.apply_theme(theme_id)
+            assert launcher.property("yulon_theme") == theme_id
+            assert spec.text_muted in launcher.note_label.styleSheet()
+            assert spec.bg_dark in launcher.styleSheet()
+            assert not launcher.make_button.icon().isNull()
+            assert not launcher.play_button.icon().isNull()
+            assert not launcher.remove_button.icon().isNull()
+
+            logs_view.apply_theme(theme_id)
+            assert logs_view.property("yulon_theme") == theme_id
+            assert (
+                logs_view.viewer.palette().color(QPalette.ColorRole.Base).name().lower()
+                == spec.bg_input.lower()
+            )
+            assert not logs_view.save_button.icon().isNull()
+
+            log_panel.apply_theme(theme_id)
+            assert log_panel.property("yulon_theme") == theme_id
+            assert (
+                log_panel._text.palette().color(QPalette.ColorRole.Base).name().lower()
+                == spec.bg_input.lower()
+            )
+
+            flyout_card.apply_theme(theme_id)
+            assert flyout_card.property("yulon_theme") == theme_id
+            assert not flyout_card.start.icon().isNull()
+            assert not flyout_card.stop.icon().isNull()
+    finally:
+        for w in (launcher, logs_view, log_panel, flyout_card):
+            w.close()
+            w.deleteLater()
+        _ = TrayFlyout

@@ -21,6 +21,7 @@ from __future__ import annotations
 import re
 import threading
 
+import shiboken6
 from PySide6.QtCore import QObject, Qt, Signal, Slot
 from PySide6.QtWidgets import QDialog, QInputDialog, QLineEdit, QWidget
 
@@ -88,11 +89,35 @@ class InputPrompter(QObject):
         self._answer: str | None = None
         self._answered = threading.Event()
         self._cancel: threading.Event | None = None
+        self._active: bool = False
+        self._cancelled_before_show: bool = False
+        self._active_dialog: QInputDialog | None = None
         self.requested.connect(self._show, Qt.ConnectionType.QueuedConnection)
 
     def bind_cancel(self, cancel: threading.Event | None) -> None:
         """Let a cancelled job stop waiting for an answer nobody is going to give."""
         self._cancel = cancel
+
+    def is_active(self) -> bool:
+        """Return True while a prompt is awaiting an answer or showing its input dialog."""
+        if self._active:
+            return True
+        dlg = self._active_dialog
+        return dlg is not None and shiboken6.isValid(dlg) and dlg.isVisible()
+
+    def cancel(self) -> bool:
+        """Cancel an active prompt without navigating away from the current view."""
+        if not self.is_active():
+            return False
+        self._active = False
+        self._cancelled_before_show = True
+        self._answer = None
+        self._answered.set()
+        dlg = self._active_dialog
+        self._active_dialog = None
+        if dlg is not None and shiboken6.isValid(dlg):
+            dlg.reject()
+        return True
 
     def ask(self, prompt: str) -> str | None:
         """Called ON THE WORKER THREAD. Blocks until the user answers or cancels.
@@ -104,20 +129,25 @@ class InputPrompter(QObject):
         """
         self._answer = None
         self._answered.clear()
+        self._cancelled_before_show = False
+        self._active = True
         secret = is_secret(prompt)
         logger.info(f"asking the user for input: {'<secret prompt>' if secret else prompt!r}")
-        self.requested.emit(tidy(prompt), secret)
-        while not self._answered.wait(_POLL_SECONDS):
-            if self._cancel is not None and self._cancel.is_set():
-                logger.info("input prompt abandoned: the job was cancelled")
-                self._answer = None
-                return None
-        # Handed over, not shared. The module docstring promises the answer is
-        # never kept, and this object outlives the install: leaving the password
-        # on `self._answer` left a live plaintext copy on a widget's child for
-        # the rest of the session (review, 2026-08-22).
-        answer, self._answer = self._answer, None
-        return answer
+        try:
+            self.requested.emit(tidy(prompt), secret)
+            while not self._answered.wait(_POLL_SECONDS):
+                if self._cancel is not None and self._cancel.is_set():
+                    logger.info("input prompt abandoned: the job was cancelled")
+                    self._answer = None
+                    return None
+            # Handed over, not shared. The module docstring promises the answer is
+            # never kept, and this object outlives the install: leaving the password
+            # on `self._answer` left a live plaintext copy on a widget's child for
+            # the rest of the session (review, 2026-08-22).
+            answer, self._answer = self._answer, None
+            return answer
+        finally:
+            self._active = False
 
     @Slot(str, bool)
     def _show(self, prompt: str, secret: bool) -> None:
@@ -134,14 +164,19 @@ class InputPrompter(QObject):
         dismissed. What made modality harmful before was opening it over
         ordinary build output, which the marker gate ended.
         """
-        if self._cancel is not None and self._cancel.is_set():
+        if self._cancelled_before_show or (self._cancel is not None and self._cancel.is_set()):
+            self._cancelled_before_show = False
+            self._active = False
             self._answered.set()
             return
         dialog = self._dialog_for(prompt, secret)
+        self._active_dialog = dialog
         try:
             ok = dialog.exec() == QDialog.DialogCode.Accepted
             text = dialog.textValue()
         finally:
+            self._active_dialog = None
+            self._active = False
             # The typed text is not left on a dialog waiting for deletion.
             dialog.setTextValue("")
             dialog.deleteLater()

@@ -76,8 +76,7 @@ from yulon.ui.tray_flyout import (
     TrayFlyout,
     server_actions,
 )
-from yulon.ui.widgets.dadcraft_decorations import DadcraftRealmBadge, realm_tone
-from yulon.ui.widgets.panel_style import panel_qss
+from yulon.ui.widgets.dadcraft_decorations import realm_tone
 from yulon.ui.widgets.reasons import reason_of
 
 logger = get_logger(__name__)
@@ -854,16 +853,16 @@ class YulonTray(QObject):
                 width=self.window.width() or None,
                 theme_name=resolved,
             )
-            for badge in self.window.findChildren(DadcraftRealmBadge):
-                badge.set_theme(resolved)
-            for widget in self.window.findChildren(QWidget):
-                if hasattr(widget, "apply_theme") and widget is not self.window:
-                    widget.apply_theme(resolved)
-                elif type(widget).__name__ in ("ModulesPanel", "TuningPanel"):
-                    widget.setStyleSheet(panel_qss(resolved))
         for launcher in getattr(self.window, "yulon_launchers", {}).values():
             if shiboken6.isValid(launcher) and hasattr(launcher, "apply_theme"):
                 launcher.apply_theme(resolved)
+        friend_launcher = getattr(self.window, "yulon_friend_launcher", None)
+        if (
+            friend_launcher is not None
+            and shiboken6.isValid(friend_launcher)
+            and hasattr(friend_launcher, "apply_theme")
+        ):
+            friend_launcher.apply_theme(resolved)
         if self.flyout is not None and shiboken6.isValid(self.flyout):
             apply_dadcraft_theme(self.flyout, theme_name=resolved)
             self.flyout.set_theme(resolved)

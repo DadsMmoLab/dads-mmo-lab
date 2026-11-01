@@ -36,6 +36,7 @@ def _modules(ps_: _Ps, tmp_path: Path, *, box: bool, rows: bool) -> tuple[Contro
     if box:
         services.client_addons = cast(Any, _Route(rows=[_manifest()] if rows else []))
     view = ControllerView(WOTLK, services, status_poll_ms=0)
+    view.set_bring_own_submenu_open(True)
     window, tab = _controller_in_the_real_window(view, "Modules")
     return view, window, tab
 
@@ -110,3 +111,34 @@ def test_what_the_box_bills_is_the_height_it_is_drawn_at(
     box = view.addon_box
     assert box.note.isHidden(), "control: a short tab has the compact form"
     assert box.height() == box.minimum_for(box.width(), False)
+
+
+def test_bring_own_submenu_expands_module_catalog_view_by_default(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Default Modules view hides the two bring-your-own boxes behind `bring_own_button`."""
+    services = _services(ps, tmp_path, [])
+    _with_the_card_buttons(services)
+    services.client_addons = cast(Any, _Route(rows=[_manifest()]))
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, (1280, 800))
+
+    assert not view.bring_own_button.isChecked()
+    assert not view.custom_module_card.isVisible()
+    assert not view.addon_box.isVisible()
+    catalog_only_height = view.modules_panel.height()
+
+    view.bring_own_button.click()
+    _at(window, (1280, 800))
+    assert view.bring_own_button.isChecked()
+    assert view.custom_module_card.isVisible()
+    assert view.addon_box.isVisible()
+    assert catalog_only_height > view.modules_panel.height() + 100
+
+    view.bring_own_button.click()
+    _at(window, (1280, 800))
+    assert not view.bring_own_button.isChecked()
+    assert not view.custom_module_card.isVisible()
+    assert not view.addon_box.isVisible()
+    assert view.modules_panel.height() == catalog_only_height

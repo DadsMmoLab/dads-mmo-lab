@@ -17,6 +17,7 @@ from PySide6.QtCore import QEvent, QPointF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QColor,
     QEnterEvent,
+    QFocusEvent,
     QFontMetricsF,
     QHideEvent,
     QLinearGradient,
@@ -31,20 +32,15 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from yulon.ui.theme import (
-    COLOR_BRASS_DARK,
     COLOR_EPIC,
-    COLOR_GOLD_BRIGHT,
-    COLOR_GOLD_LIGHT,
     COLOR_LEGENDARY,
-    COLOR_RARE,
-    COLOR_TEXT_GOLD,
-    COLOR_TEXT_PRIMARY,
-    COLOR_UNCOMMON,
-    DEFAULT_THEME,
     FONT_FAMILY_BODY,
     FONT_FAMILY_TITLE,
+    TOP_MENU_BAR,
+    _px,
     get_theme,
     normalize_theme_name,
+    resolve_widget_scale,
     resolve_widget_theme,
 )
 
@@ -56,45 +52,47 @@ def format_dadcraft_tooltip(
     quality: str = "artifact",
     flavor_text: str | None = None,
     item_level: str | int | None = None,
+    theme_name: str | None = None,
 ) -> str:
     """Format an HTML tooltip styled like a World of Dadcraft item/spell tooltip.
 
     Quality tiers: 'common', 'uncommon', 'rare', 'epic', 'legendary', 'artifact'.
     """
+    spec = get_theme(theme_name)
     quality_colors = {
-        "common": "#FFFFFF",
-        "uncommon": COLOR_UNCOMMON,
-        "rare": COLOR_RARE,
+        "common": spec.text_primary,
+        "uncommon": spec.uncommon,
+        "rare": spec.rare,
         "epic": COLOR_EPIC,
         "legendary": COLOR_LEGENDARY,
-        "artifact": COLOR_GOLD_BRIGHT,
+        "artifact": spec.accent_bright,
     }
-    color = quality_colors.get(quality.lower(), COLOR_GOLD_BRIGHT)
+    color = quality_colors.get(quality.lower(), spec.accent_bright)
     lines: list[str] = [
         f'<div style="font-family: {FONT_FAMILY_BODY}; font-size: 12px; '
-        f'color: {COLOR_TEXT_PRIMARY}; min-width: 180px;">',
+        f'color: {spec.text_primary}; min-width: 180px;">',
         f'  <div style="font-family: {FONT_FAMILY_TITLE}; font-size: 14px; '
         f'font-weight: bold; color: {color}; margin-bottom: 3px;">{title}</div>',
     ]
     if item_level is not None:
         lines.append(
-            f'  <div style="color: {COLOR_GOLD_LIGHT}; font-size: 11px; '
+            f'  <div style="color: {spec.accent_light}; font-size: 11px; '
             f'margin-bottom: 4px;">Server Tier / Build: {item_level}</div>'
         )
     lines.append(
-        f'  <hr style="border: 0; border-top: 1px solid {COLOR_BRASS_DARK}; '
+        f'  <hr style="border: 0; border-top: 1px solid {spec.border_dark}; '
         'margin: 4px 0 6px 0;" />'
     )
     if isinstance(body, str):
-        lines.append(f'  <div style="color: {COLOR_TEXT_PRIMARY}; line-height: 1.3;">{body}</div>')
+        lines.append(f'  <div style="color: {spec.text_primary}; line-height: 1.3;">{body}</div>')
     else:
         for b_line in body:
             lines.append(
-                f'  <div style="color: {COLOR_TEXT_PRIMARY}; line-height: 1.3;">{b_line}</div>'
+                f'  <div style="color: {spec.text_primary}; line-height: 1.3;">{b_line}</div>'
             )
     if flavor_text:
         lines.append(
-            f'  <div style="color: {COLOR_TEXT_GOLD}; font-style: italic; '
+            f'  <div style="color: {spec.text_gold}; font-style: italic; '
             f'margin-top: 6px; font-size: 11px;">"{flavor_text}"</div>'
         )
     lines.append("</div>")
@@ -137,13 +135,11 @@ class DadcraftRealmBadge(QWidget):
     def __init__(self, status: str = "stopped", parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._status = status
-        self._theme_name = DEFAULT_THEME
+        self._theme_name = resolve_widget_theme(parent)
+        self._scale: float | None = None
         self._label = QLabel(self)
+        self._label.setObjectName("realm-badge-label")
         self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._label.setStyleSheet(
-            f"font-family: {FONT_FAMILY_TITLE}; font-size: 11px; font-weight: bold; "
-            f"padding: 2px 8px; border-radius: 3px;"
-        )
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self._label)
@@ -154,9 +150,11 @@ class DadcraftRealmBadge(QWidget):
         """The status last set, lower-cased (`running`, `starting`, `stopped`, ...)."""
         return self._status
 
-    def set_theme(self, theme_name: str | None = None) -> None:
-        """Restyle the badge for `theme_name` without emitting a status change."""
+    def set_theme(self, theme_name: str | None = None, *, scale: float | None = None) -> None:
+        """Restyle the badge for `theme_name` (and optional `scale`) without emitting."""
         self._theme_name = normalize_theme_name(theme_name)
+        if scale is not None:
+            self._scale = scale
         self._apply_status_style()
 
     def set_status(self, status: str) -> None:
@@ -169,6 +167,7 @@ class DadcraftRealmBadge(QWidget):
 
     def _apply_status_style(self) -> None:
         spec = get_theme(self._theme_name)
+        scale = self._scale if self._scale is not None else resolve_widget_scale(self)
         tone = realm_tone(self._status)
         if tone == "up":
             bg_color = "qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1E824C, stop:1 #145A32)"
@@ -220,7 +219,7 @@ class DadcraftRealmBadge(QWidget):
             f"border: 1.5px solid {border_color}; "
             f"color: {text_color}; "
             f"font-family: {FONT_FAMILY_TITLE}; "
-            f"font-size: 11px; font-weight: bold; "
+            f"font-size: {_px(12, scale)}; font-weight: bold; "
             f"padding: 3px 8px; border-radius: 3px;"
         )
 
@@ -351,7 +350,7 @@ class DadcraftHeader(QFrame):
         self.setObjectName("dadcraft-header")
         self.setStyleSheet("QFrame#dadcraft-header { background: transparent; border: none; }")
         self._time = 0.0
-        self._theme_name = DEFAULT_THEME
+        self._theme_name = resolve_widget_theme(parent)
 
         rng = random.Random(1337)
         self._rng: random.Random = rng
@@ -379,13 +378,16 @@ class DadcraftHeader(QFrame):
         left_col = QVBoxLayout()
         left_col.setSpacing(0)
         self._title_label = QLabel(f"⚔ {title} ⚔", self)
+        self._title_label.setObjectName("header-title")
         self._sub_label = QLabel(subtitle, self)
+        self._sub_label.setObjectName("header-subtitle")
         left_col.addWidget(self._title_label)
         left_col.addWidget(self._sub_label)
-        layout.addLayout(left_col, 1)
+        layout.addLayout(left_col, 0)
 
-        # T192's game strip: the whole name of the server the badge is about,
-        # right beside it. The rail shows only "WotLK"; this says which one.
+        # T192's game strip + K3 left-cluster status placement: the server's name
+        # and realm badge sit right beside the title cluster on the left side of the
+        # header, followed by a central stretch so `TopMenuBar` aligns flush right.
         self._realm_title = _RealmTitle(self)
         self._realm_title.setObjectName("realm-title")
         self._realm_title.hide()
@@ -394,12 +396,12 @@ class DadcraftHeader(QFrame):
         self._badge = DadcraftRealmBadge("stopped", self)
         layout.addWidget(self._badge, 0, Qt.AlignmentFlag.AlignVCenter)
         # The name and the badge keep their places when hidden (the Catalog, the Logs tab):
-        # hiding them would hand their room to the stretch and move the top menu sideways
-        # each time a server page opened or closed.
+        # hiding them would hand their room to the stretch and move the slot reading.
         for kept in (self._realm_title, self._badge):
             policy = kept.sizePolicy()
             policy.setRetainSizeWhenHidden(True)
             kept.setSizePolicy(policy)
+        layout.addStretch(1)
         badge_layout = self._badge.layout()
         if badge_layout is not None:
             badge_layout.setAlignment(
@@ -407,15 +409,18 @@ class DadcraftHeader(QFrame):
                 Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
             )
         self._followed: DadcraftRealmBadge | None = None
-        self.set_theme(DEFAULT_THEME)
+        self._scale: float = 1.0
+        self.set_theme(self._theme_name)
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
         self._timer.start(33)
 
-    def set_theme(self, theme_name: str | None = None) -> None:
-        """Apply `theme_name` to the header's labels, embedded badge, and backdrop."""
+    def set_theme(self, theme_name: str | None = None, *, scale: float | None = None) -> None:
+        """Apply `theme_name` (and optional `scale`) to header labels, badge, and backdrop."""
         self._theme_name = normalize_theme_name(theme_name)
+        resolved_scale = scale if scale is not None else resolve_widget_scale(self)
+        self._scale = resolved_scale
         spec = get_theme(self._theme_name)
         title_color = (
             "#FFFFFF"
@@ -433,19 +438,20 @@ class DadcraftHeader(QFrame):
             else (spec.accent_bright if spec.is_light else spec.accent_light)
         )
         self._title_label.setStyleSheet(
-            f"font-family: {FONT_FAMILY_TITLE}; font-size: 20px;"
+            f"font-family: {FONT_FAMILY_TITLE}; font-size: {_px(20, resolved_scale)};"
             f"font-weight: bold; color: {title_color}; background: transparent;"
         )
         self._sub_label.setStyleSheet(
-            f"font-family: {FONT_FAMILY_BODY}; font-size: 11px; color: {sub_color}; "
-            "background: transparent;"
+            f"font-family: {FONT_FAMILY_BODY}; font-size: {_px(12, resolved_scale)}; "
+            f"color: {sub_color}; background: transparent;"
         )
         self._realm_title.setStyleSheet(
-            f"font-family: {FONT_FAMILY_TITLE}; font-size: 13px; font-weight: bold; "
-            f"color: {realm_color}; background: transparent;"
+            f"font-family: {FONT_FAMILY_TITLE}; font-size: {_px(13, resolved_scale)}; "
+            f"font-weight: bold; color: {realm_color}; background: transparent;"
         )
-        self._badge.set_theme(self._theme_name)
+        self._badge.set_theme(self._theme_name, scale=resolved_scale)
         self._reserve_badge_width()
+        self._fit_title()
         self.update()
 
     def set_realm_status(self, status: str) -> None:
@@ -460,7 +466,7 @@ class DadcraftHeader(QFrame):
         width of a hidden badge is the one it last had. Its text stays right-aligned in the room.
         """
         probe = DadcraftRealmBadge("stopped")
-        probe.set_theme(self._theme_name)
+        probe.set_theme(self._theme_name, scale=self._scale)
         widest = 0
         for status in BADGE_STATUSES:
             probe.set_status(status)
@@ -505,15 +511,13 @@ class DadcraftHeader(QFrame):
             self._realm_title.hide()
 
     def add_action(self, widget: QWidget) -> None:
-        """Place a small control left of the realm badge and its name (the update check, T90).
-
-        There is no menu bar in this app, so the header is where a control that
-        belongs to the whole window goes. Left of the badge rather than right:
-        the badge is the rightmost thing in every screenshot of this app, and
-        moving it would move the one element a user looks for by position.
-        Left of the server's name too (T192), which belongs to the badge.
-        """
+        """Mount `TopMenuBar` flush right on the header row, or place an action left of badge."""
         widget.setParent(self)
+        if widget.objectName() == TOP_MENU_BAR:
+            self._row.addWidget(
+                widget, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+            )
+            return
         self._row.insertWidget(
             self._row.indexOf(self._realm_title), widget, 0, Qt.AlignmentFlag.AlignVCenter
         )
@@ -574,6 +578,7 @@ class DadcraftHeader(QFrame):
             self._timer.start(33)
 
     def paintEvent(self, event: QPaintEvent) -> None:
+        del event
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         w, h = self.width(), self.height()
@@ -1278,6 +1283,32 @@ object name and the particle seed stay the tile's own id.
 """
 
 
+@dataclass(slots=True)
+class _CardParticle:
+    """One atmospheric particle drifting across a `DadcraftCampaignCard`."""
+
+    x: float
+    y: float
+    speed: float
+    size: float
+    sway_speed: float
+    sway_amp: float
+    phase: float
+    tier: str
+
+
+def _blend_color(base: QColor, tint: QColor, weight: float, alpha: int = 255) -> QColor:
+    """Blend `base` toward `tint` by `weight` in `[0.0, 1.0]` with explicit `alpha`."""
+    clamped = max(0.0, min(1.0, weight))
+    inv = 1.0 - clamped
+    return QColor(
+        int(base.red() * inv + tint.red() * clamped),
+        int(base.green() * inv + tint.green() * clamped),
+        int(base.blue() * inv + tint.blue() * clamped),
+        max(0, min(255, alpha)),
+    )
+
+
 class DadcraftCampaignCard(QFrame):
     """Themed animated campaign card frame with expansion-specific backdrops,
     glowing particle physics, and reactive hover lighting.
@@ -1309,20 +1340,19 @@ class DadcraftCampaignCard(QFrame):
         # Unique particle pool seeded deterministically per campaign
         rng = random.Random((hash(game_id) & 0xFFFFFFFF) ^ 0xA5A5A5A5)
         self._rng: random.Random = rng
-        self._particles: list[dict[str, float | str]] = []
-        for _ in range(28):
-            self._particles.append(
-                {
-                    "x": rng.uniform(0.02, 0.98),
-                    "y": rng.uniform(0.0, 1.0),
-                    "speed": rng.uniform(0.005, 0.016),
-                    "size": rng.uniform(1.2, 2.6),
-                    "sway_speed": rng.uniform(1.2, 3.2),
-                    "sway_amp": rng.uniform(0.006, 0.02),
-                    "phase": rng.uniform(0, math.tau),
-                    "tier": rng.choice(["bright", "mid", "soft"]),
-                }
+        self._particles: list[_CardParticle] = [
+            _CardParticle(
+                x=rng.uniform(0.02, 0.98),
+                y=rng.uniform(0.0, 1.0),
+                speed=rng.uniform(0.005, 0.016),
+                size=rng.uniform(1.2, 2.6),
+                sway_speed=rng.uniform(1.2, 3.2),
+                sway_amp=rng.uniform(0.006, 0.02),
+                phase=rng.uniform(0, math.tau),
+                tier=rng.choice(["bright", "mid", "soft"]),
             )
+            for _ in range(28)
+        ]
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
@@ -1331,10 +1361,20 @@ class DadcraftCampaignCard(QFrame):
     def enterEvent(self, event: QEnterEvent) -> None:
         super().enterEvent(event)
         self._hovered = True
+        self.update()
 
     def leaveEvent(self, event: QEvent) -> None:
         super().leaveEvent(event)
         self._hovered = False
+        self.update()
+
+    def focusInEvent(self, event: QFocusEvent) -> None:
+        super().focusInEvent(event)
+        self.update()
+
+    def focusOutEvent(self, event: QFocusEvent) -> None:
+        super().focusOutEvent(event)
+        self.update()
 
     def hideEvent(self, event: QHideEvent) -> None:
         super().hideEvent(event)
@@ -1355,166 +1395,163 @@ class DadcraftCampaignCard(QFrame):
         for p in self._particles:
             if self._theme == "wow-wotlk":
                 # Snow drifts down & across
-                p["y"] = float(p["y"]) + float(p["speed"]) * 0.8
-                p["x"] = float(p["x"]) + float(p["speed"]) * 0.3
-                if float(p["y"]) > 1.0:
-                    p["y"] = self._rng.uniform(0.0, 0.08)
-                    p["x"] = self._rng.uniform(0.0, 0.98)
-                if float(p["x"]) > 1.0:
-                    p["x"] = 0.0
+                p.y += p.speed * 0.8
+                p.x += p.speed * 0.3
+                if p.y > 1.0:
+                    p.y = self._rng.uniform(0.0, 0.08)
+                    p.x = self._rng.uniform(0.0, 0.98)
+                if p.x > 1.0:
+                    p.x = 0.0
             elif self._theme == "wow-vanilla":
                 # Cinders & ashes fall slowly downward, drifting with the heat
-                p["y"] = float(p["y"]) + float(p["speed"]) * 0.45
-                p["x"] = float(p["x"]) + float(p["speed"]) * 0.12
-                if float(p["y"]) > 1.0:
-                    p["y"] = self._rng.uniform(0.0, 0.06)
-                    p["x"] = self._rng.uniform(0.0, 0.98)
-                if float(p["x"]) > 1.0:
-                    p["x"] = 0.0
+                p.y += p.speed * 0.45
+                p.x += p.speed * 0.12
+                if p.y > 1.0:
+                    p.y = self._rng.uniform(0.0, 0.06)
+                    p.x = self._rng.uniform(0.0, 0.98)
+                if p.x > 1.0:
+                    p.x = 0.0
             else:
                 # Embers / nature wisps float upwards
-                p["y"] = float(p["y"]) - float(p["speed"])
-                if float(p["y"]) < 0.0:
-                    p["y"] = self._rng.uniform(0.92, 1.0)
-                    p["x"] = self._rng.uniform(0.02, 0.98)
-        self.update()
+                p.y -= p.speed
+                if p.y < 0.0:
+                    p.y = self._rng.uniform(0.92, 1.0)
+                    p.x = self._rng.uniform(0.02, 0.98)
+        if self.isVisible():
+            self.update()
 
     def paintEvent(self, event: QPaintEvent) -> None:
+        del event
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         w, h = self.width(), self.height()
         t = self._time
         hp = self._hover_progress
         spec = get_theme(resolve_widget_theme(self))
+        accent_bright = QColor(spec.accent_bright)
+        accent_light = QColor(spec.accent_light)
+        ember_col = QColor(spec.accent_border)
 
         path = QPainterPath()
         path.addRoundedRect(1, 1, w - 2, h - 2, 7, 7)
         painter.setClipPath(path)
 
-        # 1. Theme-specific background foundations & radial pulses
-        if spec.is_light:
-            bg = QLinearGradient(0, 0, w, h)
-            bg.setColorAt(0.0, QColor(spec.bg_panel))
-            bg.setColorAt(0.55, QColor(spec.bg_container))
-            bg.setColorAt(1.0, QColor(spec.bg_dark))
-            painter.fillRect(0, 0, w, h, bg)
+        # 1. Theme-derived background foundation (both dark and light themes read `spec`)
+        bg = QLinearGradient(0, 0, w, h)
+        bg.setColorAt(0.0, QColor(spec.bg_panel))
+        bg.setColorAt(0.55, QColor(spec.bg_container))
+        bg.setColorAt(1.0, QColor(spec.bg_dark))
+        painter.fillRect(0, 0, w, h, bg)
 
-            if self._theme == "wow-wotlk":
-                pulse = 0.5 + 0.5 * math.sin(t * 2.2) * math.cos(t * 1.3)
-                g1 = QRadialGradient(w * 0.5 + 30 * math.sin(t), h * 0.15, w * 0.7)
-                g1.setColorAt(0.0, QColor(56, 189, 248, int(42 + 24 * pulse + 30 * hp)))
-                g1.setColorAt(0.5, QColor(14, 116, 144, int(18 + 12 * pulse)))
-                g1.setColorAt(1.0, QColor(0, 0, 0, 0))
-            elif self._theme == "wow-tbc":
-                pulse = 0.5 + 0.5 * math.sin(t * 3.4) * math.cos(t * 1.9)
-                g1 = QRadialGradient(w * 0.5 + 25 * math.sin(t * 1.5), h * 1.15, w * 0.65)
-                g1.setColorAt(0.0, QColor(34, 197, 94, int(42 + 24 * pulse + 30 * hp)))
-                g1.setColorAt(0.5, QColor(21, 128, 61, int(18 + 12 * pulse)))
-                g1.setColorAt(1.0, QColor(0, 0, 0, 0))
-            elif self._theme == "wow-vanilla":
-                pulse = 0.5 + 0.5 * math.sin(t * 2.8) * math.cos(t * 1.4)
-                g1 = QRadialGradient(w * 0.5, h * 1.2, w * 0.6)
-                g1.setColorAt(0.0, QColor(234, 88, 12, int(40 + 22 * pulse + 28 * hp)))
-                g1.setColorAt(0.5, QColor(180, 83, 9, int(18 + 10 * pulse)))
-                g1.setColorAt(1.0, QColor(0, 0, 0, 0))
-            else:
-                pulse = 0.5 + 0.5 * math.sin(t * 2.0)
-                g1 = QRadialGradient(w * 0.5 + 20 * math.sin(t * 0.8), h * 0.55, w * 0.65)
-                g1.setColorAt(0.0, QColor(16, 185, 129, int(38 + 20 * pulse + 28 * hp)))
-                g1.setColorAt(0.5, QColor(5, 150, 105, int(16 + 10 * pulse)))
-                g1.setColorAt(1.0, QColor(0, 0, 0, 0))
-            painter.fillRect(0, 0, w, h, g1)
-        elif self._theme == "wow-wotlk":
-            # Icy Frostmourne Glacier
-            bg = QLinearGradient(0, 0, w, h)
-            bg.setColorAt(0.0, QColor("#101824"))
-            bg.setColorAt(0.5, QColor("#0D141E"))
-            bg.setColorAt(1.0, QColor("#070B10"))
-            painter.fillRect(0, 0, w, h, bg)
-
-            aurora = 0.5 + 0.5 * math.sin(t * 2.2) * math.cos(t * 1.3)
-            g1 = QRadialGradient(w * 0.5 + 30 * math.sin(t), h * 0.15, w * 0.7)
-            g1.setColorAt(0.0, QColor(100, 200, 255, int(45 + 30 * aurora + 40 * hp)))
-            g1.setColorAt(0.4, QColor(40, 120, 200, int(25 + 15 * aurora)))
-            g1.setColorAt(0.8, QColor(15, 45, 80, 15))
+        if self._theme == "wow-wotlk":
+            # Icy Frostmourne Glacier blended with active theme accent
+            motif_hi = _blend_color(QColor(100, 200, 255), accent_bright, 0.65)
+            motif_mid = _blend_color(QColor(40, 120, 200), ember_col, 0.65)
+            pulse = 0.5 + 0.5 * math.sin(t * 2.2) * math.cos(t * 1.3)
+            g1 = QRadialGradient(w * 0.5 + 30 * math.sin(t), h * 0.15, max(w, h) * 0.75)
+            a0 = int((42 + 24 * pulse + 30 * hp) if spec.is_light else (45 + 30 * pulse + 40 * hp))
+            a1 = int((18 + 12 * pulse) if spec.is_light else (25 + 15 * pulse))
+            g1.setColorAt(0.0, QColor(motif_hi.red(), motif_hi.green(), motif_hi.blue(), a0))
+            g1.setColorAt(0.5, QColor(motif_mid.red(), motif_mid.green(), motif_mid.blue(), a1))
             g1.setColorAt(1.0, QColor(0, 0, 0, 0))
             painter.fillRect(0, 0, w, h, g1)
 
-            mist = QLinearGradient(0, h * 0.75, 0, h)
-            mist.setColorAt(0.0, QColor(100, 180, 240, 0))
-            mist.setColorAt(1.0, QColor(60, 140, 220, int(30 + 20 * hp)))
-            painter.fillRect(0, int(h * 0.75), w, int(h * 0.25), mist)
+            if not spec.is_light:
+                mist = QLinearGradient(0, h * 0.75, 0, h)
+                mist.setColorAt(0.0, QColor(motif_hi.red(), motif_hi.green(), motif_hi.blue(), 0))
+                mist.setColorAt(
+                    1.0,
+                    QColor(motif_mid.red(), motif_mid.green(), motif_mid.blue(), int(30 + 20 * hp)),
+                )
+                painter.fillRect(0, int(h * 0.75), w, int(h * 0.25), mist)
 
         elif self._theme == "wow-tbc":
-            # Fel Fire & Dark Portal Brimstone
-            bg = QLinearGradient(0, 0, w, h)
-            bg.setColorAt(0.0, QColor("#162214"))
-            bg.setColorAt(0.5, QColor("#101A0E"))
-            bg.setColorAt(1.0, QColor("#091007"))
-            painter.fillRect(0, 0, w, h, bg)
-
-            flame = 0.5 + 0.5 * math.sin(t * 3.4) * math.cos(t * 1.9)
+            # Fel Fire & Dark Portal Brimstone blended with active theme accent
+            motif_hi = _blend_color(QColor(80, 255, 40), accent_bright, 0.45)
+            motif_mid = _blend_color(QColor(40, 180, 20), ember_col, 0.45)
+            pulse = 0.5 + 0.5 * math.sin(t * 3.4) * math.cos(t * 1.9)
             g1 = QRadialGradient(w * 0.5 + 25 * math.sin(t * 1.5), h * 1.15, w * 0.65)
-            g1.setColorAt(0.0, QColor(80, 255, 40, int(65 + 35 * flame + 45 * hp)))
-            g1.setColorAt(0.35, QColor(40, 180, 20, int(40 + 20 * flame)))
-            g1.setColorAt(0.7, QColor(15, 75, 10, 20))
+            a0 = int((42 + 24 * pulse + 30 * hp) if spec.is_light else (60 + 30 * pulse + 40 * hp))
+            a1 = int((18 + 12 * pulse) if spec.is_light else (35 + 18 * pulse))
+            g1.setColorAt(0.0, QColor(motif_hi.red(), motif_hi.green(), motif_hi.blue(), a0))
+            g1.setColorAt(0.45, QColor(motif_mid.red(), motif_mid.green(), motif_mid.blue(), a1))
             g1.setColorAt(1.0, QColor(0, 0, 0, 0))
             painter.fillRect(0, 0, w, h, g1)
 
         elif self._theme == "wow-vanilla":
-            # Dark Iron Forge & Polished Steel
-            bg = QLinearGradient(0, 0, w, h)
-            bg.setColorAt(0.0, QColor("#1C1E24"))
-            bg.setColorAt(0.5, QColor("#14161C"))
-            bg.setColorAt(1.0, QColor("#0D0E12"))
-            painter.fillRect(0, 0, w, h, bg)
-
-            forge = 0.5 + 0.5 * math.sin(t * 2.8) * math.cos(t * 1.4)
+            # Dark Iron Forge & Polished Steel blended with active theme accent
+            motif_hi = _blend_color(QColor(255, 130, 30), accent_bright, 0.45)
+            motif_mid = _blend_color(QColor(180, 60, 15), ember_col, 0.45)
+            pulse = 0.5 + 0.5 * math.sin(t * 2.8) * math.cos(t * 1.4)
             g1 = QRadialGradient(w * 0.5, h * 1.2, w * 0.6)
-            g1.setColorAt(0.0, QColor(255, 130, 30, int(60 + 30 * forge + 35 * hp)))
-            g1.setColorAt(0.4, QColor(180, 60, 15, int(35 + 15 * forge)))
-            g1.setColorAt(0.8, QColor(80, 25, 10, 15))
+            a0 = int((40 + 22 * pulse + 28 * hp) if spec.is_light else (55 + 28 * pulse + 35 * hp))
+            a1 = int((18 + 10 * pulse) if spec.is_light else (30 + 15 * pulse))
+            g1.setColorAt(0.0, QColor(motif_hi.red(), motif_hi.green(), motif_hi.blue(), a0))
+            g1.setColorAt(0.45, QColor(motif_mid.red(), motif_mid.green(), motif_mid.blue(), a1))
             g1.setColorAt(1.0, QColor(0, 0, 0, 0))
             painter.fillRect(0, 0, w, h, g1)
 
-            sheen = QLinearGradient(0, 0, 0, h * 0.35)
-            sheen.setColorAt(0.0, QColor(220, 235, 255, int(30 + 35 * hp)))
-            sheen.setColorAt(1.0, QColor(200, 220, 245, 0))
-            painter.fillRect(0, 0, w, int(h * 0.35), sheen)
+            if not spec.is_light:
+                sheen = QLinearGradient(0, 0, 0, h * 0.35)
+                sheen.setColorAt(
+                    0.0,
+                    _blend_color(QColor(220, 235, 255), accent_light, 0.4, int(26 + 30 * hp)),
+                )
+                sheen.setColorAt(1.0, QColor(200, 220, 245, 0))
+                painter.fillRect(0, 0, w, int(h * 0.35), sheen)
+
+        elif self._theme in ("wow-unbound", "wow-coa"):
+            # Arcane Nether & Prismatic Crest blended with active theme accent
+            motif_hi = _blend_color(QColor(165, 110, 255), accent_bright, 0.50)
+            motif_mid = _blend_color(QColor(95, 50, 175), ember_col, 0.50)
+            pulse = 0.5 + 0.5 * math.sin(t * 2.5) * math.cos(t * 1.5)
+            g1 = QRadialGradient(w * 0.5 + 22 * math.sin(t * 1.1), h * 0.45, max(w, h) * 0.68)
+            a0 = int((40 + 22 * pulse + 28 * hp) if spec.is_light else (50 + 28 * pulse + 38 * hp))
+            a1 = int((18 + 10 * pulse) if spec.is_light else (28 + 15 * pulse))
+            g1.setColorAt(0.0, QColor(motif_hi.red(), motif_hi.green(), motif_hi.blue(), a0))
+            g1.setColorAt(0.5, QColor(motif_mid.red(), motif_mid.green(), motif_mid.blue(), a1))
+            g1.setColorAt(1.0, QColor(0, 0, 0, 0))
+            painter.fillRect(0, 0, w, h, g1)
+
+        elif self._theme in ("wow-centurion", "dfo"):
+            # Arena Bronze & Crimson Ember blended with active theme accent
+            motif_hi = _blend_color(QColor(255, 155, 65), accent_bright, 0.48)
+            motif_mid = _blend_color(QColor(185, 70, 30), ember_col, 0.48)
+            pulse = 0.5 + 0.5 * math.sin(t * 3.0) * math.cos(t * 1.6)
+            g1 = QRadialGradient(w * 0.5 + 18 * math.sin(t * 1.2), h * 0.85, w * 0.65)
+            a0 = int((40 + 22 * pulse + 28 * hp) if spec.is_light else (52 + 26 * pulse + 36 * hp))
+            a1 = int((18 + 10 * pulse) if spec.is_light else (28 + 14 * pulse))
+            g1.setColorAt(0.0, QColor(motif_hi.red(), motif_hi.green(), motif_hi.blue(), a0))
+            g1.setColorAt(0.45, QColor(motif_mid.red(), motif_mid.green(), motif_mid.blue(), a1))
+            g1.setColorAt(1.0, QColor(0, 0, 0, 0))
+            painter.fillRect(0, 0, w, h, g1)
 
         else:
-            # Turtle WoW Mystic Jade & Forest
-            bg = QLinearGradient(0, 0, w, h)
-            bg.setColorAt(0.0, QColor("#141F18"))
-            bg.setColorAt(0.5, QColor("#0F1813"))
-            bg.setColorAt(1.0, QColor("#09100C"))
-            painter.fillRect(0, 0, w, h, bg)
-
-            aura = 0.5 + 0.5 * math.sin(t * 2.0)
+            # WoW Tortoise & DDON Mystic Jade & Forest blended with active theme accent
+            motif_hi = _blend_color(QColor(70, 230, 140), accent_bright, 0.45)
+            motif_mid = _blend_color(QColor(35, 150, 85), ember_col, 0.45)
+            pulse = 0.5 + 0.5 * math.sin(t * 2.0)
             g1 = QRadialGradient(w * 0.5 + 20 * math.sin(t * 0.8), h * 0.55, w * 0.65)
-            g1.setColorAt(0.0, QColor(70, 230, 140, int(45 + 25 * aura + 40 * hp)))
-            g1.setColorAt(0.4, QColor(35, 150, 85, int(25 + 15 * aura)))
-            g1.setColorAt(0.8, QColor(15, 60, 35, 15))
+            a0 = int((38 + 20 * pulse + 28 * hp) if spec.is_light else (45 + 25 * pulse + 40 * hp))
+            a1 = int((16 + 10 * pulse) if spec.is_light else (25 + 15 * pulse))
+            g1.setColorAt(0.0, QColor(motif_hi.red(), motif_hi.green(), motif_hi.blue(), a0))
+            g1.setColorAt(0.45, QColor(motif_mid.red(), motif_mid.green(), motif_mid.blue(), a1))
             g1.setColorAt(1.0, QColor(0, 0, 0, 0))
             painter.fillRect(0, 0, w, h, g1)
 
         # 2. Render particle pool
         for p in self._particles:
-            sway = math.sin(t * float(p["sway_speed"]) + float(p["phase"])) * float(p["sway_amp"])
-            px = (float(p["x"]) + sway) * w
-            py = float(p["y"]) * h
+            sway = math.sin(t * p.sway_speed + p.phase) * p.sway_amp
+            px = (p.x + sway) * w
+            py = p.y * h
 
             if self._theme == "wow-wotlk":
-                alpha = int(
-                    255 * min(1.0, (1.0 - float(p["y"])) * 2.0) * min(1.0, float(p["y"]) * 3.0)
-                )
+                alpha = int(255 * min(1.0, (1.0 - p.y) * 2.0) * min(1.0, p.y * 3.0))
             elif self._theme == "wow-vanilla":
                 # Ashes fade in as they fall from above, then settle out at the bottom
-                alpha = int(
-                    255 * min(1.0, float(p["y"]) * 4.0) * min(1.0, (1.0 - float(p["y"])) * 1.6)
-                )
+                alpha = int(255 * min(1.0, p.y * 4.0) * min(1.0, (1.0 - p.y) * 1.6))
             else:
-                alpha = int(255 * min(1.0, (1.0 - float(p["y"])) * 1.8) * float(p["y"]))
+                alpha = int(255 * min(1.0, (1.0 - p.y) * 1.8) * p.y)
 
             if alpha <= 0:
                 continue
@@ -1522,35 +1559,46 @@ class DadcraftCampaignCard(QFrame):
             alpha = min(255, int(alpha * (1.0 + 0.4 * hp)))
 
             if spec.is_light:
-                accent_q = QColor(spec.accent_bright)
-                col = QColor(accent_q.red(), accent_q.green(), accent_q.blue(), int(alpha * 0.55))
+                col = QColor(
+                    accent_bright.red(),
+                    accent_bright.green(),
+                    accent_bright.blue(),
+                    int(alpha * 0.55),
+                )
             elif self._theme == "wow-wotlk":
-                col = (
-                    QColor(210, 245, 255, alpha)
-                    if p["tier"] == "bright"
-                    else QColor(120, 200, 255, int(alpha * 0.8))
+                base_mote = QColor(210, 245, 255) if p.tier == "bright" else QColor(120, 200, 255)
+                col = _blend_color(
+                    base_mote,
+                    accent_light if p.tier == "bright" else accent_bright,
+                    0.45,
+                    alpha if p.tier == "bright" else int(alpha * 0.8),
                 )
             elif self._theme == "wow-tbc":
-                col = (
-                    QColor(190, 255, 150, alpha)
-                    if p["tier"] == "bright"
-                    else QColor(70, 240, 30, int(alpha * 0.85))
+                base_mote = QColor(190, 255, 150) if p.tier == "bright" else QColor(70, 240, 30)
+                col = _blend_color(
+                    base_mote,
+                    accent_light if p.tier == "bright" else accent_bright,
+                    0.45,
+                    alpha if p.tier == "bright" else int(alpha * 0.85),
                 )
             elif self._theme == "wow-vanilla":
-                # Falling ashes: pale smoke-white motes, a few faint ember cinders
-                col = (
-                    QColor(205, 210, 218, alpha)
-                    if p["tier"] == "bright"
-                    else QColor(138, 143, 152, int(alpha * 0.8))
+                base_mote = QColor(205, 210, 218) if p.tier == "bright" else QColor(138, 143, 152)
+                col = _blend_color(
+                    base_mote,
+                    accent_light if p.tier == "bright" else accent_bright,
+                    0.35,
+                    alpha if p.tier == "bright" else int(alpha * 0.8),
                 )
             else:
-                col = (
-                    QColor(200, 255, 220, alpha)
-                    if p["tier"] == "bright"
-                    else QColor(60, 225, 130, int(alpha * 0.85))
+                base_mote = QColor(200, 255, 220) if p.tier == "bright" else QColor(60, 225, 130)
+                col = _blend_color(
+                    base_mote,
+                    accent_light if p.tier == "bright" else accent_bright,
+                    0.45,
+                    alpha if p.tier == "bright" else int(alpha * 0.85),
                 )
 
-            rad = float(p["size"])
+            rad = p.size
             pg = QRadialGradient(px, py, rad * 1.6)
             pg.setColorAt(0.0, col)
             pg.setColorAt(0.6, QColor(col.red(), col.green(), col.blue(), int(alpha * 0.5)))
@@ -1559,40 +1607,22 @@ class DadcraftCampaignCard(QFrame):
             painter.setBrush(pg)
             painter.drawEllipse(QPointF(px, py), rad * 1.6, rad * 1.6)
 
-        # 3. Outer Dadcraft Bevel & Filigree Frame
+        # 3. Outer Dadcraft Bevel & Filigree Frame (derived from `spec` in both dark and light)
         painter.setClipping(False)
 
-        if spec.is_light:
-            border_base = QColor(spec.accent_bright if hp > 0.2 else spec.border_dark)
-            border_hi = QColor(spec.header_top_highlight)
-        elif self._theme == "wow-wotlk":
-            if hp > 0:
-                border_base = QColor(int(43 + 37 * hp), int(82 + 86 * hp), int(120 + 135 * hp))
-                border_hi = QColor(int(128 + 96 * hp), int(208 + 36 * hp), 255)
-            else:
-                border_base = QColor(43, 82, 120)
-                border_hi = QColor(128, 208, 255)
-        elif self._theme == "wow-tbc":
-            if hp > 0:
-                border_base = QColor(int(40 + 24 * hp), int(90 + 165 * hp), int(32 + 32 * hp))
-                border_hi = QColor(int(96 + 120 * hp), 255, int(48 + 136 * hp))
-            else:
-                border_base = QColor(40, 90, 32)
-                border_hi = QColor(96, 255, 48)
-        elif self._theme == "wow-vanilla":
-            if hp > 0:
-                border_base = QColor(int(74 + 54 * hp), int(86 + 74 * hp), int(102 + 90 * hp))
-                border_hi = QColor(255, 255, 255)
-            else:
-                border_base = QColor(74, 86, 102)
-                border_hi = QColor(216, 228, 240)
+        rest_border = QColor(spec.border_dark)
+        hover_border = QColor(spec.accent_bright)
+        if self.hasFocus():
+            border_base = hover_border
+        elif hp > 0.0:
+            border_base = _blend_color(rest_border, hover_border, hp)
         else:
-            if hp > 0:
-                border_base = QColor(int(46 + 18 * hp), int(96 + 128 * hp), int(68 + 68 * hp))
-                border_hi = QColor(int(80 + 112 * hp), 255, int(152 + 68 * hp))
-            else:
-                border_base = QColor(46, 96, 68)
-                border_hi = QColor(80, 232, 152)
+            border_base = rest_border
+        border_hi = _blend_color(
+            QColor(spec.header_top_highlight),
+            accent_light,
+            0.35 * hp,
+        )
 
         pen = QPen(border_base, 2.0)
         painter.setPen(pen)

@@ -59,6 +59,13 @@ from yulon.support import bundle, runlog
 from yulon.support import sources as support_sources
 from yulon.support.redact import Redactor
 from yulon.ui.folder_picker import pick_save_file
+from yulon.ui.icons import dadcraft_icon
+from yulon.ui.theme import (
+    build_dadcraft_palette,
+    get_theme,
+    normalize_theme_name,
+    resolve_widget_theme,
+)
 from yulon.ui.widgets.flow_layout import flow_bar
 from yulon.ui.widgets.job import JobRunner, LineRelay, threaded_job_runner
 from yulon.ui.widgets.log_panel import line_format
@@ -393,6 +400,19 @@ class LogsView(QWidget):
         layout.addWidget(self.viewer, 1)
         layout.addWidget(bar)
         layout.addWidget(self.status)
+        self.apply_theme(resolve_widget_theme(self))
+
+    def apply_theme(self, theme_name: str | None = None) -> None:
+        """Restyle the viewer palette, syntax highlighter, and button icons for `theme_name`."""
+        resolved = normalize_theme_name(theme_name or resolve_widget_theme(self))
+        spec = get_theme(resolved)
+        self.setProperty("yulon_theme", resolved)
+        icon_color = spec.text_primary if spec.is_light else spec.text_gold
+        self.save_button.setIcon(dadcraft_icon("download", icon_color, 14))
+        self.open_folder_button.setIcon(dadcraft_icon("folder", icon_color, 14))
+        self.refresh_button.setIcon(dadcraft_icon("refresh", icon_color, 14))
+        self.viewer.setPalette(build_dadcraft_palette(resolved))
+        self.highlighter.rehighlight()
 
     # -- reading ----------------------------------------------------------
 

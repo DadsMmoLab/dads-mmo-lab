@@ -2157,3 +2157,35 @@ def test_the_version_is_whole_or_ends_in_an_ellipsis_never_cut_mid_glyph(
         assert shown in ("", row.data.version) or shown.endswith("…"), shown
         assert label.toolTip() == row.data.version
     assert host.isVisible()
+
+
+def test_module_rows_render_distinct_card_borders_and_status_accents_across_themes(
+    qapp: object,
+) -> None:
+    """Each `RowWidget` has a bordered card surface and status-tinted left bar."""
+    from yulon.ui.theme import get_theme
+
+    session = mp.SessionState(sql_owed={("module", "mod-sql"): ("a.sql",)})
+    rows = _rows(
+        [_m("mod-ok"), _m("mod-sql"), _m("mod-avail", requires=("mod-missing",))],
+        {"module": frozenset({"mod-ok", "mod-sql"})},
+        session,
+    )
+    panel = _panel(rows)
+    for theme_id in ("arthas", "gruvbox-dark", "gruvbox-light"):
+        panel.apply_theme(theme_id)
+        spec = get_theme(theme_id)
+        ok_row = panel.row("mod-ok")
+        sql_row = panel.row("mod-sql")
+        avail_row = panel.row("mod-avail")
+
+        assert spec.bg_container in ok_row.styleSheet()
+        assert f"border-left: 3px solid {spec.uncommon}" in ok_row.styleSheet()
+        assert f"border-left: 3px solid {spec.text_warning}" in sql_row.styleSheet()
+        assert f"border-left: 3px solid {spec.border_dark}" in avail_row.styleSheet()
+
+        panel.select("mod-ok")
+        assert spec.bg_hover in ok_row.styleSheet()
+        assert f"border-left: 3px solid {spec.accent_bright}" in ok_row.styleSheet()
+        ok_row.set_selected(False)
+        panel._selected = None

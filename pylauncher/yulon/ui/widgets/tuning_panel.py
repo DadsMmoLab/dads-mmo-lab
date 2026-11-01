@@ -727,13 +727,13 @@ class RowEditor(QWidget):
         self.changed_label.setStyleSheet(f"color: {COLOR_TEXT_WARNING};")
         self.changed_label.setVisible(False)
         box.addWidget(self.changed_label)
-        self._theme_name = DEFAULT_THEME
+        self._theme_name = resolve_widget_theme(self)
         self._draw_chips()
-        self._draw_rail()
+        self.apply_theme(self._theme_name)
 
     def apply_theme(self, theme_name: str | None = None) -> None:
         """Restyle the row editor's labels and rail for `theme_name`."""
-        self._theme_name = normalize_theme_name(theme_name)
+        self._theme_name = normalize_theme_name(theme_name or resolve_widget_theme(self))
         spec = get_theme(self._theme_name)
         self.label.setStyleSheet(f"color: {spec.text_primary}; font-weight: bold;")
         self.chips.setStyleSheet(f"color: {spec.text_muted};")
@@ -1013,7 +1013,7 @@ class CardWidget(QGroupBox):
 
     def apply_theme(self, theme_name: str | None = None) -> None:
         """Restyle the card and its row editors for `theme_name`."""
-        resolved = normalize_theme_name(theme_name)
+        resolved = normalize_theme_name(theme_name or resolve_widget_theme(self))
         spec = get_theme(resolved)
         self.title_label.setStyleSheet(f"color: {spec.text_primary}; font-weight: bold;")
         self.count_label.setStyleSheet(f"color: {spec.text_muted};")
@@ -1346,9 +1346,7 @@ class TuningPanel(QWidget):
         for widget in self._cards.values():
             widget.set_rule_lifted(widget.card.rules == lifted)
         self._draw_file_note()
-        active = self._theme_name or resolve_widget_theme(self)
-        if active != DEFAULT_THEME or self._theme_name is not None:
-            self.apply_theme(active)
+        self.apply_theme(self._theme_name or resolve_widget_theme(self))
 
     def apply_theme(self, theme_name: str | None = None) -> None:
         """Restyle the tuning panel, cards, file buttons, and editor for `theme_name`."""
@@ -1374,6 +1372,7 @@ class TuningPanel(QWidget):
             f"color: {spec.text_primary}; min-height: {lines}px;"
         )
         self.backup_label.setStyleSheet(f"color: {spec.text_muted};")
+        self._draw_file_title()
         self._relint()
         for card_widget in self._cards.values():
             card_widget.apply_theme(resolved)
@@ -1589,6 +1588,7 @@ class TuningPanel(QWidget):
         if not file:
             self.file_title.setText("")
             return
+        spec = get_theme(self._theme_name or resolve_widget_theme(self))
         name = html.escape(file.rsplit("/", 1)[-1], quote=False)
         path = html.escape(file, quote=False)
         said = (
@@ -1597,8 +1597,8 @@ class TuningPanel(QWidget):
             else ""
         )
         self.file_title.setText(
-            f'<span style="color: {COLOR_TEXT_PRIMARY}; font-weight: bold;">{name}</span> '
-            f'<span style="color: {COLOR_TEXT_MUTED};">{path}{said}</span>'
+            f'<span style="color: {spec.text_primary}; font-weight: bold;">{name}</span> '
+            f'<span style="color: {spec.text_muted};">{path}{said}</span>'
         )
 
     def set_file_text(

@@ -3000,19 +3000,19 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "for `ui.json.*.tmp` a killed save left, and deletes only a file this app named "
         "itself, in its own directory, more than a day old. Nothing of a server's"
     ),
-    ("ui/theme.py", "_load_bundled_themes"): (
+    ("ui/theme_spec.py", "_load_bundled_themes"): (
         "Theme engine (#444). Globs the theme `.json` files shipped inside the app "
         "(`resources.themes_dir()`) to build the built-in theme list. Read only, in the "
         "app's own bundle; it decides which colours are offered and writes nothing, and it "
         "touches no server or game folder"
     ),
-    ("ui/theme.py", "sync_user_themes"): (
+    ("ui/theme_spec.py", "sync_user_themes"): (
         "Theme engine (#444). Globs the bundled theme files to copy each into the player's "
         "own `<config dir>/themes` folder when that name is not there yet. It writes only "
         "into this app's config directory, never replaces a file that exists (a player's "
         "edited theme stays), and has nothing to do with a server's or a game's folder"
     ),
-    ("ui/theme.py", "load_available_themes"): (
+    ("ui/theme_spec.py", "load_available_themes"): (
         "Theme engine (#444). Globs `<config dir>/themes/*.json` to offer the player's own "
         "themes next to the built-in ones. Read only, this app's own directory; an OSError "
         "answers an empty listing, which leaves the built-in themes"
