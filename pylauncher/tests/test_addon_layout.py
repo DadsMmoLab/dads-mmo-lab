@@ -436,6 +436,7 @@ def test_a_source_with_no_toc_says_what_it_holds(tmp_path: Path) -> None:
         ("wow-unbound", 30300),
         ("wow-coa", 30300),
         ("wow-centurion", 30300),
+        ("wow-mop", 50400),
         ("wow-tbc", 20400),
         ("wow-vanilla", 11200),
         ("wow-tortoise", 11200),

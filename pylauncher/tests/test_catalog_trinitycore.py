@@ -180,8 +180,13 @@ def test_trinitycore_is_a_family_and_an_account_scheme_the_models_name() -> None
     assert Accounts(scheme="trinitycore_sha").scheme == "trinitycore_sha"
 
 
-def test_the_shipped_catalog_has_one_trinitycore_entry_and_it_is_centurion() -> None:
-    """Task 1 was the model only; the real `wow-centurion` entry landed in Task 7."""
+def test_the_shipped_catalog_has_two_trinitycore_entries_centurion_and_mop() -> None:
+    """Task 1 was the model only; `wow-centurion` landed in Task 7 and `wow-mop` in T850.
+
+    The family's two credential shapes are declared one per entry (T850-C): Centurion's
+    `trinitycore` (SRP6 `salt`/`verifier`) and MoP's `trinitycore_sha` (`sha_pass_hash`
+    with the level in `account_access(id, gmlevel, RealmID)`).
+    """
     catalog = load_catalog()
     assert [entry.id for entry in catalog.games] == [
         "wow-wotlk",
@@ -191,14 +196,19 @@ def test_the_shipped_catalog_has_one_trinitycore_entry_and_it_is_centurion() -> 
         "wow-centurion",
         "wow-unbound",
         "wow-coa",
+        "wow-mop",
     ]
+    shapes = {"wow-centurion": "trinitycore", "wow-mop": "trinitycore_sha"}
     for entry in catalog.games:
         native = entry.install.native
         assert native is not None
-        is_tc = entry.id == "wow-centurion"
+        is_tc = entry.id in shapes
         assert (native.family == "trinitycore") is is_tc, entry.id
         assert (native.trinitycore is not None) is is_tc, entry.id
-        assert (entry.accounts.scheme == "trinitycore") is is_tc, entry.id
+        assert (entry.accounts.scheme in tuple(shapes.values())) is is_tc, entry.id
+    assert {(game, shapes[game]) for game in shapes} == {
+        (game, catalog.get(game).accounts.scheme) for game in shapes
+    }
 
 
 def test_an_entry_of_the_family_dispatches_to_the_trinitycore_engine() -> None:

@@ -2734,6 +2734,29 @@ def test_the_centurion_windows_render_reproduces_its_committed_snapshot_byte_for
         assert text == (root / name).read_text(encoding="utf-8"), name
 
 
+# -- T850: Mists of Pandaria's files are the family's second entry's -----------------------
+
+
+@pytest.mark.parametrize("folder", sorted(support_rendered.MOP_LABELS))
+def test_the_mop_render_reproduces_its_committed_snapshot_byte_for_byte(folder: str) -> None:
+    """T850's `wow-mop`: the shared TrinityCore templates over MoP's own Dockerfile set.
+
+    Written by `support_rendered.write_mop_snapshots()` at the commit that added the entry,
+    so a later change to a shared token or to `wow-mop/native/*.tmpl` has to move these bytes
+    deliberately. Regenerate only when a MoP template change for Linux is the point:
+
+        python -c "from tests.support_rendered import write_mop_snapshots as w; w()"
+    """
+    texts = support_rendered.mop_rendered(support_rendered.MOP_LABELS[folder])
+    root = support_rendered.MOP_SNAPSHOT_ROOT / folder
+    assert set(texts) == {path.name for path in root.iterdir() if path.is_file()}
+    for name, text in texts.items():
+        assert text == (root / name).read_text(encoding="utf-8"), f"{folder}: {name}"
+    # The install prefix the whole entry hangs on: `conf.source_dir` is /opt/mop/etc, so the
+    # data bind and every argv in the catalog spell /opt/mop.
+    assert "./data:/opt/mop/data" in texts[composegen.BASE_FILE]
+
+
 # -- T219: on Windows the world server reads its map data from a volume ---------------------
 
 

@@ -31,6 +31,7 @@ def test_every_game_yulon_runs_takes_add_ons() -> None:
         "wow-unbound": 30300,
         "wow-coa": 30300,
         "wow-centurion": 30300,
+        "wow-mop": 50400,
         "wow-tbc": 20400,
         "wow-vanilla": 11200,
         "wow-tortoise": 11200,

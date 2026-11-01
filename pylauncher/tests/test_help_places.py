@@ -87,6 +87,14 @@ EXPECTED: dict[str, list[tuple[str, str]]] = {
         ),
         ("Yu'lon", YULON_ISSUES),
     ],
+    "wow-mop": [
+        (
+            "1LineAtaTime/LoA-Pandaria-Playerbots",
+            "https://github.com/1LineAtaTime/LoA-Pandaria-Playerbots/issues",
+        ),
+        ("Recall WoW", "https://www.recallwow.online/"),
+        ("Yu'lon", YULON_ISSUES),
+    ],
 }
 
 

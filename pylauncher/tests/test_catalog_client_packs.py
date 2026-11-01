@@ -178,7 +178,8 @@ def test_a_client_without_the_new_fields_names_no_host() -> None:
 def test_the_shipped_catalog_uses_the_new_fields_on_wotlk_centurion_and_unbound() -> None:
     """T809 W2: wow-wotlk and wow-unbound carry the Lumenveil ClientPack; Centurion does not.
     WoW Unbound (T555) keeps its required addons pack beside it; WoW Conquest of Azeroth (T812)
-    carries its own client fields and no packs; every other entry behaves exactly as before
+    carries its own client fields and no packs; Mists of Pandaria (T850) carries an `exe_names`
+    and a `config_wtf` and no packs; every other entry behaves exactly as before
     (its own tests: test_catalog_centurion, test_unbound_entry, test_coa_entry)."""
     raw = json.loads(CATALOG_FILE.read_text(encoding="utf-8"))
     for entry in raw["games"]:
@@ -197,6 +198,19 @@ def test_the_shipped_catalog_uses_the_new_fields_on_wotlk_centurion_and_unbound(
                 "update",
                 "hd_patches",
                 "notes",
+            }, sorted(set(entry["client"]))
+            continue
+        if entry["id"] == "wow-mop":
+            # T850: exactly these, and no pack or patch of any kind -- the Recall client
+            # logs in as shipped, so there is nothing to lay down at Play.
+            assert set(entry["client"]) == {
+                "version",
+                "build",
+                "required_build",
+                "addon_interface",
+                "exe_names",
+                "notes",
+                "config_wtf",
             }, sorted(set(entry["client"]))
             continue
         assert set(entry["client"]) <= {
@@ -251,6 +265,19 @@ def test_the_shipped_catalog_uses_the_new_fields_on_wotlk_centurion_and_unbound(
             # T828: the CoA launcher's "Enable HD patches" off is exactly `-hd 0`.
             assert game.client.hd_patches is not None
             assert game.client.hd_patches.args_when_off == ("-hd", "0")
+            continue
+        if game.id == "wow-mop":
+            assert game.client.packs == ()
+            assert game.client.exe_patch is None
+            assert game.client.exe_names == ("_wow-64.exe",)
+            # T850: `portal` is taken out of the ready-to-play Config.wtf -- a `SET portal`
+            # line sends this client to Battle.net's :1119 -- and realmList/locale are set
+            # on every Play, so the copy dials this server whatever the player's own said.
+            assert game.client.config_wtf is not None
+            assert game.client.config_wtf.remove == ("portal",)
+            assert game.client.config_wtf.always["realmList"] == "127.0.0.1"
+            assert game.client.config_wtf.remove_locale_realmlists is True
+            assert game.client.hosts() == frozenset()
             continue
         assert game.client.packs == ()
         assert game.client.exe_patch is None

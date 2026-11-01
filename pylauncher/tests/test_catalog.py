@@ -34,17 +34,18 @@ V1_GAMES = (
     "wow-centurion",
     "wow-unbound",
     "wow-coa",
+    "wow-mop",
 )
-"""README §1's four v1 servers, Centurion after them (T179 Task 7), Unbound (T554) and CoA
-(T812)."""
+"""README §1's four v1 servers, Centurion after them (T179 Task 7), Unbound (T554), CoA
+(T812) and Mists of Pandaria (T850)."""
 
 
-def test_bundled_catalog_describes_exactly_the_seven_servers() -> None:
+def test_bundled_catalog_describes_exactly_the_eight_servers() -> None:
     """README §1: v1 scope is WoW WotLK / TBC / Vanilla / Tortoise, acronyms only.
 
     Plus Centurion (T179), the first server that is not one of the four, WoW Unbound
     (T554) and WoW Conquest of Azeroth (T812), each a WotLK of its own that runs
-    beside the first and so has ports of its own.
+    beside the first and so has ports of its own, and Mists of Pandaria (T850).
     """
     catalog = load_catalog()
     assert tuple(g.id for g in catalog.games) == V1_GAMES
@@ -406,6 +407,9 @@ def test_every_entry_says_whether_it_offers_the_update_to_latest_control() -> No
         "wow-centurion": True,
         # T812: CoA pins its fork and carries a patch; no update control until a gate proves one.
         "wow-coa": False,
+        # T850: MoP pins its fork; the world database comes from a release asset, not
+        # the checkout, so there is no snapshot for an update route to compare.
+        "wow-mop": False,
     }, offered
 
 

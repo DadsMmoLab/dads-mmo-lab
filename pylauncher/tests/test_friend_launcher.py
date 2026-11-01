@@ -103,12 +103,14 @@ def _type(window: FriendLauncher, tmp_path: Path, *, realm: str = "192.168.50.49
 def test_only_games_whose_client_is_complete_without_a_server_are_offered(
     tmp_path: Path,
 ) -> None:
-    """WotLK, TBC, Vanilla, Tortoise and CoA are pure copies; Centurion and Unbound are not.
+    """WotLK, TBC, Vanilla, Tortoise and CoA are pure copies; Centurion, Unbound and MoP are not.
 
-    Their packs and Wow.exe patch are fetched and laid by the server's own tab,
+    Their packs, Wow.exe patch or Config.wtf are fetched and laid by the server's own tab,
     keyed by the server folder — a friend launcher has no server folder, so a
     client made here could never receive them. WotLK's only pack is the optional Lumenveil
     extra, off by default, so WotLK is offered (mutation: count every pack and WotLK drops out).
+    Mists of Pandaria (T850) is out on its Config.wtf alone: the copy must have `portal`
+    taken out and `realmList` set, which only a server folder can do.
     """
     window = _window(tmp_path)
     offered = [window.game_pick.itemData(i) for i in range(window.game_pick.count())]

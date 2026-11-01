@@ -7115,6 +7115,9 @@ BOT_SQL_BY_GAME = {
     "wow-unbound": ("acore_auth", "acore_characters", "ub-database"),
     # T812: the same schema names as WotLK, in the database container of its own.
     "wow-coa": ("acore_auth", "acore_characters", "coa-database"),
+    # T850: from the entry's own `databases` block, not measured on a box yet -- the
+    # first live MoP install is what turns these three into a reading (GAP §2).
+    "wow-mop": ("mop_auth", "mop_characters", "mop-db"),
 }
 """Written out per game rather than read back out of the entry.
 

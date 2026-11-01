@@ -12,6 +12,12 @@ This package is built before the `wow-centurion` entry lands in `catalog.json`
 that imports this one; and the entry the view holds is the authority on THIS
 install anyway (`controller_view._sql_for()` says the same of the containers).
 
+Since T850 it serves the family's SECOND entry too, Mists of Pandaria
+(`wow-mop`, 1LineAtaTime/LoA-Pandaria-Playerbots): both are driven by
+`controller_view._FACTORIES`'s `_for_centurion`, and the only per-game fact in the
+package is which Characters verbs that tree has had checked
+(`characters.CONFIRMED_LIVE_BY_GAME`) -- which is keyed by id and not inherited.
+
 What is this core's own, and where each fact comes from:
 
 * **Containers, schemas, client.** `entry.container_spec()`, `entry.schema_map()`,

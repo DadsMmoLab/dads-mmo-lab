@@ -14,6 +14,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ## Unreleased
 
 ### New
+- Mists of Pandaria 5.4.8 (LoA Pandaria with 500 playerbots) can be installed; bring the Recall WoW client.
 
 ### Fixed
 

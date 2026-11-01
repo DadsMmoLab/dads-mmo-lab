@@ -594,6 +594,7 @@ def test_every_tab_that_offers_an_uninstall_is_handed_this_installs_own_built_im
     assert sorted(offered) == [
         "wow-centurion",
         "wow-coa",
+        "wow-mop",
         "wow-unbound",
         "wow-vanilla",
         "wow-wotlk",

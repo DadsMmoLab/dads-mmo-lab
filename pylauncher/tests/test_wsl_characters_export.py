@@ -1014,6 +1014,7 @@ def test_the_other_games_the_script_names_match_the_catalog() -> None:
         "wow-tortoise",
         "wow-centurion",
         "wow-unbound",
+        "wow-mop",
     }
     for game_id, name, database in script.OTHER_GAMES:
         entry = catalog.get(game_id)
