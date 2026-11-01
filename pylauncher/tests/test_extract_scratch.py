@@ -395,6 +395,47 @@ def test_a_copy_that_fails_falls_back_to_the_link_and_keeps_the_tools_status(
     assert staging(out) == []
 
 
+@NOT_ROOT
+def test_a_copy_that_fails_inside_a_read_only_folder_never_leaves_a_partial_tree(
+    tmp_path: Path,
+) -> None:
+    """Codex, T847: a partial copy holding a read-only folder must not stand in for the link.
+
+    `cp -r` gives the copied folder its source's mode, so a cleanup that just ran
+    `rm -rf` could not empty it, `ln -s` then made its link INSIDE the leftover
+    folder, and the tool ran on the incomplete tree. The copy lands under a
+    temporary name and is renamed only when whole, so the tool sees the link.
+    """
+    out = tmp_path / "out"
+    locked = out / "Buildings" / "locked"
+    locked.mkdir(parents=True)
+    (locked / "f1").write_bytes(b"contents\n")
+    secret = locked / "secret"
+    secret.write_bytes(b"s")
+    secret.chmod(0o000)
+    locked.chmod(0o555)
+    stage(out, {"vmaps": 1})
+    try:
+        result = run_scratched(
+            tmp_path,
+            out,
+            "if [ -L Buildings ]; then echo LINK; else echo NOTLINK; fi\n"
+            "cat Buildings/locked/f1\nexit 0\n",
+            "vmaps",
+            "Buildings",
+            "vmaps",
+        )
+    finally:
+        for folder in tmp_path.rglob("*"):
+            if folder.is_dir() and not folder.is_symlink():
+                folder.chmod(0o755)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "yulon: copying Buildings into the container failed" in result.stdout
+    assert "NOTLINK" not in result.stdout, result.stdout
+    assert "LINK" in result.stdout
+    assert "contents" in result.stdout
+
+
 def test_a_scratched_tool_reads_an_earlier_tools_output_through_a_link(tmp_path: Path) -> None:
     """`vmap assemble` reads `Buildings` from cwd: it is a link to `/out/Buildings`.
 
@@ -709,13 +750,18 @@ def test_the_script_is_its_own_home_for_its_paths_and_constants() -> None:
     assert "--update=none" in extract.SCRATCH_SCRIPT
     # The only removal is T847's partial copy-in, by its bare name in the scratch cwd:
     # the container still cannot touch the top of /out.
-    assert extract.SCRATCH_SCRIPT.count("rm -rf") == extract.SCRATCH_SCRIPT.count('rm -rf "$name"')
+    partial = 'rm -rf -- ".yulon-in-$name"'
+    assert extract.SCRATCH_SCRIPT.count("rm -rf") == extract.SCRATCH_SCRIPT.count(partial)
     assert "rm -rf /out" not in extract.SCRATCH_SCRIPT, "the container cannot touch the top of /out"
     assert 'for arg in "$@";' in extract.SCRATCH_SCRIPT
-    assert 'cp -r "$entry" "$name"' in extract.SCRATCH_SCRIPT
+    assert 'cp -r -- "$entry" ".yulon-in-$name"' in extract.SCRATCH_SCRIPT
     assert "yulon: copying $name into the container failed" in extract.SCRATCH_SCRIPT
-    assert 'rm -rf "$name"' in extract.SCRATCH_SCRIPT
-    assert " mv " not in extract.SCRATCH_SCRIPT, "the host does the swap, not the container"
+    assert 'rm -rf -- ".yulon-in-$name"' in extract.SCRATCH_SCRIPT
+    # The host does the swap, not the container: the one `mv` is T847's rename of a
+    # whole copy-in inside the scratch cwd, never anything in /out.
+    rename = 'mv -- ".yulon-in-$name" "$name"'
+    assert extract.SCRATCH_SCRIPT.count(" mv ") == extract.SCRATCH_SCRIPT.count(" " + rename)
+    assert "/out" not in rename, "the host does the swap, not the container"
 
 
 # -- run_plan: the line, and the two refusals ---------------------------------
