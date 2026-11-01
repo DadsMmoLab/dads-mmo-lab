@@ -477,7 +477,9 @@ class TrinityCoreInstaller(CmangosInstaller):
            another server's patch in the copy would be extracted into maps this
            server does not expect (Review Focus 1).
         3. **The tree's own DBCs** over `data/dbc` (`dbc_overlay_from`): "Use these
-           DBCs, not the ones the extractor writes" (README.md:174-180).
+           DBCs, not the ones the extractor writes" (README.md:174-180). Skipped
+           when the entry names no `dbc_overlay_from`: the extractor's own DBCs
+           are then used as they are (a tree that ships none, e.g. MoP).
         4. **The start check**: maps and vmaps for every `required_maps` id, or a
            refusal naming this step, before a server is started that would stop
            with "Unable to load critical files" (World.cpp:1823-1835 at 6c6472c3, read 2026-10-07).
@@ -508,13 +510,15 @@ class TrinityCoreInstaller(CmangosInstaller):
             yield from self._extract_through_a_temporary_client(
                 ctx, original, data_dir, packs, salt
             )
-        source = ctx.server_dir / tc.checkout / tc.extract.dbc_overlay_from
-        target = data_dir / tc.extract.dbc_overlay_to
-        copied = extract.overlay_files(source, target)
-        yield (
-            f"Laid the server's own DBC files from {tc.extract.dbc_overlay_from} over {target} "
-            f"({copied} copied; the rest were already there)."
-        )
+        overlay_from = tc.extract.dbc_overlay_from
+        if overlay_from is not None:
+            source = ctx.server_dir / tc.checkout / overlay_from
+            target = data_dir / tc.extract.dbc_overlay_to
+            copied = extract.overlay_files(source, target)
+            yield (
+                f"Laid the server's own DBC files from {overlay_from} over {target} "
+                f"({copied} copied; the rest were already there)."
+            )
         self._refuse_missing_map_data(data_dir, original)
         maps = ", ".join(str(map_id) for map_id in tc.required_maps)
         yield f"The map data the world server checks at start (maps {maps}) is in place."
@@ -877,7 +881,7 @@ class TrinityCoreInstaller(CmangosInstaller):
         back and says so itself (T241).
         """
         tc = self._tc()
-        missing = extract.missing_map_data(data_dir, tc.required_maps)
+        missing = extract.missing_map_data(data_dir, tc.required_maps, map_names=tc.map_names)
         if not missing:
             return
         evidence = data_dir / extract.EVIDENCE_FILE
@@ -916,17 +920,21 @@ class TrinityCoreInstaller(CmangosInstaller):
         The player's random-bot count is carried over, as on CMaNGOS (T117, T179
         Task 5): read back from `playerbots.conf` BEFORE `materialise()`, and only
         once this stage has finished before -- until then a pair in the file is
-        the `.dist`'s. The bot dashboard is the Tortoise module's, not carried here.
+        the `.dist`'s. The two keys are the entry's `bot_count_keys` (Centurion's
+        `Playerbot.RandomPopulation.TargetMin`/`TargetMax` by default, MoP's
+        `AiPlayerbot.MinRandomBots`/`MaxRandomBots`). The bot dashboard is the
+        Tortoise module's, not carried here.
         """
         tc = self._tc()
         etc_dir = ctx.server_dir / ETC_DIR
+        count_keys = tc.conf.bot_count_keys
         table = (
             bot_count.conf_table(
                 tc.conf,
                 etc_dir,
                 name=tc.conf.playerbots_conf,
-                low=bot_count.TC_MIN_KEY,
-                high=bot_count.TC_MAX_KEY,
+                low=count_keys.min if count_keys is not None else bot_count.TC_MIN_KEY,
+                high=count_keys.max if count_keys is not None else bot_count.TC_MAX_KEY,
             )
             if ctx.state.has("conf")
             else tc.conf
@@ -1111,7 +1119,8 @@ class TrinityCoreInstaller(CmangosInstaller):
     def _watched_paths(self) -> tuple[str, ...]:
         """The checkout-relative folders the route asks git about: what the import and maps read."""
         tc = self._tc()
-        found = {tc.extract.dbc_overlay_from.strip("/")}
+        overlay = tc.extract.dbc_overlay_from
+        found = {overlay.strip("/")} if overlay is not None else set()
         prefix = f"{tc.checkout.rstrip('/')}/"
         globs = [glob for phase in tc.sql.phases for glob in phase.files]
         globs += [glob for phase in tc.sql.phases for glob in (phase.into_each or {}).values()]
@@ -1128,9 +1137,11 @@ class TrinityCoreInstaller(CmangosInstaller):
     def _is_map_data(self, rel: str) -> bool:
         """Is this server-dir-relative file one the map data is made from?"""
         tc = self._tc()
-        dbc = posixpath.join(tc.checkout, tc.extract.dbc_overlay_from.strip("/"))
-        if rel.startswith(f"{dbc}/"):
-            return True
+        overlay = tc.extract.dbc_overlay_from
+        if overlay is not None:
+            dbc = posixpath.join(tc.checkout, overlay.strip("/"))
+            if rel.startswith(f"{dbc}/"):
+                return True
         for pack in self._map_packs():
             path = pack.source.path or ""
             if rel == path or rel.startswith(f"{path}.part"):
@@ -2420,10 +2431,10 @@ class TrinityCoreInstaller(CmangosInstaller):
         """Is the map data in `data/` what a finished client-data stage leaves? (T241)
 
         Every tool recorded for its argv with its counts met, the server's own
-        DBCs laid over the extracted ones (`extract.overlaid()`), and the start
-        check's maps and vmaps there -- the three things the stage does, each
-        read off the disk. Anything unread answers False, and the old data comes
-        back.
+        DBCs laid over the extracted ones (`extract.overlaid()`, skipped when the
+        entry names no `dbc_overlay_from`), and the start check's maps and vmaps
+        there -- the three things the stage does, each read off the disk. Anything
+        unread answers False, and the old data comes back.
         """
         tc = self._tc()
         current = extract.read_evidence(data_dir)
@@ -2434,10 +2445,13 @@ class TrinityCoreInstaller(CmangosInstaller):
             for tool in tc.extract.tools
         ):
             return False
-        if extract.missing_map_data(data_dir, tc.required_maps):
+        if extract.missing_map_data(data_dir, tc.required_maps, map_names=tc.map_names):
             return False
+        overlay_from = tc.extract.dbc_overlay_from
+        if overlay_from is None:
+            return True
         return extract.overlaid(
-            server_dir / tc.checkout / tc.extract.dbc_overlay_from,
+            server_dir / tc.checkout / overlay_from,
             data_dir / tc.extract.dbc_overlay_to,
         )
 

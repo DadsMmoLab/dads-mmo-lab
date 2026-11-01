@@ -1548,11 +1548,14 @@ class TrinityCoreExtractPlan(ExtractPlan):
     copies differ from the server's in places.
     """
 
-    dbc_overlay_from: str = Field(
+    dbc_overlay_from: str | None = Field(
+        default=None,
         min_length=1,
         description=(
             "Directory inside the checkout (relative to `TrinityCoreData.checkout`) whose files "
-            "are copied over the extracted `data/dbc` after the extractors ran."
+            "are copied over the extracted `data/dbc` after the extractors ran. `None` when the "
+            "tree ships no DBCs of its own to lay over the extractor's, which are then used as "
+            "they were written (MoP: the core's DBCs come from the client)."
         ),
     )
 
@@ -1569,8 +1572,8 @@ class TrinityCoreExtractPlan(ExtractPlan):
 
     @field_validator("dbc_overlay_from")
     @classmethod
-    def _inside_the_checkout(cls, value: str) -> str:
-        return _below(value, "dbc_overlay_from", "the checkout")
+    def _inside_the_checkout(cls, value: str | None) -> str | None:
+        return None if value is None else _below(value, "dbc_overlay_from", "the checkout")
 
     client_archives: tuple[str, ...] = Field(
         min_length=1,
@@ -1685,6 +1688,21 @@ class TrinityCoreMmaps(MmapPlan):
     )
 
 
+class BotCountKeys(_Strict):
+    """The two keys a core's bot conf keeps its random-bot count in.
+
+    Centurion's `playerbots.conf` spells them `Playerbot.RandomPopulation.TargetMin`/
+    `TargetMax` (`bot_count.TC_MIN_KEY`/`TC_MAX_KEY`); TrinityCore 5.x/MoP keeps
+    AzerothCore's `AiPlayerbot.MinRandomBots`/`MaxRandomBots` (`bot_count.MIN_KEY`/
+    `MAX_KEY`). The count carry-over (`trinitycore._conf`) and the Bots tab
+    (`bot_population._count_conf`) both read this pair, so a tree that spells
+    them another way needs no code.
+    """
+
+    min: str = Field(min_length=1)
+    max: str = Field(min_length=1)
+
+
 class TrinityCoreConf(ConfPatchTable):
     """The conf table, the world server's conf in it, and the file that must sit beside it."""
 
@@ -1712,6 +1730,15 @@ class TrinityCoreConf(ConfPatchTable):
             "README.md:203-204), which the world server finds in its own conf's folder "
             "(AutoBalanceConfig.cpp:177-213, 761). Never patched and never one of `files`; "
             "Reset to default copies it from the checkout again."
+        ),
+    )
+    bot_count_keys: BotCountKeys | None = Field(
+        default=None,
+        description=(
+            "The two keys this core's bot conf keeps its random-bot count in, or `None` for "
+            "Centurion's `Playerbot.RandomPopulation.TargetMin`/`TargetMax`. The count is carried "
+            "over from the player's conf and read and written by the Bots tab (T117, T179 Task 5); "
+            "both sites read this pair."
         ),
     )
 
@@ -1895,13 +1922,20 @@ class TrinityCoreUpdates(_Strict):
         return value
 
 
+MapNames = Literal["mmmyyxx", "mmmm_yy_xx"]
+"""How a core names its map, vmap and mmap files: `mmmyyxx` is Centurion/AC/CMaNGOS's
+`maps/MMMYYXX.map`, `mmmm_yy_xx` is TrinityCore 5.x/MoP's `maps/MMMM_YY_XX.map`."""
+
+
 class TrinityCoreData(_Strict):
     """Everything the TrinityCore family needs that differs per game (T179).
 
     Shaped after `CmangosData`, with what Centurion (a TrinityCore 3.3.5 fork)
-    adds: a sparse checkout, CMake defines, a DBC overlay from the checkout, mmaps
-    in the background, a `playerbots.conf` beside `worldserver.conf`, renames in
-    the import, and the maps the start check requires. The facts are in
+    adds: a sparse checkout, CMake defines, a DBC overlay from the checkout (when
+    the tree ships one), mmaps in the background, a `playerbots.conf` beside
+    `worldserver.conf`, renames in the import, the maps the start check requires
+    and how the tree names them (`map_names`), and the keys its bot conf keeps the
+    random-bot count in (`conf.bot_count_keys`). The facts are in
     `.notes/tickets/T179-centurion-facts.md` (CENTURION @ faac5fc9).
     """
 
@@ -1938,6 +1972,18 @@ class TrinityCoreData(_Strict):
             "Map ids whose maps and vmaps must exist before the server is started: without them "
             "the worldserver exits 'Unable to load critical files' (World.cpp:1823-1835 at "
             "6c6472c3, read 2026-10-07, facts §3) -- 0 and 1, and 530 with `Expansion = 2`."
+        ),
+    )
+    map_names: MapNames = Field(
+        default="mmmyyxx",
+        description=(
+            "How the core names its map, vmap and mmap files, which the start check reads. "
+            "`mmmyyxx`: `maps/MMMYYXX.map`, a 3-digit map id then the two grid numbers with no "
+            "separator, and `vmaps/MMM.vmtree` -- Centurion/AC/CMaNGOS, e.g. `maps/0003248.map`, "
+            "`vmaps/000.vmtree`. `mmmm_yy_xx`: `maps/MMMM_YY_XX.map`, a 4-digit map id, `_YY_XX`, "
+            "and `vmaps/MMMM.vmtree` -- TrinityCore 5.x/MoP, e.g. `maps/0000_32_48.map`, "
+            "`vmaps/0000.vmtree`. The mmaps generator follows the same id width: "
+            "`mmaps/MMMM.mmap` and `mmaps/MMMM_YY_XX.mmtile`."
         ),
     )
     world_data_dirs: tuple[Annotated[str, Field(pattern=r"^[A-Za-z0-9_]+$")], ...] = Field(
@@ -3578,10 +3624,22 @@ class ConfigWtf(_Strict):
     `always` is set at every Play (where the server is); `seed` only where
     the key is absent (a first-run preference the player may change after).
     A key in both would be a seed that is never a seed, so it is refused.
+    `remove` names keys whose lines are taken out of the file first, for a
+    client whose shipped `Config.wtf` sends it somewhere this server is not
+    (`portal`); a key that is also set or seeded is refused.
     """
 
     always: dict[WtfKey, WtfValue] = Field(default_factory=dict)
     seed: dict[WtfKey, WtfValue] = Field(default_factory=dict)
+    remove: tuple[WtfKey, ...] = Field(
+        default=(),
+        description=(
+            "Keys whose `SET` lines are taken out of the ready-to-play client's Config.wtf "
+            "before the merge, whatever they hold (MoP's shipped `portal`). Passed to "
+            "`client_config.merge_config_wtf(..., remove=...)` beside the launcher's own "
+            "removals. A key in both this and `always`/`seed` is refused."
+        ),
+    )
     remove_locale_realmlists: bool = Field(
         default=False,
         description=(
@@ -3595,6 +3653,15 @@ class ConfigWtf(_Strict):
         both = sorted(key for key in self.seed if key.casefold() in always)
         if both:
             raise ValueError(f"Config.wtf keys {both} are in both always and seed")
+        return self
+
+    @model_validator(mode="after")
+    def _a_key_is_never_both_set_and_removed(self) -> ConfigWtf:
+        """A key the merge removes and then sets (or seeds) would come back: refuse it."""
+        set_or_seeded = {key.casefold() for key in (*self.always, *self.seed)}
+        both = sorted(key for key in self.remove if key.casefold() in set_or_seeded)
+        if both:
+            raise ValueError(f"Config.wtf keys {both} are in remove and also in always or seed")
         return self
 
 

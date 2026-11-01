@@ -232,6 +232,10 @@ def centurion_like(
     packs: list[dict[str, Any]] | None = None,
     rev: str | None = None,
     world_data_dirs: tuple[str, ...] = (),
+    extract: dict[str, Any] | None = None,
+    map_names: str | None = None,
+    bot_count_keys: dict[str, str] | None = None,
+    playerbots_keys: dict[str, str] | None = None,
 ) -> CatalogEntry:
     """A whole, valid `trinitycore` entry: generated password, SOAP channel published.
 
@@ -239,6 +243,13 @@ def centurion_like(
     core source's pin, for the install engine's tests (Task 3). `world_data_dirs`
     are the folders a Windows world server reads from its volume (T219); none by
     default, so the entry binds `data/` on every platform.
+
+    The rest change what a SECOND core of the family needs, so a test can reach
+    those code paths without the shipped `wow-centurion` shape: `extract` is
+    merged over `TRINITYCORE["extract"]` (so `{"dbc_overlay_from": None}` drops
+    the overlay), `map_names` sets the file-naming pattern, `bot_count_keys` the
+    two keys the count is carried over in, and `playerbots_keys` the whole key set
+    of `playerbots.conf`. Every default is Centurion's.
     """
     data = json.loads(CATALOG_FILE.read_text(encoding="utf-8"))
     entry: dict[str, Any] = copy.deepcopy(
@@ -323,6 +334,18 @@ def centurion_like(
     }
     entry["install"]["default_server_dir"] = "yulon-centurion"
     entry["install"]["password"] = {"mode": "generated", "file": ".db_password", "prefix": "tc-"}
+    trinitycore = copy.deepcopy(TRINITYCORE)
+    if extract is not None:
+        trinitycore["extract"] = {**trinitycore["extract"], **extract}
+    if map_names is not None:
+        trinitycore["map_names"] = map_names
+    if playerbots_keys is not None:
+        conf = trinitycore["conf"]
+        files = dict(conf["files"])
+        files["playerbots.conf"] = {**files["playerbots.conf"], "keys": playerbots_keys}
+        trinitycore["conf"] = {**conf, "files": files}
+    if bot_count_keys is not None:
+        trinitycore["conf"] = {**trinitycore["conf"], "bot_count_keys": bot_count_keys}
     entry["install"]["native"] = {
         "family": "trinitycore",
         "templates": "shared/trinitycore",
@@ -333,7 +356,7 @@ def centurion_like(
         "ready": {"world": "World initialized"},
         "update_to_latest": True,
         "trinitycore": {
-            **copy.deepcopy(TRINITYCORE),
+            **trinitycore,
             "world_data_dirs": list(world_data_dirs),
             **({"world_data_gb": 5} if world_data_dirs else {}),
         },

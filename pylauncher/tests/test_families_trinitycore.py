@@ -1165,6 +1165,34 @@ def test_the_servers_dbc_files_replace_the_extracted_ones(machine: Machine) -> N
     assert (dbc / "Map.dbc").read_bytes() == b"the client's Map.dbc", "an overlay, not a wipe"
 
 
+def test_an_entry_without_a_dbc_overlay_keeps_the_extractors_own_dbc(machine: Machine) -> None:
+    """T850 A1: `dbc_overlay_from: None` skips the overlay AND the line that announces it."""
+    entry = centurion_like(extract={"dbc_overlay_from": None})
+    lay_for_client_data(machine)
+
+    said = run_stage(machine, "client-data", entry=entry)
+
+    dbc = machine.server_dir / "data" / "dbc"
+    assert (dbc / "Spell.dbc").read_bytes() == b"the client's Spell.dbc"
+    assert (dbc / "Map.dbc").read_bytes() == b"the client's Map.dbc"
+    assert not any("Laid the server's own DBC files" in line for line in said)
+    assert any("map data the world server checks at start" in line for line in said)
+
+
+def test_the_start_check_asks_for_the_pattern_the_entrys_naming_names(machine: Machine) -> None:
+    """T850 A2: an entry on MoP naming refuses Centurion's 3-digit files by MoP's pattern."""
+    entry = centurion_like(map_names="mmmm_yy_xx")
+    lay_for_client_data(machine)
+
+    with pytest.raises(InstallerError) as caught:
+        run_stage(machine, "client-data", entry=entry)
+
+    message = str(caught.value)
+    assert "map 0: no maps/0000_??_??.map" in message
+    assert "map 0: no vmaps/0000.vmtree" in message
+    assert "maps/000????.map" not in message
+
+
 @pytest.mark.parametrize("gone", ["530", "0", "1"])
 def test_a_missing_start_map_is_refused_naming_the_step_to_run_again(
     machine: Machine, gone: str

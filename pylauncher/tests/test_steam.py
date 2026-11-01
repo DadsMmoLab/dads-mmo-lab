@@ -322,6 +322,27 @@ def test_the_client_entry_points_at_the_clients_own_executable(tmp_path: Path) -
     assert entry["appid"] == steam.to_signed(steam.gen_appid(str(entry["Exe"]), "Turtle WoW"))
 
 
+def test_the_executable_pick_follows_the_entrys_names_order(tmp_path: Path) -> None:
+    """T850 A6: the FIRST name the entry lists wins, not the one whose name sorts first.
+
+    `Wow-64.exe` sorts before `_Wow-64.exe` ('W' 0x57 < '_' 0x5F), so the old
+    sorted-folder pick would hand a multi-name entry the wrong binary.
+    """
+    client = tmp_path / "client"
+    client.mkdir()
+    (client / "Wow-64.exe").write_bytes(b"MZ the 64-bit game")
+    (client / "_Wow-64.exe").write_bytes(b"MZ the launcher's own")
+
+    assert (
+        steam.client_executable(client, names=("_wow-64.exe", "wow-64.exe")).name == "_Wow-64.exe"
+    )
+    assert steam.client_executable(client, names=("wow-64.exe", "_wow-64.exe")).name == "Wow-64.exe"
+    # A name the folder lacks is skipped, and the fallback for a folder with none is unchanged.
+    assert steam.client_executable(client, names=("gone.exe", "wow-64.exe")).name == "Wow-64.exe"
+    assert steam.client_executable(tmp_path / "none", names=("_wow-64.exe",)).name == "_wow-64.exe"
+    assert steam.client_executable(tmp_path / "none").name == "WoW.exe"
+
+
 def test_a_second_press_replaces_the_two_entries_rather_than_appending(tmp_path: Path) -> None:
     """The box's own requirement, and the one thing the prior art does NOT do.
 

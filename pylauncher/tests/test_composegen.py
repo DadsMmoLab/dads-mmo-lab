@@ -1599,6 +1599,26 @@ def test_logs_db_is_omitted_not_blanked_without_an_extra_schema(tmp_path: Path) 
         composegen.fill("{{LOGS_DB}}", tokens)
 
 
+def test_playerbots_db_is_the_entries_own_schema_or_absent(tmp_path: Path) -> None:
+    """T850 A4: the 4th-database token, for a core whose SQL plan creates it itself.
+
+    Like `LOGS_DB`, it is absent rather than blank when the entry names none, so a
+    template that uses it fails the unknown-token check instead of writing `None`.
+    """
+    entry = generated_entry(tmp_path, SAFE_BASE)  # wow-tbc: no playerbots schema
+    tokens = composegen.entry_tokens(entry)
+    assert "PLAYERBOTS_DB" not in tokens
+    with pytest.raises(composegen.ComposeGenError, match="PLAYERBOTS_DB"):
+        composegen.fill("{{PLAYERBOTS_DB}}", tokens)
+
+    with_playerbots = entry.model_copy(
+        update={"databases": entry.databases.model_copy(update={"playerbots": "tbc_playerbots"})}
+    )
+    tokens = composegen.entry_tokens(with_playerbots)
+    assert tokens["PLAYERBOTS_DB"] == "tbc_playerbots"
+    assert composegen.fill("db: {{PLAYERBOTS_DB}}", tokens) == "db: tbc_playerbots"
+
+
 def test_the_family_tokens_come_from_the_entry(tmp_path: Path) -> None:
     """DB host, user, schema names, container prefix and client build are catalog facts."""
     templates = tmp_path / "native"

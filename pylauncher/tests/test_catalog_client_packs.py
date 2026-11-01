@@ -123,6 +123,7 @@ def _client() -> dict[str, Any]:
         "config_wtf": {
             "always": {"realmList": "127.0.0.1", "realmName": "Centurion"},
             "seed": {"gxWindow": "1"},
+            "remove": ["portal"],
             "remove_locale_realmlists": True,
         },
     }
@@ -715,6 +716,18 @@ REFUSALS: dict[str, tuple[Mutation, str]] = {
         _set("config_wtf.seed.gx Window", "1"),
         "String should match pattern",
     ),
+    "a key both removed and set": (
+        _set("config_wtf.remove", ["realmName"]),
+        "in remove and also in always or seed",
+    ),
+    "a key both removed and seeded": (
+        _set("config_wtf.remove", ["gxWindow"]),
+        "in remove and also in always or seed",
+    ),
+    "a removed key that is not a key": (
+        _set("config_wtf.remove", ["not a key"]),
+        "String should match pattern",
+    ),
     # T809 W1: the new optional pack fields.
     "platforms not a list": (
         _set("packs.3.platforms", "windows"),
@@ -976,6 +989,8 @@ def test_write_and_model_types_are_importable_for_the_engine() -> None:
     write = ExeWrite(offset=0, bytes="eb")
     assert write.length == 1 and write.payload() == b"\xeb"
     assert ConfigWtf().always == {} and ConfigWtf().seed == {}
+    assert ConfigWtf().remove == ()
+    assert ConfigWtf(remove=("portal",)).remove == ("portal",)
     assert ExePatch.model_fields["options"].default_factory is dict
     assert ClientPack.model_fields["optional"].default is False
     assert ClientPack.model_fields["platforms"].default == ()

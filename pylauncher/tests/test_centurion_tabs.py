@@ -25,6 +25,7 @@ from yulon import (
     tuning,
 )
 from yulon.catalog import composegen, native, time_zone
+from yulon.catalog.catalog import CatalogEntry
 from yulon.catalog.families import azerothcore, conf, decisions, mmaps, trinitycore
 from yulon.catalog.families.cmangos import ETC_DIR
 from yulon.catalog.families.trinitycore import TrinityCoreInstaller
@@ -221,20 +222,22 @@ def test_the_files_reset_to_default_offers_are_the_install_conf_table() -> None:
     )
 
 
-def _engine() -> TrinityCoreInstaller:
+def _engine(entry: CatalogEntry = ENTRY) -> TrinityCoreInstaller:
     return TrinityCoreInstaller(
-        ENTRY,
+        entry,
         seams=native.Seams(platform_id=_linux, copy_from_image=_FakeImage()),
         mmaps_runner=FakeMmapsDocker(),
     )
 
 
-def _context(server: Path, password: str, *, done: tuple[str, ...] = ()) -> native.StageContext:
+def _context(
+    server: Path, password: str, *, entry: CatalogEntry = ENTRY, done: tuple[str, ...] = ()
+) -> native.StageContext:
     return native.StageContext(
         server_dir=server,
         client_dir=None,
         state=native.InstallState(
-            game_id=ENTRY.id,
+            game_id=entry.id,
             install_id=composegen.install_id(server, platform_id=_linux),
             family="trinitycore",
             completed=done,
@@ -261,6 +264,31 @@ def test_the_conf_stage_run_again_keeps_the_players_bot_count(tmp_path: Path) ->
     # A first run (the stage never finished) takes the table's, not the file's.
     list(engine._conf(_context(server, password)))
     assert "Playerbot.RandomPopulation.TargetMax = 150" in path.read_text(encoding="utf-8")
+
+
+def test_the_conf_stage_run_again_keeps_a_second_cores_bot_count(tmp_path: Path) -> None:
+    """T850 A3: the carry-over reads the entry's `bot_count_keys` (MoP's AiPlayerbot pair)."""
+    mop = centurion_like(
+        bot_count_keys={"min": "AiPlayerbot.MinRandomBots", "max": "AiPlayerbot.MaxRandomBots"},
+        playerbots_keys={
+            "AiPlayerbot.Enabled": "1",
+            "AiPlayerbot.MinRandomBots": "150",
+            "AiPlayerbot.MaxRandomBots": "150",
+            "AiPlayerbot.RandomBotAccountCount": "200",
+        },
+    )
+    server, password = _server(tmp_path)
+    engine = _engine(mop)
+    list(engine._conf(_context(server, password, entry=mop)))
+    path = server / PLAYERBOTS
+    assert "AiPlayerbot.MaxRandomBots = 150" in path.read_text(encoding="utf-8")
+    bot_population.write(mop, server, 40)
+
+    list(engine._conf(_context(server, password, entry=mop, done=("conf",))))
+
+    text = path.read_text(encoding="utf-8")
+    assert "AiPlayerbot.MinRandomBots = 40" in text
+    assert "AiPlayerbot.MaxRandomBots = 40" in text
 
 
 def test_the_default_of_each_file_is_what_the_install_itself_wrote(tmp_path: Path) -> None:

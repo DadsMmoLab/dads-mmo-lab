@@ -127,13 +127,18 @@ LOG_TAIL_LINES = 200
 """How much of the generator's log a status reads: bounded, the progress is in its last line."""
 
 TILE_SUFFIX = extract.MMTILE_SUFFIX
-"""`mmaps/MMMYYXX.mmtile`, one finished navmesh tile (MapBuilder.cpp:963 at faac5fc9); the
-per-map `MMM.mmap` is rewritten whenever a map starts (:649-651) and is never checked."""
+"""One finished navmesh tile, whose name follows the core's map naming (catalog's
+`TrinityCoreData.map_names`): Centurion/AC/CMaNGOS's `mmaps/MMMYYXX.mmtile`, TrinityCore
+5.x/MoP's `mmaps/MMMM_YY_XX.mmtile` (MapBuilder.cpp:963 at faac5fc9, MapBuilder.cpp:599 at
+e135742e). The per-map `MMM.mmap`/`MMMM.mmap` is rewritten whenever a map starts and is
+never checked. Every site here counts or globs by this suffix, never by the id width."""
 
 _PROGRESS = re.compile(r"^\s*(\d{1,3})% \[Map (\d+)\] Building tile", re.MULTILINE)
 """MapBuilder.cpp:547 at CENTURION faac5fc9:
 `printf("%u%% [Map %03i] Building tile [%02u,%02u]\\n", currentPercentageDone(), ...)`;
-the percentage is of every tile of every map (`m_totalTilesProcessed / m_totalTiles`)."""
+the percentage is of every tile of every map (`m_totalTilesProcessed / m_totalTiles`).
+The map id is `\\d+`, so a 4-digit id (`%04i`, TrinityCore 5.x/MoP's
+PathGenerator.cpp:190) matches too."""
 
 JobState = Literal["queued", "running", "done", "failed"]
 State = Literal["not-started", "queued", "running", "done", "failed"]
@@ -719,7 +724,9 @@ def start_mmaps(
         if status.state == "done":
             return "Pathfinding data is already made."
         data_dir = _checked_data_dir(job)
-        missing = extract.missing_map_data(data_dir, job.block.required_maps)
+        missing = extract.missing_map_data(
+            data_dir, job.block.required_maps, map_names=job.block.map_names
+        )
         if missing:
             raise MmapsError(
                 f"Pathfinding data is made from the server's map data, and that is not all "

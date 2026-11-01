@@ -1046,7 +1046,10 @@ def entry_tokens(entry: CatalogEntry) -> dict[str, str]:
     `_public_tokens()` adds `REALM_HOST`, the three ports, the project name and
     the image prefix and tag, and is what the build context is rendered from;
     `_secret_tokens()` is that plus `DB_PASSWORD`, for the conf tables and
-    (K.7) the SQL and verify.
+    (K.7) the SQL and verify. `LOGS_DB` is `databases.extra[0]` and
+    `PLAYERBOTS_DB` is `databases.playerbots`, each present only when the entry
+    names one (T850): a template that uses a token its entry does not set fails
+    the unknown-token check, as before.
 
     Raises:
         ComposeGenError: the entry has no `install.native` block, its three
@@ -1067,6 +1070,8 @@ def entry_tokens(entry: CatalogEntry) -> dict[str, str]:
     }
     if entry.databases.extra:
         tokens["LOGS_DB"] = entry.databases.extra[0]
+    if entry.databases.playerbots is not None:
+        tokens["PLAYERBOTS_DB"] = entry.databases.playerbots
     built = built_here(native)
     if built is not None:
         tokens["MAKE_JOBS"] = str(built.dockerfile.make_jobs)

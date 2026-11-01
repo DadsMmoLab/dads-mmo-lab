@@ -14967,7 +14967,8 @@ class ControllerView(QWidget):
                     ) from exc
             # The catalog's `always` is the server's own: `launcher_config_keys` dropped every
             # pick it sets except a typed address's `realmList`/`patchList`, which win (lead
-            # ruling). A pick, or a removal, also takes a seed's place.
+            # ruling). A pick, or a removal, also takes a seed's place. The catalog's own
+            # `remove` (`portal`, T850 A5) goes in beside the picks' removals.
             taken = {key.casefold() for key in (*picked, *removed)}
             cfg = cfg.model_copy(
                 update={
@@ -14979,7 +14980,7 @@ class ControllerView(QWidget):
                 }
             )
             client_config.merge_config_wtf(
-                play, cfg, first_run=not record.config_seeded, remove=removed
+                play, cfg, first_run=not record.config_seeded, remove=(*removed, *cfg.remove)
             )
             seeded = True
             save()

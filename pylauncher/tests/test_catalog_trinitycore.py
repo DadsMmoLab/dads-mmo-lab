@@ -258,6 +258,24 @@ def test_a_dbc_overlay_outside_the_checkout_is_refused(path: str) -> None:
         NativeInstall.model_validate(_native(extract__dbc_overlay_from=path))
 
 
+def test_the_dbc_overlay_is_optional_and_none_means_no_overlay() -> None:
+    """A tree that ships no DBCs (MoP) leaves the extractor's own in place (T850 A1)."""
+    native = _native()
+    del native["trinitycore"]["extract"]["dbc_overlay_from"]
+    block = NativeInstall.model_validate(native).trinitycore
+    assert block is not None and block.extract.dbc_overlay_from is None
+
+
+def test_map_names_defaults_to_centurions_naming_and_takes_mops() -> None:
+    """T850 A2: the id width and separator are catalog data, not a constant in the check."""
+    block = NativeInstall.model_validate(NATIVE).trinitycore
+    assert block is not None and block.map_names == "mmmyyxx"
+    mop = NativeInstall.model_validate(_native(map_names="mmmm_yy_xx")).trinitycore
+    assert mop is not None and mop.map_names == "mmmm_yy_xx"
+    with pytest.raises(ValidationError, match="map_names"):
+        NativeInstall.model_validate(_native(map_names="mmmyy"))
+
+
 @pytest.mark.parametrize("checkout", ["/src/core", "../core", "src\\core", "."])
 def test_a_checkout_outside_the_server_dir_is_refused(checkout: str) -> None:
     """`.` is the server dir itself: `!.` in the .dockerignore re-includes all of it."""

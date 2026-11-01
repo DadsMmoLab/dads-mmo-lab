@@ -3921,6 +3921,57 @@ def test_a_map_file_of_another_map_does_not_stand_in(tmp_path: Path) -> None:
     assert extract.missing_map_data(tmp_path, (0,)) == ("map 0: no maps/000????.map",)
 
 
+def start_maps_4digit(data: Path, ids: Sequence[int]) -> None:
+    """The same set under TrinityCore 5.x/MoP's naming: `MMMM_YY_XX.map`, `MMMM.vmtree`."""
+    (data / "maps").mkdir(parents=True, exist_ok=True)
+    (data / "vmaps").mkdir(parents=True, exist_ok=True)
+    for map_id in ids:
+        (data / "maps" / f"{map_id:04}_32_48.map").write_bytes(b"MAPS")
+        (data / "vmaps" / f"{map_id:04}.vmtree").write_bytes(b"VMAP")
+
+
+def test_a_4_digit_named_start_map_set_passes_under_the_mop_naming(tmp_path: Path) -> None:
+    """T850 A2: `map_names="mmmm_yy_xx"` reads `maps/MMMM_YY_XX.map` and `vmaps/MMMM.vmtree`."""
+    start_maps_4digit(tmp_path, (0, 1, 530))
+    assert extract.missing_map_data(tmp_path, (0, 1, 530), map_names="mmmm_yy_xx") == ()
+
+
+def test_a_3_digit_named_set_is_missing_under_the_4_digit_naming(tmp_path: Path) -> None:
+    """The two namings do not stand in for each other; the phrase names the pattern asked for."""
+    start_maps(tmp_path, (0,))
+    assert extract.missing_map_data(tmp_path, (0,), map_names="mmmm_yy_xx") == (
+        "map 0: no maps/0000_??_??.map",
+        "map 0: no vmaps/0000.vmtree",
+    )
+
+
+def test_a_4_digit_named_set_is_missing_under_the_centurion_naming(tmp_path: Path) -> None:
+    """And the other way: the default still asks for `maps/MMMYYXX.map` (T850 A2)."""
+    start_maps_4digit(tmp_path, (0,))
+    assert extract.missing_map_data(tmp_path, (0,)) == (
+        "map 0: no maps/000????.map",
+        "map 0: no vmaps/000.vmtree",
+    )
+
+
+def test_a_4_digit_map_file_of_another_map_does_not_stand_in(tmp_path: Path) -> None:
+    """`MMMM_YY_XX.map` is exact too: the id and both grid numbers, two digits each."""
+    start_maps_4digit(tmp_path, ())
+    for name in (
+        "0001_32_48.map",
+        "000_32_48.map",
+        "0000_3_48.map",
+        "0000_32_4.map",
+        "0000_32_48.mapx",
+        "0000_32_48.mmap",
+    ):
+        (tmp_path / "maps" / name).write_bytes(b"x")
+    (tmp_path / "vmaps" / "0000.vmtree").write_bytes(b"VMAP")
+    assert extract.missing_map_data(tmp_path, (0,), map_names="mmmm_yy_xx") == (
+        "map 0: no maps/0000_??_??.map",
+    )
+
+
 def test_no_data_folder_at_all_is_every_half_missing(tmp_path: Path) -> None:
     assert extract.missing_map_data(tmp_path / "nothing", (530,)) == (
         "map 530: no maps/530????.map",
