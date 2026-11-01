@@ -606,8 +606,15 @@ def test_the_trinitycore_build_stage_says_this_platforms_cancel_note(
 
 
 def test_the_stage_tuple_is_the_specs_and_the_names_agree(machine: Machine) -> None:
-    """T179 spec §1 steps 1-9; mmaps (step 10) is a background job after ready (Task 4)."""
-    assert TrinityCoreInstaller.STAGE_NAMES == STAGES
+    """T179 spec §1 steps 1-9; mmaps (step 10) is a background job after ready (Task 4).
+
+    The CLASS tuple carries `fetch-release` second, because a reader with the family
+    but no entry validates a state file against it and a MoP install records that
+    name (T850-B). Centurion's own `stages()` -- the tuple above, word for word -- is
+    what its install log, its "Step N of M" and every record on disk hold; the entry
+    that needs the stage is `tests/test_trinitycore_release_assets.py`'s.
+    """
+    assert TrinityCoreInstaller.STAGE_NAMES == (STAGES[0], "fetch-release", *STAGES[1:])
     assert engine(machine).stage_names() == STAGES
     eng = engine(machine)
     recorded = {stage.name: stage.recorded for stage in eng.stages()}
