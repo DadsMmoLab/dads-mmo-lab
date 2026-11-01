@@ -181,7 +181,7 @@ def fold(text: str) -> str:
     return "".join(chr(ord(ch) - 0x20) if "a" <= ch <= "z" else ch for ch in text)
 
 
-Scheme = Literal["azerothcore", "mangos_sha", "mangos_srp6", "trinitycore"]
+Scheme = Literal["azerothcore", "mangos_sha", "mangos_srp6", "trinitycore", "trinitycore_sha"]
 """How a core stores an account's credentials and its GM level.
 
 `azerothcore` is SRP6 in binary `salt`/`verifier` with the level in a separate
@@ -192,9 +192,15 @@ for the auth server to fill on first login. `mangos_srp6` is CMaNGOS proper
 hex text in `v`/`s` and with the level in `account.gmlevel`. `trinitycore` (T179)
 is AzerothCore's parent: the same binary `salt`/`verifier`, and the level in
 `account_access(AccountID, SecurityLevel, RealmID)` -- its own column names
-(`TRINITYCORE_ACCESS`).
+(`TRINITYCORE_ACCESS`). `trinitycore_sha` (T850-C) is the TrinityCore family's
+OTHER shape, which Mists of Pandaria's core writes: `mangos_sha`'s credentials
+(one `sha_pass_hash` column, `v`/`s` left `''` for the authserver to derive) with
+the level in `azerothcore`'s table -- `account_access(id, gmlevel, RealmID)`. It
+is the one scheme that takes its credentials from one core's statement and its
+GM level from another's, which is why it is a value of its own rather than a
+column list hidden inside `trinitycore`.
 
-Four schemes, and the difference between them is three statements:
+Five schemes, and the difference between them is three statements:
 the insert, reading the level, writing the level. Everything else -- the
 validation, the id lookup, the realmcharacters seeding, the convergence rules --
 is the same on all of them.
@@ -236,6 +242,12 @@ Read at CENTURION faac5fc9 from the dump the install imports
 and from the core's own statements (`LoginDatabase.cpp:79-83`). Named once, here,
 because they are confirmed on a live Centurion server in T179 Task 9 before the
 entry ships; a wrong name is an `Unknown column` from every grant, not a silent row.
+
+These are the `trinitycore` scheme's columns only. The family's other shape,
+`trinitycore_sha` (MoP, T850-C), keeps the same table with AzerothCore's column
+names: its dump's `account_access(id, gmlevel, RealmID)` is what
+`accounts.level` names for that entry (`catalog.py`'s `AccountLevel`), and both
+of this module's level statements read and write those names.
 """
 
 
@@ -576,6 +588,21 @@ def reset_own_password(
         # stay NULL; that core derives them on first login, and writing them
         # here would hand it a pair it did not choose.
         columns = f"sha_pass_hash = {_text_literal(mangos_password_hash(name, password))}"
+    elif scheme == "trinitycore_sha":
+        # The same one column as `mangos_sha` above, plus the two the MoP core
+        # clears itself. `AccountMgr::ChangePassword` (`AccountMgr.cpp:176-193`)
+        # runs `LOGIN_UPD_PASSWORD` (`UPDATE account SET v = 0, s = 0,
+        # sha_pass_hash = ? WHERE id = ?`) and then `LOGIN_UPD_VS`
+        # (`UPDATE account SET v = ?, s = ? WHERE username = ?`) with an empty
+        # pair, so what the row holds afterwards is this hash and `v`/`s` at
+        # `''` -- the state the authserver derives a fresh pair from
+        # (`AuthSession.cpp:502-504`). Written as the single statement those two
+        # net out to; leaving `v`/`s` alone would keep a pair the OLD password
+        # produced, which is the one thing a reset must not do.
+        columns = (
+            f"sha_pass_hash = {_text_literal(mangos_password_hash(name, password))},"
+            " v = '', s = ''"
+        )
     elif scheme in ("azerothcore", "trinitycore"):
         # The same two binary columns on both: TrinityCore's own re-password is
         # `LOGIN_UPD_LOGON`, `UPDATE account SET salt = ?, verifier = ?`.
@@ -767,6 +794,28 @@ def _insert_statement(name: str, password: str, scheme: Scheme) -> _Insert:
             " '', '', NOW())",
             ("HEX(salt)", salt.hex()),
         )
+    if scheme == "trinitycore_sha":
+        # The TrinityCore family's other shape: MoP's own `LOGIN_INS_ACCOUNT`
+        # (`LoginDatabase.cpp:65` at the `wow-mop` pin e135742e), column for
+        # column and in its own spelling -- no space after `account`, `email`
+        # named and written `''` (the core passes its `email` argument in, and
+        # `AccountMgr::CreateAccount`'s default is empty). `v` and `s` are left
+        # at the column's own `''`; the authserver derives them from this hash
+        # when they are not 64 hex characters (`AuthSession.cpp:502-504`).
+        #
+        # The hash is `CalculateShaPassHash` (`AccountMgr.cpp:345-355`): one
+        # SHA1 over the ALREADY folded `name` + `":"` + `password`, printed by
+        # `ByteArrayToHexStr` -- which formats each byte with `%02X`
+        # (`Util.cpp:614`), so the core writes UPPERCASE hex, exactly
+        # `mangos_password_hash()`. `LOGIN_SEL_CHECK_PASSWORD`
+        # (`LoginDatabase.cpp:85`) compares it against a `utf8mb4_bin` column,
+        # so the case is not free.
+        return _Insert(
+            "INSERT INTO account(username,sha_pass_hash,email,joindate)"
+            f" VALUES({_text_literal(name)},"
+            f"{_text_literal(mangos_password_hash(name, password))},'',NOW())",
+            None,
+        )
     raise _unknown_scheme(scheme, "write an account row for")
 
 
@@ -807,7 +856,13 @@ def _grant_gm(sql: SqlSeam, account_id: int, gm_level: int, scheme: Scheme) -> N
             f"grant GM level {gm_level} to account {account_id}",
         )
         return
-    if scheme == "azerothcore":
+    if scheme in ("azerothcore", "trinitycore_sha"):
+        # Two cores, one statement: MoP's `LOGIN_INS_ACCOUNT_ACCESS`
+        # (`LoginDatabase.cpp:80`) is `account_access(id, gmlevel, RealmID)`,
+        # which is AzerothCore's table with AzerothCore's column names -- the
+        # same primary key `(id, RealmID)`, so the same upsert converges. (The
+        # TrinityCore112 scheme above writes `AccountID`/`SecurityLevel`
+        # instead; the two shapes are why `scheme` exists.)
         _run(
             sql,
             f"INSERT INTO account_access (id, gmlevel, RealmID)"
@@ -890,7 +945,11 @@ def _gm_level(sql: SqlSeam, account_id: int, scheme: Scheme) -> int:
         )
         level = _one_int(rows, f"read the GM level of account {account_id}")
         return NO_GM if level is None else level
-    if scheme == "azerothcore":
+    if scheme in ("azerothcore", "trinitycore_sha"):
+        # The read half of the write above: MoP's `LOGIN_GET_GMLEVEL_BY_REALMID`
+        # (`LoginDatabase.cpp:83`) is `RealmID = ? OR RealmID = -1`, and this
+        # app only ever writes the `-1` row, so the level for every realm is
+        # that row -- AzerothCore's statement, unchanged.
         rows = _query_rows(
             sql,
             f"SELECT gmlevel FROM account_access WHERE id = {account_id}"

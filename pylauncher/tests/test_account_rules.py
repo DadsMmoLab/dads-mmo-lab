@@ -204,3 +204,6 @@ def test_each_family_says_its_own_cores_longest_name() -> None:
     assert tbc_accounts.MAX_USERNAME == account_rules.name_max("mangos_srp6") == 16
     assert vanilla_accounts.MAX_USERNAME == account_rules.name_max("mangos_srp6") == 16
     assert wotlk_accounts.MAX_USERNAME == account_rules.name_max("azerothcore") == 17
+    # The MoP line's own `MAX_ACCOUNT_STR` (T850-C) is 16, not the 32 its
+    # `account.username` column holds: the CORE refuses the 17th character.
+    assert account_rules.name_max("trinitycore_sha") == 16
