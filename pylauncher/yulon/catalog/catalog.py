@@ -1927,6 +1927,78 @@ MapNames = Literal["mmmyyxx", "mmmm_yy_xx"]
 `maps/MMMYYXX.map`, `mmmm_yy_xx` is TrinityCore 5.x/MoP's `maps/MMMM_YY_XX.map`."""
 
 
+GITHUB_RELEASE_HOSTS: frozenset[str] = frozenset(
+    {"objects.githubusercontent.com", "release-assets.githubusercontent.com"}
+)
+"""The two hosts GitHub serves a release asset's bytes FROM (it answers github.com with a redirect).
+
+Named here for the server side, the way a client pack names them in its own
+`redirect_hosts` (T809): a download that follows GitHub's redirect lands on one of
+these, so anything that bounds a download's hosts has to be told both.
+"""
+
+
+class ReleaseAsset(_Strict):
+    """One zip a release page serves, used only at exactly this size and sha256 (T850-B).
+
+    Some trees do not ship their databases in the checkout at all: MoP's come from a
+    GitHub release asset whose zip is laid out FLAT -- four `.sql` files at the root,
+    no folder (GAP §0). So this model names the members rather than a folder to keep
+    (`VerifiedArchive.root`): the unpack writes exactly `members` and nothing else
+    the zip happens to hold, and `dest` says where they land.
+    """
+
+    url: str = Field(min_length=1)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    size: int = Field(gt=0, description="Bytes; a download of any other size is refused unread.")
+    dest: str = Field(
+        min_length=1,
+        description=(
+            "The folder under the server dir the members are unpacked into; relative, POSIX, "
+            "and inside the server dir by `GoToolchain.dest`'s rule."
+        ),
+    )
+    members: tuple[str, ...] = Field(
+        min_length=1,
+        description=(
+            "The zip's root-level files to unpack, by name. Each is a plain file name -- no "
+            "`/`, `\\`, `..` or `:` -- and no name is listed twice: this list is the whole of "
+            "what is written to the disk."
+        ),
+    )
+
+    @field_validator("url")
+    @classmethod
+    def _url_is_https(cls, value: str) -> str:
+        return _https_url(value, "release asset url")
+
+    @field_validator("dest")
+    @classmethod
+    def _dest_stays_inside_the_server_dir(cls, value: str) -> str:
+        return _inside(value, "release asset dest", names_a_file=True)
+
+    @field_validator("members")
+    @classmethod
+    def _members_are_plain_file_names(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        for name in value:
+            rel = PurePosixPath(name)
+            if (
+                not name
+                or "\\" in name
+                or ":" in name
+                or rel.is_absolute()
+                or ".." in rel.parts
+                or len(rel.parts) != 1
+            ):
+                raise ValueError(
+                    "release asset members must be plain file names at the zip's root, got "
+                    f"{name!r}"
+                )
+        if len(set(value)) != len(value):
+            raise ValueError(f"release asset members repeat a name: {list(value)}")
+        return value
+
+
 class TrinityCoreData(_Strict):
     """Everything the TrinityCore family needs that differs per game (T179).
 
@@ -2021,6 +2093,27 @@ class TrinityCoreData(_Strict):
             "`update_to_latest`."
         ),
     )
+    release_assets: tuple[ReleaseAsset, ...] = Field(
+        default=(),
+        description=(
+            "Zips this entry's install downloads from a release page, for a tree whose "
+            "databases are not in its checkout (T850-B). Empty -- every entry today but "
+            "MoP's -- means the family has no `fetch-release` stage at all, so an entry "
+            "that names none behaves exactly as it did before the stage existed."
+        ),
+    )
+
+    def release_hosts(self) -> frozenset[str]:
+        """Every host one of this entry's release assets may be fetched from (T850-B).
+
+        Each asset's own host, plus GitHub's two release-asset hosts: github.com
+        answers a release download with a redirect to one of them, and a download
+        that follows it lands somewhere the catalog has to have named. `Client.hosts()`
+        has this shape for the client's downloads and this property for the same
+        reason -- the set is exactly what the catalog names, never a wildcard.
+        """
+        hosts = {urlsplit(asset.url).hostname for asset in self.release_assets}
+        return frozenset(host for host in hosts if host) | GITHUB_RELEASE_HOSTS
 
     @model_validator(mode="after")
     def _the_update_rules_name_what_the_plan_imports(self) -> TrinityCoreData:
