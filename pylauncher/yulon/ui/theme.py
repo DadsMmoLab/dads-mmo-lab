@@ -89,11 +89,11 @@ from yulon.ui.theme_spec import (
     user_themes_dir,
 )
 from yulon.ui.theme_widgets import (
+    _SPIN_GUARD_PROPERTY,
+    _SPIN_NUMBER_GAP_PX,
     TOUCH_TARGET_PX,
     _ensure_spin_watcher,
     _guard_spin_numbers,
-    _SPIN_GUARD_PROPERTY,
-    _SPIN_NUMBER_GAP_PX,
     _SpinBoxWatcher,
     _SpinNumberGuard,
 )
@@ -1596,6 +1596,43 @@ QFrame[objectName^="catalog-tile-"] QPushButton[objectName^="install-"]:disabled
     border: 1px solid {spec.border_deep};
 }}
 
+/* --- Stage 1 Boxart Cards & Stage 2 Back Button (Project Kael Phase K2) --- */
+QPushButton[objectName^="boxart-card-"] {{
+    background: transparent;
+    border: none;
+    padding: 0px;
+}}
+
+QPushButton#catalog-back-button {{
+    background-color: {spec.bg_panel};
+    color: {spec.text_primary};
+    border: 1px solid {spec.accent_brass};
+    border-radius: 3px;
+    min-height: {_touch(34, scale)};
+    padding: 6px 14px;
+    font-weight: bold;
+    font-size: {_px(13, scale)};
+}}
+
+QPushButton#catalog-back-button:hover {{
+    background-color: {spec.bg_hover};
+    color: {spec.accent_bright};
+    border: 1px solid {spec.accent_bright};
+}}
+
+QPushButton#catalog-back-button:focus {{
+    border: 2px solid {spec.accent_bright};
+}}
+
+QLabel#catalog-group-title {{
+    color: {spec.accent_light};
+    font-family: {FONT_FAMILY_TITLE};
+    font-size: {_px(16, scale)};
+    font-weight: bold;
+    padding: 0px 6px;
+    background: transparent;
+}}
+
 /* ScrollAreas default to QPalette.Base unless styled; make them match the container sheet. */
 QScrollArea {{
     background-color: transparent;
@@ -1762,7 +1799,10 @@ def apply_dadcraft_theme(
             target.apply_theme(resolved_theme)
         for card in target.findChildren(QWidget):
             if card.objectName().startswith(("catalog-tile-", "boxart-card-")):
-                card.update()
+                if hasattr(card, "apply_theme"):
+                    card.apply_theme(resolved_theme)
+                else:
+                    card.update()
             if hasattr(card, "set_theme") and type(card).__name__ == "DadcraftRealmBadge":
                 card.set_theme(resolved_theme)
             elif (

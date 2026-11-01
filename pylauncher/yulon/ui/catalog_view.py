@@ -14,12 +14,13 @@ import os
 import re
 import threading
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
-from PySide6.QtCore import QPoint, Qt, Signal
-from PySide6.QtGui import QGuiApplication
+from PySide6.QtCore import QEvent, QObject, QPoint, Qt, Signal
+from PySide6.QtGui import QGuiApplication, QResizeEvent, QShowEvent
 from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
@@ -30,6 +31,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -61,6 +63,7 @@ from yulon.ui.theme import (
     normalize_theme_name,
     resolve_widget_theme,
 )
+from yulon.ui.widgets.boxart_card import GameBoxartCard
 from yulon.ui.widgets.dadcraft_decorations import DadcraftCampaignCard
 from yulon.ui.widgets.log_panel import LogPanel
 from yulon.ui.widgets.prompt import InputPrompter
@@ -91,6 +94,7 @@ class MoveInProtocol(Protocol):
         ]
         | None
     ): ...
+
 
 logger = get_logger(__name__)
 
@@ -523,9 +527,73 @@ WELCOME = (
 )
 """The line under the Catalog heading (T195 C23)."""
 
+BACK_ACTION_PROPERTY = "yulon_back_button"
+"""Qt dynamic property marking an active in-panel Back button (`style-guide.md` §5)."""
+
+_SINGLE_GROUP_TITLES: dict[str, str] = {
+    "ddon": "DDON",
+    "dfo": "DFO",
+}
+
+_SINGLE_GROUP_GLYPHS: dict[str, str] = {
+    "ddon": "dragon",
+    "dfo": "sparkles",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class GameGroup:
+    """One top-level game franchise card in the Stage 1 Catalog boxart grid."""
+
+    id: str
+    title: str
+    subtitle: str
+    glyph: str
+    entries: tuple[CatalogEntry | SingleEntry, ...]
+
+
+def group_catalog_entries(
+    catalog: Catalog,
+    *,
+    include_single: bool = True,
+) -> tuple[GameGroup, ...]:
+    """Group `Catalog.games` and `Catalog.single` into franchise `GameGroup`s."""
+    groups: list[GameGroup] = []
+    if catalog.games:
+        count = len(catalog.games)
+        word = "Server Core" if count == 1 else "Server Cores"
+        groups.append(
+            GameGroup(
+                id="wow",
+                title="WoW",
+                subtitle=f"{count} {word}",
+                glyph="sword",
+                entries=tuple(catalog.games),
+            )
+        )
+    if include_single and catalog.single:
+        for single in catalog.single:
+            title = _SINGLE_GROUP_TITLES.get(single.id, single.name)
+            glyph = _SINGLE_GROUP_GLYPHS.get(single.id, "shield")
+            subtitle = (
+                "1 Server"
+                if single.status == "stable"
+                else f"1 Server ({_STATUS_WORDS[single.status]})"
+            )
+            groups.append(
+                GameGroup(
+                    id=single.id,
+                    title=title,
+                    subtitle=subtitle,
+                    glyph=glyph,
+                    entries=(single,),
+                )
+            )
+    return tuple(groups)
+
 
 class CatalogView(QWidget):
-    """One tile per catalog entry; Install streams the Phase 3a installer into `log_panel`."""
+    """Two-stage stacked Catalog: Stage 0 = Boxart Grid, Stage 1 = Game Server List."""
 
     install_started = Signal(str)  # game id
     install_finished = Signal(str, bool, str)  # game id, ok, message
@@ -552,6 +620,8 @@ class CatalogView(QWidget):
     The tile's button stops being a dead grey "Installed" and becomes "Open server";
     the receiver (the window's `show_server_tab`) switches to that server's tab.
     """
+    stage_changed = Signal(int)
+    """Emitted when the Catalog switches between Stage 0 (boxart grid) and Stage 1 (servers)."""
 
     def __init__(
         self,
@@ -606,11 +676,34 @@ class CatalogView(QWidget):
         self._installed_dirs: dict[str, Path] = dict(installed_games or {})
         self._current: tuple[str, Path, Path | None] | None = None
         self._prompter: InputPrompter | None = None
+        self._groups: tuple[GameGroup, ...] = group_catalog_entries(
+            catalog,
+            include_single=single_installer_factory is not None,
+        )
+        self._group_by_id: dict[str, GameGroup] = {g.id: g for g in self._groups}
+        self._entry_to_group: dict[str, str] = {e.id: g.id for g in self._groups for e in g.entries}
+        self._active_group_id: str | None = None
+        self._last_group_id: str | None = None
+        self._boxart_cards: dict[str, GameBoxartCard] = {}
+        self._switching_stage: bool = False
 
         header_row = QHBoxLayout()
+        self.back_button = QPushButton("← Back", self)
+        self.back_button.setObjectName("catalog-back-button")
+        self.back_button.setProperty(BACK_ACTION_PROPERTY, True)
+        self.back_button.setToolTip("Return to game selection")
+        self.back_button.setVisible(False)
+        self.back_button.clicked.connect(self.show_boxart_grid)
+        header_row.addWidget(self.back_button)
+
         header_label = QLabel("Choose a game to install", self)
         header_label.setObjectName("section-title")
         header_row.addWidget(header_label)
+
+        self._group_title_label = QLabel("", self)
+        self._group_title_label.setObjectName("catalog-group-title")
+        self._group_title_label.setVisible(False)
+        header_row.addWidget(self._group_title_label)
         header_row.addStretch(1)
 
         # Hidden until the window shows the install log for the first time
@@ -624,53 +717,275 @@ class CatalogView(QWidget):
         welcome.setObjectName("catalog-welcome")
         welcome.setWordWrap(True)
 
+        self._stack = QStackedWidget(self)
+        self._stack.setObjectName("catalog-stage-stack")
+
+        # Stage 0: Game Boxart Grid (`CatalogBoxartGrid`)
+        self._boxart_page = QWidget(self._stack)
+        self._boxart_page.setObjectName("catalog-boxart-page")
+        boxart_outer = QVBoxLayout(self._boxart_page)
+        boxart_outer.setContentsMargins(4, 8, 4, 8)
+        boxart_outer.setSpacing(12)
+        boxart_row = QHBoxLayout()
+        boxart_row.setContentsMargins(0, 0, 0, 0)
+        boxart_row.setSpacing(18)
+        for group in self._groups:
+            card = GameBoxartCard(
+                group.id,
+                group.title,
+                group.subtitle,
+                group.glyph,
+                total_servers=len(group.entries),
+                installed_servers=self._installed_count_for_group(group),
+                parent=self._boxart_page,
+            )
+            card.group_selected.connect(self.show_game_servers)
+            self._boxart_cards[group.id] = card
+            boxart_row.addWidget(card, 0, Qt.AlignmentFlag.AlignTop)
+        boxart_row.addStretch(1)
+        boxart_outer.addLayout(boxart_row)
+        boxart_outer.addStretch(1)
+
+        # Stage 1: Game Server List View (`CatalogGameServersView`)
+        self._servers_page = QWidget(self._stack)
+        self._servers_page.setObjectName("catalog-servers-page")
+        servers_layout = QVBoxLayout(self._servers_page)
+        servers_layout.setContentsMargins(0, 0, 0, 0)
+        servers_layout.setSpacing(0)
+
         grid = QGridLayout()
         grid.setSpacing(12)
         grid.setContentsMargins(0, 4, 0, 4)
-        # Two tiles per row, wrapping into further rows. A single row of four
-        # demanded 4x235 + spacing ≈ 980px, well past the 420px the splitter is
-        # free to give this pane, so a horizontal scrollbar appeared on every
-        # narrow window. Two-up drops that floor to ~480px, keeps each tile wide
-        # enough for its buttons, and lets the grid grow downward, where the
-        # vertical scrollbar belongs.
-        columns = 2
-        # Top-aligned, with the spare height in an empty row under the last
-        # one: a tile is as tall as its own text at any width, never stretched
-        # to its row neighbour or to the shelf (T195 C24).
-        row = self._place_tiles(grid, [self._tile(entry) for entry in catalog.games], 0, columns)
+        self._grid = grid
+        self._wow_tiles: list[QFrame] = [self._tile(entry) for entry in catalog.games]
+        self._single_tiles: list[QFrame] = []
+        self._other_games_heading: QLabel | None = None
+        self._tiles_by_id: dict[str, QFrame] = {
+            entry.id: tile for entry, tile in zip(catalog.games, self._wow_tiles, strict=True)
+        }
         if single_installer_factory is not None and catalog.single:
-            # The other games (DDON), under an `OTHER_GAMES` heading after every WoW tile.
-            heading = QLabel(OTHER_GAMES, self)
+            # The other games (DDON, DFO), under an `OTHER_GAMES` heading after every WoW tile.
+            heading = QLabel(OTHER_GAMES, self._servers_page)
             heading.setObjectName("section-title")
             heading.setContentsMargins(0, 10, 0, 0)
-            grid.addWidget(heading, row, 0, 1, columns)
-            others = [self._single_tile(entry) for entry in catalog.single]
-            row = self._place_tiles(grid, others, row + 1, columns)
-        for col in range(columns):
-            grid.setColumnStretch(col, 1)
-        grid.setRowStretch(row, 1)
+            self._other_games_heading = heading
+            self._single_tiles = [self._single_tile(entry) for entry in catalog.single]
+            for entry, tile in zip(catalog.single, self._single_tiles, strict=True):
+                self._tiles_by_id[entry.id] = tile
+
+        self._populate_all_tiles_grid()
+        for entry_id, tile in self._tiles_by_id.items():
+            tile.setProperty("yulon_group_id", self._entry_to_group.get(entry_id, "wow"))
+            tile.installEventFilter(self)
+            for child_btn in tile.findChildren(QPushButton):
+                child_btn.setProperty("yulon_group_id", self._entry_to_group.get(entry_id, "wow"))
+                child_btn.installEventFilter(self)
 
         inner = QWidget()
         inner.setLayout(grid)
-        scroll = QScrollArea(self)
+        self._scroll_inner = inner
+        scroll = QScrollArea(self._servers_page)
         scroll.setObjectName("catalog-shelf-scroll")
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setWidget(inner)
+        self._scroll = scroll
+        servers_layout.addWidget(scroll, 1)
+
+        self._stack.addWidget(self._boxart_page)
+        self._stack.addWidget(self._servers_page)
+        self._stack.setCurrentIndex(0)
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
         layout.addLayout(header_row)
         layout.addWidget(welcome)
-        layout.addWidget(scroll, 1)
+        layout.addWidget(self._stack, 1)
         self._log.run_finished.connect(self._on_run_finished)
         self.apply_theme(resolve_widget_theme(self))
+
+    @property
+    def current_stage(self) -> int:
+        """Current stage index (`0` = boxart grid, `1` = game server list)."""
+        return self._stack.currentIndex()
+
+    @property
+    def active_group_id(self) -> str | None:
+        """Currently selected `GameGroup.id` when on Stage 1, else `None`."""
+        return self._active_group_id
+
+    @property
+    def game_groups(self) -> tuple[GameGroup, ...]:
+        """The franchise `GameGroup`s rendered in Stage 0."""
+        return self._groups
+
+    def boxart_card_for(self, group_id: str) -> GameBoxartCard:
+        """Return the Stage 0 `GameBoxartCard` for `group_id`."""
+        return self._boxart_cards[group_id]
+
+    def _installed_count_for_group(self, group: GameGroup) -> int:
+        return sum(1 for entry in group.entries if entry.id in self._installed_dirs)
+
+    def _refresh_boxart_counts(self) -> None:
+        for group in self._groups:
+            card = self._boxart_cards.get(group.id)
+            if card is not None:
+                card.set_server_counts(
+                    len(group.entries),
+                    self._installed_count_for_group(group),
+                )
+
+    def _clear_grid_items(self) -> None:
+        for r in range(self._grid.rowCount()):
+            self._grid.setRowStretch(r, 0)
+        while self._grid.count():
+            self._grid.takeAt(0)
+
+    def _populate_all_tiles_grid(self) -> None:
+        """Lay out all WoW and single-server tiles in the 2-column grid."""
+        self._clear_grid_items()
+        columns = 2
+        for tile in self._wow_tiles:
+            tile.setVisible(True)
+        row = self._place_tiles(self._grid, self._wow_tiles, 0, columns)
+        if self._other_games_heading is not None and self._single_tiles:
+            self._other_games_heading.setVisible(True)
+            self._grid.addWidget(self._other_games_heading, row, 0, 1, columns)
+            for tile in self._single_tiles:
+                tile.setVisible(True)
+            row = self._place_tiles(self._grid, self._single_tiles, row + 1, columns)
+        for col in range(columns):
+            self._grid.setColumnStretch(col, 1)
+        self._grid.setRowStretch(row, 1)
+
+    def _populate_group_tiles_grid(self, group: GameGroup) -> None:
+        """Filter the Stage 1 grid to show only the tiles belonging to `group`."""
+        self._clear_grid_items()
+        columns = 2
+        active_ids = {entry.id for entry in group.entries}
+        if self._other_games_heading is not None:
+            self._other_games_heading.setVisible(False)
+        group_tiles: list[QFrame] = []
+        for entry in group.entries:
+            tile = self._tiles_by_id.get(entry.id)
+            if tile is not None:
+                tile.setVisible(True)
+                group_tiles.append(tile)
+        for entry_id, tile in self._tiles_by_id.items():
+            if entry_id not in active_ids:
+                tile.setVisible(False)
+        row = self._place_tiles(self._grid, group_tiles, 0, columns)
+        for col in range(columns):
+            self._grid.setColumnStretch(col, 1)
+        self._grid.setRowStretch(row, 1)
+
+    def _sync_servers_geometry(self) -> None:
+        """Keep `catalog-shelf-scroll` and its tiles sized to the stack viewport at all times."""
+        rect = self._stack.contentsRect()
+        if rect.width() <= 0 or rect.height() <= 0:
+            return
+        self._servers_page.setGeometry(0, 0, rect.width(), rect.height())
+        self._scroll.setGeometry(0, 0, rect.width(), rect.height())
+        self._scroll.viewport().setGeometry(0, 0, rect.width(), rect.height())
+        self._grid.invalidate()
+        inner_h = (
+            self._grid.totalHeightForWidth(rect.width())
+            if self._grid.hasHeightForWidth()
+            else self._scroll_inner.sizeHint().height()
+        )
+        self._scroll_inner.setGeometry(0, 0, rect.width(), max(rect.height(), inner_h))
+        self._grid.setGeometry(self._scroll_inner.rect())
+        self._grid.activate()
+        self._scroll.horizontalScrollBar().setRange(
+            0, max(0, self._scroll_inner.minimumSizeHint().width() - rect.width())
+        )
+
+    def showEvent(self, event: QShowEvent) -> None:  # noqa: N802 - Qt's own name
+        super().showEvent(event)
+        self._sync_servers_geometry()
+
+    def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802 - Qt's own name
+        super().resizeEvent(event)
+        self._sync_servers_geometry()
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802 - Qt's own name
+        """Switch to Stage 1 automatically if focus is placed directly onto a server tile."""
+        if (
+            not self._switching_stage
+            and event.type() == QEvent.Type.FocusIn
+            and self._stack.currentIndex() == 0
+            and isinstance(watched, QWidget)
+        ):
+            group_id = watched.property("yulon_group_id")
+            if isinstance(group_id, str) and group_id in self._group_by_id:
+                self.show_game_servers(group_id, preserve_focus=watched)
+        return super().eventFilter(watched, event)
+
+    def show_game_servers(
+        self,
+        group_id: str,
+        *,
+        preserve_focus: QWidget | None = None,
+    ) -> None:
+        """Drill down from Stage 0 (Boxart Grid) to Stage 1 (Game Server List) for `group_id`."""
+        group = self._group_by_id.get(group_id)
+        if group is None:
+            return
+        self._switching_stage = True
+        try:
+            self._active_group_id = group_id
+            self._last_group_id = group_id
+            self._populate_group_tiles_grid(group)
+            self.back_button.setVisible(True)
+            self._group_title_label.setText(f"— {group.title}")
+            self._group_title_label.setVisible(True)
+            self._stack.setCurrentIndex(1)
+            self._sync_servers_geometry()
+            self._scroll.verticalScrollBar().setValue(0)
+            if preserve_focus is not None:
+                preserve_focus.setFocus()
+            else:
+                first_btn = next(
+                    (
+                        btn
+                        for e in group.entries
+                        for btn in (
+                            self._buttons.get(e.id),
+                            self._existing_buttons.get(e.id),
+                        )
+                        if btn is not None and btn.isEnabled()
+                    ),
+                    self.back_button,
+                )
+                first_btn.setFocus()
+        finally:
+            self._switching_stage = False
+        self.stage_changed.emit(1)
+
+    def show_boxart_grid(self) -> None:
+        """Return from Stage 1 (Game Server List) to Stage 0 (Boxart Grid)."""
+        self._switching_stage = True
+        restore_group = self._active_group_id or self._last_group_id
+        try:
+            self._active_group_id = None
+            self.back_button.setVisible(False)
+            self._group_title_label.setVisible(False)
+            self._populate_all_tiles_grid()
+            self._stack.setCurrentIndex(0)
+            self._sync_servers_geometry()
+            if restore_group is not None and restore_group in self._boxart_cards:
+                self._boxart_cards[restore_group].setFocus()
+        finally:
+            self._switching_stage = False
+        self.stage_changed.emit(0)
 
     def apply_theme(self, theme_name: str | None = None) -> None:
         """Re-tint the catalog's `dadcraft_icon()` buttons and repaint cards for `theme_name`."""
         resolved = normalize_theme_name(theme_name or resolve_widget_theme(self))
         spec = get_theme(resolved)
         self.setProperty("yulon_theme", resolved)
+        self.back_button.setIcon(dadcraft_icon("arrow-left", spec.text_gold, 14))
         self.toggle_console_button.setIcon(dadcraft_icon("console", spec.text_gold, 14))
         for button in self._buttons.values():
             button.setIcon(dadcraft_icon("download", spec.primary_btn_text, 16))
@@ -680,8 +995,11 @@ class CatalogView(QWidget):
             bring.setIcon(dadcraft_icon("download", spec.text_gold, 14))
         for adopt in self._adopt_buttons.values():
             adopt.setIcon(dadcraft_icon("network", spec.text_gold, 14))
+        for boxart in self._boxart_cards.values():
+            boxart.apply_theme(resolved)
         for card in self.findChildren(DadcraftCampaignCard):
             card.update()
+        self._sync_servers_geometry()
 
     # -- tiles ----------------------------------------------------------
 
@@ -1012,6 +1330,7 @@ class CatalogView(QWidget):
         """Record an install this view just produced, and grey its button."""
         self._installed_dirs[game_id] = server_dir
         self._show_installed(game_id)
+        self._refresh_boxart_counts()
 
     def forget_installed(self, game_id: str, surviving: Mapping[str, Path]) -> None:
         """An install of `game_id` is gone (8.9a). Recompute this tile from what is left.
@@ -1038,6 +1357,7 @@ class CatalogView(QWidget):
         if game_id in surviving:
             self._installed_dirs[game_id] = surviving[game_id]
             self._show_installed(game_id)
+            self._refresh_boxart_counts()
             return
         self._installed_dirs.pop(game_id, None)
         button.setText("Install")
@@ -1046,6 +1366,7 @@ class CatalogView(QWidget):
         bring = self._move_buttons.get(game_id)
         if bring is not None:
             bring.setEnabled(game_id not in self._gated)
+        self._refresh_boxart_counts()
 
     def button_for(self, game_id: str) -> QPushButton:
         """The Install button of a tile (tests / accessibility)."""

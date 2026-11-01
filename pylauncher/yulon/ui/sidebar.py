@@ -86,6 +86,7 @@ class _ControllerManagedServerView(ManagedServerView, Protocol):
     @property
     def services(self) -> _HasController: ...
 
+
 RAIL_MIN_WIDTH = SIDEBAR_RAIL_WIDTH
 """The rail's thickness floor (px): a server tab's styled width, so the rail is
 as wide with no server tab as with five."""
@@ -428,7 +429,7 @@ class TopMenuBar(QWidget):
 
         self.servers_menu.clear()
         indices = self.server_indices()
-        views: list[QWidget | None] = [self._tabs.widget(idx) for idx in indices]
+        views: list[object] = [self._tabs.widget(idx) for idx in indices]
         pairs = [
             (view.entry.name, view.services.controller.server_dir)
             for view in views

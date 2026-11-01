@@ -1407,7 +1407,7 @@ class DadcraftCampaignCard(QFrame):
         spec = get_theme(resolve_widget_theme(self))
         accent_bright = QColor(spec.accent_bright)
         accent_light = QColor(spec.accent_light)
-        ember_col = QColor(spec.ember)
+        ember_col = QColor(spec.accent_border)
 
         path = QPainterPath()
         path.addRoundedRect(1, 1, w - 2, h - 2, 7, 7)
@@ -1422,10 +1422,10 @@ class DadcraftCampaignCard(QFrame):
 
         if self._theme == "wow-wotlk":
             # Icy Frostmourne Glacier blended with active theme accent
-            motif_hi = _blend_color(QColor(100, 200, 255), accent_bright, 0.45)
-            motif_mid = _blend_color(QColor(40, 120, 200), ember_col, 0.45)
+            motif_hi = _blend_color(QColor(100, 200, 255), accent_bright, 0.65)
+            motif_mid = _blend_color(QColor(40, 120, 200), ember_col, 0.65)
             pulse = 0.5 + 0.5 * math.sin(t * 2.2) * math.cos(t * 1.3)
-            g1 = QRadialGradient(w * 0.5 + 30 * math.sin(t), h * 0.15, w * 0.7)
+            g1 = QRadialGradient(w * 0.5 + 30 * math.sin(t), h * 0.15, max(w, h) * 0.75)
             a0 = int((42 + 24 * pulse + 30 * hp) if spec.is_light else (45 + 30 * pulse + 40 * hp))
             a1 = int((18 + 12 * pulse) if spec.is_light else (25 + 15 * pulse))
             g1.setColorAt(0.0, QColor(motif_hi.red(), motif_hi.green(), motif_hi.blue(), a0))
