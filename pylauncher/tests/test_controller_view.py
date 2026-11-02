@@ -32762,9 +32762,7 @@ def _github_entry(tmp_path: Path) -> CatalogEntry:
         }
     )
     base = _client_entry(tmp_path, with_packs=False)
-    return base.model_copy(
-        update={"client": base.client.model_copy(update={"packs": (pack,)})}
-    )
+    return base.model_copy(update={"client": base.client.model_copy(update={"packs": (pack,)})})
 
 
 def test_play_takes_the_github_release_branch(
@@ -32844,4 +32842,3 @@ def test_update_takes_the_github_release_branch(
 
     assert pack_id == "consoleport"
     assert (play / "Interface" / "AddOns" / "ConsolePort" / "ConsolePort.toc").is_file()
-
