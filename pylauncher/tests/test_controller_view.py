@@ -32698,3 +32698,186 @@ def test_every_azerothcore_factory_takes_a_safety_copy_before_repair_clears_an_i
         entry = load_catalog().get(game)
         services = ControllerServices.for_entry(entry, tmp_path / game)
         assert services.controller.safety_copy is not None, game
+
+
+# -- T857: Start offers to switch when another realm type is picked -----------
+
+
+def _coa_view(tmp_path: Path) -> ControllerView:
+    """A CoA Server tab with the realm-type file on `coa`, jobs running inline."""
+    from tests.test_coa_realm import write_file
+
+    write_file(tmp_path, "coa")
+    entry = load_catalog().get("wow-coa")
+    services = ControllerServices.for_wotlk(entry, tmp_path, None)
+    assert services.realm_switch is not None
+    return ControllerView(entry, services, status_poll_ms=0)
+
+
+class _FakeRealmSwitch:
+    """Records `switch_to()` targets; the switch itself starts again, like the real one."""
+
+    def __init__(self) -> None:
+        self.targets: list[str] = []
+
+    def switch_to(self, target: str) -> Iterator[str]:
+        self.targets.append(target)
+        yield "switched"
+
+
+def _watched_start(
+    view: ControllerView, monkeypatch: pytest.MonkeyPatch
+) -> tuple[_FakeRealmSwitch, list[str]]:
+    """The view's switch seam faked and its `controller.start` recorded.
+
+    The switch's `_realm_switched` ends in `refresh_status()`, which reads the
+    live `docker ps`; the `ps` fixture already answers that for the WOTLK-tab
+    tests, so the CoA tab takes it too rather than shelling out.
+    """
+    from yulon import runner
+
+    switch = _FakeRealmSwitch()
+    view.services.realm_switch = switch  # type: ignore[assignment]
+    starts: list[str] = []
+    monkeypatch.setattr(view.services.controller, "start", lambda: starts.append("start") or True)
+    monkeypatch.setattr(view, "refresh_status", lambda: None)
+    monkeypatch.setattr(runner, "run", _Ps())
+    return switch, starts
+
+
+def test_start_on_another_type_with_switch_and_start_runs_the_switch_once(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ "Switch and start": the switch is run once, Start is not pressed a second time."""
+    qmb = controller_view_module.QMessageBox
+    boxes = _answer(monkeypatch, qmb.StandardButton.Yes)
+    view = _coa_view(tmp_path)
+    view.realm_type_choice.setCurrentIndex(1)
+    assert view.realm_type_choice.currentData() == "hero"
+    switch, starts = _watched_start(view, monkeypatch)
+
+    view.start_server()
+
+    assert switch.targets == ["hero"], "the switch did not run with the chosen id"
+    assert starts == [], "Start ran a second time after the switch"
+    assert len(boxes) == 1, "more than one question was asked"
+    box = boxes[0]
+    assert box.windowTitle() == "Start as Free Pick?"
+    assert box.text() == (
+        "The list is on Free Pick, but this server runs CoA classes. "
+        "Switch realm type first? Each type keeps its own characters."
+    )
+    assert {button.text() for button in box.buttons()} == {
+        "Switch and start",
+        "Start CoA classes",
+        "Cancel",
+    }
+    assert box.defaultButton() is box.button(qmb.StandardButton.Cancel)
+    assert box.escapeButton() is box.button(qmb.StandardButton.Cancel)
+
+
+def test_start_on_another_type_with_start_active_resets_the_combo_and_starts(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ "Start <active>": the combo goes back to the active type, then the normal Start runs."""
+    qmb = controller_view_module.QMessageBox
+    _answer(monkeypatch, qmb.StandardButton.Save)
+    view = _coa_view(tmp_path)
+    view.realm_type_choice.setCurrentIndex(1)
+    switch, starts = _watched_start(view, monkeypatch)
+
+    view.start_server()
+
+    assert switch.targets == [], "no switch may run for a start-as-is"
+    assert starts == ["start"], "the normal Start did not run"
+    assert view.realm_type_choice.currentData() == "coa", "the combo did not go back"
+
+
+def test_start_on_another_type_cancelled_starts_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cancel: neither the switch nor the Start runs."""
+    qmb = controller_view_module.QMessageBox
+    _answer(monkeypatch, qmb.StandardButton.Cancel)
+    view = _coa_view(tmp_path)
+    view.realm_type_choice.setCurrentIndex(1)
+    switch, starts = _watched_start(view, monkeypatch)
+
+    view.start_server()
+
+    assert switch.targets == []
+    assert starts == [], "a job ran after Cancel"
+    assert view._busy is False
+    assert view.realm_type_choice.currentData() == "hero", "Cancel moved the combo"
+
+
+def test_start_on_the_active_type_asks_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The combo on the active type: Start is unchanged, with no box."""
+    qmb = controller_view_module.QMessageBox
+    boxes = _answer(monkeypatch, qmb.StandardButton.Yes)
+    view = _coa_view(tmp_path)
+    assert view.realm_type_choice.currentData() == "coa"
+    _switch, starts = _watched_start(view, monkeypatch)
+
+    view.start_server()
+
+    assert boxes == [], "a question was asked though the combo is on the active type"
+    assert starts == ["start"], "the normal Start did not run"
+
+
+def test_start_without_realm_types_asks_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An entry without realm types: unchanged, no box even with an answer armed."""
+    qmb = controller_view_module.QMessageBox
+    boxes = _answer(monkeypatch, qmb.StandardButton.Yes)
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    assert view.services.realm_switch is None
+
+    view.start_server()
+
+    assert boxes == []
+    assert any(c[:5] == ["docker", "compose", "up", "-d", "--no-deps"] for c in ps.calls)
+
+
+def test_restart_on_another_type_with_switch_and_start_runs_the_switch_once(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Restart asks the same one question; "Switch and start" switches without restarting twice."""
+    qmb = controller_view_module.QMessageBox
+    boxes = _answer(monkeypatch, qmb.StandardButton.Yes)
+    view = _coa_view(tmp_path)
+    view.realm_type_choice.setCurrentIndex(2)
+    assert view.realm_type_choice.currentData() == "wcr"
+    switch, starts = _watched_start(view, monkeypatch)
+    restarts: list[str] = []
+    monkeypatch.setattr(
+        view.services.controller, "stop", lambda *a, **k: restarts.append("stop") or True
+    )
+    view.restart_button.setEnabled(True)
+
+    view.restart_from_server_tab()
+
+    assert switch.targets == ["wcr"], "the switch did not run with the chosen id"
+    assert starts == [], "Start ran on top of the switch"
+    assert restarts == [], "Restart ran on top of the switch"
+    assert len(boxes) == 1, "more than one question was asked"
+
+
+def test_an_unrecognised_start_answer_cancels_rather_than_switching(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The safety property: an answer the dialog does not recognise starts nothing."""
+    qmb = controller_view_module.QMessageBox
+    for answer in (qmb.StandardButton.No, qmb.StandardButton.NoButton):
+        _answer(monkeypatch, answer)
+        view = _coa_view(tmp_path)
+        view.realm_type_choice.setCurrentIndex(1)
+        switch, starts = _watched_start(view, monkeypatch)
+
+        view.start_server()
+
+        assert switch.targets == [], f"an unrecognised answer switched: {answer}"
+        assert starts == [], f"an unrecognised answer started something: {answer}"

@@ -16,6 +16,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ### New
 
 ### Fixed
+- Conquest of Azeroth: pressing Start with another realm type picked now offers to switch to it instead of starting the old one.
 
 ### Changed
 

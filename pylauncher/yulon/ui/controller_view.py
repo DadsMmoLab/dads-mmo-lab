@@ -6113,6 +6113,52 @@ def ask_backup_choice(
     return UpdateChoice.CANCEL
 
 
+class StartChoice(enum.Enum):
+    """What the T857 Start question was answered with. Three, and `CANCEL` is the default.
+
+    `ask_start_choice()`'s own shape for the same two reasons it gives: a
+    relabelled standard button keeps its platform position and its keyboard
+    role, and anything the dialog does not recognise -- `No` included, and
+    `NoButton`, which is what Escape and the window's close button answer --
+    falls through to `CANCEL`.
+    """
+
+    SWITCH_AND_START = "switch-and-start"
+    START_ACTIVE = "start-active"
+    CANCEL = "cancel"
+
+
+def ask_start_choice(
+    parent: QWidget | None, title: str, text: str, *, switch_label: str, start_label: str
+) -> StartChoice:
+    """A three-way "switch first / start as is / Cancel" question, defaulting to Cancel.
+
+    T857: Start (and Restart) with the realm-type combo on a type that is not
+    the active one asks whether to switch first, since Start alone starts the
+    active type. `Yes` is the switch, `Save` the start-as-is, `Cancel` nothing.
+    """
+    box = FittedMessageBox(
+        QMessageBox.Icon.Question,
+        title,
+        text,
+        QMessageBox.StandardButton.Yes
+        | QMessageBox.StandardButton.Save
+        | QMessageBox.StandardButton.Cancel,
+        parent,
+    )
+    _relabel(box, QMessageBox.StandardButton.Yes, switch_label)
+    _relabel(box, QMessageBox.StandardButton.Save, start_label)
+    _relabel(box, QMessageBox.StandardButton.Cancel, "Cancel")
+    box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+    box.setEscapeButton(QMessageBox.StandardButton.Cancel)
+    answer = box.exec()
+    if answer == QMessageBox.StandardButton.Yes:
+        return StartChoice.SWITCH_AND_START
+    if answer == QMessageBox.StandardButton.Save:
+        return StartChoice.START_ACTIVE
+    return StartChoice.CANCEL
+
+
 def _relabel(box: QMessageBox, which: QMessageBox.StandardButton, text: str) -> None:
     """Put `text` on a standard button, if this Qt gave us one to put it on.
 
@@ -11067,7 +11113,9 @@ class ControllerView(QWidget):
             return
 
         current = coa_realm.active(entry, self.services.controller.server_dir).id
-        self.realm_type_label.setText("Realm type: each keeps its own characters.")
+        self.realm_type_label.setText(
+            "Realm type — pick one, then press Switch realm type… (each keeps its own characters)."
+        )
         self.realm_type_label.setVisible(True)
         box = self.realm_type_choice
         box.blockSignals(True)
@@ -11098,15 +11146,19 @@ class ControllerView(QWidget):
     @Slot()
     def switch_realm_type(self) -> None:
         """Ask, then stop, switch and start again on the worker thread (T812 C3b)."""
+        self._switch_realm_type_asked()
+
+    def _switch_realm_type_asked(self) -> bool:
+        """`switch_realm_type()`'s own question answered yes; False answers nothing."""
         switch = self.services.realm_switch
         if switch is None or self._busy:
-            return
+            return False
         from yulon import coa_realm
 
         target = self.realm_type_choice.currentData()
         types = {realm.id: realm for realm in coa_realm.types_of(self.entry)}
         if target not in types:
-            return
+            return False
         realm = types[target]
         from yulon import coa_switch
 
@@ -11114,6 +11166,18 @@ class ControllerView(QWidget):
             "Switch realm type",
             coa_switch.confirm_text(realm.label, realm.realm_name),
         ):
+            return False
+        self._run_the_realm_switch(target)
+        return True
+
+    def _run_the_realm_switch(self, target: str) -> None:
+        """Stop, switch to `target` and start again on the worker thread, unasked (T857).
+
+        The switch the Start question runs: it stops the server, switches and
+        starts again, so Start must not start a second time after it.
+        """
+        switch = self.services.realm_switch
+        if switch is None or self._busy:
             return
         self.problem_label.setText("")
         self._set_busy(True, "Switch realm type")
@@ -12172,8 +12236,13 @@ class ControllerView(QWidget):
         (T690): the tray's and the flyout's Start reach this after their row was built,
         and a Start on top of a running job unlocks the tab when it ends while the first
         job still runs.
+
+        T857: with the realm-type combo on a type that is not the active one,
+        one question first: switch first, start the active type, or nothing.
         """
         if self._busy:
+            return
+        if not self._start_over_a_realm_type_mismatch():
             return
         self._disarm_actions()
         self._nothing_to_remove = False
@@ -12184,6 +12253,48 @@ class ControllerView(QWidget):
         self.status_label.setText("Starting…")
         self._hold_badge("starting")
         self._run(self.services.controller.start, self._server_action_done, self._start_failed)
+
+    def _start_over_a_realm_type_mismatch(self) -> bool:
+        """True when Start may start; False when the answer was "do nothing" (T857).
+
+        An entry with realm types (`services.realm_switch`) and the combo on a
+        type that is not the active one asks one three-way question: switch
+        first (then the switch starts again itself), start the active type, or
+        Cancel. Every other press -- no realm types, the combo on the active
+        type -- starts unchanged, with no box.
+        """
+        switch = self.services.realm_switch
+        if switch is None or not hasattr(self, "realm_type_choice"):
+            return True
+        from yulon import coa_realm
+
+        types = {realm.id: realm for realm in coa_realm.types_of(self.entry)}
+        if not types:
+            return True
+        active = coa_realm.active(self.entry, self.services.controller.server_dir)
+        chosen_id = self.realm_type_choice.currentData()
+        chosen = types.get(chosen_id, active)
+        if chosen is None or chosen.id == active.id:
+            return True
+        answer = ask_start_choice(
+            self,
+            f"Start as {chosen.label}?",
+            f"The list is on {chosen.label}, but this server runs {active.label}. "
+            "Switch realm type first? Each type keeps its own characters.",
+            switch_label="Switch and start",
+            start_label=f"Start {active.label}",
+        )
+        if answer is StartChoice.SWITCH_AND_START:
+            self._run_the_realm_switch(chosen.id)
+            return False
+        if answer is StartChoice.START_ACTIVE:
+            box = self.realm_type_choice
+            box.blockSignals(True)
+            box.setCurrentIndex(max(0, box.findData(active.id)))
+            box.blockSignals(False)
+            self._set_realm_switch_button()
+            return True
+        return False
 
     @Slot()
     def stop_server(self) -> bool:
@@ -12347,8 +12458,13 @@ class ControllerView(QWidget):
         The Tuning tab's restart (`_do_restart()`), so one job and one lifecycle
         command; without its question, as Stop has none. Live only while Stop is
         (the tray's menu can call this after its row was built).
+
+        T857: with the realm-type combo on another type, the same one question
+        Start asks -- switch first, start the active type, or nothing.
         """
         if self._busy or not self.restart_button.isEnabled():
+            return
+        if not self._start_over_a_realm_type_mismatch():
             return
         self._disarm_actions()
         self.problem_label.setText("")
