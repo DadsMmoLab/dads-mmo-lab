@@ -1124,6 +1124,8 @@ def app_seams(
         logs_dir=logs_dir if logs_dir is not None else platform.config_dir() / "logs",
         forget=lambda: None,  # an unfinished bring-in is never one of the remembered servers
         project_of=lambda: resolved() or planned,
+        # T854: every project the install may have, for its movement-map job, not one.
+        projects_of=projects,
         remove_folder=empty_the_folder,
         restore_refusal=running_load_refusal,
         take_back_client_files=take_back_client_files,

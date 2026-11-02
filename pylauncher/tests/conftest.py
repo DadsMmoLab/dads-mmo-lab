@@ -1874,4 +1874,4 @@ def _an_uninstall_finds_no_movement_map_container(monkeypatch: pytest.MonkeyPatc
     """
     from yulon import purge
 
-    monkeypatch.setattr(purge.Uninstaller, "_real_tool_containers", lambda self, project: [])
+    monkeypatch.setattr(purge.Uninstaller, "_real_tool_containers", lambda self, projects: [])

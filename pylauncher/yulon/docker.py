@@ -8946,24 +8946,40 @@ def tool_containers_left_running(folder: Path) -> StillWriting:
     return StillWriting(ours=tuple(left), others=tuple(theirs))
 
 
-def project_tool_containers(project: str, *, wsl_distro: str | None = None) -> list[str] | None:
-    """Running extraction-tool containers (`yulon-extract-*`) that carry THIS compose project.
+def install_tool_containers(
+    projects: Sequence[str], folders: Sequence[Path], *, wsl_distro: str | None = None
+) -> list[str] | None:
+    """Running extraction-tool containers (`yulon-extract-*`) that belong to THIS install.
 
     T854: the movement-map step of an install is such a container, and it can outlive a Stop
-    (Docker Desktop keeps a container whose CLI is gone, T303). Found by the project label AND
-    the tool prefix together -- the label alone also matches the install's own servers, the
-    prefix alone also matches another install's tools -- so only this install's come back.
-    None when Docker would not answer: the caller's next Docker command says so.
+    (Docker Desktop keeps a container whose CLI is gone, T303). One `docker ps` lists every
+    running tool with the labels that can name its install; the filtering is here. A tool is
+    this install's when EITHER its `WRITES_LABEL` holds the `folder_id()` of one of `folders`
+    (the data folder it writes: what `ContainerRun.to_create_argv` records, and the only thing
+    that names the install for a tool that does not carry the compose label) OR it carries the
+    `PROJECT_LABEL` of one of `projects` (compose-built images hand their labels to the
+    containers made from them). `OWNER_LABEL` is deliberately not asked: `compose down
+    --remove-orphans` already takes any container of the project whoever made it, and a
+    Windows and a WSL Yu'lon on one folder are one install.
+
+    The ids are only READ (`_read_folder_id`): `folder_id()` would write a file into a folder
+    that is about to be deleted, through whatever link it is. A folder with no id file has had
+    no tool that names it, so it matches nothing.
+
+    None when Docker would not answer: the caller says so and the removal's own Docker
+    commands report it next.
     """
+    wanted_projects = {project for project in projects if project}
+    wanted_ids = {
+        ident for ident in (_read_folder_id(folder / FOLDER_ID_FILE) for folder in folders) if ident
+    }
     proc = _docker(
         [
             "ps",
             "--filter",
-            f"label={PROJECT_LABEL}={project}",
-            "--filter",
             f"name={TOOL_CONTAINER_PREFIX}",
             "--format",
-            "{{.Names}}",
+            f'{{{{.Names}}}}\t{{{{.Label "{PROJECT_LABEL}"}}}}\t{{{{.Label "{WRITES_LABEL}"}}}}',
         ],
         timeout=_ASK_AGAIN_TIMEOUT,
         wsl_distro=wsl_distro,
@@ -8971,8 +8987,15 @@ def project_tool_containers(project: str, *, wsl_distro: str | None = None) -> l
     if proc.returncode != 0:
         logger.info(f"could not list this install's extraction tool containers: {proc.stderr}")
         return None
-    names = (line.strip() for line in proc.stdout.splitlines())
-    return sorted(name for name in names if name.startswith(TOOL_CONTAINER_PREFIX))
+    ours: list[str] = []
+    for row in proc.stdout.splitlines():
+        name, project, writes = ([*row.strip().split("\t"), "", ""])[:3]
+        if not name.startswith(TOOL_CONTAINER_PREFIX):
+            continue
+        named = {part for part in writes.strip().split(",") if part}
+        if project.strip() in wanted_projects or named & wanted_ids:
+            ours.append(name)
+    return sorted(ours)
 
 
 def end_tool_container(name: str, *, wsl_distro: str | None = None) -> str | None:
