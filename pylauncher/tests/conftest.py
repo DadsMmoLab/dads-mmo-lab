@@ -1862,3 +1862,16 @@ def _no_machine_probes_in_the_support_file(
 
     monkeypatch.setattr(sources, "docker_size", lambda distro: None)
     monkeypatch.setattr(sources, "machine_lines", lambda: ["CPU: test"])
+
+
+@pytest.fixture(autouse=True)
+def _an_uninstall_finds_no_movement_map_container(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An `Uninstaller` that was not given the T854 seams asks no real Docker for tool containers.
+
+    Its default lists this install's running `yulon-extract-*` containers before anything is
+    removed, and no unit test may reach the real CLI. `test_uninstall_stops_movement_map_job.py`
+    passes its own seams over a fake daemon.
+    """
+    from yulon import purge
+
+    monkeypatch.setattr(purge.Uninstaller, "_real_tool_containers", lambda self, project: [])

@@ -8946,6 +8946,52 @@ def tool_containers_left_running(folder: Path) -> StillWriting:
     return StillWriting(ours=tuple(left), others=tuple(theirs))
 
 
+def project_tool_containers(project: str, *, wsl_distro: str | None = None) -> list[str] | None:
+    """Running extraction-tool containers (`yulon-extract-*`) that carry THIS compose project.
+
+    T854: the movement-map step of an install is such a container, and it can outlive a Stop
+    (Docker Desktop keeps a container whose CLI is gone, T303). Found by the project label AND
+    the tool prefix together -- the label alone also matches the install's own servers, the
+    prefix alone also matches another install's tools -- so only this install's come back.
+    None when Docker would not answer: the caller's next Docker command says so.
+    """
+    proc = _docker(
+        [
+            "ps",
+            "--filter",
+            f"label={PROJECT_LABEL}={project}",
+            "--filter",
+            f"name={TOOL_CONTAINER_PREFIX}",
+            "--format",
+            "{{.Names}}",
+        ],
+        timeout=_ASK_AGAIN_TIMEOUT,
+        wsl_distro=wsl_distro,
+    )
+    if proc.returncode != 0:
+        logger.info(f"could not list this install's extraction tool containers: {proc.stderr}")
+        return None
+    names = (line.strip() for line in proc.stdout.splitlines())
+    return sorted(name for name in names if name.startswith(TOOL_CONTAINER_PREFIX))
+
+
+def end_tool_container(name: str, *, wsl_distro: str | None = None) -> str | None:
+    """Kill and remove one extraction-tool container at once (`docker rm -f`, no grace).
+
+    T854: for an uninstall, which deletes the data the tool writes, so there is nothing to
+    wait for (`compose down` would give it `STOP_GRACE_SECONDS` first, twice). None once it is
+    gone; otherwise Docker's reason in words. Never raises.
+    """
+    proc = _docker(
+        ["rm", "-f", name], timeout=container_end.END_CONTAINER_TIMEOUT, wsl_distro=wsl_distro
+    )
+    said = (proc.stderr or "").lower()
+    if proc.returncode == 0 or "no such container" in said or "already in progress" in said:
+        _ended(name)
+        return None
+    return (proc.stderr or "").strip() or f"docker rm exited {proc.returncode}"
+
+
 WRITES_LABEL = "yulon.writes-ids"
 """The label `docker create` puts on an extraction tool container: the folders it writes,
 each as `folder_id()`, comma-separated (Codex review of the owner label; T536).

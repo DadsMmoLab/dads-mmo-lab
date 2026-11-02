@@ -16,6 +16,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ### New
 
 ### Fixed
+- Uninstall and Start over stop a running movement-map job first, instead of waiting for it silently.
 
 ### Changed
 

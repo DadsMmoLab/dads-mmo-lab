@@ -129,6 +129,14 @@ class PurgeRefusal(PurgeError, SaidByYulon):
     """A `PurgeError` whose message is Yu'lon's own sentence (T248)."""
 
 
+MOVEMENT_MAP_JOB_STOPPING = "Stopping the movement-map job that was still running for this server…"
+"""The log line before an uninstall or a start over ends this install's running movement-map job."""
+
+MOVEMENT_MAP_JOB_NOT_STOPPED = (
+    "The movement-map job that was still running for this server ({name}) could not be "
+    "stopped ({problem}), so nothing was removed. Check that Docker is running, then try again."
+)
+
 DB_VOLUME_SUFFIX = "_db-data"
 """How this install's character volume is spelled: `<compose project>_db-data`.
 
@@ -585,6 +593,8 @@ class Uninstaller:
         forget_credential: Callable[[], None] | None = None,
         remove_extraction_client: Callable[[], str] | None = None,
         stop_background_jobs: Callable[[], None] | None = None,
+        tool_containers_of: Callable[[str], list[str] | None] | None = None,
+        end_tool_container: Callable[[str], str | None] | None = None,
         take_back_client_files: Callable[[], tuple[list[str], list[str]]] | None = None,
         hold_server: Callable[[str], AbstractContextManager[object]] | None = None,
         restore_refusal: Callable[[Path], str | None] | None = None,
@@ -639,6 +649,14 @@ class Uninstaller:
             stop_background_jobs
             if stop_background_jobs is not None
             else self._real_stop_background_jobs
+        )
+        # T854: this install's running movement-map (extraction tool) containers, found by its
+        # compose project and ended at once; `docker.end_tool_container` answers None or why not.
+        self._tool_containers_of = (
+            tool_containers_of if tool_containers_of is not None else self._real_tool_containers
+        )
+        self._end_tool_container = (
+            end_tool_container if end_tool_container is not None else self._real_end_tool
         )
         # How the containers' removal is heard and steered while it waits for a
         # world that is still loading (T158, `docker.StopControl`). Set by the
@@ -760,6 +778,12 @@ class Uninstaller:
         except MmapsError as exc:
             raise PurgeError(str(exc)) from exc
 
+    def _real_tool_containers(self, project: str) -> list[str] | None:
+        return docker.project_tool_containers(project, wsl_distro=self.wsl_distro)
+
+    def _real_end_tool(self, name: str) -> str | None:
+        return docker.end_tool_container(name, wsl_distro=self.wsl_distro)
+
     def _pending_record(self) -> Path:
         """Where that record is, keyed as the channel keys it, for a sentence that names it."""
         from yulon import channel_setup
@@ -818,6 +842,29 @@ class Uninstaller:
             backups_to=found.destination,
             backups_linked_to=found.linked_to,
         )
+
+    def _end_own_movement_map_job(self, project: str) -> None:
+        """End this install's own movement-map container first, so nothing waits for it (T854).
+
+        The step is an `yulon-extract-*` container that can outlive a Stop and carries the
+        install's compose project, so `compose down --remove-orphans` (`docker.remove_staged`)
+        signalled it and waited `STOP_GRACE_SECONDS` for a tool that does not exit on SIGTERM,
+        then waited that long again in its by-name fallback: ~10 silent minutes, hours if the
+        tool had been left to run. Found by the project label and the tool prefix together, so
+        another install's tools are never touched. Docker that does not answer here is left to
+        the removal below, which says so.
+
+        Raises:
+            PurgeRefusal: a container could not be ended; nothing was removed.
+        """
+        running = self._tool_containers_of(project)
+        if not running:
+            return
+        logger.info(MOVEMENT_MAP_JOB_STOPPING)
+        for name in running:
+            problem = self._end_tool_container(name)
+            if problem:
+                raise PurgeRefusal(MOVEMENT_MAP_JOB_NOT_STOPPED.format(name=name, problem=problem))
 
     def _resolve(self) -> tuple[_Targets | None, str]:
         """Every refusal, in the order that costs least and proves most first.
@@ -978,6 +1025,7 @@ class Uninstaller:
     ) -> PurgeReport:
         """Everything `_run` does after the refusals and the backups' move; see `_run`."""
         # --- everything below this line changes the machine ---------------
+        self._end_own_movement_map_job(targets.project)
         snapshot = self._snapshot()
         if snapshot.problem:
             logger.warning(f"uninstall: no log snapshot ({snapshot.problem}); going ahead anyway")
