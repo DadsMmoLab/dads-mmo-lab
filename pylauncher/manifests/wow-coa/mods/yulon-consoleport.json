@@ -4,7 +4,7 @@
   "name": "ConsolePort (controller support, client add-on)",
   "type": "mod",
   "game": "wow-coa",
-  "description": "Play with a controller: the ConsolePortLK Enhanced add-on, copied into your CoA client's Interface/AddOns; nothing is written to the server. On a Steam Deck, Steam Input sends its keys; in game type /cp recalibrate once. Not yet tested on Conquest of Azeroth's own class and talent windows.",
+  "description": "New: play with a controller: the ConsolePortLK Enhanced add-on, copied into your CoA client's Interface/AddOns; nothing is written to the server. On a Steam Deck, Steam Input sends its keys; in game type /cp recalibrate once. Not yet tested on Conquest of Azeroth's own class and talent windows. Not yet tested on a Steam Deck: tell us on Discord if something is off.",
   "source": {
     "repo": "SuttonX/ConsolePortLK-Enhanced",
     "follow": "releases"

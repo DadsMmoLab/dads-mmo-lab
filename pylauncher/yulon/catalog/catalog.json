@@ -213,7 +213,7 @@
           {
             "id": "consoleport",
             "label": "Controller support (ConsolePort)",
-            "description": "Play with a controller: the ConsolePortLK Enhanced add-on. On a Steam Deck, Steam Input sends its keys; in game, type /cp recalibrate once.",
+            "description": "New: play with a controller, using the ConsolePortLK Enhanced add-on. On a Steam Deck, Steam Input sends its keys; in game, type /cp recalibrate once. Not yet tested on a Steam Deck: tell us on Discord if something is off.",
             "source": {
               "kind": "github_release",
               "repo": "SuttonX/ConsolePortLK-Enhanced",
@@ -2369,7 +2369,7 @@
           {
             "id": "consoleport",
             "label": "Controller support (ConsolePort)",
-            "description": "Play with a controller: the ConsolePortLK Enhanced add-on. On a Steam Deck, Steam Input sends its keys; in game, type /cp recalibrate once.",
+            "description": "New: play with a controller, using the ConsolePortLK Enhanced add-on. On a Steam Deck, Steam Input sends its keys; in game, type /cp recalibrate once. Not yet tested on a Steam Deck: tell us on Discord if something is off.",
             "source": {
               "kind": "github_release",
               "repo": "SuttonX/ConsolePortLK-Enhanced",
@@ -2925,7 +2925,7 @@
           {
             "id": "consoleport",
             "label": "Controller support (ConsolePort)",
-            "description": "Play with a controller: the ConsolePortLK Enhanced add-on. On a Steam Deck, Steam Input sends its keys; in game, type /cp recalibrate once.",
+            "description": "New: play with a controller, using the ConsolePortLK Enhanced add-on. On a Steam Deck, Steam Input sends its keys; in game, type /cp recalibrate once. Not yet tested on a Steam Deck: tell us on Discord if something is off.",
             "source": {
               "kind": "github_release",
               "repo": "SuttonX/ConsolePortLK-Enhanced",
