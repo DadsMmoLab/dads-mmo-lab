@@ -1687,6 +1687,14 @@ def run_plan(
     for tool in plan.tools:
         if tool_satisfied(tool, data_dir, current, expected):
             continue
+        if scratch_off_bind:
+            # T856-B: no `blocking_output()` refusal here. On the bind the tool's cwd is
+            # `data/`, so a leftover `Buildings/dir_bin` would meet the real extractor and
+            # refuse to start. Off the bind the tool starts in an empty scratch `Buildings/`
+            # (`SCRATCH_SCRIPT` makes every `produces` folder fresh and links nothing under
+            # a produced name in), and `promote_copies()` replaces the old folder with the
+            # finished one — so the leftover cannot reach the tool and never survives the run.
+            continue
         blocked = blocking_output(tool, data_dir)
         if blocked is not None:
             raise InstallerError(blocked_message(tool, blocked))
