@@ -113,7 +113,11 @@ def shipped_ids(kind: ManifestType = "module") -> tuple[str, ...]:
 
 
 def store(
-    root: Path = BUNDLED_MANIFESTS_DIR, user_root: Path | None = None, *, user_game: str = GAME
+    root: Path = BUNDLED_MANIFESTS_DIR,
+    user_root: Path | None = None,
+    *,
+    user_game: str = GAME,
+    own: str | None = None,
 ) -> ManifestStore:
     """The WotLK manifest store over `root`, with the user layer over it.
 
@@ -127,13 +131,16 @@ def store(
 
     `user_game` is the server whose user layer is read: another AzerothCore
     server that offers WotLK's shipped manifests (WoW Unbound) keeps the modules
-    added to it under its own game id, never under WotLK's (T554).
+    added to it under its own game id, never under WotLK's (T554). `own` layers
+    that server's own tree over the borrowed one (T855-B: CoA passes its own
+    id; every other caller leaves it absent and reads exactly what it always did).
     """
     return ManifestStore(
         root,
         GAME,
         user_root if user_root is not None else user_manifests_dir(),
         user_game=user_game,
+        own_game=own,
     )
 
 

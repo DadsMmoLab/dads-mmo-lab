@@ -1,10 +1,10 @@
-"""T855: Conquest of Azeroth reads its own manifest tree, not WotLK's.
+"""T855-B: Conquest of Azeroth keeps every WotLK item and adds its own.
 
-`wow-coa` used to carry `manifests_from: wow-wotlk`, so its Modules tab
-offered WotLK's twenty-one C++ modules and eleven SQL mods — none of which the
-CoA server builds. It now reads `manifests/wow-coa/`, which holds exactly the
-opt-in ConsolePort controller add-on; WotLK, Unbound and Centurion keep theirs
-(T853's client pack, not this module).
+`wow-coa` carries `manifests_from: wow-wotlk`, so its Modules tab offers every
+WotLK item in every index — plus CoA's own `consoleport` mod from
+`manifests/wow-coa/`. An own item with a borrowed id would replace it; none
+collides today. WotLK and Unbound never offer `consoleport` (T853's client
+pack, not this module).
 """
 
 from __future__ import annotations
@@ -15,10 +15,12 @@ import pytest
 
 from yulon import coa_client, resources, steam_input
 from yulon.catalog.catalog import load_catalog
+from yulon.manifest import ManifestType
 from yulon.manifest_store import ManifestStore
 from yulon.ui.controller_view import ControllerServices
 
 COA = "wow-coa"
+WOTLK = "wow-wotlk"
 
 FOLDERS = (
     "ConsolePort",
@@ -31,6 +33,8 @@ FOLDERS = (
     "ConsolePortUI_Menu",
 )
 
+KINDS: tuple[ManifestType, ...] = ("module", "mod", "ale", "keg")
+
 
 def _services(tmp_path: Path) -> ControllerServices:
     entry = load_catalog().get(COA)
@@ -42,19 +46,34 @@ def _services(tmp_path: Path) -> ControllerServices:
     return ControllerServices.for_entry(entry, server_dir)
 
 
-def test_coa_reads_its_own_tree() -> None:
+def _borrowed(kind: ManifestType) -> tuple[str, ...]:
+    return ManifestStore(resources.manifests_dir(), WOTLK).load_index(kind).items
+
+
+def test_coa_borrows_wotlks_tree_and_layers_its_own() -> None:
     entry = load_catalog().get(COA)
     assert entry.has_manifests is True
-    assert entry.manifest_game() == COA
+    assert entry.manifests_from == WOTLK
+    assert entry.manifest_game() == WOTLK
     assert (resources.manifests_dir() / COA).is_dir()
 
 
-def test_only_consoleport_is_offered_on_coa(tmp_path: Path) -> None:
+def test_coa_offers_every_wotlk_item_plus_consoleport(tmp_path: Path) -> None:
     services = _services(tmp_path)
-    assert services.store is not None and services.store.game == COA
+    assert services.store is not None and services.store.game == WOTLK
+    for kind in KINDS:
+        assert set(services.store.load_index(kind).items) >= set(_borrowed(kind)), kind
     mods = {m.id: m for m in services.store.load_all("mod")}
-    assert set(mods) == {"consoleport"}
-    manifest = mods["consoleport"]
+    assert set(_borrowed("mod")) | {"consoleport"} <= set(mods)
+    for kind in ("module", "ale", "keg"):
+        offered = {m.id for m in services.store.load_all(kind)}
+        assert set(_borrowed(kind)) <= offered, kind
+
+
+def test_consoleport_is_coas_own_item(tmp_path: Path) -> None:
+    services = _services(tmp_path)
+    assert services.store is not None
+    manifest = services.store.load("mod", "consoleport")
     assert manifest.game == COA and manifest.type == "mod"
     assert [(step.src, step.dest, step.name) for step in manifest.client] == [
         (folder, "addons", folder) for folder in FOLDERS
@@ -63,18 +82,7 @@ def test_only_consoleport_is_offered_on_coa(tmp_path: Path) -> None:
     assert manifest.source is not None and manifest.source.follow == "releases"
 
 
-def test_coa_shows_no_wotlk_module(tmp_path: Path) -> None:
-    coa = {m.id for m in _services(tmp_path).store.load_all("module")}  # type: ignore[union-attr]
-    assert coa == set()
-    wotlk_ids = set(
-        ManifestStore(resources.manifests_dir(), "wow-wotlk").load_index("module").items
-    )
-    assert len(wotlk_ids) > 20, "the tree this test contrasts against shrank away"
-
-
-@pytest.mark.parametrize(
-    "game", ["wow-wotlk", "wow-unbound", "wow-tortoise", "wow-centurion", "wow-tbc"]
-)
+@pytest.mark.parametrize("game", ["wow-wotlk", "wow-unbound", "wow-tortoise", "wow-tbc"])
 def test_no_other_game_lists_the_coa_item(game: str, tmp_path: Path) -> None:
     entry = load_catalog().get(game)
     if not entry.has_manifests:

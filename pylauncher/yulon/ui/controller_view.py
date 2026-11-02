@@ -186,7 +186,6 @@ from yulon.controller_wow_centurion import characters as centurion_characters
 from yulon.controller_wow_centurion import console as centurion_console
 from yulon.controller_wow_centurion import controller as centurion_controller
 from yulon.controller_wow_centurion import maintenance as centurion_maintenance
-from yulon.controller_wow_coa import modules as coa_modules
 from yulon.controller_wow_tbc import accounts as tbc_accounts
 from yulon.controller_wow_tbc import console as tbc_console
 from yulon.controller_wow_tbc import controller as tbc_controller
@@ -4326,26 +4325,30 @@ def _for_wotlk(
 
     Every seam is bound to `entry`'s own containers, never to WotLK's
     `docker_ctl.SPEC`, so a second AzerothCore server beside WotLK is managed
-    as itself (T552). The module seams read `manifests/<game>/` of
-    `entry.manifest_game()` through `_MANIFEST_TREES` below, so an entry that
-    names a tree this build does not know is refused rather than handed
-    WotLK's. CoA reads its own `manifests/wow-coa/` tree (T855); WotLK and
-    Unbound share `manifests/wow-wotlk/`.
+    as itself (T552). The module seams read `_azeroth_manifest_store()` below:
+    the `manifests_from` tree when the entry names one, layered with its own
+    tree when `manifests/<entry id>/` is on disk (CoA, T855-B), so an entry
+    that names a tree this build does not know is refused rather than handed
+    WotLK's. WotLK and Unbound read WotLK's tree exactly as before.
     """
-    if entry.has_manifests and entry.manifest_game() not in _MANIFEST_TREES:
-        raise UnsupportedGameError(
-            f"{entry.name} ({entry.id}) reads the modules of manifests/{entry.manifest_game()}/, "
-            "and this build's AzerothCore tab has no store for that tree. "
-            "Nothing was opened."
-        )
+    if entry.has_manifests:
+        # The resolver refuses an entry naming an unknown tree; keep the refusal
+        # before any seam is built so nothing half-wired is handed back.
+        tab_store: ManifestStore | None = _azeroth_manifest_store(entry)
+    else:
+        tab_store = None
     spec = entry.container_spec()
-    # The shipped manifests are this entry's own tree; the modules the user
-    # ADDED are this server's own, under its game id (T554: a Remove on WoW
-    # Unbound never drops WotLK's record). For WotLK both are `wow-wotlk`.
+    # The shipped manifests are the entry's borrowed tree layered with its own
+    # (T855-B); the modules the user ADDED are this server's own, under its
+    # game id (T554: a Remove on WoW Unbound never drops WotLK's record). For
+    # WotLK all three are `wow-wotlk`.
     user_game = entry.id
-    game_modules = _MANIFEST_TREES[entry.manifest_game()]
-    record_backed = _record_backed_keys(game_modules.store(user_game=user_game))
-    settings_mods = _settings_mods(game_modules.store(user_game=user_game))
+    # The same store the tab lists, closed over lazily: the closures below only
+    # run when `entry.has_manifests`, so the fallback is never read — it only
+    # keeps their construction total.
+    listed_store = tab_store if tab_store is not None else wotlk_modules.store(user_game=user_game)
+    record_backed = _record_backed_keys(listed_store)
+    settings_mods = _settings_mods(listed_store)
     password = _db_password(entry, server_dir, wsl_distro=wsl_distro)
     sql = _sql_for(entry, password, wsl_distro=wsl_distro)
     mysql = _mysql_for(entry, password, wsl_distro=wsl_distro)
@@ -4647,7 +4650,7 @@ def _for_wotlk(
             scheme=wotlk_accounts.checked_scheme(entry.accounts.scheme, entry.id),
             names_are_names=entry.id in commands.NAME_LOOKUP_TREES,
         ),
-        store=game_modules.store(user_game=user_game) if entry.has_manifests else None,
+        store=tab_store,
         applier=module_applier,
         # The other half of installing a module, and until now the half with no
         # button: `applier` clones the module and activates its conf, leaving
@@ -5833,16 +5836,32 @@ def _knowing_its_server_sources(
     return services
 
 
-_MANIFEST_TREES = {
-    wotlk_modules.GAME: wotlk_modules,
-    coa_modules.GAME: coa_modules,
-}
-"""Shipped manifest tree by `entry.manifest_game()`: WotLK's and CoA's own (T855).
+def _azeroth_manifest_store(entry: CatalogEntry) -> ManifestStore:
+    """The one resolver from an AzerothCore entry to its manifest tree (T855-B).
 
-Unbound shares WotLK's tree (`manifests_from: wow-wotlk`); a second AzerothCore
-server naming none of these is refused in `_for_wotlk()` rather than handed a
-tree it does not read.
-"""
+    An entry reads the `manifests_from` tree when it names one (Unbound and CoA
+    both read WotLK's) and its own tree when `manifests/<entry id>/` is on disk:
+    each index is the borrowed list followed by the own tree's items, and an own
+    item with the same id as a borrowed one replaces it (T855-B; none collide
+    today). Item files are looked up in the own tree first, then the borrowed
+    one. An entry with no own tree (Unbound) reads exactly its borrowed lists;
+    an entry with no `manifests_from` (WotLK) reads exactly its own tree — both
+    byte-for-byte as before. An entry naming a tree this build does not know is
+    refused rather than handed WotLK's.
+    """
+    from yulon import resources as _resources
+
+    borrowed = entry.manifest_game()
+    if borrowed != wotlk_modules.GAME:
+        raise UnsupportedGameError(
+            f"{entry.name} ({entry.id}) reads the modules of manifests/{borrowed}/, "
+            "and this build's AzerothCore tab has no store for that tree. "
+            "Nothing was opened."
+        )
+    own = entry.id if (_resources.manifests_dir() / entry.id).is_dir() else None
+    store = wotlk_modules.store(user_game=entry.id, own=own if own != borrowed else None)
+    assert isinstance(store, ManifestStore)
+    return store
 
 
 def manifest_store_for(entry: CatalogEntry) -> ManifestStore | None:
@@ -5853,12 +5872,8 @@ def manifest_store_for(entry: CatalogEntry) -> ManifestStore | None:
     """
     if not entry.has_manifests:
         return None
-    if entry.manifest_game() in _MANIFEST_TREES:
-        store = _MANIFEST_TREES[entry.manifest_game()].store(user_game=entry.id)
-        assert isinstance(store, ManifestStore)
-        return store
     if _FACTORIES.get(entry.id) is _for_wotlk:
-        return wotlk_modules.store(user_game=entry.id)
+        return _azeroth_manifest_store(entry)
     stores: dict[str, Callable[[], ManifestStore]] = {
         "wow-tbc": tbc_modules.store,
         "wow-vanilla": vanilla_modules.store,
