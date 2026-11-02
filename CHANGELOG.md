@@ -17,8 +17,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Mists of Pandaria 5.4.8 (LoA Pandaria with 500 playerbots) can be installed; bring the Recall WoW client.
 
 ### Fixed
-
-### Changed
+- Centurion and Mists of Pandaria on Windows build their map data inside Docker, not through the slow Windows folder share.
 
 ## v0.9.30-Public — 2026-11-01
 

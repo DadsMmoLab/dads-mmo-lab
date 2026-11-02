@@ -307,6 +307,8 @@ class FakeMysql:
 
 MAP_NAMES = ("0003232.map", "0013232.map", "5303232.map")
 VMAP_TREES = ("000.vmtree", "001.vmtree", "530.vmtree")
+MOP_MAP_NAMES = ("0000_32_48.map", "0001_32_48.map", "0530_32_48.map")
+MOP_VMAP_TREES = ("0000.vmtree", "0001.vmtree", "0530.vmtree")
 
 
 @dataclass
@@ -323,6 +325,8 @@ class Extractors:
     rec: Recorder
     missing: tuple[str, ...] = ()
     fail_tool: str = ""
+    map_names: str = "mmmyyxx"
+    """The entry's file naming: `mmmm_yy_xx` lays MoP's `MMMM_YY_XX.map`/`MMMM.vmtree`."""
     seen: dict[str, dict[str, bytes]] = field(default_factory=dict)
     client_mounts: list[docker.Mount] = field(default_factory=list)
 
@@ -333,7 +337,18 @@ class Extractors:
         sink: docker.OutputSink,
         cancel: threading.Event | None = None,
     ) -> docker.AttachedRun:
-        program = spec.argv[0].rsplit("/", 1)[-1]
+        argv = spec.argv
+        # Under T856's scratch wrapper the tool's own argv starts after the script's
+        # `sh` name: `("sh", "-c", SCRATCH_SCRIPT, "sh", *tool.argv)`.
+        if (
+            len(argv) > 4
+            and argv[0] == "sh"
+            and argv[1] == "-c"
+            and argv[3] == "sh"
+            and argv[2] == extract.SCRATCH_SCRIPT
+        ):
+            argv = argv[4:]
+        program = argv[0].rsplit("/", 1)[-1]
         client = next(mount for mount in spec.mounts if mount.guest == extract.CLIENT_MOUNT)
         self.client_mounts.append(client)
         self.seen[program] = {
@@ -346,15 +361,18 @@ class Extractors:
             return docker.AttachedRun(139, ("Segmentation fault",))
         run = self.rec.run_container(spec, sink=sink, cancel=cancel)
         out = next(mount.host for mount in spec.mounts if mount.guest == extract.OUT_MOUNT)
+        map_names = MOP_MAP_NAMES if self.map_names == "mmmm_yy_xx" else MAP_NAMES
+        vmap_trees = MOP_VMAP_TREES if self.map_names == "mmmm_yy_xx" else VMAP_TREES
+        width = 4 if self.map_names == "mmmm_yy_xx" else 3
         if program == "mapextractor":
-            for name in MAP_NAMES:
-                if not any(name.startswith(f"{gone:03}") for gone in self.missing_ids()):
+            for name in map_names:
+                if not any(name.startswith(f"{gone:0{width}}") for gone in self.missing_ids()):
                     (out / "maps" / name).write_bytes(b"MAPS")
             (out / "dbc").mkdir(exist_ok=True)
             (out / "dbc" / "Spell.dbc").write_bytes(b"the client's Spell.dbc")
             (out / "dbc" / "Map.dbc").write_bytes(b"the client's Map.dbc")
         if program == "vmap4assembler":
-            for name in VMAP_TREES:
+            for name in vmap_trees:
                 (out / "vmaps" / name).write_bytes(b"VMAP_4.8")
         return run
 
@@ -2574,3 +2592,92 @@ def test_the_shortfall_names_the_players_stock_client_not_the_realms_build() -> 
         "ready-to-play copy report)"
     )
     assert TrinityCoreInstaller(ENTRY)._players_client() is None, "no exe patch: its own build"
+
+
+# -- T856: off Docker Desktop's slow bind ---------------------------------------------
+
+SCRATCH_SENTENCE = (
+    "Docker Desktop writes slowly into a Windows or macOS folder, so each tool writes inside "
+    "its container and the result is copied into data/ when it finishes."
+)
+
+
+def _run_client_data_on(
+    machine: Machine, platform: str, entry: CatalogEntry
+) -> tuple[list[str], list[docker.ContainerRun]]:
+    """`client-data` with `platform_id` answering `platform`; the said lines and the runs."""
+    lay_for_client_data(machine)
+    said = run_stage(machine, "client-data", entry=entry, platform_id=lambda: platform)
+    return said, list(machine.rec.container_runs)
+
+
+def _expected_tools(entry: CatalogEntry) -> list[Any]:
+    tc = entry.install.native.trinitycore if entry.install.native is not None else None
+    assert tc is not None
+    return list(tc.extract.tools)
+
+
+@pytest.mark.parametrize("platform", ["windows", "macos"])
+def test_t856_on_docker_desktop_every_tool_runs_in_the_containers_own_layer(
+    machine: Machine, platform: str
+) -> None:
+    """T856: the SCRATCH_SCRIPT wrapper, workdir /tmp, and the output folders in the env."""
+    said, runs = _run_client_data_on(machine, platform, ENTRY)
+    tools = _expected_tools(ENTRY)
+    assert len(runs) == len(tools)
+    for run, tool in zip(runs, tools, strict=True):
+        assert run.argv == ("sh", "-c", extract.SCRATCH_SCRIPT, "sh", *tool.argv)
+        assert run.workdir == extract.SCRATCH_WORKDIR
+        assert dict(run.env) == {"YULON_OUT_DIRS": " ".join(tool.produces)}
+    assert SCRATCH_SENTENCE in said
+
+
+def test_t856_on_macos_a_mop_like_entry_runs_off_the_bind_too(machine: Machine) -> None:
+    """T856: the MoP-like entry (`map_names`, no overlay) takes the same path on macOS."""
+    entry = centurion_like(map_names="mmmm_yy_xx", extract={"dbc_overlay_from": None})
+    machine.tools.map_names = "mmmm_yy_xx"
+    said, runs = _run_client_data_on(machine, "macos", entry)
+    tools = _expected_tools(entry)
+    assert len(runs) == len(tools)
+    for run, tool in zip(runs, tools, strict=True):
+        assert run.argv == ("sh", "-c", extract.SCRATCH_SCRIPT, "sh", *tool.argv)
+        assert run.workdir == extract.SCRATCH_WORKDIR
+        assert dict(run.env) == {"YULON_OUT_DIRS": " ".join(tool.produces)}
+    assert SCRATCH_SENTENCE in said
+
+
+def test_t856_on_linux_the_tools_are_the_argv_they_always_were(machine: Machine) -> None:
+    """T856: Linux keeps today's argv, mounts, workdir and env byte for byte."""
+    said, runs = _run_client_data_on(machine, "linux", ENTRY)
+    tools = _expected_tools(ENTRY)
+    assert [run.argv for run in runs] == [tuple(tool.argv) for tool in tools]
+    assert all(run.workdir == extract.OUT_MOUNT and dict(run.env) == {} for run in runs)
+    client_mounts = [mount for run in runs for mount in run.mounts]
+    assert client_mounts, "no extractor ran"
+    for mount in client_mounts:
+        if mount.guest == extract.CLIENT_MOUNT:
+            assert mount.read_only, "the copy stays read-only on Linux too"
+    assert SCRATCH_SENTENCE not in said
+
+
+def test_t856_the_evidence_on_linux_is_what_it_was_before_the_switch(
+    machine: Machine,
+) -> None:
+    """T856: the switch is a keyword, not a catalog field, so the evidence is unchanged."""
+    _run_client_data_on(machine, "linux", ENTRY)
+    data_dir = machine.server_dir / "data"
+    evidence = extract.read_evidence(data_dir)
+    assert evidence is not None
+    tc = ENTRY.install.native.trinitycore if ENTRY.install.native is not None else None
+    assert tc is not None
+    salt = trinitycore._packs_salt(
+        [pack for pack in ENTRY.client.packs if not pack.optional], machine.server_dir
+    )
+    expected = extract.expected_evidence(
+        tc.extract, machine.client, tc.client.required_file, salt=salt
+    )
+    assert evidence.plan_hash == expected.plan_hash
+    assert evidence.client_path == expected.client_path
+    assert [record.name for record in evidence.tools] == [tool.name for tool in tc.extract.tools]
+    for record, tool in zip(evidence.tools, tc.extract.tools, strict=True):
+        assert record.argv_hash == extract.argv_hash(tool.argv)

@@ -830,6 +830,14 @@ class TrinityCoreInstaller(CmangosInstaller):
             yield from self._make_extraction_client(ctx, original, temp, packs)
             image_ref = self._image_ref(ctx, tc.extract.image)
             user_args = self._user_args()
+            # T856: on Docker Desktop `data/` is a bind into a Windows or macOS
+            # folder where small-file writes are ~10x slower than in the container's
+            # own layer, so there each tool writes inside its container and only the
+            # finished folders are copied into `data/`. Linux passes nothing and
+            # keeps today's argv, mounts, workdir and env byte for byte. The switch
+            # is decided here, not in the catalog: the evidence hashes the plan, and
+            # a new field would make every install everywhere extract again.
+            scratch_off_bind = self._seams.platform_id() in ("windows", "macos")
             yield f"Extracting map data from the copy into {data_dir} (the copy is read-only)."
             yield from self._stream(
                 lambda sink: extract.run_plan(
@@ -847,6 +855,7 @@ class TrinityCoreInstaller(CmangosInstaller):
                     evidence_client_dir=original,
                     evidence_salt=salt,
                     client_named=self._players_client(),
+                    scratch_off_bind=scratch_off_bind,
                 ),
                 cancel=ctx.cancel,
                 stage="client-data",
