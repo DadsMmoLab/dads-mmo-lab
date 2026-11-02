@@ -9297,6 +9297,10 @@ class ControllerView(QWidget):
         # Play's two waits: a Start it asked for, and a Refresh it asked for.
         self._play_after_start = False
         self._play_after_refresh = False
+        # T857 review round 2: counts every server-action job launched
+        # (`_set_busy(True, ...)`), so a question that runs a nested event loop can
+        # tell that a job started -- and maybe finished -- while it was open.
+        self._action_generation = 0
         # T672: the wait for the realm between that Start and the game, which no button waits on.
         self._play_realm_wait: threading.Event | None = None
         self._play_realm_number = 0
@@ -11216,7 +11220,21 @@ class ControllerView(QWidget):
             # refused: Play is over with the failure ("Nothing was started.",
             # the sentence the switch's own question carries).
             self._play_after_start = False
-            self._play_end("Nothing was started.")
+            self._play_end(self._play_sentence_after_a_failed_switch(exc))
+
+    def _play_sentence_after_a_failed_switch(self, exc: object) -> str:
+        """Play's sentence for a refused switch: the old type may be running again.
+
+        `coa_switch` starts the ORIGINAL type again when it refused before
+        writing anything, and marks that exception `server_restarted`; then
+        "Nothing was started." would be untrue.
+        """
+        if getattr(exc, "server_restarted", False):
+            from yulon import coa_realm
+
+            label = coa_realm.active(self.entry, self.services.controller.server_dir).label
+            return f"The realm type was not switched; the server is running {label} again."
+        return "Nothing was started."
 
     def reextract_map_data(self) -> bool:
         """Extract the map data again from the player's client; streams into the log panel.
@@ -12042,6 +12060,8 @@ class ControllerView(QWidget):
             self._stop_update_refresh()  # T621
             self._end_the_world_wait()  # T382: the press that starts now owns the server
             self._end_the_play_realm_wait("busy")  # T672: and Play's wait for it ends too
+        if busy:
+            self._action_generation += 1
         self._busy = busy
         self._busy_job = job if busy else ""
         # T179: the movement-map job's Start is held while any press runs.
@@ -12255,9 +12275,18 @@ class ControllerView(QWidget):
         when "Switch and start" ran the switch instead (so a caller that waits
         on the start, like Play, can carry or end its own wait).
         """
+        return self._start_server(play=False)
+
+    def _start_server(self, *, play: bool) -> bool | None:
+        """`start_server()`; `play` says Play asked for this Start (T857 review round 2).
+
+        Play's wait (`_play_after_start`) is set only where the job is launched,
+        after the realm-type question: a nested tray Start that finishes while
+        the box is open must not consume it.
+        """
         if self._busy:
             return False
-        verdict = self._start_over_a_realm_type_mismatch()
+        verdict = self._start_over_a_realm_type_mismatch(play=play)
         if verdict is None:
             return None
         if not verdict:
@@ -12270,10 +12299,12 @@ class ControllerView(QWidget):
         self._set_busy(True, "Start")
         self.status_label.setText("Starting…")
         self._hold_badge("starting")
+        if play:
+            self._play_after_start = True
         self._run(self.services.controller.start, self._server_action_done, self._start_failed)
         return True
 
-    def _start_over_a_realm_type_mismatch(self) -> bool | None:
+    def _start_over_a_realm_type_mismatch(self, *, play: bool = False) -> bool | None:
         """True when Start may start, False on Cancel, None when the switch runs (T857).
 
         An entry with realm types (`services.realm_switch`) and the combo on a
@@ -12288,6 +12319,13 @@ class ControllerView(QWidget):
         re-checked against `_busy` after the box, exactly as
         `_play_stopped_by_another_action()` does for Play's own questions: if
         busy, start nothing and say the other action's sentence.
+
+        T857 review round 2: `_busy` alone is not enough -- a tray Start that
+        starts AND finishes while the box is open leaves it clear again. So the
+        view's action generation is read before the box and compared after: any
+        job launched meanwhile refuses the answer. Cancel is refused silently
+        (it asked for nothing); only an answer that wanted something says so.
+        `play`: Play asked for this press, so a switch carries its wait.
         """
         switch = self.services.realm_switch
         if switch is None or not hasattr(self, "realm_type_choice"):
@@ -12302,6 +12340,7 @@ class ControllerView(QWidget):
         chosen = types.get(chosen_id, active)
         if chosen is None or chosen.id == active.id:
             return True
+        generation = self._action_generation
         answer = ask_start_choice(
             self,
             f"Start as {chosen.label}?",
@@ -12312,7 +12351,9 @@ class ControllerView(QWidget):
         )
         # A job may have started while the question was open (the tray's
         # Start/Restart/Stop, like Play's own questions): start nothing over it.
-        if self._busy:
+        if answer is StartChoice.CANCEL:
+            return False
+        if self._busy or self._action_generation != generation:
             show_information(
                 self,
                 "Something else is running",
@@ -12321,6 +12362,8 @@ class ControllerView(QWidget):
             )
             return False
         if answer is StartChoice.SWITCH_AND_START:
+            if play:
+                self._play_after_start = True
             self._run_the_realm_switch(chosen.id)
             return None
         if answer is StartChoice.START_ACTIVE:
@@ -14690,12 +14733,10 @@ class ControllerView(QWidget):
             return
         if self._play_stopped_by_another_action():
             return
-        self._play_after_start = True
-        launched = self.start_server()
+        launched = self._start_server(play=True)
         if launched is None:
             return  # "Switch and start": the switch holds the tab, carrying the Play
         if not launched:
-            self._play_after_start = False
             self._play_end("Nothing was started.")
 
     def _play_check_stale(self) -> None:

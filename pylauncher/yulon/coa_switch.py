@@ -172,9 +172,14 @@ def _restarted_after_failed_switch(exc: BaseException, original: str) -> BaseExc
         f"{exc} The switch did not go through, and the server started again "
         f"on the {original} realm type."
     )
-    if isinstance(exc, coa_realm.RealmSwitchError):
-        return coa_realm.RealmSwitchError(message)
-    return RuntimeError(message)
+    restarted: BaseException = (
+        coa_realm.RealmSwitchError(message)
+        if isinstance(exc, coa_realm.RealmSwitchError)
+        else RuntimeError(message)
+    )
+    # T857: the view's Play reads this to say the server runs again (typed, not parsed).
+    restarted.server_restarted = True  # type: ignore[attr-defined]
+    return restarted
 
 
 def _stopped_after_failed_switch(exc: BaseException, extra: str = "") -> BaseException:
