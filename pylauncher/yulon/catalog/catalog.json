@@ -8,7 +8,8 @@
       "description": "Wrath of the Lich King (3.3.5a) on AzerothCore, with bots that quest, group and fight alongside you. The most complete server here: add modules, scripts and mods from its Modules tab.",
       "notes": [
         "The tile said, until T194: \"The flagship install; module/ALE/mod/keg management is manifest-driven.\"",
-        "T824 (2026-10-28): core 8a4e76ea -> 3f2969dd and mod-playerbots d750b4b3 -> e88cc409, the newest at 2026-10-28, not live-tested."
+        "T824 (2026-10-28): core 8a4e76ea -> 3f2969dd and mod-playerbots d750b4b3 -> e88cc409, the newest at 2026-10-28, not live-tested.",
+        "T860 (2026-11-02): core 3f2969dd -> 93333d6a and mod-playerbots e88cc409 -> 05a1f6fc, the newest at 2026-11-02, not live-tested."
       ],
       "emulator": {
         "name": "AzerothCore (mod-playerbots fork) + mod-playerbots",
@@ -288,7 +289,8 @@
       "status": "beta",
       "description": "TBC (2.4.3) on CMaNGOS with the CMaNGOS playerbots fork.",
       "notes": [
-        "T824 (2026-10-28): mangos-tbc 15b6ddb4 -> 37767e95, playerbots da4419af -> 6823423e and tbc-db ebe51a83 -> 1c54acd2, the newest at 2026-10-28, not live-tested."
+        "T824 (2026-10-28): mangos-tbc 15b6ddb4 -> 37767e95, playerbots da4419af -> 6823423e and tbc-db ebe51a83 -> 1c54acd2, the newest at 2026-10-28, not live-tested.",
+        "T860 (2026-11-02): mangos-tbc 37767e95 -> af6b4885 and playerbots 6823423e -> de1b1823; tbc-db stays 1c54acd2 (already the newest); not live-tested."
       ],
       "emulator": {
         "name": "CMaNGOS mangos-tbc + cmangos/playerbots + tbc-db",
@@ -756,7 +758,8 @@
       "status": "beta",
       "description": "Vanilla (1.12.1) on CMaNGOS with the CMaNGOS playerbots fork.",
       "notes": [
-        "T824 (2026-10-28): mangos-classic 8ec338a1 -> 57312491, playerbots da4419af -> 6823423e and classic-db ec4f5961 -> 603ece10, the newest at 2026-10-28, not live-tested."
+        "T824 (2026-10-28): mangos-classic 8ec338a1 -> 57312491, playerbots da4419af -> 6823423e and classic-db ec4f5961 -> 603ece10, the newest at 2026-10-28, not live-tested.",
+        "T860 (2026-11-02): mangos-classic 57312491 -> ff13624a and playerbots 6823423e -> de1b1823; classic-db stays 603ece10 (already the newest); not live-tested."
       ],
       "emulator": {
         "name": "CMaNGOS mangos-classic + cmangos/playerbots + classic-db",
@@ -1670,7 +1673,8 @@
       "status": "beta",
       "description": "Centurion is level-60 player-versus-player WoW on the 3.3.5a client, with hardcore world characters, tournament battlegrounds and arenas, and 150 bots that quest, roam and fill the battlegrounds. Yu'lon builds the server from Centurion's own source and makes your English 3.3.5a client ready to play it, with Centurion's patches and addons.",
       "notes": [
-        "T824 (2026-10-28): TrinityCore112 CENTURION 25d3e6ef -> 351950fb, the newest at 2026-10-28, not live-tested."
+        "T824 (2026-10-28): TrinityCore112 CENTURION 25d3e6ef -> 351950fb, the newest at 2026-10-28, not live-tested.",
+        "T860 (2026-11-02): TrinityCore112 CENTURION 351950fb -> 0f7e3f59, the newest at 2026-11-02, not live-tested."
       ],
       "emulator": {
         "name": "Centurion (TrinityCore 3.3.5 fork with its own playerbots)",
@@ -2563,7 +2567,8 @@
       "description": "Wrath of the Lich King with Wrath Unbound: unlock more classes at the Mentor and mix their spells and talents. Its own server, beside your WotLK one. Death Knight can be your first class, not an added one.",
       "notes": [
         "T554: the multi-class server. Own folder, containers, images, volumes, databases and ports, so it runs beside WoW WotLK.",
-        "T824 (2026-10-28): core 8a4e76ea -> 3f2969dd and mod-playerbots d750b4b3 -> e88cc409, the newest at 2026-10-28, not live-tested."
+        "T824 (2026-10-28): core 8a4e76ea -> 3f2969dd and mod-playerbots d750b4b3 -> e88cc409, the newest at 2026-10-28, not live-tested.",
+        "T860 (2026-11-02): core 3f2969dd -> 93333d6a and mod-playerbots e88cc409 -> 05a1f6fc, the newest at 2026-11-02, not live-tested."
       ],
       "emulator": {
         "name": "AzerothCore (mod-playerbots fork) + mod-playerbots + mod-ale + Wrath Unbound",
