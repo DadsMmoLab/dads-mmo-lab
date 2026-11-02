@@ -425,7 +425,7 @@ def test_the_install_checks_what_the_unbound_sql_must_have_made() -> None:
 
 def test_the_client_carries_the_modules_addon_folder_as_one_required_pack() -> None:
     client = unbound().client
-    assert [p.id for p in client.packs] == ["unbound-addons", "lumenveil"]
+    assert [p.id for p in client.packs] == ["unbound-addons", "lumenveil", "consoleport"]
     pack = client.packs[0]
     assert pack.label == "Unbound addons"
     assert (pack.source.kind, pack.source.path) == (
@@ -474,9 +474,21 @@ def test_wotlks_client_carries_lumenveil_and_no_config_wtf() -> None:
     from tests.test_catalog_client_packs import LUMENVEIL_SHA256
 
     client = load_catalog().get("wow-wotlk").client
-    assert [pack.id for pack in client.packs] == ["lumenveil"]
+    assert [pack.id for pack in client.packs] == ["lumenveil", "consoleport"]
     assert client.packs[0].sha256 == LUMENVEIL_SHA256
     assert client.config_wtf is None and client.exe_patch is None
+
+
+def test_the_client_offers_consoleport_as_an_optional_latest_release_extra() -> None:
+    """T853: the ConsolePort controller add-on follows SuttonX's latest release."""
+    pack = unbound().client.packs[2]
+    assert pack.id == "consoleport"
+    assert (pack.source.kind, pack.source.repo, pack.source.asset) == (
+        "github_release",
+        "SuttonX/ConsolePortLK-Enhanced",
+        "ConsolePortLK-Enhanced.zip",
+    )
+    assert pack.optional is True and pack.default is False
 
 
 def test_the_installer_runs_the_patch_and_lua_stages_and_wotlks_tuple_is_unchanged() -> None:

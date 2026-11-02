@@ -27150,10 +27150,10 @@ def test_the_shipped_wotlk_entry_offers_lumenveil_in_the_make_dialog(
     view.make_play_client()
 
     assert asker.offers[0].client is not None
-    assert [pack.id for pack in asker.offers[0].client.packs] == ["lumenveil"]
+    assert [pack.id for pack in asker.offers[0].client.packs] == ["lumenveil", "consoleport"]
     dialog = controller_view_module.PlayClientDialog(asker.offers[0], jobs=run_inline)
     assert dialog.client_options is not None
-    assert list(dialog.client_options.pack_boxes) == ["lumenveil"]
+    assert list(dialog.client_options.pack_boxes) == ["lumenveil", "consoleport"]
     assert (
         dialog.client_options.pack_boxes["lumenveil"].toolTip() != ""
     ), "the credit line rides on the box"
@@ -27162,7 +27162,7 @@ def test_the_shipped_wotlk_entry_offers_lumenveil_in_the_make_dialog(
 def test_the_make_dialog_hides_lumenveil_off_windows(
     qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """T809 W4: Linux/macOS offer no box for the Windows-only pack."""
+    """T809 W4: Linux/macOS offer no box for the Windows-only pack (T853: consoleport stays)."""
     ClientOptionsBox = controller_view_module.ClientOptionsBox
     client = WOTLK.client
     for here in ("linux", "macos"):
@@ -27170,7 +27170,7 @@ def test_the_make_dialog_hides_lumenveil_off_windows(
             controller_view_module.client_packs.platform, "detect", lambda here=here: here
         )
         box = ClientOptionsBox(client, choices=None, parent=None)
-        assert list(box.pack_boxes) == [], here
+        assert list(box.pack_boxes) == ["consoleport"], here
 
 
 def _lumen_entry(tmp_path: Path) -> CatalogEntry:

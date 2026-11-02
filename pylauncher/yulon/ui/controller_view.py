@@ -1270,7 +1270,7 @@ class ClientOptionsBox(QWidget):
         required = sum(
             pack.size_hint or 0
             for pack in client.packs
-            if not pack.optional and pack.source.kind == "url"
+            if not pack.optional and pack.source.kind in ("url", "github_release")
         )
         self.required_label = QLabel("", self)
         self.required_label.setWordWrap(True)
@@ -1296,7 +1296,7 @@ class ClientOptionsBox(QWidget):
             if gone and pack.id not in installed:
                 check.setChecked(False)
                 check.setEnabled(False)
-            if pack.source.kind == "url":
+            if pack.source.kind in ("url", "github_release"):
                 self._sizes[pack.id] = pack.size_hint or 0
             check.toggled.connect(self._update_extra)
             self.pack_boxes[pack.id] = check
@@ -14763,6 +14763,14 @@ class ControllerView(QWidget):
                         progress=self._download_progress(pack),
                         cancelled=cancelled,
                     )
+                elif kind == "github_release":
+                    fetched = client_packs.fetch_github_release(
+                        pack,
+                        entry_id=game,
+                        allowed_hosts=client.hosts(),
+                        progress=self._download_progress(pack),
+                        cancelled=cancelled,
+                    )
                 else:
                     assert_never(kind)
             except client_packs.Cancelled:
@@ -15165,6 +15173,14 @@ class ControllerView(QWidget):
                 )
             elif kind == "url":
                 fetched = client_packs.fetch_url(
+                    pack,
+                    entry_id=game,
+                    allowed_hosts=client.hosts(),
+                    progress=self._download_progress(pack),
+                    cancelled=cancelled,
+                )
+            elif kind == "github_release":
+                fetched = client_packs.fetch_github_release(
                     pack,
                     entry_id=game,
                     allowed_hosts=client.hosts(),

@@ -3026,7 +3026,8 @@ class HelpPlace(_Strict):
 
 
 class PackSource(_Strict):
-    """Where one client pack's zip comes from: the server's own checkout, or a URL.
+    """Where one client pack's zip comes from: the server's own checkout, a URL,
+    or a GitHub repo's latest release.
 
     One shape for all so a pack is one list entry either way; `kind` says
     which half is filled, and the validator holds the halves apart so a
@@ -3037,9 +3038,33 @@ class PackSource(_Strict):
     them. Each file is proved against that list and packed into a zip in the
     cache (`client_packs.fetch_checkout_folder`), so everything after the fetch
     is the zip path every other pack takes.
+
+    `github_release` (T853) is a GitHub release asset kept at the repo's
+    latest: `repo` is `owner/name`, `asset` its file name. The fetch reads
+    the release's `tag_name` (its version) through `_checked_version` and
+    proves the asset against the release's own `digest` (`sha256:<hex>`),
+    so the pack needs no pinned checksum and no `version_url`.
     """
 
-    kind: Literal["checkout", "checkout_folder", "url"]
+    REPO_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
+    """A GitHub `owner/name`: exactly one slash, each side a plain name."""
+
+    kind: Literal["checkout", "checkout_folder", "url", "github_release"]
+    repo: str | None = Field(
+        default=None,
+        description=(
+            "The GitHub repo (`owner/name`) whose latest release holds the zip. "
+            "github_release packs only."
+        ),
+    )
+    asset: str | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "The release asset's file name (`ConsolePortLK-Enhanced.zip`). "
+            "github_release packs only."
+        ),
+    )
     path: str | None = Field(
         default=None,
         min_length=1,
@@ -3070,12 +3095,46 @@ class PackSource(_Strict):
     def _urls_are_https(cls, value: str | None) -> str | None:
         return value if value is None else _https_url(value, "source url")
 
+    @field_validator("repo")
+    @classmethod
+    def _repo_is_owner_slash_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not PackSource.REPO_PATTERN.match(value):
+            raise ValueError(f"source.repo must be an owner and a name (owner/name), got {value!r}")
+        return value
+
+    @field_validator("asset")
+    @classmethod
+    def _asset_is_a_plain_file_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if value in (".", "..") or PurePosixPath(value).parts != (value,):
+            raise ValueError(f"source.asset must be a plain file name, got {value!r}")
+        return value
+
     @model_validator(mode="after")
     def _kind_matches_the_half_that_is_filled(self) -> PackSource:
         if self.from_checkout and (
             self.path is None or self.url is not None or self.version_url is not None
         ):
             raise ValueError(f"a {self.kind} source names a path, and no url or version_url")
+        if self.kind == "github_release" and (
+            self.repo is None
+            or self.asset is None
+            or self.path is not None
+            or self.url is not None
+            or self.version_url is not None
+        ):
+            raise ValueError(
+                "a github_release source names a repo and an asset, "
+                "and no path, url or version_url"
+            )
+        if self.kind != "github_release" and (self.repo is not None or self.asset is not None):
+            raise ValueError(
+                f"a {self.kind} source names no repo or asset: those are a "
+                "github_release source's"
+            )
         if self.kind == "url" and (self.url is None or self.path is not None):
             raise ValueError("a url source names a url, and no path")
         return self
@@ -3398,7 +3457,13 @@ class ClientPack(_Strict):
                     f"pack {self.id!r}: its zip {self.source.path!r} must be inside the folder of "
                     f"its md5_file {self.md5_file!r}, whose lines name files relative to it"
                 )
-        if self.source.kind == "checkout" and all(item is None for item in given):
+        if self.source.kind == "github_release":
+            if any(item is not None for item in given):
+                raise ValueError(
+                    f"pack {self.id!r}: a github_release pack takes no pinned checksum: "
+                    "its checksum is the release's own digest"
+                )
+        elif self.source.kind == "checkout" and all(item is None for item in given):
             raise ValueError(
                 f"pack {self.id!r}: a checkout pack needs a checksum: exactly one of sha256, "
                 "md5 and md5_file"
@@ -3807,25 +3872,48 @@ class Client(_Strict):
                     )
         return self
 
+    GITHUB_RELEASE_HOSTS: ClassVar[frozenset[str]] = frozenset(
+        {
+            "api.github.com",
+            "github.com",
+            "release-assets.githubusercontent.com",
+            "objects.githubusercontent.com",
+        }
+    )
+    """Hosts a github_release pack's fetch may reach (T853).
+
+    The release answer (`api.github.com`), the asset's own address
+    (`github.com`, which redirects to an asset host), and the two asset
+    hosts Luminveil's `redirect_hosts` names (the catalog entry adds no
+    `redirect_hosts` of its own: the kind carries them).
+    """
+
     def hosts(self) -> frozenset[str]:
         """Every host a download for this client may reach: packs and clean exe sources.
 
         Packs add their urls' hosts plus `redirect_hosts`: a redirect target
         (GitHub's release-asset hosts) the catalog names so the engine does
-        not refuse it. Not `fallback_page`: that is a page a person
+        not refuse it. A github_release pack adds the kind's hosts instead:
+        the release answer, the asset's address and the two asset hosts.
+        Not `fallback_page`: that is a page a person
         is sent to, never fetched.
         """
         urls: list[str | None] = []
         extra: list[str] = []
+        kinds: set[str] = set()
         for pack in self.packs:
             urls += [pack.source.url, pack.source.version_url]
             extra += list(pack.redirect_hosts)
+            kinds.add(pack.source.kind)
         if self.exe_patch is not None:
             urls += [source.url for source in self.exe_patch.clean_sources]
         if self.update is not None:
             urls += [self.update.manifest_url, self.update.objects_url]
         hosts = (urlsplit(url).hostname for url in urls if url is not None)
-        return frozenset([host for host in hosts if host] + extra)
+        found = [host for host in hosts if host] + extra
+        if "github_release" in kinds:
+            found += sorted(Client.GITHUB_RELEASE_HOSTS)
+        return frozenset(found)
 
 
 class BotRegistry(_Strict):

@@ -107,8 +107,9 @@ def test_only_games_whose_client_is_complete_without_a_server_are_offered(
 
     Their packs and Wow.exe patch are fetched and laid by the server's own tab,
     keyed by the server folder — a friend launcher has no server folder, so a
-    client made here could never receive them. WotLK's only pack is the optional Lumenveil
-    extra, off by default, so WotLK is offered (mutation: count every pack and WotLK drops out).
+    client made here could never receive them. WotLK's packs are the optional Lumenveil
+    and ConsolePort extras, both off by default, so WotLK is offered (mutation: count
+    every pack and WotLK drops out).
     """
     window = _window(tmp_path)
     offered = [window.game_pick.itemData(i) for i in range(window.game_pick.count())]

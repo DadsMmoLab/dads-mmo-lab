@@ -209,6 +209,26 @@
               "timeout_seconds": 1800
             },
             "credit": "Lumenveil, GPL-2.0, built on CoAVolFog; downloaded from its makers (github.com/lumenveil/Lumenveil)."
+          },
+          {
+            "id": "consoleport",
+            "label": "Controller support (ConsolePort)",
+            "description": "Play with a controller: the ConsolePortLK Enhanced add-on. On a Steam Deck, Steam Input sends its keys; in game, type /cp recalibrate once.",
+            "source": {
+              "kind": "github_release",
+              "repo": "SuttonX/ConsolePortLK-Enhanced",
+              "asset": "ConsolePortLK-Enhanced.zip"
+            },
+            "install": [
+              {
+                "member": "*",
+                "to_dir": "Interface/AddOns"
+              }
+            ],
+            "optional": true,
+            "default": false,
+            "size_hint": 13646207,
+            "credit": "ConsolePortLK Enhanced by SuttonX, Artistic License 2.0; based on ConsolePort by Sebastian Lindfors and ConsolePortLK by Leandro Araujo"
           }
         ]
       },
@@ -2345,6 +2365,26 @@
             "optional": true,
             "default": false,
             "size_hint": 146670268
+          },
+          {
+            "id": "consoleport",
+            "label": "Controller support (ConsolePort)",
+            "description": "Play with a controller: the ConsolePortLK Enhanced add-on. On a Steam Deck, Steam Input sends its keys; in game, type /cp recalibrate once.",
+            "source": {
+              "kind": "github_release",
+              "repo": "SuttonX/ConsolePortLK-Enhanced",
+              "asset": "ConsolePortLK-Enhanced.zip"
+            },
+            "install": [
+              {
+                "member": "*",
+                "to_dir": "Interface/AddOns"
+              }
+            ],
+            "optional": true,
+            "default": false,
+            "size_hint": 13646207,
+            "credit": "ConsolePortLK Enhanced by SuttonX, Artistic License 2.0; based on ConsolePort by Sebastian Lindfors and ConsolePortLK by Leandro Araujo"
           }
         ],
         "exe_patch": {
@@ -2881,6 +2921,26 @@
               "timeout_seconds": 1800
             },
             "credit": "Lumenveil, GPL-2.0, built on CoAVolFog; downloaded from its makers (github.com/lumenveil/Lumenveil)."
+          },
+          {
+            "id": "consoleport",
+            "label": "Controller support (ConsolePort)",
+            "description": "Play with a controller: the ConsolePortLK Enhanced add-on. On a Steam Deck, Steam Input sends its keys; in game, type /cp recalibrate once.",
+            "source": {
+              "kind": "github_release",
+              "repo": "SuttonX/ConsolePortLK-Enhanced",
+              "asset": "ConsolePortLK-Enhanced.zip"
+            },
+            "install": [
+              {
+                "member": "*",
+                "to_dir": "Interface/AddOns"
+              }
+            ],
+            "optional": true,
+            "default": false,
+            "size_hint": 13646207,
+            "credit": "ConsolePortLK Enhanced by SuttonX, Artistic License 2.0; based on ConsolePort by Sebastian Lindfors and ConsolePortLK by Leandro Araujo"
           }
         ],
         "config_wtf": {

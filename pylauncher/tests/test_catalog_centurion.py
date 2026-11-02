@@ -301,7 +301,23 @@ def test_the_client_is_3_3_5a_reporting_build_12342() -> None:
     """The realm row's `gamebuild` is 12342 (auth_data.sql:73); a 12340 client sees it offline
     (AuthSession.cpp:755-765), which is what the exe patch's build string is for."""
     assert (ENTRY.client.version, ENTRY.client.build) == ("3.3.5a", 12342)
-    assert list(_packs()) == [*REQUIRED, *HD]
+    assert list(_packs()) == [*REQUIRED, *HD, "consoleport"]
+
+
+def test_the_client_offers_consoleport_as_an_optional_latest_release_extra() -> None:
+    """T853: the ConsolePort controller add-on follows SuttonX's latest release."""
+    pack = _packs()["consoleport"]
+    assert pack.label == "Controller support (ConsolePort)"
+    assert (pack.source.kind, pack.source.repo, pack.source.asset) == (
+        "github_release",
+        "SuttonX/ConsolePortLK-Enhanced",
+        "ConsolePortLK-Enhanced.zip",
+    )
+    assert (pack.sha256, pack.md5, pack.md5_file, pack.sha256_file) == (None, None, None, None)
+    assert pack.optional is True and pack.default is False, "opt-in (T181 decision 1)"
+    assert pack.size_hint == 13646207
+    assert pack.platforms == (), "a pure addons zip: every platform"
+    assert [(rule.member, rule.to_dir) for rule in pack.install] == [("*", "Interface/AddOns")]
 
 
 def test_the_required_packs_come_from_the_checkout_checked_by_its_own_patches_md5() -> None:
@@ -451,7 +467,16 @@ def test_the_exe_patch_writes_exactly_what_centurions_launcher_writes_both_ways(
 
 
 def test_the_hosts_a_download_may_reach_are_centurions_site_and_the_clean_client() -> None:
-    assert ENTRY.client.hosts() == frozenset({"centurionpvp.com", "wow.baerthe.com"})
+    assert ENTRY.client.hosts() == frozenset(
+        {
+            "centurionpvp.com",
+            "wow.baerthe.com",
+            "api.github.com",
+            "github.com",
+            "release-assets.githubusercontent.com",
+            "objects.githubusercontent.com",
+        }
+    )
 
 
 # -- the shipped entry is the one the family was tested with ---------------------------------
