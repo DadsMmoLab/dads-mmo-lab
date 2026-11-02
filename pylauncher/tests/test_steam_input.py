@@ -613,7 +613,7 @@ def test_add_with_a_refusing_configset_shape_still_writes_shortcuts(tmp_path: Pa
 
     assert (tmp_path / ".local/share/Steam/userdata" / ACCOUNT / "config/shortcuts.vdf").is_file()
     assert report.entries == ("Turtle WoW", "Turtle WoW Server")
-    assert report.layout.startswith("Steam Input: the controller layout was not set up:")
+    assert report.layout.startswith("Steam Input: the controller layout was not set up (")
     assert "Steam Input" in steam.confirmation(report)
     assert key.configset.read_text(encoding="utf-8") == before
     assert not key.layout_file.exists()
@@ -631,7 +631,7 @@ def test_add_with_a_missing_template_still_writes_shortcuts(
     report = _shortcuts(tmp_path).add(controller_layout=True)
 
     assert (tmp_path / ".local/share/Steam/userdata" / ACCOUNT / "config/shortcuts.vdf").is_file()
-    assert report.layout.startswith("Steam Input: the controller layout was not set up:")
+    assert report.layout.startswith("Steam Input: the controller layout was not set up (")
     key = _plan(tmp_path).keys[0]
     assert not key.configset.exists() and not key.layout_file.exists()
 
@@ -646,19 +646,20 @@ def test_add_with_a_failing_configset_replace_leaves_no_layout_file(
     the reason in the report line.
     """
     _profile(tmp_path)
-    real_replace = Path.replace
+    real_replace = os.replace
 
-    def _refusing_replace(self: Path, target: Path) -> None:
-        if Path(target).name == steam_input.CONFIGSET_FILE:
+    def _refusing_replace(src: object, dst: object, *args: object, **kwargs: object) -> None:
+        if Path(str(dst)).name == steam_input.CONFIGSET_FILE:
             raise OSError(28, "No space left on device")
-        real_replace(self, target)
+        real_replace(src, dst, *args, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(Path, "replace", _refusing_replace)
+    monkeypatch.setattr(os, "replace", _refusing_replace)
 
     report = _shortcuts(tmp_path).add(controller_layout=True)
 
     assert (tmp_path / ".local/share/Steam/userdata" / ACCOUNT / "config/shortcuts.vdf").is_file()
-    assert report.layout.startswith("Steam Input: the controller layout was not set up:")
+    assert report.layout.startswith("Steam Input: the controller layout was not set up (")
+    assert ".." not in report.layout
     key = _plan(tmp_path).keys[0]
     assert not key.layout_file.exists()
     assert not key.configset.exists()
@@ -666,3 +667,125 @@ def test_add_with_a_failing_configset_replace_leaves_no_layout_file(
         path for path in key.configset.parent.iterdir() if path.name.endswith(".yulon-tmp")
     ]
     assert leftovers == []
+
+
+def _two_key_plan(home: Path, app_name: str = "A: B.C") -> steam_input.InputPlan:
+    """A plan with two `write` keys (a name with `:` and `.` spells two)."""
+    input_plan = steam_input.plan(
+        _steam_root(home),
+        ACCOUNT,
+        app_name,
+        config_dir=home / ".local/share/yulon",
+    )
+    assert [key.action for key in input_plan.keys] == ["write", "write"]
+    return input_plan
+
+
+def _no_debris(input_plan: steam_input.InputPlan) -> None:
+    base = input_plan.keys[0].configset.parent
+    leftovers = [
+        path
+        for path in base.rglob("*")
+        if path.name.endswith(".yulon-tmp") or path.name.endswith(steam_input.OLD_SUFFIX)
+    ]
+    assert leftovers == []
+
+
+def test_a_failing_layout_replace_restores_the_configset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """H1: failure on the layout replace leaves the original bytes, no layout, no temps."""
+    _profile(tmp_path)
+    input_plan = _plan(tmp_path)
+    key = input_plan.keys[0]
+    key.configset.parent.mkdir(parents=True, exist_ok=True)
+    before = _realistic_configset()
+    key.configset.write_text(before, encoding="utf-8")
+    real_replace = os.replace
+
+    def _refusing_replace(src: object, dst: object, *args: object, **kwargs: object) -> None:
+        if Path(str(dst)) == key.layout_file:
+            raise OSError(28, "No space left on device")
+        real_replace(src, dst, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "replace", _refusing_replace)
+
+    with pytest.raises(steam.SteamRefusal, match="Nothing of the layout was kept"):
+        steam_input.apply(input_plan, steam_running=False)
+
+    assert key.configset.read_text(encoding="utf-8") == before
+    assert not key.layout_file.exists()
+    assert not input_plan.state_file.exists()
+    _no_debris(input_plan)
+
+
+def test_a_failing_state_replace_restores_configset_and_layouts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """H1: failure on the state write restores the configset and layouts, no temps."""
+    _profile(tmp_path)
+    input_plan = _plan(tmp_path)
+    key = input_plan.keys[0]
+    key.configset.parent.mkdir(parents=True, exist_ok=True)
+    before = _realistic_configset()
+    key.configset.write_text(before, encoding="utf-8")
+    real_replace = os.replace
+    state_name = input_plan.state_file.name
+
+    def _refusing_replace(src: object, dst: object, *args: object, **kwargs: object) -> None:
+        if Path(str(dst)).name == state_name:
+            raise OSError(28, "No space left on device")
+        real_replace(src, dst, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "replace", _refusing_replace)
+
+    with pytest.raises(steam.SteamRefusal, match="Nothing of the layout was kept"):
+        steam_input.apply(input_plan, steam_running=False)
+
+    assert key.configset.read_text(encoding="utf-8") == before
+    assert not key.layout_file.exists()
+    assert not input_plan.state_file.exists()
+    _no_debris(input_plan)
+
+
+def test_two_keys_failure_on_the_second_rolls_back_the_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """H1: two keys, failure on the second — the first key's layout and entry roll back too."""
+    _profile(tmp_path)
+    input_plan = _two_key_plan(tmp_path)
+    first, second = input_plan.keys
+    assert first.configset == second.configset
+    first.configset.parent.mkdir(parents=True, exist_ok=True)
+    before = _realistic_configset()
+    first.configset.write_text(before, encoding="utf-8")
+    real_replace = os.replace
+
+    def _refusing_replace(src: object, dst: object, *args: object, **kwargs: object) -> None:
+        if Path(str(dst)) == second.layout_file:
+            raise OSError(28, "No space left on device")
+        real_replace(src, dst, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "replace", _refusing_replace)
+
+    with pytest.raises(steam.SteamRefusal, match="Nothing of the layout was kept"):
+        steam_input.apply(input_plan, steam_running=False)
+
+    assert first.configset.read_text(encoding="utf-8") == before
+    assert not first.layout_file.exists() and not second.layout_file.exists()
+    assert not input_plan.state_file.exists()
+    _no_debris(input_plan)
+
+
+def test_two_keys_success_leaves_no_temps_and_no_olds(tmp_path: Path) -> None:
+    """H1: success over two keys leaves no temps and no `.yulon-old` files."""
+    _profile(tmp_path)
+    input_plan = _two_key_plan(tmp_path)
+
+    report = steam_input.apply(input_plan, steam_running=False)
+
+    assert report.written == (input_plan.keys[0].key, input_plan.keys[1].key)
+    for key in input_plan.keys:
+        assert key.layout_file.is_file()
+        assert f'"{key.key}"' in key.configset.read_text(encoding="utf-8")
+    _no_debris(input_plan)

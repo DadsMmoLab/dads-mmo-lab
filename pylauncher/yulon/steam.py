@@ -995,6 +995,28 @@ class AddReport:
     """The Steam Input sentence, or "": `controller_layout` fills it, nothing else does."""
 
 
+def _layout_sentence(reason: object) -> str:
+    """The report line for a refused layout step: no double period (round 2, N6).
+
+    The refusal text (`SteamRefusal`) ends its own sentence, so appending
+    another period wrote two. The reason's trailing "Nothing was written" (or
+    "Nothing of the layout was kept") clause is about the LAYOUT step, while
+    the press DID write the Steam tiles — keeping it would say nothing was
+    written when the tiles were added. It is cut there, and the line says so.
+    """
+    text = str(reason).rstrip()
+    for clause in ("Nothing of the layout was kept.", "Nothing was written."):
+        cut = text.find(clause)
+        if cut != -1:
+            text = text[:cut].rstrip(" .")
+            break
+    else:
+        text = text.rstrip(".")
+    return (
+        f"Steam Input: the controller layout was not set up ({text}); the Steam tiles were added."
+    )
+
+
 def confirmation(report: AddReport) -> str:
     """The sentence the button shows: what is in the library now, and the one thing to do.
 
@@ -1125,9 +1147,10 @@ class SteamShortcuts:
         The layout is an EXTRA on top of the shortcuts: it is planned before
         the first Steam write, and a planning or apply refusal never escapes
         `add()` — the shortcuts still go ahead and the report carries
-        "Steam Input: the controller layout was not set up: <reason>."
-        Turning ConsolePort off later removes nothing (the player may like the
-        layout on its own); `steam_input.remove()` stays available.
+        "Steam Input: the controller layout was not set up (<reason>); the
+        Steam tiles were added." Turning ConsolePort off later removes nothing
+        (the player may like the layout on its own); `steam_input.remove()`
+        stays available.
         """
         detected = self.platform_id()
         if detected != "linux":
@@ -1249,7 +1272,7 @@ class SteamShortcuts:
                 )
                 steam_input.planned_texts(layout_plan)
             except (_PlanRefusal, OSError) as exc:
-                layout_sentence = f"Steam Input: the controller layout was not set up: {exc}."
+                layout_sentence = _layout_sentence(exc)
                 layout_plan = None
                 logger.info(f"steam input: {layout_sentence}")
 
@@ -1279,7 +1302,7 @@ class SteamShortcuts:
                 try:
                     layout_report = _steam_input.apply(layout_plan, steam_running=False)
                 except (_SteamRefusal, OSError) as exc:
-                    layout_sentence = f"Steam Input: the controller layout was not set up: {exc}."
+                    layout_sentence = _layout_sentence(exc)
                 else:
                     layout_sentence = _steam_input.report_sentence(layout_report)
                 logger.info(f"steam input: {layout_sentence}")

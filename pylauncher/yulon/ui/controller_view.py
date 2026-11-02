@@ -1336,7 +1336,10 @@ class ClientOptionsBox(QWidget):
         if pack.size_hint:
             text += f" ({size_text(pack.size_hint)})"
         if gone:
-            text += " — unavailable: the server's site no longer has it"
+            if pack.source.kind == "github_release":
+                text += " — unavailable: its GitHub release is not available right now"
+            else:
+                text += " — unavailable: the server's site no longer has it"
         return text
 
     def _update_extra(self) -> None:
@@ -14789,10 +14792,17 @@ class ControllerView(QWidget):
             except client_packs.PackUnavailable as exc:
                 if pack.optional:
                     unavailable.add(pack.id)
-                    notes.append(
-                        f"{pack.label} is unavailable: the server's site no longer has it. "
-                        "What is installed stays until you switch it off."
-                    )
+                    if pack.source.kind == "github_release":
+                        notes.append(
+                            f"{pack.label} is unavailable: "
+                            "its GitHub release is not available right now. "
+                            "What is installed stays until you switch it off."
+                        )
+                    else:
+                        notes.append(
+                            f"{pack.label} is unavailable: the server's site no longer has it. "
+                            "What is installed stays until you switch it off."
+                        )
                     continue
                 raise _PackStopped(pack, str(exc)) from exc
             except client_packs.PackError as exc:

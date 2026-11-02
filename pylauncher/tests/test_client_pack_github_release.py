@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 import zipfile
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -468,9 +469,9 @@ def test_a_tampered_but_valid_zip_in_cache_is_refused():
 def test_the_newer_verified_at_wins_whatever_the_name():
     """G1: the fallback is newest by note, not by folder name."""
     _lay_verified("v1.10")
-    new_data = _zip({"ConsolePort/ConsolePort.toc": b"## v1.9\n"})
-    old_folder = _lay_verified("v1.9", new_data)
-    _note(old_folder, tag="v1.9", hours_old=-3)
+    old_data = _zip({"ConsolePort/ConsolePort.toc": b"## v1.9\n"})
+    old_folder = _lay_verified("v1.9", old_data)
+    _note(old_folder, tag="v1.9", hours_old=3)
 
     class _Down:
         def __call__(self, url, watcher, **kw):
@@ -478,8 +479,8 @@ def test_the_newer_verified_at_wins_whatever_the_name():
 
     got = fetch_github_release(_pack(), entry_id="wotlk", allowed_hosts=HOSTS, opener=_Down())
 
-    assert got.version == "v1.9"
-    assert got.path.read_bytes() == new_data
+    assert got.version == "v1.10"
+    assert got.path.read_bytes() == DATA
 
 
 def test_a_folder_without_a_note_is_not_a_cached_version():
@@ -566,3 +567,53 @@ def test_an_oversized_release_keeps_the_verified_cache():
 
     assert got == first
     assert site.gets("https://github.com/x/y/v1.0.7.zip") == []
+
+
+def test_a_failing_note_write_keeps_the_old_note(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M1: a failure after the note temp is opened leaves the old note intact."""
+    site = _site()
+    first = fetch_github_release(_pack(), entry_id="wotlk", allowed_hosts=HOSTS, opener=site)
+    folder = first.path.parent
+    before = (folder / ".yulon-github-release.json").read_bytes()
+    real_replace = os.replace
+
+    def _refusing_replace(src: object, dst: object, *a: object, **k: object) -> None:
+        if str(dst).endswith(".yulon-github-release.json"):
+            raise OSError(28, "No space left on device")
+        real_replace(src, dst, *a, **k)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "replace", _refusing_replace)
+    site.files[API] = _release(tag="v1.0.7", digest=f"sha256:{DIGEST}")
+    site.files[f"https://github.com/{REPO}/releases/download/v1.0.7/{ASSET}"] = DATA
+
+    got = fetch_github_release(_pack(), entry_id="wotlk", allowed_hosts=HOSTS, opener=site)
+
+    assert got.version == "v1.0.7"
+    assert (folder / ".yulon-github-release.json").read_bytes() == before
+    assert not list(folder.glob("*.yulon-tmp"))
+
+
+def test_a_reverify_with_a_failing_note_write_keeps_the_old_note(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """M1: re-verify of a cached archive with a failing note write keeps the old note."""
+    site = _site()
+    first = fetch_github_release(_pack(), entry_id="wotlk", allowed_hosts=HOSTS, opener=site)
+    folder = first.path.parent
+    before = (folder / ".yulon-github-release.json").read_bytes()
+    real_replace = os.replace
+
+    def _refusing_replace(src: object, dst: object, *a: object, **k: object) -> None:
+        if str(dst).endswith(".yulon-github-release.json"):
+            raise OSError(28, "No space left on device")
+        real_replace(src, dst, *a, **k)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "replace", _refusing_replace)
+
+    got = fetch_github_release(_pack(), entry_id="wotlk", allowed_hosts=HOSTS, opener=site)
+
+    assert got == first
+    assert (folder / ".yulon-github-release.json").read_bytes() == before
+    assert not list(folder.glob("*.yulon-tmp"))

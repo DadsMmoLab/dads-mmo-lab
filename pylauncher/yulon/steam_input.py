@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import shutil
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -62,6 +64,14 @@ answer for the other. A changed sha means Steam or the player edited the file
 since — the layout is theirs now and a second press must leave it alone (a
 Steam autosave rewrites the file on every player edit in the controller
 editor).
+"""
+OLD_SUFFIX = ".yulon-old"
+"""Where a replaced layout file waits while the press commits (T853 round 2, H1).
+
+`apply()` moves each existing layout aside under this sibling before its
+temp takes its name, then the configset, then the state; only after all
+three land are the asides removed. A failure puts every aside back, so the
+first key's file is restored when the second key's fails.
 """
 
 
@@ -376,19 +386,28 @@ def apply(
 ) -> InputApplyReport:
     """Write every `write` key of `input_plan`; refuse while Steam runs.
 
-    Backs up the configset first (`*.yulon-bak-<stamp>`, `steam.py`'s helper).
-    The configset is re-read from disk (refusing an unreadable file exactly
-    as `plan()` does — never treated as empty) and goes through a sibling
-    temp file and a rename; the layout file is moved into place only after
-    the configset replace has landed. If the configset replace fails there
-    is no layout file left behind: what this press wrote of the layout is
-    removed again, so a later press finds the pair exactly as it left them
-    and never a layout with no entry. Keeps every other byte: adds
-    `"<key>" { "autosave" "1" "yulon" "1" }` inside `"controller_config"`
-    (creating the file with the minimal wrapper if absent). Records the
-    written sha256 in Yu'lon's own state beside the scripts dir, keyed by
-    `(steam_root, account_id, key)`. `keep-player` keys are left exactly as
-    they are.
+    One transaction over ALL keys of the press. Two halves, in this order:
+
+    1. Stage: render every key's layout to `<layout>.yulon-tmp`, the edited
+       configset text to `<configset>.yulon-tmp`, the new state to its temp.
+       The configset is re-read from disk (refusing an unreadable file
+       exactly as `plan()` does — never treated as empty), so a configset
+       that changed since the plan is never written from a stale read. Any
+       failure here removes every temp and refuses with nothing committed.
+    2. Commit: layout files first (each `os.replace` from its temp; an
+       existing file is moved aside as `<layout>.yulon-old` until the end),
+       then the configset (`os.replace`), then the state.
+
+    On any failure in step 2: put back what was replaced (the configset
+    from the backup `steam.py` already takes, old layouts from `.yulon-old`,
+    new layout files removed), remove every temp, and raise `SteamRefusal`
+    saying nothing of the layout was kept. On success remove the `.yulon-old`
+    files. Backs up the configset first (`*.yulon-bak-<stamp>`, `steam.py`'s
+    helper). Keeps every other byte: adds `"<key>" { "autosave" "1" "yulon"
+    "1" }` inside `"controller_config"` (creating the file with the minimal
+    wrapper if absent). Records the written sha256 in Yu'lon's own state
+    beside the scripts dir, keyed by `(steam_root, account_id, key)`.
+    `keep-player` keys are left exactly as they are.
     """
     if steam_running:
         raise steam.SteamRefusal(
@@ -399,84 +418,178 @@ def apply(
         )
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     app_name = input_plan.app_name
-    written: list[str] = []
-    kept: list[str] = []
+    kept = [key_plan.key for key_plan in input_plan.keys if key_plan.action != "write"]
+    writes = [key_plan for key_plan in input_plan.keys if key_plan.action == "write"]
     backups: list[Path] = []
-    for key_plan in input_plan.keys:
-        if key_plan.action != "write":
-            kept.append(key_plan.key)
-            continue
-        # Fresh read, not the plan's `prior_text`: the file may have changed
-        # since the plan (a press plans, then writes other files, then
-        # applies), and writing from a stale read would drop the other games'
-        # entries. An unreadable file refuses here exactly as in `plan()`.
-        new_text, payload = _stage_key(
-            input_plan.steam_root,
-            input_plan.account_id,
-            key_plan.key,
-            _read_configset(key_plan.configset),
+    if not writes:
+        logger.info(f"steam input: {app_name}: wrote 0 layout(s), kept {len(kept)} player one(s)")
+        return InputApplyReport(app_name=app_name, written=(), kept=tuple(kept), backups=())
+    configsets = {key_plan.configset for key_plan in writes}
+    if len(configsets) != 1:
+        raise steam.SteamRefusal(
+            "The controller configset this would write spans more than one file. "
+            "Nothing of the layout was kept."
         )
-        key_plan.layout_file.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            backup = steam._backup(key_plan.configset, stamp)
-            if backup is not None:
-                backups.append(backup)
+    configset = next(iter(configsets))
+    # Fresh read, not the plan's `prior_text`: the file may have changed
+    # since the plan (a press plans, then writes other files, then
+    # applies), and writing from a stale read would drop the other games'
+    # entries. An unreadable file refuses here exactly as in `plan()`.
+    live = _read_configset(configset)
+    staged: list[tuple[KeyPlan, str, bytes]] = []
+    acc = live or ""
+    for key_plan in writes:
+        payload = layout_bytes(
+            steam_root=input_plan.steam_root,
+            account_id=input_plan.account_id,
+            key=key_plan.key,
+        )
+        acc, _ = _configset_with_entry(acc, key_plan.key)
+        staged.append((key_plan, acc, payload))
+    new_text = acc
+    new_state_text: str | None = None
+    try:
+        state_raw: dict[str, Any] = {}
+        if input_plan.state_file.is_file():
+            loaded = json.loads(input_plan.state_file.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                state_raw = loaded
+        for key_plan, _, payload in staged:
+            state_raw[_state_key(input_plan.steam_root, input_plan.account_id, key_plan.key)] = (
+                hashlib.sha256(payload).hexdigest()
+            )
+        new_state_text = json.dumps(state_raw, indent=2, sort_keys=True) + "\n"
+    except (OSError, ValueError) as exc:
+        raise steam.SteamRefusal(
+            "The controller layout was staged, but what was staged could not be "
+            f"recorded ({exc}). Nothing of the layout was kept."
+        ) from exc
+    # Stage 1: every temp lands before anything is committed.
+    layout_tmps: list[tuple[KeyPlan, Path]] = []
+    aside: list[tuple[Path, Path]] = []
+    created_layouts: list[Path] = []
+    configset_tmp = configset.with_name(configset.name + steam.TMP_SUFFIX)
+    state_tmp = input_plan.state_file.with_name(input_plan.state_file.name + steam.TMP_SUFFIX)
+    assert new_state_text is not None
+    try:
+        for key_plan in writes:
+            key_plan.layout_file.parent.mkdir(parents=True, exist_ok=True)
+        backup = steam._backup(configset, stamp)
+        if backup is not None:
+            backups.append(backup)
+        for key_plan, _, payload in staged:
             layout_tmp = key_plan.layout_file.with_name(
                 key_plan.layout_file.name + steam.TMP_SUFFIX
             )
             layout_tmp.write_bytes(payload)
-            compat_tmp = key_plan.configset.with_name(key_plan.configset.name + steam.TMP_SUFFIX)
-            try:
-                compat_tmp.write_text(
-                    new_text, encoding="utf-8", errors="surrogateescape", newline=""
-                )
-            except (UnicodeDecodeError, UnicodeEncodeError, ValueError) as exc:
-                raise steam.SteamRefusal(
-                    "The controller configset this would write is not plain text "
-                    f"Steam can read ({exc}). Nothing was written."
-                ) from exc
-            try:
-                compat_tmp.replace(key_plan.configset)
-            except OSError:
-                for debris in (layout_tmp, compat_tmp):
-                    try:
-                        debris.unlink(missing_ok=True)
-                    except OSError:
-                        pass
-                raise
-            layout_tmp.replace(key_plan.layout_file)
-        except steam.SteamRefusal:
-            raise
-        except OSError as exc:
-            raise steam.SteamRefusal(
-                steam.UNWRITABLE.format(path=key_plan.configset.parent, reason=exc.strerror or exc)
-            ) from exc
-        sha = hashlib.sha256(payload).hexdigest()
+            layout_tmps.append((key_plan, layout_tmp))
         try:
-            state_raw: dict[str, Any] = {}
-            if input_plan.state_file.is_file():
-                loaded = json.loads(input_plan.state_file.read_text(encoding="utf-8"))
-                if isinstance(loaded, dict):
-                    state_raw = loaded
-            state_raw[_state_key(input_plan.steam_root, input_plan.account_id, key_plan.key)] = sha
-            input_plan.state_file.parent.mkdir(parents=True, exist_ok=True)
-            state_tmp = input_plan.state_file.with_name(
-                input_plan.state_file.name + steam.TMP_SUFFIX
+            configset_tmp.write_text(
+                new_text, encoding="utf-8", errors="surrogateescape", newline=""
             )
-            state_tmp.write_text(json.dumps(state_raw, indent=2, sort_keys=True) + "\n")
-            state_tmp.replace(input_plan.state_file)
-        except (OSError, ValueError) as exc:
+        except (UnicodeDecodeError, UnicodeEncodeError, ValueError) as exc:
             raise steam.SteamRefusal(
-                f"The controller layout was written, but what was written could not be "
-                f"recorded in {input_plan.state_file} ({exc}). Nothing else was changed."
+                "The controller configset this would write is not plain text "
+                f"Steam can read ({exc}). Nothing of the layout was kept."
             ) from exc
-        written.append(key_plan.key)
+        input_plan.state_file.parent.mkdir(parents=True, exist_ok=True)
+        state_tmp.write_text(new_state_text, encoding="utf-8")
+    except steam.SteamRefusal:
+        _drop_temps([tmp for _, tmp in layout_tmps] + [configset_tmp, state_tmp])
+        raise
+    except OSError as exc:
+        _drop_temps([tmp for _, tmp in layout_tmps] + [configset_tmp, state_tmp])
+        raise steam.SteamRefusal(
+            steam.UNWRITABLE.format(path=configset.parent, reason=exc.strerror or exc)
+            + " Nothing of the layout was kept."
+        ) from exc
+    # Stage 2: commit — layouts, then the configset, then the state.
+    try:
+        for key_plan, layout_tmp in layout_tmps:
+            target = key_plan.layout_file
+            if target.exists():
+                old = target.with_name(target.name + OLD_SUFFIX)
+                os.replace(target, old)
+                aside.append((target, old))
+            os.replace(layout_tmp, target)
+            if not any(dst == target for dst, _ in aside):
+                created_layouts.append(target)
+        os.replace(configset_tmp, configset)
+        os.replace(state_tmp, input_plan.state_file)
+    except steam.SteamRefusal:
+        _restore_commit(
+            configset=configset,
+            backups=backups,
+            aside=aside,
+            created=created_layouts,
+            temps=[tmp for _, tmp in layout_tmps] + [configset_tmp, state_tmp],
+        )
+        raise
+    except OSError as exc:
+        _restore_commit(
+            configset=configset,
+            backups=backups,
+            aside=aside,
+            created=created_layouts,
+            temps=[tmp for _, tmp in layout_tmps] + [configset_tmp, state_tmp],
+        )
+        raise steam.SteamRefusal(
+            steam.UNWRITABLE.format(path=configset.parent, reason=exc.strerror or exc)
+            + " Nothing of the layout was kept."
+        ) from exc
+    for _, old in aside:
+        try:
+            old.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("steam input: could not remove %s", old, exc_info=True)
+    written = tuple(key_plan.key for key_plan, _, _ in staged)
     logger.info(
         f"steam input: {app_name}: wrote {len(written)} layout(s), kept {len(kept)} player one(s)"
     )
     return InputApplyReport(
-        app_name=app_name, written=tuple(written), kept=tuple(kept), backups=tuple(backups)
+        app_name=app_name, written=written, kept=tuple(kept), backups=tuple(backups)
     )
+
+
+def _drop_temps(temps: list[Path]) -> None:
+    """Remove every staged temp; a failure to remove one is passed over."""
+    for tmp in temps:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _restore_commit(
+    *,
+    configset: Path,
+    backups: list[Path],
+    aside: list[tuple[Path, Path]],
+    created: list[Path],
+    temps: list[Path],
+) -> None:
+    """Put back what a failed commit replaced: configset, layouts, temps gone."""
+    _drop_temps(temps)
+    if backups:
+        try:
+            shutil.copy2(backups[0], configset)
+        except OSError:
+            logger.warning("steam input: could not restore %s", configset, exc_info=True)
+    else:
+        try:
+            configset.unlink(missing_ok=True)
+        except OSError:
+            pass
+    for target in created:
+        try:
+            target.unlink(missing_ok=True)
+        except OSError:
+            pass
+    for target, old in reversed(aside):
+        try:
+            os.replace(old, target)
+        except OSError:
+            logger.warning("steam input: could not restore %s", target, exc_info=True)
 
 
 @dataclass(frozen=True)

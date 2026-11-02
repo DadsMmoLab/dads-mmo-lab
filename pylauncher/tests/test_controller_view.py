@@ -32779,6 +32779,7 @@ def test_play_takes_the_github_release_branch(
 
     def fake_fetch(pack: ClientPack, **kw: Any) -> client_packs.Fetched:
         assert pack.source.kind == "github_release"
+        assert "api.github.com" in kw["allowed_hosts"]
         folder = tmp_path / "gh-cache"
         folder.mkdir(parents=True, exist_ok=True)
         path = folder / f"{pack.id}.zip"
@@ -32824,6 +32825,7 @@ def test_update_takes_the_github_release_branch(
 
     def fake_fetch(pack: ClientPack, **kw: Any) -> client_packs.Fetched:
         assert pack.source.kind == "github_release"
+        assert "api.github.com" in kw["allowed_hosts"]
         folder = tmp_path / "gh-cache"
         folder.mkdir(parents=True, exist_ok=True)
         path = folder / f"{pack.id}.zip"

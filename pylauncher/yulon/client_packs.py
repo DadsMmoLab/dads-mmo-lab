@@ -1244,12 +1244,12 @@ GITHUB_RELEASE_MAX_BYTES = 64 * 1024 * 1024
 
 Counted against the release's own `size`, BEFORE the first byte is downloaded: an
 asset over it is refused as unavailable, whether or not a verified cache stands
-by. (A url pack has no such bound: Lumenveil and the HD packs exceed it.)
+by — a verified cache is kept with the kept sentence (`_keep_cached`). (A url
+pack has no such bound: Lumenveil and the HD packs exceed it.)
 """
 
-_GITHUB_RELEASE_MAX_BYTES = 64 * 1024
+_GITHUB_API_ANSWER_MAX_BYTES = 64 * 1024
 """How much of a GitHub latest-release answer is read: JSON with assets, never a zip."""
-
 _GITHUB_ASSET_HOSTS = frozenset(
     {"github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"}
 )
@@ -1302,15 +1302,17 @@ def _fetch_github_release(
     its tag names the folder; a cached zip there is proved again against the
     release's digest and used. Else the asset (redirecting only to the kind's
     own hosts) downloads onto `<file>.part` (resumed from its size, bound by
-    the release's `size`), is proved (`sha256 == digest`) and renamed into
-    place with a note of what was verified and when (`_note_fetch`); a `.part`
-    that fails its proof is deleted, and a digest mismatch deletes the cache
-    file too. Over `GITHUB_RELEASE_MAX_BYTES` the asset is refused as
-    unavailable before any download, cached copy or none. A release the answer
-    cannot name (GONE from the API, or no network, too long, not JSON, no tag),
-    or that names no proved file for this pack, falls back to the newest
-    verified cache with the kept sentence (`_keep_cached`), and without one
-    refuses in the url pack's own words.
+    the release's `size`), is proved (`sha256 == digest`); the note is staged
+    first (temp), then the zip is moved into its final name, then the note —
+    a NEW download counts as cached only when both the proved zip and its
+    note are in place. A `.part` that fails its proof is deleted, and a
+    digest mismatch deletes the cache file too. Over
+    `GITHUB_RELEASE_MAX_BYTES` the asset is refused as unavailable before any
+    download, keeping a verified cache with the kept sentence (`_keep_cached`).
+    A release the answer cannot name (GONE from the API, or no network, too long,
+    not JSON, no tag), or that names no proved file for this pack, falls back to
+    the newest verified cache with the kept sentence (`_keep_cached`), and without
+    one refuses in the url pack's own words.
     """
     source = pack.source
     if source.kind != "github_release" or source.repo is None or source.asset is None:
@@ -1375,9 +1377,10 @@ def _fetch_github_release(
     except PackError:
         part.unlink(missing_ok=True)
         raise
+    _stage_fetch_note(folder, tag=version, asset=source.asset, size=size, digest=digest)
     os.replace(part, dest)
     logger.info(f"client-packs: {pack.id} {version} downloaded to {dest}")
-    _note_fetch(folder, tag=version, asset=source.asset, size=size, digest=digest)
+    _commit_fetch_note(folder)
     return Fetched(dest, version, sha256)
 
 
@@ -1424,9 +1427,9 @@ def _read_release_answer(
     with _Deadline(STALL_SECONDS) as watcher:
         response = _request(pack, opener, url, watcher, method="GET", headers={}, hosts=hosts)
         try:
-            while len(data) <= _GITHUB_RELEASE_MAX_BYTES:
+            while len(data) <= _GITHUB_API_ANSWER_MAX_BYTES:
                 try:
-                    chunk = response.read1(_GITHUB_RELEASE_MAX_BYTES + 1 - len(data))
+                    chunk = response.read1(_GITHUB_API_ANSWER_MAX_BYTES + 1 - len(data))
                 except Exception as exc:
                     raise PackError(
                         f"{pack.label}: its latest release could not be read ({exc}). Try again."
@@ -1438,7 +1441,7 @@ def _read_release_answer(
                 data += chunk
         finally:
             _close(response)
-    if len(data) > _GITHUB_RELEASE_MAX_BYTES:
+    if len(data) > _GITHUB_API_ANSWER_MAX_BYTES:
         raise PackError(f"{pack.label}: its latest release answer is too long. Try again.")
     try:
         release = json.loads(data.decode("utf-8"))
@@ -1523,26 +1526,95 @@ def _read_meta(folder: Path) -> dict[str, Any] | None:
 def _note_fetch(folder: Path, *, tag: str, asset: str, size: int, digest: str) -> None:
     """Leave the fetch note: what was verified, against the release's own digest, and when.
 
-    Best effort (a cache that could not be noted is no reason to refuse Play):
-    a failure is logged, and the folder simply does not count as verified.
+    Through a sibling temp and `os.replace`, only after a complete write: a
+    failure keeps the previous valid note, never a truncated one. Best effort
+    (a cache that could not be noted is no reason to refuse Play): a failure
+    is logged, and the folder simply does not count as verified.
     """
+    text = (
+        json.dumps(
+            {
+                "tag": tag,
+                "asset": asset,
+                "size": size,
+                "sha256": digest,
+                "verified_at": datetime.now(UTC).isoformat(timespec="seconds"),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    )
+    tmp = folder / (_META_NAME + ".yulon-tmp")
     try:
-        (folder / _META_NAME).write_text(
-            json.dumps(
-                {
-                    "tag": tag,
-                    "asset": asset,
-                    "size": size,
-                    "sha256": digest,
-                    "verified_at": datetime.now(UTC).isoformat(timespec="seconds"),
-                },
-                indent=2,
-                sort_keys=True,
-            )
-            + "\n",
-            encoding="utf-8",
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, folder / _META_NAME)
+    except OSError as exc:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        logger.warning("client-packs: could not note the verified fetch in %s (%s)", folder, exc)
+
+
+def _fetch_note_text(*, tag: str, asset: str, size: int, digest: str) -> str:
+    """The fetch note's bytes for one verified download, before it is staged."""
+    return (
+        json.dumps(
+            {
+                "tag": tag,
+                "asset": asset,
+                "size": size,
+                "sha256": digest,
+                "verified_at": datetime.now(UTC).isoformat(timespec="seconds"),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    )
+
+
+def _stage_fetch_note(folder: Path, *, tag: str, asset: str, size: int, digest: str) -> None:
+    """Stage the fetch note's temp: the new download counts as cached only with it.
+
+    Written (not yet committed) BEFORE the proved zip is moved into its final
+    name; `_commit_fetch_note` moves it after. If the note cannot even be
+    staged, the fetch still returns the proved zip for THIS Play but logs that
+    it will not be usable offline — the note is what makes the folder count
+    as a verified cached version.
+    """
+    tmp = folder / (_META_NAME + ".yulon-tmp")
+    try:
+        tmp.write_text(
+            _fetch_note_text(tag=tag, asset=asset, size=size, digest=digest), encoding="utf-8"
         )
     except OSError as exc:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        logger.warning(
+            "client-packs: downloaded %s but could not note the verified fetch in %s (%s); "
+            "it will not be usable offline",
+            asset,
+            folder,
+            exc,
+        )
+
+
+def _commit_fetch_note(folder: Path) -> None:
+    """Move the staged fetch note into place; a missing stage is passed over."""
+    tmp = folder / (_META_NAME + ".yulon-tmp")
+    if not tmp.is_file():
+        return
+    try:
+        os.replace(tmp, folder / _META_NAME)
+    except OSError as exc:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
         logger.warning("client-packs: could not note the verified fetch in %s (%s)", folder, exc)
 
 
