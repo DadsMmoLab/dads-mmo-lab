@@ -471,6 +471,17 @@ def apply(
     configset_tmp = configset.with_name(configset.name + steam.TMP_SUFFIX)
     state_tmp = input_plan.state_file.with_name(input_plan.state_file.name + steam.TMP_SUFFIX)
     assert new_state_text is not None
+    # Codex round 3: the aside name is fixed, so one already there (left by an interrupted
+    # commit, or anybody's) would be overwritten by the commit below and could be the only
+    # copy of a player's layout. Refuse before anything is written instead.
+    for key_plan in writes:
+        old = key_plan.layout_file.with_name(key_plan.layout_file.name + OLD_SUFFIX)
+        if os.path.lexists(old):
+            raise steam.SteamRefusal(
+                f"{old} is already there, and Yu'lon will not write over it: it may be the only "
+                "copy of a controller layout. Move it somewhere safe and try again. "
+                "Nothing of the layout was kept."
+            )
     try:
         for key_plan in writes:
             key_plan.layout_file.parent.mkdir(parents=True, exist_ok=True)

@@ -194,6 +194,27 @@ def test_rerun_rewrites_idempotently_with_no_duplicate_entry(tmp_path: Path) -> 
     assert text.count('"turtle wow"') == 1
 
 
+def test_an_aside_file_already_there_refuses_and_is_never_overwritten(tmp_path: Path) -> None:
+    """Codex round 3: `<layout>.yulon-old` has a fixed name; one already there (an interrupted
+    commit, or anybody's) may be the only copy of a layout, so the press refuses first."""
+    _profile(tmp_path)
+    steam_input.apply(_plan(tmp_path), steam_running=False)
+    second = _plan(tmp_path)
+    layout = second.keys[0].layout_file
+    old = layout.with_name(layout.name + steam_input.OLD_SUFFIX)
+    old.write_bytes(b"the player's only copy")
+    configset_before = second.keys[0].configset.read_bytes()
+    layout_before = layout.read_bytes()
+
+    with pytest.raises(steam.SteamRefusal, match="will not write over it"):
+        steam_input.apply(second, steam_running=False)
+
+    assert old.read_bytes() == b"the player's only copy"
+    assert layout.read_bytes() == layout_before
+    assert second.keys[0].configset.read_bytes() == configset_before
+    assert not list(layout.parent.glob("*" + steam.TMP_SUFFIX))
+
+
 def test_player_edited_file_is_kept(tmp_path: Path) -> None:
     _profile(tmp_path)
     steam_input.apply(_plan(tmp_path), steam_running=False)
