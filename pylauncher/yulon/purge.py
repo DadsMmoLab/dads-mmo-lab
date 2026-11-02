@@ -138,7 +138,7 @@ MOVEMENT_MAP_JOB_NOT_STOPPED = (
 )
 MOVEMENT_MAP_JOBS_PARTLY_STOPPED = (
     "Yu'lon stopped {ended} of {total} movement-map jobs that were still running for this "
-    "server; the other ({name}) could not be stopped ({problem}), so nothing else was removed. "
+    "server; {name} could not be stopped ({problem}), so nothing else was removed. "
     "Check that Docker is running, then try again."
 )
 MOVEMENT_MAP_JOB_NOT_CHECKED = (
