@@ -41,13 +41,14 @@ Leap) measured inside the spline initializer and drawn at 0.4 yd (MotionMaster.c
 game test). No SQL, conf, CMake, dbc, World.cpp, cs_misc.cpp or MapBuilder.cpp change, so every
 reading above and the revive fix still hold.
 
-T824 (2026-10-28) moved the pin to 351950fb, the newest CENTURION tip that day, without a live
+T860 (2026-11-02) moved the pin to 0f7e3f59, the newest CENTURION tip that day, without a live
 run: the versioned SQL files are unchanged (`auth_data.sql`'s realm row still at :73,
-`auth_schema.sql`'s `localAddress` now :400), the ready line is still Main.cpp:446 and the
-signal handler :304-308, `World initialized` moved to World.cpp:2544 and the fatal line to
-:1876, `TCSoap.cpp`'s `SEC_ADMINISTRATOR` check is :103-105, `worldserver.conf.dist`'s
-`MaxCoreStuckTime = 60` is :464 and `playerbots.conf.dist:27` still defaults every bot feature
-off, and `cs_misc.cpp:798` still holds the revive fix (added to `REVIVE_FIXED_PINS`).
+`auth_schema.sql`'s `localAddress` still :399), the ready line is still Main.cpp:446 and the
+signal handler :304-308, `World initialized` moved to World.cpp:2554 and the fatal line to
+:1883, `TCSoap.cpp`'s `SEC_ADMINISTRATOR` check is still :103-105,
+`worldserver.conf.dist`'s `MaxCoreStuckTime = 60` is still :464 and `playerbots.conf.dist:27`
+still defaults every bot feature off, and `cs_misc.cpp:797-798` still holds the revive fix
+(added to `REVIVE_FIXED_PINS`).
 
 The entry's family blocks were tested before this entry existed against the fixture in
 `tests/support_trinitycore.py`; the last test here holds the two together, so a template
@@ -74,7 +75,7 @@ ENTRY: CatalogEntry = load_catalog().get("wow-centurion")
 NATIVE = ENTRY.install.native
 assert NATIVE is not None and NATIVE.trinitycore is not None
 TC = NATIVE.trinitycore
-REV = "351950fb9a5579edfb96a301eb846f13e65aeda6"
+REV = "0f7e3f5992620e02edd6238a790fee9827af60ec"
 CHECKOUT = "src/centurion"
 PATCHES = f"{CHECKOUT}/centurion/patches"
 CORE = "/opt/trinitycore"
@@ -117,14 +118,14 @@ def test_ports_databases_and_the_realm_row() -> None:
     assert ENTRY.databases.auth == "centurion_auth"
     assert ENTRY.databases.world == "centurion_world"
     assert ENTRY.databases.characters == "centurion_characters"
-    assert ENTRY.realmlist.local_address_column == "localAddress"  # auth_schema.sql:400
+    assert ENTRY.realmlist.local_address_column == "localAddress"  # auth_schema.sql:399
 
 
 def test_the_world_is_ready_when_it_says_so_after_its_network_is_up() -> None:
     """`(worldserver-daemon) ready...` (worldserver/Main.cpp:446) is printed after the SOAP
     thread, the world socket and the realm's online flag (:383-425); `World initialized`
-    (World.cpp:2544 at 351950fb; :2492 at 6c6472c3 when it was read on 2026-10-07) comes before
-    all three. The fatal line is World.cpp:1876, whole."""
+    (World.cpp:2554 at 0f7e3f59; :2544 at 351950fb; :2492 at 6c6472c3 when it was read on
+    2026-10-07) comes before all three. The fatal line is World.cpp:1883, whole."""
     assert NATIVE.ready.world == "(worldserver-daemon) ready..."
     assert NATIVE.ready.regex is False
     assert NATIVE.ready.fatal == "Unable to load critical files - server shutting down !!!"

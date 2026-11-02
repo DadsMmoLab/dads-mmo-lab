@@ -13,9 +13,9 @@ a pin moves, so the reading is repeated rather than inherited):
 game           conf (server dir)            where the keys are read and spelled
 =============  ===========================  ======================================
 wow-wotlk      env/dist/etc/worldserver.conf  mod-playerbots/azerothcore-wotlk:
-                                              `worldserver.conf.dist:2439` (rep),
-                                              `:2499-2502` (XP), `:2573` (honor),
-                                              `:2850-2858` (drops, gold);
+                                              `worldserver.conf.dist:2444` (rep),
+                                              `:2504-2507` (XP), `:2578` (honor),
+                                              `:2855-2863` (drops, gold);
                                               `WorldConfig.cpp:41-55,62,64,88,119`
 wow-tbc        etc/mangosd.conf             cmangos/mangos-tbc:
                                               `mangosd.conf.dist.in:1566-1600`;
@@ -27,7 +27,7 @@ wow-tortoise   etc/mangosd.conf             tortoise-wow/tortoise-wow:
                                               `mangosd.conf.dist.in:1702-1716,1744,1776`;
                                               `World.cpp:1045-1054,1084`
 wow-centurion  etc/worldserver.conf         thomasjteachey/TrinityCore112:
-                                              `worldserver.conf.dist:2537-2545,2563-2565,2630,2651`;
+                                              `worldserver.conf.dist:2539-2547,2565-2567,2632,2653`;
                                               `World/World.cpp:570-583,597,624`
 =============  ===========================  ======================================
 
@@ -213,7 +213,7 @@ _GAMES: dict[str, _GameRates] = {
     "wow-wotlk": _GameRates(
         file="env/dist/etc/worldserver.conf",
         repo="mod-playerbots/azerothcore-wotlk",
-        rev="3f2969ddb0da42b48b4fca050c02b19163ba1e20",
+        rev="93333d6a9eb00fdf0179adde30da3c17618207d6",
         keys=_ALL_KEYS,
         notes={},
     ),
@@ -221,11 +221,11 @@ _GAMES: dict[str, _GameRates] = {
     # 7f12e89e; T580 (2026-10-09) moved it to f19a1879, wow-wotlk's pin since T389; T655
     # (2026-10-10) moved both to 2a2211cd (worldserver.conf.dist unchanged between the two);
     # the move to 8a4e76ea (2026-10-17) changed only the default of `DungeonFinder.OptionsMask`;
-    # T824 (2026-10-28) moved both to 3f2969dd, the newest, not live-tested (same conf.dist).
+    # T860 (2026-11-02) moved both to 93333d6a, the newest, not live-tested (same conf.dist).
     "wow-unbound": _GameRates(
         file="env/dist/etc/worldserver.conf",
         repo="mod-playerbots/azerothcore-wotlk",
-        rev="3f2969ddb0da42b48b4fca050c02b19163ba1e20",
+        rev="93333d6a9eb00fdf0179adde30da3c17618207d6",
         keys=_ALL_KEYS,
         notes={},
     ),
@@ -241,7 +241,7 @@ _GAMES: dict[str, _GameRates] = {
     "wow-tbc": _GameRates(
         file="etc/mangosd.conf",
         repo="cmangos/mangos-tbc",
-        rev="37767e954241e346453260b8bc8c1fb2e2afdf7d",
+        rev="af6b4885647d4eca7802b68fccf52f0bccd8ed23",
         keys=_ALL_KEYS,
         notes={
             **{
@@ -254,7 +254,7 @@ _GAMES: dict[str, _GameRates] = {
     "wow-vanilla": _GameRates(
         file="etc/mangosd.conf",
         repo="cmangos/mangos-classic",
-        rev="5731249195520323cb5fb9aa29761d4f033272ce",
+        rev="ff13624a4be74816796bc0f8555f03011438144e",
         keys=_ALL_KEYS,
         notes={"Rate.Drop.Money": _QUEST_MONEY},
     ),
@@ -268,7 +268,7 @@ _GAMES: dict[str, _GameRates] = {
     "wow-centurion": _GameRates(
         file="etc/worldserver.conf",
         repo="thomasjteachey/TrinityCore112",
-        rev="351950fb9a5579edfb96a301eb846f13e65aeda6",
+        rev="0f7e3f5992620e02edd6238a790fee9827af60ec",
         keys=_ALL_KEYS,
         notes={},
     ),

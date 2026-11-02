@@ -18,13 +18,13 @@
             "branch": "Playerbot",
             "depth": null,
             "dest": ".",
-            "rev": "3f2969ddb0da42b48b4fca050c02b19163ba1e20"
+            "rev": "93333d6a9eb00fdf0179adde30da3c17618207d6"
           },
           {
             "repo": "mod-playerbots/mod-playerbots",
             "branch": "master",
             "dest": "modules/mod-playerbots",
-            "rev": "e88cc4099e69f35126b28942a412ca702d20453b"
+            "rev": "05a1f6fceb8a32aa879b13f5f48934c6e46a774c"
           }
         ]
       },
@@ -296,12 +296,12 @@
           {
             "repo": "cmangos/mangos-tbc",
             "dest": "src/mangos-tbc",
-            "rev": "37767e954241e346453260b8bc8c1fb2e2afdf7d"
+            "rev": "af6b4885647d4eca7802b68fccf52f0bccd8ed23"
           },
           {
             "repo": "cmangos/playerbots",
             "dest": "src/mangos-tbc/src/modules/Bots",
-            "rev": "6823423e07789c875f55a0fee9beeae0d3b69561"
+            "rev": "de1b1823ab8352c6ebaeaa98cc576e1b2e2195d8"
           },
           {
             "repo": "cmangos/tbc-db",
@@ -764,12 +764,12 @@
           {
             "repo": "cmangos/mangos-classic",
             "dest": "src/mangos-classic",
-            "rev": "5731249195520323cb5fb9aa29761d4f033272ce"
+            "rev": "ff13624a4be74816796bc0f8555f03011438144e"
           },
           {
             "repo": "cmangos/playerbots",
             "dest": "src/mangos-classic/src/modules/Bots",
-            "rev": "6823423e07789c875f55a0fee9beeae0d3b69561"
+            "rev": "de1b1823ab8352c6ebaeaa98cc576e1b2e2195d8"
           },
           {
             "repo": "cmangos/classic-db",
@@ -1679,7 +1679,7 @@
             "repo": "thomasjteachey/TrinityCore112",
             "branch": "CENTURION",
             "dest": "src/centurion",
-            "rev": "351950fb9a5579edfb96a301eb846f13e65aeda6"
+            "rev": "0f7e3f5992620e02edd6238a790fee9827af60ec"
           }
         ]
       },
@@ -2573,13 +2573,13 @@
             "branch": "Playerbot",
             "depth": null,
             "dest": ".",
-            "rev": "3f2969ddb0da42b48b4fca050c02b19163ba1e20"
+            "rev": "93333d6a9eb00fdf0179adde30da3c17618207d6"
           },
           {
             "repo": "mod-playerbots/mod-playerbots",
             "branch": "master",
             "dest": "modules/mod-playerbots",
-            "rev": "e88cc4099e69f35126b28942a412ca702d20453b"
+            "rev": "05a1f6fceb8a32aa879b13f5f48934c6e46a774c"
           },
           {
             "repo": "azerothcore/mod-ale",
@@ -2978,7 +2978,7 @@
         "status": "beta",
         "description": "Conquest of Azeroth (3.3.5a) on the Ascension CoA fork, with bots that quest, group and fight alongside you. You bring your own Ascension 3.3.5a client; use the CoA client files (Update client makes your Ascension copy one).",
         "notes": [
-            "T812: the Conquest of Azeroth server. Core (Zyth45/azerothcore-wotlk-coa, mirrored as pjerra/azerothcore-wotlk-coa so an upstream 404 cannot break installs) @ coa-bots-2.8 98570f248b6095a23ef14bbbfac6731ac4c20d66; mod-playerbots (Zyth45, mirrored as pjerra/mod-playerbots-coa) v2.8 2b7a4f6547b2e4b35a4ec3a89374e41e5c6e5272 (on branch coa). The 30 CoA modules are in-tree. client_build.read_version reads Ascension.exe as 3.3.5 (12340), checked 2026-10-27 on the live client.",
+            "T812: the Conquest of Azeroth server. Core (Zyth45/azerothcore-wotlk-coa, mirrored as pjerra/azerothcore-wotlk-coa so an upstream 404 cannot break installs) @ coa-bots-2.8 98570f248b6095a23ef14bbbfac6731ac4c20d66; mod-playerbots (Zyth45, mirrored as pjerra/mod-playerbots-coa) v2.8 9bf5cb3c1cbc594ad416293985bbc406544ca7db (on branch coa). The 30 CoA modules are in-tree. client_build.read_version reads Ascension.exe as 3.3.5 (12340), checked 2026-10-27 on the live client.",
             "Health markers read off the pin: src/server/coa/AscensionCompat.cpp:9472 (Ascension compatibility) and src/server/coa/CoADungeonBossKit.cpp:154 (CoA dungeon boss kit rows).",
             "T827: use the CoA client files (Update client makes your Ascension copy one). The stock Ascension client logs in and is then disconnected at realm select (world log: malformed packet, cryptInitialized: true); the Server tab tells the two apart by Extensions.dll and Ascension.exe against the CoA manifest."
         ],
@@ -2996,7 +2996,7 @@
                     "repo": "pjerra/mod-playerbots-coa",
                     "branch": "coa",
                     "dest": "modules/mod-playerbots",
-                    "rev": "2b7a4f6547b2e4b35a4ec3a89374e41e5c6e5272"
+                    "rev": "9bf5cb3c1cbc594ad416293985bbc406544ca7db"
                 }
             ]
         },

@@ -31,10 +31,10 @@ CORE_BRANCH = "coa-bots-2.8"
 CORE_REV = "98570f248b6095a23ef14bbbfac6731ac4c20d66"
 BOTS_REPO = "pjerra/mod-playerbots-coa"
 BOTS_BRANCH = "coa"
-BOTS_REV = "2b7a4f6547b2e4b35a4ec3a89374e41e5c6e5272"
-"""The two pins. The core branch `coa-bots-2.8` is `98570f24…` and the bots tag
-`v2.8` is `2b7a4f65…`, both verified with `git ls-remote` 2026-10-27; the bots
-commit sits on branch `coa` (mirror clone, `branch -r --contains`)."""
+BOTS_REV = "9bf5cb3c1cbc594ad416293985bbc406544ca7db"
+"""The two pins. The core branch `coa-bots-2.8` is `98570f24…` and the bots commit
+`9bf5cb3c…` sits on branch `coa` (two README-only commits past the `v2.8` tag `2b7a4f65…`,
+verified with `git ls-remote` and the GitHub API 2026-11-02; no `src/` change)."""
 
 COA_PATCH = "01-vmap4-extractor-name-lists.patch"
 
