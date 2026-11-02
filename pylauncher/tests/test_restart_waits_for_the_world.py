@@ -369,7 +369,8 @@ def test_every_game_s_services_wait_for_its_own_world_after_a_start(
         looked.append(spec.world)
         return native.WorldOutput(
             "loading\nready...\n(worldserver-daemon) ready...\nAvg Diff: 15ms\n"
-            "World server is up and running",
+            "World server is up and running\n"
+            "Starting up anti-freeze thread (300 seconds max stuck time)...",  # wow-mop (T850)
             0,
             "running",
         )
