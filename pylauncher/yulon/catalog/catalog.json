@@ -3395,7 +3395,8 @@
             "T850: 1LineAtaTime/LoA-Pandaria-Playerbots, branch `playerbot` @ e135742e1891d3e653d27966da2dc70e793f203e (tag v1.0.4, 2026-10-26, \"Fix the Linux build\"): a TrinityCore/SkyFire-lineage 5.4.8 fork (Legends of Azeroth Pandaria) with mod_playerbots ported from AzerothCore. The lab's handoff of 2026-10-28 logged in, created a character and ran 500 bots on this exact commit on Docker Desktop; the catalog ENTRY is not live-tested (GAP §2 and §4).",
             "The four databases come from the release asset LoA-Pandaria-Playerbots-v1.0.4-win64-database.zip (142,501,177 B, sha256 db8dd845e3a5da4bc3a6f28afa68ed839aceb222101db949ae74840a5a2365a0): four .sql files at the ZIP'S ROOT, no folder (GAP §0). Source pin, asset and zip layout read at GAP §0; NOT from the checkout, whose sql/base holds no world.",
             "Client data is MPQ, not CASC: 5.4.8 predates CASC, and the extractors open fixed names (upstream src/tools/map_extractor/System.cpp:104-117,1275-1400 and vmap4_extractor/vmapexport.cpp:68-79,130-165). Target build is 18273 -- `18414 but Blizz didnt rename the MPQ files` (System.cpp:101) -- so the 18 wow-update MPQ names carry 16016..18273, never 18414.",
-            "GAP §2's \"Characters tab\" row: NOTHING has been run against a live LoA Pandaria server, so every Characters verb is withheld with the \"each is offered once it has been checked against a live server\" sentence, Revive included; fill them in after the first live check."
+            "GAP §2's \"Characters tab\" row: NOTHING has been run against a live LoA Pandaria server, so every Characters verb is withheld with the \"each is offered once it has been checked against a live server\" sentence, Revive included; fill them in after the first live check.",
+            "T850-F: the Bots tab's marker is `RNDBOT`, the stored form of `AiPlayerbot.RandomBotAccountPrefix`'s default `rndbot` (playerbots.conf.dist:621): the core upper-cases every account name in AccountMgr::normalizeString (AccountMgr.cpp:48-50,327-343). No registry table is named (`registry: null`) because this core's module creates none: the only playerbots table it touches is `playerbots_random_bots` (PlayerbotAIConfig.cpp:418), which it deletes from, and GAP §2 lists no account-type table for MoP -- so bots are found by the prefix arm alone until a live install shows a registry."
         ],
         "emulator": {
             "name": "Legends of Azeroth Pandaria (TrinityCore 5.4.8 fork) + mod_playerbots",
@@ -3827,6 +3828,19 @@
                 8888,
                 3443
             ]
+        },
+        "observability": {
+            "characters": {
+                "table": "characters",
+                "account": "account",
+                "online": "online"
+            },
+            "bots": {
+                "account_prefix": "RNDBOT",
+                "prefix_conf_file": "etc/playerbots.conf",
+                "prefix_conf_key": "AiPlayerbot.RandomBotAccountPrefix",
+                "registry": null
+            }
         },
         "has_manifests": false,
         "help_places": [

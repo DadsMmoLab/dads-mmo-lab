@@ -5029,6 +5029,11 @@ def test_each_game_waits_for_the_ready_line_its_own_server_prints(
             "TrinityCore rev. unknown 1970-01-01 00:00:00 +0000 (Archived branch) "
             "(Unix, RelWithDebInfo, Static) (worldserver-daemon) ready..."
         ),
+        # T850: the entry's `ready.world` is the anti-freeze thread's line, not
+        # `ready...`: the 5.4.8 fork starts `MaxCoreStuckTime` seconds as the conf
+        # table sets it (300), and `src/server/worldserver/Main.cpp:345-349` formats it
+        # as below (`.notes/mop/upstream/src_server_worldserver_Main.cpp:345-349`).
+        "wow-mop": "Starting up anti-freeze thread (300 seconds max stuck time)...",
     }
     seen: dict[str, docker.ReadySpec] = {}
 

@@ -146,8 +146,8 @@ def fetch_bounded(
                             raise InstallerError(f"{url} could not be downloaded: {exc}") from exc
                         if watcher.fired:
                             raise InstallerError(
-                                f"{url} sent nothing for {STALL_SECONDS:.0f}s and the download "
-                                "was stopped; nothing was unpacked."
+                                f"{url} sent nothing for {STALL_SECONDS:.0f}s, so the download "
+                                "was given up; nothing was unpacked."
                             )
                         if not chunk:
                             break
