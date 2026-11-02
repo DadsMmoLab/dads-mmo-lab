@@ -32881,3 +32881,270 @@ def test_an_unrecognised_start_answer_cancels_rather_than_switching(
 
         assert switch.targets == [], f"an unrecognised answer switched: {answer}"
         assert starts == [], f"an unrecognised answer started something: {answer}"
+
+
+def test_restart_on_another_type_with_start_active_resets_the_combo_and_restarts(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T857 review R3: Restart with "Start <active>" resets the combo, runs the normal
+    restart (the controller's stop and a start, one job), and switches nothing."""
+    qmb = controller_view_module.QMessageBox
+    _answer(monkeypatch, qmb.StandardButton.Save)
+    view = _coa_view(tmp_path)
+    view.realm_type_choice.setCurrentIndex(2)
+    assert view.realm_type_choice.currentData() == "wcr"
+    switch, starts = _watched_start(view, monkeypatch)
+    restarted: list[bool] = []
+    monkeypatch.setattr(view, "_do_restart", lambda stopped=None: restarted.append(True) or True)
+    view.restart_button.setEnabled(True)
+
+    assert view.restart_from_server_tab() is True
+
+    assert switch.targets == [], "no switch may run for a start-as-is"
+    assert view.realm_type_choice.currentData() == "coa", "the combo did not go back"
+    assert restarted == [True], "the normal restart did not run"
+    assert starts == [], "Start ran on top of the restart"
+
+
+def test_start_on_another_type_with_start_active_that_turns_busy_starts_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T857 review R1: a job started while the box was open (the tray's press from the
+    nested loop) answers "Start <active>" with no second start, and says the
+    other action's sentence."""
+    qmb = controller_view_module.QMessageBox
+    said: list[tuple[object, str, str]] = []
+    monkeypatch.setattr(
+        controller_view_module,
+        "show_information",
+        lambda parent, title, text: said.append((parent, title, text)),
+    )
+
+    def answer_with_a_busy_tab(box: object) -> object:
+        view._set_busy(True, "Restart")
+        return qmb.StandardButton.Save
+
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox, "exec", three_way_only(answer_with_a_busy_tab)
+    )
+    view = _coa_view(tmp_path)
+    view.realm_type_choice.setCurrentIndex(1)
+    switch, starts = _watched_start(view, monkeypatch)
+
+    assert view.start_server() is False
+
+    assert switch.targets == [], "a second start ran on top of the tray's press"
+    assert starts == [], "a second start ran on top of the tray's press"
+    assert view.realm_type_choice.currentData() == "hero", "the busy answer moved the combo"
+    assert said and said[-1][1] == "Something else is running", said
+    assert said[-1][2].endswith("Nothing was started."), said
+
+
+def test_start_on_another_type_with_switch_and_start_that_turns_busy_starts_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T857 review R1: the same re-check for Restart's path -- "Switch and start"
+    with a busy tab runs neither the switch nor a start."""
+    qmb = controller_view_module.QMessageBox
+    said: list[tuple[object, str, str]] = []
+    monkeypatch.setattr(
+        controller_view_module,
+        "show_information",
+        lambda parent, title, text: said.append((parent, title, text)),
+    )
+
+    def answer_with_a_busy_tab(box: object) -> object:
+        view._set_busy(True, "Stop")
+        return qmb.StandardButton.Yes
+
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox, "exec", three_way_only(answer_with_a_busy_tab)
+    )
+    view = _coa_view(tmp_path)
+    view.realm_type_choice.setCurrentIndex(2)
+    switch, starts = _watched_start(view, monkeypatch)
+    restarts: list[str] = []
+    monkeypatch.setattr(
+        view.services.controller, "stop", lambda *a, **k: restarts.append("stop") or True
+    )
+    view.restart_button.setEnabled(True)
+
+    assert view.restart_from_server_tab() is False
+
+    assert switch.targets == [], "the switch ran on top of the tray's press"
+    assert starts == [], "Start ran on top of the tray's press"
+    assert restarts == [], "Restart ran on top of the tray's press"
+    assert said and said[-1][1] == "Something else is running", said
+
+
+def test_play_with_cancel_on_another_type_ends_the_play_and_starts_nothing(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launched: list[object]
+) -> None:
+    """T857 review R2: Play + Cancel ends the Play, starts nothing, and a later plain Start
+    launches no game either (neither flag survives the refusal)."""
+    from yulon.controller import InstallStatus
+
+    qmb = controller_view_module.QMessageBox
+    view = _coa_view(tmp_path)
+    _switch, starts = _watched_start(view, monkeypatch)
+    view.realm_type_choice.setCurrentIndex(1)
+    assert view.realm_type_choice.currentData() == "hero"
+    stopped = InstallStatus(db=False, auth=False, world=False)
+    # Play's own question says "Start it first?", the Start question says Cancel.
+    # The Start box is the one carrying a Save button; route by shape, not order.
+    save = qmb.StandardButton.Save
+
+    def exec_(box: object) -> object:
+        buttons = box.standardButtons()  # type: ignore[union-attr]
+        return qmb.StandardButton.Cancel if buttons & save else qmb.StandardButton.Yes
+
+    monkeypatch.setattr(controller_view_module.QMessageBox, "exec", three_way_only(exec_))
+    view._play_pending = True
+    view._say_play("Checking that the server is running…")
+    notices: list[str] = []
+    monkeypatch.setattr(
+        controller_view_module, "show_information", lambda *a, **k: notices.append(str(a[2]))
+    )
+    before = (view._play_pending, view._play_after_start)
+
+    view._play_status_read(stopped)
+
+    assert (
+        view._play_pending,
+        view._play_after_start,
+    ) != before, "the refused start changed no Play state"
+    assert notices == [], f"a refused start said the busy sentence: {notices}"
+    assert view._play_pending is False, "a refused start left Play pending"
+    assert view._play_after_start is False, "a refused start left Play waiting on a start"
+    assert view.play_label.text() == "Nothing was started.", view.play_label.text()
+    assert starts == [], "a job ran after Cancel"
+    assert launched == [], "a game was launched after Cancel"
+    # A later plain Start launches no game either: Play ended, so nothing waits on it.
+    _answer(monkeypatch, qmb.StandardButton.Yes)
+    view.realm_type_choice.setCurrentIndex(0)
+    view.start_server()
+    assert launched == [], "the later Start launched the game"
+
+
+def _coa_play_client(entry: CatalogEntry, tmp_path: Path) -> tuple[Path, Path]:
+    """A launchable CoA play client: Ascension.exe plus a real record, sharing one archive."""
+    from tests.test_coa_realm import write_file
+
+    write_file(tmp_path, "coa")
+    original = tmp_path / "clients" / "Ascension"
+    (original / "Data").mkdir(parents=True)
+    (original / "Data" / "common.MPQ").write_bytes(b"MPQ the shared archive")
+    (original / "Ascension.exe").write_bytes(b"MZ the game")
+    play = tmp_path / "clients" / "Ascension (Yu'lon)"
+    play_client.create(
+        original,
+        play,
+        game=entry.id,
+        server_dir=tmp_path,
+        allow_full_copy=False,
+        reflink=lambda _s, _d: False,
+    )
+    record = client_packs.read_record(play)
+    client_packs.write_record(play, record, game=entry.id, server_dir=tmp_path)
+    return original, play
+
+
+def test_play_with_switch_and_start_runs_the_switch_once_then_plays(
+    qapp: object,
+    ps: _Ps,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    launched: list[object],
+) -> None:
+    """T857 review R2: Play + "Switch and start" runs the switch once, then continues Play
+    the step a finished start runs: the realm wait, then the game step, then the launch."""
+    from yulon.controller import InstallStatus
+
+    qmb = controller_view_module.QMessageBox
+    entry = load_catalog().get("wow-coa")
+    jobs = _Deferred()
+    original, play = _coa_play_client(entry, tmp_path)
+    services = replace(
+        ControllerServices.for_entry(entry, tmp_path),
+        client_dir=original,
+        play_client_dir=play,
+    )
+    view = ControllerView(entry, services, status_poll_ms=0, job_runner=jobs)
+    jobs.queue.clear()
+    switch, starts = _watched_start(view, monkeypatch)
+    view.services.ready_after_start = _RealmWait(launched)
+    view.realm_type_choice.setCurrentIndex(1)
+    assert view.realm_type_choice.currentData() == "hero"
+    stopped = InstallStatus(db=False, auth=False, world=False)
+    # Play's own question says "Start it first?", the Start question says "Switch and start".
+    # Both answer Yes: `three_way_only` routes the Yes/No box to `question`, so patch that too.
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "question",
+        lambda *a, **k: qmb.StandardButton.Yes,
+    )
+    _answer(monkeypatch, qmb.StandardButton.Yes)
+    view._play_pending = True
+    view._say_play("Checking that the server is running…")
+
+    view._play_status_read(stopped)
+
+    assert view._busy, "the switch did not hold the tab"
+    jobs.run(0)  # the switch itself
+    assert switch.targets == ["hero"], "the switch did not run with the chosen id"
+    assert starts == [], "Start ran on top of the switch"
+    assert len(jobs.queue) == 1, "the realm wait did not run once after the switch"
+    assert launched == [], "the game launched before the realm wait answered"
+    jobs.run(0)  # the realm wait answers ready
+    while jobs.queue:
+        jobs.run(0)  # the game step, then the launch
+    assert len(launched) == 1, "the game did not launch after the switch's realm wait"
+
+
+def test_play_with_a_failed_switch_ends_the_play(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launched: list[object]
+) -> None:
+    """T857 review R2: Play + switch failure ends the Play with the failure sentence."""
+    from yulon.controller import InstallStatus
+
+    qmb = controller_view_module.QMessageBox
+    entry = load_catalog().get("wow-coa")
+    jobs = _Deferred()
+    original, play = _coa_play_client(entry, tmp_path)
+    services = replace(
+        ControllerServices.for_entry(entry, tmp_path),
+        client_dir=original,
+        play_client_dir=play,
+    )
+    view = ControllerView(entry, services, status_poll_ms=0, job_runner=jobs)
+    jobs.queue.clear()
+    switch, starts = _watched_start(view, monkeypatch)
+    view.realm_type_choice.setCurrentIndex(1)
+    stopped = InstallStatus(db=False, auth=False, world=False)
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "question",
+        lambda *a, **k: qmb.StandardButton.Yes,
+    )
+    _answer(monkeypatch, qmb.StandardButton.Yes)
+    view._play_pending = True
+    view._say_play("Checking that the server is running…")
+
+    view._play_status_read(stopped)
+
+    assert view._busy, "the switch did not hold the tab"
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+
+    def refuse(target: str) -> object:
+        raise RuntimeError("the switch refused")
+
+    switch.switch_to = refuse  # type: ignore[method-assign]
+    jobs.run(0)  # the switch itself; its failure slot ends the Play inline
+    assert switch.targets == [], "a refusing switch recorded a run"
+    assert view._play_pending is False, "a failed switch left Play pending"
+    assert view._play_after_start is False, "a failed switch left Play waiting on a start"
+    assert launched == [], "a game was launched after a failed switch"
+    assert starts == [], "Start ran after a failed switch"
+    assert "Nothing was started." in view.play_label.text(), view.play_label.text()
+    assert failures and "the switch refused" in failures[0], failures

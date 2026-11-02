@@ -11196,6 +11196,12 @@ class ControllerView(QWidget):
         self.problem_label.setText(said)
         self._show_realm_type()
         self.refresh_status()
+        if self._play_after_start:
+            # T857 review: Play asked for this Start ("Start and play"), and the
+            # answer was "Switch and start": continue Play the same step a
+            # finished start runs, not a copy of it.
+            self._play_after_start = False
+            self._play_wait_for_the_realm()
 
     @Slot(object)
     def _realm_switch_failed(self, exc: object) -> None:
@@ -11205,6 +11211,12 @@ class ControllerView(QWidget):
         self.action_failed.emit(str(exc))
         self._show_realm_type()
         self.refresh_status()
+        if self._play_after_start:
+            # T857 review: Play's Start became this switch, and the switch
+            # refused: Play is over with the failure ("Nothing was started.",
+            # the sentence the switch's own question carries).
+            self._play_after_start = False
+            self._play_end("Nothing was started.")
 
     def reextract_map_data(self) -> bool:
         """Extract the map data again from the player's client; streams into the log panel.
@@ -12229,7 +12241,7 @@ class ControllerView(QWidget):
         return self._hold_ends_at is not None and self._status_ask_out >= self._hold_ends_at
 
     @Slot()
-    def start_server(self) -> None:
+    def start_server(self) -> bool | None:
         """Start the install; a README §12 conflict is shown, never a raw Docker error.
 
         Refused while another action holds the tab, like `restart_from_server_tab()`
@@ -12239,11 +12251,17 @@ class ControllerView(QWidget):
 
         T857: with the realm-type combo on a type that is not the active one,
         one question first: switch first, start the active type, or nothing.
+        True when a Start job was launched, False when the guard refused, None
+        when "Switch and start" ran the switch instead (so a caller that waits
+        on the start, like Play, can carry or end its own wait).
         """
         if self._busy:
-            return
-        if not self._start_over_a_realm_type_mismatch():
-            return
+            return False
+        verdict = self._start_over_a_realm_type_mismatch()
+        if verdict is None:
+            return None
+        if not verdict:
+            return False
         self._disarm_actions()
         self._nothing_to_remove = False
         self._update_forget_visibility()
@@ -12253,15 +12271,23 @@ class ControllerView(QWidget):
         self.status_label.setText("Starting…")
         self._hold_badge("starting")
         self._run(self.services.controller.start, self._server_action_done, self._start_failed)
+        return True
 
-    def _start_over_a_realm_type_mismatch(self) -> bool:
-        """True when Start may start; False when the answer was "do nothing" (T857).
+    def _start_over_a_realm_type_mismatch(self) -> bool | None:
+        """True when Start may start, False on Cancel, None when the switch runs (T857).
 
         An entry with realm types (`services.realm_switch`) and the combo on a
         type that is not the active one asks one three-way question: switch
         first (then the switch starts again itself), start the active type, or
         Cancel. Every other press -- no realm types, the combo on the active
         type -- starts unchanged, with no box.
+
+        The box runs its own event loop (`QMessageBox.exec`), and the tray's
+        Start/Restart/Stop presses reach this same slot while it is open, so a
+        job may hold the tab by the time the answer lands. Both answers are
+        re-checked against `_busy` after the box, exactly as
+        `_play_stopped_by_another_action()` does for Play's own questions: if
+        busy, start nothing and say the other action's sentence.
         """
         switch = self.services.realm_switch
         if switch is None or not hasattr(self, "realm_type_choice"):
@@ -12284,9 +12310,19 @@ class ControllerView(QWidget):
             switch_label="Switch and start",
             start_label=f"Start {active.label}",
         )
+        # A job may have started while the question was open (the tray's
+        # Start/Restart/Stop, like Play's own questions): start nothing over it.
+        if self._busy:
+            show_information(
+                self,
+                "Something else is running",
+                "This server is busy with another action — wait for it to finish, then press "
+                "this again. Nothing was started.",
+            )
+            return False
         if answer is StartChoice.SWITCH_AND_START:
             self._run_the_realm_switch(chosen.id)
-            return False
+            return None
         if answer is StartChoice.START_ACTIVE:
             box = self.realm_type_choice
             box.blockSignals(True)
@@ -12452,7 +12488,7 @@ class ControllerView(QWidget):
         self.problem_label.setText(f"The reservation could not be removed: {exc}")
 
     @Slot()
-    def restart_from_server_tab(self) -> None:
+    def restart_from_server_tab(self) -> bool | None:
         """Stop the server, saving every character, and start it again: one press (T559).
 
         The Tuning tab's restart (`_do_restart()`), so one job and one lifecycle
@@ -12460,12 +12496,18 @@ class ControllerView(QWidget):
         (the tray's menu can call this after its row was built).
 
         T857: with the realm-type combo on another type, the same one question
-        Start asks -- switch first, start the active type, or nothing.
+        Start asks -- switch first, start the active type, or nothing. True when
+        a Restart job was launched, False when the guard refused, None when
+        "Switch and start" ran the switch instead (so a caller that waits on
+        the restart, like Play, can carry or end its own wait).
         """
         if self._busy or not self.restart_button.isEnabled():
-            return
-        if not self._start_over_a_realm_type_mismatch():
-            return
+            return False
+        verdict = self._start_over_a_realm_type_mismatch()
+        if verdict is None:
+            return None
+        if not verdict:
+            return False
         self._disarm_actions()
         self.problem_label.setText("")
         self._stop_forced = ""
@@ -12474,6 +12516,7 @@ class ControllerView(QWidget):
         self.status_label.setText(RESTART_STOPPING)
         self._hold_badge("stopping")
         self._run(self._restart_job, self._restart_done, self._restart_failed)
+        return True
 
     def _restart_job(self) -> bool:
         """The worker half: `_do_restart()`, saying when the Stop is done and the Start begins."""
@@ -14648,7 +14691,12 @@ class ControllerView(QWidget):
         if self._play_stopped_by_another_action():
             return
         self._play_after_start = True
-        self.start_server()
+        launched = self.start_server()
+        if launched is None:
+            return  # "Switch and start": the switch holds the tab, carrying the Play
+        if not launched:
+            self._play_after_start = False
+            self._play_end("Nothing was started.")
 
     def _play_check_stale(self) -> None:
         marker = self._play_still_usable()
