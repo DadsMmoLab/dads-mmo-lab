@@ -3071,14 +3071,18 @@ def _with_client_addons(
             logger.warning(f"could not read {entry.id}'s shipped add-ons: {exc}")
             unreadable = " ".join(str(exc).split()) or type(exc).__name__
     # T855: the merged mod list, own tree included, so a player-brought add-on
-    # can never take the shipped `yulon-consoleport` id (the slug guard is the
-    # belt; this is the braces for an id arriving by hand).
+    # deriving exactly the shipped `yulon-consoleport` id is refused (T855-D1).
+    # The folder-name refusal is narrower: a shipped item's add-on folders count
+    # as "Yu'lon installs this" only while that item is installed and completed
+    # for this server, so a player's own ConsolePort keeps working once the
+    # shipped one is gone (T855-D2).
     route = client_addons.ClientAddons(
         applier=applier,
         game=entry.id,
         interface=interface,
         shipped=client_addons.shipped_addons(shipped),
         shipped_ids=tuple(m.id for m in shipped),
+        shipped_items=tuple(shipped),
         shipped_unreadable=unreadable,
     )
     route.pack_addons = lambda: client_addons.pack_addon_names(

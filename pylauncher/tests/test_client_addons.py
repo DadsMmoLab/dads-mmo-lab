@@ -22,7 +22,7 @@ import pytest
 from tests.test_addon_archive import _Opener, _Response
 from yulon import client_packs
 from yulon.addon_archive import AddonRefusal
-from yulon.apply import Applier, ApplyRefusal, read_client_copies
+from yulon.apply import Applier, ApplyRefusal, CompletionRefused, read_client_copies
 from yulon.client_addons import (
     AddonOnlyApplier,
     ClientAddons,
@@ -87,6 +87,8 @@ def _route(
     *,
     applier: Applier | None = None,
     shipped: Mapping[str, str] | None = None,
+    shipped_ids: tuple[str, ...] = ("bigger-stacks",),
+    shipped_items: tuple[Manifest, ...] = (),
     opener: object = client_packs._open,
     git: _Git | None = None,
 ) -> tuple[ClientAddons, Path]:
@@ -101,7 +103,8 @@ def _route(
         game=GAME,
         interface=11200,
         shipped=shipped or {},
-        shipped_ids=("bigger-stacks",),
+        shipped_ids=shipped_ids,
+        shipped_items=shipped_items,
         user_root=tmp_path / "user",
         today=lambda: date(2026, 10, 9),
         opener=opener,  # type: ignore[arg-type]
@@ -236,21 +239,19 @@ def test_item_name_falls_back_to_the_first_when_no_name_leads() -> None:
     assert item_name(addons) == "Zeta"
 
 
-def test_a_yulon_prefixed_name_gets_no_id(tmp_path: Path) -> None:
-    """M1: a `.toc` spelling `Yulon-ConsolePort` slugifies to the shipped CoA
-    item's id, so the slug claims no name for it — the box refuses the source
-    again, and no id starting `yulon-` can ever arrive by hand either."""
+def test_a_yulon_prefixed_name_gets_a_plain_id(tmp_path: Path) -> None:
+    """D1: the `yulon-` slug is no global reservation. A `Yulon-QuestHelper`
+    add-on derives the plain `yulon-questhelper` id, which no shipped id equals,
+    and imports as usual; only an add-on deriving EXACTLY a shipped id of this
+    route's game is refused, with the sentence naming that row."""
     from yulon.client_addons import item_id_for
 
-    assert item_id_for("Yulon-ConsolePort") is None
-    assert item_id_for("Yulon") is None
-    assert item_id_for("YulonFoo") == "yulonfoo"
+    assert item_id_for("Yulon-QuestHelper") == "yulon-questhelper"
+    assert item_id_for("Yulon") == "yulon"
 
     route, _addons = _route(tmp_path)
-    folder = _tree(tmp_path / "Yulon-ConsolePort", {"Yulon-ConsolePort.toc": TOC})
-    said = _refused(lambda: route.from_folder(folder))
-
-    assert "letters or digits" in said
+    quest = _tree(tmp_path / "Yulon-QuestHelper", {"Yulon-QuestHelper.toc": TOC})
+    assert route.from_folder(quest).manifest.id == "yulon-questhelper"
 
 
 def test_a_shipped_add_on_name_is_refused_before_anything_is_copied(tmp_path: Path) -> None:
@@ -272,13 +273,27 @@ def test_a_program_in_the_folder_is_refused(tmp_path: Path) -> None:
     assert said.startswith("helper.exe is a program file")
 
 
-def test_an_id_this_game_ships_is_refused(tmp_path: Path) -> None:
-    route, _addons = _route(tmp_path)
+def test_an_id_this_game_ships_is_refused_with_the_row_sentence(tmp_path: Path) -> None:
+    """D1: only an EXACT shipped id refuses, naming the shipped item's row."""
+    shipped = parse_manifest(
+        {
+            "id": "bigger-stacks",
+            "name": "Bigger Stacks (shipped)",
+            "type": "mod",
+            "game": GAME,
+            "client": [{"src": ".", "dest": "addons", "name": "Bigger_Stacks"}],
+        }
+    )
+    route, _addons = _route(tmp_path, shipped_items=(shipped,))
     folder = _tree(tmp_path / "x", {"Bigger_Stacks.toc": "## Interface: 11200\n"})
 
     said = _refused(lambda: route.from_folder(folder))
 
-    assert said.startswith("Bigger_Stacks is an item Yu'lon already ships for this server")
+    assert said.startswith(
+        "Bigger_Stacks would use the id bigger-stacks, which Yu'lon's own "
+        "Bigger Stacks (shipped) uses on this server. Rename the add-on's "
+        "folder, or use Yu'lon's row."
+    )
 
 
 def test_a_refused_zip_leaves_no_staging_behind(tmp_path: Path, _cache: Path) -> None:
@@ -516,6 +531,24 @@ def test_a_folder_add_on_is_updated_from_the_same_folder(tmp_path: Path) -> None
     assert (addons / "pfUI" / "new.lua").read_text() == "-- new\n"
 
 
+def test_a_yulon_prefixed_record_updates_normally(tmp_path: Path) -> None:
+    """D1: an existing user record with a `yulon-…` id is no special case on
+    Update — the prefix rule is gone, and the id equals no shipped id."""
+    route, addons = _route(tmp_path, shipped_ids=("yulon-consoleport",))
+    folder = _tree(
+        tmp_path / "Yulon-QuestHelper",
+        {"Yulon-QuestHelper.toc": "## Interface: 11200\n## Title: Yulon-QuestHelper\n"},
+    )
+    route.install(route.from_folder(folder))
+    (manifest,) = route.installed()
+    assert manifest.id == "yulon-questhelper"
+    (folder / "new.lua").write_text("-- new\n", encoding="utf-8")
+
+    route.update(manifest)
+
+    assert (addons / "Yulon-QuestHelper" / "new.lua").read_text() == "-- new\n"
+
+
 def test_an_update_that_now_holds_another_add_on_is_refused(tmp_path: Path) -> None:
     route, addons = _route(tmp_path)
     folder = _tree(tmp_path / "pfUI", {"pfUI.toc": TOC})
@@ -614,6 +647,54 @@ def test_a_shipped_list_that_could_not_be_read_refuses_the_route(tmp_path: Path)
         "changed."
     )
     assert list(addons.iterdir()) == []
+
+
+def test_the_completer_accepts_a_players_own_addon_until_the_shipped_one_is_installed(
+    tmp_path: Path,
+) -> None:
+    """D2: the cold review's probe as a real test. A player's own `consoleport`
+    record + clone with `ConsolePort/ConsolePort.toc` completes while the
+    shipped `yulon-consoleport` is NOT installed, and refuses once it is
+    installed and completed (a genuine clash in Interface/AddOns)."""
+    from yulon import apply as _apply
+
+    shipped = parse_manifest(
+        {
+            "id": "yulon-consoleport",
+            "name": "ConsolePort (shipped)",
+            "type": "mod",
+            "game": GAME,
+            "client": [{"src": "ConsolePort", "dest": "addons", "name": "ConsolePort"}],
+        }
+    )
+    route, _addons = _route(
+        tmp_path,
+        shipped={"ConsolePort": "ConsolePort (shipped)"},
+        shipped_ids=("yulon-consoleport",),
+        shipped_items=(shipped,),
+    )
+    mine = parse_manifest(
+        {
+            "id": "consoleport",
+            "name": "ConsolePort",
+            "type": "mod",
+            "game": GAME,
+            "origin": {"kind": "folder", "path": "/x", "added": "2026-11-02", "addon": True},
+            "client": [{"src": ".", "dest": "addons", "name": "ConsolePort"}],
+        }
+    )
+    clone = tmp_path / "clone"
+    (clone / "ConsolePort").mkdir(parents=True)
+    (clone / "ConsolePort" / "ConsolePort.toc").write_text("## Interface: 11200\n")
+
+    assert route.completer(mine, clone).id == "consoleport"
+
+    install = route.applier.server_dir / "sql_scripts" / "clones" / "yulon-consoleport"
+    install.mkdir(parents=True)
+    _apply.write_clone_claim(install, item_id="yulon-consoleport", url="", completed=True)
+
+    with pytest.raises(CompletionRefused, match="already installs for this server"):
+        route.completer(mine, clone)
 
 
 def test_a_route_item_is_marked_as_the_routes() -> None:

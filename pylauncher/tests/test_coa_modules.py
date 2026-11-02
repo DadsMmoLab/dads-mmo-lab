@@ -177,10 +177,9 @@ def test_consoleport_chosen_for_coa_follows_the_install_record(
 def test_a_players_own_consoleport_coexists_with_the_shipped_one(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """M1: a CoA player who added ConsolePortLK through the add-on box already
-    owns the id `consoleport`. The shipped item is `yulon-consoleport`, so both
-    are listed separately, and removing the shipped one leaves the player's
-    own record and clone untouched."""
+    """D3: `yulon-consoleport` refuses at derive now, so the player's own is
+    `consoleport`. Both list separately, and removing the shipped one through
+    the real removal leaves the player's own record and clone untouched."""
     from yulon import apply as _apply
     from yulon import module_source
     from yulon.controller_wow_wotlk import modules as wotlk_modules
@@ -188,7 +187,8 @@ def test_a_players_own_consoleport_coexists_with_the_shipped_one(
 
     monkeypatch.setattr(wotlk_modules, "user_manifests_dir", lambda *a, **k: tmp_path / "user")
     services = _services(tmp_path)
-    assert services.store is not None
+    assert services.store is not None and services.client_addons is not None
+    store = services.store
     user_root = tmp_path / "user"
 
     mine = parse_manifest(
@@ -202,26 +202,18 @@ def test_a_players_own_consoleport_coexists_with_the_shipped_one(
         }
     )
     module_source.persist(user_root, mine, shipped_ids=("yulon-consoleport",))
-
-    from yulon.manifest_store import ManifestStore
-
-    store = ManifestStore(
-        services.store.root,
-        WOTLK,
-        user_root,
-        user_game=COA,
-        own_game=COA,
-    )
     assert {"consoleport", "yulon-consoleport"} <= {m.id for m in store.load_all("mod")}
 
-    server = tmp_path / "coa"
-    mine_clone = server / "sql_scripts" / "clones" / "consoleport"
+    mine_clone = (
+        services.client_addons.applier.server_dir / "sql_scripts" / "clones" / "consoleport"
+    )
     mine_clone.mkdir(parents=True)
     _apply.write_clone_claim(mine_clone, item_id="consoleport", url="", completed=True)
     mine_bytes = (user_root / COA / "mods" / "consoleport.json").read_bytes()
 
-    assert services.module_forget is not None
     shipped = store.load("mod", "yulon-consoleport")
+    services.client_addons.applier.remove(shipped)
+    assert services.module_forget is not None
     assert services.module_forget(shipped) is False
 
     assert (user_root / COA / "mods" / "consoleport.json").read_bytes() == mine_bytes

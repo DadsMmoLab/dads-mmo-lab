@@ -57,6 +57,7 @@ from yulon.apply import (
     FolderSource,
     UncheckedApproval,
     addon_only_refusal,
+    clone_install_completed,
 )
 from yulon.git import CloneSpec, Git
 from yulon.log import get_logger
@@ -90,20 +91,9 @@ _RELEASES = re.compile(r"/releases(?:/latest)?/?$")
 
 
 def item_id_for(name: str) -> str | None:
-    """The id an add-on named `name` is kept under: its slug (`pfUI` → `pfui`), or None.
-
-    A slug starting with `yulon-` is refused (None): that prefix is the shipped
-    CoA item's own (`yulon-consoleport`, T855), and a player-brought add-on must
-    never take an id that collides with a shipped one. The `.toc` could spell it
-    (`Yulon-ConsolePort` slugifies to `yulon-consoleport`); such a source gets
-    the add-on-box refusal naming letters or digits instead.
-    """
+    """The id an add-on named `name` is kept under: its slug (`pfUI` → `pfui`), or None."""
     slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
-    if not slug or len(slug) > MAX_ID:
-        return None
-    if slug == "yulon" or slug.startswith("yulon-"):
-        return None
-    return slug
+    return slug if slug and len(slug) <= MAX_ID else None
 
 
 def item_name(addons: Sequence[Addon]) -> str:
@@ -237,6 +227,17 @@ class ClientAddons:
     Without the list nothing stops an outside add-on landing on a shipped one's
     folder, so the route says so instead of installing on a guess (review round 1).
     """
+    shipped_items: Sequence[Manifest] = ()
+    """The shipped `mod` manifests behind `shipped`/`shipped_ids`, for the install check.
+
+    Empty is the field's old reading: every name in `shipped` counts, whether or
+    not its item is installed. Set (the tab's route), only a shipped item whose
+    clone is installed and completed for this server counts: the eight
+    ConsolePort folders refuse a player's own ConsolePort only while Yu'lon's
+    own one is in Interface/AddOns, and a shipped item the player removed (or
+    never took) leaves its names free again. The `shipped_ids` refusal needs no
+    such check: an id is taken by the row itself, installed or not.
+    """
 
     # ------------------------------------------------------------------ where things are
 
@@ -276,13 +277,35 @@ class ClientAddons:
                 f"replace one of them. {NOTHING_CHANGED}"
             )
 
+    def _shipped_names(self) -> Mapping[str, str]:
+        """The add-on folder names that count as Yu'lon's for this read.
+
+        Without `shipped_items` (a route driven by hand) every name in
+        `shipped` counts, installed or not. With them (the tab's route), only
+        the names of a shipped item whose clone is installed and completed for
+        this server do: a shipped item's folders stop being "Yu'lon installs
+        this" the moment its own clone is gone or unfinished.
+        """
+        if not self.shipped_items:
+            return self.shipped
+        kept = [
+            manifest
+            for manifest in self.shipped_items
+            if clone_install_completed(
+                self.applier.server_dir / CLONE_DIRS["mod"] / manifest.id,
+                item_id=manifest.id,
+            )
+            is True
+        ]
+        return shipped_addons(kept)
+
     def _read(self, root: Path, label: str) -> tuple[Found, str]:
         """The add-ons `root` holds, checked, and the item's name; raises with the sentence."""
         self._refuse_without_the_shipped_list()
         found = addon_layout.find_addons(
             root,
             interface=self.interface,
-            shipped={**self.pack_addons(), **self.shipped},
+            shipped={**self.pack_addons(), **self._shipped_names()},
             installed=self._installed_names(),
             label=label,
         )
@@ -309,9 +332,12 @@ class ClientAddons:
                 f"needs letters or digits, at most {MAX_ID}. {NOTHING_CHANGED}"
             )
         if item_id in self.shipped_ids:
+            names = {manifest.id: manifest.name for manifest in self.shipped_items}
+            item = names.get(item_id, item_id)
             raise AddonRefusal(
-                f"{name} is an item Yu'lon already ships for this server: install it from its "
-                f"row on the Modules tab. {NOTHING_CHANGED}"
+                f"{name} would use the id {item_id}, which Yu'lon's own {item} uses on "
+                f"this server. Rename the add-on's folder, or use Yu'lon's row. "
+                f"{NOTHING_CHANGED}"
             )
         return parse_manifest(
             {
