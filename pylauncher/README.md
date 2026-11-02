@@ -132,8 +132,8 @@ All of the below on Linux. On Windows, the command channel and the Accounts tab 
 
 ## Which servers
 
-The catalog lists seven: WoW WotLK (stable), and WoW TBC, WoW Vanilla, WoW Tortoise, Centurion, WoW Unbound
-and WoW Mists of Pandaria (beta). WotLK, TBC, Vanilla and Tortoise were exercised against a live server in
+The catalog lists eight: WoW WotLK (stable), and WoW TBC, WoW Vanilla, WoW Tortoise, Centurion, WoW Unbound,
+WoW Conquest of Azeroth and WoW Mists of Pandaria (beta). WotLK, TBC, Vanilla and Tortoise were exercised against a live server in
 Phase 8 -- TBC, Vanilla and Tortoise each on the test box with a real game client of its own version -- and
 every ticked box in `pyplan/checklist.md` says what was measured on which tree.
 
@@ -178,7 +178,7 @@ every ticked box in `pyplan/checklist.md` says what was measured on which tree.
   switched on by an environment variable on the user's machine, which is the same problem one step
   along. Hence the second artifact rather than a cleverer first one.
 - **You need your own copy of the game.** Yu'lon never bundles, sells or distributes a game client,
-  and it cannot get you one. Three details worth stating plainly, because the short version of this
+  and it cannot get you one. Two details worth stating plainly, because the short version of this
   sentence is misleading: WoW TBC, Vanilla, Tortoise and Mists of Pandaria ask you to point at a
   client folder you already have, and **WotLK does not** — its installer never asks, because the
   server fetches AzerothCore's own client-data archive (maps, vmaps, mmaps, DBC) into a Docker
