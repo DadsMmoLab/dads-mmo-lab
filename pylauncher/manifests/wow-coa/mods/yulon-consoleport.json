@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "id": "consoleport",
+  "id": "yulon-consoleport",
   "name": "ConsolePort (controller support, client add-on)",
   "type": "mod",
   "game": "wow-coa",
@@ -69,8 +69,9 @@
     "the default add-ons, so Play and a fresh install leave the client alone until the Modules",
     "tab's own Install. A Remove is remembered per server and nothing puts the add-on back;",
     "installing it by hand lifts that. Nothing is written to the server and nothing is restarted.",
-    "Interface 30300 (Wrath 3.3.5a) against this entry's 30300 CoA client, which Yu'lon itself",
-    "keeps current. Credit: ConsolePortLK Enhanced by SuttonX, Artistic License 2.0; based on",
-    "ConsolePort by Sebastian Lindfors and ConsolePortLK by Leandro Araujo."
+    "\"Check for updates\" counts only `modules/`, so this `mods` item gets no update count; a",
+    "manual Update follows releases. Interface 30300 (Wrath 3.3.5a) against this entry's 30300",
+    "CoA client, which Yu'lon itself keeps current. Credit: ConsolePortLK Enhanced by SuttonX,",
+    "Artistic License 2.0; based on ConsolePort by Sebastian Lindfors and ConsolePortLK by Leandro Araujo."
   ]
 }

@@ -5,7 +5,7 @@ the `wow-coa` game id, where its bundled manifests live, the GitHub location
 they are refreshed from. Loading and validating (`yulon.manifest_store`) and
 applying (`yulon.apply`) are shared and game-agnostic (style-guide §4).
 
-What the tree holds, and why it is its own: ONE `mod`, `consoleport` — the
+What the tree holds, and why it is its own: ONE `mod`, `yulon-consoleport` — the
 ConsolePortLK Enhanced controller add-on, eight `client` steps into the
 player's own CoA client (`Interface/AddOns`). CoA's Modules tab reads WotLK's
 tree (`manifests_from: wow-wotlk`, restored by T855-B) PLUS this tree: every

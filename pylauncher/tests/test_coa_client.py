@@ -342,6 +342,28 @@ def test_apply_refuses_an_excluded_path_even_when_a_plan_names_it(tmp_path: Path
     assert (client / "WTF/Config.wtf").read_bytes() == b"mine"
 
 
+def test_consoleport_folders_are_never_planned_whatever_their_case(tmp_path: Path) -> None:
+    """T2 (cold must-fix 3): a manifest listing `Interface/AddOns/consoleport/x.lua`
+    (lower case) and one of each other ConsolePort folder in mixed case is never
+    planned (`classify()` folds case), and a normal file next to them is."""
+    update = {
+        "Interface/AddOns/consoleport/x.lua": b"lower case tree",
+        "Interface/AddOns/ConsolePortAdvanced/x.lua": b"mixed case tree",
+        "Interface/AddOns/ConsolePortBar/x.lua": b"mixed case tree",
+        "Interface/AddOns/ConsolePortHelp/x.lua": b"mixed case tree",
+        "Interface/AddOns/ConsolePortKeyboard/x.lua": b"mixed case tree",
+        "Interface/AddOns/ConsolePortLoader/x.lua": b"mixed case tree",
+        "Interface/AddOns/ConsolePortUI_Loot/x.lua": b"mixed case tree",
+        "Interface/AddOns/ConsolePortUI_Menu/x.lua": b"mixed case tree",
+        "Data/patch-A.MPQ": b"a normal file",
+    }
+    client = _client(tmp_path, {})
+    manifest = coa_client.parse_manifest(_manifest(update))
+    items = coa_client.plan(client, manifest, None)
+
+    assert _actions(items) == {"Data/patch-A.MPQ": "add"}
+
+
 def test_a_differing_file_yulon_has_no_record_of_is_kept(tmp_path: Path) -> None:
     """Owner's decision (T825): on a first update a differing file stays the player's."""
     client = _client(tmp_path, {"Data/patch-A.MPQ": b"old"})

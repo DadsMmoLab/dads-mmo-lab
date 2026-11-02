@@ -740,18 +740,26 @@ def consoleport_chosen(play_dir: Path | None) -> bool:
 
 
 def consoleport_module_installed(server_dir: Path) -> bool:
-    """Whether this server installed the ConsolePort module into its own client (T855).
+    """Whether this server finished installing the ConsolePort mod into its own client (T855).
 
     Read at press time, off the GUI thread like `consoleport_chosen`, from the
-    clone folders the Modules tab itself reads: `sql_scripts/clones/consoleport`
-    is there exactly while the tab says Installed. A CoA server has no
-    ready-to-play client and no pack record, so the module's own record is the
-    switch the pack choice is on WotLK.
+    clone folder the Modules tab itself reads: `sql_scripts/clones/yulon-consoleport`
+    counts only with THIS app's own finished claim on it (`clone_install_completed`
+    is True). An unfinished clone (Install stopped halfway), an empty folder, a
+    malformed claim, or a foreign folder never wrote the layout. A CoA server has
+    no ready-to-play client and no pack record, so the mod's own record is the
+    switch the pack choice is on WotLK. A removed mod reads not installed.
     """
     from yulon import apply as _apply
 
     try:
-        return "consoleport" in _apply.installed_clones(server_dir).get("mod", frozenset())
+        return (
+            _apply.clone_install_completed(
+                server_dir / _apply.CLONE_DIRS["mod"] / "yulon-consoleport",
+                item_id="yulon-consoleport",
+            )
+            is True
+        )
     except OSError:
         return False
 

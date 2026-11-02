@@ -312,12 +312,19 @@ class ManifestStore:
                     skipped.append(USER_ITEM_SKIPPED.format(item_id=item_id, reason=reason))
 
     def relative_files(self, kind: ManifestType) -> list[str]:
-        """Paths (relative to `<root>`) the fetcher must mirror for a family."""
+        """Paths (relative to `<root>`) the fetcher must mirror for a family.
+
+        With an own tree (CoA, T855-B): both index files, every borrowed item
+        file, and every own item file — including an own id that collides with
+        a borrowed one. The colliding borrowed file stays (the borrowed tree
+        needs it), and the own file is listed too (it is the one
+        `load`/`load_all` read: own wins).
+        """
         if self.has_own_tree and not self._own_index_missing(kind):
             own_game = self.own_game
             assert own_game is not None
             borrowed = list(self._index_at(self.index_path(kind), kind).items)
-            own = [item_id for item_id in self._own_index_at(kind).items if item_id not in borrowed]
+            own = list(self._own_index_at(kind).items)
             files = [
                 f"{self.game}/{FAMILY_FILES[kind]}.json",
                 f"{own_game}/{FAMILY_FILES[kind]}.json",

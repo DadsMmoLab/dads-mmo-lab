@@ -236,6 +236,23 @@ def test_item_name_falls_back_to_the_first_when_no_name_leads() -> None:
     assert item_name(addons) == "Zeta"
 
 
+def test_a_yulon_prefixed_name_gets_no_id(tmp_path: Path) -> None:
+    """M1: a `.toc` spelling `Yulon-ConsolePort` slugifies to the shipped CoA
+    item's id, so the slug claims no name for it — the box refuses the source
+    again, and no id starting `yulon-` can ever arrive by hand either."""
+    from yulon.client_addons import item_id_for
+
+    assert item_id_for("Yulon-ConsolePort") is None
+    assert item_id_for("Yulon") is None
+    assert item_id_for("YulonFoo") == "yulonfoo"
+
+    route, _addons = _route(tmp_path)
+    folder = _tree(tmp_path / "Yulon-ConsolePort", {"Yulon-ConsolePort.toc": TOC})
+    said = _refused(lambda: route.from_folder(folder))
+
+    assert "letters or digits" in said
+
+
 def test_a_shipped_add_on_name_is_refused_before_anything_is_copied(tmp_path: Path) -> None:
     route, addons = _route(tmp_path, shipped={"pfUI": "pfUI (shipped)"})
     folder = _tree(tmp_path / "pfUI", {"pfUI.toc": TOC})

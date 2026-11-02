@@ -3070,6 +3070,9 @@ def _with_client_addons(
         except Exception as exc:  # noqa: BLE001 - the route refuses; the log says why
             logger.warning(f"could not read {entry.id}'s shipped add-ons: {exc}")
             unreadable = " ".join(str(exc).split()) or type(exc).__name__
+    # T855: the merged mod list, own tree included, so a player-brought add-on
+    # can never take the shipped `yulon-consoleport` id (the slug guard is the
+    # belt; this is the braces for an id arriving by hand).
     route = client_addons.ClientAddons(
         applier=applier,
         game=entry.id,

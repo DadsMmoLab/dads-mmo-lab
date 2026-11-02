@@ -90,9 +90,20 @@ _RELEASES = re.compile(r"/releases(?:/latest)?/?$")
 
 
 def item_id_for(name: str) -> str | None:
-    """The id an add-on named `name` is kept under: its slug (`pfUI` → `pfui`), or None."""
+    """The id an add-on named `name` is kept under: its slug (`pfUI` → `pfui`), or None.
+
+    A slug starting with `yulon-` is refused (None): that prefix is the shipped
+    CoA item's own (`yulon-consoleport`, T855), and a player-brought add-on must
+    never take an id that collides with a shipped one. The `.toc` could spell it
+    (`Yulon-ConsolePort` slugifies to `yulon-consoleport`); such a source gets
+    the add-on-box refusal naming letters or digits instead.
+    """
     slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
-    return slug if slug and len(slug) <= MAX_ID else None
+    if not slug or len(slug) > MAX_ID:
+        return None
+    if slug == "yulon" or slug.startswith("yulon-"):
+        return None
+    return slug
 
 
 def item_name(addons: Sequence[Addon]) -> str:
