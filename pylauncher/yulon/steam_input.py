@@ -482,6 +482,42 @@ def report_sentence(report: InputApplyReport) -> str:
     )
 
 
+def apply_for_game(
+    steam_root: Path,
+    account_id: str,
+    app_name: str,
+    *,
+    config_dir: Path | None = None,
+) -> InputApplyReport:
+    """Plan and apply the layout for one GAME tile's `app_name`, as one step.
+
+    What `steam.SteamShortcuts.add()` and `gaming_mode.add()` both do with
+    `controller_layout=True`: refusal while Steam runs is the CALLER's (both
+    refuse before anything is written), so this passes `steam_running=False`.
+    Turning ConsolePort off later removes nothing: the player may like the
+    layout on its own, and `remove()` stays available for the shortcut's
+    removal path.
+    """
+    return apply(plan(steam_root, account_id, app_name, config_dir=config_dir), steam_running=False)
+
+
+def consoleport_chosen(play_dir: Path | None) -> bool:
+    """Whether the ready-to-play client at `play_dir` chose the ConsolePort pack.
+
+    Read at press time, off the GUI thread like the rest of `add`: the record
+    (`choices["packs"]["consoleport"]`) is the player's current answer, and
+    None (no ready-to-play client) or no record means no layout.
+    """
+    if play_dir is None:
+        return False
+    try:
+        from yulon import client_packs
+
+        return bool(client_packs.read_record(play_dir).choices.get("packs", {}).get("consoleport"))
+    except OSError:
+        return False
+
+
 __all__ = [
     "CONFIGSET_FILE",
     "LAYOUT_FILE",
@@ -492,6 +528,8 @@ __all__ = [
     "KeyPlan",
     "STATE_FILE",
     "apply",
+    "apply_for_game",
+    "consoleport_chosen",
     "layout_bytes",
     "layout_keys",
     "plan",

@@ -1101,8 +1101,17 @@ class SteamShortcuts:
     """
     account_id: str | None = None
     """The Steam account id for the controller config dir; `find_profile()` unless given."""
+    controller_layout: Callable[[], bool] | None = None
+    """Whether this press also writes the ConsolePort controller layout (T853).
 
-    def add(self, *, controller_layout: bool = False) -> AddReport:
+    A seam for the reason `launch_args` is: the answer lives in the ready-to-play
+    client's record (`choices["packs"]["consoleport"]`), which is read off the
+    GUI thread at press time, when `add()` runs — not at tab build. None keeps
+    the old explicit `controller_layout=` flag; a seam answering False writes
+    nothing, exactly as then.
+    """
+
+    def add(self, *, controller_layout: bool | None = None) -> AddReport:
         """Write the two entries, the artwork and the compatibility tool.
 
         Order matters and is checked by tests: every refusal happens before the
@@ -1111,6 +1120,10 @@ class SteamShortcuts:
         controller layout for the GAME tile (`self.game`, never the
         Server/Stop tiles): a ConsolePort pad layout under the same Steam-closed
         window, after the same refusals. Off on Windows/macOS with the rest.
+        True writes it, False never does, and None (the default) asks this
+        press's `controller_layout` seam — None there writes nothing.
+        Turning ConsolePort off later removes nothing (the player may like the
+        layout on its own); `steam_input.remove()` stays available.
         """
         detected = self.platform_id()
         if detected != "linux":
@@ -1225,18 +1238,20 @@ class SteamShortcuts:
                 _write_artwork(stop_art, icon_png(SERVER_ACCENT))
             _write_compat(compat_path, compat_text)
             _write_shortcuts(path, payload)
+            write_layout = controller_layout
+            if write_layout is None:
+                write_layout = self.controller_layout() if self.controller_layout else False
             layout_sentence = ""
-            if controller_layout:
+            if write_layout:
                 from yulon import steam_input
 
                 account = self.account_id or config.parent.name
-                layout_plan = steam_input.plan(
+                layout_report = steam_input.apply_for_game(
                     steam_root,
                     account,
                     self.game,
                     config_dir=self.config_dir,
                 )
-                layout_report = steam_input.apply(layout_plan, steam_running=False)
                 layout_sentence = steam_input.report_sentence(layout_report)
                 logger.info(f"steam input: {layout_sentence}")
         except OSError as exc:

@@ -10,12 +10,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 
 import pytest
 
-from yulon import resources, steam, steam_input
+from yulon import client_packs, play_client, resources, steam, steam_input
 
 FIXED = datetime(2026, 11, 2, 12, 0, 0)
 ACCOUNT = "18347166"
@@ -382,3 +384,113 @@ def test_server_and_stop_tiles_get_no_layout(tmp_path: Path) -> None:
         "configset_controller_neptune.vdf",
         "turtle wow",
     ]
+
+
+# -- T853-C: the seam reads the ready-to-play client's ConsolePort choice ---------------
+
+
+def _play_with_record(home: Path, *, consoleport: bool | None) -> Path:
+    """A ready-to-play client whose record says ConsolePort on, off, or nothing.
+
+    A real marker and a real `write_record` through its gate — not hand-written
+    JSON — so the seam reads what Play writes. `None` is a client with no
+    record at all (made, never chosen through).
+    """
+    original = home / "clients/TurtleWoW"
+    original.mkdir(parents=True, exist_ok=True)
+    (original / "WoW.exe").write_bytes(b"MZ")
+    (original / "Data").mkdir(exist_ok=True)
+    (original / "Data" / "common.MPQ").write_bytes(b"mpq" * 100)
+    play = home / "WoW (Yu'lon)"
+    server = home / "tortoise-vm"
+    play_client.create(original, play, game="wow-turtle", server_dir=server, allow_full_copy=True)
+    if consoleport is not None:
+        client_packs.write_record(
+            play,
+            client_packs.PackRecord(
+                packs={},
+                exe=None,
+                choices={"packs": {"consoleport": consoleport}, "exe_options": {}},
+                config_seeded=False,
+                launcher={},
+            ),
+            game="wow-turtle",
+            server_dir=server,
+        )
+    return play
+
+
+def _wow_shortcuts(home: Path, play: Path | None) -> steam.SteamShortcuts:
+    """The WoW press: the seam reads the record at press time, off the GUI thread."""
+    shortcuts = _shortcuts(home, config_dir=home / ".local/share/yulon")
+    return replace(
+        shortcuts,
+        controller_layout=(
+            partial(steam_input.consoleport_chosen, play) if play is not None else None
+        ),
+    )
+
+
+def _controller_base(home: Path) -> Path:
+    return home / ".local/share/Steam/steamapps/common/Steam Controller Configs"
+
+
+def test_wow_add_with_consoleport_true_writes_the_layout(tmp_path: Path) -> None:
+    _profile(tmp_path)
+    play = _play_with_record(tmp_path, consoleport=True)
+
+    report = _wow_shortcuts(tmp_path, play).add()
+
+    layout = _controller_base(tmp_path) / ACCOUNT / "config/turtle wow/controller_neptune.vdf"
+    assert layout.is_file()
+    assert (_controller_base(tmp_path) / ACCOUNT / "config" / steam_input.CONFIGSET_FILE).is_file()
+    assert report.layout == (
+        "Steam Input: a ConsolePort controller layout for Turtle WoW "
+        "(in game, type /cp recalibrate once)."
+    )
+
+
+def test_wow_add_with_consoleport_false_writes_nothing(tmp_path: Path) -> None:
+    _profile(tmp_path)
+    play = _play_with_record(tmp_path, consoleport=False)
+
+    report = _wow_shortcuts(tmp_path, play).add()
+
+    assert not _controller_base(tmp_path).exists()
+    assert report.layout == ""
+
+
+def test_wow_add_with_consoleport_absent_writes_nothing(tmp_path: Path) -> None:
+    _profile(tmp_path)
+    play = _play_with_record(tmp_path, consoleport=None)
+    record = client_packs.read_record(play)
+    assert record.choices["packs"] == {}
+
+    report = _wow_shortcuts(tmp_path, play).add()
+
+    assert not _controller_base(tmp_path).exists()
+    assert report.layout == ""
+
+
+def test_wow_add_without_a_record_writes_nothing(tmp_path: Path) -> None:
+    _profile(tmp_path)
+
+    report = _wow_shortcuts(tmp_path, None).add()
+
+    assert not _controller_base(tmp_path).exists()
+    assert report.layout == ""
+
+
+def test_wow_add_refuses_while_steam_runs_before_any_write(tmp_path: Path) -> None:
+    _profile(tmp_path)
+    play = _play_with_record(tmp_path, consoleport=True)
+    shortcuts = _wow_shortcuts(tmp_path, play)
+    running = replace(shortcuts, is_running=lambda: True)
+
+    with pytest.raises(steam.SteamRefusal, match="Steam is running"):
+        running.add()
+
+    assert not (
+        tmp_path / ".local/share/Steam/userdata" / ACCOUNT / "config/shortcuts.vdf"
+    ).exists()
+    assert not _controller_base(tmp_path).exists()

@@ -128,6 +128,7 @@ from yulon import (
     server_time_zone,
     serverlock,
     sql_log_offer,
+    steam_input,
     stop_choice,
     table_repair,
     teardown,
@@ -3625,6 +3626,15 @@ def _steam_seam(
     """
     if platform.detect() != "linux":
         return None
+    play_dir = client_dir
+    read_layout_choice = (
+        # T853: the ready-to-play client's recorded ConsolePort choice, read at
+        # press time off the GUI thread — never at tab build. No ready-to-play
+        # client (or no record) writes no layout.
+        partial(steam_input.consoleport_chosen, play_dir)
+        if play_dir is not None
+        else None
+    )
     return steam_module.SteamShortcuts(
         game=entry.name,
         server_dir=server_dir,
@@ -3636,6 +3646,7 @@ def _steam_seam(
         # Steam Deck Gaming Mode: the Server tile starts the server through `yulon --server`
         # and stops it when the game closes, and a third tile stops it (`gaming_mode`).
         gaming=partial(_wow_gaming_scripts, entry, server_dir),
+        controller_layout=read_layout_choice,
     )
 
 

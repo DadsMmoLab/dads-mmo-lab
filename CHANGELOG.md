@@ -14,7 +14,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ## Unreleased
 
 ### New
-- WotLK, Unbound and Centurion can install the ConsolePort controller add-on, and Yu'lon keeps it up to date.
+- WotLK, Unbound and Centurion can install the ConsolePort controller add-on, and Yu'lon keeps it up to date, and on a Steam Deck its controller layout is set up in Steam.
 ### Fixed
 
 ### Changed
