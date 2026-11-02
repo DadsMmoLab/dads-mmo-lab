@@ -3880,40 +3880,47 @@ class Client(_Strict):
             "objects.githubusercontent.com",
         }
     )
-    """Hosts a github_release pack's fetch may reach (T853).
+    """Hosts a github_release pack's own fetch may reach (T853 review 1, G4).
 
     The release answer (`api.github.com`), the asset's own address
     (`github.com`, which redirects to an asset host), and the two asset
-    hosts Luminveil's `redirect_hosts` names (the catalog entry adds no
-    `redirect_hosts` of its own: the kind carries them).
+    hosts. Carried by the KIND, never widening the whole entry's fence:
+    `hosts()` stays what it was before T853, and only a github_release
+    pack's own fetch is opened to these (`pack_hosts()`).
     """
+
+    def pack_hosts(self, pack: ClientPack) -> frozenset[str]:
+        """The hosts one pack's fetch may reach: the entry's fence, plus the kind's own (T853 G4).
+
+        A github_release pack's release answer and asset live on hosts no url
+        of the entry names, so its own fetch — and only its own fetch — is
+        opened to `GITHUB_RELEASE_HOSTS`. Every other pack (and download) is
+        held to exactly what `hosts()` names, as before T853.
+        """
+        if pack.source.kind != "github_release":
+            return self.hosts()
+        return self.hosts() | Client.GITHUB_RELEASE_HOSTS
 
     def hosts(self) -> frozenset[str]:
         """Every host a download for this client may reach: packs and clean exe sources.
 
         Packs add their urls' hosts plus `redirect_hosts`: a redirect target
         (GitHub's release-asset hosts) the catalog names so the engine does
-        not refuse it. A github_release pack adds the kind's hosts instead:
-        the release answer, the asset's address and the two asset hosts.
-        Not `fallback_page`: that is a page a person
-        is sent to, never fetched.
+        not refuse it. Not `fallback_page`: that is a page a person
+        is sent to, never fetched. Never the github_release hosts: those are
+        the kind's own (`pack_hosts()`), used only for that pack's fetch.
         """
         urls: list[str | None] = []
         extra: list[str] = []
-        kinds: set[str] = set()
         for pack in self.packs:
             urls += [pack.source.url, pack.source.version_url]
             extra += list(pack.redirect_hosts)
-            kinds.add(pack.source.kind)
         if self.exe_patch is not None:
             urls += [source.url for source in self.exe_patch.clean_sources]
         if self.update is not None:
             urls += [self.update.manifest_url, self.update.objects_url]
         hosts = (urlsplit(url).hostname for url in urls if url is not None)
-        found = [host for host in hosts if host] + extra
-        if "github_release" in kinds:
-            found += sorted(Client.GITHUB_RELEASE_HOSTS)
-        return frozenset(found)
+        return frozenset([host for host in hosts if host] + extra)
 
 
 class BotRegistry(_Strict):

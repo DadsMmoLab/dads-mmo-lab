@@ -20,8 +20,12 @@ import pytest
 
 from yulon import client_packs, platform
 from yulon.catalog.catalog import ClientPack, load_catalog
-from yulon.client_packs import PackError, fetch_github_release
-from yulon.update import _Deadline
+from yulon.client_packs import (
+    GITHUB_RELEASE_MAX_BYTES,
+    PackError,
+    PackUnavailable,
+    fetch_github_release,
+)
 
 REPO = "SuttonX/ConsolePortLK-Enhanced"
 ASSET = "ConsolePortLK-Enhanced.zip"
@@ -311,6 +315,7 @@ def test_a_malformed_digest_is_refused(digest: str) -> None:
 def test_an_unreachable_release_keeps_the_cached_version_with_the_sentence(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    """The outage keeps the newest VERIFIED cache; the sentence names the outage (T853 G1)."""
     site = _site()
     first = fetch_github_release(_pack(), entry_id="wotlk", allowed_hosts=HOSTS, opener=site)
 
@@ -326,8 +331,10 @@ def test_an_unreachable_release_keeps_the_cached_version_with_the_sentence(
     got = fetch_github_release(_pack(), entry_id="wotlk", allowed_hosts=HOSTS, opener=_Broken(site))
 
     assert got == first
-    assert "Could not check for a newer Controller support (ConsolePort); kept v1.0.6." in (
-        caplog.text
+    assert (
+        "Could not use Controller support (ConsolePort)'s newest release "
+        "(Controller support (ConsolePort): the server's site could not be reached (down). "
+        "Check the connection and try again.); kept v1.0.6." in caplog.text
     )
 
 
@@ -405,6 +412,157 @@ def test_the_three_entries_carry_the_pack_and_coa_does_not() -> None:
 def test_the_fence_names_the_release_and_asset_hosts() -> None:
     for game in load_catalog().games:
         if game.id in ("wow-wotlk", "wow-unbound", "wow-centurion"):
-            assert HOSTS <= game.client.hosts(), game.id
+            pack = next(pack for pack in game.client.packs if pack.id == "consoleport")
+            assert HOSTS <= game.client.pack_hosts(pack), game.id
+            assert game.client.hosts() != game.client.pack_hosts(pack), game.id
         if game.id == "wow-coa":
             assert "api.github.com" not in game.client.hosts()
+
+
+# -- the review round 1 fallback (G1-G3) ---------------------------------------------------
+def _note(folder, *, tag, hours_old=0.0):
+    """A fetch note as `_note_fetch` would have left it, `hours_old` hours back."""
+    import datetime
+
+    at = datetime.datetime.now(datetime.UTC) - datetime.timedelta(hours=hours_old)
+    folder.mkdir(parents=True, exist_ok=True)
+    folder.joinpath(".yulon-github-release.json").write_text(
+        json.dumps(
+            {
+                "tag": tag,
+                "asset": ASSET,
+                "size": len(DATA),
+                "sha256": hashlib.sha256(folder.joinpath(ASSET).read_bytes()).hexdigest(),
+                "verified_at": at.isoformat(timespec="seconds"),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def _lay_verified(tag, data=DATA):
+    """A cache folder as a successful fetch would have left it: the zip and its note."""
+    folder = client_packs.cache_dir() / "wotlk" / "consoleport" / tag
+    folder.mkdir(parents=True, exist_ok=True)
+    folder.joinpath(ASSET).write_bytes(data)
+    _note(folder, tag=tag)
+    return folder
+
+
+def test_a_tampered_but_valid_zip_in_cache_is_refused():
+    """G1: the note's digest proves; the archive's own CRCs alone do not stand in."""
+    folder = _lay_verified("v1.0.6")
+    folder.joinpath(ASSET).write_bytes(_zip({"other.txt": b"changed"}))
+
+    class _Down:
+        def __call__(self, url, watcher, **kw):
+            raise ConnectionError("down")
+
+    with pytest.raises(PackUnavailable, match="could not be reached"):
+        fetch_github_release(_pack(), entry_id="wotlk", allowed_hosts=HOSTS, opener=_Down())
+
+
+def test_the_newer_verified_at_wins_whatever_the_name():
+    """G1: the fallback is newest by note, not by folder name."""
+    _lay_verified("v1.10")
+    new_data = _zip({"ConsolePort/ConsolePort.toc": b"## v1.9\n"})
+    old_folder = _lay_verified("v1.9", new_data)
+    _note(old_folder, tag="v1.9", hours_old=-3)
+
+    class _Down:
+        def __call__(self, url, watcher, **kw):
+            raise ConnectionError("down")
+
+    got = fetch_github_release(_pack(), entry_id="wotlk", allowed_hosts=HOSTS, opener=_Down())
+
+    assert got.version == "v1.9"
+    assert got.path.read_bytes() == new_data
+
+
+def test_a_folder_without_a_note_is_not_a_cached_version():
+    """G1: a note-less folder is ignored, even when its zip would prove."""
+    folder = client_packs.cache_dir() / "wotlk" / "consoleport" / "v1.0.6"
+    folder.mkdir(parents=True, exist_ok=True)
+    folder.joinpath(ASSET).write_bytes(DATA)
+
+    class _Down:
+        def __call__(self, url, watcher, **kw):
+            raise ConnectionError("down")
+
+    with pytest.raises(PackUnavailable, match="could not be reached"):
+        fetch_github_release(_pack(), entry_id="wotlk", allowed_hosts=HOSTS, opener=_Down())
+
+
+def test_a_missing_asset_keeps_the_verified_cache_with_the_sentence(caplog):
+    """G2: no asset of that name is not a reason to stop Play for everyone."""
+    site = _site()
+    first = fetch_github_release(_pack(), entry_id="wotlk", allowed_hosts=HOSTS, opener=site)
+    site.files[API] = _release(assets=[{"name": "other.zip"}])
+    site.requests.clear()
+
+    with caplog.at_level("INFO", logger="yulon.client_packs"):
+        got = fetch_github_release(_pack(), entry_id="wotlk", allowed_hosts=HOSTS, opener=site)
+
+    assert got == first
+    assert (
+        "Could not use Controller support (ConsolePort)'s newest release "
+        f"(Controller support (ConsolePort): its latest release has no {ASSET} asset. "
+        "Try again later.); kept v1.0.6." in caplog.text
+    )
+
+
+def test_a_missing_asset_without_a_cache_is_unavailable_like_a_404():
+    """G2: without a verified cache, the missing asset refuses as a url pack's 404 does."""
+    site = _site(release=_release(assets=[{"name": "other.zip"}]))
+
+    with pytest.raises(PackUnavailable, match="has no ConsolePortLK-Enhanced.zip asset"):
+        fetch_github_release(_pack(), entry_id="wotlk", allowed_hosts=HOSTS, opener=site)
+    assert not (client_packs.cache_dir() / "wotlk").exists()
+
+
+def test_a_release_without_a_digest_keeps_the_verified_cache():
+    """G2: a checksum-less release keeps the verified cache, too."""
+    site = _site()
+    first = fetch_github_release(_pack(), entry_id="wotlk", allowed_hosts=HOSTS, opener=site)
+    site.files[API] = _release(digest=None)
+    site.requests.clear()
+
+    got = fetch_github_release(_pack(), entry_id="wotlk", allowed_hosts=HOSTS, opener=site)
+
+    assert got == first
+    assert [u for (_, u, _) in site.requests] == [API]
+
+
+def test_a_release_without_a_digest_and_without_a_cache_is_unavailable():
+    """G2: without a verified cache, no digest refuses as a url pack's 404 does."""
+    site = _site(release=_release(digest=None))
+
+    with pytest.raises(PackUnavailable, match="published no checksum"):
+        fetch_github_release(_pack(), entry_id="wotlk", allowed_hosts=HOSTS, opener=site)
+    assert not client_packs.cache_dir().exists()
+
+
+def test_an_asset_over_64_mib_is_unavailable_before_any_download():
+    """G3: the release's own size bounds the asset; a verified cache still stands by."""
+    site = _site(release=_release(size=GITHUB_RELEASE_MAX_BYTES + 1))
+
+    with pytest.raises(PackUnavailable, match="over the 64 MB Yu'lon downloads"):
+        fetch_github_release(_pack(), entry_id="wotlk", allowed_hosts=HOSTS, opener=site)
+    assert site.gets() == []
+    assert not client_packs.cache_dir().exists()
+
+
+def test_an_oversized_release_keeps_the_verified_cache():
+    """G3: an over-size release keeps the verified cache with the kept sentence."""
+    site = _site()
+    first = fetch_github_release(_pack(), entry_id="wotlk", allowed_hosts=HOSTS, opener=site)
+    site.files[API] = _release(tag="v1.0.7", size=GITHUB_RELEASE_MAX_BYTES + 1)
+    site.requests.clear()
+
+    got = fetch_github_release(_pack(), entry_id="wotlk", allowed_hosts=HOSTS, opener=site)
+
+    assert got == first
+    assert site.gets("https://github.com/x/y/v1.0.7.zip") == []

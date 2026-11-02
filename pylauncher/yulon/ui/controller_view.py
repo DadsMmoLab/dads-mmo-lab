@@ -14778,7 +14778,7 @@ class ControllerView(QWidget):
                     fetched = client_packs.fetch_github_release(
                         pack,
                         entry_id=game,
-                        allowed_hosts=client.hosts(),
+                        allowed_hosts=client.pack_hosts(pack),
                         progress=self._download_progress(pack),
                         cancelled=cancelled,
                     )
@@ -15194,7 +15194,7 @@ class ControllerView(QWidget):
                 fetched = client_packs.fetch_github_release(
                     pack,
                     entry_id=game,
-                    allowed_hosts=client.hosts(),
+                    allowed_hosts=client.pack_hosts(pack),
                     progress=self._download_progress(pack),
                     cancelled=cancelled,
                 )

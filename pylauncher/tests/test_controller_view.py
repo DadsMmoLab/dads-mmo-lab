@@ -32698,3 +32698,148 @@ def test_every_azerothcore_factory_takes_a_safety_copy_before_repair_clears_an_i
         entry = load_catalog().get(game)
         services = ControllerServices.for_entry(entry, tmp_path / game)
         assert services.controller.safety_copy is not None, game
+
+
+# -- T853 review round 1: the steam seam's layout product wiring (W1) ------------
+
+
+def test_steam_seam_product_wiring_reads_the_layout_choice(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """W1: `_steam_seam()` wires the product's `controller_layout` to the record's choice.
+
+    The tab never reads the layout at build: the seam carries a callable, and the
+    press reads it off the GUI thread. Mutation: set the seam to None and this
+    fails on the callable's answer (verified manually).
+    """
+    monkeypatch.setattr(controller_view_module.platform, "detect", lambda: "linux")
+    play_dir = _built(_game_client(tmp_path / "clients" / "WoW"), tmp_path)
+    client_packs.write_record(
+        play_dir,
+        client_packs.PackRecord({}, None, {"packs": {"consoleport": True}, "exe_options": {}}),
+        game=WOTLK.id,
+        server_dir=tmp_path,
+    )
+
+    seam = controller_view_module._steam_seam(WOTLK, tmp_path, play_dir)
+
+    assert seam is not None
+    assert seam.controller_layout is not None
+    assert seam.controller_layout() is True
+    monkeypatch.setattr(controller_view_module.steam_input, "consoleport_chosen", lambda _d: False)
+    again = controller_view_module._steam_seam(WOTLK, tmp_path, play_dir)
+    assert again is not None and again.controller_layout is not None
+    assert again.controller_layout() is False
+
+
+def test_steam_seam_without_a_ready_to_play_client_writes_no_layout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """W1 companion: no ready-to-play client means no layout callable at all."""
+    monkeypatch.setattr(controller_view_module.platform, "detect", lambda: "linux")
+
+    seam = controller_view_module._steam_seam(WOTLK, tmp_path, None)
+
+    assert seam is not None
+    assert seam.controller_layout is None
+
+
+# -- T853 review round 1: github_release through Play and Update (W2) --------------
+
+
+def _github_entry(tmp_path: Path) -> CatalogEntry:
+    """WotLK's entry with one required github_release pack (a small local zip per call)."""
+    pack = ClientPack.model_validate(
+        {
+            "id": "consoleport",
+            "label": "Controller support (ConsolePort)",
+            "source": {
+                "kind": "github_release",
+                "repo": "SuttonX/ConsolePortLK-Enhanced",
+                "asset": "ConsolePortLK-Enhanced.zip",
+            },
+            "install": [{"member": "*", "to_dir": "Interface/AddOns"}],
+        }
+    )
+    base = _client_entry(tmp_path, with_packs=False)
+    return base.model_copy(
+        update={"client": base.client.model_copy(update={"packs": (pack,)})}
+    )
+
+
+def test_play_takes_the_github_release_branch(
+    qapp: object, ps: _Ps, tmp_path: Path, steps: list[str], asks: _Asks
+) -> None:
+    """W2: Play fetches a github_release pack through `fetch_github_release` (~14777)."""
+    entry = _github_entry(tmp_path)
+    original = _game_client(tmp_path / "clients" / "WoW")
+    (original / "Wow.exe").write_bytes(STOCK_EXE)
+    play = _built(original, tmp_path)
+    fetched_sha: dict[str, str] = {}
+
+    def fake_fetch(pack: ClientPack, **kw: Any) -> client_packs.Fetched:
+        assert pack.source.kind == "github_release"
+        folder = tmp_path / "gh-cache"
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / f"{pack.id}.zip"
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr(
+                zipfile.ZipInfo("ConsolePort/ConsolePort.toc", (2026, 1, 1, 0, 0, 0)),
+                b"## Interface: 30300\n",
+            )
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        fetched_sha["sha256"] = digest
+        return client_packs.Fetched(path, "v1", digest)
+
+    import unittest.mock as _mock
+
+    with _mock.patch.object(client_packs, "fetch_github_release", fake_fetch):
+        view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+        ps.names = WORLD_UP
+        view.play()
+
+    assert steps == ["install consoleport", "exe", "config", "launch"]
+    assert (play / "Interface" / "AddOns" / "ConsolePort" / "ConsolePort.toc").is_file()
+    assert client_packs.read_record(play).packs["consoleport"]["sha256"] == fetched_sha["sha256"]
+
+
+def test_update_takes_the_github_release_branch(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """W2: the Update path fetches a github_release pack through `fetch_github_release` (~15193)."""
+    entry = _github_entry(tmp_path)
+    original = _game_client(tmp_path / "clients" / "WoW")
+    (original / "Wow.exe").write_bytes(STOCK_EXE)
+    play = _built(original, tmp_path)
+    client_packs.write_record(
+        play,
+        client_packs.PackRecord(
+            {"consoleport": {"version": "v0", "sha256": "0" * 64, "files": {}}},
+            None,
+            {"packs": {}, "exe_options": {}},
+        ),
+        game=WOTLK.id,
+        server_dir=tmp_path,
+    )
+
+    def fake_fetch(pack: ClientPack, **kw: Any) -> client_packs.Fetched:
+        assert pack.source.kind == "github_release"
+        folder = tmp_path / "gh-cache"
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / f"{pack.id}.zip"
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr(
+                zipfile.ZipInfo("ConsolePort/ConsolePort.toc", (2026, 1, 1, 0, 0, 0)),
+                b"## Interface: 30300\n",
+            )
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        return client_packs.Fetched(path, "v1", digest)
+
+    monkeypatch.setattr(client_packs, "fetch_github_release", fake_fetch)
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+
+    pack_id, _sentence = view._lumen_update_work("consoleport")
+
+    assert pack_id == "consoleport"
+    assert (play / "Interface" / "AddOns" / "ConsolePort" / "ConsolePort.toc").is_file()
+

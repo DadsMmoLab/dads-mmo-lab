@@ -50,14 +50,18 @@ An entry for our key WITHOUT it is the player's own choice and is never touched.
 """
 
 STATE_FILE = "steam-input.json"
-"""Yu'lon's own record of what was written: `{key: sha256 of the layout bytes}`.
+"""Yu'lon's own record of what was written: `{state_key: sha256 of the layout bytes}`.
 
 Beside the scripts dir (`<config_dir>/gaming-mode/`, `gaming_mode.py`'s own
 folder) rather than in the Steam profile, because Steam owns that tree and
-Yu'lon's bookkeeping of its own writes does not belong in it. A changed sha
-means Steam or the player edited the file since — the layout is theirs now and
-a second press must leave it alone (a Steam autosave rewrites the file on every
-player edit in the controller editor).
+Yu'lon's bookkeeping of its own writes does not belong in it. The state key
+joins the Steam root, the account id, and the configset key, because two
+libraries — two machines' roots, or two accounts on one — hold different
+layout files under the same app name, and a sha recorded for one must never
+answer for the other. A changed sha means Steam or the player edited the file
+since — the layout is theirs now and a second press must leave it alone (a
+Steam autosave rewrites the file on every player edit in the controller
+editor).
 """
 
 
@@ -91,6 +95,8 @@ class KeyPlan:
     entry: str | None = None
     """The entry block as found, when there is one."""
     recorded_sha: str | None = None
+    prior_text: str | None = None
+    """The whole configset file as read at plan time, when there was one."""
 
 
 @dataclass(frozen=True)
@@ -143,6 +149,37 @@ def _find_key_entry(text: str, key: str) -> tuple[int, int, str] | None:
     return None
 
 
+def _state_key(steam_root: Path, account_id: str, key: str) -> str:
+    """The state record behind one configset key: root, account, and key.
+
+    Keyed three ways because two Steam libraries — two machines' roots, or two
+    accounts on one — hold different layout files under the same app name. A
+    sha recorded for one must never answer for the other.
+    """
+    return f"{steam_root}\x1f{account_id}\x1f{key}"
+
+
+def _read_configset(configset: Path) -> str | None:
+    """The configset text, or None when there is no configset yet.
+
+    Only a missing file means "not there yet". Every other read failure —
+    permissions, a directory by that name, undecodable bytes — refuses before
+    anything is written: treating what cannot be read as empty would replace
+    the other games' entries with a fresh file holding only ours.
+    """
+    try:
+        with configset.open("r", encoding="utf-8", errors="strict", newline="") as fh:
+            return fh.read()
+    except FileNotFoundError:
+        return None
+    except (IsADirectoryError, PermissionError, UnicodeDecodeError, OSError) as exc:
+        raise steam.SteamRefusal(
+            f"The controller configset {configset} cannot be read ({exc}). "
+            "Yu'lon will not replace a file it cannot see — other games' "
+            "layouts may live in it. Nothing was written."
+        ) from exc
+
+
 def plan(
     steam_root: Path,
     account_id: str,
@@ -155,8 +192,10 @@ def plan(
     `write`: no entry for the key, or our own entry (`"yulon" "1"`) whose layout
     file's sha256 still equals the one Yu'lon's state recorded. `keep-player`:
     an entry for the key that is not ours, a recorded sha that no longer
-    matches the file (Steam or the player edited it), or a layout file already
-    there with no entry at all. Never anything else.
+    matches the file (Steam or the player edited it), a layout file already
+    there with no state record of our own write (ours is proven by the
+    record, not by the marker in the file), or a layout file already there
+    with no entry at all. Never anything else.
     """
     base = steam_root / "steamapps" / "common" / "Steam Controller Configs" / account_id / "config"
     state_file = (
@@ -170,30 +209,31 @@ def plan(
         configset = base / CONFIGSET_FILE
         layout_file = base / key / LAYOUT_FILE
         entry: str | None = None
-        text: str | None = None
-        if configset.is_file():
-            try:
-                text = configset.read_text(encoding="utf-8", errors="surrogateescape")
-            except OSError:
-                text = None
-            if text is not None:
-                found = _find_key_entry(text, key)
-                if found is not None:
-                    entry = found[2]
+        text: str | None = _read_configset(configset)
+        if text is not None:
+            found = _find_key_entry(text, key)
+            if found is not None:
+                entry = found[2]
         if entry is None:
-            action = "keep-player" if layout_file.is_file() else "write"
+            if layout_file.is_file():
+                action = "keep-player"
+            else:
+                action = "write"
         elif f'"{MARKER_KEY}"' not in entry:
             action = "keep-player"
         else:
-            want = recorded.get(key)
-            action = "write"
-            if want is not None and layout_file.is_file():
-                try:
-                    have = hashlib.sha256(layout_file.read_bytes()).hexdigest()
-                except OSError:
-                    have = None
-                if have != want:
-                    action = "keep-player"
+            want = recorded.get(_state_key(steam_root, account_id, key))
+            if want is None:
+                action = "keep-player"
+            else:
+                action = "write"
+                if layout_file.is_file():
+                    try:
+                        have = hashlib.sha256(layout_file.read_bytes()).hexdigest()
+                    except OSError:
+                        have = None
+                    if have != want:
+                        action = "keep-player"
         keys.append(
             KeyPlan(
                 key=key,
@@ -201,7 +241,8 @@ def plan(
                 layout_file=layout_file,
                 action=action,
                 entry=entry,
-                recorded_sha=recorded.get(key),
+                recorded_sha=recorded.get(_state_key(steam_root, account_id, key)),
+                prior_text=text,
             )
         )
     return InputPlan(
@@ -295,6 +336,39 @@ class InputApplyReport:
     backups: tuple[Path, ...] = ()
 
 
+def _stage_key(
+    steam_root: Path, account_id: str, key: str, existing: str | None
+) -> tuple[str, bytes]:
+    """The new configset text and the layout bytes for one `write` key.
+
+    Raises `SteamRefusal` for a missing template or a configset whose
+    `controller_config` map cannot be found — with nothing written.
+    """
+    payload = layout_bytes(steam_root=steam_root, account_id=account_id, key=key)
+    new_text, _ = _configset_with_entry(existing or "", key)
+    return new_text, payload
+
+
+def planned_texts(input_plan: InputPlan) -> dict[str, tuple[str, bytes]]:
+    """The staged work for every `write` key: the new configset text and the layout bytes.
+
+    Rendered — and refused — BEFORE the first Steam write lands, so the caller
+    (`steam.SteamShortcuts.add`) can validate the whole layout step while the
+    shortcuts are still unwritten. A missing template or a configset whose
+    `controller_config` map cannot be found raises `SteamRefusal` with nothing
+    written. Stages from the plan's `prior_text` (taken at plan time);
+    `apply()` re-reads the live file and renders again, so a configset that
+    changed since the plan is never written from a stale read.
+    """
+    return {
+        key_plan.key: _stage_key(
+            input_plan.steam_root, input_plan.account_id, key_plan.key, key_plan.prior_text
+        )
+        for key_plan in input_plan.keys
+        if key_plan.action == "write"
+    }
+
+
 def apply(
     input_plan: InputPlan,
     *,
@@ -303,11 +377,18 @@ def apply(
     """Write every `write` key of `input_plan`; refuse while Steam runs.
 
     Backs up the configset first (`*.yulon-bak-<stamp>`, `steam.py`'s helper).
-    Writes the layout file (dir created), then edits the configset KEEPING EVERY
-    OTHER BYTE: adds `"<key>" { "autosave" "1" "yulon" "1" }` inside
-    `"controller_config"` (creating the file with the minimal wrapper if
-    absent). Records the written sha256 in Yu'lon's own state beside the
-    scripts dir. `keep-player` keys are left exactly as they are.
+    The configset is re-read from disk (refusing an unreadable file exactly
+    as `plan()` does — never treated as empty) and goes through a sibling
+    temp file and a rename; the layout file is moved into place only after
+    the configset replace has landed. If the configset replace fails there
+    is no layout file left behind: what this press wrote of the layout is
+    removed again, so a later press finds the pair exactly as it left them
+    and never a layout with no entry. Keeps every other byte: adds
+    `"<key>" { "autosave" "1" "yulon" "1" }` inside `"controller_config"`
+    (creating the file with the minimal wrapper if absent). Records the
+    written sha256 in Yu'lon's own state beside the scripts dir, keyed by
+    `(steam_root, account_id, key)`. `keep-player` keys are left exactly as
+    they are.
     """
     if steam_running:
         raise steam.SteamRefusal(
@@ -317,8 +398,6 @@ def apply(
             "Add to Steam… again."
         )
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    steam_root = input_plan.steam_root
-    account_id = input_plan.account_id
     app_name = input_plan.app_name
     written: list[str] = []
     kept: list[str] = []
@@ -327,30 +406,47 @@ def apply(
         if key_plan.action != "write":
             kept.append(key_plan.key)
             continue
-        payload = layout_bytes(
-            steam_root=steam_root,
-            account_id=account_id,
-            key=key_plan.key,
+        # Fresh read, not the plan's `prior_text`: the file may have changed
+        # since the plan (a press plans, then writes other files, then
+        # applies), and writing from a stale read would drop the other games'
+        # entries. An unreadable file refuses here exactly as in `plan()`.
+        new_text, payload = _stage_key(
+            input_plan.steam_root,
+            input_plan.account_id,
+            key_plan.key,
+            _read_configset(key_plan.configset),
         )
         key_plan.layout_file.parent.mkdir(parents=True, exist_ok=True)
-        tmp = key_plan.layout_file.with_name(key_plan.layout_file.name + steam.TMP_SUFFIX)
-        try:
-            with key_plan.configset.open(
-                "r", encoding="utf-8", errors="surrogateescape", newline=""
-            ) as fh:
-                existing = fh.read()
-        except OSError:
-            existing = ""
-        new_text, _ = _configset_with_entry(existing, key_plan.key)
         try:
             backup = steam._backup(key_plan.configset, stamp)
             if backup is not None:
                 backups.append(backup)
-            tmp.write_bytes(payload)
-            tmp.replace(key_plan.layout_file)
+            layout_tmp = key_plan.layout_file.with_name(
+                key_plan.layout_file.name + steam.TMP_SUFFIX
+            )
+            layout_tmp.write_bytes(payload)
             compat_tmp = key_plan.configset.with_name(key_plan.configset.name + steam.TMP_SUFFIX)
-            compat_tmp.write_text(new_text, encoding="utf-8", errors="surrogateescape", newline="")
-            compat_tmp.replace(key_plan.configset)
+            try:
+                compat_tmp.write_text(
+                    new_text, encoding="utf-8", errors="surrogateescape", newline=""
+                )
+            except (UnicodeDecodeError, UnicodeEncodeError, ValueError) as exc:
+                raise steam.SteamRefusal(
+                    "The controller configset this would write is not plain text "
+                    f"Steam can read ({exc}). Nothing was written."
+                ) from exc
+            try:
+                compat_tmp.replace(key_plan.configset)
+            except OSError:
+                for debris in (layout_tmp, compat_tmp):
+                    try:
+                        debris.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                raise
+            layout_tmp.replace(key_plan.layout_file)
+        except steam.SteamRefusal:
+            raise
         except OSError as exc:
             raise steam.SteamRefusal(
                 steam.UNWRITABLE.format(path=key_plan.configset.parent, reason=exc.strerror or exc)
@@ -362,7 +458,7 @@ def apply(
                 loaded = json.loads(input_plan.state_file.read_text(encoding="utf-8"))
                 if isinstance(loaded, dict):
                     state_raw = loaded
-            state_raw[key_plan.key] = sha
+            state_raw[_state_key(input_plan.steam_root, input_plan.account_id, key_plan.key)] = sha
             input_plan.state_file.parent.mkdir(parents=True, exist_ok=True)
             state_tmp = input_plan.state_file.with_name(
                 input_plan.state_file.name + steam.TMP_SUFFIX
@@ -441,11 +537,12 @@ def remove(input_plan: InputPlan) -> InputRemoveReport:
                         )
                     ) from exc
                 entries.append(key_plan.key)
+        state_key = _state_key(input_plan.steam_root, input_plan.account_id, key_plan.key)
         recorded: str | None = None
         try:
             raw = json.loads(input_plan.state_file.read_text(encoding="utf-8"))
-            if isinstance(raw, dict) and isinstance(raw.get(key_plan.key), str):
-                recorded = str(raw[key_plan.key])
+            if isinstance(raw, dict) and isinstance(raw.get(state_key), str):
+                recorded = str(raw[state_key])
         except (OSError, ValueError):
             recorded = None
         if recorded is not None and key_plan.layout_file.is_file():
@@ -533,6 +630,7 @@ __all__ = [
     "layout_bytes",
     "layout_keys",
     "plan",
+    "planned_texts",
     "remove",
     "report_sentence",
 ]

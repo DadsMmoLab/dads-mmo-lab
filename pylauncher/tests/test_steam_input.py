@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import stat
 from dataclasses import replace
 from datetime import datetime
 from functools import partial
@@ -112,7 +114,8 @@ def test_fresh_press_writes_entry_layout_and_state(tmp_path: Path) -> None:
     text = key.configset.read_text(encoding="utf-8")
     assert '"turtle wow"' in text and '"yulon"' in text and '"autosave"' in text
     recorded = json.loads(input_plan.state_file.read_text(encoding="utf-8"))
-    assert recorded == {"turtle wow": hashlib.sha256(key.layout_file.read_bytes()).hexdigest()}
+    state_key = f"{_steam_root(tmp_path)}\x1f{ACCOUNT}\x1fturtle wow"
+    assert recorded == {state_key: hashlib.sha256(key.layout_file.read_bytes()).hexdigest()}
 
 
 # -- an existing configset keeps every other byte -------------------------------------
@@ -235,6 +238,96 @@ def test_layout_file_without_an_entry_is_kept(tmp_path: Path) -> None:
     rerun = _plan(tmp_path)
 
     assert [entry.action for entry in rerun.keys] == ["keep-player"]
+
+
+def test_an_entry_with_our_marker_but_no_record_is_kept(tmp_path: Path) -> None:
+    """A marker with no recorded sha proves a write the state lost: keep-player.
+
+    The record is what says "Yu'lon wrote this file"; a configset entry with
+    our marker but no state entry is a state loss (deleted settings dir, a
+    press from another machine), and writing over the layout file would take
+    a file whose bytes were never proven ours.
+    """
+    _profile(tmp_path)
+    key = _plan(tmp_path).keys[0]
+    key.configset.parent.mkdir(parents=True, exist_ok=True)
+    key.configset.write_text(
+        '"controller_config"\n{\n\t"turtle wow"\n\t{\n\t\t"autosave"\t\t"1"\n'
+        '\t\t"yulon"\t\t"1"\n\t}\n}\n',
+        encoding="utf-8",
+    )
+    key.layout_file.parent.mkdir(parents=True, exist_ok=True)
+    key.layout_file.write_bytes(b"a layout whose record is gone\n")
+
+    rerun = _plan(tmp_path)
+
+    assert [entry.action for entry in rerun.keys] == ["keep-player"]
+    before = key.configset.read_bytes()
+    report = steam_input.apply(rerun, steam_running=False)
+    assert report.written == () and report.kept == ("turtle wow",)
+    assert key.configset.read_bytes() == before
+    assert key.layout_file.read_bytes() == b"a layout whose record is gone\n"
+
+
+def test_an_unreadable_configset_refuses_and_writes_nothing(tmp_path: Path) -> None:
+    """A configset that cannot be READ is refused: never treated as empty.
+
+    Every read error other than a missing file — permissions, a directory by
+    that name, undecodable bytes — raises `SteamRefusal` before anything is
+    written. Treating it as empty would replace the other games' entries with
+    a fresh file holding only ours.
+    """
+    if os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0):
+        pytest.skip("a mode-000 file stops no read on Windows, nor for root")
+    _profile(tmp_path)
+    key = _plan(tmp_path).keys[0]
+    key.configset.parent.mkdir(parents=True, exist_ok=True)
+    before = _realistic_configset().encode("utf-8")
+    key.configset.write_bytes(before)
+    key.configset.chmod(0)
+
+    try:
+        with pytest.raises(steam.SteamRefusal):
+            _plan(tmp_path)
+    finally:
+        key.configset.chmod(stat.S_IRUSR | stat.S_IWUSR)
+    assert key.configset.read_bytes() == before
+
+
+def test_state_is_keyed_by_steam_root_account_and_key(tmp_path: Path) -> None:
+    """Two accounts (or two roots) hold different layouts under one app name.
+
+    A sha recorded for one must never answer for the other: the state key
+    joins the Steam root, the account id, and the configset key.
+    """
+    _profile(tmp_path)
+    first = _plan(tmp_path)
+    steam_input.apply(first, steam_running=False)
+    key = first.keys[0]
+
+    rerun = _plan(tmp_path)
+    assert [entry.action for entry in rerun.keys] == ["write"]
+
+    other_root = tmp_path / "other-steam"
+    (other_root / "steamapps/common/Steam Controller Configs" / ACCOUNT / "config").mkdir(
+        parents=True
+    )
+    stranger = steam_input.plan(
+        other_root,
+        ACCOUNT,
+        GAME,
+        config_dir=first.state_file.parent.parent,
+    )
+    assert [entry.action for entry in stranger.keys] == ["write"]
+
+    outsider = steam_input.plan(
+        _steam_root(tmp_path),
+        "28006437",
+        GAME,
+        config_dir=first.state_file.parent.parent,
+    )
+    assert [entry.action for entry in outsider.keys] == ["write"]
+    assert key.layout_file.is_file()
 
 
 # -- refusals, backups, removal ----------------------------------------------------------
@@ -494,3 +587,82 @@ def test_wow_add_refuses_while_steam_runs_before_any_write(tmp_path: Path) -> No
         tmp_path / ".local/share/Steam/userdata" / ACCOUNT / "config/shortcuts.vdf"
     ).exists()
     assert not _controller_base(tmp_path).exists()
+
+
+def test_add_with_a_refusing_configset_shape_still_writes_shortcuts(tmp_path: Path) -> None:
+    """A configset whose `controller_config` map is one line refuses the layout, not the press.
+
+    The layout is an EXTRA: planning refuses before the first Steam write, the
+    shortcuts still go ahead, and the report carries the reason. The configset
+    and the layout dir are left exactly as they were.
+    """
+    _profile(tmp_path)
+    key = _plan(tmp_path).keys[0]
+    key.configset.parent.mkdir(parents=True, exist_ok=True)
+    before = (
+        '"controller_config" {\n'
+        '\t"413080"\n'
+        "\t{\n"
+        '\t\t"template"\t\t"controller_neptune_gamepad+mouse.vdf"\n'
+        "\t}\n"
+        "}\n"
+    )
+    key.configset.write_text(before, encoding="utf-8")
+
+    report = _shortcuts(tmp_path).add(controller_layout=True)
+
+    assert (tmp_path / ".local/share/Steam/userdata" / ACCOUNT / "config/shortcuts.vdf").is_file()
+    assert report.entries == ("Turtle WoW", "Turtle WoW Server")
+    assert report.layout.startswith("Steam Input: the controller layout was not set up:")
+    assert "Steam Input" in steam.confirmation(report)
+    assert key.configset.read_text(encoding="utf-8") == before
+    assert not key.layout_file.exists()
+
+
+def test_add_with_a_missing_template_still_writes_shortcuts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A template that cannot be read refuses the layout step, not the press."""
+    _profile(tmp_path)
+    monkeypatch.setattr(
+        steam_input.resources, "installers_dir", lambda: tmp_path / "no-such-installers"
+    )
+
+    report = _shortcuts(tmp_path).add(controller_layout=True)
+
+    assert (tmp_path / ".local/share/Steam/userdata" / ACCOUNT / "config/shortcuts.vdf").is_file()
+    assert report.layout.startswith("Steam Input: the controller layout was not set up:")
+    key = _plan(tmp_path).keys[0]
+    assert not key.configset.exists() and not key.layout_file.exists()
+
+
+def test_add_with_a_failing_configset_replace_leaves_no_layout_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """All-or-nothing for our two files: a failed configset write takes its layout with it.
+
+    The layout temp file is removed again when the configset replace fails, so
+    no layout file is left behind — and the shortcuts still went ahead with
+    the reason in the report line.
+    """
+    _profile(tmp_path)
+    real_replace = Path.replace
+
+    def _refusing_replace(self: Path, target: Path) -> None:
+        if Path(target).name == steam_input.CONFIGSET_FILE:
+            raise OSError(28, "No space left on device")
+        real_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", _refusing_replace)
+
+    report = _shortcuts(tmp_path).add(controller_layout=True)
+
+    assert (tmp_path / ".local/share/Steam/userdata" / ACCOUNT / "config/shortcuts.vdf").is_file()
+    assert report.layout.startswith("Steam Input: the controller layout was not set up:")
+    key = _plan(tmp_path).keys[0]
+    assert not key.layout_file.exists()
+    assert not key.configset.exists()
+    leftovers = [
+        path for path in key.configset.parent.iterdir() if path.name.endswith(".yulon-tmp")
+    ]
+    assert leftovers == []

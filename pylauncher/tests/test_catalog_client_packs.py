@@ -186,23 +186,34 @@ def test_the_fixture_every_refusal_below_is_cut_from_loads() -> None:
 
 
 def test_hosts_names_every_host_a_download_may_reach_and_nothing_else() -> None:
-    """Packs' url and version_url, the github_release kind's hosts, and the clean-exe
-    sources; never the fallback page.
+    """Packs' url and version_url, plus the clean-exe sources; never the fallback page.
 
     The fallback page is a page a PERSON is sent to in a refusal, so it is not a
     host Yu'lon fetches from and must not widen the allow-list later tasks check.
-    Hostnames compare lowercased, as DNS does.
+    A github_release pack's own hosts ride on its fetch (`pack_hosts`), never on
+    the whole entry's fence. Hostnames compare lowercased, as DNS does.
     """
     assert Client.model_validate(_client()).hosts() == frozenset(
-        {
-            "packs.example.org",
-            "clean.example.org",
-            "api.github.com",
-            "github.com",
-            "release-assets.githubusercontent.com",
-            "objects.githubusercontent.com",
-        }
+        {"packs.example.org", "clean.example.org"}
     )
+
+
+def test_a_version_url_packs_fetch_is_not_given_github() -> None:
+    """T853 G4: the release hosts stay on the github_release pack's own fetch."""
+    client = Client.model_validate(_client())
+    release = next(pack for pack in client.packs if pack.source.kind == "github_release")
+    assert "api.github.com" not in client.hosts()
+    assert "github.com" not in client.hosts()
+    assert {
+        "packs.example.org",
+        "clean.example.org",
+        "api.github.com",
+        "github.com",
+        "release-assets.githubusercontent.com",
+        "objects.githubusercontent.com",
+    } <= client.pack_hosts(release)
+    url_pack = next(pack for pack in client.packs if pack.source.kind == "url")
+    assert client.pack_hosts(url_pack) == client.hosts()
 
 
 def test_a_client_without_the_new_fields_names_no_host() -> None:
@@ -258,17 +269,29 @@ def test_the_shipped_catalog_uses_the_new_fields_on_wotlk_centurion_and_unbound(
             assert game.client.config_wtf is None
             assert game.client.hosts() == frozenset(
                 {
-                    "api.github.com",
                     "github.com",
                     "release-assets.githubusercontent.com",
                     "objects.githubusercontent.com",
                 }
             )
+            release = next(pack for pack in game.client.packs if pack.id == "consoleport")
+            assert game.client.pack_hosts(release) == frozenset(
+                {
+                    "github.com",
+                    "api.github.com",
+                    "release-assets.githubusercontent.com",
+                    "objects.githubusercontent.com",
+                }
+            )
+            url_pack = next(pack for pack in game.client.packs if pack.id == "lumenveil")
+            assert game.client.pack_hosts(url_pack) == game.client.hosts()
             continue
         if game.id == "wow-centurion":
             assert game.client.packs and game.client.exe_patch and game.client.config_wtf
             assert [pack.id for pack in game.client.packs][-1] == "consoleport"
-            assert game.client.hosts() == frozenset(
+            assert game.client.hosts() == frozenset({"centurionpvp.com", "wow.baerthe.com"})
+            release = next(pack for pack in game.client.packs if pack.id == "consoleport")
+            assert game.client.pack_hosts(release) == frozenset(
                 {
                     "centurionpvp.com",
                     "wow.baerthe.com",
@@ -289,12 +312,13 @@ def test_the_shipped_catalog_uses_the_new_fields_on_wotlk_centurion_and_unbound(
             assert game.client.exe_patch is None
             assert game.client.hosts() == frozenset(
                 {
-                    "api.github.com",
                     "github.com",
                     "release-assets.githubusercontent.com",
                     "objects.githubusercontent.com",
                 }
             )
+            release = next(pack for pack in game.client.packs if pack.id == "consoleport")
+            assert "api.github.com" in game.client.pack_hosts(release)
             continue
         if game.id == "wow-coa":
             assert game.client.exe_names == ("ascension.exe",)
@@ -1046,17 +1070,18 @@ def test_a_pack_with_the_new_fields_parses_and_names_its_redirect_hosts() -> Non
 
 
 def test_a_github_release_pack_names_the_release_and_asset_hosts() -> None:
-    """The kind carries its fence: the API host and the asset hosts, no redirect_hosts."""
+    """The kind carries its own fence: the API host and the asset hosts, no redirect_hosts."""
     client = Client.model_validate(_client())
     pack = next(item for item in client.packs if item.id == "consoleport")
     assert pack.source.kind == "github_release"
     assert pack.redirect_hosts == ()
+    assert "api.github.com" not in client.hosts()
     assert {
         "api.github.com",
         "github.com",
         "release-assets.githubusercontent.com",
         "objects.githubusercontent.com",
-    } <= client.hosts()
+    } <= client.pack_hosts(pack)
 
 
 def test_redirect_hosts_compare_case_insensitively() -> None:

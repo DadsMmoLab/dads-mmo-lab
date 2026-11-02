@@ -467,7 +467,14 @@ def test_the_exe_patch_writes_exactly_what_centurions_launcher_writes_both_ways(
 
 
 def test_the_hosts_a_download_may_reach_are_centurions_site_and_the_clean_client() -> None:
-    assert ENTRY.client.hosts() == frozenset(
+    assert ENTRY.client.hosts() == frozenset({"centurionpvp.com", "wow.baerthe.com"})
+
+
+def test_a_github_release_packs_own_fetch_reaches_the_release_and_asset_hosts() -> None:
+    """T853 G4: the kind carries its own fence; the whole entry's does not widen."""
+    pack = next(pack for pack in ENTRY.client.packs if pack.id == "consoleport")
+    assert pack.source.kind == "github_release"
+    assert ENTRY.client.pack_hosts(pack) == frozenset(
         {
             "centurionpvp.com",
             "wow.baerthe.com",
@@ -477,6 +484,8 @@ def test_the_hosts_a_download_may_reach_are_centurions_site_and_the_clean_client
             "objects.githubusercontent.com",
         }
     )
+    other = next(pack for pack in ENTRY.client.packs if pack.source.kind == "url")
+    assert ENTRY.client.pack_hosts(other) == ENTRY.client.hosts()
 
 
 # -- the shipped entry is the one the family was tested with ---------------------------------

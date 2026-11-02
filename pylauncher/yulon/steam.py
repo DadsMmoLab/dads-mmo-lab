@@ -1122,6 +1122,10 @@ class SteamShortcuts:
         window, after the same refusals. Off on Windows/macOS with the rest.
         True writes it, False never does, and None (the default) asks this
         press's `controller_layout` seam — None there writes nothing.
+        The layout is an EXTRA on top of the shortcuts: it is planned before
+        the first Steam write, and a planning or apply refusal never escapes
+        `add()` — the shortcuts still go ahead and the report carries
+        "Steam Input: the controller layout was not set up: <reason>."
         Turning ConsolePort off later removes nothing (the player may like the
         layout on its own); `steam_input.remove()` stays available.
         """
@@ -1219,6 +1223,36 @@ class SteamShortcuts:
         with compat_path.open("r", encoding="utf-8", errors="surrogateescape", newline="") as fh:
             compat_text, _ = compat_mapping(fh.read(), appid=int(client_entry["appid"]), tool=tool)
 
+        write_layout = controller_layout
+        if write_layout is None:
+            write_layout = self.controller_layout() if self.controller_layout else False
+        # The layout is an EXTRA, planned before the first Steam write lands:
+        # its refusals (an unreadable configset, a missing template, a
+        # refusing configset shape) carry the press on to the shortcuts anyway
+        # and surface as the report line, never as an exception. Only the
+        # plan-time refusal is caught here; the apply after the shortcuts is
+        # caught again below (it can still fail on a write that was fine to
+        # plan).
+        layout_plan = None
+        layout_sentence = ""
+        if write_layout:
+            from yulon import steam_input
+            from yulon.steam import SteamRefusal as _PlanRefusal
+
+            account = self.account_id or config.parent.name
+            try:
+                layout_plan = steam_input.plan(
+                    steam_root,
+                    account,
+                    self.game,
+                    config_dir=self.config_dir,
+                )
+                steam_input.planned_texts(layout_plan)
+            except (_PlanRefusal, OSError) as exc:
+                layout_sentence = f"Steam Input: the controller layout was not set up: {exc}."
+                layout_plan = None
+                logger.info(f"steam input: {layout_sentence}")
+
         stamp = self.now().strftime("%Y%m%d-%H%M%S")
         try:
             backup = _backup(path, stamp)
@@ -1238,21 +1272,16 @@ class SteamShortcuts:
                 _write_artwork(stop_art, icon_png(SERVER_ACCENT))
             _write_compat(compat_path, compat_text)
             _write_shortcuts(path, payload)
-            write_layout = controller_layout
-            if write_layout is None:
-                write_layout = self.controller_layout() if self.controller_layout else False
-            layout_sentence = ""
-            if write_layout:
-                from yulon import steam_input
+            if layout_plan is not None:
+                from yulon import steam_input as _steam_input
+                from yulon.steam import SteamRefusal as _SteamRefusal
 
-                account = self.account_id or config.parent.name
-                layout_report = steam_input.apply_for_game(
-                    steam_root,
-                    account,
-                    self.game,
-                    config_dir=self.config_dir,
-                )
-                layout_sentence = steam_input.report_sentence(layout_report)
+                try:
+                    layout_report = _steam_input.apply(layout_plan, steam_running=False)
+                except (_SteamRefusal, OSError) as exc:
+                    layout_sentence = f"Steam Input: the controller layout was not set up: {exc}."
+                else:
+                    layout_sentence = _steam_input.report_sentence(layout_report)
                 logger.info(f"steam input: {layout_sentence}")
         except OSError as exc:
             # `OSError` and not `PermissionError`: a read-only filesystem answers

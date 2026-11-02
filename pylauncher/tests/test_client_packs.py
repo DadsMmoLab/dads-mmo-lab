@@ -1129,6 +1129,27 @@ def test_a_star_member_unpacks_the_whole_zip_under_its_folder(rig: _Rig) -> None
     rig.untouched()
 
 
+def test_a_consoleport_shaped_install_switches_off_cleanly(rig: _Rig) -> None:
+    """T853 review 1 (G5): off removes only the recorded files of an 8-folder shaped zip."""
+    members = {f"ConsolePort{i}/ConsolePort{i}.toc": f"## Title: {i}\n".encode() for i in range(8)}
+    pack = _pack_of(
+        [{"member": "*", "to_dir": "Interface/AddOns"}],
+        id="consoleport",
+        label="ConsolePort",
+    )
+    entry = rig.install(pack, rig.fetched(members))
+    assert len(entry["files"]) == 8
+
+    left = rig.remove(entry, pack)
+
+    assert left == ()
+    addons = rig.play / "Interface" / "AddOns"
+    assert (addons / "Blizzard_Own" / "x.toc").exists(), "the client's own addons stay"
+    for i in range(8):
+        assert not (addons / f"ConsolePort{i}").exists()
+    rig.untouched()
+
+
 def test_an_mpq_is_hard_linked_from_an_extracted_copy_in_the_cache(rig: _Rig) -> None:
     rig.install(WORLD, rig.fetched({"patch-Y.MPQ": NEW_Y}))
 
