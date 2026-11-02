@@ -991,6 +991,8 @@ class AddReport:
     compat_backup: Path | None
     scripts: tuple[Path, ...] = ()
     lib: str = ""
+    layout: str = ""
+    """The Steam Input sentence, or "": `controller_layout` fills it, nothing else does."""
 
 
 def confirmation(report: AddReport) -> str:
@@ -1004,14 +1006,19 @@ def confirmation(report: AddReport) -> str:
     where = "Updated in your Steam library" if report.replaced else "Added to your Steam library"
     if len(report.entries) == 3:
         client, server, stop = report.entries
-        return (
+        said = (
             f"{where}: “{server}” (starts the server and stops it when you close the game), "
             f"“{client}” (the game) and “{stop}”. Restart Steam to see them."
         )
-    client, server = report.entries
-    return (
-        f"{where}: “{client}” (the game) and “{server}” (this launcher). Restart Steam to see them."
-    )
+    else:
+        client, server = report.entries
+        said = (
+            f"{where}: “{client}” (the game) and “{server}” (this launcher). "
+            "Restart Steam to see them."
+        )
+    if report.layout:
+        said += f"\n{report.layout}"
+    return said
 
 
 def confirmation_details(report: AddReport) -> str:
@@ -1069,7 +1076,7 @@ class SteamShortcuts:
 
     game: str
     server_dir: Path
-    client_dir: Path | None
+    client_dir: Path | None = None
     exe_names: tuple[str, ...] = ("wow.exe",)
     """The entry's `client.exe_names`: which executable in the folder is the game (T812)."""
     wine_dll_overrides: str | None = None
@@ -1086,12 +1093,24 @@ class SteamShortcuts:
     """Gaming Mode (a WoW server on a Steam Deck): the Server tile runs the Lab's launcher
     in Konsole, which starts the server through Yu'lon and stops it when the game closes,
     and a third tile stops it. None keeps 8.8's two entries exactly as they were."""
+    config_dir: Path | None = None
+    """Where Yu'lon's own Steam Input record lives; `platform.config_dir()` unless given.
 
-    def add(self) -> AddReport:
+    A seam for the same reason `home` is: the record is app state, and a test
+    that reached the real config dir would write outside its own tree.
+    """
+    account_id: str | None = None
+    """The Steam account id for the controller config dir; `find_profile()` unless given."""
+
+    def add(self, *, controller_layout: bool = False) -> AddReport:
         """Write the two entries, the artwork and the compatibility tool.
 
         Order matters and is checked by tests: every refusal happens before the
         first byte, and both backups are taken before either file is written.
+        `controller_layout` adds, for WoW game tiles only, the Steam Deck
+        controller layout for the GAME tile (`self.game`, never the
+        Server/Stop tiles): a ConsolePort pad layout under the same Steam-closed
+        window, after the same refusals. Off on Windows/macOS with the rest.
         """
         detected = self.platform_id()
         if detected != "linux":
@@ -1206,6 +1225,20 @@ class SteamShortcuts:
                 _write_artwork(stop_art, icon_png(SERVER_ACCENT))
             _write_compat(compat_path, compat_text)
             _write_shortcuts(path, payload)
+            layout_sentence = ""
+            if controller_layout:
+                from yulon import steam_input
+
+                account = self.account_id or config.parent.name
+                layout_plan = steam_input.plan(
+                    steam_root,
+                    account,
+                    self.game,
+                    config_dir=self.config_dir,
+                )
+                layout_report = steam_input.apply(layout_plan, steam_running=False)
+                layout_sentence = steam_input.report_sentence(layout_report)
+                logger.info(f"steam input: {layout_sentence}")
         except OSError as exc:
             # `OSError` and not `PermissionError`: a read-only filesystem answers
             # EROFS, which is `OSError` and not a subclass of `PermissionError`,
@@ -1234,4 +1267,5 @@ class SteamShortcuts:
             compat_backup=compat_backup,
             scripts=(scripts.launcher, scripts.stop) if scripts is not None else (),
             lib=scripts.lib if scripts is not None else "",
+            layout=layout_sentence,
         )
