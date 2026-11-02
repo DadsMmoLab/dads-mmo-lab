@@ -186,6 +186,7 @@ from yulon.controller_wow_centurion import characters as centurion_characters
 from yulon.controller_wow_centurion import console as centurion_console
 from yulon.controller_wow_centurion import controller as centurion_controller
 from yulon.controller_wow_centurion import maintenance as centurion_maintenance
+from yulon.controller_wow_coa import modules as coa_modules
 from yulon.controller_wow_tbc import accounts as tbc_accounts
 from yulon.controller_wow_tbc import console as tbc_console
 from yulon.controller_wow_tbc import controller as tbc_controller
@@ -3630,14 +3631,21 @@ def _steam_seam(
     if platform.detect() != "linux":
         return None
     play_dir = client_dir
-    read_layout_choice = (
-        # T853: the ready-to-play client's recorded ConsolePort choice, read at
-        # press time off the GUI thread — never at tab build. No ready-to-play
-        # client (or no record) writes no layout.
-        partial(steam_input.consoleport_chosen, play_dir)
-        if play_dir is not None
-        else None
-    )
+    read_layout_choice: Callable[[], bool] | None
+    if entry.id == "wow-coa":
+        # T855: CoA has no ready-to-play client and no pack record — its
+        # switch is the Modules tab's own install record, read at press time
+        # off the GUI thread like T853's. A removed module reads not installed.
+        read_layout_choice = partial(steam_input.consoleport_module_installed, server_dir)
+    else:
+        read_layout_choice = (
+            # T853: the ready-to-play client's recorded ConsolePort choice, read at
+            # press time off the GUI thread — never at tab build. No ready-to-play
+            # client (or no record) writes no layout.
+            partial(steam_input.consoleport_chosen, play_dir)
+            if play_dir is not None
+            else None
+        )
     return steam_module.SteamShortcuts(
         game=entry.name,
         server_dir=server_dir,
@@ -4318,22 +4326,26 @@ def _for_wotlk(
 
     Every seam is bound to `entry`'s own containers, never to WotLK's
     `docker_ctl.SPEC`, so a second AzerothCore server beside WotLK is managed
-    as itself (T552). The module seams read `manifests/wow-wotlk/`, so an
-    entry that names another tree is refused rather than handed WotLK's.
+    as itself (T552). The module seams read `manifests/<game>/` of
+    `entry.manifest_game()` through `_MANIFEST_TREES` below, so an entry that
+    names a tree this build does not know is refused rather than handed
+    WotLK's. CoA reads its own `manifests/wow-coa/` tree (T855); WotLK and
+    Unbound share `manifests/wow-wotlk/`.
     """
-    if entry.has_manifests and entry.manifest_game() != wotlk_modules.GAME:
+    if entry.has_manifests and entry.manifest_game() not in _MANIFEST_TREES:
         raise UnsupportedGameError(
             f"{entry.name} ({entry.id}) reads the modules of manifests/{entry.manifest_game()}/, "
-            f"and this build's AzerothCore tab only knows manifests/{wotlk_modules.GAME}/. "
+            "and this build's AzerothCore tab has no store for that tree. "
             "Nothing was opened."
         )
     spec = entry.container_spec()
-    # The shipped manifests are WotLK's for every server here; the modules the
-    # user ADDED are this server's own, under its game id (T554: a Remove on
-    # WoW Unbound never drops WotLK's record). For WotLK both are `wow-wotlk`.
+    # The shipped manifests are this entry's own tree; the modules the user
+    # ADDED are this server's own, under its game id (T554: a Remove on WoW
+    # Unbound never drops WotLK's record). For WotLK both are `wow-wotlk`.
     user_game = entry.id
-    record_backed = _record_backed_keys(wotlk_modules.store(user_game=user_game))
-    settings_mods = _settings_mods(wotlk_modules.store(user_game=user_game))
+    game_modules = _MANIFEST_TREES[entry.manifest_game()]
+    record_backed = _record_backed_keys(game_modules.store(user_game=user_game))
+    settings_mods = _settings_mods(game_modules.store(user_game=user_game))
     password = _db_password(entry, server_dir, wsl_distro=wsl_distro)
     sql = _sql_for(entry, password, wsl_distro=wsl_distro)
     mysql = _mysql_for(entry, password, wsl_distro=wsl_distro)
@@ -4635,7 +4647,7 @@ def _for_wotlk(
             scheme=wotlk_accounts.checked_scheme(entry.accounts.scheme, entry.id),
             names_are_names=entry.id in commands.NAME_LOOKUP_TREES,
         ),
-        store=wotlk_modules.store(user_game=user_game) if entry.has_manifests else None,
+        store=game_modules.store(user_game=user_game) if entry.has_manifests else None,
         applier=module_applier,
         # The other half of installing a module, and until now the half with no
         # button: `applier` clones the module and activates its conf, leaving
@@ -5821,6 +5833,18 @@ def _knowing_its_server_sources(
     return services
 
 
+_MANIFEST_TREES = {
+    wotlk_modules.GAME: wotlk_modules,
+    coa_modules.GAME: coa_modules,
+}
+"""Shipped manifest tree by `entry.manifest_game()`: WotLK's and CoA's own (T855).
+
+Unbound shares WotLK's tree (`manifests_from: wow-wotlk`); a second AzerothCore
+server naming none of these is refused in `_for_wotlk()` rather than handed a
+tree it does not read.
+"""
+
+
 def manifest_store_for(entry: CatalogEntry) -> ManifestStore | None:
     """The Modules tab's manifest store for a server of `entry`, as its factory builds it (T601).
 
@@ -5829,6 +5853,10 @@ def manifest_store_for(entry: CatalogEntry) -> ManifestStore | None:
     """
     if not entry.has_manifests:
         return None
+    if entry.manifest_game() in _MANIFEST_TREES:
+        store = _MANIFEST_TREES[entry.manifest_game()].store(user_game=entry.id)
+        assert isinstance(store, ManifestStore)
+        return store
     if _FACTORIES.get(entry.id) is _for_wotlk:
         return wotlk_modules.store(user_game=entry.id)
     stores: dict[str, Callable[[], ManifestStore]] = {

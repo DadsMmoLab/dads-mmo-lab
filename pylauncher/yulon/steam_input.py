@@ -739,6 +739,23 @@ def consoleport_chosen(play_dir: Path | None) -> bool:
         return False
 
 
+def consoleport_module_installed(server_dir: Path) -> bool:
+    """Whether this server installed the ConsolePort module into its own client (T855).
+
+    Read at press time, off the GUI thread like `consoleport_chosen`, from the
+    clone folders the Modules tab itself reads: `sql_scripts/clones/consoleport`
+    is there exactly while the tab says Installed. A CoA server has no
+    ready-to-play client and no pack record, so the module's own record is the
+    switch the pack choice is on WotLK.
+    """
+    from yulon import apply as _apply
+
+    try:
+        return "consoleport" in _apply.installed_clones(server_dir).get("mod", frozenset())
+    except OSError:
+        return False
+
+
 __all__ = [
     "CONFIGSET_FILE",
     "LAYOUT_FILE",
@@ -751,6 +768,7 @@ __all__ = [
     "apply",
     "apply_for_game",
     "consoleport_chosen",
+    "consoleport_module_installed",
     "layout_bytes",
     "layout_keys",
     "plan",

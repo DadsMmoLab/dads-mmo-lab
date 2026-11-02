@@ -15,6 +15,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 
 ### New
 - WotLK, Unbound and Centurion can use the ConsolePort controller add-on, kept up to date, with a Steam Deck controller layout.
+- Conquest of Azeroth can install the ConsolePort controller add-on from its Modules tab.
 ### Fixed
 
 ### Changed

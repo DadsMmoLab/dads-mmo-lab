@@ -3437,7 +3437,6 @@
                 "purpose": "Problems with Yu'lon itself: installing, starting, and this app."
             }
         ],
-        "manifests_from": "wow-wotlk",
         "realmlist": {
             "table": "realmlist",
             "address_column": "address",
