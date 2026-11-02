@@ -707,6 +707,8 @@ def test_a_stop_after_the_first_chunk_ends_the_fetch_and_deletes_the_part(tmp_pa
     opener = ServingOpener(DATABASE_ZIP, after_first_read=stop.set)
     with pytest.raises(InstallStopped, match="the install was stopped"):
         fetch(mop_like(), server_dir, opener=opener, cancel=stop)
+    # `opener.reads == 64` below is what proves the fetch's own Stop check: the unpack's
+    # later check would raise the same InstallStopped.
     assert opener.reads == 64, "the first chunk arrived, then the cancel was seen"
     assert not (server_dir / f"{DEST}.download.zip").exists()
     assert not (server_dir / f"{DEST}.download.zip.part").exists()
@@ -742,3 +744,96 @@ def test_a_stale_zip_on_disk_is_deleted_and_fetched_once_through_the_fence(
     fetch(mop_like(), server_dir, opener=opener)
     assert len(opener.requests) == 1
     assert (dest_of(server_dir) / "auth.sql").is_file()
+
+
+def test_a_stop_before_the_first_byte_never_reaches_the_opener(tmp_path: Path) -> None:
+    """A Stop pressed before the request is honoured without connecting (T850-M3)."""
+    opener = ServingOpener(DATABASE_ZIP)
+    path = tmp_path / "db.download.zip"
+    with pytest.raises(InstallStopped, match="the install was stopped"):
+        verified_download.fetch_bounded(
+            MOP_DATABASE_URL,
+            path,
+            size=len(DATABASE_ZIP),
+            hosts=RELEASE_HOSTS,
+            opener=opener,
+            cancelled=lambda: True,
+        )
+    assert opener.requests == [], "the opener was never asked"
+    assert not path.exists()
+    assert not (tmp_path / "db.download.zip.part").exists()
+
+
+def test_a_failed_rename_deletes_the_part_and_is_refused_as_unwritable(
+    tmp_path: Path,
+) -> None:
+    """A folder at `path` breaks the rename, so the part is deleted, not left (T850-M3)."""
+    opener = ServingOpener(DATABASE_ZIP)
+    path = tmp_path / "db.download.zip"
+    path.mkdir()
+    with pytest.raises(InstallerError, match=re.escape("could not be written")):
+        verified_download.fetch_bounded(
+            MOP_DATABASE_URL,
+            path,
+            size=len(DATABASE_ZIP),
+            hosts=RELEASE_HOSTS,
+            opener=opener,
+            cancelled=lambda: False,
+        )
+    assert path.is_dir(), "the folder that broke the rename is left as it is"
+    assert not (tmp_path / "db.download.zip.part").exists()
+
+
+def test_the_progress_callback_logs_about_every_tenth_and_the_full_size(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A small `size` over 64-byte chunks: lines arrive and the last says the full size."""
+    from yulon.catalog.families import trinitycore as trinitycore_family
+
+    body = b"x" * (1 << 20)
+    opener = ServingOpener(body, chunk=64)
+    path = tmp_path / "db.download.zip"
+    zip_name = "LoA-Pandaria-Playerbots-v1.0.4-win64-database.zip"
+    with caplog.at_level("INFO", logger="yulon.catalog.families.trinitycore"):
+        verified_download.fetch_bounded(
+            MOP_DATABASE_URL,
+            path,
+            size=len(body),
+            hosts=RELEASE_HOSTS,
+            opener=opener,
+            cancelled=lambda: False,
+            progress=trinitycore_family._release_progress(zip_name, len(body)),
+        )
+    said = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "yulon.catalog.families.trinitycore"
+        and record.getMessage().startswith("Downloading")
+    ]
+    assert said, "progress lines are emitted"
+    assert said[-1] == f"Downloading {zip_name}: 1 of 1 MB", "the last says the full size"
+
+
+def test_the_progress_callback_logs_every_sixteen_megabytes_for_a_large_asset(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The 142 MB asset's 10% is rarer than 16 MB never: the floor wins (T850-M3)."""
+    from yulon.catalog.families import trinitycore as trinitycore_family
+
+    zip_name = "LoA-Pandaria-Playerbots-v1.0.4-win64-database.zip"
+    size = 142 << 20
+    note = trinitycore_family._release_progress(zip_name, size)
+    with caplog.at_level("INFO", logger="yulon.catalog.families.trinitycore"):
+        note(1 << 20, size)
+        note(16 << 20, size)
+        note(size, size)
+    said = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "yulon.catalog.families.trinitycore"
+        and record.getMessage().startswith("Downloading")
+    ]
+    assert said == [
+        f"Downloading {zip_name}: 16 of 142 MB",
+        f"Downloading {zip_name}: 142 of 142 MB",
+    ]

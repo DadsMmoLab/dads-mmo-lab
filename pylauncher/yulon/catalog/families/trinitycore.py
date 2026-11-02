@@ -345,6 +345,32 @@ class SnapshotChanges:
         return bool(self.reimport or self.parts or self.everything)
 
 
+_DOWNLOAD_PROGRESS_STEP = 16 << 20
+"""Longest a release-asset download goes without a line in the log (T850-M3)."""
+
+
+def _release_progress(zip_name: str, size: int) -> Callable[[int, int], None]:
+    """A `fetch_bounded` progress callback that logs about every tenth of the download (T850-M3).
+
+    About every 10% of `size`, or every 16 MB, whichever is rarer, plus the final
+    line: `Downloading <zip>: 48 of 142 MB`. The stage is a generator and the fetch
+    is one blocking call, so these cannot be yielded live the way a sink's lines are
+    (`CmangosInstaller._stream`); they go to the module log instead. No `progress=`
+    callback-into-yields pattern exists in any family stage to copy.
+    """
+    step = max(size // 10, _DOWNLOAD_PROGRESS_STEP)
+    said = 0
+
+    def note(done: int, total: int) -> None:
+        nonlocal said
+        if done < total and done - said < step:
+            return
+        said = done
+        logger.info(f"Downloading {zip_name}: {done / (1 << 20):.0f} of {total / (1 << 20):.0f} MB")
+
+    return note
+
+
 class TrinityCoreInstaller(CmangosInstaller):
     """Install a TrinityCore server: sparse clone, build, client data, conf, SQL plan, start."""
 
@@ -566,6 +592,7 @@ class TrinityCoreInstaller(CmangosInstaller):
                     hosts=RELEASE_HOSTS,
                     opener=self._release_opener,
                     cancelled=lambda: ctx.cancel is not None and ctx.cancel.is_set(),
+                    progress=_release_progress(zip_name, asset.size),
                 )
             yield from verified_download.download_verified(
                 asset.url,

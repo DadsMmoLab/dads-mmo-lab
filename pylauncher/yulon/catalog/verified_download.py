@@ -114,8 +114,10 @@ def fetch_bounded(
     ends. A body of MORE than `size` bytes stops the fetch the moment `size + 1` have
     arrived, and the part is DELETED: GitHub answers a release download with a signed
     redirect a second request cannot resume, so a half file is worth nothing (MoP's
-    zip is 142 MB). `cancelled()` is asked between chunks and raises the stage's stop
-    the way `_check_cancel` does, the part deleted for the same reason.
+    zip is 142 MB). `cancelled()` is asked once before the opener is called and then
+    between chunks, and raises the stage's stop the way `_check_cancel` does, the part
+    deleted for the same reason. The rename onto `path` is inside the same cleanup:
+    a failed rename deletes the part and is refused as unwritable below.
 
     A file already at `path` is handed back unread: `download_verified()` proves it
     by size and sha256 and, if it fails, deletes it and calls here again, which then
@@ -124,6 +126,8 @@ def fetch_bounded(
     """
     if path.is_file():
         return path
+    if cancelled():
+        raise InstallStopped(_cancelled_message("the install"))
     part = path.with_name(path.name + ".part")
     path.parent.mkdir(parents=True, exist_ok=True)
     done = 0
@@ -168,7 +172,11 @@ def fetch_bounded(
     except BaseException:
         part.unlink(missing_ok=True)
         raise
-    part.replace(path)
+    try:
+        part.replace(path)
+    except OSError as exc:
+        part.unlink(missing_ok=True)
+        raise InstallerError(f"{path} could not be written: {exc}") from exc
     return path
 
 
