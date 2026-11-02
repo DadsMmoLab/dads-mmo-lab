@@ -27,6 +27,7 @@ from yulon.client_packs import (
     PackUnavailable,
     fetch_github_release,
 )
+from yulon.update import _Deadline
 
 REPO = "SuttonX/ConsolePortLK-Enhanced"
 ASSET = "ConsolePortLK-Enhanced.zip"
