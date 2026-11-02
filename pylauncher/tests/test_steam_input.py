@@ -80,13 +80,14 @@ def test_layout_keys_name_with_colon_only_strips_it() -> None:
 
 
 def test_the_shipped_layout_is_the_research_example_with_the_lead_title() -> None:
+    """The layout is the T853 research example, pinned by sha256 (the research notes are not in
+    the repo, so the pin is what holds it): any edit to the shipped file must be deliberate."""
     text = _shipped_text()
-    research = (
-        Path("/home/perzi/dads-mmo-lab/.notes/research/T853-controller_neptune.example.vdf")
-        .read_text(encoding="utf-8")
-        .replace("Yu'lon ConsolePort (WoW)", "Yu'lon: ConsolePort (WoW)")
-    )
-    assert text == research
+    pinned = "dce7cfc4e99b81066d7ce311edbbd3fccf6fbf75f5dfdd13ee209f35474ec6ef"
+    assert hashlib.sha256(_shipped()).hexdigest() == pinned
+    assert "Yu'lon: ConsolePort (WoW)" in text
+    for binding in ("key_press F11", "key_press F10", "key_press F12", "key_press F9"):
+        assert binding in text, binding
     assert text.count('"group"') > 1, "duplicate group keys survive: no dict round-trip"
     assert text.count('"preset"') == 1
     assert text.count("{") == text.count("}")
