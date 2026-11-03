@@ -14,8 +14,9 @@ name: ci
 # seconds after it.
 #
 # So the fast checks no longer wait behind Docker. The test matrix deselects
-# the marker and answers in about 80 seconds; `integration` runs the same 16
-# tests it always did, in parallel, on its own runner.
+# the marker; its slowest leg takes about 15 minutes (2026-11-04, fork run on
+# #36). `integration` runs the same 16 tests it always did, in parallel, on its
+# own runner.
 #
 # The 41 minutes turned out not to be inherent to those tests either - it was
 # four of them waiting out a stop grace, fixed in tests/integration/conftest.py.
@@ -136,7 +137,7 @@ jobs:
       - name: mypy (types, as macOS)
         run: python -m mypy --platform darwin yulon main.py
 
-  lint-type-test:
+  test:
     runs-on: ubuntu-latest
     # Measured 2026-09-29 over 19 runs: each leg took 10-15 minutes, most of
     # them over 13, and two were cancelled by the old 15-minute limit, one
@@ -347,7 +348,7 @@ jobs:
       # The daemon must be REACHED, not assumed. Every test in this job skips
       # itself when `docker info` fails, so a runner image that dropped Docker
       # would turn this job into a green no-op - which is exactly the silence
-      # that let the suite run unnoticed inside `lint-type-test` for weeks.
+      # that let the suite run unnoticed inside the test job for weeks.
       - name: A daemon has to be there for this job to mean anything
         run: docker info > /dev/null
 

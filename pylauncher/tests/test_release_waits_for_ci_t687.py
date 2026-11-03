@@ -135,9 +135,9 @@ def test_the_workflow_token_is_read_only_by_default() -> None:
 def test_the_called_ci_still_tests() -> None:
     """The gate is only as good as what it calls: the suite, the live suite, both OSes."""
     jobs = CI["jobs"]
-    for name in ("lint-type-test", "integration", "platform-smoke"):
+    for name in ("test", "integration", "platform-smoke"):
         assert name in jobs, f"ci.yml lost {name}"
-    runs = [str(step.get("run", "")) for step in _steps(jobs["lint-type-test"])]
+    runs = [str(step.get("run", "")) for step in _steps(jobs["test"])]
     assert any("python -m pytest" in run for run in runs)
 
 

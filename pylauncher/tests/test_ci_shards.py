@@ -8,6 +8,7 @@ untouched. Collected for real, in a subprocess, on a small file with many parame
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 import zlib
@@ -97,7 +98,26 @@ def test_a_shard_outside_the_count_is_refused() -> None:
 def test_ci_runs_exactly_the_shards_this_file_tests() -> None:
     """The matrix and the pytest line cannot drift from SHARDS without a red test."""
     ci = yaml.safe_load(CI.read_text(encoding="utf-8"))
-    job = ci["jobs"]["lint-type-test"]
+    job = ci["jobs"]["test"]
     assert job["strategy"]["matrix"]["shard"] == list(range(SHARDS))
     runs = [str(step.get("run", "")) for step in job["steps"]]
-    assert any(f"--num-shards {SHARDS}" in run for run in runs), runs
+    sharded = [run for run in runs if "--shard-id" in run]
+    assert len(sharded) == 1, runs
+    expected = re.escape(f"--shard-id ${{{{ matrix.shard }}}} --num-shards {SHARDS}")
+    assert re.search(rf"{expected}\b", sharded[0]), sharded[0]
+
+
+def test_the_checker_job_runs_on_both_pythons_with_every_pass() -> None:
+    """Before T868 mypy ran on 3.11 and 3.13; splitting the job must not drop either."""
+    ci = yaml.safe_load(CI.read_text(encoding="utf-8"))
+    job = ci["jobs"]["lint-type"]
+    assert job["strategy"]["matrix"]["python-version"] == ["3.11", "3.13"]
+    runs = [str(step.get("run", "")) for step in job["steps"]]
+    for command in (
+        "python -m ruff check .",
+        "python -m black --check .",
+        "python -m mypy yulon main.py",
+        "python -m mypy --platform win32 yulon main.py",
+        "python -m mypy --platform darwin yulon main.py",
+    ):
+        assert command in runs, (command, runs)
