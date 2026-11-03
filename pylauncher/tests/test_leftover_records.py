@@ -55,14 +55,55 @@ def _hold_a_file_listed_after_the_record(rec: Recorder) -> Path:
 
     `shutil.rmtree` works in listing order, so with the old order the record is certain to
     be gone before the removal reaches the held file. The listing order is this filesystem's
-    own; the test reads it rather than assuming one.
+    own; the test reads it rather than assuming one. Some filesystems (ext4 hashes a
+    directory per filesystem) list the record after every folder, T869; adding folders gives
+    the hash other names to put after the record, so the helper adds up to 200 and reads the
+    real order again before it gives up.
     """
     listing = os.listdir(rec.server_dir)
     after = [n for n in listing[listing.index(native.STATE_FILE) + 1 :] if n.startswith("dir")]
+    for extra in range(200):
+        if after:
+            break
+        sub = rec.server_dir / f"dir{12 + extra}" / ".git" / "objects"
+        sub.mkdir(parents=True)
+        (sub / "pack.idx").write_text("x", encoding="utf-8")
+        listing = os.listdir(rec.server_dir)
+        after = [n for n in listing[listing.index(native.STATE_FILE) + 1 :] if n.startswith("dir")]
     assert after, f"this filesystem lists the record after every folder: {listing}"
     held = rec.server_dir / after[0] / HELD
     held.write_text("open in another program", encoding="utf-8")
     return held
+
+
+def test_the_helper_adds_folders_when_the_first_listing_puts_the_record_last(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T869: a listing with the record after every folder makes the helper add folders.
+
+    The first listing answers with the record last whatever the filesystem says; the helper
+    must add folders and read the real order again rather than fail.
+    Mutation: drop the added folders (assert on the first listing).
+    """
+    rec = _owned_server(tmp_path)
+    real = os.listdir
+    seen: list[list[str]] = []
+
+    def record_last_first(path: str | os.PathLike[str] = ".") -> list[str]:
+        listing = list(real(path))
+        seen.append(listing)
+        if len(seen) == 1:
+            return [n for n in listing if n != native.STATE_FILE] + [native.STATE_FILE]
+        return listing
+
+    monkeypatch.setattr(os, "listdir", record_last_first)
+
+    held = _hold_a_file_listed_after_the_record(rec)
+
+    assert len(seen) > 1, "the helper took the first listing's word for the order"
+    listing = os.listdir(rec.server_dir)
+    assert held.parent.name in listing[listing.index(native.STATE_FILE) + 1 :], listing
+    assert held.is_file()
 
 
 @pytest.fixture
