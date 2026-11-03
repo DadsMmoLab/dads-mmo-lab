@@ -15,8 +15,10 @@ The tip the catalog pinned since v0.9.18, d750b4b3 (891 keys), adds three more a
 none: `RandomBotJoinLfgOutleveledExpansion`, `AllowBattlegroundCommands` and
 `RpgStatusProbWeight.DoGather`, all under `Playerbots.`. The next tip, e88cc409 (T824,
 2026-10-28), is the same file byte for byte except one comment line at :1642 (the battleground
-command note), so it is 891 keys and no rename either.
-The `GetOption` literals in `src/` agree (395 and 396). So a key's own name is kept
+command note), so it is 891 keys and no rename either. The tip T860 pins, 05a1f6f
+(2026-11-02), adds four keys and renames none: `AutoPickTalentsForPlayerControlledBots`,
+`RpgTargetSearchDistance`, `CollectDetailedQuestStats` and `ProbTeleToQuestGivers`, so it is
+895 keys. The `GetOption` literals in `src/` agree (395 and 396). So a key's own name is kept
 and its prefix is swapped, in both directions.
 
 **Three kinds of name the swap never touches**, read in both trees:

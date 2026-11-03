@@ -2072,7 +2072,8 @@ Read out of the pinned sources on m910q, 2026-09-05, at the two revisions
 `catalog.json` named then -- `cmangos/mangos-classic` 8ec338a1
 (`contrib/vmap_extractor/vmapextract/vmapexport.cpp:472-483`) and
 `cmangos/mangos-tbc` f82e7d67 (the same file, :522-533); `contrib/` is byte-identical at
-the current pins 57312491 and 37767e95 (T824's GitHub compare). Re-read at both
+the current pins af6b4885 and ff13624a (T860's GitHub compare; T824's at 57312491 and
+37767e95). Re-read at both
 revisions on yulon-fedora 2026-09-05 (`~/probe10`, `git init` + `git fetch
 --depth 1` BY SHA): the twelve lines are byte-identical at the two revisions,
 and the condition is an OR over exactly these two paths -- quoted whole,

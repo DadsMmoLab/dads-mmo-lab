@@ -43,9 +43,9 @@ them as measured:
    announces itself rather than a silently wrong row, which is why it is
    documented instead of guarded by a guess.
 2. **The length ceilings** -- read since (T673, 2026-10-11; re-read at 57312491 for T824,
-   2026-10-28): mangos-classic takes names of up to 16 characters, one fewer than AzerothCore's
-   17, and passwords of up to 16. The shared writer applies this core's own
-   through `account_rules`, and `MAX_USERNAME` below is this core's 16.
+   2026-10-28 and at ff13624a for T860, 2026-11-02): mangos-classic takes names of up to
+   16 characters, one fewer than AzerothCore's 17, and passwords of up to 16. The shared
+   writer applies this core's own
 """
 
 from __future__ import annotations

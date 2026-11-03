@@ -26,6 +26,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 
 ### Changed
 - Centurion and Mists of Pandaria on Windows build their map data inside Docker, not through the slow Windows folder share.
+- Every game's server now builds from its newest upstream version (WotLK, Unbound, TBC, Vanilla, Centurion, Conquest of Azeroth).
 
 ## v0.9.30-Public — 2026-11-01
 
