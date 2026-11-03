@@ -3,7 +3,15 @@
 Every release of Yu'lon, newest first.
 
 <!--
-How to add a line: under "## Unreleased
+How to add a line: under "## Unreleased" use only the headings "### New", "### Fixed" and "### Changed".
+One plain line per change, at most about 120 characters, saying what the player gets. Bold button names are fine;
+ticket ids, proof, test notes, numbers as evidence, backticks and commands are not: they go in the pull request.
+New: Set a server's time zone on the Tuning tab with **Server time zone**.
+Fixed: Sending gold to a character no longer crashes the app.
+Changed: Opening Yu'lon while it is already running brings the open window to the front.
+-->
+
+## Unreleased
 
 ### New
 - Mists of Pandaria 5.4.8 (LoA Pandaria with 500 playerbots) can be installed; bring the Recall WoW client.
