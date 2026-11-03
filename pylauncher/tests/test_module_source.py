@@ -168,7 +168,7 @@ def test_a_dotted_name_says_why_the_dot_cannot_be_compiled() -> None:
     """N6: the sentence names the loader, so a refusal of an ordinary-looking name is legible."""
     message = _refused(lambda: _link("https://github.com/u/My_Addon.v2"))
 
-    assert "dot" in message and "Add<folder>Scripts" in message
+    assert "dot" in message and "finds the module's code by its folder name" in message
     assert message.endswith(NOTHING_CHANGED)
 
 

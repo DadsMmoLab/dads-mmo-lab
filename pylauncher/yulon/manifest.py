@@ -191,8 +191,9 @@ def folder_refusal(
     if not FOLDER_NAME.fullmatch(value):
         return (
             "a module's folder must be one plain folder name — letters, digits, underscores "
-            "and hyphens, starting with a letter or digit and at most 100 characters, with no "
-            "dot: the server builds `Add<folder>Scripts` from it, and a dot would not compile"
+            "and hyphens, starting with a letter or digit and at most 100 characters, with "
+            "no dot: the server finds the module's code by its folder name, and a dot "
+            "would not compile"
         )
     if windows_names and value.casefold() in WINDOWS_RESERVED_FOLDERS:
         return (
