@@ -6562,6 +6562,10 @@ NETWORK_HINT = (
 RESTORE_PICK = "Pick a backup in the list, then press Show restore plan."
 RESTORE_NO_BACKUPS = "There are no backups yet. Press Back up now to make one."
 RESTORE_REFUSED = "This backup cannot be restored right now; the plan in the Restore box says why."
+FREE_DOCKER_SPACE_WAITS_FOR_DISTRO = (
+    f"{server_build_presses.FREE_DOCKER_SPACE} waits for this server's WSL distro: "
+    "Docker is read once it is running."
+)
 RESTORE_WAITS_FOR_DISTRO = (
     "Restore waits for this server's WSL distro: the backups are listed once it is running."
 )
@@ -19211,6 +19215,7 @@ class ControllerView(QWidget):
         """Re-list the backups directory. Reading a directory, not doing any work."""
         if self._waits_for_the_distro("backups", self.refresh_backups):
             set_enabled_why(self.restore_button, self._restore_waits_for())
+            self._settle_docker_space_button()
             return
         self._restore_plan = None
         self.backup_list.clear()
@@ -19366,6 +19371,8 @@ class ControllerView(QWidget):
             return wait_for(self._docker_space_job)
         if self._busy:
             return wait_for(self._busy_job)
+        if "backups" in self._waiting_on_distro:
+            return FREE_DOCKER_SPACE_WAITS_FOR_DISTRO
         return self._shelf_waits_for()
 
     def _settle_docker_space_button(self) -> None:
@@ -24333,7 +24340,8 @@ class ControllerView(QWidget):
 
     @Slot(object)
     def _kept_build_removed(self, result: object) -> None:
-        self.problem_label.setText(str(result))
+        line = result.line if isinstance(result, native.KeptBuildRemoved) else str(result)
+        self.problem_label.setText(line)
         self._set_busy(False)
         self.check_kept_build()
 

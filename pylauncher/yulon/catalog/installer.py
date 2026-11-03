@@ -1331,7 +1331,9 @@ class InstallEngine(Protocol):
     No `ask`, for `rebuild`'s reason: this route provisions nothing.
     """
 
-    def remove_kept_build(self, options: InstallOptions | None = None) -> str: ...
+    def remove_kept_build(
+        self, options: InstallOptions | None = None
+    ) -> native.KeptBuildRemoved: ...
 
     def reserved(
         self, server_dir: Path, press: str

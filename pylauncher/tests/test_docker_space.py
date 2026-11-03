@@ -283,12 +283,14 @@ def test_choice_defaults_tick_cache_and_old_builds_but_not_the_kept_build() -> N
     assert docker_space.Choice().kept_build is False
 
 
-def _kept_route(recorded: list[str], sentence: str = "kept gone") -> native.KeptBuildRoute:
+def _kept_route(
+    recorded: list[str], sentence: str = "kept gone", *, ok: bool = True
+) -> native.KeptBuildRoute:
     """A kept-build route whose `remove()` records into the shared `recorded` list."""
 
-    def remove() -> str:
+    def remove() -> native.KeptBuildRemoved:
         recorded.append("kept-remove")
-        return sentence
+        return native.KeptBuildRemoved(ok=ok, line=sentence)
 
     return native.KeptBuildRoute(check=lambda: "kept", remove=remove, size=lambda: None)
 
@@ -347,7 +349,7 @@ def test_carry_out_removes_old_builds_then_kept_then_cache_in_order(
     assert calls == ["rm:aaa", "rm:bbb", "rm:held", "kept-remove", "prune"]
     assert freed.lines == (
         "Yu'lon's old untagged builds: removed 1, up to 20.0 GB. "
-        "1 still held by a stopped container was left.",
+        "1 still used by a container was left.",
         "kept gone",
         "Docker's build cache: removed, 28.0 GB freed.",
     )
@@ -447,6 +449,42 @@ def test_a_build_press_running_refuses_and_touches_nothing(
     assert taken == [], "pre-lease check deleted: the lease was taken first"
 
 
+def test_a_compiling_stage_loop_refuses_with_the_install_sentence(tmp_path: Path) -> None:
+    """R3: an install compiling before `start-db` holds no reservation, yet still refuses."""
+    assert docker_space.build_press_refusal() is None
+    with docker.building(tmp_path / "wow"):
+        refused = docker_space.build_press_refusal()
+    assert refused is not None and native.INSTALL_PRESS in refused, refused
+    assert refused.endswith("Nothing was removed.")
+    assert docker_space.build_press_refusal() is None
+
+
+def test_the_compiling_flag_drops_when_a_stage_fails(tmp_path: Path) -> None:
+    """R3: whatever exit the stage loop takes, the flag goes with it (success, error, cancel)."""
+    from collections.abc import Iterator
+
+    from tests.support_native import Recorder, install
+    from tests.test_spine import _build, _family
+    from yulon.catalog.installer import InstallerError, InstallOptions
+
+    rec = Recorder()
+    server_dir = tmp_path / "wow"
+    install(rec, server_dir)
+    rec.calls.clear()
+
+    def _boom(ctx: native.StageContext) -> Iterator[str]:
+        refused = docker_space.build_press_refusal()
+        assert refused is not None and native.INSTALL_PRESS in refused, refused
+        yield "compiling"
+        raise InstallerError("the build died")
+
+    family = _family(lambda me: (native.Stage("build", _boom),))
+    with pytest.raises(InstallerError):
+        list(_build(rec, family).run(InstallOptions(server_dir=server_dir)))
+    assert docker.builds_running() is False
+    assert docker_space.build_press_refusal() is None
+
+
 def test_a_taken_lease_refuses_and_removes_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -495,6 +533,24 @@ def test_windows_note_last_on_windows_and_absent_on_linux(
         wsl_distro=None,
     )
     assert all(line != docker_space.WINDOWS_NOTE for line in freed.lines)
+
+
+def test_a_failed_kept_build_removal_is_shown_as_is_with_no_windows_note(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2: a kept-build Docker refused is not "freed": its line stands, and no note follows."""
+    monkeypatch.setattr(docker_space, "_old_builds", lambda distro: ())
+    monkeypatch.setattr(docker, "build_cache_bytes", lambda **_: 1)
+    kept = _kept_route([], "The kept build was not removed: boom.", ok=False)
+    monkeypatch.setattr(docker_space.platform, "detect", lambda: "windows")
+    freed = docker_space.carry_out(
+        tmp_path,
+        docker_space.Choice(cache=False, old_builds=False, kept_build=True),
+        kept_build=kept,
+        spec=None,
+        wsl_distro=None,
+    )
+    assert freed.lines == ("The kept build was not removed: boom.",)
 
 
 def test_no_player_text_carries_a_backtick() -> None:

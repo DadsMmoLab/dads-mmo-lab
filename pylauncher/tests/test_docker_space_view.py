@@ -127,6 +127,25 @@ def test_while_a_rebuild_is_busy_the_press_names_the_wait_and_reads_nothing(
     assert seam.read_calls == 0
 
 
+def test_a_distro_wait_greys_the_button_and_pressing_reads_nothing(
+    qapp: object,
+    ps: _Ps,  # noqa: F811
+    tmp_path: Path,
+    made: _FakeMaintenance,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R1: while the backups wait for a stopped distro, the press is greyed and reads nothing."""
+    seam = FakeSpace(_space())
+    view = make_view(ps, tmp_path, made, monkeypatch, seam=seam)
+    view._waiting_on_distro["backups"] = view.refresh_backups
+    view._settle_docker_space_button()
+    assert not view.free_docker_space_button.isEnabled()
+    assert view.free_docker_space_button.toolTip() == view_module.FREE_DOCKER_SPACE_WAITS_FOR_DISTRO
+    view.free_docker_space()
+    assert view_module.FREE_DOCKER_SPACE_WAITS_FOR_DISTRO in view.maintenance_report.toPlainText()
+    assert seam.read_calls == 0
+
+
 # -- 22-23. read, agree, report; cancel ----------------------------------------
 
 

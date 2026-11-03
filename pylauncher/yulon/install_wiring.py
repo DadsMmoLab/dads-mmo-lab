@@ -1285,11 +1285,13 @@ def kept_build_for_app(
     return KeptBuildRoute(
         check=lambda: parked_build_note(server_dir),
         remove=lambda: installer_for_app(entry).remove_kept_build(options),
-        size=lambda: _kept_build_bytes(entry, server_dir),
+        size=lambda: _kept_build_bytes(entry, server_dir, wsl_distro=wsl_distro),
     )
 
 
-def _kept_build_bytes(entry: CatalogEntry, server_dir: Path) -> int | None:
+def _kept_build_bytes(
+    entry: CatalogEntry, server_dir: Path, *, wsl_distro: str | None = None
+) -> int | None:
     """What this install's kept `-parked` images take, up to (T864); None unknown. Never raises."""
     try:
         engine = installer_for_app(entry)
@@ -1298,7 +1300,7 @@ def _kept_build_bytes(entry: CatalogEntry, server_dir: Path) -> int | None:
         names = [ref + PARKED_TAG_SUFFIX for ref in engine.image_refs_at(server_dir)]
         if not names:
             return None
-        facts = docker.image_facts(names)
+        facts = docker.image_facts(names, wsl_distro=wsl_distro)
         if not facts:
             return None
         return sum(f.size for f in facts)

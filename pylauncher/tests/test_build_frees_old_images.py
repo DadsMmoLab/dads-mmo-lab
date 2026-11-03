@@ -63,6 +63,12 @@ def test_an_in_use_image_yields_no_line_but_is_still_listed_next_time(
     said = list(engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
     assert said[-1] == f"{ENTRY.name} was rebuilt and is running in {server_dir}"
     assert all("old images" not in line for line in said)
+    rec.dangling_asked.clear()
+    rec.unused_removed.clear()
+    said = list(engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
+    assert rec.dangling_asked == [f"{docker.PROJECT_LABEL}={_project(server_dir, rec)}"]
+    assert rec.unused_removed == ["aaa"]
+    assert said[-1] == f"{ENTRY.name} was rebuilt and is running in {server_dir}"
 
 
 def test_a_failed_rebuild_never_lists(tmp_path: Path) -> None:

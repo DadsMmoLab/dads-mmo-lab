@@ -8298,6 +8298,35 @@ def prune_build_cache(*, wsl_distro: str | None = None) -> str:
     return said
 
 
+_BUILDING: int = 0
+"""How many install, rebuild or update stage loops of this process compile now (T864 R3)."""
+
+
+@contextmanager
+def building(server_dir: Path | str) -> Iterator[None]:
+    """Count the caller as compiling, from the first stage to the last (T864 R3).
+
+    No reservation, no refusal, never raises: `build_press_refusal()` asks
+    `builds_running()`, and an install only takes its reservation at `start-db`,
+    after `build`. Thread-safe like `_press_on()`'s bookkeeping; `server_dir`
+    is accepted and ignored so the stage loop reads plainly.
+    """
+    global _BUILDING
+    with _HOLD_LOCK:
+        _BUILDING += 1
+    try:
+        yield
+    finally:
+        with _HOLD_LOCK:
+            _BUILDING -= 1
+
+
+def builds_running() -> bool:
+    """Whether any install, rebuild or update stage loop of this process compiles now (T864 R3)."""
+    with _HOLD_LOCK:
+        return _BUILDING > 0
+
+
 def presses_running() -> tuple[str, ...]:
     """Every press inside a reservation of any server in this process (T864)."""
     with _HOLD_LOCK:

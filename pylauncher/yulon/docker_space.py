@@ -78,8 +78,7 @@ CACHE_NOTE = (
 )
 OLD_BUILDS_NOTE = (
     "Old images that earlier builds of Yu'lon's servers left behind with no name, including "
-    "servers you removed. No server runs on them; one that a stopped container still holds is "
-    "left alone."
+    "servers you removed. One that a container still uses is left alone."
 )
 KEPT_NOTE = (
     f"The build this server kept from before its last rebuild. The next "
@@ -232,7 +231,10 @@ def build_press_refusal() -> str | None:
     """Why the press must not run now, or None when no build press runs here (T864 D2).
 
     Any install/rebuild/update press in a reservation of any server in this
-    process builds with Docker, so freeing beside it is refused.
+    process builds with Docker, so freeing beside it is refused. An install
+    only takes its reservation at `start-db`, after `build`, so a stage loop
+    that compiles (`docker.builds_running()`, T864 R3) refuses with the
+    install's sentence too.
     """
     from yulon.catalog import native  # noqa: PLC0415
 
@@ -248,6 +250,11 @@ def build_press_refusal() -> str | None:
                 f"“{press}” is running in this Yu'lon, and it builds with Docker. "
                 "Wait for it to finish, then try again. Nothing was removed."
             )
+    if docker.builds_running():
+        return (
+            f"“{native.INSTALL_PRESS}” is running in this Yu'lon, and it builds with Docker. "
+            "Wait for it to finish, then try again. Nothing was removed."
+        )
     return None
 
 
@@ -354,17 +361,15 @@ def _free_under_the_lease(
                 f"up to {gb_text(freed_bytes)}."
             )
             if held:
-                line += (
-                    f" {held} still held by a stopped container "
-                    f"{'was' if held == 1 else 'were'} left."
-                )
+                line += f" {held} still used by a container {'was' if held == 1 else 'were'} left."
             if failed:
                 line += f" {failed} could not be removed; the log says why."
             lines.append(line)
             removed_any = removed_any or removed > 0
     if choice.kept_build and kept_build is not None:
-        lines.append(kept_build.remove())
-        removed_any = True
+        outcome = kept_build.remove()
+        lines.append(outcome.line)
+        removed_any = removed_any or outcome.ok
     if choice.cache:
         before = docker.build_cache_bytes(wsl_distro=wsl_distro)
         said = docker.prune_build_cache(wsl_distro=wsl_distro)

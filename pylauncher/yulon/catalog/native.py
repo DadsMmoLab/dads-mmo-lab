@@ -4641,17 +4641,28 @@ def _no_size() -> int | None:
 
 
 @dataclass(frozen=True)
+class KeptBuildRemoved:
+    """What letting go of the kept build did: its sentence, and whether it went (T864 R2)."""
+
+    ok: bool
+    """True once no `-parked` name is left: the record is forgotten and the build is gone."""
+    line: str
+    """The sentence for the player, on either exit."""
+
+
+@dataclass(frozen=True)
 class KeptBuildRoute:
     """The two halves of the Server tab's kept-build banner (T224, D3), wired for one install.
 
     `check` reads only `PARKED_BUILD_FILE` and never raises: the note, or None.
-    `remove` lets the `-parked` names go and forgets the record, and returns the
-    sentence that says what it did.
+    `remove` lets the `-parked` names go and forgets the record, and returns
+    `KeptBuildRemoved`: `ok` says whether anything counts as freed (T864 R2),
+    `line` the sentence that says what it did.
     `size` is what the `-parked` images take, up to (T864); None unknown.
     """
 
     check: Callable[[], str | None]
-    remove: Callable[[], str]
+    remove: Callable[[], KeptBuildRemoved]
     size: Callable[[], int | None] = _no_size
 
 
@@ -8831,7 +8842,7 @@ class StagedInstaller:
         reservation = ExitStack()
         reserved = False
         try:
-            with reservation, self._held_awake() as note:
+            with reservation, self._held_awake() as note, docker.building(ctx.server_dir):
                 if note:
                     yield note
                 try:
@@ -11004,31 +11015,37 @@ class StagedInstaller:
         yield f"{self.entry.name} was rebuilt and is running in {server_dir}"
 
     @_reserving_call(REMOVE_KEPT_BUILD_LABEL)
-    def remove_kept_build(self, options: InstallOptions | None = None) -> str:
+    def remove_kept_build(self, options: InstallOptions | None = None) -> KeptBuildRemoved:
         """Remove the kept build now: "Remove kept build…" on the Server tab (T224, D3).
 
         Every `<ref>-parked` name is let go (`_let_go()`, whose `-f` covers a stopped
         container), and only when none is left is the record forgotten: a name Docker
         kept, or a Docker that did not answer, leaves the build recorded and the
         banner up (Codex adversarial review). `remove_image()` reads "no such image"
-        as done. Returns the sentence; never raises for Docker's refusals.
+        as done. Returns `KeptBuildRemoved`; never raises for Docker's refusals.
         """
         server_dir = self.server_dir(options or InstallOptions())
         names = [ref + PARKED_TAG_SUFFIX for ref in self.image_refs_at(server_dir)]
         left = self._let_go(names)
         if left:
-            return (
-                f"The kept build was not removed: Docker would not remove {', '.join(left)} (the "
-                f"log says why). It is still kept; press {REMOVE_KEPT_BUILD_LABEL} again once "
-                f"Docker answers."
+            return KeptBuildRemoved(
+                ok=False,
+                line=(
+                    f"The kept build was not removed: Docker would not remove {', '.join(left)} "
+                    f"(the log says why). It is still kept; press {REMOVE_KEPT_BUILD_LABEL} "
+                    f"again once Docker answers."
+                ),
             )
         forgot = forget_parked_build(server_dir)
         if forgot:
-            return (
-                f"The kept build was removed from Docker, but {forgot}; the next rebuild "
-                f"forgets it."
+            return KeptBuildRemoved(
+                ok=True,
+                line=(
+                    f"The kept build was removed from Docker, but {forgot}; the next rebuild "
+                    f"forgets it."
+                ),
             )
-        return "The kept build was removed."
+        return KeptBuildRemoved(ok=True, line="The kept build was removed.")
 
     # ------------------------------------------------------- update to latest (T64)
 
