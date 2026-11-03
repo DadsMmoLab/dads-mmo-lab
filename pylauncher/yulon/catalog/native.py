@@ -5194,7 +5194,11 @@ class SourceRev:
       off the catalog when the line is drawn, because the two are different
       questions: "what was this measured against" is a fact about the press,
       and a later app version that moves the pin must not be able to rewrite
-      what an earlier press did.
+      what an earlier press did. The one exception is a press that compiled
+      NOTHING: `_record_unbuilt_refresh()` refreshes `pin` (and recounts
+      `ahead`) for a build the app still describes, because that press is the
+      new app version's reading of the same build, and a pin left behind
+      withholds Revive and the mmaps stamp from it (T863-D).
     * `ahead` is how many commits `built` carries that `pin` does not, or
       `None` for "could not count". `None` and `0` are deliberately different:
       zero is "you are on the tested pin" and `None` is "nobody could say",
@@ -11791,10 +11795,16 @@ class StagedInstaller:
                         # commit stays refused. The press's own rows name
                         # folders still on their build commit, so they are
                         # forgotten.
+                        #
+                        # The row's `pin` and `ahead` are refreshed with the name
+                        # (T863-D): this app version may test against a pin that
+                        # moved while no code did, and a pin left at the old one
+                        # withholds Revive and the mmaps stamp from a build this
+                        # catalog describes (`built_carries_pin()`). `built` and
+                        # `refused_updates` are never touched here.
                         forget_sources_off(server_dir)
                         marked = {repo: said.tag for repo, said in targets.items() if said.tag}
-                        if not to_pin and marked:
-                            self._record_release_names(server_dir, marked)
+                        self._record_unbuilt_refresh(server_dir, marked)
                         if to_pin:
                             yield (
                                 f"{self.entry.name} is already on the commit this app was tested "
@@ -13038,20 +13048,9 @@ class StagedInstaller:
         """
         found: list[SourceRev] = []
         for source, dest, _old in moved:
-            built = self._seams.head_version(dest)
-            if built is None:
-                logger.warning(f"could not read what {dest} was built from; not recording it")
-                continue
-            pin = source.rev or ""
-            found.append(
-                SourceRev(
-                    repo=source.repo,
-                    built=built,
-                    pin=pin,
-                    ahead=self._seams.commits_since(dest, pin) if pin else None,
-                    release=(releases or {}).get(source.repo, ""),
-                )
-            )
+            row = self._row_for(source, dest, (releases or {}).get(source.repo, ""))
+            if row is not None:
+                found.append(row)
         if not found:
             return
         fresh = read_state(server_dir, valid=self.stage_names())
@@ -13077,30 +13076,72 @@ class StagedInstaller:
             ),
         )
 
-    def _record_release_names(self, server_dir: Path, releases: Mapping[str, str]) -> None:
-        """Name the release a no-move press kept, changing nothing else (T863, T862-E).
+    def _row_for(self, source: EmulatorSource, dest: Path, release: str) -> SourceRev | None:
+        """The row a LANDING writes for one source, or None when its built string is unreadable.
 
-        `_record_source_revs()` is the wrong tool here, and the reason is the
-        press it is now called for: it assumes a landing, rewrites
-        `built`/`pin`/`ahead` from the checkout and drops every
-        `refused_updates` entry for the repos it touches. A press that moved
-        nothing landed nowhere, and a refused commit already recorded for the
-        same repo must survive it. So this changes `release` and only `release`,
-        and only on rows that exist: without a row there is no `built` to keep
-        the name beside, and such a press could not be here (`_nothing_moved()`).
+        `_record_source_revs()` is the only caller, and it exists so `pin`/`ahead` have one
+        derivation for both writers of a row: this one, after a build, and
+        `_record_unbuilt_refresh()`, on a press that built nothing and must refresh the very
+        same two fields.
+        """
+        built = self._seams.head_version(dest)
+        if built is None:
+            logger.warning(f"could not read what {dest} was built from; not recording it")
+            return None
+        pin, ahead = self._pin_and_ahead(source, dest)
+        return SourceRev(repo=source.repo, built=built, pin=pin, ahead=ahead, release=release)
 
-        Best-effort like every write through `write_state()`: a record that
-        could not be written costs a release name, not the press.
+    def _pin_and_ahead(self, source: EmulatorSource, dest: Path) -> tuple[str, int | None]:
+        """The pin `source` names in the catalog now, and how far `dest` is ahead of it (T863).
+
+        Shared by `_row_for()` and `_record_unbuilt_refresh()` so a landing and a no-move
+        press cannot disagree about the two fields the version line and
+        `built_carries_pin()` read. `ahead` is `None` -- "nobody could say" -- where the
+        source pins nothing, as `SourceRev` says.
+        """
+        pin = source.rev or ""
+        return pin, (self._seams.commits_since(dest, pin) if pin else None)
+
+    def _record_unbuilt_refresh(self, server_dir: Path, releases: Mapping[str, str]) -> None:
+        """Refresh what a press that built nothing can still make true (T863, T862-E).
+
+        Called on the no-move exit and nowhere else. `_record_source_revs()` is the wrong
+        tool here: it assumes a landing and drops every `refused_updates` entry for the
+        repos it touches. A press that moved nothing landed nowhere, and a refused commit
+        already recorded for the same repo must survive it. So this never touches `built`
+        or `refused_updates`.
+
+        It does refresh all three of the rest, and that was a review finding: the exit
+        used to change only `release`, so a server updated to a tip H under catalog pin
+        P1 kept P1 after a new Yu'lon shipped pin P2. `built_carries_pin()` then answered
+        False -- H is past P2, not past P1 -- which withholds Revive and the mmaps stamp
+        for a build the new catalog DOES describe. The press is the new app version's
+        reading of the same build, so the pin is the one this app now tests against, and
+        `ahead` is recounted from it exactly as a landing counts it (`_pin_and_ahead()`).
+
+        Only rows that exist are changed: without a row there is no `built` to keep the
+        other fields beside, and such a press could not be here (`_nothing_moved()`), nor
+        is a row invented for a source the install record never named.
+
+        Best-effort like every write through `write_state()`, and written only when
+        something changed.
         """
         fresh = read_state(server_dir, valid=self.stage_names())
         if fresh is None:
             return
-        rows = tuple(
-            replace(rev, release=releases[rev.repo]) if rev.repo in releases else rev
-            for rev in fresh.source_revs
-        )
-        if rows != fresh.source_revs:
-            write_state(server_dir, replace(fresh, source_revs=rows))
+        sources = {source.repo: source for source in self.entry.emulator.sources}
+        rows: list[SourceRev] = []
+        for rev in fresh.source_revs:
+            source = sources.get(rev.repo)
+            if source is None:
+                rows.append(rev)
+                continue
+            pin, ahead = self._pin_and_ahead(source, server_dir / source.dest)
+            rows.append(
+                replace(rev, pin=pin, ahead=ahead, release=releases.get(rev.repo, rev.release))
+            )
+        if tuple(rows) != fresh.source_revs:
+            write_state(server_dir, replace(fresh, source_revs=tuple(rows)))
 
     def record_source_rows(self, server_dir: Path, rows: Sequence[SourceRev]) -> bool:
         """Write `rows` into the install record, keeping every other source's row (T601).

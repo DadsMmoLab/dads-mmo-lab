@@ -57,6 +57,7 @@ from yulon import (
 from yulon.apply import CLONE_DIRS
 from yulon.catalog import native
 from yulon.catalog.catalog import CatalogEntry, EmulatorSource, load_catalog
+from yulon.catalog.families.azerothcore import AzerothCoreInstaller
 from yulon.catalog.families.cmangos import CmangosInstaller
 from yulon.catalog.installer import (
     InstallerError,
@@ -148,6 +149,25 @@ def _record_the_build(
     )
     native.remember_built_from(server_dir, compiled, written=digest)
     rec.calls.clear()
+
+
+def _entry_pinning(pin: str) -> CatalogEntry:
+    """`ENTRY` with its core pinned to `pin`: a catalog that moved the pin, not the code."""
+    sources = list(ENTRY.emulator.sources)
+    sources[0] = sources[0].model_copy(update={"rev": pin})
+    emulator = ENTRY.emulator.model_copy(update={"sources": tuple(sources)})
+    return CatalogEntry.model_validate(ENTRY.model_copy(update={"emulator": emulator}).model_dump())
+
+
+def _entry_engine(rec: Recorder, entry: CatalogEntry) -> AzerothCoreInstaller:
+    """`engine()` over a catalog entry this test built rather than the shipped one (T863-D)."""
+    return AzerothCoreInstaller(
+        entry,
+        installers_root=resources.installers_dir(),
+        import_probe=rec.probe,
+        reset_unfinished=rec.reset,
+        seams=rec.seams(),
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -3245,6 +3265,65 @@ def test_a_no_move_press_keeps_a_refusal_and_only_refreshes_the_release(tmp_path
     got = after.rev_for(CORE)
     assert got is not None and got.release == "coa-bots-2.10", got
     assert replace(got, release="") == replace(before, release=""), "the build was rewritten"
+
+
+def test_a_no_move_press_names_the_pin_this_app_now_tests_against(tmp_path: Path) -> None:
+    """T863-D: the exit refreshes the row's `pin` and `ahead`, never `built` or a refusal.
+
+    A server updated to a tip H under catalog pin P1, then a new Yu'lon ships pin P2
+    that H is past, and upstream did not move: the press exits without a build, and
+    the row must stop naming P1. `built_carries_pin()` reads that row's pin, so a
+    stale one withholds Revive (Centurion) and the mmaps stamp from a build this
+    catalog does describe, and the version line keeps an old "ahead".
+
+    Mutation: refresh only `release` again (`replace(rev, release=...)`) -> fails
+    (the row's pin is still P1 and its `ahead` still the stale count).
+    """
+    rec, server_dir = _ready(tmp_path)
+    for source in ENTRY.emulator.sources:
+        rec.upstream[server_dir / source.dest] = OLD
+    _record_the_build(rec, server_dir)
+    state = native.read_state(server_dir, valid=())
+    assert state is not None
+    core = ENTRY.emulator.sources[0]
+    old_pin = "e" * 40
+    stale_commit = "d" * 40
+    rows = tuple(
+        native.SourceRev(
+            repo=source.repo,
+            built=rec.head_version(server_dir / source.dest) or "",
+            pin=old_pin if source.repo == core.repo else (source.rev or ""),
+            # A count neither pin gives: the exit must recount from the pin it records.
+            ahead=7,
+            release="",
+        )
+        for source in ENTRY.emulator.sources
+    )
+    native.write_state(
+        server_dir,
+        replace(state, source_revs=rows, refused_updates=((core.repo, stale_commit),)),
+    )
+    rec.calls.clear()
+    # The pin moved onto the head: P2 is the commit every source is already on, so
+    # the fetch lands where it started and this press has nothing to compile.
+    repinned = _entry_pinning(OLD)
+    made = _entry_engine(rec, repinned)
+    lines = list(made.update_to_latest(InstallOptions(server_dir=server_dir)))
+    assert lines[-1] == NO_MOVE_UPDATE, lines
+    assert "build" not in rec.calls, rec.calls
+    after = native.read_state(server_dir, valid=())
+    assert after is not None
+    got = after.rev_for(core.repo)
+    assert got is not None, after.source_revs
+    assert got.pin == OLD, got
+    assert got.ahead == 0, got
+    assert tuple(rev.built for rev in after.source_revs) == tuple(
+        rev.built for rev in rows
+    ), "the build was rewritten"
+    assert after.refused_updates == ((core.repo, stale_commit),), after.refused_updates
+    for rev in after.source_revs:
+        source = next(one for one in repinned.emulator.sources if one.repo == rev.repo)
+        assert (rev.pin, rev.ahead) == made._pin_and_ahead(source, server_dir / source.dest), rev
 
 
 def test_a_no_move_press_the_family_refuses_puts_each_folder_back_once(
