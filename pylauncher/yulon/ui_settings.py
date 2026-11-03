@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import tempfile
 import threading
 import time
@@ -33,6 +32,43 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 from yulon import client_packs, platform
 from yulon.log import get_logger
+from yulon.ui.theme_spec import (
+    _THEME_ID_RE,
+    BUNDLED_THEME_ORDER,
+    DEFAULT_THEME,
+    THEME_ALIASES,
+)
+
+__all__ = [
+    "ADDRESS_HISTORY",
+    "DEFAULT_THEME",
+    "FriendServer",
+    "LauncherPlace",
+    "STALE_TMP_SECONDS",
+    "THIS_COMPUTER",
+    "UI_SETTINGS_FILE_NAME",
+    "UiSettings",
+    "VALID_THEMES",
+    "clean_theme",
+    "forget_friend_server",
+    "forget_launcher",
+    "friend_servers",
+    "launcher_key",
+    "launcher_place",
+    "load_ui_settings",
+    "recent_addresses",
+    "remember_friend_server",
+    "remember_launcher",
+    "remember_leftover_notices",
+    "remember_theme",
+    "remember_tray",
+    "save_ui_settings",
+    "ui_settings_path",
+    "unnoticed_leftovers",
+]
+
+VALID_THEMES: tuple[str, ...] = BUNDLED_THEME_ORDER
+_THEME_ALIASES: dict[str, str] = THEME_ALIASES
 
 logger = get_logger(__name__)
 
@@ -67,33 +103,6 @@ def recent_addresses(addresses: Iterable[object]) -> list[str]:
         if len(kept) == ADDRESS_HISTORY:
             break
     return kept
-
-
-DEFAULT_THEME = "arthas"
-"""The default UI theme (`yulon/ui/theme.py`)."""
-
-VALID_THEMES: tuple[str, ...] = (
-    "arthas",
-    "gruvbox-dark",
-    "gruvbox-light",
-    "98x-light",
-    "98x-dark",
-    "ocean",
-    "ocean-dark",
-    "jungle",
-    "jungle-dark",
-    "floral",
-    "floral-dark",
-    "dracula-dark",
-    "dracula-light",
-)
-"""Canonical theme IDs that `ui.json` may store."""
-
-_THEME_ALIASES: dict[str, str] = {
-    "98x": "98x-light",
-}
-
-_THEME_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
 
 def clean_theme(value: object, config_dir: Path | None = None) -> str:
