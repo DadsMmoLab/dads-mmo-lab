@@ -10368,6 +10368,19 @@ class _FakeClientDir:
             raise self._error
 
 
+@pytest.fixture(autouse=True)
+def _roomy_client_drive(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every client-folder pick here sees 100 GB free next to the client (T851).
+
+    The pick warns "Use this client folder anyway?" below `near_client_warn_gb` (8 GB) on
+    the client's own drive, and `preflight.free_bytes()` measured the runner's real disk: a
+    CI runner with less than that left the question unanswered and the pick unwritten, at
+    random (`test_picking_any_build_..._t594` failed three times on 2026-11-01). A test that
+    is about the space rule patches its own figure over this one.
+    """
+    monkeypatch.setattr(preflight, "free_bytes", lambda _path: 100 * 2**30)
+
+
 def _client_dir_view(
     entry: CatalogEntry,
     server_dir: Path,
@@ -11719,6 +11732,10 @@ def test_a_docker_error_yulon_does_not_recognise_reaches_the_log(
     assert len(logged) == 1, logged
     assert logged[0].startswith("WoW WotLK: Docker answered the status poll with an error:")
     assert _shown(view, view.docker_banner)
+    # T851: the real runner also ran the jobs the view started when it was built (the reset
+    # undo lookup); their answers are queued to this thread, and the T771 guard fails a test
+    # that ends before taking them -- which it did in CI whenever the lookup outlasted the polls.
+    pump_until_every_job_has_answered("the jobs the view started when it was built")
     assert all(runner.wait(HANG_BOUND_MS) for runner in runners)
 
 
