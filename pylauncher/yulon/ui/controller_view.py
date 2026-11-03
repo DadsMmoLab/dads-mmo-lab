@@ -22970,7 +22970,11 @@ class ControllerView(QWidget):
         moved = self._server_updated()
         for widget in self.modules_panel.rows():
             row = widget.data
-            if moved_by_server_update(row.family, row.id, moved):
+            # T861: the row is keyed by its ID, while the folder on disk can keep the
+            # author's capitals, so the predicate is handed the item's folder.
+            manifest = self._manifests.get((row.family, row.id))
+            folder = apply_module.clone_folder(manifest) if manifest is not None else row.id
+            if moved_by_server_update(row.family, row.id, moved, folder=folder):
                 self._behind.pop((row.family, row.id), None)
                 self._versions.forget(row.id)
 

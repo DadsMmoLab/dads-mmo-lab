@@ -468,6 +468,11 @@ def moved_by_server_update(
     readers -- the row builder deciding the chip, and the view deciding which
     counts a finished server update has made stale -- so the two cannot
     disagree about which rows the button moved.
+
+    `folder` is the name this item's clone lives in when it differs from `item_id`
+    (`apply.clone_folder()`, T861). Both callers pass it: the row builder's T41
+    rows are uncatalogued and their `item_id` IS the folder, while the view hands
+    the manifest's folder for catalogued rows, whose id can be a lower-case slug.
     """
     return PurePosixPath(_clone_dir_of(family)) / (folder or item_id) in server_updated
 
@@ -997,7 +1002,12 @@ def build_module_rows(
                         session,
                         client_dir,
                         dependants.get(name, []),
-                        server_update=moved_by_server_update(kind, name, moved_by_server),
+                        # T861: an uncatalogued name is the FOLDER read from the disk, which
+                        # is the path component this predicate tests; a catalogued row is
+                        # keyed by id and its caller (`controller_view`) passes its folder.
+                        server_update=moved_by_server_update(
+                            kind, name, moved_by_server, folder=name
+                        ),
                     ),
                     removable=False,
                     remove_reason=None,

@@ -33,6 +33,7 @@ Remove, update-check and SQL routes all take and a folder-copied module has no
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -43,13 +44,14 @@ from datetime import date
 from pathlib import Path
 from typing import Protocol
 
-from pydantic import TypeAdapter, ValidationError
+from pydantic import ValidationError
 
 from yulon import folder_swap, links
 from yulon.apply import updater_folder_dbs
 from yulon.log import get_logger
 from yulon.manifest import (
     ALLOWED_REPO_HOSTS,
+    ID_MAX,
     Build,
     ConfFile,
     Db,
@@ -57,23 +59,31 @@ from yulon.manifest import (
     Manifest,
     ManifestType,
     Origin,
-    Slug,
     Source,
     SqlStep,
+    folder_refusal,
     is_inside_path,
     parse_manifest,
+)
+
+# Re-exported for this module's public surface (T861): the ONE id derivation lives in
+# `manifest` so `Manifest`'s own validator can hold every item to it, and the per-game
+# layouts read it from here.
+from yulon.manifest import (
+    id_for_folder as id_for_folder,
 )
 from yulon.manifest_store import FAMILY_FILES
 
 logger = get_logger(__name__)
 
-_SLUG: TypeAdapter[str] = TypeAdapter(Slug)
-"""`manifest.Slug`'s own pattern, asked directly rather than respelled here.
+_NAMES_FOR_TWO_FAMILIES = frozenset({"wow-tortoise"})
+"""Games whose custom route recorded one thing under two families (T861, cold note 8).
 
-The id is the slug this asks of, and re-typing the kebab-case rule in this module
-is the duplicate style-guide §4 forbids — a widened `Slug` must widen what a
-custom module's id may be, in one edit. Since T861 the FOLDER is separate and
-keeps the author's exact name."""
+Tortoise's custom route called an add-on or database package a legacy `mod` before
+T861 and calls it a `module` now, so one id can be recorded in either family. Every
+other game's two families are two different things (`module` vs `mod`), so the
+record check stays inside the item's own family there.
+"""
 
 LINK_DESCRIPTION = "Custom module (cloned from a URL you provided)."
 """Verbatim from `RUST crates/dml-wow/src/modules.rs:38` (itself from `90-main.sh:5394`).
@@ -90,53 +100,6 @@ _NOTHING_CHANGED = "Nothing on this machine was changed."
 
 NOTHING_CHANGED = _NOTHING_CHANGED
 """The same clause for a per-game `Layout`, whose refusals end the same way (T596)."""
-
-_FOLDER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}")
-"""A clone folder's exact name: one directory name, capitals allowed (T861).
-
-The core finds a module by its FOLDER (`Add<folder>Scripts`), so the folder is the
-author's name and the id is a lower-case slug beside it. This rule keeps that
-folder one plain name: no separator, no leading dot, no trailing dot, at most 100
-characters. `Manifest.folder` asks the same pattern of a persisted manifest.
-"""
-
-_AZEROTHCORE_MODULE_FILES = frozenset(
-    {
-        "cmakelists.txt",
-        "modulesloader.cpp.in.cmake",
-        "modulespch.h",
-        "modulesscriptloader.h",
-        "create_module.sh",
-        "how_to_make_a_module.md",
-        ".gitkeep",
-    }
-)
-"""The files AzerothCore keeps in `modules/` beside the modules, lower-cased.
-
-A repository whose basename is one of these would land ON the build system's own
-file, so the basename is refused rather than copied. Tortoise's list is beside it.
-"""
-
-_TORTOISE_MODULE_FILES = frozenset(
-    {
-        ".gitkeep",
-        "cmakelists.txt",
-        "modulesloader.cpp.in.cmake",
-        "modulesscriptloader.h",
-        "readme.md",
-        "create_module.sh",
-        "templates",
-    }
-)
-"""`CORE/modules/` at the Tortoise pin (T861): its README, CMake glue and templates."""
-
-_CORE_MODULE_FILES: dict[str, frozenset[str]] = {
-    "wow-tortoise": _TORTOISE_MODULE_FILES,
-}
-"""Per-game additions; every other core here is AzerothCore's list (wotlk/unbound/coa)."""
-
-_ID_MAX = 64
-"""An id is a list key and the default folder name; the slug is capped, the folder is not."""
 
 _MODULE_MARKERS = ("src", "conf", "data")
 """What a folder must hold at least one of to be taken as a module.
@@ -539,26 +502,6 @@ def beyond_derived_shape(manifest: Manifest) -> str | None:
     return None
 
 
-def slug_from(basename: str) -> str:
-    """The lower-case slug a basename yields, possibly empty (T861).
-
-    Lower-cased, every run of non `[a-z0-9]` becomes one hyphen, the ends trimmed,
-    then cut to 64 characters and trimmed again (a cut can land on a hyphen). The
-    result is checked through `manifest.Slug` itself, so this cannot drift from
-    what a persisted manifest accepts.
-    """
-    candidate = basename
-    if candidate.endswith(".git"):
-        candidate = candidate[: -len(".git")]
-    candidate = re.sub(r"[^a-z0-9]+", "-", candidate.lower()).strip("-")
-    candidate = candidate[:_ID_MAX].strip("-")
-    try:
-        _SLUG.validate_python(candidate)
-    except ValidationError:
-        return ""
-    return candidate
-
-
 def _names_from(basename: str, game: str, *, what: str) -> tuple[str, str | None]:
     """`(id, folder)` for a repository or folder basename, or a whole refusal (T861).
 
@@ -566,26 +509,20 @@ def _names_from(basename: str, game: str, *, what: str) -> tuple[str, str | None
     Tortoise both find a module's code by `Add<folder>Scripts`, so a renamed folder
     no longer links. `folder` is `None` when the name already IS the id, which
     keeps every existing manifest and derivation unchanged.
+
+    The folder rule itself is `manifest.folder_refusal()`'s, the same one a persisted
+    manifest is held to, so the two cannot drift; the id beside it is
+    `manifest.id_for_folder()`, which `Manifest` requires of every folder.
     """
     name = basename[: -len(".git")] if basename.endswith(".git") else basename
-    core_files = _CORE_MODULE_FILES.get(game, _AZEROTHCORE_MODULE_FILES)
-    if name.casefold() in core_files:
-        raise DeriveError(
-            f"The {what} is named {name!r}, which is one of the files the core keeps in "
-            f"its modules folder, so a module cannot take that name. {_NOTHING_CHANGED}"
-        )
-    if not _FOLDER_NAME.fullmatch(name) or name.endswith(".") or ".." in name:
-        raise DeriveError(
-            f"The {what} is named {name!r}, and a module's folder must be one plain folder "
-            f"name — letters, digits, dots, underscores and hyphens, starting with a letter or "
-            f"digit and not ending in a dot — because the server finds a module by its folder's "
-            f"name. {_NOTHING_CHANGED}"
-        )
-    item_id = slug_from(name)
+    refusal = folder_refusal(name, game)
+    if refusal is not None:
+        raise DeriveError(f"The {what} is named {name!r}, and {refusal}. {_NOTHING_CHANGED}")
+    item_id = id_for_folder(name)
     if not item_id:
         raise DeriveError(
             f"The {what} is named {name!r}, which gives Yu'lon no name to keep it under: "
-            f"an id needs a letter or a digit, at most {_ID_MAX}. {_NOTHING_CHANGED}"
+            f"an id needs a letter or a digit, at most {ID_MAX}. {_NOTHING_CHANGED}"
         )
     return item_id, (name if name != item_id else None)
 
@@ -685,17 +622,52 @@ def recorded(user_root: Path, manifest: Manifest) -> bool:
 
 
 def refuse_if_recorded(user_root: Path, manifest: Manifest) -> None:
-    """Refuse a derivation whose id is already one this app installed here (T861).
+    """Refuse a derivation whose id is recorded under a DIFFERENT folder spelling (T861).
 
-    Two spellings of one folder (`Mod-X` and `mod-x`) give the same id, and a
-    Windows folder ignores case, so they are one item. The record the user layer
-    keeps is what says so before a second clone lands.
+    Two spellings of one folder (`Mod-X` and `mod-x`) give the same id, and a Windows
+    folder ignores case, so a second record of that id under the other spelling would
+    be two items for one folder. That is the refusal.
+
+    It is deliberately no wider (review round 1, N4). A record with this id AND this
+    folder falls through to the behaviour before T861: re-picking an edited folder
+    (T47's replace question), and adding the same link on a second server, are both
+    legitimate presses this must not refuse. A record that will not parse cannot
+    answer which folder it names, so it is refused: something is at that id's name and
+    this app may not overwrite it blind.
+
+    Tortoise records one custom thing under either family — a legacy `mod` before T861,
+    a `module` now — so both are read there (`_NAMES_FOR_TWO_FAMILIES`).
     """
-    if recorded(user_root, manifest):
-        raise DeriveError(
-            f"{manifest.id} is already installed — find it on the Modules tab, or Remove it "
-            f"first. {_NOTHING_CHANGED}"
-        )
+    wanted = manifest.folder or manifest.id
+    families: tuple[ManifestType, ...] = (manifest.type,)
+    if manifest.game in _NAMES_FOR_TWO_FAMILIES and manifest.type in ("module", "mod"):
+        families = (manifest.type, "mod" if manifest.type == "module" else "module")
+    for kind in families:
+        present, folder = _recorded_folder(user_root, manifest.game, kind, manifest.id)
+        if present and folder != wanted:
+            raise DeriveError(
+                f"{manifest.id} is already installed — find it on the Modules tab, or "
+                f"Remove it first. {_NOTHING_CHANGED}"
+            )
+
+
+def _recorded_folder(
+    user_root: Path, game: str, kind: ManifestType, item_id: str
+) -> tuple[bool, str | None]:
+    """`(is there a record, the folder it names)`, the folder `None` when it cannot be read.
+
+    A file at the id's name that does not parse still answers `True`: something is
+    recorded there and `refuse_if_recorded()` refuses rather than guessing which
+    folder it belongs to.
+    """
+    item = _items_dir(user_root, game, kind) / f"{item_id}.json"
+    if not item.is_file():
+        return (False, None)
+    try:
+        record = parse_manifest(json.loads(item.read_text(encoding="utf-8")))
+    except (OSError, ValueError, ValidationError):
+        return (True, None)
+    return (True, record.folder or record.id)
 
 
 def forget(user_root: Path, manifest: Manifest) -> bool:

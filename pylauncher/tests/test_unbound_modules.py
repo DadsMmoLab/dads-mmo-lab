@@ -299,3 +299,34 @@ def test_a_module_added_from_a_link_on_unbound_is_unbounds_and_lands_in_its_laye
     assert (user_dir / "wow-unbound" / "modules" / "mod-linked.json").is_file()
     assert not (user_dir / "wow-wotlk" / "modules" / "mod-linked.json").exists()
     assert "mod-linked" in _listed(unbound)
+
+
+def test_a_capitals_spelling_of_the_servers_own_source_is_refused_before_anything_is_cloned(
+    tmp_path: Path,
+) -> None:
+    """R3: `Mod-Playerbots` on WotLK and `MOD-ALE` on Unbound are the server's own module.
+
+    The folder differs only in capitals from the one the server install clones, which is
+    the same folder on Windows and one folder BESIDE the source on Linux — both wrong, so
+    the T554 refusal is asked case-insensitively (cold review, round 1).
+    """
+    from datetime import date
+
+    from yulon import module_source
+
+    for game, url in (
+        ("wow-wotlk", "https://github.com/x/Mod-Playerbots"),
+        ("wow-unbound", "https://github.com/x/MOD-ALE"),
+    ):
+        server = tmp_path / game
+        server.mkdir()
+        manifest = module_source.derive_link(url, game, today=date(2026, 11, 3))
+        assert manifest.folder is not None and manifest.folder != manifest.id
+        applier = apply_module.Applier(server)
+        applier.server_sources = native.server_source_folders(entry(game))
+        applier.server_name = entry(game).name
+
+        with pytest.raises(apply_module.ApplyRefusal, match="part of the"):
+            applier.install(manifest)
+
+        assert list(server.iterdir()) == [], "nothing on disk was changed"

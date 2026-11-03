@@ -124,7 +124,7 @@ def test_an_owner_name_slug_is_a_github_link() -> None:
             "mod-twow-QOL-followers",
         ),
         ("https://github.com/u/tools.git", "tools", None),
-        ("https://github.com/u/My_Addon.v2", "my-addon-v2", "My_Addon.v2"),
+        ("https://github.com/u/MobStats", "mobstats", "MobStats"),
         ("https://github.com/u/mod--doubled", "mod-doubled", "mod--doubled"),
     ],
 )
@@ -148,6 +148,13 @@ def test_a_link_takes_any_repository_name_and_keeps_the_folder_exactly(
         "https://github.com/u/..",
         "https://github.com/u/a b",
         "https://github.com/u/---",
+        # N6: the core pastes the folder into `Add<folder, - to _>Scripts()`, so a dot
+        # cannot be compiled and the name is refused rather than cloned.
+        "https://github.com/u/My_Addon.v2",
+        # N6: names Windows keeps for its own devices, in any case.
+        "https://github.com/u/CON",
+        "https://github.com/u/com1",
+        "https://github.com/u/LPT9",
     ],
 )
 def test_a_link_named_like_a_core_file_or_no_plain_folder_is_refused(repo: str) -> None:
@@ -155,6 +162,25 @@ def test_a_link_named_like_a_core_file_or_no_plain_folder_is_refused(repo: str) 
 
     assert message.endswith(NOTHING_CHANGED)
     assert "folder" in message or "core" in message
+
+
+def test_a_dotted_name_says_why_the_dot_cannot_be_compiled() -> None:
+    """N6: the sentence names the loader, so a refusal of an ordinary-looking name is legible."""
+    message = _refused(lambda: _link("https://github.com/u/My_Addon.v2"))
+
+    assert "dot" in message and "Add<folder>Scripts" in message
+    assert message.endswith(NOTHING_CHANGED)
+
+
+@pytest.mark.parametrize("name", ["CON", "prn", "Aux", "nul", "COM4", "lpt2"])
+def test_a_folder_named_after_a_windows_device_is_refused(tmp_path: Path, name: str) -> None:
+    folder = tmp_path / name
+    (folder / "src").mkdir(parents=True)
+
+    message = _refused(lambda: _folder(folder))
+
+    assert "Windows" in message
+    assert message.endswith(NOTHING_CHANGED)
 
 
 def test_a_link_off_the_allowed_hosts_is_refused_with_the_hosts_named() -> None:
@@ -239,7 +265,7 @@ def test_a_folder_takes_any_name_and_keeps_it_exactly(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    "name", ["CMakeLists.txt", "modulespch.h", ".hidden", "a b", "---", "ending."]
+    "name", ["CMakeLists.txt", "modulespch.h", ".hidden", "a b", "---", "ending.", "a.b"]
 )
 def test_a_folder_whose_name_is_a_core_file_or_not_a_plain_name_is_refused(
     tmp_path: Path, name: str
@@ -411,6 +437,52 @@ def test_persist_writes_the_item_and_rebuilds_the_index_from_the_files(tmp_path:
 
     reread = parse_manifest(json.loads((items / "mod-my-thing.json").read_text(encoding="utf-8")))
     assert reread == _link("you/mod-my-thing")
+
+
+def test_a_record_under_another_folder_spelling_refuses_the_derivation(
+    tmp_path: Path,
+) -> None:
+    """N4: two spellings of one folder are one id, so the second record is refused."""
+    module_source.persist(tmp_path, _link("https://github.com/u/Mod-X"), shipped_ids=())
+
+    with pytest.raises(DeriveError) as refused:
+        module_source.refuse_if_recorded(tmp_path, _link("https://github.com/u/mod-x"))
+
+    assert str(refused.value).endswith(NOTHING_CHANGED)
+
+
+def test_the_same_id_under_the_same_folder_falls_through(tmp_path: Path) -> None:
+    """N4: re-picking an edited folder and a second server are not refused.
+
+    Same id AND same folder spelling is what those presses look like, so the record
+    check must say nothing and leave them to T47's replace question.
+    """
+    module_source.persist(tmp_path, _link("https://github.com/u/Mod-X"), shipped_ids=())
+
+    module_source.refuse_if_recorded(tmp_path, _link("https://github.com/u/Mod-X"))
+
+
+def test_tortoises_two_families_are_both_read_for_a_record(tmp_path: Path) -> None:
+    """N4 / cold note 8: a legacy `mod` record and a `module` derivation are one item there."""
+    legacy = module_source.derive_link(
+        "https://github.com/u/Mod-X", "wow-tortoise", today=TODAY
+    ).model_copy(update={"type": "mod"})
+    module_source.persist(tmp_path, legacy, shipped_ids=())
+
+    with pytest.raises(DeriveError):
+        module_source.refuse_if_recorded(
+            tmp_path,
+            module_source.derive_link("https://github.com/u/mod-x", "wow-tortoise", today=TODAY),
+        )
+
+
+def test_a_record_that_will_not_parse_is_refused_rather_than_guessed(tmp_path: Path) -> None:
+    """N4: the check is narrowed by folder spelling, which an unreadable file cannot give."""
+    module_source.persist(tmp_path, _link("https://github.com/u/Mod-X"), shipped_ids=())
+    (tmp_path / GAME / "modules" / "mod-x.json").write_text("{ not json", encoding="utf-8")
+
+    with pytest.raises(DeriveError):
+        module_source.refuse_if_recorded(tmp_path, _link("https://github.com/u/mod-x"))
 
 
 def test_persist_is_atomic_and_a_torn_write_leaves_the_previous_file(

@@ -57,7 +57,7 @@ from yulon.manifest import (
     is_inside_path,
     parse_manifest,
 )
-from yulon.module_source import slug_from
+from yulon.module_source import id_for_folder
 
 CONF_SUFFIX = ".conf.dist"
 MODULE_CONF_DIR = "etc/modules"
@@ -112,7 +112,7 @@ class TortoiseLayout:
 
     def identify(self, basename: str, *, folder: bool) -> tuple[ManifestType, str, str]:
         """This core derives no kind from a name: a link is a module, a folder is read."""
-        return "module", slug_from(basename), basename
+        return "module", id_for_folder(basename), basename
 
     def kind_for_folder(self, path: Path) -> ManifestType:
         """A folder with C++ in `src/` is a server module; anything else is a mod."""

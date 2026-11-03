@@ -101,6 +101,7 @@ from yulon.manifest import (
     Prompt,
     SqlStep,
     When,
+    id_for_folder,
 )
 from yulon.ownership import Ownership
 from yulon.said import SaidByYulon
@@ -152,14 +153,37 @@ def folders_as_ids(
     }
 
 
+def clone_folder_twin(clone_dir: Path, folder: str) -> str | None:
+    """The folder already in `clone_dir` that is `folder` but for its capitals, or None (T861).
+
+    One directory on Windows holds one spelling, so `Mod-X` and `mod-x` are one folder
+    there and two here. Installing the second spelling beside the first would put two
+    clone folders for what the game sees as one name, so the press is refused before
+    anything is cloned. The listing is `docker.clone_names()`'s -- the same read
+    `installed_clones()` makes, and an unreadable directory answers None there: the
+    applier's own guards still stand over the path itself.
+    """
+    wanted = folder.casefold()
+    names = docker.clone_names(clone_dir)
+    return next(
+        (name for name in sorted(names) if name != folder and name.casefold() == wanted), None
+    )
+
+
 def is_server_source(manifest: Manifest, folders: Set[PurePosixPath]) -> bool:
     """Whether this manifest's clone folder is one the server install itself clones into (T554).
 
     `folders` is `native.server_source_folders(entry)`. The test is the folder and not the
-    game: WotLK's sources are `modules/mod-playerbots` alone, which no manifest names, so for
-    WotLK this is `False` for every manifest, and for Unbound it is `True` for `mod-ale`.
+    game: WotLK's sources are `modules/mod-playerbots` alone, so for WotLK this is `True`
+    for `mod-playerbots` and `False` for `mod-ale`, and for Unbound `mod-ale` is `True`.
+
+    **Compared case-insensitively (T861).** A folder that differs only in capitals is the
+    same folder on Windows, and on Linux the clone would sit BESIDE the server's own source
+    instead of over it — both wrong. `MOD-ALE` on Unbound and `Mod-Playerbots` on WotLK are
+    therefore the server's own module, refused with the same sentence as the exact spelling.
     """
-    return PurePosixPath(CLONE_DIRS[manifest.type]) / clone_folder(manifest) in folders
+    wanted = f"{CLONE_DIRS[manifest.type]}/{clone_folder(manifest)}".casefold()
+    return any(str(folder).casefold() == wanted for folder in folders)
 
 
 def _distro_git(server_dir: Path) -> ContainerGit | None:
@@ -1423,13 +1447,16 @@ def rebased(path: Path, client_dir: Path, origins: Sequence[Path]) -> Path:
 def client_receipts(server_dir: Path) -> tuple[ClientCopy, ...]:
     """Every client-file receipt in the claims of this server's clones, every family (T181).
 
-    A clone's folder name is its item id (`Applier.clone_dir()`), which is the id
-    `read_client_copies()` checks the claim against.
+    A claim is written with the item's id (`write_clone_claim`), while the folder can keep
+    the author's name (`Manifest.folder`), so the folder is turned back into its id through
+    the one derivation (`id_for_folder()`, T861) rather than compared as itself.
     """
     found: list[ClientCopy] = []
     for folder in sorted(set(CLONE_DIRS.values())):
         for name in sorted(docker.clone_names(server_dir / folder)):
-            found.extend(read_client_copies(server_dir / folder / name, item_id=name))
+            found.extend(
+                read_client_copies(server_dir / folder / name, item_id=id_for_folder(name))
+            )
     return tuple(found)
 
 
@@ -1896,10 +1923,17 @@ def unfinished_clones(server_dir: Path) -> dict[str, frozenset[str]]:
     walks the same directories, and every id it returns is one `installed_clones
     ()` listed.
 
-    `item_id=name` is the directory name, which is what `Applier.clone_dir()`
-    built the path from (`CLONE_DIRS[type] / clone_folder(manifest)`) — so a claim that
-    names a different item is a folder some other install put here under a name
-    this one uses, and it answers False rather than offering a press.
+    **The answer is IDS, not folder names (T861).** A clone folder can keep the
+    author's spelling (`mod-twow-QOL-followers/`) while the item's id is the
+    lower-case slug, and the caller keys both questions by `(family, id)`; so the
+    folder is read as `id_for_folder(name)`, which is the claim's own `item_id` and
+    the id the panel asks with. Without that the claim of every capitals item read
+    as another item's, and the row offered Remove for an install that never
+    finished.
+
+    A claim that names a different item is still a folder some other install put
+    here under a name this one uses, and it answers False rather than offering a
+    press.
 
     Costs one small JSON read per clone on top of the directory listing, paid on
     every reload beside `installed_clones()`. That is the same order of work as
@@ -1908,9 +1942,9 @@ def unfinished_clones(server_dir: Path) -> dict[str, frozenset[str]]:
     """
     return {
         str(kind): frozenset(
-            name
+            id_for_folder(name)
             for name in docker.clone_names(server_dir / folder)
-            if clone_install_unfinished(server_dir / folder / name, item_id=name)
+            if clone_install_unfinished(server_dir / folder / name, item_id=id_for_folder(name))
         )
         for kind, folder in CLONE_DIRS.items()
     }
@@ -3775,6 +3809,26 @@ class Applier:
                 "Modules tab. Nothing was changed."
             )
 
+    def _refuse_a_case_twin(self, manifest: Manifest) -> None:
+        """Refuse a new clone whose folder is another folder's spelling but for capitals (T861).
+
+        Asked on the Install press only: an Update re-uses the folder the item already has,
+        and Remove takes one away. Two clone folders whose names differ only in case are
+        one folder to Windows and two to Linux, so the second spelling would either land on
+        the first or sit beside it where the game reads one of them at random.
+        """
+        folder = clone_folder(manifest)
+        clone_dir = self.server_dir / CLONE_DIRS[manifest.type]
+        twin = clone_folder_twin(clone_dir, folder)
+        if twin is None:
+            return
+        raise ApplyRefusal(
+            f"{manifest.name} would be installed as {CLONE_DIRS[manifest.type]}/{folder}, and "
+            f"{CLONE_DIRS[manifest.type]}/{twin} is already in this server: the two names "
+            "differ only in capitals, and Windows treats them as one folder. Rename or remove "
+            f"that folder first, then install again. Nothing was changed."
+        )
+
     def _recompleter_for(self, manifest: Manifest) -> Completer | None:
         """The hook that reads an outside item's clone again; None for any other item.
 
@@ -3893,6 +3947,7 @@ class Applier:
         install that does not pass it, is unchanged.
         """
         self._refuse_a_server_source(manifest)
+        self._refuse_a_case_twin(manifest)
         self._refuse_a_route_item_that_is_more(manifest)
         self._put_back_a_bridge(f"Install {manifest.name}")
         log = _Log()
@@ -8097,12 +8152,18 @@ class Applier:
         return rebased(Path(path), self.client_dir, self.client_origins)
 
     def _receipts_by_item(self) -> list[tuple[str, ClientCopy]]:
-        """Every client-file receipt of this server's clones, with the item that wrote it."""
+        """Every client-file receipt of this server's clones, with the id of the item that wrote it.
+
+        The key is `id_for_folder(name)` and not the folder: a claim is written with the
+        manifest's id, so the folder's own spelling would read every claim of a capitals
+        item as another item's (`client_receipts()` has the argument, T861).
+        """
         found: list[tuple[str, ClientCopy]] = []
         for folder in sorted(set(CLONE_DIRS.values())):
             for name in sorted(docker.clone_names(self.server_dir / folder)):
                 clone = self.server_dir / folder / name
-                found.extend((name, copy) for copy in read_client_copies(clone, item_id=name))
+                item_id = id_for_folder(name)
+                found.extend((item_id, copy) for copy in read_client_copies(clone, item_id=item_id))
         return found
 
     def _claimed_asides(self, log: _Log) -> set[Path]:

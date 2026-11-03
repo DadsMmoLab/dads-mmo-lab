@@ -18,7 +18,7 @@ import pytest
 from pydantic import ValidationError
 
 from yulon import manifest
-from yulon.manifest import ALLOWED_REPO_HOSTS, Manifest, parse_index, parse_manifest
+from yulon.manifest import ALLOWED_REPO_HOSTS, Manifest, id_for_folder, parse_index, parse_manifest
 
 MANIFESTS_DIR = Path(__file__).resolve().parents[1] / "manifests"
 SCHEMA_FILE = MANIFESTS_DIR / "schema" / "manifest.schema.json"
@@ -130,23 +130,53 @@ def test_an_old_manifest_without_a_folder_parses_and_resolves_to_its_id() -> Non
 @pytest.mark.parametrize(
     ("folder", "why"),
     [
-        ("mod-twow-QOL-followers", ""),
-        ("AzerothCore-Transmog", ""),
-        ("../x", "one directory name"),
-        (".hidden", "one directory name"),
-        ("a b", "one directory name"),
-        ("ending.", "one directory name"),
-        ("a" * 101, "one directory name"),
+        ("mod-ah-bot", ""),
+        ("Mod-Ah-Bot", ""),
+        ("mod--ah-bot", ""),
+        ("../x", "one plain folder name"),
+        (".hidden", "one plain folder name"),
+        ("a b", "one plain folder name"),
+        ("ending.", "one plain folder name"),
+        ("a" * 101, "one plain folder name"),
         ("a" * 100, ""),
+        # N6: the core pastes the folder into `Add<folder, - to _>Scripts()`.
+        ("Mod.Ah.Bot", "no dot"),
+        # N6: names Windows keeps for its own devices, in any case.
+        ("CON", "Windows"),
+        ("prn", "Windows"),
+        ("nul", "Windows"),
+        ("COM3", "Windows"),
+        ("lpt9", "Windows"),
     ],
 )
 def test_a_folder_is_one_plain_directory_name(folder: str, why: str) -> None:
-    value = {**README_EXAMPLE, "folder": folder}
+    """T861/N6: one directory name, no dot, and it must derive to this item's own id."""
+    derived = id_for_folder(folder)
+    value = {**README_EXAMPLE, "id": derived or README_EXAMPLE["id"], "folder": folder}
     if why:
         with pytest.raises(ValidationError, match=why):
             parse_manifest(value)
     else:
         assert parse_manifest(value).folder == folder
+
+
+def test_a_folder_that_derives_to_another_items_id_is_refused() -> None:
+    """T861, round 1: a hand-edited manifest cannot point an item at another item's folder.
+
+    Every folder reader turns a directory name back into an id with
+    `id_for_folder()`, so an item whose folder derives to a different id would read
+    and delete that other item's claim receipts.
+    """
+    with pytest.raises(ValidationError, match="derives to the id"):
+        parse_manifest({**README_EXAMPLE, "folder": "Mod-Ah-Bot-Plus"})
+
+
+def test_a_folder_named_after_a_core_file_is_refused_when_the_manifest_loads() -> None:
+    """N6: the core-files list is one list, and the persisted manifest is held to it too."""
+    with pytest.raises(ValidationError, match="core keeps"):
+        parse_manifest(
+            {**README_EXAMPLE, "game": "wow-tortoise", "id": "templates", "folder": "templates"}
+        )
 
 
 def test_ale_and_keg_examples_validate() -> None:

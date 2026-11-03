@@ -71,7 +71,7 @@ VANILLA_TOC = "## Interface: 11200\n## Title: MobStats\nMobStats.lua\n"
     [
         ("refaim/MobStats", "mobstats", "MobStats", "MobStats"),
         ("https://github.com/shagu/pfUI.git", "pfui", "pfUI", "pfUI"),
-        ("https://github.com/you/My_Addon.v2/", "my-addon-v2", "My_Addon.v2", "My_Addon.v2"),
+        ("https://github.com/you/My-Addon-v2/", "my-addon-v2", "My-Addon-v2", "My-Addon-v2"),
         ("you/bot-gear-sql", "bot-gear-sql", "bot-gear-sql", None),
         (
             "Ildourol/mod-twow-QOL-followers",
@@ -96,6 +96,12 @@ def test_a_link_is_a_module_cloned_under_the_author_s_exact_folder(
     assert manifest.origin is not None and manifest.origin.kind == "link"
     assert manifest.source is not None
     assert manifest.sql == () and manifest.client == ()
+
+
+def test_a_dotted_repository_name_is_refused_here_too() -> None:
+    """N6: the core pastes the folder into `Add<folder, - to _>Scripts()`, so a dot breaks it."""
+    with pytest.raises(module_source.DeriveError, match="no dot"):
+        _link("https://github.com/you/My_Addon.v2/")
 
 
 @pytest.mark.parametrize(

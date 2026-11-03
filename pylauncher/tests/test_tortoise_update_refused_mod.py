@@ -224,3 +224,36 @@ def test_a_route_add_on_on_tortoise_that_gains_sql_runs_none_of_it(tmp_path: Pat
     assert _git(clone, "rev-parse", "HEAD") == second, "put back on the version it was on"
     assert sent.sent == []  # type: ignore[attr-defined]
     assert first != third
+
+
+def _installed_module(applier: autoupdate.GuardedApplier) -> object:
+    listed = {m.id: m for m in tortoise_modules.store().load_all("module")}
+    return listed["mobstats"]
+
+
+def test_a_refused_update_of_a_new_addon_link_is_put_back_without_naming_a_rebuild(
+    tmp_path: Path,
+) -> None:
+    """N5: a link is derived as a `module` now, and an add-on one holds no C++.
+
+    Nothing compiles it, so "the next rebuild builds that one" would name a build step
+    that does not exist for this item; the add-on path's sentence is the true one.
+    Mutation: route every `module` through `put_back()` and this sentence comes back.
+    """
+    applier, origin, server = _rig(tmp_path)
+    first = _publish(origin, "11200", "v1")
+    tortoise_modules.install_custom(applier)(tortoise_modules.derive_link(URL), None)
+    clone = server / "modules" / "MobStats"
+    assert _git(clone, "rev-parse", "HEAD") == first
+    second = _publish(origin, "20400", "v2")  # now made for another game version
+
+    with pytest.raises(CompletionRefused) as refused:
+        applier.update(_installed_module(applier))  # type: ignore[arg-type]
+
+    said = str(refused.value)
+    assert "is made for The Burning Crusade (Interface 20400)" in said
+    assert "put it back on the version it was on" in said
+    assert "next rebuild" not in said
+    assert _git(clone, "rev-parse", "HEAD") == first, "the clone agrees with its record again"
+    ledger = module_moves.read(server)
+    assert ledger is not None and ledger.skipped["module/mobstats"].tip == second
