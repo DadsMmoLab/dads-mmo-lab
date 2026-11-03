@@ -624,9 +624,12 @@ class DadcraftHeader(QFrame):
         elif anim == "dracula" or spec.id in ("dracula-dark", "dracula-light"):
             self._paint_dracula_night(painter, w, h, t, light=spec.is_light)
             rime_rgb = (100, 74, 201) if spec.is_light else (189, 147, 249)
-        elif anim == "gruvbox" or spec.id in ("gruvbox-dark", "gruvbox-light"):
-            self._paint_gruvbox_flames(painter, w, h, t, light=spec.is_light)
-            rime_rgb = (175, 58, 3) if spec.is_light else (254, 128, 25)
+        elif anim == "organic" or spec.id in ("organic-dark", "organic-light"):
+            self._paint_organic_flames(painter, w, h, t, light=spec.is_light)
+            rime_rgb = (166, 50, 24) if spec.is_light else (242, 100, 48)
+        elif anim == "gruvbox" or spec.id.startswith("gruvbox-"):
+            self._paint_gruvbox_painterly(painter, w, h, t, light=spec.is_light)
+            rime_rgb = (181, 118, 20) if spec.is_light else (250, 189, 47)
         else:
             self._paint_arthas_frost(painter, w, h, t, pulse_center, pulse_flame)
             rime_rgb = (118, 213, 255)
@@ -832,16 +835,16 @@ class DadcraftHeader(QFrame):
             painter.setBrush(core_grad)
             painter.drawPath(core)
 
-    def _paint_gruvbox_flames(
+    def _paint_organic_flames(
         self, painter: QPainter, w: int, h: int, t: float, *, light: bool
     ) -> None:
-        """Gruvbox: roaring furnace inferno with multi-tier orange/yellow flames & ember sparks."""
+        """Organic: roaring brick-kiln hearth inferno with warm terracotta/amber flames & sparks."""
         roar_a = 0.5 + 0.5 * math.sin(t * 6.4) * math.cos(t * 2.9)
         roar_b = 0.5 + 0.5 * math.sin(t * 8.2 + 1.1)
-        crimson_rgb = (157, 0, 6) if light else (204, 36, 29)
-        orange_rgb = (175, 58, 3) if light else (254, 128, 25)
-        gold_rgb = (215, 153, 33) if light else (250, 189, 47)
-        white_hot_rgb = (251, 241, 199)
+        crimson_rgb = (142, 24, 16) if light else (196, 38, 26)
+        orange_rgb = (166, 50, 24) if light else (242, 100, 48)
+        gold_rgb = (200, 92, 36) if light else (247, 160, 91)
+        white_hot_rgb = (253, 244, 238)
 
         # Intense furnace glow across the entire bottom & center
         glow_main = QRadialGradient(w * 0.5 + 36 * math.sin(t * 2.1), h * 1.12, w * 0.68)
@@ -958,6 +961,99 @@ class DadcraftHeader(QFrame):
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(mote_glow)
             painter.drawEllipse(QPointF(mx, my), mote.size * 1.5, mote.size * 2.4)
+
+    def _paint_gruvbox_painterly(
+        self, painter: QPainter, w: int, h: int, t: float, *, light: bool
+    ) -> None:
+        """Gruvbox: chill painterly abstract scene of rolling smooth colors."""
+        painter.setPen(Qt.PenStyle.NoPen)
+        slow_t = t * 0.36
+        palette = (
+            (
+                (254, 128, 25),  # #FE8019 bright vibrant orange
+                (250, 189, 47),  # #FABD2F bright vibrant yellow
+                (142, 192, 124),  # #8EC07C bright vibrant aqua
+                (131, 165, 152),  # #83A598 bright sky-teal blue
+                (211, 134, 155),  # #D3869B bright pastel-rose purple
+                (184, 187, 38),  # #B8BB26 bright spring green
+            )
+            if light
+            else (
+                (175, 58, 3),  # #AF3A03 deep faded rust-orange
+                (181, 118, 20),  # #B57614 deep faded ochre
+                (66, 123, 88),  # #427B58 deep faded forest-aqua
+                (7, 102, 120),  # #076678 deep faded slate-blue
+                (143, 63, 113),  # #8F3F71 deep faded plum
+                (121, 116, 14),  # #79740E deep faded moss
+            )
+        )
+
+        # 1. Soft faded watercolor/pastel wash clouds across the canvas
+        wash_peak = 32 if light else 14
+        wash_mid = 14 if light else 6
+        for idx, rgb in enumerate(palette):
+            cx = (0.12 + idx * 0.16 + math.sin(slow_t * 0.8 + idx * 1.3) * 0.09) * w
+            cy = (0.28 + (idx % 3) * 0.22 + math.cos(slow_t * 0.65 + idx * 0.9) * 0.14) * h
+            wash = QRadialGradient(cx, cy, w * 0.36)
+            wash.setColorAt(0.0, QColor(*rgb, wash_peak))
+            wash.setColorAt(0.55, QColor(*rgb, wash_mid))
+            wash.setColorAt(1.0, QColor(*rgb, 0))
+            painter.setBrush(wash)
+            painter.drawRect(0, 0, w, h)
+
+        # 2. Five overlapping smooth rolling painterly color ribbons (faded & airy)
+        ribbon_specs = (
+            (0.40, 7.0, 0.0, palette[3], palette[2], 32 if light else 15),
+            (0.53, 6.2, 1.3, palette[4], palette[0], 30 if light else 14),
+            (0.65, 5.4, 2.5, palette[2], palette[5], 36 if light else 17),
+            (0.76, 4.6, 3.8, palette[0], palette[1], 40 if light else 19),
+            (0.86, 3.6, 5.1, palette[1], palette[2], 46 if light else 22),
+        )
+        steps = 36
+        for base_frac, amp, phase_off, left_rgb, right_rgb, alpha in ribbon_specs:
+            wave = QPainterPath()
+            wave.moveTo(0, h + 3)
+            for step in range(steps + 1):
+                nx = step / steps
+                x = nx * w
+                y = (
+                    h * base_frac
+                    + math.sin(nx * math.tau * 1.15 + slow_t * 0.9 + phase_off) * amp
+                    + math.cos(nx * math.tau * 2.05 - slow_t * 0.55 + phase_off * 0.7)
+                    * (amp * 0.42)
+                )
+                wave.lineTo(x, y)
+            wave.lineTo(w, h + 3)
+            wave.closeSubpath()
+
+            grad = QLinearGradient(
+                w * (0.15 + 0.1 * math.sin(slow_t + phase_off)),
+                h * (base_frac - 0.18),
+                w * (0.85 + 0.1 * math.cos(slow_t + phase_off)),
+                h,
+            )
+            grad.setColorAt(0.0, QColor(*left_rgb, alpha))
+            grad.setColorAt(0.55, QColor(*right_rgb, int(alpha * 0.80)))
+            grad.setColorAt(1.0, QColor(*left_rgb, int(alpha * 0.30)))
+            painter.setBrush(grad)
+            painter.drawPath(wave)
+
+        # 3. Gentle floating pigment dabs that drift with the rolling color waves
+        dab_peak = 26 if light else 12
+        dab_mid = 10 if light else 5
+        for idx, mote in enumerate(self._frost_motes[:14]):
+            rgb = palette[idx % len(palette)]
+            drift_x = (mote.x + math.sin(slow_t * 0.75 + mote.phase) * 0.04) % 1.0
+            drift_y = 0.25 + 0.58 * (0.5 + 0.5 * math.sin(slow_t * 0.5 + mote.phase))
+            px = drift_x * w
+            py = drift_y * h
+            rad = mote.size * 5.0
+            dab = QRadialGradient(px, py, rad)
+            dab.setColorAt(0.0, QColor(*rgb, dab_peak))
+            dab.setColorAt(0.6, QColor(*rgb, dab_mid))
+            dab.setColorAt(1.0, QColor(*rgb, 0))
+            painter.setBrush(dab)
+            painter.drawEllipse(QPointF(px, py), rad * 1.4, rad * 0.75)
 
     def _paint_98x_hills(self, painter: QPainter, w: int, h: int, t: float, *, dark: bool) -> None:
         """98x: rolling green bliss hills with drifting sky clouds / stars."""

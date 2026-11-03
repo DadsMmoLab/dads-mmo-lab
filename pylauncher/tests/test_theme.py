@@ -77,8 +77,14 @@ def test_all_css_themes_and_arthas_build_valid_palettes_and_stylesheets(
 
     expected = (
         "arthas",
-        "gruvbox-dark",
-        "gruvbox-light",
+        "organic-dark",
+        "organic-light",
+        "gruvbox-dark-soft",
+        "gruvbox-dark-medium",
+        "gruvbox-dark-hard",
+        "gruvbox-light-soft",
+        "gruvbox-light-medium",
+        "gruvbox-light-hard",
         "98x-light",
         "98x-dark",
         "ocean",
@@ -93,6 +99,9 @@ def test_all_css_themes_and_arthas_build_valid_palettes_and_stylesheets(
     assert tuple(THEMES) == expected
     assert tuple(k for k, _ in THEME_CHOICES) == expected
     assert normalize_theme_name("98x") == "98x-light"
+    assert normalize_theme_name("organic") == "organic-dark"
+    assert normalize_theme_name("gruvbox-dark") == "gruvbox-dark-medium"
+    assert normalize_theme_name("gruvbox-light") == "gruvbox-light-medium"
     assert normalize_theme_name("Arthas") == "arthas"
 
     messages: list[str] = []
@@ -119,8 +128,30 @@ def test_gruvbox_uses_orange_accent_and_header_renders_theme_specific_animations
 ) -> None:
     from yulon.ui.theme import THEMES, get_theme
 
-    assert get_theme("gruvbox-dark").accent_bright.upper() == "#FE8019"
-    assert get_theme("gruvbox-light").accent_bright.upper() == "#AF3A03"
+    assert get_theme("organic-dark").label == "Organic Dark"
+    assert get_theme("organic-light").label == "Organic Light"
+    assert get_theme("organic-dark").animation == "organic"
+    assert get_theme("organic-light").animation == "organic"
+    assert get_theme("organic-dark").accent_bright.upper() == "#F26430"
+    assert get_theme("organic-light").accent_bright.upper() == "#A63218"
+    assert (
+        QColor(get_theme("organic-dark").bg_panel).red()
+        > QColor(get_theme("organic-dark").bg_panel).green()
+    )
+    assert (
+        QColor(get_theme("organic-light").bg_panel).red()
+        > QColor(get_theme("organic-light").bg_panel).green()
+    )
+    assert get_theme("gruvbox-dark-soft").bg_dark.upper() == "#32302F"
+    assert get_theme("gruvbox-dark-medium").bg_dark.upper() == "#282828"
+    assert get_theme("gruvbox-dark-hard").bg_dark.upper() == "#1D2021"
+    assert get_theme("gruvbox-light-soft").bg_dark.upper() == "#F2E5BC"
+    assert get_theme("gruvbox-light-medium").bg_dark.upper() == "#FBF1C7"
+    assert get_theme("gruvbox-light-hard").bg_dark.upper() == "#F9F5D7"
+    assert get_theme("gruvbox-dark-medium").accent_bright.upper() == "#FE8019"
+    assert get_theme("gruvbox-light-medium").accent_bright.upper() == "#AF3A03"
+    assert get_theme("gruvbox-dark-medium").animation == "gruvbox"
+    assert get_theme("gruvbox-light-medium").animation == "gruvbox"
     assert get_theme("98x-light").animation == "98x"
     assert get_theme("98x-dark").animation == "98x"
 
@@ -137,7 +168,10 @@ def test_gruvbox_uses_orange_accent_and_header_renders_theme_specific_animations
             assert not img.isNull()
             rendered[theme_id] = img.pixelColor(img.width() // 2, img.height() - 8)
         assert rendered["98x-light"] != rendered["arthas"]
-        assert rendered["gruvbox-dark"] != rendered["arthas"]
+        assert rendered["organic-dark"] != rendered["arthas"]
+        assert rendered["gruvbox-dark-medium"] != rendered["arthas"]
+        assert rendered["gruvbox-dark-medium"] != rendered["organic-dark"]
+        assert rendered["gruvbox-light-medium"] != rendered["gruvbox-dark-medium"]
         assert rendered["floral"] != rendered["ocean"]
     finally:
         header.close()
@@ -147,7 +181,7 @@ def test_gruvbox_uses_orange_accent_and_header_renders_theme_specific_animations
     host = QWidget()
     card = DadcraftCampaignCard("wow-wotlk", host)
     card.resize(300, 370)
-    apply_dadcraft_theme(host, theme_name="gruvbox-light")
+    apply_dadcraft_theme(host, theme_name="gruvbox-light-medium")
     host.show()
     try:
         card_img = card.grab().toImage()
@@ -179,10 +213,15 @@ def test_themes_load_from_json_files_and_support_user_accessible_custom_themes(
     bundled_files = {p.stem for p in resources.themes_dir().glob("*.json")}
     assert set(BUNDLED_THEME_ORDER) <= bundled_files
 
-    # Seeding the user-accessible themes folder copies the bundled JSON files there.
+    # Seeding the user-accessible themes folder copies the bundled JSON files there
+    # and prunes legacy alias files (`gruvbox-dark.json` -> `gruvbox-dark-medium.json`).
+    legacy = tmp_path / "themes" / "gruvbox-dark.json"
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text(json.dumps({"id": "gruvbox-dark", "label": "Gruvbox Dark"}), encoding="utf-8")
     seeded = sync_user_themes()
     assert seeded == tmp_path / "themes"
     assert (seeded / "arthas.json").is_file()
+    assert not legacy.exists()
 
     # Dropping a custom JSON theme into the user folder makes it selectable and loadable.
     custom_path = seeded / "frostfire-custom.json"
@@ -755,7 +794,7 @@ def test_the_header_names_the_server_it_follows(qapp: QApplication) -> None:
     header.close()
 
 
-def test_bundled_themes_match_json_files() -> None:
+def test_bundled_themes_match_json_files_and_meet_wcag_aa_contrast() -> None:
     """K1: every `.json` file in `yulon/ui/themes/` matches its `BUNDLED_THEMES` baseline."""
     import dataclasses
     import json
@@ -763,13 +802,33 @@ def test_bundled_themes_match_json_files() -> None:
     from yulon import resources
     from yulon.ui.theme_spec import BUNDLED_THEME_ORDER, BUNDLED_THEMES
 
+    def rel_lum(hex_str: str) -> float:
+        c = QColor(hex_str)
+
+        def ch(v: int) -> float:
+            x = v / 255.0
+            return float(x / 12.92 if x <= 0.03928 else ((x + 0.055) / 1.055) ** 2.4)
+
+        return 0.2126 * ch(c.red()) + 0.7152 * ch(c.green()) + 0.0722 * ch(c.blue())
+
+    def contrast(h1: str, h2: str) -> float:
+        l1, l2 = rel_lum(h1), rel_lum(h2)
+        return (max(l1, l2) + 0.05) / (min(l1, l2) + 0.05)
+
     assert tuple(BUNDLED_THEMES) == BUNDLED_THEME_ORDER
     json_files = sorted(resources.themes_dir().glob("*.json"))
     assert {p.stem for p in json_files} == set(BUNDLED_THEMES)
     for path in json_files:
         raw = json.loads(path.read_text(encoding="utf-8"))
-        spec_dict = dataclasses.asdict(BUNDLED_THEMES[path.stem])
+        spec = BUNDLED_THEMES[path.stem]
+        spec_dict = dataclasses.asdict(spec)
         assert raw == spec_dict, f"{path.name} drifted from BUNDLED_THEMES[{path.stem!r}]"
+        assert contrast(spec.text_primary, spec.bg_panel) >= 4.5, path.stem
+        assert contrast(spec.text_muted, spec.bg_panel) >= 4.0, path.stem
+        assert contrast(spec.text_muted, spec.bg_container) >= 4.5, path.stem
+        if path.stem.startswith(("gruvbox-", "organic-")):
+            assert contrast(spec.text_muted, spec.bg_panel) >= 4.5, path.stem
+            assert contrast(spec.primary_btn_text, spec.accent_border) >= 4.5, path.stem
 
 
 def test_dark_theme_cards_and_tile_buttons_use_spec_tokens_and_tooltips_respect_theme(
@@ -940,7 +999,7 @@ def test_friend_launcher_logs_view_and_tray_flyout_follow_theme_changes(
     log_panel = LogPanel()
     flyout_card = ServerCard()
     try:
-        for theme_id in ("gruvbox-dark", "dracula-light"):
+        for theme_id in ("gruvbox-dark-medium", "dracula-light"):
             spec = get_theme(theme_id)
             launcher.apply_theme(theme_id)
             assert launcher.property("yulon_theme") == theme_id
@@ -974,3 +1033,103 @@ def test_friend_launcher_logs_view_and_tray_flyout_follow_theme_changes(
             w.close()
             w.deleteLater()
         _ = TrayFlyout
+
+
+def test_dialogs_and_embedded_scroll_areas_render_light_surface_on_light_themes(
+    qapp: QApplication,
+) -> None:
+    """In light themes, dialog scroll areas and quit modals render light surfaces and fit."""
+    from PySide6.QtWidgets import QMessageBox
+
+    from yulon import ui_settings
+    from yulon.manifest import Manifest, Prompt
+    from yulon.ui.message_box import FittedMessageBox
+    from yulon.ui.tray import note_box, quit_box, while_stopping_box
+    from yulon.ui.widgets.manifest_prompt import ManifestPromptDialog
+
+    window = QMainWindow()
+    apply_dadcraft_theme(window, theme_name="organic-light")
+    window.resize(640, 480)
+    window.show()
+
+    box = FittedMessageBox(
+        QMessageBox.Icon.Information,
+        "Light Dialog Check",
+        "First paragraph of notice.\n\nSecond paragraph of notice.",
+        QMessageBox.StandardButton.Ok,
+        window,
+    )
+    box.show()
+
+    manifest = Manifest(
+        id="mod-xp",
+        game="wow-wotlk",
+        type="mod",
+        name="XP Rate",
+        description="Set XP rate.",
+    )
+    prompt = Prompt(key="rate", question="XP Rate?", kind="int", default="1")
+    prompt_dlg = ManifestPromptDialog(window, manifest, [prompt])
+    prompt_dlg.show()
+
+    qbox, qbtns = quit_box(1, "A server is being stopped...", window)
+    qbox.show()
+
+    wbox, wbtns = while_stopping_box(1, parent=window)
+    wbox.show()
+
+    nbox, nbtns = note_box(window)
+    nbox.show()
+    qapp.processEvents()
+
+    try:
+        assert box._scroll is not None
+        box_img = box.grab().toImage()
+        pt = box._scroll.mapTo(box, box._scroll.rect().topLeft())
+        scroll_px = box_img.pixelColor(pt.x() + 4, pt.y() + 4)
+        assert (
+            scroll_px.lightness() > 180
+        ), f"FittedMessageBox scroll stayed dark: {scroll_px.name()}"
+
+        prompt_img = prompt_dlg.grab().toImage()
+        mpt = prompt_dlg._scroll.mapTo(prompt_dlg, prompt_dlg._scroll.rect().topLeft())
+        m_px = prompt_img.pixelColor(mpt.x() + 4, mpt.y() + 4)
+        assert m_px.lightness() > 180, f"ManifestPromptDialog scroll stayed dark: {m_px.name()}"
+
+        # Verify quit modals keep their scroll area inside the grid and buttons separated
+        for modal, btns in ((qbox, qbtns), (wbox, wbtns), (nbox, nbtns)):
+            assert modal._scroll is not None
+            assert modal.layout().indexOf(modal._scroll) >= 0
+            assert modal._scroll.geometry().x() > 0
+            assert modal._scroll.geometry().width() < modal.width()
+            btn_list = list(btns.values())
+            for i, btn in enumerate(btn_list):
+                r1 = btn.geometry()
+                assert r1.width() >= btn.sizeHint().width()
+                for other in btn_list[i + 1 :]:
+                    assert not r1.intersects(
+                        other.geometry()
+                    ), f"Buttons overlapped in {modal.windowTitle()}"
+
+        # Verify Gruvbox dark headers stay dark and Gruvbox light headers stay bright & vibrant
+        header = DadcraftHeader("Dad's MMO Lab", "Yu'lon")
+        header.follow(None)
+        header.resize(720, 50)
+        header.show()
+        try:
+            header.set_theme("gruvbox-dark-hard")
+            header._tick()
+            dark_hdr = header.grab().toImage().pixelColor(520, 24)
+            header.set_theme("gruvbox-light-hard")
+            header._tick()
+            light_hdr = header.grab().toImage().pixelColor(520, 24)
+            assert dark_hdr.lightness() < 75, f"Gruvbox dark header too bright: {dark_hdr.name()}"
+            assert light_hdr.lightness() > 190, f"Gruvbox light header too dark: {light_hdr.name()}"
+        finally:
+            header.close()
+            header.deleteLater()
+    finally:
+        for w in (box, prompt_dlg, qbox, wbox, nbox, window):
+            w.close()
+            w.deleteLater()
+        _ = ui_settings
