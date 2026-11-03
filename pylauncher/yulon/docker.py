@@ -8956,6 +8956,77 @@ def tool_containers_left_running(folder: Path) -> StillWriting:
     return StillWriting(ours=tuple(left), others=tuple(theirs))
 
 
+def install_tool_containers(
+    projects: Sequence[str], folders: Sequence[Path], *, wsl_distro: str | None = None
+) -> list[str] | None:
+    """Running extraction-tool containers (`yulon-extract-*`) that belong to THIS install.
+
+    T854: the movement-map step of an install is such a container, and it can outlive a Stop
+    (Docker Desktop keeps a container whose CLI is gone, T303). One `docker ps` lists every
+    running tool with the labels that can name its install; the filtering is here. A tool is
+    this install's when EITHER its `WRITES_LABEL` holds the `folder_id()` of one of `folders`
+    (the data folder it writes: what `ContainerRun.to_create_argv` records, and the only thing
+    that names the install for a tool that does not carry the compose label) OR it carries the
+    `PROJECT_LABEL` of one of `projects` (compose-built images hand their labels to the
+    containers made from them). `OWNER_LABEL` is deliberately not asked: `compose down
+    --remove-orphans` already takes any container of the project whoever made it, and a
+    Windows and a WSL Yu'lon on one folder are one install.
+
+    The ids are only READ (`_read_folder_id`): `folder_id()` would write a file into a folder
+    that is about to be deleted, through whatever link it is. A folder with no id file has had
+    no tool that names it, so it matches nothing.
+
+    None when Docker would not answer: the caller says so and the removal's own Docker
+    commands report it next.
+    """
+    wanted_projects = {project for project in projects if project}
+    wanted_ids = {
+        ident for ident in (_read_folder_id(folder / FOLDER_ID_FILE) for folder in folders) if ident
+    }
+    proc = _docker(
+        [
+            "ps",
+            "--filter",
+            f"name={TOOL_CONTAINER_PREFIX}",
+            "--format",
+            f'{{{{.Names}}}}\t{{{{.Label "{PROJECT_LABEL}"}}}}\t{{{{.Label "{WRITES_LABEL}"}}}}',
+        ],
+        timeout=_ASK_AGAIN_TIMEOUT,
+        wsl_distro=wsl_distro,
+    )
+    if proc.returncode != 0:
+        logger.info(f"could not list this install's extraction tool containers: {proc.stderr}")
+        return None
+    ours: list[str] = []
+    for row in proc.stdout.splitlines():
+        name, project, writes = ([*row.strip().split("\t"), "", ""])[:3]
+        if not name.startswith(TOOL_CONTAINER_PREFIX):
+            continue
+        named = {part for part in writes.strip().split(",") if part}
+        if project.strip() in wanted_projects or named & wanted_ids:
+            ours.append(name)
+    return sorted(ours)
+
+
+def end_tool_container(name: str, *, wsl_distro: str | None = None) -> str | None:
+    """Kill and remove one extraction-tool container at once (`docker rm -f -v`, no grace).
+
+    `-v` takes only that container's own anonymous volumes (T846), never a named one.
+
+    T854: for an uninstall, which deletes the data the tool writes, so there is nothing to
+    wait for (`compose down` would give it `STOP_GRACE_SECONDS` first, twice). None once it is
+    gone; otherwise Docker's reason in words. Never raises.
+    """
+    proc = _docker(
+        ["rm", "-f", "-v", name], timeout=container_end.END_CONTAINER_TIMEOUT, wsl_distro=wsl_distro
+    )
+    said = (proc.stderr or "").lower()
+    if proc.returncode == 0 or "no such container" in said or "already in progress" in said:
+        _ended(name)
+        return None
+    return (proc.stderr or "").strip() or f"docker rm exited {proc.returncode}"
+
+
 WRITES_LABEL = "yulon.writes-ids"
 """The label `docker create` puts on an extraction tool container: the folders it writes,
 each as `folder_id()`, comma-separated (Codex review of the owner label; T536).

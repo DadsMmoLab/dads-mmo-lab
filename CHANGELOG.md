@@ -24,6 +24,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 
 - The Conquest of Azeroth install on Windows no longer stops at the map step with "Permission denied" on a stock Ascension client.
 - Conquest of Azeroth: pressing Start with another realm type picked now offers to switch to it instead of starting the old one.
+- Uninstall and Start over stop a running movement-map job first, instead of waiting for it silently.
 
 ### Changed
 - Centurion and Mists of Pandaria on Windows build their map data inside Docker, not through the slow Windows folder share.
