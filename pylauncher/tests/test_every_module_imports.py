@@ -1,7 +1,7 @@
 """Every module of `yulon` imports on the interpreter this runs on (T687).
 
 CI's `platform-smoke` job runs this on real Windows and macOS. The mypy passes
-in `lint-type-test` check the other platforms' imports by SIMULATING them
+in `lint-type` check the other platforms' imports by SIMULATING them
 (`--platform win32`), which is how a `pwd` import once went green on one OS and
 red on the other; a real import on the real OS is the check that cannot be
 simulated away. On Linux it is cheap, because the rest of the suite imports

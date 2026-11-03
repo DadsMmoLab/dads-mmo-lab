@@ -41,7 +41,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 def pytest_addoption(parser: pytest.Parser) -> None:
     """`--shard-id N --num-shards M`: run the Nth of M slices of the collected tests.
 
-    CI splits its pytest run into four jobs per Python version (`ci.yml`); a run given neither
+    CI splits its pytest run into six jobs per Python version (`ci.yml`); a run given neither
     option is the whole suite, so the local runners (`yt`, `yt-vm`) are unchanged.
     """
     group = parser.getgroup("shards", "split the run into slices")
