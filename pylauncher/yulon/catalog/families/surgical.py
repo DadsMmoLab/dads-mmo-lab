@@ -51,7 +51,26 @@ TOOL_PREFIX = "map "
 """The appended tool's name: `map <id> from <archive>`, so the log says what it did."""
 
 SURGICAL_DIR = ".yulon-surgical-"
-"""Scratch under the container's `/out`: wiped before and after, never recorded."""
+"""The side run's scratch, under `BIND_ROOT` or `SCRATCH_ROOT`: wiped before and after.
+
+A `data/.yulon-surgical-*` an older run left is removed by `azerothcore.py` without
+following a link."""
+
+BIND_ROOT = "/out"
+"""Where the scratch lies on Linux: in `data/`, which Yu'lon made and the tools' user owns.
+
+Linux keeps it there so its argv, and with it the evidence's plan hash, stays byte for
+byte what it was, and the ~1.9 GB lands on the data drive, not in Docker's own storage."""
+
+SCRATCH_ROOT = "/tmp"
+"""Where the scratch lies on Docker Desktop (Windows, macOS): the container's own layer.
+
+There the tools run as the image's USER (uid 1000), and a `data/` that Docker created is
+root's 0755 at `/out`, so `mkdir /out/.yulon-surgical-936` was refused (#459, T849:
+"Permission denied" on a stock Ascension client). `/tmp` is in every image, mode 1777,
+and the extraction there also stays off the slow bind. Only the finished files are
+copied into `/out/maps` and `/out/vmaps`, folders the host made. The caller picks it
+with the same platform switch as the T840 scratch (`scratch_off_bind`)."""
 
 FAILED_EXIT = 3
 """The script's status when the archive is not there or fewer than `min_maps` maps came out."""
@@ -314,7 +333,7 @@ def archive_checks(entry: CatalogEntry, client_dir: Path) -> tuple[Check, ...]:
     return tuple(rows)
 
 
-def script(spec: AcSurgicalMap, tools_bin: str) -> str:
+def script(spec: AcSurgicalMap, tools_bin: str, *, scratch_root: str = BIND_ROOT) -> str:
     """The `bash -c` program that extracts one map out of its disabled archive.
 
     `tools_bin` is the container-absolute folder the three extractor binaries
@@ -340,6 +359,10 @@ def script(spec: AcSurgicalMap, tools_bin: str) -> str:
     creates `out/maps` but not `out` itself and stops with "Could not create
     directory ... check your permissions" (three Linux Mint installs, v0.9.19;
     the stub in the test used to `mkdir -p` the parent and hid it).
+
+    `$w` is under `scratch_root`: `BIND_ROOT` on Linux, `SCRATCH_ROOT` on Docker
+    Desktop, where the script must not create anything at the top of `/out`
+    because the tools' user may not write there (T849).
 
     Layout inside `$w`: `view/` is the farm (`cp -rs /client/.` — links only,
     nothing copied; the disabled archive arrives as `ln -sfn`), `map_extractor`
@@ -376,7 +399,7 @@ def script(spec: AcSurgicalMap, tools_bin: str) -> str:
     return (
         "set -eu\n"
         + archive_check
-        + f'w="/out/{SURGICAL_DIR}{map_id}"\n'
+        + f'w="{scratch_root}/{SURGICAL_DIR}{map_id}"\n'
         + "trap 'rm -rf \"$w\"' EXIT\n"
         + 'rm -rf "$w"\n'
         + 'mkdir -p "$w/view" "$w/out"\n'
@@ -400,12 +423,17 @@ def tool_name(spec: AcSurgicalMap) -> str:
 
 
 def append(
-    block: AzerothCoreData, tools_bin: str, specs: tuple[AcSurgicalMap, ...] | None = None
+    block: AzerothCoreData,
+    tools_bin: str,
+    specs: tuple[AcSurgicalMap, ...] | None = None,
+    *,
+    scratch_root: str = BIND_ROOT,
 ) -> ExtractPlan:
     """The catalog plan plus one `ExtractTool` per surgical map, same `produces` as `maps`.
 
     `specs` narrows the appended tools to those maps (T836: the ones whose
     archive the client keeps switched off); None appends every one.
+    `scratch_root` is `script()`'s (T849).
     """
     plan = block.client_extract
     assert plan is not None  # the caller (the AC extract stage) only runs with one
@@ -416,7 +444,12 @@ def append(
         *(
             ExtractTool(
                 name=tool_name(spec),
-                argv=("bash", "-c", script(spec, tools_bin), "yulon-surgical"),
+                argv=(
+                    "bash",
+                    "-c",
+                    script(spec, tools_bin, scratch_root=scratch_root),
+                    "yulon-surgical",
+                ),
                 produces={"maps": maps_need},
             )
             for spec in chosen
@@ -425,7 +458,9 @@ def append(
     return plan.extract.model_copy(update={"tools": tuple(tools)})
 
 
-def effective_plan(block: AzerothCoreData, tools_bin: str, client_dir: Path) -> ExtractPlan:
+def effective_plan(
+    block: AzerothCoreData, tools_bin: str, client_dir: Path, *, scratch_root: str = BIND_ROOT
+) -> ExtractPlan:
     """The catalog plan plus a side run for each surgical map the client keeps switched off.
 
     T836: a map whose archive the client loads under `link_as` (the CoA
@@ -437,10 +472,11 @@ def effective_plan(block: AzerothCoreData, tools_bin: str, client_dir: Path) -> 
     evidence's plan hash, therefore follows the client's layout: a client
     that switches the archive on after an install extracts everything again
     on the next extract stage instead of keeping terrain made without it.
+    `scratch_root` is `script()`'s (T849).
     """
     plan = block.client_extract
     assert plan is not None
     off = tuple(spec for spec in plan.surgical_maps if layout(spec, client_dir) != "enabled")
     if not off:
         return plan.extract
-    return append(block, tools_bin, off)
+    return append(block, tools_bin, off, scratch_root=scratch_root)

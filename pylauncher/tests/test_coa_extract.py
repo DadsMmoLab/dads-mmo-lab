@@ -329,6 +329,27 @@ def test_an_old_client_still_carves_936_out_of_the_disabled_archive(tmp_path: Pa
     assert any("switched off" in line for line in said), said
 
 
+@pytest.mark.parametrize(
+    ("platform", "scratch", "not_there"),
+    [("linux", "/out/", "/tmp/"), ("windows", "/tmp/", "/out/"), ("macos", "/tmp/", "/out/")],
+)
+def test_the_side_run_scratch_follows_the_platform(
+    tmp_path: Path, platform: str, scratch: str, not_there: str
+) -> None:
+    """#459 / T849: on Docker Desktop the side run's scratch is the container's /tmp, because the
+    tools' user may not create anything at the top of a `data/` Docker made; Linux keeps it in
+    `data/`, so its argv (and the evidence's plan hash) is what it was."""
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    client = coa_client(tmp_path, "disabled")
+    rec = coa_produce(Recorder())
+    lay_evidence_maps(server_dir / "data", (0, 1, 530, 571, 936, 937))
+    list(engine(rec, platform_id=lambda: platform)._extract_maps(context(server_dir, client)))
+    side = " ".join(rec.container_runs[-1].argv)
+    assert f'w="{scratch}{surgical.SURGICAL_DIR}936"' in side, side
+    assert f'w="{not_there}{surgical.SURGICAL_DIR}936"' not in side, side
+
+
 def test_a_client_with_neither_archive_is_refused_before_any_run(tmp_path: Path) -> None:
     """No `patch-WB1.MPQ` and no `.DISABLED`: refused by name, nothing extracted."""
     server_dir = tmp_path / "srv"

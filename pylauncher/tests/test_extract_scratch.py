@@ -1059,12 +1059,15 @@ def coa_produce(rec: Recorder) -> Recorder:
     return rec
 
 
-def coa_tools(entry: CatalogEntry, client_dir: Path) -> tuple[ExtractTool, ...]:
+def coa_tools(
+    entry: CatalogEntry, client_dir: Path, *, scratch_root: str = surgical.BIND_ROOT
+) -> tuple[ExtractTool, ...]:
+    """The plan's tools; `scratch_root` is the side run's (T849: `SCRATCH_ROOT` off the bind)."""
     block = entry.install.native.azerothcore.client_extract
     assert block is not None
     tools_bin = block.extract.tools[0].argv[0].rpartition("/")[0] or "/"
     data = AzerothCoreData(client_extract=block)
-    return surgical.effective_plan(data, tools_bin, client_dir).tools
+    return surgical.effective_plan(data, tools_bin, client_dir, scratch_root=scratch_root).tools
 
 
 def test_on_docker_desktop_every_coa_tool_runs_in_the_containers_own_layer(
@@ -1077,7 +1080,7 @@ def test_on_docker_desktop_every_coa_tool_runs_in_the_containers_own_layer(
     lay_map_data(server_dir / "data", (0, 1, 530, 571, 936, 937))
     rec = coa_produce(Recorder())
     said = list(ac_engine(rec, entry)._extract_maps(ac_context(server_dir, client_dir, entry)))
-    tools = coa_tools(entry, client_dir)
+    tools = coa_tools(entry, client_dir, scratch_root=surgical.SCRATCH_ROOT)
     assert len(rec.container_runs) == len(tools)
     for run, tool in zip(rec.container_runs, tools, strict=True):
         assert run.argv == ("sh", "-c", extract.SCRATCH_SCRIPT, "sh", *tool.argv)
