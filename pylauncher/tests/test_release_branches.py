@@ -31,14 +31,18 @@ BASELINE = "data/coa-world/baseline.json"
 
 # Real shas from the mirror: v2.9.1 is annotated (peel `^{}`), v2.8.1 is lightweight.
 TAG_V291 = "79c5437a84bb0b9593011c261b1bd9afa558427e"
-TAG_V281 = "8203e0a3e0a3e0a3e0a3e0a3e0a3e0a3e0a3e0a3"
+TAG_V281 = "8203e0a3d85948d40e063e7c277ff25597e8d81c"
 
 
 def _branching() -> CatalogEntry:
     """WotLK shaped like CoA: core follows release branches, bots the paired tag."""
     sources = list(ENTRY.emulator.sources)
     sources[0] = sources[0].model_copy(
-        update={"follow": "release_branches", "release_prefix": "coa-bots-"}
+        update={
+            "follow": "release_branches",
+            "release_prefix": "coa-bots-",
+            "branch": "coa-bots-2.9.1",
+        }
     )
     sources[1] = sources[1].model_copy(update={"follow": "release_tag", "release_prefix": "v"})
     emulator = ENTRY.emulator.model_copy(update={"sources": tuple(sources)})
@@ -53,7 +57,9 @@ def _branching() -> CatalogEntry:
     )
     native_block = block.model_copy(update={"azerothcore": azerothcore})
     install_block = entry.install.model_copy(update={"native": native_block})
-    return entry.model_copy(update={"install": install_block})
+    return CatalogEntry.model_validate(
+        entry.model_copy(update={"install": install_block}).model_dump()
+    )
 
 
 def _engine(rec: Recorder, entry: CatalogEntry | None = None) -> AzerothCoreInstaller:
@@ -285,6 +291,31 @@ def test_release_branches_that_cannot_be_listed_change_nothing(tmp_path: Path) -
     assert rec.heads == before
 
 
+def test_release_branches_with_no_matching_branch_say_so_not_unreachable(
+    tmp_path: Path,
+) -> None:
+    rec, server_dir = _ready(tmp_path)
+    entry = _branching()
+    core = entry.emulator.sources[0]
+    rec.adverts[core.url] = {}
+    before = dict(rec.heads)
+    with pytest.raises(InstallerError) as exc:
+        _press(rec, server_dir)
+    assert "lists none named coa-bots-<version>" in str(exc.value)
+    assert "could not list them" not in str(exc.value)
+    assert rec.clones == []
+    assert rec.heads == before
+
+
+def test_news_with_no_matching_branch_says_nothing(tmp_path: Path) -> None:
+    rec, server_dir = _ready(tmp_path)
+    entry = _branching()
+    rec.adverts[entry.emulator.sources[0].url] = {}
+    news = _engine(rec).upstream_news(InstallOptions(server_dir=server_dir), now=T0)
+    assert upstream.line(news) == ""
+    assert all(row.behind is None and row.release == "" for row in news.sources)
+
+
 # -- 9. news ------------------------------------------------------------------
 
 
@@ -300,6 +331,27 @@ def test_news_counts_against_the_newest_release_branch(tmp_path: Path) -> None:
     )
     row = next(s for s in news.sources if s.repo == CORE)
     assert row.release == "coa-bots-2.10"
+
+
+def test_a_stale_bots_row_beside_a_fresh_core_row_is_still_counted(tmp_path: Path) -> None:
+    rec, server_dir = _ready(tmp_path)
+    _engine(rec).upstream_news(InstallOptions(server_dir=server_dir), now=T0)
+    import json as _json
+
+    cached = _json.loads((server_dir / upstream.UPSTREAM_FILE).read_text(encoding="utf-8"))
+    stale = T0 - upstream.MAX_AGE_SECONDS - 1
+    for row in cached["sources"]:
+        if row["repo"] == BOTS:
+            row["checked_unix"] = stale
+    (server_dir / upstream.UPSTREAM_FILE).write_text(_json.dumps(cached), encoding="utf-8")
+    rec.gets.clear()
+    news = _engine(rec).upstream_news(InstallOptions(server_dir=server_dir), now=T0 + 10)
+    bots_row = next(s for s in news.sources if s.repo == BOTS)
+    assert bots_row.release == "v2.10"
+    assert any(f"/repos/{BOTS}/compare/" in url for url in rec.gets)
+    assert not any(f"/repos/{CORE}/compare/" in url for url in rec.gets)
+    core_row = next(s for s in news.sources if s.repo == CORE)
+    assert core_row.release == "coa-bots-2.10"
 
 
 # -- 10. held -----------------------------------------------------------------
@@ -340,6 +392,39 @@ def test_a_refused_release_is_not_offered_again(tmp_path: Path) -> None:
     assert not any(f"/repos/{CORE}/compare/" in url for url in rec.gets)
 
 
+def test_a_baseline_refusal_holds_the_paired_release_in_the_news(tmp_path: Path) -> None:
+    rec, server_dir, entry = _baseline_ready(tmp_path)
+    dest = server_dir / entry.emulator.sources[0].dest
+    rec.blob_ids[(dest, OLD_A, BASELINE)] = "f8f4001a" * 5
+    rec.blob_ids[(dest, NEW_B, BASELINE)] = "1" * 40
+    with pytest.raises(InstallerError):
+        _press(rec, server_dir)
+    news = _engine(rec).upstream_news(InstallOptions(server_dir=server_dir), now=T0)
+    assert upstream.line(news) == ""
+    for row in news.sources:
+        assert row.behind == 0
+        assert row.release == ""
+
+
+def test_pressing_again_after_a_baseline_refusal_refuses_without_cloning(
+    tmp_path: Path,
+) -> None:
+    rec, server_dir, entry = _baseline_ready(tmp_path)
+    dest = server_dir / entry.emulator.sources[0].dest
+    rec.blob_ids[(dest, OLD_A, BASELINE)] = "f8f4001a" * 5
+    rec.blob_ids[(dest, NEW_B, BASELINE)] = "1" * 40
+    with pytest.raises(InstallerError):
+        _press(rec, server_dir)
+    rec.clones.clear()
+    before = dict(rec.heads)
+    with pytest.raises(InstallerError) as refused:
+        _press(rec, server_dir)
+    assert "was refused before: it brings a new world baseline" in str(refused.value)
+    assert "wait for a Yu'lon release" in str(refused.value)
+    assert rec.clones == []
+    assert rec.heads == before
+
+
 # -- 12. the guard -------------------------------------------------------------
 
 
@@ -356,7 +441,7 @@ def test_the_local_commit_guard_asks_the_branch_the_install_moved_to(tmp_path: P
     rec2, server_dir2 = _ready(tmp_path / "second")
     list(_engine(rec2).update_to_latest(InstallOptions(server_dir=server_dir2)))
     asked2 = dict(rec2.local_commit_branches)
-    assert entry.emulator.sources[0].branch in set(asked2.values())
+    assert entry.emulator.sources[0].branch == "coa-bots-2.9.1"
     bots_dest = entry.emulator.sources[1].dest.rsplit("/", 1)[-1]
     assert asked.get(bots_dest) == entry.emulator.sources[1].branch
     assert asked2.get(bots_dest) == entry.emulator.sources[1].branch
@@ -374,7 +459,7 @@ def test_return_to_the_pin_fetches_the_pinned_branch_and_lists_nothing(tmp_path:
     entry = _branching()
     core, bots = entry.emulator.sources[0], entry.emulator.sources[1]
     by_url = {spec.url: spec for spec in rec.clones}
-    assert by_url[core.url].branch == core.branch
+    assert by_url[core.url].branch == "coa-bots-2.9.1"
     assert by_url[core.url].rev == core.rev
     assert by_url[bots.url].branch == bots.branch
     assert not any("info/refs" in url for url in rec.gets)

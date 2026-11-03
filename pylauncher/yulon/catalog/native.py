@@ -5067,6 +5067,8 @@ class BranchReleasePlan:
     """repo -> (name recorded and said, sha): the core's branch, each bots tag."""
     missing: tuple[tuple[str, str], ...]
     """`(repo, tag)` of paired tags not published: a release without its bots."""
+    branch_repo: str = ""
+    """The repo the release_branches source names: the refused-baseline hold reads it."""
 
 
 @dataclass(frozen=True)
@@ -11046,10 +11048,18 @@ class StagedInstaller:
         found: list[upstream.SourceNews] = []
         asked = False
         record = read_state(server_dir, valid=())
-        stale = [s for s in moving if s.repo not in fresh]
         branches: BranchReleasePlan | None = None
-        if any(s.follow in ("release_branches", "release_tag") for s in stale):
-            branches = self._newest_branch_release(stale)
+        # T862 (review round 1): a fresh core row beside a stale bots row once
+        # made the plan from the stale sources alone, so the plan had no
+        # release_branches source and the bots row stayed unknown until the core
+        # row expired. The plan covers the whole pair; only the stale rows are
+        # re-asked and written.
+        if any(
+            s.follow in ("release_branches", "release_tag") for s in moving if s.repo not in fresh
+        ):
+            branches = self._newest_branch_release(
+                [s for s in moving if s.follow in ("release_branches", "release_tag")]
+            )
         for index, source in enumerate(moving):
             kept = fresh.get(source.repo)
             if kept is not None:
@@ -11059,7 +11069,11 @@ class StagedInstaller:
             label = "server" if index == 0 else source.repo.rsplit("/", 1)[-1]
             if source.follow in ("release_branches", "release_tag"):
                 stands, release, held = self._behind_branch(
-                    server_dir, source, branches, refused=_refused_for(record, source)
+                    server_dir,
+                    source,
+                    branches,
+                    refused=_refused_for(record, source),
+                    held_refused=self._baseline_refused(record, branches),
                 )
             else:
                 behind, release = self._behind(
@@ -11092,13 +11106,17 @@ class StagedInstaller:
         branches: BranchReleasePlan | None,
         *,
         refused: str = "",
+        held_refused: bool = False,
     ) -> tuple[upstream.Comparison | None, str, str]:
         """How a release-mode source stands to the newest release branch (T862).
 
         `(comparison, release name, held sentence)`. `(None, "")` with no held when
         the listing could not be read. When the bots tag is missing every
         release-mode row counts 0 with no release, and the release_branches row
-        carries the held sentence instead.
+        carries the held sentence instead. A refused baseline holds the whole
+        paired release: while the newest release branch's commit still matches a
+        refused commit, every release-mode row counts 0 with no release and no
+        held sentence (review round 1).
         """
         slug = upstream.github_slug(source.repo)
         if slug is None or branches is None:
@@ -11113,12 +11131,31 @@ class StagedInstaller:
             name, sha = branches.commits[source.repo]
         except KeyError:
             return None, "", ""
+        if held_refused:
+            return upstream.Comparison(ahead=0, behind=0, status="identical"), "", ""
         if refused == sha:
             return upstream.Comparison(ahead=0, behind=0, status="identical"), "", ""
         head = self._seams.head_sha(server_dir / source.dest)
         if head is None:
             return None, "", ""
         return upstream.compare(slug, head, sha, get=self._seams.upstream_get), name, ""
+
+    @staticmethod
+    def _baseline_refused(record: InstallState | None, branches: BranchReleasePlan | None) -> bool:
+        """Is the newest release branch's own commit already a refused one (T862)?
+
+        `_refuse_a_new_world_baseline` remembers only the core row's commit, but
+        the bots row moves to its paired tag in the same press: offering it
+        again would refuse again. While the listing's newest branch still names
+        that commit, the whole paired release holds.
+        """
+        if record is None or branches is None or branches.missing:
+            return False
+        try:
+            _name, sha = branches.commits[branches.branch_repo]
+        except KeyError:
+            return False
+        return any(commit == sha for _repo, commit in record.refused_updates)
 
     def _behind(
         self, server_dir: Path, source: EmulatorSource, *, refused: str = ""
@@ -11439,7 +11476,7 @@ class StagedInstaller:
         # fetch, for `_refuse_unless_updatable()`'s reason: a press that moved
         # the core and then could not say which release the bots are on would
         # leave the folder half a version ahead of the image.
-        targets = {} if to_pin else self._release_targets(plan, rewritten_ok)
+        targets = {} if to_pin else self._release_targets(plan, rewritten_ok, server_dir)
         where = "the commit this app was tested against" if to_pin else "the newest upstream code"
         press = (
             server_build_presses.RETURN_TO_PIN if to_pin else server_build_presses.UPDATE_TO_LATEST
@@ -11820,6 +11857,7 @@ class StagedInstaller:
         self,
         plan: Sequence[tuple[EmulatorSource, Path, str]],
         rewritten_ok: Collection[str] = (),
+        server_dir: Path | None = None,
     ) -> dict[str, ReleaseTarget]:
         """The commit "latest" means for each source that follows its releases (T126).
 
@@ -11848,6 +11886,12 @@ class StagedInstaller:
             core = next(s for s in branch_sources if s.follow == "release_branches")
             asked = self._newest_branch_release([s for s, _, _ in plan])
             if asked is None:
+                if self._release_listing_reachable(core):
+                    prefix = core.release_prefix or ""
+                    raise InstallerError(
+                        f"{core.repo} follows its release branches, and {core.url} lists none "
+                        f"named {prefix}<version>. Nothing in that folder was changed."
+                    )
                 raise InstallerError(
                     f"{core.repo} follows its release branches, and Yu'lon could not list them "
                     f"from {core.url}. Nothing in that folder was changed; try again when it "
@@ -11860,6 +11904,24 @@ class StagedInstaller:
                     f"no {tag}, and Yu'lon never builds a release with another release's bots. "
                     f"Nothing in those folders was changed; this offers {asked.branch.name} "
                     f"once {tag} is out."
+                )
+            record = read_state(server_dir, valid=()) if server_dir is not None else None
+            try:
+                _name, core_sha = asked.commits[asked.branch_repo or core.repo]
+            except KeyError:
+                core_sha = ""
+            refused = (
+                {commit for _repo, commit in record.refused_updates}
+                if record is not None
+                else set()
+            )
+            if core_sha and core_sha in refused:
+                raise UpdateRefused(
+                    f"{asked.branch.name} was refused before: it brings a new world baseline, "
+                    "which an update cannot take. Nothing was changed; wait for a Yu'lon "
+                    f"release that moves {self.entry.name} onto it.",
+                    repo=core.repo,
+                    commit=core_sha,
                 )
             for source, dest, old in plan:
                 if source.follow not in ("release_branches", "release_tag"):
@@ -11993,7 +12055,19 @@ class StagedInstaller:
                 missing.append((source.repo, tag))
             else:
                 commits[source.repo] = (tag, sha)
-        return BranchReleasePlan(branch=branch, commits=commits, missing=tuple(missing))
+        return BranchReleasePlan(
+            branch=branch, commits=commits, missing=tuple(missing), branch_repo=core.repo
+        )
+
+    def _release_listing_reachable(self, core: EmulatorSource) -> bool:
+        """Was the core's release listing read, just with no matching branch (T862)?
+
+        `advertised_refs` answers None both when the server cannot be reached
+        and when its answer parses to an empty mapping, and only the first is
+        the "could not list them" sentence. A second read is cheap beside a
+        refused press, and it runs only on that path.
+        """
+        return upstream.advertised_refs(core.url, get=self._seams.upstream_get) is not None
 
     @staticmethod
     def _latest_rev(source: EmulatorSource, targets: Mapping[str, ReleaseTarget]) -> str | None:
