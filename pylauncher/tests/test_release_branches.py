@@ -349,9 +349,79 @@ def test_a_stale_bots_row_beside_a_fresh_core_row_is_still_counted(tmp_path: Pat
     bots_row = next(s for s in news.sources if s.repo == BOTS)
     assert bots_row.release == "v2.10"
     assert any(f"/repos/{BOTS}/compare/" in url for url in rec.gets)
-    assert not any(f"/repos/{CORE}/compare/" in url for url in rec.gets)
+    # Review round 2: the pair is one generation, so the fresh core row is
+    # recomputed from the same plan rather than served from the cache.
+    assert any(f"/repos/{CORE}/compare/" in url for url in rec.gets)
     core_row = next(s for s in news.sources if s.repo == CORE)
     assert core_row.release == "coa-bots-2.10"
+
+
+def test_a_stale_bots_row_does_not_keep_the_fresh_core_rows_held_sentence(
+    tmp_path: Path,
+) -> None:
+    """A held core row is recomputed with the tag now published (review round 2)."""
+    rec, server_dir = _ready(tmp_path)
+    entry = _branching()
+    bots = entry.emulator.sources[1]
+    rec.adverts[bots.url] = {}
+    _engine(rec).upstream_news(InstallOptions(server_dir=server_dir), now=T0)
+    import json as _json
+
+    cached = _json.loads((server_dir / upstream.UPSTREAM_FILE).read_text(encoding="utf-8"))
+    stale = T0 - upstream.MAX_AGE_SECONDS - 1
+    for row in cached["sources"]:
+        if row["repo"] == BOTS:
+            row["checked_unix"] = stale
+    (server_dir / upstream.UPSTREAM_FILE).write_text(_json.dumps(cached), encoding="utf-8")
+    rec.adverts[bots.url] = {
+        "refs/tags/v2.10^{}": TAG_C,
+        "refs/tags/v2.10": TAG_C,
+    }
+    rec.github = {CORE: 0, BOTS: 0}
+    rec.gets.clear()
+    news = _engine(rec).upstream_news(InstallOptions(server_dir=server_dir), now=T0 + 10)
+    for row in news.sources:
+        assert row.repo in (CORE, BOTS)
+        assert row.held == ""
+        assert row.behind == 0
+    assert upstream.line(news) == ""
+
+
+def test_a_stale_bots_row_does_not_keep_the_fresh_core_rows_older_release(
+    tmp_path: Path,
+) -> None:
+    """A core row naming an older pair is recomputed once adverts move on (review round 2)."""
+    rec, server_dir = _ready(tmp_path)
+    news = _engine(rec).upstream_news(InstallOptions(server_dir=server_dir), now=T0)
+    core_row = next(s for s in news.sources if s.repo == CORE)
+    assert core_row.release == "coa-bots-2.10"
+    import json as _json
+
+    cached = _json.loads((server_dir / upstream.UPSTREAM_FILE).read_text(encoding="utf-8"))
+    stale = T0 - upstream.MAX_AGE_SECONDS - 1
+    for row in cached["sources"]:
+        if row["repo"] == BOTS:
+            row["checked_unix"] = stale
+        elif row["repo"] == CORE:
+            row["release"] = "coa-bots-2.9.1"
+    (server_dir / upstream.UPSTREAM_FILE).write_text(_json.dumps(cached), encoding="utf-8")
+    entry = _branching()
+    rec.adverts[entry.emulator.sources[0].url] = {
+        "refs/heads/coa-bots-2.9.1": OLD_A,
+        "refs/heads/coa-bots-2.10": NEW_B,
+        "refs/heads/main": "d" * 40,
+    }
+    rec.adverts[entry.emulator.sources[1].url] = {
+        "refs/tags/v2.10^{}": TAG_C,
+        "refs/tags/v2.10": TAG_C,
+    }
+    rec.github = {CORE: 0, BOTS: 0}
+    rec.gets.clear()
+    again = _engine(rec).upstream_news(InstallOptions(server_dir=server_dir), now=T0 + 10)
+    for row in again.sources:
+        assert row.repo in (CORE, BOTS)
+        assert row.release in ("coa-bots-2.10", "v2.10")
+        assert row.held == ""
 
 
 # -- 10. held -----------------------------------------------------------------
@@ -445,6 +515,31 @@ def test_the_local_commit_guard_asks_the_branch_the_install_moved_to(tmp_path: P
     bots_dest = entry.emulator.sources[1].dest.rsplit("/", 1)[-1]
     assert asked.get(bots_dest) == entry.emulator.sources[1].branch
     assert asked2.get(bots_dest) == entry.emulator.sources[1].branch
+
+
+def test_a_kept_head_keeps_its_release_branch(tmp_path: Path) -> None:
+    """A checkout past the release keeps HEAD and still names its release (review round 2)."""
+    rec, server_dir = _ready(tmp_path)
+    entry = _branching()
+    ahead = "f" * 40
+    rec.heads[server_dir / entry.emulator.sources[0].dest] = ahead
+    rec.heads[server_dir / entry.emulator.sources[1].dest] = TAG_C
+    rec.github = {CORE: 0, BOTS: 0}
+    rec.github_behind = {CORE: 2, BOTS: 0}
+    lines = _press(rec, server_dir)
+    assert any("so it stays there" in line for line in lines), lines
+    state = native.read_state(server_dir, valid=())
+    assert state is not None
+    core = state.rev_for(CORE)
+    assert core is not None and core.release == "coa-bots-2.10"
+    assert core.built.split(" · ")[0] == ahead[:7]
+    rec.local_commit_branches.clear()
+    rec.upstream[server_dir / entry.emulator.sources[0].dest] = "e" * 40
+    rec.github = {CORE: 3, BOTS: 0}
+    rec.github_behind = {}
+    _press(rec, server_dir)
+    asked = dict(rec.local_commit_branches)
+    assert asked.get(server_dir.name) == "coa-bots-2.10"
 
 
 # -- 13. return ----------------------------------------------------------------

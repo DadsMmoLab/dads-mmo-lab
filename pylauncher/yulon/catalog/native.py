@@ -11049,20 +11049,24 @@ class StagedInstaller:
         asked = False
         record = read_state(server_dir, valid=())
         branches: BranchReleasePlan | None = None
-        # T862 (review round 1): a fresh core row beside a stale bots row once
-        # made the plan from the stale sources alone, so the plan had no
-        # release_branches source and the bots row stayed unknown until the core
-        # row expired. The plan covers the whole pair; only the stale rows are
-        # re-asked and written.
-        if any(
-            s.follow in ("release_branches", "release_tag") for s in moving if s.repo not in fresh
-        ):
-            branches = self._newest_branch_release(
-                [s for s in moving if s.follow in ("release_branches", "release_tag")]
-            )
+        release_sources = [s for s in moving if s.follow in ("release_branches", "release_tag")]
+        stale_release = any(s.repo not in fresh for s in release_sources)
+        # T862 (review round 2): the release pair is ONE generation. A stale
+        # bots row beside a fresh core row once left the core row's held /
+        # release in place for a day, so the tab said "bots are not out" after
+        # the tag appeared (or an older pair after the plan moved on). When
+        # any release-mode row is stale or missing, every release-mode row is
+        # recomputed from the one resolved plan with the same timestamp.
+        if stale_release:
+            branches = self._newest_branch_release(release_sources)
+            release_fresh = False
+        else:
+            release_fresh = any(s.repo in fresh for s in release_sources)
         for index, source in enumerate(moving):
             kept = fresh.get(source.repo)
-            if kept is not None:
+            if kept is not None and (
+                source.follow not in ("release_branches", "release_tag") or release_fresh
+            ):
                 found.append(kept)
                 continue
             asked = True
@@ -11941,8 +11945,15 @@ class StagedInstaller:
                     )
                 if stands.ahead == 0 and old != sha:
                     past = _commits(stands.behind)
+                    # T862 (review round 2): the folder is kept, and the record
+                    # keeps the release HEAD came from -- the newest branch for
+                    # the core, the tag for a release_tag source. Naming nothing
+                    # once asked the guard the catalog's pinned branch, so the
+                    # retained upstream commits read as local work and a later
+                    # valid Update was refused.
+                    kept = asked.branch.name if source.follow == "release_branches" else name
                     found[source.repo] = ReleaseTarget(
-                        tag="",
+                        tag=kept,
                         rev=old,
                         branch=(asked.branch.name if source.follow == "release_branches" else None),
                         line=(
