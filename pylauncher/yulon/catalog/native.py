@@ -69,7 +69,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable, Collection, Generator, Iterator, Mapping, Sequence
-from contextlib import AbstractContextManager, ExitStack, contextmanager
+from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from pathlib import Path, PurePosixPath
@@ -8701,6 +8701,7 @@ class StagedInstaller:
                 self._locking(self.stages(), server_dir, started_empty),
                 ctx,
                 run=ERROR_RUN_INSTALL,
+                builds=True,
             )
         except ReadyWaitStopped as stopped:
             # T247: the containers are up, and the world is still loading -- or,
@@ -8789,7 +8790,13 @@ class StagedInstaller:
         return INSTALL_WORLD_STOPPED
 
     def _staged(
-        self, stages: Sequence[Stage], ctx: StageContext, *, run: str = ""
+        self,
+        stages: Sequence[Stage],
+        ctx: StageContext,
+        *,
+        run: str = "",
+        builds: bool = False,
+        press: str = INSTALL_PRESS,
     ) -> Generator[str, None, InstallState]:
         """Run `stages` in order, saying where the user is. The ONE progress reporter.
 
@@ -8825,6 +8832,19 @@ class StagedInstaller:
         during the extraction, 2026-09-08. The record belongs to whoever holds
         the current state, and after this change that is exactly one function.
 
+        **`builds` is about the FREE DOCKER SPACE press, not about this loop.**
+        Only the install's `run()` and `rebuild()` pass True, because only they
+        run a `build` stage; their whole loop counts as compiling
+        (`docker.building()`), which refuses Free Docker space (T864 R3). An
+        update, a repair, corrections and an adopt pass through the same loop
+        with no compile at all, and counting them refused the press with a
+        sentence about an install building when nothing was (T864 review).
+        Writing Docker's cache for a minute is not a reason to skip the press.
+        `press` is the name the server's reservation carries at `start-db`: the
+        caller's own (a repair's or an update's), never the install's by
+        default, so the label another Yu'lon and `build_press_refusal()` read
+        names the press that is actually running.
+
         **T841's cleanup stop is HERE for the same reason, and for its own.**
         An install whose world came up and then stopped must stop that world
         (nothing watches an unfinished install, and `restart: unless-stopped`
@@ -8842,7 +8862,8 @@ class StagedInstaller:
         reservation = ExitStack()
         reserved = False
         try:
-            with reservation, self._held_awake() as note, docker.building(ctx.server_dir):
+            compiling = docker.building(ctx.server_dir) if builds else nullcontext()
+            with reservation, self._held_awake() as note, compiling:
                 if note:
                     yield note
                 try:
@@ -8853,7 +8874,7 @@ class StagedInstaller:
                             held = reservation.enter_context(
                                 self._reservation(
                                     ctx.server_dir,
-                                    INSTALL_PRESS,
+                                    press,
                                     ctx.cancel,
                                     images=self.image_refs_at(ctx.server_dir),
                                 )
@@ -9177,7 +9198,7 @@ class StagedInstaller:
             for stage in planned
         )
         ctx = self._update_context(server_dir, cancel)
-        yield from self._staged(stages, ctx)
+        yield from self._staged(stages, ctx, press=UPDATES_BUTTON_LABEL)
         # T808: an update may write the realm row again (the shared post-import step).
         yield from self._apply_realm_name(ctx, "The database updates are applied")
 
@@ -9236,7 +9257,7 @@ class StagedInstaller:
         yield REPAIR_DATABASE_OPENING_NOTE
         self._check_cancel(cancel)
         ctx = replace(self._update_context(server_dir, cancel), updates_only=False)
-        yield from self._staged(self.repair_database_stages(), ctx)
+        yield from self._staged(self.repair_database_stages(), ctx, press=REPAIR_DATABASE_PRESS)
         # T808: the import just seeded the catalog's realm name into the new login database.
         yield from self._apply_realm_name(ctx, "The database was made again")
         yield (
@@ -9466,7 +9487,7 @@ class StagedInstaller:
             )
             for stage in (self.stage_named("start-db"), self.stage_named("import"))
         )
-        yield from self._staged(stages, ctx)
+        yield from self._staged(stages, ctx, press=CORRECTIONS_BUTTON_LABEL)
         # T808: a corrected phase may write the realm row again (the shared post-import step).
         yield from self._apply_realm_name(ctx, "The corrections are applied")
         if stopped:
@@ -9931,7 +9952,7 @@ class StagedInstaller:
         )
         ctx = self._update_context(server_dir, cancel)
         try:
-            yield from self._staged(stages, ctx)
+            yield from self._staged(stages, ctx, press=ADOPT_BUTTON_LABEL)
         except BaseException:
             # Logged and not yielded: a generator whose consumer has abandoned
             # it may not yield again, and a press that failed has already said
@@ -10728,7 +10749,9 @@ class StagedInstaller:
             ctx, refs, missing_ok=missing_images_ok, held=held is not None
         )
         try:
-            state = yield from self._staged(stages, ctx)
+            state = yield from self._staged(
+                stages, ctx, builds=True, press=server_build_presses.REBUILD
+            )
         except InstallerError as exc:
             # FIRST, and outside every rollback branch below, because it is not
             # about the images at all: `touched` False is the whole window the

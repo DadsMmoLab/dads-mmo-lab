@@ -35,6 +35,7 @@ from yulon.ui import controller_view as controller_view_module
 from yulon.ui.controller_view import (
     DISTRO_STOPPED,
     DISTRO_UNKNOWN,
+    FREE_DOCKER_SPACE_WAITS_FOR_DISTRO,
     ControllerServices,
     ControllerView,
 )
@@ -345,6 +346,42 @@ def test_a_greyed_restore_says_why_while_the_backups_wait_for_the_distro(
             "Pick a backup in the list, then press Show restore plan."
         )
         assert waits not in view.restore_reasons.text()
+    finally:
+        disk.stopped = False
+        view.shutdown()
+
+
+def test_a_distro_stopped_while_the_tab_is_open_greys_free_docker_space(
+    qapp: object, disk: _DistroDisk, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T864 review: the press waits whenever WSL does not say the distro runs.
+
+    The tab opened with the distro running, so nothing was ever queued in
+    `_waiting_on_distro`; a distro stopped afterwards must still grey the press,
+    because `seam.read` runs `wsl -d` and brings the distro -- and a server
+    stopped earlier with it -- back (T133). Built through the real route, and
+    the dict is never set by hand.
+    """
+    disk.stopped = False
+    entry = _entry("wow-wotlk")
+    services = ControllerServices.for_entry(entry, Path(disk.root), None, DISTRO)
+    view = ControllerView(entry, services, status_poll_ms=0)
+    try:
+        assert view._distro == "running"
+        assert view._waiting_on_distro == {}, "the distro was up, so nothing should be queued"
+        assert view.free_docker_space_button.isEnabled(), view.free_docker_space_button.toolTip()
+
+        ran: list[object] = []
+        monkeypatch.setattr(view, "_run", lambda fn, done, failed: ran.append(fn))
+
+        view._distro_answered("stopped")
+
+        assert view._distro == "stopped"
+        assert not view.free_docker_space_button.isEnabled()
+        assert view.free_docker_space_button.toolTip() == FREE_DOCKER_SPACE_WAITS_FOR_DISTRO
+        view.free_docker_space()
+        assert ran == [], "the press reached the seam while the distro was stopped"
+        assert FREE_DOCKER_SPACE_WAITS_FOR_DISTRO in view.maintenance_report.toPlainText()
     finally:
         disk.stopped = False
         view.shutdown()

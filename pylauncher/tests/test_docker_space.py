@@ -143,6 +143,20 @@ def test_remove_unused_image_returns_empty_on_success(
     assert docker.remove_unused_image("abc") == ""
 
 
+def test_remove_unused_image_names_the_exit_when_docker_says_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R2: a nonzero exit with empty stderr and stdout is a failure, never `""`.
+
+    Mutation: returning `proc.stderr.strip()` unchanged answers `""`, which the
+    caller reads as "removed" and counts the space freed.
+    """
+    _docker_with(monkeypatch, {"image": _completed(returncode=1)})
+    said = docker.remove_unused_image("abc")
+    assert said, "a nonzero exit answered the success sentinel"
+    assert "code 1" in said, said
+
+
 # -- 3. image_facts ---------------------------------------------------------------
 
 
@@ -218,6 +232,16 @@ def test_prune_build_cache_returns_the_daemon_words_on_failure(
 ) -> None:
     _docker_with(monkeypatch, {"builder": _completed(returncode=1, stderr="daemon busy")})
     assert docker.prune_build_cache() == "daemon busy"
+
+
+def test_prune_build_cache_names_the_exit_when_docker_says_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R2: a nonzero exit with empty stderr and stdout is a failure, never `""`."""
+    _docker_with(monkeypatch, {"builder": _completed(returncode=1)})
+    said = docker.prune_build_cache()
+    assert said, "a nonzero exit answered the success sentinel"
+    assert "code 1" in said, said
 
 
 # -- 5. presses_running --------------------------------------------------------------
@@ -533,6 +557,37 @@ def test_windows_note_last_on_windows_and_absent_on_linux(
         wsl_distro=None,
     )
     assert all(line != docker_space.WINDOWS_NOTE for line in freed.lines)
+
+
+def test_a_silent_nonzero_removal_is_not_counted_freed_and_adds_no_windows_note(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2: both helpers exit nonzero with nothing printed, through the real ones.
+
+    The caller's only success sentinel is `""`; a silent failure that answered
+    it would count the image removed and the cache freed, and append the Windows
+    "removed" note over nothing.
+    """
+    old = (docker_space.OldBuild(image_id="aaa", size=GIB, project="yulon-wow-coa-x"),)
+    monkeypatch.setattr(docker_space, "_old_builds", lambda distro: old)
+    monkeypatch.setattr(docker, "build_cache_bytes", lambda **_: GIB)
+    monkeypatch.setattr(docker_space.platform, "detect", lambda: "windows")
+    _docker_with(
+        monkeypatch,
+        {"image": _completed(returncode=1), "builder": _completed(returncode=1)},
+    )
+    freed = docker_space.carry_out(
+        tmp_path,
+        docker_space.Choice(cache=True, old_builds=True, kept_build=False),
+        kept_build=None,
+        spec=None,
+        wsl_distro=None,
+    )
+    assert "removed 0" in freed.lines[0], freed.lines
+    assert "1 could not be removed" in freed.lines[0], freed.lines
+    assert freed.lines[1].startswith("Docker's build cache was not removed:"), freed.lines
+    assert "code 1" in freed.lines[1], freed.lines
+    assert docker_space.WINDOWS_NOTE not in freed.lines
 
 
 def test_a_failed_kept_build_removal_is_shown_as_is_with_no_windows_note(

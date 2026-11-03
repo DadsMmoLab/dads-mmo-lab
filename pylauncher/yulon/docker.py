@@ -8258,6 +8258,18 @@ def image_facts(
     return tuple(rows)
 
 
+def _failure_said(proc: subprocess.CompletedProcess[str]) -> str:
+    """What a nonzero exit said: stderr, else stdout, else the exit code (T864 review).
+
+    The callers below use `""` as their only success sentinel, so a nonzero
+    exit MUST never answer `""` even when Docker printed nothing: an empty
+    string would read as "removed" and the caller would count the space freed.
+    """
+    return (
+        proc.stderr.strip() or proc.stdout.strip() or f"docker exited with code {proc.returncode}"
+    )
+
+
 def remove_unused_image(image_id: str, *, wsl_distro: str | None = None) -> str:
     """Remove one dangling image by id. Returns why it could not be, or `""` (T864).
 
@@ -8268,7 +8280,7 @@ def remove_unused_image(image_id: str, *, wsl_distro: str | None = None) -> str:
     if proc.returncode == 0:
         logger.info(f"removed image {image_id}")
         return ""
-    said = proc.stderr.strip()
+    said = _failure_said(proc)
     lowered = said.lower()
     if "no such image" in lowered:
         return IMAGE_GONE
@@ -8293,7 +8305,7 @@ def prune_build_cache(*, wsl_distro: str | None = None) -> str:
         lines = proc.stdout.splitlines()
         logger.info(f"pruned Docker's build cache: {lines[-1].strip() if lines else 'done'}")
         return ""
-    said = proc.stderr.strip()
+    said = _failure_said(proc)
     logger.warning(f"could not prune Docker's build cache: {said}")
     return said
 

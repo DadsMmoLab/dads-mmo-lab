@@ -10786,6 +10786,9 @@ class ControllerView(QWidget):
             return
         self._distro = state
         self._show_the_distro()
+        # T864 review: a distro stopped while the tab is open must grey the
+        # press at that moment, not only once something re-lists the backups.
+        self._settle_docker_space_button()
         if state != "running":
             # The last verdict ("up -- 0 players…") described a world this
             # distro no longer runs, and it sat above "world down" and the
@@ -19366,12 +19369,22 @@ class ControllerView(QWidget):
         set_enabled_why(self.clean_up_button, clean, self.restore_reasons)
 
     def _docker_space_waits_for(self) -> str | None:
-        """Why Free Docker space is greyed: its own job, a busy press, or the shelf's waits."""
+        """Why Free Docker space is greyed: its own job, a busy press, or the shelf's waits.
+
+        A WSL-backed server waits whenever its distro is not SAID to run -- not
+        only while the backups are listed (`_waiting_on_distro`). A tab opened
+        while the distro ran has nothing waiting, and a distro stopped since
+        then would be started again by `seam.read`'s `wsl -d`, bringing a
+        stopped server back (T133); `_distro_answered()` re-settles this button
+        on every answer.
+        """
         if self._docker_space_job:
             return wait_for(self._docker_space_job)
         if self._busy:
             return wait_for(self._busy_job)
         if "backups" in self._waiting_on_distro:
+            return FREE_DOCKER_SPACE_WAITS_FOR_DISTRO
+        if self.services.controller.wsl_distro is not None and self._distro != "running":
             return FREE_DOCKER_SPACE_WAITS_FOR_DISTRO
         return self._shelf_waits_for()
 
