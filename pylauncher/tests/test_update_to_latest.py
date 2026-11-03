@@ -518,7 +518,7 @@ def test_a_source_that_was_already_at_the_tip_says_so_rather_than_claiming_a_mov
     not published anything.
     """
     rec, server_dir = _ready(tmp_path)
-    rec.upstream[server_dir] = OLD
+    rec.upstream[server_dir / ENTRY.emulator.sources[0].dest] = OLD
 
     said = "\n".join(_press(rec, server_dir))
     assert f"already on {OLD[:7]}" in said
@@ -2995,3 +2995,158 @@ def test_an_update_that_was_put_back_shows_its_details_in_the_fold_and_the_messa
     assert "put back" in line and "docker compose logs" not in line, line
     assert "docker compose logs" in panel.failure_details.text_box.toPlainText()
     assert finished and "\nDetails:\n" in finished[0] and "docker compose logs" in finished[0]
+
+
+# -- T863: an update that moves nothing -----------------------------------------
+
+NO_MOVE_UPDATE = (
+    "WoW WotLK is already on the newest code it follows, so nothing was rebuilt "
+    "and the server was not stopped."
+)
+NO_MOVE_RETURN = (
+    "WoW WotLK is already on the commit this app was tested against, so nothing "
+    "was rebuilt and the server was not stopped."
+)
+
+
+def _no_move_press(rec: Recorder, server_dir: Path, **kwargs: object) -> list[str]:
+    """Run the press, failing loudly on a refusal or crash."""
+    return list(
+        engine(rec).update_to_latest(InstallOptions(server_dir=server_dir), **kwargs)  # type: ignore[arg-type]
+    )
+
+
+def test_an_update_with_nothing_new_ends_without_a_rebuild(tmp_path: Path) -> None:
+    """T863: every source on upstream's tip: the last line says so, and the rebuild never runs.
+
+    Mutation: remove the early exit -> fails (the full path rebuilds).
+    """
+    rec, server_dir = _ready(tmp_path)
+    for source in ENTRY.emulator.sources:
+        rec.upstream[server_dir / source.dest] = OLD
+    lines = _no_move_press(rec, server_dir)
+    assert lines[-1] == NO_MOVE_UPDATE, lines
+    assert "build" not in rec.calls, rec.calls
+    assert "recreate" not in rec.calls, rec.calls
+    assert "stop_servers" not in rec.calls and "stop_servers:forced" not in rec.calls, rec.calls
+    assert "start" not in rec.calls, rec.calls
+    assert not [call for call in rec.calls if call.startswith("snapshot:")], rec.calls
+    assert f"already on {OLD[:7]}" in "\n".join(lines)
+
+
+def test_a_return_on_the_pin_already_ends_without_a_rebuild(tmp_path: Path) -> None:
+    """T863: on the pin, the way back ends the same way.
+
+    Mutation: remove the early exit -> fails (the full path rebuilds).
+    """
+    rec, server_dir = _ready(tmp_path)
+    for source in ENTRY.emulator.sources:
+        assert source.rev, "the ground: every shipped source pins its commit"
+        rec.heads[server_dir / source.dest] = source.rev
+    lines = _no_move_press(rec, server_dir, to_pin=True)
+    assert lines[-1] == NO_MOVE_RETURN, lines
+    assert "build" not in rec.calls, rec.calls
+    assert "recreate" not in rec.calls, rec.calls
+    assert "stop_servers" not in rec.calls and "stop_servers:forced" not in rec.calls, rec.calls
+    assert "start" not in rec.calls, rec.calls
+    assert not [call for call in rec.calls if call.startswith("snapshot:")], rec.calls
+    assert f"already on {PINNED[:7]}" in "\n".join(lines)
+
+
+def test_an_update_where_one_source_moved_still_rebuilds(tmp_path: Path) -> None:
+    """T863: one source on the tip, the other behind: the normal full path runs.
+
+    Mutation: `any` instead of `all` in `_nothing_moved` -> fails (ends early on
+    a half-moved press).
+    """
+    rec, server_dir = _ready(tmp_path)
+    rec.upstream[server_dir / ENTRY.emulator.sources[0].dest] = OLD
+    lines = _no_move_press(rec, server_dir)
+    assert lines[-1] == "WoW WotLK is running on the newest upstream code.", lines
+    assert "build" in rec.calls, rec.calls
+    assert f"already on {OLD[:7]}" in "\n".join(lines)
+    assert f"{OLD[:7]} -> {NEW[:7]}" in "\n".join(lines)
+
+
+def test_an_update_with_an_unreadable_head_runs_the_normal_path(tmp_path: Path) -> None:
+    """T863: `head_sha` None reads as moved, so `_nothing_moved` is False here.
+
+    A git that will not say which commit a checkout is on refuses the press
+    before anything is fetched -- it could not promise to put that checkout
+    back if the new build failed. The refusal is the normal path, and it proves
+    the helper's half: None never counts as unchanged (the helper's False is
+    what a press past the guards would read).
+
+    Mutation: `== old` (None never equals a sha) still refuses at the guards,
+    so the mutation this test kills is `is None or head == old` in the helper,
+    which would end the press early if the guards ever let None through.
+    """
+    rec, server_dir = _ready(tmp_path)
+    for source in ENTRY.emulator.sources:
+        rec.upstream[server_dir / source.dest] = OLD
+    real_head = rec.head_sha
+
+    def silent_head(dest: Path) -> str | None:
+        if dest == server_dir / ENTRY.emulator.sources[0].dest:
+            real_head(dest)
+            return None
+        return real_head(dest)
+
+    made = engine(rec, head_sha=silent_head)
+    before = native.read_state(server_dir, valid=())
+    with pytest.raises(InstallerError, match="could not read which commit"):
+        list(made.update_to_latest(InstallOptions(server_dir=server_dir)))
+    assert rec.clones == []
+    assert native.read_state(server_dir, valid=()) == before
+
+
+def test_an_update_with_a_folder_off_its_build_still_rebuilds(tmp_path: Path) -> None:
+    """T863 (T680/T758): an `earlier` row owes a build, so the full path runs with heads unchanged.
+
+    Mutation: drop the `earlier` condition in `_nothing_moved` -> fails (ends early
+    while a folder is owed its build).
+    """
+    rec, server_dir = _ready(tmp_path)
+    for source in ENTRY.emulator.sources:
+        rec.upstream[server_dir / source.dest] = OLD
+    stray = server_dir / "elsewhere"
+    (stray / ".git").mkdir(parents=True, exist_ok=True)
+    (stray / ".git" / "HEAD").write_text("c" * 40 + "\n")
+    assert native.remember_sources_off(server_dir, [("other/repo", stray, "d" * 40)]) == ""
+    lines = _no_move_press(rec, server_dir)
+    assert lines[-1] == "WoW WotLK is running on the newest upstream code.", lines
+    assert "build" in rec.calls, rec.calls
+
+
+def test_a_kept_head_with_nothing_new_still_names_its_release(tmp_path: Path) -> None:
+    """T863 (T862-E): the "stays there" press with nothing moved still leaves coa-bots-2.10.
+
+    Mutation: skip the record on the exit -> fails (the release row is lost).
+    """
+    from tests.test_release_branches import BOTS, CORE, TAG_C, _branching
+    from tests.test_release_branches import _engine as _coa_engine
+    from tests.test_release_branches import _ready as _coa_ready
+
+    rec, server_dir = _coa_ready(tmp_path)
+    entry = _branching()
+    ahead = "f" * 40
+    rec.heads[server_dir / entry.emulator.sources[0].dest] = ahead
+    rec.heads[server_dir / entry.emulator.sources[1].dest] = TAG_C
+    rec.github = {CORE: 0, BOTS: 0}
+    rec.github_behind = {CORE: 2, BOTS: 0}
+    first = list(_coa_engine(rec, entry).update_to_latest(InstallOptions(server_dir=server_dir)))
+    assert any("so it stays there" in line for line in first), first
+    state = native.read_state(server_dir, valid=())
+    assert state is not None
+    got = state.rev_for(CORE)
+    assert got is not None and got.release == "coa-bots-2.10", got
+    rec.clones.clear()
+    rec.calls.clear()
+    rec.gets.clear()
+    lines = list(_coa_engine(rec, entry).update_to_latest(InstallOptions(server_dir=server_dir)))
+    assert lines[-1].endswith("nothing was rebuilt and the server was not stopped."), lines
+    assert "build" not in rec.calls, rec.calls
+    state = native.read_state(server_dir, valid=())
+    assert state is not None
+    got = state.rev_for(CORE)
+    assert got is not None and got.release == "coa-bots-2.10", got
