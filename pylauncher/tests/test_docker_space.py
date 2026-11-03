@@ -424,7 +424,12 @@ def test_cache_only_lists_and_removes_no_image(
 def test_a_build_press_running_refuses_and_touches_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """REBUILD and INSTALL_PRESS both refuse; naming the press, ending as specified."""
+    """A Rebuild press refuses; naming the press, ending as specified.
+
+    The "Install" label is NOT one of these (T864 review round 3): a CoA repair,
+    update or adopt re-takes the hold under it and compiles nothing, and an
+    install that compiles is seen by `builds_running()`, pinned below.
+    """
     touched: list[str] = []
     monkeypatch.setattr(
         docker, "dangling_image_ids", lambda label, **_: touched.append("list") or ()
@@ -433,7 +438,11 @@ def test_a_build_press_running_refuses_and_touches_nothing(
         docker, "remove_unused_image", lambda image_id, **_: touched.append("rm") or ""
     )
     monkeypatch.setattr(docker, "prune_build_cache", lambda **_: touched.append("prune") or "")
-    for press in (server_build_presses.REBUILD, native.INSTALL_PRESS):
+    for press in (
+        server_build_presses.REBUILD,
+        server_build_presses.UPDATE_TO_LATEST,
+        server_build_presses.RETURN_TO_PIN,
+    ):
         # Mutation guard: deleting the pre-lease check takes the lease first,
         # which the under-lease check then refuses with the lease-taker suffix.
         with docker._press_on(tmp_path / "other", press):
@@ -471,6 +480,24 @@ def test_a_build_press_running_refuses_and_touches_nothing(
                 wsl_distro=None,
             )
     assert taken == [], "pre-lease check deleted: the lease was taken first"
+
+
+def test_an_installs_reservation_label_is_not_a_build_press(tmp_path: Path) -> None:
+    """R3 review: a CoA repair/update/adopt re-takes the hold as "Install", compiling nothing.
+
+    Mutation: put `native.INSTALL_PRESS` back in `build_press_refusal()`'s `watched`.
+    Then the first half refuses with a sentence about an install building while no
+    compile runs, which is what the press said during a CoA repair.
+    """
+    assert docker_space.build_press_refusal() is None
+    with docker._press_on(tmp_path / "wow", native.INSTALL_PRESS):
+        assert native.INSTALL_PRESS in docker.presses_running()
+        assert docker.builds_running() is False
+        assert docker_space.build_press_refusal() is None
+        with docker.building(tmp_path / "wow"):
+            refused = docker_space.build_press_refusal()
+        assert refused is not None and native.INSTALL_PRESS in refused, refused
+    assert docker_space.build_press_refusal() is None
 
 
 def test_a_compiling_stage_loop_refuses_with_the_install_sentence(tmp_path: Path) -> None:

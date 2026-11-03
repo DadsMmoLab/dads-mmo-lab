@@ -582,6 +582,13 @@ SEAMS: dict[str, tuple[str, str]] = {
         "tests.test_coa_switch_hold."
         "test_a_switch_while_another_yulon_holds_the_server_switches_nothing",
     ),
+    # T864: the Maintenance tab's Free Docker space, which frees Docker's images and build
+    # cache, never this server's databases or files. It refuses while any build press runs
+    # and takes the maintenance lease, so it neither writes here nor races one that does.
+    "docker_space": (
+        "outside",
+        "removes Docker images and build cache, not this server's databases or files",
+    ),
 }
 
 OPEN_SEAMS = {"backup", "restore", "forget_interrupted", "database_alone"}

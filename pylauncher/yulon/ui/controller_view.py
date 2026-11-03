@@ -19439,6 +19439,14 @@ class ControllerView(QWidget):
         if not (choice.cache or choice.old_builds or choice.kept_build):
             self.maintenance_report.setPlainText(DOCKER_SPACE_NOTHING)
             return
+        # The dialog is modal but the tab is not frozen: a distro answer can land
+        # while it is open (T864 review round 3), and the seam's `read()` above is a
+        # `wsl -d` that would start a distro stopped since. Asked again here, the
+        # only answer that matters before the worker takes the lease.
+        waits = self._docker_space_waits_for()
+        if waits:
+            self.maintenance_report.setPlainText(waits)
+            return
         self._docker_space_job = DOCKER_SPACE_JOB
         self._settle_shelf_buttons()
         self.maintenance_report.setPlainText(DOCKER_SPACE_FREEING)

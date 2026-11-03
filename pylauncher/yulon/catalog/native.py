@@ -10347,7 +10347,7 @@ class StagedInstaller:
                 ) from exc
         yield HELD_REMOVED
 
-    @_reserving(server_build_presses.REBUILD)
+    @_reserving(lambda given: given.get("press") or server_build_presses.REBUILD)
     def rebuild(
         self,
         options: InstallOptions | None = None,
@@ -10749,9 +10749,11 @@ class StagedInstaller:
             ctx, refs, missing_ok=missing_images_ok, held=held is not None
         )
         try:
-            state = yield from self._staged(
-                stages, ctx, builds=True, press=server_build_presses.REBUILD
-            )
+            # `press`, never REBUILD: this loop's reservation (a family whose rebuild opens
+            # the database first) is the update route's or the player's own, and another
+            # Yu'lon reading `presses_running()` must not be told "Rebuild" while an Update
+            # or a Return to the pin is what runs (T864 review round 3).
+            state = yield from self._staged(stages, ctx, builds=True, press=press)
         except InstallerError as exc:
             # FIRST, and outside every rollback branch below, because it is not
             # about the images at all: `touched` False is the whole window the

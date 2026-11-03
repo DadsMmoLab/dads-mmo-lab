@@ -24,6 +24,7 @@ from tests.test_controller_view import (  # noqa: F401
     ps,
 )
 from yulon import docker_space, server_build_presses
+from yulon.controller import Controller
 from yulon.server_build_presses import MAINTENANCE_TAB  # noqa: F401
 from yulon.ui import controller_view as view_module
 from yulon.ui.controller_view import ControllerView
@@ -61,9 +62,14 @@ def make_view(
     monkeypatch: pytest.MonkeyPatch,
     *,
     seam: Any,
+    wsl_distro: str | None = None,
 ) -> ControllerView:
     (tmp_path / "sql_scripts" / "backups").mkdir(parents=True, exist_ok=True)
     services = dataclasses.replace(_services(ps, tmp_path, [], made), docker_space=seam)
+    if wsl_distro is not None:
+        services = dataclasses.replace(
+            services, controller=Controller(WOTLK.container_spec(), tmp_path, wsl_distro=wsl_distro)
+        )
     view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=run_inline)
 
     def run_in_line(fn: Any, done: Any, failed: Any) -> None:
@@ -197,6 +203,33 @@ def test_cancelling_the_dialog_frees_nothing(
     )
     view.free_docker_space()
     assert seam.free_calls == []
+
+
+def test_a_distro_stopped_under_the_dialog_frees_nothing(
+    qapp: object,
+    ps: _Ps,  # noqa: F811
+    tmp_path: Path,
+    made: _FakeMaintenance,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R3 review: the modal box is not a frozen tab -- an answer can land inside it.
+
+    Mutation: drop the second `_docker_space_waits_for()` in `_docker_space_read()`
+    and the worker calls `seam.free` for a distro that is no longer running, which
+    the seam's own `wsl -d` would start again.
+    """
+    seam = FakeSpace(_space(cache_bytes=1024))
+    view = make_view(ps, tmp_path, made, monkeypatch, seam=seam, wsl_distro="Ubuntu")
+    view._distro_answered("running")
+
+    def stops_while_open(_dialog: FreeDockerSpaceDialog) -> None:
+        view._distro_answered("stopped")
+
+    accept_with(monkeypatch, stops_while_open)
+    view.free_docker_space()
+    assert seam.read_calls == 1
+    assert seam.free_calls == []
+    assert view.maintenance_report.toPlainText() == view_module.FREE_DOCKER_SPACE_WAITS_FOR_DISTRO
 
 
 # -- 24. the dialog itself ------------------------------------------------------

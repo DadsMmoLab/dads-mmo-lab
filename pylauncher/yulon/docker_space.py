@@ -230,11 +230,14 @@ def read_space(*, kept_build: KeptBuildRoute | None, wsl_distro: str | None) -> 
 def build_press_refusal() -> str | None:
     """Why the press must not run now, or None when no build press runs here (T864 D2).
 
-    Any install/rebuild/update press in a reservation of any server in this
-    process builds with Docker, so freeing beside it is refused. An install
-    only takes its reservation at `start-db`, after `build`, so a stage loop
-    that compiles (`docker.builds_running()`, T864 R3) refuses with the
-    install's sentence too.
+    Rebuild, Update and Return to the pin hold their server under their own
+    names, and each compiles, so freeing beside one is refused with its own
+    sentence. An install is seen through `docker.builds_running()` instead
+    (`_staged(builds=True)`, T864 R3), never through the reservation's "Install"
+    label: an install only takes its reservation at `start-db`, after `build`,
+    while a CoA repair, update or adopt re-takes the hold under that same label
+    with no compile at all, and naming it here refused the press with a
+    sentence about an install building when nothing was (T864 review round 3).
     """
     from yulon.catalog import native  # noqa: PLC0415
 
@@ -242,7 +245,6 @@ def build_press_refusal() -> str | None:
         server_build_presses.REBUILD,
         server_build_presses.UPDATE_TO_LATEST,
         server_build_presses.RETURN_TO_PIN,
-        native.INSTALL_PRESS,
     }
     for press in docker.presses_running():
         if press in watched:
