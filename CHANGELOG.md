@@ -17,6 +17,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Mists of Pandaria 5.4.8 (LoA Pandaria with 500 playerbots) can be installed; bring the Recall WoW client.
 - New, untested on a Steam Deck: WotLK, Unbound and Centurion can use the ConsolePort controller add-on and a Deck layout. Report issues.
 - New, untested on a Steam Deck: Conquest of Azeroth can install the ConsolePort controller add-on from its Modules tab.
+- Six new themes: Gruvbox dark and light (medium and soft) and Organic dark and light.
 
 ### Fixed
 - Installs no longer leave unnamed Docker volumes behind (one per Conquest of Azeroth install, and one after a tool run was cut off).
