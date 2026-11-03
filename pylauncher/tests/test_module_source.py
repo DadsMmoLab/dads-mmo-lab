@@ -476,6 +476,33 @@ def test_tortoises_two_families_are_both_read_for_a_record(tmp_path: Path) -> No
         )
 
 
+def test_tortoises_other_family_refuses_the_same_id_whatever_the_spelling(
+    tmp_path: Path,
+) -> None:
+    """C4: one add-on, two families. A legacy `mod` record IS the module being derived.
+
+    Both spell `MyAddon`, so the folder check alone says nothing — the record is the
+    refused thing, and the sentence names what it is installed as. Nothing is written:
+    the `modules/` record the press would have created is not there afterwards.
+    """
+    legacy = module_source.derive_link(
+        "https://github.com/u/MyAddon", "wow-tortoise", today=TODAY
+    ).model_copy(update={"type": "mod"})
+    module_source.persist(tmp_path, legacy, shipped_ids=())
+    derived = module_source.derive_link("https://github.com/u/MyAddon", "wow-tortoise", today=TODAY)
+
+    with pytest.raises(DeriveError) as refused:
+        module_source.refuse_if_recorded(tmp_path, derived)
+
+    said = str(refused.value)
+    assert said == (
+        f"myaddon is already installed as MyAddon — find it on the Modules tab, or "
+        f"Remove it first. {NOTHING_CHANGED}"
+    )
+    assert not module_source.recorded(tmp_path, derived)
+    assert sorted(p.name for p in (tmp_path / "wow-tortoise" / "modules").glob("*.json")) == []
+
+
 def test_a_record_that_will_not_parse_is_refused_rather_than_guessed(tmp_path: Path) -> None:
     """N4: the check is narrowed by folder spelling, which an unreadable file cannot give."""
     module_source.persist(tmp_path, _link("https://github.com/u/Mod-X"), shipped_ids=())

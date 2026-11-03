@@ -515,7 +515,10 @@ def _names_from(basename: str, game: str, *, what: str) -> tuple[str, str | None
     `manifest.id_for_folder()`, which `Manifest` requires of every folder.
     """
     name = basename[: -len(".git")] if basename.endswith(".git") else basename
-    refusal = folder_refusal(name, game)
+    # A derivation makes a `module` and asks the module rule: a name the core keeps in
+    # `modules/` would land on the build's own file. `Manifest` asks the same question
+    # with the item's own type, which is where a `mod` is let off that clause (T861).
+    refusal = folder_refusal(name, game, kind="module")
     if refusal is not None:
         raise DeriveError(f"The {what} is named {name!r}, and {refusal}. {_NOTHING_CHANGED}")
     item_id = id_for_folder(name)
@@ -622,29 +625,39 @@ def recorded(user_root: Path, manifest: Manifest) -> bool:
 
 
 def refuse_if_recorded(user_root: Path, manifest: Manifest) -> None:
-    """Refuse a derivation whose id is recorded under a DIFFERENT folder spelling (T861).
+    """Refuse a derivation the user layer already records as an installed item (T861).
 
-    Two spellings of one folder (`Mod-X` and `mod-x`) give the same id, and a Windows
-    folder ignores case, so a second record of that id under the other spelling would
-    be two items for one folder. That is the refusal.
+    Two refusals, and the second is the reason both families are read:
 
-    It is deliberately no wider (review round 1, N4). A record with this id AND this
-    folder falls through to the behaviour before T861: re-picking an edited folder
-    (T47's replace question), and adding the same link on a second server, are both
-    legitimate presses this must not refuse. A record that will not parse cannot
-    answer which folder it names, so it is refused: something is at that id's name and
-    this app may not overwrite it blind.
+    * The same id recorded under a DIFFERENT folder spelling. Two spellings of one
+      folder (`Mod-X` and `mod-x`) give the same id, and a Windows folder ignores case,
+      so a second record of that id would be two items for one folder. Only the item's
+      OWN family is read for this: a record with this id AND this folder falls through
+      to the behaviour before T861, since re-picking an edited folder (T47's replace
+      question) and adding the same link on a second server are legitimate presses.
+    * Tortoise's OTHER family (`_NAMES_FOR_TWO_FAMILIES`): a legacy `mod` before T861
+      and a `module` now are ONE add-on, so a record of the same id in the other family
+      is refused whatever the spelling, and the sentence names what it is installed as
+      (T861, review round 2).
 
-    Tortoise records one custom thing under either family — a legacy `mod` before T861,
-    a `module` now — so both are read there (`_NAMES_FOR_TWO_FAMILIES`).
+    A record that will not parse cannot answer which folder it names, so it is refused
+    for the first reason: something is at that id's name and this app may not overwrite
+    it blind.
     """
     wanted = manifest.folder or manifest.id
-    families: tuple[ManifestType, ...] = (manifest.type,)
+    other: ManifestType | None = None
     if manifest.game in _NAMES_FOR_TWO_FAMILIES and manifest.type in ("module", "mod"):
-        families = (manifest.type, "mod" if manifest.type == "module" else "module")
-    for kind in families:
+        other = "mod" if manifest.type == "module" else "module"
+    for kind in (manifest.type, other) if other is not None else (manifest.type,):
         present, folder = _recorded_folder(user_root, manifest.game, kind, manifest.id)
-        if present and folder != wanted:
+        if not present:
+            continue
+        if kind == other:
+            raise DeriveError(
+                f"{manifest.id} is already installed as {folder or manifest.id} — find it "
+                f"on the Modules tab, or Remove it first. {_NOTHING_CHANGED}"
+            )
+        if folder != wanted:
             raise DeriveError(
                 f"{manifest.id} is already installed — find it on the Modules tab, or "
                 f"Remove it first. {_NOTHING_CHANGED}"

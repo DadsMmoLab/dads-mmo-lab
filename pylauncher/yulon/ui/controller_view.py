@@ -20133,8 +20133,12 @@ class ControllerView(QWidget):
             return {}
         # T861: a clone folder can be the author's exact name (`mod-twow-QOL-followers/`)
         # while the manifest's id is the lower-case slug. The listing is folders on disk;
-        # every row, chip and cache here is keyed by id, so the manifests say which is which.
-        return apply_module.folders_as_ids(found, self._manifests.values())
+        # every row, chip and cache here is keyed by id, so the manifests say which is which
+        # -- and a folder no manifest names is read through its own claim, which is what an
+        # install that stopped before its record was saved has left (review round 2).
+        return apply_module.folders_as_ids(
+            found, self._manifests.values(), self.services.controller.server_dir
+        )
 
     def _unfinished_clones(self) -> Mapping[str, frozenset[str]]:
         """Which clones here stopped part-way through their install, per family (T68).

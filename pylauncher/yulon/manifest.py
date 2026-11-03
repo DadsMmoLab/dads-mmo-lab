@@ -52,8 +52,8 @@ The core finds a module by its FOLDER (`Add<folder, - to _>Scripts()`), so the
 folder is the author's name and the id is a lower-case slug beside it. **No dots**,
 deliberately: the core pastes the folder into a C++ identifier and a dotted name
 does not compile. This is the ONE definition — `module_source` asks
-`folder_refusal()` rather than respelling it, and so does `Manifest.folder`'s own
-validator below.
+`folder_refusal()` rather than respelling it, and so does `Manifest`'s own
+validator below, for every item and not only those that spell a `folder`.
 """
 _REPO_SLUG = r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
 
@@ -118,40 +118,67 @@ PromptKind = Literal["string", "int", "float", "bool", "choice", "character"]
 _SLUG_ADAPTER: TypeAdapter[str] = TypeAdapter(Slug)
 """`Slug`'s own pattern, asked directly rather than respelled (T861)."""
 
-ID_MAX = 64
-"""An id is a list key and the default folder name; the slug is capped, the folder is not."""
+ID_MAX = 100
+"""The longest id this app writes: exactly the longest clone folder name (`FOLDER_NAME`).
+
+An id is a list key AND the name of the folder its clone lives in when the manifest
+names no other, so one longer than a folder name could not name its own clone. Names
+that are already a slug within this limit are kept as they were written — which is how
+the ids persisted before T861 (68 and 71 characters) still name their own folders.
+"""
+
+
+def _is_a_slug(value: str) -> bool:
+    """Whether `value` is a `Slug`, asked of `Slug`'s own adapter rather than respelled."""
+    try:
+        _SLUG_ADAPTER.validate_python(value)
+    except ValidationError:
+        return False
+    return True
 
 
 def id_for_folder(folder: str) -> str:
     """The id a clone folder derives to, or `""` when it gives no name to keep (T861).
 
-    Lower-cased, every run of non `[a-z0-9]` becomes one hyphen, the ends trimmed,
-    then cut to 64 characters and trimmed again (a cut can land on a hyphen). The
-    result is checked through `Slug` itself, so this cannot drift from what a
-    persisted manifest accepts.
+    A name that is ALREADY a slug of at most `ID_MAX` characters comes back unchanged
+    (T861, review round 2). Every id this app has persisted is one, and some are longer
+    than 64 — WotLK's `mod-` + 64 is 68 and Tortoise's `tw-mod-` + 64 is 71 — while the
+    folder holding such an item is the id itself. Cutting those would name an id that
+    the clone folder, the claim file and the record all spell differently, so the
+    receipt readers, the unfinished read and the clash check would look up another item.
+
+    Only a name it HAS to change is derived: lower-cased, every run of non `[a-z0-9]`
+    becomes one hyphen, the ends trimmed, then cut to `ID_MAX` characters and trimmed
+    again (a cut can land on a hyphen). The result is checked through `Slug` itself, so
+    this cannot drift from what a persisted manifest accepts.
 
     **The ONE derivation, and `Manifest` holds every item to it.** An item's id is
     always `id_for_folder(apply.clone_folder(manifest))`, which is what lets the
     claim readers (apply's receipts and unfinished-install reads) turn a folder
-    name on disk back into an id with no store lookup. A manifest whose `folder`
-    derives to another id is refused when it loads.
+    name on disk back into an id with no store lookup. A manifest whose effective
+    folder derives to another id is refused when it loads.
     """
+    if len(folder) <= ID_MAX and _is_a_slug(folder):
+        return folder
     candidate = re.sub(r"[^a-z0-9]+", "-", folder.lower()).strip("-")
     candidate = candidate[:ID_MAX].strip("-")
-    try:
-        _SLUG_ADAPTER.validate_python(candidate)
-    except ValidationError:
+    if not _is_a_slug(candidate):
         return ""
     return candidate
 
 
-def folder_refusal(value: str, game: str) -> str | None:
-    """Why `value` cannot be an item's clone folder for `game`, or None when it can.
+def folder_refusal(value: str, game: str, *, kind: ManifestType) -> str | None:
+    """Why `value` cannot be the clone folder of an item of type `kind` in `game`, or None.
 
     One sentence, one definition: the derivation (`module_source._names_from`) and
-    `Manifest.folder`'s validator below both ask THIS, so a hand-edited user
-    manifest cannot name a folder a link would have been refused. Each clause says
-    why, because the user is being refused something that looks like a plain name.
+    `Manifest`'s validator below both ask THIS, so a hand-edited user manifest cannot
+    name a folder a link would have been refused. Each clause says why, because the
+    user is being refused something that looks like a plain name.
+
+    The core-files clause is a `module`'s alone (T861, review round 2): only a module's
+    clone lands in `modules/`, where the core keeps its own files, so a `mod`, an `ale`
+    or a `keg` may well be called `templates`. The other two clauses hold for every
+    type, because every type's clone is a folder on this machine.
     """
     if not FOLDER_NAME.fullmatch(value):
         return (
@@ -164,7 +191,8 @@ def folder_refusal(value: str, game: str) -> str | None:
             "that is one of the names Windows keeps for its own devices (CON, PRN, AUX, NUL, "
             "COM1-9, LPT1-9), which no folder can have"
         )
-    if value.casefold() in CORE_MODULE_FILES.get(game, _AZEROTHCORE_MODULE_FILES):
+    core_files = CORE_MODULE_FILES.get(game, _AZEROTHCORE_MODULE_FILES)
+    if kind == "module" and value.casefold() in core_files:
         return "that is one of the files the core keeps in its modules folder"
     return None
 
@@ -947,8 +975,16 @@ class Manifest(_Strict):
     )
 
     @model_validator(mode="after")
-    def _folder_is_the_items_own(self) -> Manifest:
-        """A clone folder must be one plain name (T861), and it must be THIS item's (T861).
+    def _the_effective_folder_is_the_items_own(self) -> Manifest:
+        """The item's clone folder must be one plain name AND this item's own (T861).
+
+        The folder checked is the EFFECTIVE one — `folder`, or the id when it is None —
+        and it is checked for EVERY manifest (T861, review round 2). A manifest with no
+        `folder` is cloned into a folder named after its id, and that folder is what
+        `apply` and the Modules tab walk, so it is held to the same rule a link is: a
+        hand-edited manifest cannot name a folder `CON`, a file the core keeps in
+        `modules/`, or a name past a folder's length. The core-files clause is a
+        module's alone, since only a module's clone lands in `modules/`.
 
         The second half is the invariant every folder reader rests on: an item's id is
         `id_for_folder(folder)`, so `apply.client_receipts()` and the unfinished-install
@@ -957,15 +993,14 @@ class Manifest(_Strict):
         deleting that other item's receipts under an id neither of them owns, so it is
         refused here, at the one place every manifest passes through.
         """
-        if self.folder is None:
-            return self
-        refusal = folder_refusal(self.folder, self.game)
+        effective = self.folder or self.id
+        refusal = folder_refusal(effective, self.game, kind=self.type)
         if refusal is not None:
-            raise ValueError(f"folder {self.folder!r}: {refusal}")
-        derived = id_for_folder(self.folder)
+            raise ValueError(f"folder {effective!r}: {refusal}")
+        derived = id_for_folder(effective)
         if derived != self.id:
             raise ValueError(
-                f"folder {self.folder!r} derives to the id {derived!r}, not to this item's "
+                f"folder {effective!r} derives to the id {derived!r}, not to this item's "
                 f"{self.id!r}"
             )
         return self

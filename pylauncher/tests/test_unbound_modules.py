@@ -304,29 +304,35 @@ def test_a_module_added_from_a_link_on_unbound_is_unbounds_and_lands_in_its_laye
 def test_a_capitals_spelling_of_the_servers_own_source_is_refused_before_anything_is_cloned(
     tmp_path: Path,
 ) -> None:
-    """R3: `Mod-Playerbots` on WotLK and `MOD-ALE` on Unbound are the server's own module.
+    """R3/C5: `MOD-ALE` on Unbound is refused at DERIVE, `Mod-Playerbots` on WotLK at the press.
 
-    The folder differs only in capitals from the one the server install clones, which is
-    the same folder on Windows and one folder BESIDE the source on Linux — both wrong, so
-    the T554 refusal is asked case-insensitively (cold review, round 1).
+    Both are the server's own module, and the folder differs only in capitals from the
+    one the server install clones — the same folder on Windows, one folder BESIDE the
+    source on Linux. But they are refused in different places, and the production routes
+    are what says where: Unbound shares WotLK's shipped modules, so `mod-ale` is an id
+    the app already ships and the shadow rule answers it before anything is cloned. WotLK
+    ships no `mod-playerbots` (that clone is the server's own source, `native
+    .server_source_folders()`), so the derivation succeeds and the applier's T554 refusal
+    is what stops it, asked case-insensitively (cold review, round 1).
     """
-    from datetime import date
-
     from yulon import module_source
+    from yulon.controller_wow_wotlk import modules
 
-    for game, url in (
-        ("wow-wotlk", "https://github.com/x/Mod-Playerbots"),
-        ("wow-unbound", "https://github.com/x/MOD-ALE"),
-    ):
-        server = tmp_path / game
-        server.mkdir()
-        manifest = module_source.derive_link(url, game, today=date(2026, 11, 3))
-        assert manifest.folder is not None and manifest.folder != manifest.id
-        applier = apply_module.Applier(server)
-        applier.server_sources = native.server_source_folders(entry(game))
-        applier.server_name = entry(game).name
+    assert "mod-ale" in modules.shipped_ids(), "Unbound's modules are WotLK's shipped list"
+    said = "mod-ale is a module this app already ships"
+    with pytest.raises(module_source.DeriveError, match=said):
+        modules.derive_link("https://github.com/x/MOD-ALE", "wow-unbound")
 
-        with pytest.raises(apply_module.ApplyRefusal, match="part of the"):
-            applier.install(manifest)
+    server = tmp_path / "wow-wotlk"
+    server.mkdir()
+    manifest = modules.derive_link("https://github.com/x/Mod-Playerbots", "wow-wotlk")
+    assert manifest.id == "mod-playerbots"
+    assert manifest.folder == "Mod-Playerbots" and manifest.folder != manifest.id
+    applier = apply_module.Applier(server)
+    applier.server_sources = native.server_source_folders(entry("wow-wotlk"))
+    applier.server_name = entry("wow-wotlk").name
 
-        assert list(server.iterdir()) == [], "nothing on disk was changed"
+    with pytest.raises(apply_module.ApplyRefusal, match="part of the"):
+        applier.install(manifest)
+
+    assert list(server.iterdir()) == [], "nothing on disk was changed"

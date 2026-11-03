@@ -8545,3 +8545,78 @@ def test_a_new_clone_beside_a_folder_that_differs_only_in_capitals_is_refused(
     assert git.calls == []
     assert (existing / "keep.cpp").read_text(encoding="utf-8") == "the folder that was there"
     assert sorted(p.name for p in (tmp_path / "modules").iterdir()) == ["mod-twow-qol-followers"]
+
+
+# ---------------------------------------------------------- T861 review round 2
+
+LEGACY_WOTLK_ID = "mod-" + "a" * 64
+"""68 characters: WotLK's `mod-` plus the 64 its ids were cut to before T861."""
+
+LEGACY_TORTOISE_ID = "tw-mod-" + "a" * 64
+"""71 characters: Tortoise's own prefix on the same 64."""
+
+
+@pytest.mark.parametrize("item_id", [LEGACY_WOTLK_ID, LEGACY_TORTOISE_ID])
+def test_a_legacy_long_id_keeps_its_receipts_and_its_unfinished_answer(
+    tmp_path: Path, item_id: str
+) -> None:
+    """C1: an id persisted before T861 can be LONGER than the 64 every name was cut at.
+
+    Such an item's clone folder is the id itself, and the claim inside it was written
+    with that id. A derivation that cut the folder to 64 would read the claim as another
+    item's: the client file it wrote was never taken back, and the row offered Remove for
+    an install that never finished. The manifest holding the item's steps still loaded as
+    itself, because `Manifest` asked the id, not the folder.
+
+    Mutation: cut every name to 64 again and all three readers answer nothing.
+    """
+    clone = tmp_path / "modules" / item_id
+    clone.mkdir(parents=True)
+    written = tmp_path / "client" / "Data" / "Patch-A.MPQ"
+    apply_module.write_clone_claim(
+        clone,
+        item_id=item_id,
+        url=OWNED_URL,
+        completed=False,
+        client_files=(apply_module.ClientCopy(step="client", path=str(written), sha256="0" * 64),),
+    )
+
+    receipts = apply_module.client_receipts(tmp_path)
+    assert [Path(copy.path) for copy in receipts] == [written]
+    by_item = Applier(tmp_path)._receipts_by_item()
+    assert [(item, Path(copy.path)) for item, copy in by_item] == [(item_id, written)]
+    assert apply_module.unfinished_clones(tmp_path)["module"] == frozenset({item_id})
+
+
+def test_a_claim_with_no_record_names_its_item_in_the_installed_answer(tmp_path: Path) -> None:
+    """C3: an install that stopped before its record was saved leaves a folder and a claim.
+
+    The manifest list has no `mobstats` — nothing was persisted — so the folder is read
+    through its claim and the installed answer says `mobstats`, exactly what the
+    unfinished answer says. The row is then one row, and it offers Install again instead
+    of `MobStats/` drawing as an unpressable stranger beside a `mobstats` row.
+
+    Mutation: drop the claim fallback and the folder is answered as `MobStats`.
+    """
+    clone = tmp_path / "modules" / "MobStats"
+    clone.mkdir(parents=True)
+    apply_module.write_clone_claim(clone, item_id="mobstats", url=OWNED_URL, completed=False)
+
+    listed = apply_module.folders_as_ids(apply_module.installed_clones(tmp_path), (), tmp_path)
+
+    assert listed["module"] == frozenset({"mobstats"})
+    assert apply_module.unfinished_clones(tmp_path)["module"] == frozenset({"mobstats"})
+
+
+def test_a_folder_with_no_claim_of_ours_keeps_its_own_name(tmp_path: Path) -> None:
+    """C3 is a CLAIM fallback, not a renaming: a stranger's folder must not be offered a press.
+
+    `clone_install_unfinished()` answers `None` for a folder this app wrote no claim
+    into, and a row for one is a press `_require_own_clone()` refuses, so its name is
+    left exactly as the disk spells it.
+    """
+    (tmp_path / "modules" / "MobStats").mkdir(parents=True)
+
+    listed = apply_module.folders_as_ids(apply_module.installed_clones(tmp_path), (), tmp_path)
+
+    assert listed["module"] == frozenset({"MobStats"})

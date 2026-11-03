@@ -654,6 +654,7 @@ def test_the_capitals_folder_is_listed_updated_and_removed_and_a_second_add_is_r
     listed = apply_module.folders_as_ids(
         apply_module.installed_clones(server),
         tortoise_modules.store().load_all("module"),
+        server,
     )
     assert manifest.id in listed["module"]
 

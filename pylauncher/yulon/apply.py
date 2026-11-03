@@ -143,14 +143,47 @@ def clone_ids(manifests: Iterable[Manifest]) -> dict[tuple[str, str], str]:
 
 
 def folders_as_ids(
-    found: Mapping[str, frozenset[str]], manifests: Iterable[Manifest]
+    found: Mapping[str, frozenset[str]], manifests: Iterable[Manifest], server_dir: Path
 ) -> dict[str, frozenset[str]]:
-    """A per-family folder listing with each manifest's own folder turned back into its id."""
+    """A per-family folder listing with each clone folder turned back into its item's id.
+
+    A manifest that names a `folder` says which id that folder belongs to (`clone_ids`).
+    A folder NO manifest names is still one this app may have put there: an install
+    that stopped before its record was saved leaves the clone and its claim and no
+    manifest at all (T861, review round 2). Such a folder is read through its claim,
+    which was written with `id_for_folder(folder)` — the one derivation — so the
+    installed answer and `unfinished_clones()` name the same id and the row offers
+    Install again. Without it `MobStats/` read as a folder here and `mobstats` there:
+    two rows for one install, neither of them pressable.
+    """
     known = clone_ids(manifests)
     return {
-        family: frozenset(known.get((family, folder), folder) for folder in folders)
+        family: frozenset(
+            known.get((family, folder), _claimed_id(server_dir, family, folder))
+            for folder in folders
+        )
         for family, folders in found.items()
     }
+
+
+def _claimed_id(server_dir: Path, family: str, folder: str) -> str:
+    """`folder`'s item id when THIS app's claim is in it, else the folder's own name.
+
+    Only a claim of ours renames a folder, and only a folder whose name is not already
+    its own id needs renaming: a folder somebody else cloned keeps its name, so a row
+    for it is never offered a press `_require_own_clone()` would refuse. The claim is
+    the same evidence `unfinished_clones()` reads, asked the same way, so the two
+    answers cannot name different items.
+    """
+    item_id = id_for_folder(folder)
+    if not item_id or item_id == folder:
+        return folder
+    sub = next((name for kind, name in CLONE_DIRS.items() if kind == family), None)
+    if sub is None:
+        return folder
+    if read_clone_claim(server_dir / sub / folder, item_id=item_id) is Ownership.OWNED:
+        return item_id
+    return folder
 
 
 def clone_folder_twin(clone_dir: Path, folder: str) -> str | None:
