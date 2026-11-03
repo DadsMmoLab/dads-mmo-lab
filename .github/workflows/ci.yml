@@ -80,21 +80,28 @@ defaults:
     working-directory: pylauncher
 
 jobs:
-  # The checkers, on one Python and one runner. They used to run on shard 0 only,
-  # which made that shard the longest job of the eight: 23 minutes on
-  # 2026-11-02/03, against 11-20 for the others, and the slowest leg hit 27. They
-  # do not depend on the shard, so nothing here needs the test matrix; it is one
-  # Python because ruff and black do not read the interpreter's version, and
-  # mypy's answer does not depend on it either.
+  # The checkers, on both release Pythons and one runner. They used to run on shard 0
+  # only, which made that shard the longest job of the eight: 23 minutes on
+  # 2026-11-02/03, against 11-20 for the others, and the slowest leg hit 27. Here they
+  # do not depend on the shard, so no test matrix is needed - but the two Pythons stay,
+  # because mypy checks per-interpreter: it reads the running Python's version and its
+  # `sys.version_info` branches, and the release ships 3.11. Eighteen jobs in total (12
+  # test + 2 lint-type + 2 platform-smoke + discord-scripts + integration), still under
+  # the free 20-concurrent-job limit.
   lint-type:
+    name: lint-type (py${{ matrix.python-version }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.13"]
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
+          python-version: ${{ matrix.python-version }}
           # `defaults.run.working-directory` applies to `run:` steps only, never
           # to an action's inputs, so this path is from the repository root.
           cache: pip
