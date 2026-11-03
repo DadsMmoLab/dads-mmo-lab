@@ -52,7 +52,7 @@ from yulon.catalog.catalog import (
 from yulon.catalog.families import conf as conf_patch
 from yulon.catalog.git_head import read_head_file
 from yulon.log import get_logger
-from yulon.manifest import Manifest, ManifestType
+from yulon.manifest import Manifest, ManifestType, id_for_folder
 from yulon.move import PackedModule, PackedSource, PackFile, ServerFacts, ServerSpec, counts_phrase
 from yulon.move_flows import PRESS_BRING_IN, MoveError, MoveWorld, move_held_reason
 from yulon.server_build_presses import MAINTENANCE_TAB, REBUILD, under_server_build
@@ -119,9 +119,17 @@ def _modules_of(
         for clone_name in folders:
             if PurePosixPath(folder) / clone_name in builds_into:
                 continue
-            # T861: the folder is the author's exact name; the store is asked by that name,
-            # because it is what is on disk and what a clone path is built from.
-            candidates = [m for m in (load_manifest(kind, clone_name) for kind in kinds) if m]
+            # T861 review round 3: the store is keyed by id, and a folder may be the author's
+            # exact name (`mod-twow-QOL-followers` for the id `mod-twow-qol-followers`), so the
+            # store is asked by the id the folder derives to. A description that names any
+            # other folder is not this one's: a folder that is only a case variant of the
+            # item's folder is a different folder here and must stay undescribed.
+            derived_id = id_for_folder(clone_name)
+            candidates = [
+                m
+                for m in (load_manifest(kind, derived_id) for kind in kinds)
+                if m is not None and apply.clone_folder(m) == clone_name
+            ]
             if len(candidates) != 1:
                 refusals.append(
                     f"{folder}/{clone_name} is a module folder Yu'lon cannot name (no "

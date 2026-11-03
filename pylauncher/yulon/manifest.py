@@ -167,7 +167,9 @@ def id_for_folder(folder: str) -> str:
     return candidate
 
 
-def folder_refusal(value: str, game: str, *, kind: ManifestType) -> str | None:
+def folder_refusal(
+    value: str, game: str, *, kind: ManifestType, windows_names: bool = True
+) -> str | None:
     """Why `value` cannot be the clone folder of an item of type `kind` in `game`, or None.
 
     One sentence, one definition: the derivation (`module_source._names_from`) and
@@ -177,8 +179,14 @@ def folder_refusal(value: str, game: str, *, kind: ManifestType) -> str | None:
 
     The core-files clause is a `module`'s alone (T861, review round 2): only a module's
     clone lands in `modules/`, where the core keeps its own files, so a `mod`, an `ale`
-    or a `keg` may well be called `templates`. The other two clauses hold for every
+    or a `keg` may well be called `templates`. The plain-name clause holds for every
     type, because every type's clone is a folder on this machine.
+
+    `windows_names` is off for a manifest that spells no `folder` (T861, review round 3):
+    its id was made before this rule and by a Linux host, where `aux` was a legal folder,
+    so refusing it on load would hide a module already installed there. A name being
+    DERIVED now still asks the clause (the derivation passes the default), because that
+    folder would be made on a machine whose disk may be Windows'.
     """
     if not FOLDER_NAME.fullmatch(value):
         return (
@@ -186,7 +194,7 @@ def folder_refusal(value: str, game: str, *, kind: ManifestType) -> str | None:
             "and hyphens, starting with a letter or digit and at most 100 characters, with no "
             "dot: the server builds `Add<folder>Scripts` from it, and a dot would not compile"
         )
-    if value.casefold() in WINDOWS_RESERVED_FOLDERS:
+    if windows_names and value.casefold() in WINDOWS_RESERVED_FOLDERS:
         return (
             "that is one of the names Windows keeps for its own devices (CON, PRN, AUX, NUL, "
             "COM1-9, LPT1-9), which no folder can have"
@@ -982,9 +990,11 @@ class Manifest(_Strict):
         and it is checked for EVERY manifest (T861, review round 2). A manifest with no
         `folder` is cloned into a folder named after its id, and that folder is what
         `apply` and the Modules tab walk, so it is held to the same rule a link is: a
-        hand-edited manifest cannot name a folder `CON`, a file the core keeps in
+        hand-edited manifest cannot SPELL a folder `CON`, a file the core keeps in
         `modules/`, or a name past a folder's length. The core-files clause is a
-        module's alone, since only a module's clone lands in `modules/`.
+        module's alone, since only a module's clone lands in `modules/`. The device-name
+        clause is not asked of an id that spells no folder (T861, review round 3): such an
+        id was persisted by a Linux host before this rule, where `aux` was a legal folder.
 
         The second half is the invariant every folder reader rests on: an item's id is
         `id_for_folder(folder)`, so `apply.client_receipts()` and the unfinished-install
@@ -994,7 +1004,13 @@ class Manifest(_Strict):
         refused here, at the one place every manifest passes through.
         """
         effective = self.folder or self.id
-        refusal = folder_refusal(effective, self.game, kind=self.type)
+        # T861 review round 3: the device-name clause is for a folder being named NOW. A
+        # manifest without `folder` keeps its id, which a Linux host persisted before this
+        # rule (an `aux` module exists there), so loading it must not hide it. Deriving a
+        # new item still asks `folder_refusal` with the clause on.
+        refusal = folder_refusal(
+            effective, self.game, kind=self.type, windows_names=self.folder is not None
+        )
         if refusal is not None:
             raise ValueError(f"folder {effective!r}: {refusal}")
         derived = id_for_folder(effective)

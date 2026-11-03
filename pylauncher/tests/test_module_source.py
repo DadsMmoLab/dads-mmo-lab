@@ -1186,6 +1186,18 @@ def _modules_on_another_drive(tmp_path: Path) -> Iterator[Path]:
         shutil.rmtree(elsewhere, ignore_errors=True)
 
 
+@pytest.mark.parametrize("name", ["Aux", "aux"])
+def test_a_link_named_like_a_windows_device_is_still_refused(name: str) -> None:
+    """D2: only an id persisted before T861 is let through; a name derived NOW is not.
+
+    `folder_refusal` keeps the device-name clause for a new derivation, whatever the
+    case, because that folder would be made on a machine whose disk may be Windows'.
+    """
+    said = _refused(lambda: _link(f"https://github.com/you/{name}"))
+    assert "Windows keeps for its own devices" in said
+    assert said.endswith(NOTHING_CHANGED)
+
+
 def test_a_modules_folder_linked_to_another_drive_is_staged_beside_its_real_folder(
     tmp_path: Path, _modules_on_another_drive: Path
 ) -> None:

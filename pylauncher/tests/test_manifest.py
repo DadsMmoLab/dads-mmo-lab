@@ -192,16 +192,20 @@ def test_a_name_past_the_folder_length_is_cut_to_it() -> None:
     assert id_for_folder("a" * 101) == "a" * 100
 
 
-def test_a_manifest_with_no_folder_whose_id_is_a_windows_device_name_is_refused() -> None:
-    """C2: the EFFECTIVE folder is checked for every item, whether it spells one or not.
+def test_a_manifest_with_no_folder_whose_id_is_a_windows_device_name_still_loads() -> None:
+    """D2: a legacy Linux record named like a Windows device is not hidden by this rule.
 
-    A manifest with no `folder` is cloned into `modules/<id>`, so an id Windows cannot
-    hold is refused when the manifest loads rather than at the copy.
+    The device-name clause belongs to a folder being NAMED now. A `mod` persisted before
+    T861 has no `folder` and keeps its id, and on the Linux host that made it `aux` was a
+    legal folder; refusing it on load would remove an installed module from every list.
+    A folder that SPELLS one is still refused (the parametrized cases above), and so is a
+    name being derived (tests/test_module_source.py).
 
-    Mutation: skip the check when `folder` is None and `CON` loads.
+    Mutation: ask the clause when `folder` is None again and this load is refused.
     """
-    with pytest.raises(ValidationError, match="Windows"):
-        parse_manifest({**README_EXAMPLE, "id": "con"})
+    mod = parse_manifest({**README_EXAMPLE, "id": "aux", "type": "mod"})
+    assert mod.id == "aux"
+    assert mod.folder is None
 
 
 def test_a_core_file_name_is_refused_for_a_module_and_allowed_for_a_mod() -> None:
