@@ -117,10 +117,24 @@ def test_it_installs_on_linux_and_windows_with_the_coa_floors() -> None:
     assert native is not None
     assert (native.min_ram_gb, native.warn_ram_gb) == (8, 12)
     assert (native.min_server_dir_gb, native.warn_server_dir_gb) == (25, 40)
-    assert native.update_to_latest is False
+    assert native.update_to_latest is True
     assert native.templates == "wow-coa/native"
     assert list(native.images) == ["worldserver", "authserver", "db-import", "tools"]
     assert entry.install.requires_client_dir is True
+
+
+def test_coa_follows_its_newest_release_branch_and_paired_bots_tag() -> None:
+    """T862: the core follows coa-bots-<version> branches, the bots the v<version> tag."""
+    from yulon.catalog import upstream
+
+    sources = {s.dest: s for s in coa().emulator.sources}
+    core, bots = sources["."], sources["modules/mod-playerbots"]
+    assert (core.follow, core.release_prefix) == ("release_branches", "coa-bots-")
+    assert (bots.follow, bots.release_prefix) == ("release_tag", "v")
+    assert upstream.release_version(core.branch or "", "coa-bots-") is not None
+    block = coa().install.native
+    assert block is not None and block.azerothcore is not None
+    assert block.azerothcore.world_baseline == "data/coa-world/baseline.json"
 
 
 def test_its_database_password_plan_is_generated_with_a_coa_prefix() -> None:

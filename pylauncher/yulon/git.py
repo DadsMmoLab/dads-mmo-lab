@@ -997,6 +997,24 @@ def parse_changed_files(raw: str) -> tuple[tuple[str, str], ...] | None:
     return pairs
 
 
+def blob_id_args(rev: str, path: str) -> list[str]:
+    """`git ls-tree <rev> -- <path>`: the blob one file is at one commit (T862)."""
+    return ["ls-tree", rev, "--", path]
+
+
+def parse_blob_id(raw: str) -> str:
+    """The blob id of the first line of a `blob_id_args()` answer; `""` when none (T862).
+
+    Empty, or a non-blob (a tree, a commit, a submodule): the commit has no such file.
+    """
+    for line in raw.splitlines():
+        fields = line.split()
+        if len(fields) >= 3 and fields[1] == "blob":
+            return fields[2]
+        return ""
+    return ""
+
+
 def tree_files_args(rev: str, paths: Sequence[str]) -> list[str]:
     """`git ls-tree -r -z --name-only <rev> -- <paths>`: the files one commit tracks (T630)."""
     return ["ls-tree", "-r", "-z", "--name-only", rev, "--", *paths]
@@ -1944,6 +1962,21 @@ class RunnerGit:
             logger.debug(f"could not list the files {rev} tracks in {dest}: {exc}")
             return None
         return parse_tree_files(proc.stdout)
+
+    def blob_id(self, dest: Path, rev: str, path: str) -> str | None:
+        """The blob `path` is at `rev`: the file's bytes, named without reading them (T862).
+
+        From the commit's own tree, never from disk. `""` is a commit with no such
+        file; None is git that could not say (`tree_files`' rules).
+        """
+        if not (dest / ".git").is_dir():
+            return None
+        try:
+            proc = _run_git(["git", *blob_id_args(rev, path)], cwd=dest)
+        except (GitError, OSError) as exc:
+            logger.debug(f"could not read the blob of {path} at {rev} in {dest}: {exc}")
+            return None
+        return parse_blob_id(proc.stdout)
 
     def tree_bytes(self, dest: Path, rev: str, path: str) -> dict[str, bytes] | None:
         """`{repository path: bytes}` of the files under `path` (a file or folder) at `rev` (T632).
@@ -2946,6 +2979,17 @@ class ContainerGit:
             logger.debug(f"could not list the files {rev} tracks in {dest}: {exc}")
             return None
         return parse_tree_files(proc.stdout)
+
+    def blob_id(self, dest: Path, rev: str, path: str) -> str | None:
+        """`RunnerGit.blob_id()`, containerised; `writes=False`, nothing is fetched (T862)."""
+        if not (dest / ".git").is_dir():
+            return None
+        try:
+            proc = self._capture(dest, blob_id_args(rev, path), writes=False)
+        except (GitError, OSError) as exc:
+            logger.debug(f"could not read the blob of {path} at {rev} in {dest}: {exc}")
+            return None
+        return parse_blob_id(proc.stdout)
 
     def tree_bytes(self, dest: Path, rev: str, path: str) -> dict[str, bytes] | None:
         """`RunnerGit.tree_bytes()`, containerised: the read-only container, no network (T632)."""

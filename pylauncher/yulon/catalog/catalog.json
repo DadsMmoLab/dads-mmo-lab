@@ -3045,7 +3045,8 @@
         "notes": [
             "T812: the Conquest of Azeroth server. Core (Zyth45/azerothcore-wotlk-coa, mirrored as pjerra/azerothcore-wotlk-coa so an upstream 404 cannot break installs) @ coa-bots-2.9.1 a1e8c99ecf2b5c088cc342188478db4891a07c47; mod-playerbots (Zyth45, mirrored as pjerra/mod-playerbots-coa) v2.9.1 79c5437a84bb0b9593011c261b1bd9afa558427e (on branch coa). The 30 CoA modules are in-tree. client_build.read_version reads Ascension.exe as 3.3.5 (12340), checked 2026-10-27 on the live client.",
             "Health markers read off the pin: src/server/coa/AscensionCompat.cpp:10085 (Ascension compatibility) and src/server/coa/CoADungeonBossKit.cpp:154 (CoA dungeon boss kit rows).",
-            "T827: use the CoA client files (Update client makes your Ascension copy one). The stock Ascension client logs in and is then disconnected at realm select (world log: malformed packet, cryptInitialized: true); the Server tab tells the two apart by Extensions.dll and Ascension.exe against the CoA manifest."
+            "T827: use the CoA client files (Update client makes your Ascension copy one). The stock Ascension client logs in and is then disconnected at realm select (world log: malformed packet, cryptInitialized: true); the Server tab tells the two apart by Extensions.dll and Ascension.exe against the CoA manifest.",
+            "T862: Update to latest follows the newest coa-bots-<version> branch of the pjerra mirror and the mod-playerbots tag v<version> beside it (no tag yet: no update); a move that changes data/coa-world/baseline.json is refused (a new world baseline needs the world built again). The mirrors must carry each release first."
         ],
         "emulator": {
             "name": "AzerothCore (Ascension CoA fork) + SquidBots playerbots",
@@ -3053,6 +3054,8 @@
                 {
                     "repo": "pjerra/azerothcore-wotlk-coa",
                     "branch": "coa-bots-2.9.1",
+                    "follow": "release_branches",
+                    "release_prefix": "coa-bots-",
                     "depth": null,
                     "dest": ".",
                     "rev": "a1e8c99ecf2b5c088cc342188478db4891a07c47"
@@ -3060,6 +3063,8 @@
                 {
                     "repo": "pjerra/mod-playerbots-coa",
                     "branch": "coa",
+                    "follow": "release_tag",
+                    "release_prefix": "v",
                     "dest": "modules/mod-playerbots",
                     "rev": "79c5437a84bb0b9593011c261b1bd9afa558427e"
                 }
@@ -3084,7 +3089,7 @@
                     "queue_command": "server debug",
                     "queue_pattern": "CharacterDatabase queue size: (\\d+)"
                 },
-                "update_to_latest": false,
+                "update_to_latest": true,
                 "templates": "wow-coa/native",
                 "images": [
                     "worldserver",
@@ -3174,6 +3179,7 @@
                         ]
                     },
                     "world_bootstrap_service": "coa-world-bootstrap",
+                    "world_baseline": "data/coa-world/baseline.json",
                     "core_sql_modules": [
                         "mod-ascension"
                     ],

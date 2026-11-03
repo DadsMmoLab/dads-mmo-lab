@@ -54,6 +54,7 @@ from yulon.catalog.installer import (
     InstallStopped,
     OneShotLeftRunning,
     ReadyWaitStopped,
+    UpdateRefused,
 )
 from yulon.catalog.native import (
     DOWNLOAD_CANCEL_NOTE,
@@ -995,6 +996,9 @@ class AzerothCoreInstaller(StagedInstaller):
     ) -> Generator[str, None, object]:
         """Refuse a Return onto databases that hold updates the tested commit lacks (T630).
 
+        The forward half is T862: a move that changes the world baseline file is
+        refused, since the world would need building again.
+
         Asked by the update route right after the move and before anything is built,
         stopped or copied; a refusal puts every source back. Only for "Return to the
         tested pin…": an update moves forward, where its own updates are what it brings.
@@ -1012,6 +1016,7 @@ class AzerothCoreInstaller(StagedInstaller):
         """
         yield from ()
         if not to_pin:
+            self._refuse_a_new_world_baseline(moved)
             return None
         lacked = self._updates_the_target_lacks(moved)
         if not lacked:
@@ -1054,6 +1059,44 @@ class AzerothCoreInstaller(StagedInstaller):
             "None of them was applied, so the tested commit's server can start on your databases."
         )
         return None
+
+    def _refuse_a_new_world_baseline(
+        self, moved: Sequence[tuple[EmulatorSource, Path, str]]
+    ) -> None:
+        """T862: a move that changes the world baseline file is refused: a new one needs a build."""
+        path = self._block().world_baseline
+        if not path:
+            return
+        for source, dest, old in moved:
+            if source.dest != ".":
+                continue
+            new = self._seams.head_sha(dest)
+            if new is None:
+                raise InstallerError(
+                    f"Yu'lon could not read whether the newest code for {self.entry.name} "
+                    f"changes its world baseline ({path}): git did not say. Nothing was built; "
+                    "try again."
+                )
+            if new == old:
+                continue
+            before = self._seams.blob_id(dest, old, path)
+            after = self._seams.blob_id(dest, new, path)
+            if before is None or after is None:
+                raise InstallerError(
+                    f"Yu'lon could not read whether the newest code for {self.entry.name} "
+                    f"changes its world baseline ({path}): git did not say. Nothing was built; "
+                    "try again."
+                )
+            if before != after:
+                raise UpdateRefused(
+                    f"The newest code for {self.entry.name} brings a new world baseline ({path} "
+                    f"changed between {old[:7]} and {new[:7]}). An existing world cannot take a "
+                    "new baseline through an update: the world has to be built again, which this "
+                    "press does not do. Nothing was built; wait for a Yu'lon release that moves "
+                    f"{self.entry.name} onto it.",
+                    repo=source.repo,
+                    commit=new,
+                )
 
     def _database_was_up(self, container: str) -> bool | None:
         """Whether the database container ran before the check asked it; None = unknown."""

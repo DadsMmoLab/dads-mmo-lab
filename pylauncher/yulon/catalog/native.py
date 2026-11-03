@@ -5054,6 +5054,19 @@ class ReleaseTarget:
     rev: str
     """The release's commit, or the checkout's own HEAD when that already contains it."""
     line: str
+    branch: str | None = None
+    """The branch the fetch names for a branch-released source (T862); None = its own."""
+
+
+@dataclass(frozen=True)
+class BranchReleasePlan:
+    """The newest release branch and what each release-mode source moves to (T862)."""
+
+    branch: upstream.ReleaseBranch
+    commits: Mapping[str, tuple[str, str]]
+    """repo -> (name recorded and said, sha): the core's branch, each bots tag."""
+    missing: tuple[tuple[str, str], ...]
+    """`(repo, tag)` of paired tags not published: a release without its bots."""
 
 
 @dataclass(frozen=True)
@@ -5371,10 +5384,19 @@ def _parse_state(server_dir: Path, *, valid: Sequence[str]) -> InstallState | No
 
 
 def _refused_for(record: InstallState | None, source: EmulatorSource) -> str:
-    """The commit an update of `source` refused, for a branch-following source; else ""."""
+    """The commit an update of `source` refused, for any source but a releases one; else ""."""
     if record is None or source.follow == "releases":
         return ""
     return next((sha for repo, sha in record.refused_updates if repo == source.repo), "")
+
+
+def _branch_moved_from(source: EmulatorSource, record: InstallState | None) -> str | None:
+    """The branch this checkout's HEAD came from (T862): the release it moved to, else its own."""
+    if source.follow == "release_branches" and record is not None and source.release_prefix:
+        row = record.rev_for(source.repo)
+        if row is not None and upstream.release_version(row.release, source.release_prefix):
+            return row.release
+    return source.branch
 
 
 def _parse_refused(raw: object) -> tuple[tuple[str, str], ...]:
@@ -6007,6 +6029,11 @@ def _git_is_ancestor(dest: Path, old: str, new: str) -> bool | None:
 def _git_tree_files(dest: Path, rev: str, paths: Sequence[str]) -> tuple[str, ...] | None:
     """The files one commit of this checkout tracks under `paths`, containerised (T630)."""
     return git.ContainerGit().tree_files(dest, rev, paths)
+
+
+def _git_blob_id(dest: Path, rev: str, path: str) -> str | None:
+    """The blob `path` is at `rev` in this checkout, containerised (T862)."""
+    return git.ContainerGit().blob_id(dest, rev, path)
 
 
 def _git_tree_bytes(dest: Path, rev: str, path: str) -> dict[str, bytes] | None:
@@ -7446,6 +7473,11 @@ class Seams:
     to hash the migration files its databases' `migrations` table keys by hash, and to
     read the module's own install rules for where they go.
     """
+    blob_id: Callable[[Path, str, str], str | None] = _git_blob_id
+    """T862: the blob of one file at one commit; `""` = no such file, None = no answer.
+
+    What an Update to latest asks of the world baseline file on both sides of a move.
+    """
     images_built: Callable[[Sequence[str]], bool | None] = docker.images_built
     build_cache_bytes: Callable[[], int | None] = docker.build_cache_bytes
     """How much build cache Docker holds; preflight counts it for a resumed build (T203)."""
@@ -7883,6 +7915,7 @@ class Seams:
             is_ancestor=repo.is_ancestor,
             file_lines=repo.file_lines,
             tree_bytes=repo.tree_bytes,
+            blob_id=repo.blob_id,
             images_built=on(docker.images_built, wsl_distro=distro),
             build_cache_bytes=on(docker.build_cache_bytes, wsl_distro=distro),
             image_id=on(docker.image_id, wsl_distro=distro),
@@ -11013,6 +11046,10 @@ class StagedInstaller:
         found: list[upstream.SourceNews] = []
         asked = False
         record = read_state(server_dir, valid=())
+        stale = [s for s in moving if s.repo not in fresh]
+        branches: BranchReleasePlan | None = None
+        if any(s.follow in ("release_branches", "release_tag") for s in stale):
+            branches = self._newest_branch_release(stale)
         for index, source in enumerate(moving):
             kept = fresh.get(source.repo)
             if kept is not None:
@@ -11020,7 +11057,15 @@ class StagedInstaller:
                 continue
             asked = True
             label = "server" if index == 0 else source.repo.rsplit("/", 1)[-1]
-            stands, release = self._behind(server_dir, source, refused=_refused_for(record, source))
+            if source.follow in ("release_branches", "release_tag"):
+                stands, release, held = self._behind_branch(
+                    server_dir, source, branches, refused=_refused_for(record, source)
+                )
+            else:
+                behind, release = self._behind(
+                    server_dir, source, refused=_refused_for(record, source)
+                )
+                stands, held = behind, ""
             found.append(
                 upstream.SourceNews(
                     repo=source.repo,
@@ -11031,6 +11076,7 @@ class StagedInstaller:
                     follow=source.follow,
                     release=release,
                     installed=_installed_release(record, source.repo),
+                    held=held,
                 )
             )
         taken = clock if asked or not found else min(row.checked_unix for row in found)
@@ -11038,6 +11084,41 @@ class StagedInstaller:
         if asked and (server_dir / STATE_FILE).is_file():
             upstream.write_cached(server_dir, news)
         return news
+
+    def _behind_branch(
+        self,
+        server_dir: Path,
+        source: EmulatorSource,
+        branches: BranchReleasePlan | None,
+        *,
+        refused: str = "",
+    ) -> tuple[upstream.Comparison | None, str, str]:
+        """How a release-mode source stands to the newest release branch (T862).
+
+        `(comparison, release name, held sentence)`. `(None, "")` with no held when
+        the listing could not be read. When the bots tag is missing every
+        release-mode row counts 0 with no release, and the release_branches row
+        carries the held sentence instead.
+        """
+        slug = upstream.github_slug(source.repo)
+        if slug is None or branches is None:
+            return None, "", ""
+        if branches.missing:
+            held = ""
+            if source.follow == "release_branches":
+                _repo, tag = branches.missing[0]
+                held = upstream.bots_not_out_line(branches.branch.name, _repo, tag)
+            return upstream.Comparison(ahead=0, behind=0, status="identical"), "", held
+        try:
+            name, sha = branches.commits[source.repo]
+        except KeyError:
+            return None, "", ""
+        if refused == sha:
+            return upstream.Comparison(ahead=0, behind=0, status="identical"), "", ""
+        head = self._seams.head_sha(server_dir / source.dest)
+        if head is None:
+            return None, "", ""
+        return upstream.compare(slug, head, sha, get=self._seams.upstream_get), name, ""
 
     def _behind(
         self, server_dir: Path, source: EmulatorSource, *, refused: str = ""
@@ -11401,7 +11482,15 @@ class StagedInstaller:
                             git.CloneSpec(
                                 url=source.url,
                                 dest=dest,
-                                branch=source.branch,
+                                # T862: `git._fetch_ref(spec.branch)` then fetches
+                                # `origin coa-bots-<newest>`, and with `rev` set there is
+                                # no reset (`_resets_to_the_tip`); `_pin` checks out the
+                                # tip sha.
+                                branch=(
+                                    source.branch
+                                    if to_pin
+                                    else self._latest_branch(source, targets)
+                                ),
                                 sparse_path=source.sparse_path,
                                 depth=source.depth,
                                 rev=source.rev if to_pin else self._latest_rev(source, targets),
@@ -11754,6 +11843,70 @@ class StagedInstaller:
         before anything moves, and the route asks again with the line in it.
         """
         found: dict[str, ReleaseTarget] = {}
+        branch_sources = [s for s, _, _ in plan if s.follow in ("release_branches", "release_tag")]
+        if branch_sources:
+            core = next(s for s in branch_sources if s.follow == "release_branches")
+            asked = self._newest_branch_release([s for s, _, _ in plan])
+            if asked is None:
+                raise InstallerError(
+                    f"{core.repo} follows its release branches, and Yu'lon could not list them "
+                    f"from {core.url}. Nothing in that folder was changed; try again when it "
+                    "can be reached."
+                )
+            if asked.missing:
+                repo, tag = asked.missing[0]
+                raise InstallerError(
+                    f"{asked.branch.name} is out upstream, but its bots are not yet: {repo} has "
+                    f"no {tag}, and Yu'lon never builds a release with another release's bots. "
+                    f"Nothing in those folders was changed; this offers {asked.branch.name} "
+                    f"once {tag} is out."
+                )
+            for source, dest, old in plan:
+                if source.follow not in ("release_branches", "release_tag"):
+                    continue
+                name, sha = asked.commits[source.repo]
+                slug = upstream.github_slug(source.repo)
+                stands = (
+                    None
+                    if slug is None
+                    else upstream.compare(slug, old, sha, get=self._seams.upstream_get)
+                )
+                if stands is None:
+                    raise InstallerError(
+                        f"{source.repo} follows its release branches, and GitHub did not answer "
+                        f"whether {name} is ahead of what {dest} is on. Nothing in that folder "
+                        "was changed; try again later."
+                    )
+                if stands.ahead == 0 and old != sha:
+                    past = _commits(stands.behind)
+                    found[source.repo] = ReleaseTarget(
+                        tag="",
+                        rev=old,
+                        branch=(asked.branch.name if source.follow == "release_branches" else None),
+                        line=(
+                            f"{source.repo} follows its release branches; the newest, {name} "
+                            f"({sha[:7]}), is already in {old[:7]}, which is {past} past it, "
+                            "so it stays there."
+                        ),
+                    )
+                    continue
+                said = (
+                    f"{source.repo} follows its release branches; the newest is {name} "
+                    f"({sha[:7]})."
+                    if source.follow == "release_branches"
+                    else f"{source.repo} follows {core.repo}'s release; its {name} is {sha[:7]}."
+                )
+                if stands.diverged:
+                    warning = rewritten_line(source.repo, name, stands.behind)
+                    if source.repo not in rewritten_ok:
+                        raise RewrittenHistory(source.repo, warning)
+                    said = f"{said}\n{warning}"
+                found[source.repo] = ReleaseTarget(
+                    tag=name,
+                    rev=sha,
+                    branch=(asked.branch.name if source.follow == "release_branches" else None),
+                    line=said,
+                )
         for source, dest, old in plan:
             if source.follow != "releases":
                 continue
@@ -11805,11 +11958,56 @@ class StagedInstaller:
             found[source.repo] = ReleaseTarget(tag=release.tag, rev=release.sha, line=said)
         return found
 
+    def _newest_branch_release(self, sources: Sequence[EmulatorSource]) -> BranchReleasePlan | None:
+        """The newest release branch and each release-mode source's commit (T862).
+
+        None when any repo's listing could not be read, or no branch matches.
+        One listing per repo, through the same seam the compare GETs use.
+        """
+        core = next((s for s in sources if s.follow == "release_branches"), None)
+        if core is None or not core.release_prefix:
+            return None
+        adverts: dict[str, dict[str, str] | None] = {}
+        for source in sources:
+            if source.repo not in adverts:
+                adverts[source.repo] = upstream.advertised_refs(
+                    source.url, get=self._seams.upstream_get
+                )
+        core_refs = adverts.get(core.repo)
+        if core_refs is None:
+            return None
+        branch = upstream.newest_release_branch(core_refs, core.release_prefix)
+        if branch is None:
+            return None
+        commits: dict[str, tuple[str, str]] = {core.repo: (branch.name, branch.sha)}
+        missing: list[tuple[str, str]] = []
+        for source in sources:
+            if source.follow != "release_tag" or not source.release_prefix:
+                continue
+            refs = adverts.get(source.repo)
+            if refs is None:
+                return None
+            tag = f"{source.release_prefix}{branch.version}"
+            sha = upstream.tag_commit(refs, tag)
+            if sha is None:
+                missing.append((source.repo, tag))
+            else:
+                commits[source.repo] = (tag, sha)
+        return BranchReleasePlan(branch=branch, commits=commits, missing=tuple(missing))
+
     @staticmethod
     def _latest_rev(source: EmulatorSource, targets: Mapping[str, ReleaseTarget]) -> str | None:
         """What an update checks out for `source`: its release's commit, or `None` for the tip."""
         said = targets.get(source.repo)
         return said.rev if said is not None else None
+
+    @staticmethod
+    def _latest_branch(source: EmulatorSource, targets: Mapping[str, ReleaseTarget]) -> str | None:
+        """The branch the fetch names for `source`: the newest release branch (T862)."""
+        said = targets.get(source.repo)
+        if said is not None and said.branch is not None:
+            return said.branch
+        return source.branch
 
     def _refuse_unless_updatable(
         self, server_dir: Path, moving: Sequence[EmulatorSource]
@@ -11878,6 +12076,7 @@ class StagedInstaller:
         """
         ours = self.app_written_paths(server_dir)
         off = {row.dest: row.built for row in sources_still_off(server_dir)}
+        record = read_state(server_dir, valid=())
         plan: list[tuple[EmulatorSource, Path, str]] = []
         for source in moving:
             dest = server_dir / source.dest
@@ -11908,7 +12107,10 @@ class StagedInstaller:
                     f"nothing was fetched and nothing was changed. Copy them somewhere safe and "
                     f"put the files back as git has them, then press this again."
                 )
-            unmoved = self._seams.no_local_commits(dest, source.branch)
+            # T862: without this, a second Update or a Return after a move to
+            # coa-bots-2.10 fetches coa-bots-2.9.1, and HEAD's own release commits
+            # read as local commits.
+            unmoved = self._seams.no_local_commits(dest, _branch_moved_from(source, record))
             if unmoved is None:
                 raise InstallerError(
                     f"Yu'lon could not ask git whether {dest} carries commits of its own -- the "

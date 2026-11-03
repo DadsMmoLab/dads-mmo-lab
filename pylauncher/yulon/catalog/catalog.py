@@ -64,6 +64,23 @@ class EmulatorSource(Source):
     server dir IS the checkout, as it is for AzerothCore.
     """
 
+    follow: Literal["branch", "releases", "release_branches", "release_tag"] = Field(
+        default="branch",
+        description=(
+            "`release_branches` = latest is the tip of the highest `<release_prefix><version>` "
+            "branch (version compared as numbers); `release_tag` = latest is the tag "
+            "`<release_prefix><version>`, where version is this entry's release_branches "
+            "source's, and nothing moves while that tag is missing (T862)."
+        ),
+    )
+    release_prefix: str | None = Field(
+        default=None,
+        pattern=r"^[A-Za-z0-9._-]+$",
+        description=(
+            "T862: the prefix the release version hangs off (`coa-bots-`, `v`). "
+            "Only read with follow: release_branches or release_tag."
+        ),
+    )
     dest: str = Field(
         min_length=1,
         description="Clone target relative to the server dir; '.' means the server dir itself.",
@@ -85,12 +102,53 @@ class EmulatorSource(Source):
         """`Source`'s rule over the catalog's wider host list (`CATALOG_REPO_HOSTS`)."""
         return check_repo(value, CATALOG_REPO_HOSTS)
 
+    @model_validator(mode="after")
+    def _release_follow_is_whole(self) -> EmulatorSource:
+        """The two new follow modes need a prefix, a GitHub repo and a release pin (T862)."""
+        follow = self.follow
+        prefix = self.release_prefix
+        repo = self.repo
+        if follow in ("release_branches", "release_tag"):
+            if prefix is None:
+                raise ValueError(f"follow: {follow} needs release_prefix")
+            from yulon.catalog import upstream as _upstream
+
+            if _upstream.github_slug(repo) is None:
+                raise ValueError(f"follow: {follow} needs a GitHub repository, got {repo!r}")
+            if (
+                follow == "release_branches"
+                and _upstream.release_version(self.branch or "", prefix) is None
+            ):
+                raise ValueError(
+                    "follow: release_branches pins a release branch, and "
+                    f"{self.branch!r} is not {prefix}<version>"
+                )
+        elif prefix is not None:
+            raise ValueError(
+                "release_prefix is only read with follow: release_branches or release_tag"
+            )
+        return self
+
 
 class Emulator(_Strict):
     """The open-source emulator: a display name and the repos the installer clones."""
 
     name: str = Field(min_length=1)
     sources: tuple[EmulatorSource, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _release_tags_have_a_release(self) -> Emulator:
+        """A release_tag source pairs with the entry's one release_branches source (T862)."""
+        branches = [s for s in self.sources if s.follow == "release_branches"]
+        if len(branches) > 1:
+            raise ValueError("at most one source may follow release_branches")
+        for source in self.sources:
+            if source.follow == "release_tag" and not branches:
+                raise ValueError(
+                    f"{source.repo} follows release_tag, and no source of this emulator "
+                    "follows release_branches"
+                )
+        return self
 
 
 INSTALL_RECORD = ".yulon-install.json"
@@ -634,6 +692,15 @@ class AzerothCoreData(_Strict):
             "(T812). None: the entry has no bootstrap stage."
         ),
     )
+    world_baseline: str | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "T862: a file in the core checkout whose blob must not change across an Update "
+            "to latest: a new world baseline needs the world built again, which an update "
+            "does not do. None: not checked."
+        ),
+    )
     realm_types: tuple[AcRealmType, ...] = Field(
         default=(),
         description=(
@@ -712,6 +779,19 @@ class AzerothCoreData(_Strict):
                     f"realm type {realm.id!r} repeats world_env keys {repeated}: one key "
                     "has one owner, the block's or the type's, never both"
                 )
+        return self
+
+    @field_validator("world_baseline")
+    @classmethod
+    def _world_baseline_stays_inside_the_checkout(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        return _below(value, "world_baseline", "the checkout")
+
+    @model_validator(mode="after")
+    def _world_baseline_needs_a_bootstrap(self) -> AzerothCoreData:
+        if self.world_baseline is not None and self.world_bootstrap_service is None:
+            raise ValueError("world_baseline needs world_bootstrap_service")
         return self
 
     @field_validator("world_data_dirs")

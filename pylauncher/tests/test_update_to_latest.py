@@ -272,8 +272,8 @@ def test_the_route_is_offered_for_every_shipped_entry_and_by_the_flag_not_the_id
         "wow-vanilla": True,
         "wow-tortoise": True,
         "wow-centurion": True,
-        # T812: CoA pins its fork and carries a patch; no update control until a gate proves one.
-        "wow-coa": False,
+        # T862: follows its newest release branch and paired bots tag.
+        "wow-coa": True,
         # T850: MoP pins its fork and its world database comes from a release asset, so
         # there is no checkout snapshot for an update route to compare.
         "wow-mop": False,

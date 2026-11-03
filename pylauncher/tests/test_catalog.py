@@ -415,8 +415,8 @@ def test_every_entry_says_whether_it_offers_the_update_to_latest_control() -> No
         "wow-tortoise": True,
         # T179 decision 2: code = pull + rebuild, world = changed tables re-imported.
         "wow-centurion": True,
-        # T812: CoA pins its fork and carries a patch; no update control until a gate proves one.
-        "wow-coa": False,
+        # T862: follows its newest release branch and paired bots tag.
+        "wow-coa": True,
         # T850: MoP pins its fork; the world database comes from a release asset, not
         # the checkout, so there is no snapshot for an update route to compare.
         "wow-mop": False,

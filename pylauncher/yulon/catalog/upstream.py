@@ -35,7 +35,7 @@ import re
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote, urlsplit
@@ -253,6 +253,113 @@ class Release:
     sha: str
 
 
+ADVERTISEMENT_ACCEPT = "application/x-git-upload-pack-advertisement"
+
+
+def advertised_refs(url: str, *, get: HttpGet) -> dict[str, str] | None:
+    """The refs a git server advertises, by name — the same answer `git ls-remote` reads.
+
+    Over HTTPS (`info/refs?service=git-upload-pack`), so no container and no API quota (T862).
+    None when the server did not answer with one: an HTML page, a dumb server, a cut body.
+    """
+    try:
+        body = get(f"{url.rstrip('/')}/info/refs?service=git-upload-pack", ADVERTISEMENT_ACCEPT)
+    except (OSError, ValueError) as exc:
+        logger.debug(f"could not list the refs of {url}: {exc}")
+        return None
+    try:
+        found = _parse_advertisement(body)
+    except ValueError as exc:
+        logger.debug(f"could not list the refs of {url}: {exc}")
+        return None
+    return found
+
+
+def _parse_advertisement(body: bytes) -> dict[str, str] | None:
+    """`{ref: sha}` from a smart-HTTP advertisement body. None = not one (T862)."""
+    refs: dict[str, str] = {}
+    at = 0
+    seen_service = False
+    try:
+        while at < len(body):
+            if at + 4 > len(body):
+                raise ValueError("cut length")
+            chunk = body[at : at + 4].decode("ascii")
+            size = int(chunk, 16)
+            if size == 0:
+                at += 4
+                continue
+            if size < 4 or at + size > len(body):
+                raise ValueError("cut line")
+            line = body[at + 4 : at + size]
+            at += size
+            if not seen_service:
+                if line != b"# service=git-upload-pack\n":
+                    return None
+                seen_service = True
+                continue
+            if line.endswith(b"\n"):
+                line = line[:-1]
+            line = line.split(b"\0", 1)[0]
+            sha, space, ref = line.partition(b" ")
+            if not space:
+                continue
+            name = ref.decode("utf-8", errors="replace")
+            if name == "capabilities^{}":
+                continue
+            said = sha.decode("ascii")
+            if len(said) != 40 or any(c not in "0123456789abcdef" for c in said):
+                raise ValueError(f"bad sha {said!r}")
+            refs[name] = said
+    except (OSError, ValueError) as exc:
+        logger.debug(f"could not list the refs: {exc}")
+        return None
+    if not seen_service:
+        return None
+    return refs
+
+
+def release_version(name: str, prefix: str) -> tuple[int, ...] | None:
+    """`name` past `prefix` as an int tuple, or None when it is not `<prefix><version>` (T862)."""
+    found = re.fullmatch(re.escape(prefix) + r"(\d+(?:\.\d+)*)", name)
+    if found is None:
+        return None
+    return tuple(int(part) for part in found.group(1).split("."))
+
+
+@dataclass(frozen=True)
+class ReleaseBranch:
+    """The highest `<prefix><version>` branch and its tip (T862)."""
+
+    name: str
+    version: str
+    """The text after the prefix, e.g. "2.9.1"."""
+    sha: str
+
+
+def newest_release_branch(refs: Mapping[str, str], prefix: str) -> ReleaseBranch | None:
+    """The highest `<prefix><version>` branch under `refs/heads/`, or None (T862)."""
+    best: ReleaseBranch | None = None
+    best_key: tuple[tuple[int, ...], str] | None = None
+    for ref, sha in refs.items():
+        if not ref.startswith("refs/heads/"):
+            continue
+        name = ref[len("refs/heads/") :]
+        version = release_version(name, prefix)
+        if version is None:
+            continue
+        key = (version, name)
+        if best_key is None or key > best_key:
+            best_key = key
+            best = ReleaseBranch(name=name, version=name[len(prefix) :], sha=sha)
+    return best
+
+
+def tag_commit(refs: Mapping[str, str], tag: str) -> str | None:
+    """The commit `tag` names: peeled (`^{}`) when annotated, plain when lightweight (T862)."""
+    return refs.get(f"refs/tags/{tag}^{{}}") or refs.get(f"refs/tags/{tag}")
+
+
 def newest_release(slug: str, *, get: HttpGet) -> Release | None:
     """The newest published release of `slug` and its commit, or None if GitHub would not say.
 
@@ -330,6 +437,8 @@ class SourceNews:
     step: `behind` compares commits, and a positive count against a release of
     the same name is a newer build of it.
     """
+    held: str = ""
+    """The newest release is out but what it pairs with is not: nothing is offered (T862)."""
 
 
 @dataclass(frozen=True)
@@ -369,6 +478,16 @@ def _said(source: SourceNews) -> str:
     return f"{source.label} {what}"
 
 
+def bots_not_out_line(name: str, bots_repo: str, tag: str) -> str:
+    """A release is out but its paired bots tag is not, so nothing is offered (T862)."""
+    return (
+        f"{name} is out upstream, but its bots are not yet: "
+        f"{bots_repo.rsplit('/', 1)[-1]} has no {tag}. "
+        f"{server_build_presses.under_server_build(server_build_presses.UPDATE_TO_LATEST)} "
+        "offers it once they are."
+    )
+
+
 def line(news: UpstreamNews | None) -> str:
     """The Server tab's sentence, or `""` when there is nothing new or nothing known.
 
@@ -379,13 +498,18 @@ def line(news: UpstreamNews | None) -> str:
     if news is None:
         return ""
     said = [_said(source) for source in news.sources if source.behind]
-    if not said:
-        return ""
+    held = [source.held for source in news.sources if source.held]
     if news.adopted:
+        if not said:
+            return ""
         return (
             f"Upstream has new code since this server was built: {', '.join(said)}. "
             "Update it with the launcher that built it."
         )
+    if not said:
+        return " ".join(held)
+    if held:
+        said.append(" ".join(held))
     return (
         f"Upstream has new code since this server was built: {', '.join(said)}. "
         # The menu named as well as the entry (T89): the press is not on the
@@ -432,6 +556,7 @@ def read_cached(
                 release=str(row.get("release", "")),
                 installed=str(row.get("installed", "")),
                 rewritten=int(row.get("rewritten", 0)),
+                held=str(row.get("held", "")),
             )
             for row in payload["sources"]
         ]
@@ -485,6 +610,7 @@ def write_cached(server_dir: Path, news: UpstreamNews) -> None:
                 "release": source.release,
                 "installed": source.installed,
                 "rewritten": source.rewritten,
+                "held": source.held,
             }
             for source in news.sources
         ],

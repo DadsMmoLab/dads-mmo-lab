@@ -109,6 +109,24 @@ def lay_patch_sources(entry: CatalogEntry) -> Callable[[Path], None]:
     return on_clone
 
 
+def advert_body(refs: dict[str, str]) -> bytes:
+    """A smart-HTTP `info/refs` body for `refs` (`{ref: sha}`), capabilities on the first (T862).
+
+    The service line, a flush, one pkt-line per ref with the capabilities after
+    `\\0` on the first, and a closing flush — the shape `git ls-remote` reads.
+    """
+    chunks = [b"001e# service=git-upload-pack\n", b"0000"]
+    names = sorted(refs)
+    for index, name in enumerate(names):
+        line = f"{refs[name]} {name}".encode("ascii")
+        if index == 0:
+            line += b"\0multi_ack thin-pack side-band ofs-delta deepen-since"
+        line += b"\n"
+        chunks.append(f"{len(line) + 4:04x}".encode("ascii") + line)
+    chunks.append(b"0000")
+    return b"".join(chunks)
+
+
 @dataclass
 class Recorder:
     """A whole machine's worth of doubles, and a record of what the engine did to it."""
@@ -570,6 +588,22 @@ class Recorder:
     )
     """T179: `changed_lines()`'s answer per `(checkout, old, new, path)`; absent is None."""
 
+    adverts: dict[str, dict[str, str]] = field(default_factory=dict)
+    """T862: a git server's advertised refs per source `url` (the `info/refs` answer).
+
+    Answered in `upstream_get` with a pkt-line body `advert_body()` builds. A url not
+    named raises there, like a mirror that cannot be reached.
+    """
+
+    advert_errors: set[str] = field(default_factory=set)
+    """T862: urls whose `info/refs` answer fails, as an unreachable mirror would."""
+
+    blob_ids: dict[tuple[Path, str, str], str | None] = field(default_factory=dict)
+    """T862: `blob_id()`'s answer per `(checkout, commit, path)`; absent is "unchanged"."""
+
+    local_commit_branches: list[tuple[str, str | None]] = field(default_factory=list)
+    """T862: `(checkout name, branch)` of every `no_local_commits()` question, in order."""
+
     restore_error: Exception | None = None
     """What `restore_rev()` RAISES instead of moving the head, or None to move it.
 
@@ -580,8 +614,13 @@ class Recorder:
     """
 
     def upstream_get(self, url: str, accept: str) -> bytes:
-        """GitHub, as far as T124 asks it: one compare per source."""
+        """GitHub, as far as T124 asks it: one compare per source; T862's mirror listing too."""
         self.gets.append(url)
+        if url.endswith("/info/refs?service=git-upload-pack"):
+            base = url[: -len("/info/refs?service=git-upload-pack")]
+            if base in self.advert_errors or base not in self.adverts:
+                raise urllib.error.URLError("no network in this test")
+            return advert_body(self.adverts[base])
         for slug, (tag, sha) in self.releases.items():
             if url == f"https://api.github.com/repos/{slug}/releases/latest":
                 body = {"tag_name": tag, "draft": False, "prerelease": False}
@@ -621,9 +660,17 @@ class Recorder:
 
     def no_local_commits(self, dest: Path, branch: str | None) -> bool | None:
         self.calls.append(f"no-local-commits:{dest.name}")
+        self.local_commit_branches.append((dest.name, branch))
         if not self.git_reads:
             return None
         return dest not in self.diverged
+
+    def blob_id(self, dest: Path, rev: str, path: str) -> str | None:
+        """T862: the blob `path` is at `rev`; absent is "unchanged", None is git silent."""
+        self.calls.append(f"blob-id:{dest.name}:{rev[:7]}:{path}")
+        if not self.git_reads:
+            return None
+        return self.blob_ids.get((dest, rev, path), "f8f4001a" * 5)
 
     def commits_since(self, dest: Path, rev: str) -> int | None:
         self.calls.append(f"commits-since:{dest.name}")
@@ -1061,6 +1108,7 @@ class Recorder:
             is_ancestor=self.is_ancestor,
             file_lines=self.file_lines,
             tree_bytes=self.tree_bytes,
+            blob_id=self.blob_id,
             db_running=self.db_running,
             stop_db=self.stop_db,
             changed_lines=self.changed_lines,
