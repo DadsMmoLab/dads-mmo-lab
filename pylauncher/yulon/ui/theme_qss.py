@@ -1597,13 +1597,20 @@ QLabel#catalog-group-title {{
     background: transparent;
 }}
 
-/* ScrollAreas default to QPalette.Base unless styled; make them match the container sheet. */
+/* ScrollAreas default to QPalette.Base unless styled; make them and their inner body
+   match the surrounding container/dialog sheet so embedded scroll areas in dialogs
+   (`FittedMessageBox`, `ManifestPromptDialog`) never paint a dark `QPalette.Window`
+   rectangle over a light theme. */
 QScrollArea {{
     background-color: transparent;
     border: none;
 }}
 
 QScrollArea > QWidget#qt_scrollarea_viewport {{
+    background-color: transparent;
+}}
+
+QScrollArea > QWidget#qt_scrollarea_viewport > QWidget {{
     background-color: transparent;
 }}
 """

@@ -425,10 +425,10 @@ def test_k3_settings_view_signals_up_without_parent_window_ref(rail) -> None:
     assert tabs.currentWidget() is settings_view
     assert top_menu.settings_button.isChecked()
 
-    idx = settings_view.theme_combo.findData("gruvbox-dark")
+    idx = settings_view.theme_combo.findData("gruvbox-dark-medium")
     assert idx >= 0
     settings_view.theme_combo.setCurrentIndex(idx)
-    assert selected == ["gruvbox-dark"]
+    assert selected == ["gruvbox-dark-medium"]
 
     settings_view.open_logs_button.click()
     assert logs_asked == [1]

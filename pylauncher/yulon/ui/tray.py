@@ -963,7 +963,7 @@ class YulonTray(QObject):
 
     def choose_quit(self, count: int) -> str:
         """The quit box, answered: "leave", "stop" or "cancel". A seam for the tests."""
-        box, buttons = quit_box(count, self._removal_note())
+        box, buttons = quit_box(count, self._removal_note(), self.window)
         try:
             box.exec()
             clicked = box.clickedButton()
@@ -976,7 +976,7 @@ class YulonTray(QObject):
 
     def choose_while_stopping(self, count: int) -> str:
         """Quit Yu'lon… while Stop-then-quit waits: "wait" or "quit". A seam for the tests."""
-        box, buttons = while_stopping_box(count, self._removal_note())
+        box, buttons = while_stopping_box(count, self._removal_note(), self.window)
         try:
             box.exec()
             clicked = box.clickedButton()
@@ -1521,9 +1521,13 @@ OWN_DIALOG = "yulonTrayDialog"
 """A property on the tray's own boxes: asked from the tray, they need no window behind them."""
 
 
-def quit_box(count: int, note: str = "") -> tuple[QMessageBox, dict[str, QAbstractButton]]:
+def quit_box(
+    count: int, note: str = "", parent: QWidget | None = None
+) -> tuple[QMessageBox, dict[str, QAbstractButton]]:
     """Quit Yu'lon… with `count` servers running: leave them (default), stop them, or cancel."""
     box = FittedMessageBox(QMessageBox.Icon.Question, "Quit Yu'lon?", "")
+    if parent is not None:
+        box.setParent(parent, box.windowFlags())
     if count == 1:
         said = (
             "1 server is running. It keeps running after Yu'lon quits: it is a set of Docker "
@@ -1546,11 +1550,13 @@ def quit_box(count: int, note: str = "") -> tuple[QMessageBox, dict[str, QAbstra
 
 
 def while_stopping_box(
-    count: int, note: str = ""
+    count: int, note: str = "", parent: QWidget | None = None
 ) -> tuple[QMessageBox, dict[str, QAbstractButton]]:
     """Quit Yu'lon… again while Yu'lon waits for its Stops: keep waiting (default) or quit now."""
     noun = "server" if count == 1 else "servers"
     box = FittedMessageBox(QMessageBox.Icon.Question, "Yu'lon is stopping servers", "")
+    if parent is not None:
+        box.setParent(parent, box.windowFlags())
     said = (
         f"Yu'lon is stopping {count} {noun} and will quit when they are down. If you quit now, "
         "Yu'lon closes once the stop in progress has finished (about a minute or two)."
