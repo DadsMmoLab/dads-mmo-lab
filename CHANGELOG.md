@@ -3,31 +3,22 @@
 Every release of Yu'lon, newest first.
 
 <!--
-How to add a line: under "## Unreleased" use only the headings "### New", "### Fixed" and "### Changed".
-One plain line per change, at most about 120 characters, saying what the player gets. Bold button names are fine;
-ticket ids, proof, test notes, numbers as evidence, backticks and commands are not: they go in the pull request.
-New: Set a server's time zone on the Tuning tab with **Server time zone**.
-Fixed: Sending gold to a character no longer crashes the app.
-Changed: Opening Yu'lon while it is already running brings the open window to the front.
--->
-
-## Unreleased
+How to add a line: under "## Unreleased
 
 ### New
 - Mists of Pandaria 5.4.8 (LoA Pandaria with 500 playerbots) can be installed; bring the Recall WoW client.
-
 - New, untested on a Steam Deck: WotLK, Unbound and Centurion can use the ConsolePort controller add-on and a Deck layout. Report issues.
 - New, untested on a Steam Deck: Conquest of Azeroth can install the ConsolePort controller add-on from its Modules tab.
+
 ### Fixed
 - Installs no longer leave unnamed Docker volumes behind (one per Conquest of Azeroth install, and one after a tool run was cut off).
 - Conquest of Azeroth on Windows builds its map data hours faster: the last map step no longer reads through the Windows folder share.
-
 - The Conquest of Azeroth install on Windows no longer stops at the map step with "Permission denied" on a stock Ascension client.
 - Conquest of Azeroth: pressing Start with another realm type picked now offers to switch to it instead of starting the old one.
 - Uninstall and Start over stop a running movement-map job first, instead of waiting for it silently.
+- Centurion and Mists of Pandaria on Windows build their map data inside Docker, not through the slow Windows folder share.
 
 ### Changed
-- Centurion and Mists of Pandaria on Windows build their map data inside Docker, not through the slow Windows folder share.
 - Every game's server now builds from its newest upstream version (WotLK, Unbound, TBC, Vanilla, Centurion, Conquest of Azeroth).
 
 ## v0.9.30-Public — 2026-11-01
