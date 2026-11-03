@@ -67,22 +67,32 @@ VANILLA_TOC = "## Interface: 11200\n## Title: MobStats\nMobStats.lua\n"
 
 
 @pytest.mark.parametrize(
-    ("link", "item_id", "name"),
+    ("link", "item_id", "name", "folder"),
     [
-        ("refaim/MobStats", "mobstats", "MobStats"),
-        ("https://github.com/shagu/pfUI.git", "pfui", "pfUI"),
-        ("https://github.com/you/My_Addon.v2/", "my-addon-v2", "My_Addon.v2"),
-        ("you/bot-gear-sql", "bot-gear-sql", "bot-gear-sql"),
-        ("you/turtle-wow-mods", "turtle-wow-mods", "turtle-wow-mods"),
+        ("refaim/MobStats", "mobstats", "MobStats", "MobStats"),
+        ("https://github.com/shagu/pfUI.git", "pfui", "pfUI", "pfUI"),
+        ("https://github.com/you/My_Addon.v2/", "my-addon-v2", "My_Addon.v2", "My_Addon.v2"),
+        ("you/bot-gear-sql", "bot-gear-sql", "bot-gear-sql", None),
+        (
+            "Ildourol/mod-twow-QOL-followers",
+            "mod-twow-qol-followers",
+            "mod-twow-QOL-followers",
+            "mod-twow-QOL-followers",
+        ),
     ],
 )
-def test_any_other_name_is_a_mod_cloned_beside_the_shipped_addons(
-    link: str, item_id: str, name: str
+def test_a_link_is_a_module_cloned_under_the_author_s_exact_folder(
+    link: str, item_id: str, name: str, folder: str | None
 ) -> None:
+    """T861: a link is always typed `module`; its content is unknown until it is cloned.
+
+    The id is the lower-case slug and `folder` keeps the author's spelling when
+    it differs, because the core finds a module by its folder (`Add<folder>Scripts`).
+    """
     manifest = _link(link)
-    assert (manifest.type, manifest.id, manifest.name) == ("mod", item_id, name)
+    assert (manifest.type, manifest.id, manifest.name) == ("module", item_id, name)
     assert manifest.game == GAME
-    assert manifest.build.rebuild is False and manifest.build.restart is False
+    assert manifest.build.rebuild is True and manifest.build.restart is False
     assert manifest.origin is not None and manifest.origin.kind == "link"
     assert manifest.source is not None
     assert manifest.sql == () and manifest.client == ()
@@ -96,51 +106,22 @@ def test_any_other_name_is_a_mod_cloned_beside_the_shipped_addons(
         "Ildourol/mod-camps-twow",
         "Penqle/tw-mod-autoscale",
         "https://github.com/you/mod-a.git",
-        "you/tw-mod-" + "a" * 64,
+        "you/tw-mod-" + "a" * 56,
     ],
 )
-def test_the_exact_server_module_names_are_a_module_cloned_into_modules(repo: str) -> None:
+def test_the_shared_server_module_names_still_keep_their_folder(repo: str) -> None:
     manifest = _link(repo)
     name = repo.rstrip("/").removesuffix(".git").rsplit("/", 1)[-1]
     assert (manifest.type, manifest.id, manifest.name) == ("module", name, name)
+    assert manifest.folder is None
     assert manifest.game == GAME
     assert manifest.build.rebuild is True and manifest.build.restart is False
     assert manifest.source is not None and manifest.sql == () and manifest.client == ()
     assert manifest.conf == ()
 
 
-@pytest.mark.parametrize(
-    "repo",
-    [
-        "you/TW-Mod-A",
-        "https://github.com/you/Mod-Thing.git",
-        "you/tw-mod-",
-        "you/mod-",
-        "you/mod-Foo",
-        "you/mod-a_b",
-        "you/tw-mod-a.b",
-        "you/Tw-mod-a",
-        "you/mod-" + "a" * 65,
-    ],
-)
-def test_a_name_that_is_nearly_a_server_module_name_is_refused_not_taken_as_an_addon(
-    repo: str,
-) -> None:
-    """The loader name comes from the folder (`Add<folder>Scripts`): a renamed one does not link."""
-    with pytest.raises(DeriveError) as refused:
-        _link(repo)
-    said = str(refused.value)
-    assert "mod-" in said and "lower case" in said and "tw-mod-" in said
-    assert said.endswith(NOTHING)
-
-
-@pytest.mark.parametrize("repo", ["you/modest-addon", "you/model-pack", "you/stw-mod-a"])
-def test_a_name_that_only_starts_like_mod_is_an_addon_name(repo: str) -> None:
-    assert _link(repo).type == "mod"
-
-
-@pytest.mark.parametrize("repo", ["you/___", "you/" + "a" * 70])
-def test_a_name_that_gives_no_usable_id_is_refused(repo: str) -> None:
+@pytest.mark.parametrize("repo", ["you/___", "you/" + "a" * 101])
+def test_a_name_that_gives_no_usable_id_or_folder_is_refused(repo: str) -> None:
     with pytest.raises(DeriveError) as refused:
         _link(repo)
     assert str(refused.value).endswith(NOTHING)
@@ -168,7 +149,6 @@ def test_a_folder_is_read_before_it_is_copied_and_an_addon_folder_is_taken(
     ("files", "said"),
     [
         ({"README.md": "hi\n"}, "nothing in"),
-        ({"src/core.cpp": "int x;\n", "MobStats.toc": VANILLA_TOC}, "C++"),
         ({"MobStats.toc": "## Interface: 30300\n"}, "30300"),
     ],
 )
@@ -205,10 +185,25 @@ def test_a_folder_named_like_a_server_module_with_a_bad_settings_file_is_refused
     assert str(refused.value).endswith(NOTHING)
 
 
-def test_a_folder_with_the_wrong_case_of_a_module_name_is_refused(tmp_path: Path) -> None:
-    folder = _tree(tmp_path / "TW-Mod-x", {"src/a.cpp": "int x;\n"})
-    with pytest.raises(DeriveError, match="lower case"):
-        _folder(folder)
+def test_a_folder_with_c_plus_plus_in_src_is_a_module_whatever_it_is_called(
+    tmp_path: Path,
+) -> None:
+    """T861: the CONTENTS decide the kind, not the name. `QOLFollowers` is a module."""
+    folder = _tree(tmp_path / "QOLFollowers", {"src/x.cpp": "int x;\n"})
+    manifest = _folder(folder)
+    assert (manifest.type, manifest.id, manifest.folder) == (
+        "module",
+        "qolfollowers",
+        "QOLFollowers",
+    )
+    assert manifest.build.rebuild is True
+
+
+def test_a_folder_with_only_an_addon_is_a_mod_whatever_it_is_called(tmp_path: Path) -> None:
+    folder = _tree(tmp_path / "MyAddon", {"MyAddon.toc": VANILLA_TOC})
+    manifest = _folder(folder)
+    assert (manifest.type, manifest.id, manifest.folder) == ("mod", "myaddon", "MyAddon")
+    assert manifest.build.rebuild is False
 
 
 # ------------------------------------------------------------------ completing
@@ -220,7 +215,18 @@ def test_an_addon_at_the_top_is_copied_whole_under_its_toc_name(tmp_path: Path) 
     done = _complete(_link("refaim/MobStats"), clone)
     assert [(c.src, c.dest, c.name) for c in done.client] == [(".", "addons", "MobStats")]
     assert done.sql == ()
-    assert (done.id, done.type, done.game) == ("mobstats", "mod", GAME)
+    assert done.build.rebuild is False
+    assert (done.id, done.type, done.game) == ("mobstats", "module", GAME)
+
+
+def test_an_addon_link_that_clones_only_a_toc_completes_without_a_rebuild(tmp_path: Path) -> None:
+    """T861: a link is typed module, but the clone's contents take the rebuild back."""
+    clone = _tree(tmp_path / "c", {"SomeAddon.toc": VANILLA_TOC, "SomeAddon.lua": "x = 1\n"})
+    before = _link("you/SomeAddon")
+    done = _complete(before, clone)
+    assert (done.type, done.id, done.folder) == ("module", "someaddon", "SomeAddon")
+    assert done.build.rebuild is False
+    assert [(c.src, c.name) for c in done.client] == [(".", "SomeAddon")]
 
 
 def test_of_two_top_tocs_the_one_for_another_game_version_is_not_the_addon(
@@ -286,10 +292,9 @@ def test_an_addon_in_a_top_folder_of_its_own_name_is_found(tmp_path: Path) -> No
 @pytest.mark.parametrize(
     ("files", "said"),
     [
-        ({"src/core.cpp": "int x;\n", "data/sql/world/a.sql": "DELETE FROM a;\n"}, "tw-mod-"),
-        ({"Src/core.CPP": "int x;\n", "data/sql/world/a.sql": "DELETE FROM a;\n"}, "tw-mod-"),
-        ({"mod.cpp": "int x;\n", "Addon.toc": "## Interface: 11200\n"}, "tw-mod-"),
-        ({"server/inc/gear.h": "int x;\n", "data/sql/world/a.sql": "DELETE FROM a;\n"}, "tw-mod-"),
+        ({"Src/core.CPP": "int x;\n", "data/sql/world/a.sql": "DELETE FROM a;\n"}, "src/"),
+        ({"mod.cpp": "int x;\n", "Addon.toc": "## Interface: 11200\n"}, "src/"),
+        ({"server/inc/gear.h": "int x;\n", "data/sql/world/a.sql": "DELETE FROM a;\n"}, "src/"),
         ({"Wotlk.toc": "## Interface: 30300\n"}, "30300"),
         ({"sql/only.sql": "DELETE FROM a;\n", "patches/core.patch": "x\n"}, "nothing in"),
         ({}, "nothing in"),
@@ -489,7 +494,8 @@ def test_the_module_manifest_survives_its_own_reload(tmp_path: Path) -> None:
 
 def test_what_is_read_names_all_three_kinds() -> None:
     said = custom.WHAT_IS_READ
-    assert "server module" in said and "mod-" in said and "add-on" in said and "data/sql" in said
+    assert "server module" in said and "add-on" in said and "data/sql" in said
+    assert "mod-" not in said and "whatever the folder is called" in said
 
 
 # ------------------------------------------------------------------ the binding
@@ -596,7 +602,7 @@ def test_an_outside_package_installs_records_backs_up_and_is_listed(tmp_path: Pa
     assert "INSERT INTO `migrations`" in sql.sent[0][1]
     assert (client / "Interface" / "AddOns" / "GearPanel" / "GearPanel.toc").is_file()
     assert any("data/sql/world/sub/old.sql" in line for line in report.skipped), report.skipped
-    listed = {m.id: m for m in tortoise_modules.store().load_all("mod")}
+    listed = {m.id: m for m in tortoise_modules.store().load_all("module")}
     assert listed["bot-gear-pack"].sql[0].migration_module == "bot-gear-pack"
 
     removed = applier.remove(listed["bot-gear-pack"])
@@ -608,7 +614,52 @@ def test_an_outside_package_installs_records_backs_up_and_is_listed(tmp_path: Pa
         for line in removed.left_behind
     ), removed.left_behind
     assert tortoise_modules.forget(listed["bot-gear-pack"]) is True
-    assert "bot-gear-pack" not in {m.id for m in tortoise_modules.store().load_all("mod")}
+    assert "bot-gear-pack" not in {m.id for m in tortoise_modules.store().load_all("module")}
+
+
+class _UpdateClone(_Clone):
+    """A fake clone that can also answer Update's three reset questions."""
+
+    def remote_url(self, dest: Path) -> str | None:
+        return "https://github.com/Ildourol/mod-twow-QOL-followers.git"
+
+    def is_unmodified(self, dest: Path, relative_path: str) -> bool:
+        return True
+
+    def no_local_commits(self, dest: Path, branch: str | None) -> bool:
+        return True
+
+
+def test_the_capitals_folder_is_listed_updated_and_removed_and_a_second_add_is_refused(
+    tmp_path: Path,
+) -> None:
+    """T861 end to end: the clone lands under the author's name and every route finds it."""
+    from yulon import apply as apply_module
+
+    server, client = tmp_path / "server", tmp_path / "client"
+    server.mkdir()
+    git = _UpdateClone({"src/x.cpp": "int x;\n"})
+    applier = _tortoise_applier(server, git, _Db(), client)
+    manifest = tortoise_modules.derive_link("https://github.com/Ildourol/mod-twow-QOL-followers")
+    tortoise_modules.install_custom(applier)(manifest, None)
+
+    folder = server / "modules" / "mod-twow-QOL-followers"
+    assert (folder / "src" / "x.cpp").is_file()
+    listed = apply_module.folders_as_ids(
+        apply_module.installed_clones(server),
+        tortoise_modules.store().load_all("module"),
+    )
+    assert manifest.id in listed["module"]
+
+    with pytest.raises(DeriveError, match="already installed"):
+        tortoise_modules.derive_link("https://github.com/Ildourol/MOD-TWOW-qol-followers")
+
+    updated = applier.update(manifest)
+    assert (folder / "src" / "x.cpp").is_file()
+    assert any(line.startswith("clone ") for line in updated.done), updated.done
+
+    applier.remove(manifest)
+    assert not folder.exists()
 
 
 def test_a_shipped_tortoise_mod_takes_no_backup_and_names_none() -> None:
@@ -631,8 +682,8 @@ def test_a_package_carrying_a_shipped_addon_is_refused_and_its_first_clone_taken
         tortoise_modules.install_custom(applier)(manifest, None)
     assert "already installs for this server" in str(refused.value)
     assert str(refused.value).endswith("Nothing was changed.")
-    assert not (server / "sql_scripts" / "clones" / manifest.id).exists()
-    assert manifest.id not in {m.id for m in tortoise_modules.store().load_all("mod")}
+    assert not (server / "modules" / (manifest.folder or manifest.id)).exists()
+    assert manifest.id not in {m.id for m in tortoise_modules.store().load_all("module")}
 
 
 def test_remove_says_when_no_backup_can_be_found(tmp_path: Path) -> None:
@@ -685,8 +736,8 @@ def test_a_first_install_refused_by_a_running_world_leaves_no_folder_and_no_reco
         tortoise_modules.install_custom(applier)(manifest, None)
     assert "world server is running" in str(refused.value)
     assert sql.sent == []
-    assert not (server / "sql_scripts" / "clones" / "bot-gear-pack").exists()
-    assert "bot-gear-pack" not in {m.id for m in tortoise_modules.store().load_all("mod")}
+    assert not (server / "modules" / "bot-gear-pack").exists()
+    assert "bot-gear-pack" not in {m.id for m in tortoise_modules.store().load_all("module")}
 
 
 def test_a_failed_install_keeps_a_tortoise_record_from_an_earlier_press(tmp_path: Path) -> None:
@@ -706,7 +757,7 @@ def test_a_failed_install_keeps_a_tortoise_record_from_an_earlier_press(tmp_path
     applier = _tortoise_applier(server, _Unreachable(), _Db(), tmp_path / "client")  # type: ignore[arg-type]
     with pytest.raises(ApplyError):
         tortoise_modules.install_custom(applier)(manifest, None)
-    assert "bot-gear-pack" in {m.id for m in tortoise_modules.store().load_all("mod")}
+    assert "bot-gear-pack" in {m.id for m in tortoise_modules.store().load_all("module")}
 
 
 # ------------------------------------------------------------------ a server module, installed
@@ -1131,7 +1182,7 @@ def test_an_outside_add_on_through_the_tortoise_box_is_noted_and_taken_back_by_r
     addon = client / "Interface" / "AddOns" / "OldBars"
     assert (addon / "OldBars.toc").is_file() and (addon / "a.lua").is_file()
     assert any("made for an older patch (Interface 11100)" in line for line in report.done)
-    listed = {m.id: m for m in tortoise_modules.store().load_all("mod")}
+    listed = {m.id: m for m in tortoise_modules.store().load_all("module")}
 
     removed = applier.remove(listed["oldbars"])
 

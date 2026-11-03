@@ -112,6 +112,43 @@ def test_readme_example_validates() -> None:
     assert m.conflicts_with == ("mod-ah-bot-plus",)
 
 
+def test_an_old_manifest_without_a_folder_parses_and_resolves_to_its_id() -> None:
+    """T861: `folder` is optional, so every already-persisted manifest keeps loading.
+
+    The applier's one helper reads the field, so `None` is not a second spelling
+    of the id anywhere else: `apply.clone_folder()` answers the id.
+    """
+    from yulon.apply import clone_folder
+
+    old = {**README_EXAMPLE}
+    assert "folder" not in old
+    m = parse_manifest(old)
+    assert m.folder is None
+    assert clone_folder(m) == m.id
+
+
+@pytest.mark.parametrize(
+    ("folder", "why"),
+    [
+        ("mod-twow-QOL-followers", ""),
+        ("AzerothCore-Transmog", ""),
+        ("../x", "one directory name"),
+        (".hidden", "one directory name"),
+        ("a b", "one directory name"),
+        ("ending.", "one directory name"),
+        ("a" * 101, "one directory name"),
+        ("a" * 100, ""),
+    ],
+)
+def test_a_folder_is_one_plain_directory_name(folder: str, why: str) -> None:
+    value = {**README_EXAMPLE, "folder": folder}
+    if why:
+        with pytest.raises(ValidationError, match=why):
+            parse_manifest(value)
+    else:
+        assert parse_manifest(value).folder == folder
+
+
 def test_ale_and_keg_examples_validate() -> None:
     """Deploy/patch/prompt and sparse-checkout/client/npc primitives all parse."""
     ale = parse_manifest(ALE_EXAMPLE)

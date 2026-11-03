@@ -115,22 +115,25 @@ def _modules_of(
     files: list[PackFile] = []
     refusals: list[str] = []
     for folder, kinds in sorted(_CLONE_FOLDERS.items()):
-        ids = sorted(apply.installed_clones(server_dir).get(str(kinds[0]), frozenset()))
-        for item_id in ids:
-            if PurePosixPath(folder) / item_id in builds_into:
+        folders = sorted(apply.installed_clones(server_dir).get(str(kinds[0]), frozenset()))
+        for clone_name in folders:
+            if PurePosixPath(folder) / clone_name in builds_into:
                 continue
-            candidates = [m for m in (load_manifest(kind, item_id) for kind in kinds) if m]
+            # T861: the folder is the author's exact name; the store is asked by that name,
+            # because it is what is on disk and what a clone path is built from.
+            candidates = [m for m in (load_manifest(kind, clone_name) for kind in kinds) if m]
             if len(candidates) != 1:
                 refusals.append(
-                    f"{folder}/{item_id} is a module folder Yu'lon cannot name (no description of "
-                    "it, or more than one), so the new computer could not install it again. "
+                    f"{folder}/{clone_name} is a module folder Yu'lon cannot name (no "
+                    "description of it, or more than one), so the new computer could not "
+                    "install it again. "
                     f"Remove it, or add it again on the Modules tab, then pack again. {_NOT_PACKED}"
                 )
                 continue
             manifest = candidates[0]
             if manifest.origin is not None and manifest.origin.kind == "folder":
                 try:
-                    members = _folder_module_members(manifest, server_dir / folder / item_id)
+                    members = _folder_module_members(manifest, server_dir / folder / clone_name)
                 except MoveError as exc:
                     refusals.append(str(exc))
                     continue
@@ -155,7 +158,7 @@ def _modules_of(
                     f"{_NOT_PACKED}"
                 )
                 continue
-            commit = read_head_file(server_dir / folder / item_id)
+            commit = read_head_file(server_dir / folder / clone_name)
             if commit is None or not re.fullmatch(r"[0-9a-f]{40}", commit):
                 refusals.append(
                     f"Yu'lon cannot read which commit {manifest.name} is on, so the new computer "

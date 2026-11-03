@@ -78,6 +78,7 @@ from yulon.apply import (
     SqlBackup,
     SqlRunner,
     UncheckedApproval,
+    clone_folder,
 )
 from yulon.catalog import upstream
 from yulon.dbreads import SqlReader
@@ -632,12 +633,15 @@ class GuardedApplier(Applier):
         """
         if manifest.type != "module" or manifest.origin is None:
             return
+        # T861: the FOLDER is what is laid over the core's (`Add<folder>Scripts`), and it can
+        # keep the author's capitals while the id is a lower-case slug.
+        folder = clone_folder(manifest)
         core = core_modules.same_name_in(
-            manifest.id, core_modules.names_in(self.server_dir / CORE_MODULES_DIR)
+            folder, core_modules.names_in(self.server_dir / CORE_MODULES_DIR)
         )
         if core is not None:
             installed = os.path.lexists(self.clone_dir(manifest))
-            said = core_modules.sentence(manifest.id, core, CORE_MODULES_DIR, installed=installed)
+            said = core_modules.sentence(folder, core, CORE_MODULES_DIR, installed=installed)
             raise ApplyRefusal(f"{said} Nothing was changed." if installed else said)
 
     def _head_of_an_outside_mod(self, manifest: Manifest) -> str | None:

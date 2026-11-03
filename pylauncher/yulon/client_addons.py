@@ -57,6 +57,7 @@ from yulon.apply import (
     FolderSource,
     UncheckedApproval,
     addon_only_refusal,
+    clone_folder,
 )
 from yulon.git import CloneSpec, Git
 from yulon.log import get_logger
@@ -582,7 +583,7 @@ class ClientAddons:
             for server in others() if others is not None else ():
                 if (
                     server != self.applier.server_dir
-                    and (server / CLONE_DIRS[manifest.type] / manifest.id).exists()
+                    and (server / CLONE_DIRS[manifest.type] / clone_folder(manifest)).exists()
                 ):
                     return server
         except OSError:

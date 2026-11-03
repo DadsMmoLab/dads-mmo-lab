@@ -43,6 +43,7 @@ ALLOWED_REPO_HOSTS: tuple[str, ...] = ("github.com", "gitlab.com", "codeberg.org
 
 # kebab-case, lowercase, no leading/trailing/double hyphens (style-guide §6/§6a).
 _SLUG = r"^[a-z0-9]+(?:-[a-z0-9]+)*$"
+_FOLDER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}")
 _REPO_SLUG = r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
 
 Slug = Annotated[str, Field(pattern=_SLUG, min_length=1)]
@@ -797,6 +798,15 @@ class Manifest(_Strict):
     origin: Origin | None = Field(
         default=None, description="Set only on a manifest this app derived; see `Origin`."
     )
+    folder: str | None = Field(
+        default=None,
+        description=(
+            "The exact name of the folder this item's clone lives in, when it differs from "
+            "the id. A core finds a module by its folder's name (AzerothCore's and Tortoise's "
+            "`Add<folder>Scripts`), so a repository named `mod-twow-QOL-followers` keeps that "
+            "name on disk while its id stays the lower-case slug. Null means the id."
+        ),
+    )
     build: Build = Build(rebuild=False)
     requires: tuple[Slug, ...] = ()
     conflicts_with: tuple[Slug, ...] = ()
@@ -820,6 +830,19 @@ class Manifest(_Strict):
     notes: tuple[str, ...] = Field(
         default=(), description="Tacit knowledge worth showing a human; not machine-read."
     )
+
+    @field_validator("folder")
+    @classmethod
+    def _folder_is_a_plain_directory_name(cls, value: str | None) -> str | None:
+        """A clone folder is ONE directory name: no separator, no hidden name, no `..`."""
+        if value is None:
+            return None
+        if not _FOLDER_NAME.fullmatch(value) or value.endswith(".") or ".." in value:
+            raise ValueError(
+                f"folder must be one directory name of letters, digits, dots, underscores and "
+                f"hyphens, starting with a letter or digit and not ending in a dot: {value!r}"
+            )
+        return value
 
     @field_validator("folders")
     @classmethod

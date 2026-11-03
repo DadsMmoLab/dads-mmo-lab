@@ -116,6 +116,42 @@ CLONE_DIRS: dict[ManifestType, str] = {
 }
 
 
+def clone_folder(manifest: Manifest) -> str:
+    """The exact folder this item's clone lives in: the author's name, or the id (T861).
+
+    A core finds a module by its folder (`Add<folder>Scripts` on AzerothCore and
+    Tortoise), so `Manifest.folder` keeps the repository's own spelling and this is
+    the ONE place a clone path takes it from. Every other reader of a clone path
+    asks this rather than `manifest.id`.
+    """
+    return manifest.folder or manifest.id
+
+
+def clone_ids(manifests: Iterable[Manifest]) -> dict[tuple[str, str], str]:
+    """`(family, clone folder)` → id, for the manifests that name a folder of their own.
+
+    Built by the caller that holds the store, so a directory listing can turn
+    `mod-twow-QOL-followers/` back into `mod-twow-qol-followers`. Case-sensitive on
+    purpose: a Windows folder ignores case, `clone_folder` does not.
+    """
+    return {
+        (str(manifest.type), manifest.folder): manifest.id
+        for manifest in manifests
+        if manifest.folder is not None
+    }
+
+
+def folders_as_ids(
+    found: Mapping[str, frozenset[str]], manifests: Iterable[Manifest]
+) -> dict[str, frozenset[str]]:
+    """A per-family folder listing with each manifest's own folder turned back into its id."""
+    known = clone_ids(manifests)
+    return {
+        family: frozenset(known.get((family, folder), folder) for folder in folders)
+        for family, folders in found.items()
+    }
+
+
 def is_server_source(manifest: Manifest, folders: Set[PurePosixPath]) -> bool:
     """Whether this manifest's clone folder is one the server install itself clones into (T554).
 
@@ -123,7 +159,7 @@ def is_server_source(manifest: Manifest, folders: Set[PurePosixPath]) -> bool:
     game: WotLK's sources are `modules/mod-playerbots` alone, which no manifest names, so for
     WotLK this is `False` for every manifest, and for Unbound it is `True` for `mod-ale`.
     """
-    return PurePosixPath(CLONE_DIRS[manifest.type]) / manifest.id in folders
+    return PurePosixPath(CLONE_DIRS[manifest.type]) / clone_folder(manifest) in folders
 
 
 def _distro_git(server_dir: Path) -> ContainerGit | None:
@@ -1861,7 +1897,7 @@ def unfinished_clones(server_dir: Path) -> dict[str, frozenset[str]]:
     ()` listed.
 
     `item_id=name` is the directory name, which is what `Applier.clone_dir()`
-    built the path from (`CLONE_DIRS[type] / manifest.id`) — so a claim that
+    built the path from (`CLONE_DIRS[type] / clone_folder(manifest)`) — so a claim that
     names a different item is a folder some other install put here under a name
     this one uses, and it answers False rather than offering a press.
 
@@ -3553,6 +3589,11 @@ class Applier:
         # `ControllerServices.for_entry()` from the catalog entry; empty, nothing is refused.
         self.server_sources: frozenset[PurePosixPath] = frozenset()
         self.server_name = ""
+        # T861: a clone's folder can differ from its id, so a path built from an ID ALONE
+        # (a conflict's other item, a build ledger's key) has to ask the store which folder
+        # that id's manifest names. Absent, the id IS the folder, as it is for every shipped
+        # manifest.
+        self.manifest_by_id: Callable[[ManifestType, str], Manifest | None] | None = None
         # T613 PR-2: the server folders of every OTHER install on this host, for a
         # set game client two servers share: a file another server's receipt names
         # is left for that server on an outside add-on's Remove. Bound by `main.py`
@@ -3778,8 +3819,8 @@ class Applier:
         return read_client_copies(clone, item_id=manifest.id) if clone.is_dir() else ()
 
     def clone_dir(self, manifest: Manifest) -> Path:
-        """Where this item's clone lives (`modules/<id>`, `ale_scripts/<id>`, ...)."""
-        return self.server_dir / CLONE_DIRS[manifest.type] / manifest.id
+        """Where this item's clone lives (`modules/<folder>`, `ale_scripts/<id>`, ...)."""
+        return self.server_dir / CLONE_DIRS[manifest.type] / clone_folder(manifest)
 
     def _release_for(self, manifest: Manifest) -> upstream.Release | None:
         """The release an Install or Update of `manifest` checks out, or None to follow its branch.
@@ -4758,9 +4799,21 @@ class Applier:
             family, _slash, item_id = item.partition("/")
             if family != "module" or not item_id:
                 continue
-            if move.unbuilt_at(reader(self.server_dir / CLONE_DIRS["module"] / item_id)):
+            folder = self._folder_of("module", item_id)
+            if move.unbuilt_at(reader(self.server_dir / CLONE_DIRS["module"] / folder)):
                 waiting.append(item_id)
         return tuple(waiting)
+
+    def _folder_of(self, kind: ManifestType, item_id: str) -> str:
+        """The clone folder of an item known only by id (T861), or the id when nobody says."""
+        if self.manifest_by_id is None:
+            return item_id
+        try:
+            manifest = self.manifest_by_id(kind, item_id)
+        except Exception as exc:  # boundary: an unreadable manifest is not a wrong path
+            logger.info(f"no description of {kind}/{item_id} for its clone folder: {exc}")
+            return item_id
+        return item_id if manifest is None else clone_folder(manifest)
 
     def after_failed_build(
         self, named: Sequence[str], load: Callable[[str], Manifest | None]
@@ -5706,7 +5759,7 @@ class Applier:
             # naming something that is not really there (review, 2026-09-13).
             # CONTENT, not `.git`: a module copied in from a folder has
             # neither and is exactly as present to the linker as a clone.
-            seat = self.server_dir / CLONE_DIRS[kind] / other
+            seat = self.server_dir / CLONE_DIRS[kind] / self._folder_of(kind, other)
             try:
                 if not any(seat.iterdir()):
                     continue
@@ -9901,6 +9954,7 @@ def module_updates(
     newest_release: Callable[[str], upstream.Release | None] | None = None,
     compare_commits: CompareCommits | None = None,
     now: int | None = None,
+    manifests: Iterable[Manifest] = (),
 ) -> tuple[ModuleUpdate, ...]:
     """How far behind each installed module of `server_dir` is (checklist 8.7a).
 
@@ -9937,7 +9991,12 @@ def module_updates(
     `GITHUB_ASKS_PER_PRESS` and none after GitHub refuses (`_GitHubCounts`).
     Every other row costs GitHub nothing, and a GitHub that does not answer
     leaves the row saying "update available", as it did.
+
+    `manifests` is the catalog the caller already holds (T861): a clone folder
+    named `mod-twow-QOL-followers/` gets the id `mod-twow-qol-followers` for its
+    row, so the tab's chips and the cache are keyed like every other row.
     """
+    known = clone_ids(manifests)
     root = server_dir / CLONE_DIRS[kind]
     branch_of = branches or {}
     release_of = releases or {}
@@ -9953,7 +10012,14 @@ def module_updates(
     github = _github_counts(server_dir, compare_commits, now)
     rows = [
         _module_update(
-            path, kind, git, branch_of.get(path.name), release_of.get(path.name), resolve, github
+            path,
+            kind,
+            git,
+            branch_of.get(known.get((str(kind), path.name), path.name)),
+            release_of.get(known.get((str(kind), path.name), path.name)),
+            resolve,
+            github,
+            key=known.get((str(kind), path.name), path.name),
         )
         for path in entries
     ]
@@ -9989,22 +10055,26 @@ def _module_update(
     slug: str | None,
     resolve: Callable[[str], upstream.Release | None],
     github: _GitHubCounts,
+    *,
+    key: str | None = None,
 ) -> ModuleUpdate:
     """One clone's row: counted against its branch, or against its newest release (T126).
 
     A row git could not settle is posed to `github`, which the caller settles
-    once every row is counted (T148).
+    once every row is counted (T148). `key` is the item's id when its folder
+    differs from it (T861), and defaults to the folder's own name.
     """
+    item_id = key if key is not None else path.name
     checkout = (path / ".git").is_dir()
     if not checkout:
-        return ModuleUpdate(key=path.name, path=path, is_checkout=False, behind=None, family=kind)
+        return ModuleUpdate(key=item_id, path=path, is_checkout=False, behind=None, family=kind)
     if slug is None:
         counted = _counted(git, path, branch, release=False)
         question = _question(counted, path, kind, git, slug=None, release=False)
         if question is not None:
             github.pose(question)
         return ModuleUpdate(
-            key=path.name,
+            key=item_id,
             path=path,
             is_checkout=True,
             behind=counted.behind,
@@ -10020,14 +10090,14 @@ def _module_update(
     if question is not None:
         github.pose(question)
     return ModuleUpdate(
-        key=path.name,
+        key=item_id,
         path=path,
         is_checkout=True,
         behind=counted.behind,
         family=kind,
         fetched=counted.fetched or "",
         release=release.tag if release is not None else "",
-        installed_release=clone_release(path, item_id=path.name),
+        installed_release=clone_release(path, item_id=item_id),
         why=counted.why or "",
     )
 
@@ -10054,6 +10124,7 @@ def cached_module_updates(
     now: int | None = None,
     cancel: threading.Event | None = None,
     keep_count_on_failure: bool = False,
+    manifests: Iterable[Manifest] = (),
 ) -> tuple[ModuleUpdate, ...]:
     """`module_updates()`, with each row kept for a day -- T124's rule, for modules (T126).
 
@@ -10088,6 +10159,7 @@ def cached_module_updates(
             cancel,
         )
     kept = _read_module_updates(server_dir, clock)
+    known = clone_ids(manifests)
     root = server_dir / CLONE_DIRS[kind]
     try:
         entries = sorted((p for p in root.iterdir() if p.is_dir()), key=lambda p: p.name)
@@ -10099,8 +10171,9 @@ def cached_module_updates(
     asked = False
     stale = _read_module_updates_any_age(server_dir) if keep_count_on_failure else {}
     for path in entries:
+        item_id = known.get((str(kind), path.name), path.name)
         head = reader.head_sha(path) if (path / ".git").is_dir() else None
-        old = kept.get((kind, path.name))
+        old = kept.get((kind, item_id))
         if head is not None and old is not None and old.head == head:
             rows.append(replace(old, path=path))
             continue
@@ -10110,16 +10183,17 @@ def cached_module_updates(
             path,
             kind,
             reader,
-            (branches or {}).get(path.name),
-            (releases or {}).get(path.name),
+            (branches or {}).get(item_id),
+            (releases or {}).get(item_id),
             resolve,
             github,
+            key=item_id,
         )
         if cancel is not None and cancel.is_set():
             break
         asked = True
         counted = replace(row, head=head or "", checked_unix=clock)
-        before = stale.get((kind, path.name))
+        before = stale.get((kind, item_id))
         if (
             counted.behind is None
             and counted.is_checkout
@@ -10194,6 +10268,7 @@ def refresh_module_updates(
     newest_release: Callable[[str], upstream.Release | None] | None = None,
     compare_commits: CompareCommits | None = None,
     now: int | None = None,
+    manifests: Iterable[Manifest] = (),
 ) -> tuple[ModuleUpdate, ...]:
     """The Modules tab's counts, kept up to date in the background (T621).
 
@@ -10226,6 +10301,7 @@ def refresh_module_updates(
         now=now,
         cancel=cancel,
         keep_count_on_failure=True,
+        manifests=manifests,
     )
     return () if cancel.is_set() else rows
 
@@ -10857,13 +10933,17 @@ def module_sql_plan(
         return ModuleSqlPlan(
             allowed=docker.ALL_MODULES, handed=(), withheld=(), unmanifested=(), files=()
         )
-    by_id = {manifest.id: manifest for manifest in manifests if manifest.type == "module"}
+    # `installed` is the folder listing, and since T861 a folder can carry the author's
+    # exact name rather than the id. Looked up by `clone_folder`, case-sensitively.
+    by_folder = {
+        clone_folder(manifest): manifest for manifest in manifests if manifest.type == "module"
+    }
     handed: list[str] = []
     withheld: list[str] = []
     unmanifested: list[str] = []
     files: list[ModuleSqlFile] = []
     for name in installed:
-        manifest = by_id.get(name)
+        manifest = by_folder.get(name)
         if manifest is None:
             unmanifested.append(name)
             handed.append(name)

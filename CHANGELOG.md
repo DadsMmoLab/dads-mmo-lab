@@ -18,6 +18,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ### Fixed
 
 ### Changed
+- Bring your own… takes a module whatever its repository or folder is named, capitals included.
 
 ## v0.9.30-Public — 2026-11-01
 

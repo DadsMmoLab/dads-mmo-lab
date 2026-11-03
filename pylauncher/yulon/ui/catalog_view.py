@@ -430,7 +430,8 @@ def _identify(entry: CatalogEntry, server_dir: Path) -> Identification:
         `server_dir` into `wotlk_modules.applier()` when `entry.has_manifests`,
         and `apply.Applier.__init__` keeps it as `self.server_dir`;
       - `apply.Applier.install()` clones into
-        `server_dir / CLONE_DIRS[type] / id`, and `git.RunnerGit.clone()`
+        `server_dir / CLONE_DIRS[type] / clone_folder(manifest)` (the id, or the
+        manifest's `folder` when it names one), and `git.RunnerGit.clone()`
         `shutil.rmtree()`s that destination BEFORE the first git invocation.
 
     The precondition on the deletion, which the earlier note left out: it fires

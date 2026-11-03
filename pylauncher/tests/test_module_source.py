@@ -52,7 +52,7 @@ def _folder(path: Path, **kwargs: Any) -> Manifest:
 
 
 def _module_folder(root: Path, name: str, *, marker: str = "src") -> Path:
-    """A directory that `derive_folder` accepts: named `mod-*`, with one marker."""
+    """A directory that `derive_folder` accepts: any plain name, with one marker."""
     folder = root / name
     (folder / marker).mkdir(parents=True)
     return folder
@@ -77,6 +77,7 @@ def test_a_link_yields_a_module_manifest_named_for_its_repository() -> None:
     manifest = _link("https://github.com/You/Mod-My-Thing.git/")
 
     assert manifest.id == "mod-my-thing"
+    assert manifest.folder == "Mod-My-Thing"
     assert manifest.name == "mod-my-thing"
     assert manifest.type == "module"
     assert manifest.game == GAME
@@ -110,38 +111,50 @@ def test_an_owner_name_slug_is_a_github_link() -> None:
 
 
 @pytest.mark.parametrize(
-    "repo",
+    ("repo", "item_id", "folder"),
     [
-        "https://github.com/you/mod-.git",  # rust-main's own vector: needs >=1 char after
-        "https://github.com/you/mod-under_score",  # rust-main's own vector
-        "https://github.com/you/tools",
-        "https://github.com/you/mod-trailing-",  # `Slug` refuses a trailing hyphen
-        "https://github.com/you/mod--doubled",  # and a doubled one
+        (
+            "https://github.com/u/AzerothCore-Transmog",
+            "azerothcore-transmog",
+            "AzerothCore-Transmog",
+        ),
+        (
+            "https://github.com/u/mod-twow-QOL-followers",
+            "mod-twow-qol-followers",
+            "mod-twow-QOL-followers",
+        ),
+        ("https://github.com/u/tools.git", "tools", None),
+        ("https://github.com/u/My_Addon.v2", "my-addon-v2", "My_Addon.v2"),
+        ("https://github.com/u/mod--doubled", "mod-doubled", "mod--doubled"),
     ],
 )
-def test_a_link_whose_repository_is_not_named_mod_is_refused_by_name(repo: str) -> None:
-    """rust-main's `valid_cpp_key` vectors (`modules.rs:389-397`), plus `Slug`'s own.
+def test_a_link_takes_any_repository_name_and_keeps_the_folder_exactly(
+    repo: str, item_id: str, folder: str | None
+) -> None:
+    """T861: both cores find a module by its folder (`Add<folder>Scripts`), so no `mod-` rule.
 
-    `mod-UPPER`, rust-main's third vector, is deliberately NOT here: that vector
-    belongs to `valid_cpp_key`, which validates a DIRECTORY name already on disk,
-    and the derive from a URL runs `module_key_from_url` first — basename, `.git`
-    stripped, **lower-cased** (`RUST modmgr.rs:198-207`) — so `mod-UPPER` reaches
-    the pattern as `mod-upper` and is a module. The test above pins that. (The
-    design page listed all three vectors under this test while also specifying the
-    lower-casing; the two cannot both hold, and refusing a capital letter would
-    refuse a real repository that clones perfectly well.)
-
-    `mod-trailing-` and `mod--doubled` are this module's addition rather than
-    rust-main's: the design asserted `_CUSTOM_ID` is a subset of `manifest.Slug`
-    and it is not — `Slug` forbids a trailing or doubled hyphen — so without the
-    second check those two reach the user as a pydantic `ValidationError` instead
-    of a sentence.
+    The id is the lower-case slug; the clone folder is the author's exact name,
+    recorded only when it differs from the id.
     """
+    manifest = _link(repo)
+    assert (manifest.id, manifest.folder) == (item_id, folder)
+
+
+@pytest.mark.parametrize(
+    "repo",
+    [
+        "https://github.com/u/CMakeLists.txt",
+        "https://github.com/u/modulespch.h",
+        "https://github.com/u/..",
+        "https://github.com/u/a b",
+        "https://github.com/u/---",
+    ],
+)
+def test_a_link_named_like_a_core_file_or_no_plain_folder_is_refused(repo: str) -> None:
     message = _refused(lambda: _link(repo))
 
-    assert "must be named mod-<something>" in message
-    assert "https://github.com/you/mod-my-thing" in message
     assert message.endswith(NOTHING_CHANGED)
+    assert "folder" in message or "core" in message
 
 
 def test_a_link_off_the_allowed_hosts_is_refused_with_the_hosts_named() -> None:
@@ -200,6 +213,7 @@ def test_a_folder_yields_a_module_manifest_with_no_source_and_a_folder_origin(
     manifest = _folder(folder)
 
     assert manifest.id == "mod-my-thing"
+    assert manifest.folder == "Mod-My-Thing"
     assert manifest.name == "mod-my-thing"
     assert manifest.type == "module"
     assert manifest.source is None
@@ -215,17 +229,27 @@ def test_a_folder_yields_a_module_manifest_with_no_source_and_a_folder_origin(
     )
 
 
-def test_a_folder_not_named_mod_is_refused_with_the_rename_instruction(tmp_path: Path) -> None:
-    """The folder's own sentence, not the link's: there is no URL to paste again."""
-    folder = _module_folder(tmp_path, "tools")
+def test_a_folder_takes_any_name_and_keeps_it_exactly(tmp_path: Path) -> None:
+    """T861: the core's `Add<folder>Scripts` needs the author's name, so nothing is renamed."""
+    folder = _module_folder(tmp_path, "AzerothCore-Transmog")
 
+    manifest = _folder(folder)
+
+    assert (manifest.id, manifest.folder) == ("azerothcore-transmog", "AzerothCore-Transmog")
+
+
+@pytest.mark.parametrize(
+    "name", ["CMakeLists.txt", "modulespch.h", ".hidden", "a b", "---", "ending."]
+)
+def test_a_folder_whose_name_is_a_core_file_or_not_a_plain_name_is_refused(
+    tmp_path: Path, name: str
+) -> None:
+    folder = tmp_path / name
+    (folder / "src").mkdir(parents=True)
     message = _refused(lambda: _folder(folder))
 
-    assert message == (
-        "The folder is named 'tools', and a custom module must be named "
-        "mod-<something> in lowercase letters, digits and hyphens — rename the "
-        f"folder and choose it again. {NOTHING_CHANGED}"
-    )
+    assert message.endswith(NOTHING_CHANGED)
+    assert "folder" in message or "core" in message
 
 
 @pytest.mark.parametrize("marker", ["src", "conf", "data"])
@@ -487,7 +511,7 @@ def test_every_refusal_sentence_ends_with_nothing_changed_and_no_file_exists(
     refusals = [
         lambda: _link(""),
         lambda: _link("https://warez.example/mod-loot.git"),
-        lambda: _link("you/tools"),
+        lambda: _link("you/CMakeLists.txt"),
         lambda: _link("you/mod-aoe-loot", shipped_ids=("mod-aoe-loot",)),
         lambda: _folder(tmp_path / "gone"),
         lambda: _folder(a_file),
