@@ -35,6 +35,7 @@ GAMES = (
     "wow-centurion",
     "wow-unbound",
     "wow-coa",
+    "wow-mop",
 )
 
 DB_ASSERT_LINE = (

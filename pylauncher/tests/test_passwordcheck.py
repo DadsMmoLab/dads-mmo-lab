@@ -133,6 +133,39 @@ def test_the_tortoise_hash_is_not_reproduced_by_the_wrong_password_or_name() -> 
     assert passwordcheck.matches("mangos_sha", "SOMEONE", "kn0wn-p@ss77", (SHA_KNOWN,)) is False
 
 
+# -- the TrinityCore family's MoP line, on the same recipe (T850-C) ----------
+
+
+def test_the_mop_line_keeps_the_same_one_unsalted_hash() -> None:
+    """`trinitycore_sha`: one `sha_pass_hash` column, uppercase hex, no salt.
+
+    MoP's core hashes with the same single SHA1 over the folded `name:password`
+    (`AccountMgr.cpp:345-355` `CalculateShaPassHash`) printed `%02X`
+    (`Util.cpp:614` `ByteArrayToHexStr`), and its `sha_pass_hash` is
+    `utf8mb4_bin` (`auth.sql:19`) — the same case-sensitive comparison the
+    Tortoise fork's row gets. The vectors are the Tortoise ones because the
+    recipe is the recipe: what this test would catch is the two drifting.
+    """
+    assert (
+        passwordcheck.matches("trinitycore_sha", "SHAPROBE", "kn0wn-p@ss77", (SHA_KNOWN,)) is True
+    )
+    assert (
+        passwordcheck.matches(
+            "trinitycore_sha", "SHAPROBE", "tru7h-p@ss99", (SHA_AFTER_THE_SERVER_CHANGED_IT,)
+        )
+        is True
+    )
+
+
+def test_the_mop_hash_is_not_reproduced_by_the_wrong_password_or_name() -> None:
+    assert (
+        passwordcheck.matches("trinitycore_sha", "SHAPROBE", "WRONG-p@ss77", (SHA_KNOWN,)) is False
+    )
+    assert (
+        passwordcheck.matches("trinitycore_sha", "SOMEONE", "kn0wn-p@ss77", (SHA_KNOWN,)) is False
+    )
+
+
 def test_the_two_trees_do_not_answer_for_each_other() -> None:
     """The scheme comes from the catalog, and a wrong one must not pass.
 
@@ -177,6 +210,9 @@ def test_a_credential_this_module_cannot_read_is_not_a_mismatch() -> None:
         ("mangos_srp6", (SALT, VERIFIER, "a third column")),
         ("mangos_sha", ("",)),
         ("mangos_sha", ("zzzz",)),
+        ("trinitycore_sha", ("",)),
+        ("trinitycore_sha", ("zzzz",)),
+        ("trinitycore_sha", (SHA_KNOWN, "a second column")),
         ("azerothcore", good),
         ("", good),
     ]

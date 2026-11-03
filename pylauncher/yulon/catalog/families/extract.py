@@ -53,7 +53,7 @@ from typing import Any, Protocol
 
 from yulon import client_names, container_end, docker, platform, rmtree, server_build_presses
 from yulon.after_stop import TrueAfterStop
-from yulon.catalog.catalog import ExtractPlan, ExtractTool, MmapPlan, RetrySpec
+from yulon.catalog.catalog import ExtractPlan, ExtractTool, MapNames, MmapPlan, RetrySpec
 from yulon.catalog.installer import InstallerError, InstallStopped
 from yulon.log import get_logger
 
@@ -1707,6 +1707,14 @@ def run_plan(
     # pass does not come through here; it empties first.
     for tool in plan.tools:
         if tool_satisfied(tool, data_dir, current, expected):
+            continue
+        if scratch_off_bind:
+            # T856-B: no `blocking_output()` refusal here. On the bind the tool's cwd is
+            # `data/`, so a leftover `Buildings/dir_bin` would meet the real extractor and
+            # refuse to start. Off the bind the tool starts in an empty scratch `Buildings/`
+            # (`SCRATCH_SCRIPT` makes every `produces` folder fresh and links nothing under
+            # a produced name in), and `promote_copies()` replaces the old folder with the
+            # finished one — so the leftover cannot reach the tool and never survives the run.
             continue
         blocked = blocking_output(tool, data_dir)
         if blocked is not None:
@@ -3425,10 +3433,15 @@ def overlaid(source: Path, target: Path) -> bool:
 
 
 _GRID_SUFFIX = re.compile(r"\d{4}\.map")
-"""What follows the map id in a map file's name: `{gx:02}{gy:02}.map`."""
+"""What follows the map id in a Centurion/AC/CMaNGOS map file's name: `{gx:02}{gy:02}.map`."""
+
+_GRID_SUFFIX_UNDERSCORED = re.compile(r"\d{2}_\d{2}\.map")
+"""What follows `MMMM_` in a TrinityCore 5.x/MoP map file's name: `{gy:02}_{gx:02}.map`."""
 
 
-def missing_map_data(data_dir: Path, map_ids: Iterable[int]) -> tuple[str, ...]:
+def missing_map_data(
+    data_dir: Path, map_ids: Iterable[int], *, map_names: MapNames = "mmmyyxx"
+) -> tuple[str, ...]:
     """What the world server's start check would not find, one phrase each; `()` when all is there.
 
     The worldserver exits "Unable to load critical files" unless map AND vmap
@@ -3437,6 +3450,11 @@ def missing_map_data(data_dir: Path, map_ids: Iterable[int]) -> tuple[str, ...]:
     asks the coarser question the stage can answer without the grid maths: for each map, at
     least one `.map` file named after it under `maps/`, and its `.vmtree`
     under `vmaps/`. A listing that fails reads as missing, never as there.
+
+    `map_names` is the core's naming (catalog's `TrinityCoreData.map_names`): the
+    default `mmmyyxx` is `maps/MMMYYXX.map` and `vmaps/MMM.vmtree` (Centurion/AC/
+    CMaNGOS), `mmmm_yy_xx` is `maps/MMMM_YY_XX.map` and `vmaps/MMMM.vmtree`
+    (TrinityCore 5.x/MoP). The phrase names the pattern it looked for.
     """
     try:
         names = [entry.name for entry in (data_dir / MAPS_DIR).iterdir()]
@@ -3444,11 +3462,22 @@ def missing_map_data(data_dir: Path, map_ids: Iterable[int]) -> tuple[str, ...]:
         names = []
     missing: list[str] = []
     for map_id in map_ids:
-        key = f"{map_id:03}"
-        if not any(
-            name.startswith(key) and _GRID_SUFFIX.fullmatch(name[len(key) :]) for name in names
-        ):
-            missing.append(f"map {map_id}: no {MAPS_DIR}/{key}????.map")
+        if map_names == "mmmm_yy_xx":
+            key = f"{map_id:04}"
+            pattern = f"{MAPS_DIR}/{key}_??_??.map"
+            found = any(
+                name.startswith(f"{key}_")
+                and _GRID_SUFFIX_UNDERSCORED.fullmatch(name[len(key) + 1 :])
+                for name in names
+            )
+        else:
+            key = f"{map_id:03}"
+            pattern = f"{MAPS_DIR}/{key}????.map"
+            found = any(
+                name.startswith(key) and _GRID_SUFFIX.fullmatch(name[len(key) :]) for name in names
+            )
+        if not found:
+            missing.append(f"map {map_id}: no {pattern}")
         if not (data_dir / VMAPS_DIR / f"{key}.vmtree").is_file():
             missing.append(f"map {map_id}: no {VMAPS_DIR}/{key}.vmtree")
     return tuple(missing)

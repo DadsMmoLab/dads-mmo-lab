@@ -5029,6 +5029,11 @@ def test_each_game_waits_for_the_ready_line_its_own_server_prints(
             "TrinityCore rev. unknown 1970-01-01 00:00:00 +0000 (Archived branch) "
             "(Unix, RelWithDebInfo, Static) (worldserver-daemon) ready..."
         ),
+        # T850: the entry's `ready.world` is the anti-freeze thread's line, not
+        # `ready...`: the 5.4.8 fork starts `MaxCoreStuckTime` seconds as the conf
+        # table sets it (300), and `src/server/worldserver/Main.cpp:345-349` formats it
+        # as below (`.notes/mop/upstream/src_server_worldserver_Main.cpp:345-349`).
+        "wow-mop": "Starting up anti-freeze thread (300 seconds max stuck time)...",
     }
     seen: dict[str, docker.ReadySpec] = {}
 
@@ -7115,6 +7120,9 @@ BOT_SQL_BY_GAME = {
     "wow-unbound": ("acore_auth", "acore_characters", "ub-database"),
     # T812: the same schema names as WotLK, in the database container of its own.
     "wow-coa": ("acore_auth", "acore_characters", "coa-database"),
+    # T850: from the entry's own `databases` block, not measured on a box yet -- the
+    # first live MoP install is what turns these three into a reading (GAP §2).
+    "wow-mop": ("mop_auth", "mop_characters", "mop-db"),
 }
 """Written out per game rather than read back out of the entry.
 
@@ -26890,6 +26898,7 @@ def _client_entry(
     optional: bool = True,
     remove_locale: bool = True,
     hd_remove_when_off: tuple[str, ...] = (),
+    remove: tuple[str, ...] = (),
 ) -> CatalogEntry:
     """WotLK's entry with a `client` section: two required packs, one optional, exe, config."""
     zip_path = server_dir / "patches" / "patch-W.zip"
@@ -26965,6 +26974,7 @@ def _client_entry(
             {
                 "always": {"realmList": "127.0.0.1"},
                 "seed": {"gxWindow": "1"},
+                "remove": list(remove),
                 "remove_locale_realmlists": remove_locale,
             }
         )
@@ -27977,6 +27987,31 @@ def test_a_second_play_installs_nothing_again(
     view.play()
 
     assert steps == ["exe", "config", "launch"]
+
+
+def test_a_catalog_remove_key_takes_its_line_out_of_the_ready_to_play_config(
+    qapp: object, ps: _Ps, tmp_path: Path, site: _Site, steps: list[str], asks: _Asks
+) -> None:
+    """T850 A5: an entry's `ConfigWtf.remove` (`portal`) reaches the merge, beside the picks.
+
+    A shipped `Config.wtf` naming Battle.net's portal would send the client there; the
+    entry that needs it gone says so in the catalog, and Play must pass it through.
+    """
+    entry, original, play = _made_client(tmp_path, remove=("portal",))
+    (play / "WTF").mkdir()
+    (play / "WTF" / "Config.wtf").write_text(
+        'SET portal "us"\nSET locale "enUS"\nSET realmList "old.example"\n', encoding="utf-8"
+    )
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+
+    view.play()
+
+    assert steps[-1] == "launch"
+    text = (play / "WTF" / "Config.wtf").read_text(encoding="utf-8")
+    assert "portal" not in text, text
+    assert 'SET locale "enUS"' in text, "a line of the player's own was touched"
+    assert 'SET realmList "127.0.0.1"' in text
 
 
 def test_a_pack_whose_checksum_changed_is_installed_again(

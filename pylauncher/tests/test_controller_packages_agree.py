@@ -186,6 +186,10 @@ def test_every_seam_builder_in_every_package_binds_the_declared_client(tmp_path:
         "wow-unbound": (wotlk_accounts, wotlk_maintenance),  # T554: WotLK's package, its own entry
         "wow-coa": (wotlk_accounts, wotlk_maintenance),  # T812: WotLK's package, its own entry
         "wow-centurion": (centurion_accounts, centurion_maintenance),
+        # T850: Mists of Pandaria is the same family and the same package, its own entry
+        # (as T554/T812 do over WotLK's); its seams are entry-driven and its per-tree
+        # facts live in that package's `characters`.
+        "wow-mop": (centurion_accounts, centurion_maintenance),
     }
     catalog = load_catalog()
     assert set(packages) == {
@@ -223,8 +227,8 @@ def test_every_seam_builder_in_every_package_binds_the_declared_client(tmp_path:
                     + repr(expected)
                 )
                 checked += 1
-    assert checked == 18, (  # T554/T812: unbound and coa run the WotLK package's two builders
-        str(checked) + " builders were exercised, not 18. An exact count, not a floor: the "
+    assert checked == 21, (  # T554/T812/T850: unbound, coa and mop run a sibling's builders
+        str(checked) + " builders were exercised, not 21. An exact count, not a floor: the "
         "floor this replaced had slack of one, so a deleted builder still passed it."
     )
 

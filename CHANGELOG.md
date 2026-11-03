@@ -14,6 +14,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ## Unreleased
 
 ### New
+- Mists of Pandaria 5.4.8 (LoA Pandaria with 500 playerbots) can be installed; bring the Recall WoW client.
 
 ### Fixed
 - Installs no longer leave unnamed Docker volumes behind (one per Conquest of Azeroth install, and one after a tool run was cut off).
@@ -22,6 +23,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - The Conquest of Azeroth install on Windows no longer stops at the map step with "Permission denied" on a stock Ascension client.
 
 ### Changed
+- Centurion and Mists of Pandaria on Windows build their map data inside Docker, not through the slow Windows folder share.
 
 ## v0.9.30-Public — 2026-11-01
 

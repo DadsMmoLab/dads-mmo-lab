@@ -124,11 +124,18 @@ def test_every_shipped_dockerignore_parses(template: str) -> None:
 def test_the_shipped_set_is_every_install_that_renders_one() -> None:
     """The parametrisation above is not vacuous: it found every template the plan names.
 
-    The four WoW cores that build from a rendered Dockerfile, and DDON, the first
+    The five WoW cores that build from a rendered Dockerfile, and DDON, the first
     single-container server, whose image is built from Yu'lon's Dockerfile too.
     """
     found = {path.parent.parent.name for path in TEMPLATES.glob("*/native/dockerignore.tmpl")}
-    assert found == {"ddon", "wow-centurion", "wow-tbc", "wow-tortoise", "wow-vanilla"}
+    assert found == {
+        "ddon",
+        "wow-centurion",
+        "wow-mop",
+        "wow-tbc",
+        "wow-tortoise",
+        "wow-vanilla",
+    }
 
 
 @pytest.mark.parametrize(

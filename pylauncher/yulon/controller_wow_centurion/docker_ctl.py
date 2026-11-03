@@ -21,7 +21,12 @@ from yulon.catalog import native
 from yulon.catalog.catalog import CatalogEntry, NativeInstall, ReadyMarkers, TrinityCoreData
 
 GAME: Final = "wow-centurion"
-"""The catalog id this package manages (`controller_view._FACTORIES`)."""
+"""The catalog id this package was written for (`controller_view._FACTORIES`).
+
+Metadata only -- nothing in `yulon/` reads it, because every function here takes the entry.
+Since T850 the same package serves Mists of Pandaria (`wow-mop`) as well: both are the
+`trinitycore` family, both are driven by `_for_centurion`, and the per-game facts (the verbs
+the Characters tab offers) are keyed by id in `characters.py`."""
 
 start = docker.start
 start_staged = docker.start_staged

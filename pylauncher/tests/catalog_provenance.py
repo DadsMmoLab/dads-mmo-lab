@@ -501,6 +501,48 @@ PROVENANCE: dict[str, Provenance] = {
     "wow-coa:accounts.level.table": Provenance("inherited", "wow-unbound"),
     "wow-coa:accounts.level.account_column": Provenance("inherited", "wow-unbound"),
     "wow-coa:accounts.level.level_column": Provenance("inherited", "wow-unbound"),
+    # -- wow-mop (Mists of Pandaria, T850): the family's second line -----------
+    # The four ACCOUNTS rows are read off the dump the import loads, which is
+    # `.notes/mop/upstream/auth.sql` (the release asset's auth.sql, read 2026-11-01 at
+    # LoA-Pandaria-Playerbots e135742e, GAP §0). The line numbers are into that copy.
+    #
+    # The play columns and the level CEILING are INHERITED from wow-centurion: GAP §2
+    # says the play columns are the same as Centurion's (`item_instance.itemEntry`,
+    # `character_inventory.item`), and no MoP header has been read for its own
+    # `SEC_ADMINISTRATOR`. Not asked on a MoP box yet -- the first live install is what
+    # upgrades these, and Centurion's own T179 Task 9 is what its rows already carry.
+    "wow-mop:accounts.scheme": Provenance(
+        "read-from-source",
+        ".notes/mop/upstream/AccountMgr.cpp:345",
+        note=(
+            "`CalculateShaPassHash`: SHA1(UPPER(user):UPPER(pass)) hex, written into "
+            "`account.sha_pass_hash` (`auth.sql:19`) with v/s left '' for the authserver to "
+            "derive -- the recipe T850-C's `trinitycore_sha` writes. @ e135742e"
+        ),
+    ),
+    "wow-mop:accounts.level.table": Provenance(
+        "read-from-source",
+        ".notes/mop/upstream/auth.sql:76",
+        note="`account_access`, in the auth dump the release asset's import loads; @ e135742e",
+    ),
+    "wow-mop:accounts.level.account_column": Provenance(
+        "read-from-source",
+        ".notes/mop/upstream/auth.sql:77",
+        note="`account_access.id`, the first half of its `PRIMARY KEY (id, RealmID)`; @ e135742e",
+    ),
+    "wow-mop:accounts.level.level_column": Provenance(
+        "read-from-source",
+        ".notes/mop/upstream/auth.sql:78",
+        note="`account_access.gmlevel` (tinyint unsigned), the level column; @ e135742e",
+    ),
+    "wow-mop:accounts.level.max_level": Provenance("inherited", "wow-centurion"),
+    "wow-mop:play.equipped.template_column": Provenance("inherited", "wow-centurion"),
+    "wow-mop:play.equipped.instance_table": Provenance("inherited", "wow-centurion"),
+    "wow-mop:play.equipped.inventory_column": Provenance("inherited", "wow-centurion"),
+    "wow-mop:play.teleport_command": Provenance("inherited", "wow-centurion"),
+    "wow-mop:play.mail_item_cap": Provenance("inherited", "wow-centurion"),
+    "wow-mop:play.rename_command": Provenance("inherited", "wow-centurion"),
+    "wow-mop:play.set_level_command": Provenance("inherited", "wow-centurion"),
 }
 
 

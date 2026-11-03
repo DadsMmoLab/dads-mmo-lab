@@ -939,7 +939,8 @@ def test_an_unknown_scheme_is_refused_by_name_instead_of_defaulting() -> None:
 
     assert str(caught.value) == (
         "'mangos_srp7' is not an account scheme this app knows how to re-password, so "
-        "nothing was written. Known: azerothcore, mangos_sha, mangos_srp6, trinitycore."
+        "nothing was written. Known: azerothcore, mangos_sha, mangos_srp6, trinitycore, "
+        "trinitycore_sha."
     )
     assert sql.statements == [], "it touched the database before refusing"
 
@@ -973,7 +974,8 @@ def test_an_unknown_scheme_stops_the_account_row_before_the_database_is_touched(
 
     assert str(caught.value) == (
         "'mangos_srp7' is not an account scheme this app knows how to write an account row "
-        "for, so nothing was written. Known: azerothcore, mangos_sha, mangos_srp6, trinitycore."
+        "for, so nothing was written. Known: azerothcore, mangos_sha, mangos_srp6, trinitycore, "
+        "trinitycore_sha."
     )
     assert sql.statements == [], "it touched the database before refusing"
 
@@ -993,7 +995,8 @@ def test_an_unknown_scheme_stops_the_gm_grant_instead_of_writing_account_access(
 
     assert str(caught.value) == (
         "'mangos_srp7' is not an account scheme this app knows how to grant a GM level on, "
-        "so nothing was written. Known: azerothcore, mangos_sha, mangos_srp6, trinitycore."
+        "so nothing was written. Known: azerothcore, mangos_sha, mangos_srp6, trinitycore, "
+        "trinitycore_sha."
     )
     assert sql.statements == [], "it touched the database before refusing"
 
@@ -1012,13 +1015,14 @@ def test_an_unknown_scheme_stops_the_gm_level_read_instead_of_reading_account_ac
 
     assert str(caught.value) == (
         "'mangos_srp7' is not an account scheme this app knows how to read a GM level from, "
-        "so nothing was read. Known: azerothcore, mangos_sha, mangos_srp6, trinitycore."
+        "so nothing was read. Known: azerothcore, mangos_sha, mangos_srp6, trinitycore, "
+        "trinitycore_sha."
     )
     assert sql.statements == [], "it touched the database before refusing"
 
 
 def test_the_known_list_every_refusal_prints_comes_from_Scheme_itself() -> None:
-    """A hand-typed list goes stale the moment `Scheme` grows a fourth value.
+    """A hand-typed list goes stale the moment `Scheme` grows a value.
 
     T9's reviewer's finding: the list was typed into one message and pinned
     verbatim by one test, so the value that made the refusal necessary would be
@@ -1029,7 +1033,10 @@ def test_the_known_list_every_refusal_prints_comes_from_Scheme_itself() -> None:
     a constant nothing prints proves nothing about what a user is told.
     """
     known = get_args(accounts.Scheme)
-    assert len(known) == 4, known  # the alias itself, in case it lost a member
+    # Five since T850-C added the TrinityCore family's MoP shape; the count is
+    # here so a member that went missing from the alias is caught, not so the
+    # four sentences above can be derived from it.
+    assert len(known) == 5, known
     sql = _Recorder()
     messages = []
     for call in (
@@ -1255,3 +1262,115 @@ def test_an_entry_that_declares_no_scheme_is_refused_rather_than_defaulted() -> 
     # second place that decides what a core's columns are.
     for declared in get_args(accounts.Scheme):
         assert accounts.checked_scheme(declared, "wow-example") == declared
+
+
+# -- trinitycore_sha: the TrinityCore family's MoP rows (T850-C) -----------------
+
+
+def test_a_trinitycore_sha_account_is_the_row_the_mop_cores_own_command_writes() -> None:
+    """`LOGIN_INS_ACCOUNT` at the `wow-mop` pin e135742e (`LoginDatabase.cpp:65`).
+
+    Column for column: `account(username, sha_pass_hash, email, joindate)` with
+    the email written `''`, and `v`/`s` left at the column's own default -- which
+    is exactly what the authserver derives a fresh pair from when they are not
+    64 hex characters (`AuthSession.cpp:502-504`).
+
+    The hash is the MixedCase `MANGOS_WRITTEN` row, so the golden string below
+    pins the folding as well as the statement: MoP's `CalculateShaPassHash`
+    (`AccountMgr.cpp:345-355`) folds through `Utf8ToUpperOnlyLatin` exactly as
+    the Tortoise fork does, and `ByteArrayToHexStr` prints `%02X`
+    (`Util.cpp:614`), so uppercase. A row folded any other way is one the login
+    box refuses, and it is indistinguishable by inspection.
+    """
+    sql = _FakeSql()
+    result = accounts.create_account(sql, "MixedCase", "SoMePaSs", scheme="trinitycore_sha")
+
+    assert result.created is True and result.username == "MIXEDCASE"
+    (insert,) = [s for _, s in sql.statements if s.startswith("INSERT INTO account(")]
+    assert insert == (
+        "INSERT INTO account(username,sha_pass_hash,email,joindate) VALUES("
+        f"{accounts._text_literal('MIXEDCASE')},"
+        f"{accounts._text_literal('75FA45B4D076CD2C9FDE701C821EE057C1CB151E')},'',NOW())"
+    )
+    assert "SoMePaSs" not in insert, "the password itself must never reach a statement"
+    assert not any("salt" in s or "verifier" in s for _, s in sql.statements)
+    # The core's own LOGIN_INS_REALM_CHARACTERS_INIT follows, as on the others.
+    assert any(s.startswith("INSERT INTO realmcharacters") for _, s in sql.statements)
+    # No GM level asked for: no access row at all.
+    assert sql.access == {}
+
+
+def test_a_trinitycore_sha_level_is_read_and_written_exactly_as_azerothcores() -> None:
+    """MoP's level statements ARE AzerothCore's: `account_access(id, gmlevel, RealmID)`.
+
+    `LOGIN_INS_ACCOUNT_ACCESS` and `LOGIN_GET_GMLEVEL_BY_REALMID`
+    (`LoginDatabase.cpp:80,83`) name `id`/`gmlevel`/`RealmID` on MoP, not
+    TrinityCore112's `AccountID`/`SecurityLevel`, so this scheme dispatches to
+    the same branch `azerothcore` does. Asserted by running both and comparing,
+    which is the only way "exactly as" can fail when one of them is edited.
+    """
+    azeroth, mop = _FakeSql(), _FakeSql()
+
+    accounts._grant_gm(azeroth, 77, 3, "azerothcore")
+    accounts._grant_gm(mop, 77, 3, "trinitycore_sha")
+    assert [s for _, s in mop.statements] == [s for _, s in azeroth.statements]
+    assert [s for _, s in mop.statements] == [
+        "INSERT INTO account_access (id, gmlevel, RealmID) VALUES (77, 3, -1)"
+        " ON DUPLICATE KEY UPDATE gmlevel = 3"
+    ]
+
+    accounts._gm_level(azeroth, 77, "azerothcore")
+    accounts._gm_level(mop, 77, "trinitycore_sha")
+    assert [s for _, s in mop.queries] == [s for _, s in azeroth.queries]
+    assert [s for _, s in mop.queries] == [
+        "SELECT gmlevel FROM account_access WHERE id = 77 AND RealmID = -1"
+    ]
+
+
+def test_a_trinitycore_sha_create_grant_is_a_floor_and_the_second_call_converges() -> None:
+    """Row, realmcharacters, GM 3 -- then a second call that writes the two columns again."""
+    sql = _FakeSql()
+    first = accounts.create_account(
+        sql, "yulon_mopgm", PASSWORD, gm_level=3, scheme="trinitycore_sha"
+    )
+    assert first.created is True and first.gm_level == 3
+    assert sql.access == {first.account_id: 3}
+
+    again = accounts.create_account(
+        sql, "yulon_mopgm", PASSWORD, gm_level=1, scheme="trinitycore_sha"
+    )
+    assert again.created is False and again.account_id == first.account_id
+    assert again.gm_level == 3, "the level is a floor, so asking for less takes nothing away"
+    assert len([s for _, s in sql.statements if s.startswith("INSERT INTO account(")]) == 1
+    assert len([s for _, s in sql.statements if s.startswith("INSERT INTO account_access")]) == 1
+
+
+def test_the_apps_own_trinitycore_sha_account_is_re_passworded_and_its_pair_cleared() -> None:
+    """`AccountMgr::ChangePassword` (`AccountMgr.cpp:176-193`), net effect, named.
+
+    It runs `LOGIN_UPD_PASSWORD` (`UPDATE account SET v = 0, s = 0,
+    sha_pass_hash = ? WHERE id = ?`) and then
+    `LOGIN_UPD_VS` (`UPDATE account SET v = ?, s = ? WHERE username = ?`) with an
+    empty pair, so the row is left holding the new hash and `v`/`s` at `''` --
+    the state the authserver derives a fresh pair from
+    (`AuthSession.cpp:502-504`). Leaving the old pair in place would keep
+    credentials the OLD password produced, which is the one thing a reset must
+    not do, so the statement is asserted whole rather than by keyword.
+    """
+    sql = _Recorder()
+
+    accounts.reset_own_password(sql, "YULON_58C6FD1C", "n3w-p@ssw0rd1234", scheme="trinitycore_sha")
+
+    ((db, statement),) = sql.statements
+    assert db == "auth"
+    assert statement == (
+        "UPDATE account SET sha_pass_hash = "
+        + accounts._text_literal(
+            accounts.mangos_password_hash("YULON_58C6FD1C", "n3w-p@ssw0rd1234")
+        )
+        + ", v = '', s = '' WHERE username = "
+        + accounts._text_literal("YULON_58C6FD1C")
+        + ";"
+    )
+    assert "n3w-p@ssw0rd1234" not in statement, "the password reached a statement"
+    assert "salt" not in statement and "verifier" not in statement, statement

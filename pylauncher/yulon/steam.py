@@ -504,17 +504,22 @@ def client_executable(client_dir: Path, names: Sequence[str] = _CLIENT_EXE_PREFE
 
     `names` are the entry's lower-case `client.exe_names`, matched case-insensitively
     because the same folder shipped from Windows spells it `Wow.exe` (`Ascension.exe`
-    for Conquest of Azeroth). The default keeps 8.8's `WoW.exe` pick and fallback.
+    for Conquest of Azeroth). The FIRST name that exists in the folder wins, in the
+    order given: a folder holding both `Wow-64.exe` and `_Wow-64.exe` picks the one
+    the entry lists first, not the one whose name sorts first. The default keeps
+    8.8's `WoW.exe` pick and fallback.
 
     Falling back to the first name rather than refusing is deliberate and narrow: the
     folder is one the user picked and Yu'lon validated, and an entry pointing at
     the conventional name inside it is a thing they can see and correct. A
     folder Yu'lon was never given is a different case and refuses (`NO_CLIENT`).
     """
-    wanted = {name.lower() for name in names}
-    for candidate in sorted(client_dir.glob("*")):
-        if candidate.is_file() and candidate.name.lower() in wanted:
-            return candidate
+    files = [path for path in sorted(client_dir.glob("*")) if path.is_file()]
+    for name in names:
+        wanted = name.lower()
+        for candidate in files:
+            if candidate.name.lower() == wanted:
+                return candidate
     if tuple(names) == _CLIENT_EXE_PREFERENCE or not names:
         return client_dir / "WoW.exe"
     return client_dir / names[0]

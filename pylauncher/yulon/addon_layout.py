@@ -53,8 +53,11 @@ ADDON_FOLDERS = ("addon", "addons", "interface/addons")
 UNWRAP_LEVELS = 2
 """How many lone wrapping folders are looked inside: a zip's own, and Windows' "Extract All"."""
 
-CLIENT_NAMES: Mapping[int, str] = {11200: "1.12", 20400: "2.4.3", 30300: "3.3.5a"}
-"""The clients Yu'lon runs, by their Interface number (`catalog.Client.addon_interface`)."""
+CLIENT_NAMES: Mapping[int, str] = {11200: "1.12", 20400: "2.4.3", 30300: "3.3.5a", 50400: "5.4.8"}
+"""The clients Yu'lon runs, by their Interface number (`catalog.Client.addon_interface`).
+
+50400 is the Mists of Pandaria line's (`wow-mop`, T850): the add-on layout is unchanged from
+WotLK's, so its number is one more row here rather than a second reader."""
 
 TOC_READ_BYTES = 64 * 1024
 """How much of a `.toc` is read. Its `##` lines are a header; the rest is a file list."""

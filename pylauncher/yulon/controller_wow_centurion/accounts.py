@@ -6,8 +6,8 @@ SRP6 pair with its own GM-level table (`TRINITYCORE_ACCESS` there). What this
 module supplies is what that module takes as arguments:
 
 * the scheme, read from the entry's `accounts.scheme` -- the catalog refuses any
-  value but `trinitycore` or null on a TrinityCore entry, and null is refused
-  here with the console command rather than guessed;
+  value but `trinitycore` / `trinitycore_sha` or null on a TrinityCore entry, and
+  null is refused here with the console command rather than guessed;
 * the seam: `DockerSql` over this entry's database container, with its schema
   names (`centurion_auth`, not `acore_auth`) and its client (`mysql`);
 * the level ceiling: `accounts.level.max_level` (3, `SEC_ADMINISTRATOR`).

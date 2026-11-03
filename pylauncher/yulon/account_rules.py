@@ -26,6 +26,12 @@ ceiling, read at the catalog's pinned trees on 2026-10-11:
   `AccountMgr.cpp:136`.
 - `trinitycore` (TrinityCore112, Centurion): name 16, password 16. TrinityCore112
   25d3e6ef and 351950fb (T824, 2026-10-28) `src/server/game/Accounts/AccountMgr.h:41-42`.
+- `trinitycore_sha` (the TrinityCore family's MoP line): name 16, password 16. The
+  `wow-mop` core e135742e (T850-C, 2026-11-01)
+  `src/server/game/Accounts/AccountMgr.h:46-47` (`MAX_ACCOUNT_STR` / `MAX_PASS_STR`,
+  `CreateAccount`'s `utf8length(username) > MAX_ACCOUNT_STR` and `ChangePassword`'s
+  `utf8length(newPassword) > MAX_ACCOUNT_STR`). Its `account.username` column is
+  `varchar(32)`, so the CORE's 16 is the binding ceiling, not the column's.
 
 A core's own `account create` refuses a longer one (`AOR_NAME_TOO_LONG`), so a row
 written past it is one the server's own commands cannot name.
@@ -50,6 +56,7 @@ NAME_MAX: dict[str, int] = {
     "mangos_srp6": 16,
     "mangos_sha": 16,
     "trinitycore": 16,
+    "trinitycore_sha": 16,
 }
 """Each core's `MAX_ACCOUNT_STR`, by the catalog's `accounts.scheme` (table above)."""
 

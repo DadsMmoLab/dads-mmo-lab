@@ -301,7 +301,12 @@ def test_shipped_families_reads_a_trinitycore_entry_from_the_catalog(
     """The guard's view of "what ships" follows the catalog it is given, both ways."""
     shipped = load_catalog()
     raw = json.loads(CATALOG_FILE.read_text(encoding="utf-8"))
-    raw["games"] = [game for game in raw["games"] if game["id"] != "wow-centurion"]
+    # Every trinitycore entry goes, not only Centurion: MoP is a second one (T850).
+    raw["games"] = [
+        game
+        for game in raw["games"]
+        if ((game.get("install") or {}).get("native") or {}).get("family") != "trinitycore"
+    ]
     without = parse_catalog(raw)
     monkeypatch.setattr(sys.modules[__name__], "load_catalog", lambda: without)
     assert "trinitycore" not in _shipped_families()

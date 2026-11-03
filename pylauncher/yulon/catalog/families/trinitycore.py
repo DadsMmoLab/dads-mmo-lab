@@ -5,7 +5,8 @@ rests on are in `.notes/tickets/T179-centurion-facts.md` (CENTURION @ faac5fc9) 
 the stage list is the T179 spec's §1. Like `cmangos.py`, the class names no game:
 every parameter is the entry's typed `install.native.trinitycore` block.
 
-**Why it is a `CmangosInstaller`.** Six of its eleven stages are stage kinds the
+**Why it is a `CmangosInstaller`.** Six of its eleven stages (twelve for an entry
+whose databases arrive as a release asset, `fetch-release`) are stage kinds the
 CMaNGOS engine already runs and proves -- the generated database password and the
 refusal that guards it, the Dockerfile written from this repo's template with the
 secret kept out of the build context, the conf table patched over the image's
@@ -18,6 +19,8 @@ is overridden here, by name:
 * `stages()` -- its own tuple: no `patch-sources`, no `extract`/`mmaps` (the movement
   maps run after the server is up, Task 4), and `client-data` in their place;
 * `_clone_sources()` -- the core checkout is sparse (`sparse_exclude`);
+* `_fetch_release()` -- a release asset's zips, for an entry whose databases are
+  not in its checkout, in a stage that entry alone has (T850-B);
 * `_client_data()` -- the temporary extraction client, the tree's DBC overlay and
   the start check, all new;
 * `_conf()` -- the conf table alone, without the CMaNGOS bot-count carry-over and
@@ -46,6 +49,7 @@ from __future__ import annotations
 
 import errno
 import fnmatch
+import functools
 import hashlib
 import json
 import os
@@ -53,11 +57,13 @@ import posixpath
 import re
 import threading
 import time
+import zipfile
 from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import ClassVar, Literal, NoReturn, cast
+from urllib.parse import urlsplit
 
 from yulon import (
     client_names,
@@ -69,12 +75,14 @@ from yulon import (
     rmtree,
     server_build_presses,
 )
-from yulon.catalog import bot_count
+from yulon.catalog import bot_count, verified_download
 from yulon.catalog.catalog import (
+    RELEASE_HOSTS,
     CatalogEntry,
     ClientPack,
     CmangosData,
     EmulatorSource,
+    ReleaseAsset,
     SqlPhase,
     SqlPlan,
     TrinityCoreData,
@@ -111,6 +119,15 @@ from yulon.manifest import Db
 from yulon.server_build_presses import MAINTENANCE_TAB
 
 logger = get_logger(__name__)
+
+RELEASE_PARTIAL_SUFFIX = ".yulon-partial"
+"""`<dest>.yulon-partial`: where a release asset's members are unpacked before the rename.
+
+The same suffix `process_install` gives its own unpack: the asset's note
+(`verified_download.UNPACKED`) is written LAST and travels with the rename, so a
+folder still named this is one a Stop left half-written, and the next press removes
+it before unpacking again (T850-B).
+"""
 
 EXTRACT_CLIENT_RECORD = ".yulon-extract-client.json"
 """In the server folder: where this install's temporary extraction client is, while it may exist.
@@ -328,12 +345,39 @@ class SnapshotChanges:
         return bool(self.reimport or self.parts or self.everything)
 
 
+_DOWNLOAD_PROGRESS_STEP = 16 << 20
+"""Longest a release-asset download goes without a line in the log (T850-M3)."""
+
+
+def _release_progress(zip_name: str, size: int) -> Callable[[int, int], None]:
+    """A `fetch_bounded` progress callback that logs about every tenth of the download (T850-M3).
+
+    About every 10% of `size`, or every 16 MB, whichever is rarer, plus the final
+    line: `Downloading <zip>: 48 of 142 MB`. The stage is a generator and the fetch
+    is one blocking call, so these cannot be yielded live the way a sink's lines are
+    (`CmangosInstaller._stream`); they go to the module log instead. No `progress=`
+    callback-into-yields pattern exists in any family stage to copy.
+    """
+    step = max(size // 10, _DOWNLOAD_PROGRESS_STEP)
+    said = 0
+
+    def note(done: int, total: int) -> None:
+        nonlocal said
+        if done < total and done - said < step:
+            return
+        said = done
+        logger.info(f"Downloading {zip_name}: {done / (1 << 20):.0f} of {total / (1 << 20):.0f} MB")
+
+    return note
+
+
 class TrinityCoreInstaller(CmangosInstaller):
     """Install a TrinityCore server: sparse clone, build, client data, conf, SQL plan, start."""
 
     family = "trinitycore"
     STAGE_NAMES: ClassVar[tuple[str, ...]] = (
         "clone-sources",
+        "fetch-release",
         "db-password",
         "write-dockerfile",
         "generate-compose",
@@ -345,6 +389,16 @@ class TrinityCoreInstaller(CmangosInstaller):
         "up",
         "ready",
     )
+    """The names a state file of this family may record, in order.
+
+    NOT this family's `stages()`: that tuple is per-ENTRY, because `fetch-release`
+    runs only for an entry whose databases arrive as a release asset (T850-B) --
+    Centurion's `stages()`, and the steps its install log numbers, are the eleven
+    names below without it, word for word. This ClassVar is what a reader that has
+    the family but not the entry validates a record against
+    (`installer.unfinished_import()`, which builds no engine), so a name MISSING
+    here is a name dropped from a MoP record on the way in.
+    """
 
     def __init__(
         self,
@@ -358,13 +412,23 @@ class TrinityCoreInstaller(CmangosInstaller):
         database_snapshot: DatabaseSnapshot | None = None,
         importer_modules: Callable[[Path], str] | None = None,
         import_gate: ImportGateFor | None = None,
+        release_download: Callable[[str, Path], Path] | None = None,
+        release_opener: client_packs.Opener | None = None,
     ) -> None:
-        """The spine's constructor, plus the Docker seam of the movement-map job (Task 4).
+        """The spine's constructor, plus the seams of the release asset and the movement maps.
 
-        Its own seam and not a `Seams` field: only this family has the job. With
-        none given it is bound to the distro the engine's seams are (`Seams.in_wsl`,
-        T179 final round): an update of a server inside a WSL distro asks about and
-        stops the job through that distro's Docker, never this host's.
+        `mmaps_runner` is its own seam and not a `Seams` field: only this family has
+        the job. With none given it is bound to the distro the engine's seams are
+        (`Seams.in_wsl`, T179 final round): an update of a server inside a WSL distro
+        asks about and stops the job through that distro's Docker, never this host's.
+
+        `release_download` is a test's whole download for the `fetch-release` stage
+        (T850-B): when given, it IS what the stage calls, so a test can hand in its own
+        bytes and never reach a network. `release_opener` is the other half of the same
+        seam, and the one the stage's DEFAULT path uses: with no `release_download`, the
+        stage fetches through `verified_download.fetch_bounded` and this opener --
+        `client_packs._open` unless a test names its own, so a test can exercise the
+        real bounded fetch against a fake response and never reach a network either.
         """
         super().__init__(
             entry,
@@ -381,11 +445,22 @@ class TrinityCoreInstaller(CmangosInstaller):
             if mmaps_runner is not None
             else mmaps.DockerRunner(wsl_distro=self._seams.distro)
         )
+        self._release_download = release_download
+        self._release_opener = release_opener if release_opener is not None else client_packs._open
 
     def stages(self) -> tuple[Stage, ...]:
-        """The family's stage tuple, in `STAGE_NAMES` order (T179 spec §1, steps 1-9)."""
-        return (
-            Stage("clone-sources", self._clone_sources),
+        """This entry's stage tuple, in `STAGE_NAMES` order (T179 spec §1, steps 1-9).
+
+        `fetch-release` is in it only for an entry whose `release_assets` is not
+        empty (T850-B): an entry that names none -- Centurion, and every other entry
+        today -- runs the eleven stages below, in this order, and its "Step N of M"
+        is unchanged. The stage sits second so a download that does not match its
+        pin is refused before a compile that takes about 75 minutes.
+        """
+        stages = [Stage("clone-sources", self._clone_sources)]
+        if self._tc().release_assets:
+            stages.append(Stage("fetch-release", self._fetch_release))
+        stages += [
             Stage("db-password", self._db_password, recorded=False),
             Stage("write-dockerfile", self._write_dockerfile),
             Stage("generate-compose", self.stage_generate_compose),
@@ -396,7 +471,8 @@ class TrinityCoreInstaller(CmangosInstaller):
             Stage("import", self._import, cancel_note=IMPORT_STAGE_CANCEL_NOTE),
             Stage("up", self.stage_up, recorded=False),
             Stage("ready", self.stage_ready, recorded=False),
-        )
+        ]
+        return tuple(stages)
 
     # -- the block ---------------------------------------------------------
 
@@ -454,6 +530,113 @@ class TrinityCoreInstaller(CmangosInstaller):
             sparse_exclude={tc.checkout: tc.sparse_exclude},
         )
 
+    # -- fetch-release -------------------------------------------------------
+
+    def _fetch_release(self, ctx: StageContext) -> Iterator[str]:
+        """Every release asset: fetched once, checked against its pin, unpacked at its `dest`.
+
+        The databases of a tree that ships them as a release asset rather than in
+        its checkout (MoP) arrive here, second, so a download that does not match
+        its pin costs a minute instead of the ~75-minute compile that follows
+        (T850-B). One asset at a time, each against ITS OWN size and sha256:
+
+        1. **Is it already here?** `<dest>` carrying a note that names this asset's
+           url AND sha256, with every member it lists still on disk, is left exactly
+           as it is -- the SQL is 545 MB of a release zip, and the import, a repair
+           and a re-import all read it long after the install.
+        2. **Anything else at `<dest>` is somebody's**, and is refused rather than
+           replaced. A folder this app unpacked is recognized by its note, so a
+           stale one (an older pin of this asset) is replaced whole.
+        3. **The download** lands at `<server_dir>/<dest>.download.zip`, is verified
+           by `verified_download.download_verified()` and deleted once unpacked.
+        4. **The unpack** writes exactly the members the catalog lists, into
+           `<dest>.yulon-partial`, then the note, then renames onto `<dest>`. A Stop
+           between two members leaves the partial, which the next run removes; a zip
+           missing a listed member is refused by name before anything is written.
+
+        The download goes through `verified_download.fetch_bounded` and the entry's
+        opener (`release_opener`; `client_packs._open` in the app), held to the asset's
+        own `size` and to a Stop. The hosts are `RELEASE_HOSTS` -- github.com and the
+        two hosts GitHub redirects a release download to, the same fence a client
+        pack's `redirect_hosts` is -- fixed data, never the assets' own urls.
+        """
+        tc = self._tc()
+        for asset in tc.release_assets:
+            host = urlsplit(asset.url).hostname or ""
+            if host not in RELEASE_HOSTS:
+                raise InstallerError(
+                    f"{self.entry.name}'s catalog fetches {asset.dest} from {host}, which is not "
+                    f"one of this entry's own download hosts "
+                    f"({', '.join(sorted(RELEASE_HOSTS))}), so nothing was downloaded. "
+                    f"{CATALOG_ERROR_TAIL}"
+                )
+            dest = ctx.server_dir / asset.dest
+            zip_path = ctx.server_dir / f"{asset.dest}.download.zip"
+            zip_name = PurePosixPath(asset.url).name
+            if self._release_is_here(asset, dest):
+                yield f"{asset.dest} already holds {zip_name}; not downloaded again."
+                continue
+            if dest.exists() and verified_download.unpacked_note(dest) is None:
+                raise InstallerError(
+                    f"{dest} has files in it that Yu'lon did not unpack from {asset.url}, so it "
+                    "was left alone. Move that folder aside and try again."
+                )
+            partial = dest.with_name(dest.name + RELEASE_PARTIAL_SUFFIX)
+            if partial.exists():
+                rmtree.remove_tree(partial)
+            download = self._release_download
+            if download is None:
+                download = functools.partial(
+                    verified_download.fetch_bounded,
+                    size=asset.size,
+                    hosts=RELEASE_HOSTS,
+                    opener=self._release_opener,
+                    cancelled=lambda: ctx.cancel is not None and ctx.cancel.is_set(),
+                    progress=_release_progress(zip_name, asset.size),
+                )
+            yield from verified_download.download_verified(
+                asset.url,
+                zip_path,
+                size=asset.size,
+                sha256=asset.sha256,
+                download=download,
+            )
+            try:
+                verified_download.unzip_members(
+                    zip_path,
+                    partial,
+                    asset.members,
+                    cancel_check=lambda: self._check_cancel(ctx.cancel),
+                )
+                verified_download.write_unpacked(partial, url=asset.url, sha256=asset.sha256)
+                if dest.exists():
+                    rmtree.remove_tree(dest)  # this app's, from an older pin: replaced whole
+                partial.replace(dest)
+            except (OSError, zipfile.BadZipFile) as exc:
+                raise InstallerError(
+                    f"{zip_name} could not be unpacked into {asset.dest}: {exc}. Nothing else "
+                    "was changed; press Install again to fetch and unpack it afresh."
+                ) from exc
+            zip_path.unlink(missing_ok=True)
+            yield (
+                f"Unpacked {len(asset.members)} files into {asset.dest}; {zip_name} was deleted."
+            )
+
+    @staticmethod
+    def _release_is_here(asset: ReleaseAsset, dest: Path) -> bool:
+        """Whether `dest` already holds this asset, whole, unpacked by this app.
+
+        Both halves of the note, not just the sha256: the url says where the bytes
+        came from, and two release pages can serve a zip with one checksum. Every
+        member must also be there still -- the folder is a person's disk, and a file
+        deleted from it means the asset is fetched and unpacked again rather than
+        read as present.
+        """
+        note = verified_download.unpacked_note(dest)
+        if note is None or note["url"] != asset.url or note["sha256"] != asset.sha256:
+            return False
+        return all((dest / member).is_file() for member in asset.members)
+
     # -- client-data ---------------------------------------------------------
 
     def _client_data(self, ctx: StageContext) -> Iterator[str]:
@@ -477,7 +660,9 @@ class TrinityCoreInstaller(CmangosInstaller):
            another server's patch in the copy would be extracted into maps this
            server does not expect (Review Focus 1).
         3. **The tree's own DBCs** over `data/dbc` (`dbc_overlay_from`): "Use these
-           DBCs, not the ones the extractor writes" (README.md:174-180).
+           DBCs, not the ones the extractor writes" (README.md:174-180). Skipped
+           when the entry names no `dbc_overlay_from`: the extractor's own DBCs
+           are then used as they are (a tree that ships none, e.g. MoP).
         4. **The start check**: maps and vmaps for every `required_maps` id, or a
            refusal naming this step, before a server is started that would stop
            with "Unable to load critical files" (World.cpp:1823-1835 at 6c6472c3, read 2026-10-07).
@@ -508,13 +693,15 @@ class TrinityCoreInstaller(CmangosInstaller):
             yield from self._extract_through_a_temporary_client(
                 ctx, original, data_dir, packs, salt
             )
-        source = ctx.server_dir / tc.checkout / tc.extract.dbc_overlay_from
-        target = data_dir / tc.extract.dbc_overlay_to
-        copied = extract.overlay_files(source, target)
-        yield (
-            f"Laid the server's own DBC files from {tc.extract.dbc_overlay_from} over {target} "
-            f"({copied} copied; the rest were already there)."
-        )
+        overlay_from = tc.extract.dbc_overlay_from
+        if overlay_from is not None:
+            source = ctx.server_dir / tc.checkout / overlay_from
+            target = data_dir / tc.extract.dbc_overlay_to
+            copied = extract.overlay_files(source, target)
+            yield (
+                f"Laid the server's own DBC files from {overlay_from} over {target} "
+                f"({copied} copied; the rest were already there)."
+            )
         self._refuse_missing_map_data(data_dir, original)
         maps = ", ".join(str(map_id) for map_id in tc.required_maps)
         yield f"The map data the world server checks at start (maps {maps}) is in place."
@@ -643,6 +830,14 @@ class TrinityCoreInstaller(CmangosInstaller):
             yield from self._make_extraction_client(ctx, original, temp, packs)
             image_ref = self._image_ref(ctx, tc.extract.image)
             user_args = self._user_args()
+            # T856: on Docker Desktop `data/` is a bind into a Windows or macOS
+            # folder where small-file writes are ~10x slower than in the container's
+            # own layer, so there each tool writes inside its container and only the
+            # finished folders are copied into `data/`. Linux passes nothing and
+            # keeps today's argv, mounts, workdir and env byte for byte. The switch
+            # is decided here, not in the catalog: the evidence hashes the plan, and
+            # a new field would make every install everywhere extract again.
+            scratch_off_bind = self._seams.platform_id() in ("windows", "macos")
             yield f"Extracting map data from the copy into {data_dir} (the copy is read-only)."
             yield from self._stream(
                 lambda sink: extract.run_plan(
@@ -660,6 +855,7 @@ class TrinityCoreInstaller(CmangosInstaller):
                     evidence_client_dir=original,
                     evidence_salt=salt,
                     client_named=self._players_client(),
+                    scratch_off_bind=scratch_off_bind,
                 ),
                 cancel=ctx.cancel,
                 stage="client-data",
@@ -877,7 +1073,7 @@ class TrinityCoreInstaller(CmangosInstaller):
         back and says so itself (T241).
         """
         tc = self._tc()
-        missing = extract.missing_map_data(data_dir, tc.required_maps)
+        missing = extract.missing_map_data(data_dir, tc.required_maps, map_names=tc.map_names)
         if not missing:
             return
         evidence = data_dir / extract.EVIDENCE_FILE
@@ -916,17 +1112,21 @@ class TrinityCoreInstaller(CmangosInstaller):
         The player's random-bot count is carried over, as on CMaNGOS (T117, T179
         Task 5): read back from `playerbots.conf` BEFORE `materialise()`, and only
         once this stage has finished before -- until then a pair in the file is
-        the `.dist`'s. The bot dashboard is the Tortoise module's, not carried here.
+        the `.dist`'s. The two keys are the entry's `bot_count_keys` (Centurion's
+        `Playerbot.RandomPopulation.TargetMin`/`TargetMax` by default, MoP's
+        `AiPlayerbot.MinRandomBots`/`MaxRandomBots`). The bot dashboard is the
+        Tortoise module's, not carried here.
         """
         tc = self._tc()
         etc_dir = ctx.server_dir / ETC_DIR
+        count_keys = tc.conf.bot_count_keys
         table = (
             bot_count.conf_table(
                 tc.conf,
                 etc_dir,
                 name=tc.conf.playerbots_conf,
-                low=bot_count.TC_MIN_KEY,
-                high=bot_count.TC_MAX_KEY,
+                low=count_keys.min if count_keys is not None else bot_count.TC_MIN_KEY,
+                high=count_keys.max if count_keys is not None else bot_count.TC_MAX_KEY,
             )
             if ctx.state.has("conf")
             else tc.conf
@@ -1111,7 +1311,8 @@ class TrinityCoreInstaller(CmangosInstaller):
     def _watched_paths(self) -> tuple[str, ...]:
         """The checkout-relative folders the route asks git about: what the import and maps read."""
         tc = self._tc()
-        found = {tc.extract.dbc_overlay_from.strip("/")}
+        overlay = tc.extract.dbc_overlay_from
+        found = {overlay.strip("/")} if overlay is not None else set()
         prefix = f"{tc.checkout.rstrip('/')}/"
         globs = [glob for phase in tc.sql.phases for glob in phase.files]
         globs += [glob for phase in tc.sql.phases for glob in (phase.into_each or {}).values()]
@@ -1128,9 +1329,11 @@ class TrinityCoreInstaller(CmangosInstaller):
     def _is_map_data(self, rel: str) -> bool:
         """Is this server-dir-relative file one the map data is made from?"""
         tc = self._tc()
-        dbc = posixpath.join(tc.checkout, tc.extract.dbc_overlay_from.strip("/"))
-        if rel.startswith(f"{dbc}/"):
-            return True
+        overlay = tc.extract.dbc_overlay_from
+        if overlay is not None:
+            dbc = posixpath.join(tc.checkout, overlay.strip("/"))
+            if rel.startswith(f"{dbc}/"):
+                return True
         for pack in self._map_packs():
             path = pack.source.path or ""
             if rel == path or rel.startswith(f"{path}.part"):
@@ -2420,10 +2623,10 @@ class TrinityCoreInstaller(CmangosInstaller):
         """Is the map data in `data/` what a finished client-data stage leaves? (T241)
 
         Every tool recorded for its argv with its counts met, the server's own
-        DBCs laid over the extracted ones (`extract.overlaid()`), and the start
-        check's maps and vmaps there -- the three things the stage does, each
-        read off the disk. Anything unread answers False, and the old data comes
-        back.
+        DBCs laid over the extracted ones (`extract.overlaid()`, skipped when the
+        entry names no `dbc_overlay_from`), and the start check's maps and vmaps
+        there -- the three things the stage does, each read off the disk. Anything
+        unread answers False, and the old data comes back.
         """
         tc = self._tc()
         current = extract.read_evidence(data_dir)
@@ -2434,10 +2637,13 @@ class TrinityCoreInstaller(CmangosInstaller):
             for tool in tc.extract.tools
         ):
             return False
-        if extract.missing_map_data(data_dir, tc.required_maps):
+        if extract.missing_map_data(data_dir, tc.required_maps, map_names=tc.map_names):
             return False
+        overlay_from = tc.extract.dbc_overlay_from
+        if overlay_from is None:
+            return True
         return extract.overlaid(
-            server_dir / tc.checkout / tc.extract.dbc_overlay_from,
+            server_dir / tc.checkout / overlay_from,
             data_dir / tc.extract.dbc_overlay_to,
         )
 

@@ -32,6 +32,7 @@ from tests.support_trinitycore import (
     TILE_HEADER,
     FakeJob,
     FakeMmapsDocker,
+    centurion_like,
     mmtile,
 )
 from tests.test_families_trinitycore import (  # noqa: F401 - fixtures, as pytest resolves them
@@ -118,10 +119,15 @@ def record(server_dir: Path) -> dict[str, object]:
     return raw
 
 
-def start(server_dir: Path, fake: FakeMmapsDocker, clock: Clock | None = None) -> str:
+def start(
+    server_dir: Path,
+    fake: FakeMmapsDocker,
+    clock: Clock | None = None,
+    entry: CatalogEntry = ENTRY,
+) -> str:
     return mmaps.start_mmaps(
         server_dir,
-        ENTRY,
+        entry,
         runner=fake,
         clock=clock or Clock(),
         platform_id=lambda: "linux",
@@ -131,10 +137,13 @@ def start(server_dir: Path, fake: FakeMmapsDocker, clock: Clock | None = None) -
 
 
 def status(
-    server_dir: Path, fake: FakeMmapsDocker, clock: Clock | None = None
+    server_dir: Path,
+    fake: FakeMmapsDocker,
+    clock: Clock | None = None,
+    entry: CatalogEntry = ENTRY,
 ) -> mmaps.MmapsStatus:
     return mmaps.mmaps_status(
-        server_dir, ENTRY, runner=fake, clock=clock or Clock(), install_id=INSTALL_ID
+        server_dir, entry, runner=fake, clock=clock or Clock(), install_id=INSTALL_ID
     )
 
 
@@ -235,6 +244,49 @@ def test_a_start_over_an_old_partial_set_empties_it_first(server: Path) -> None:
     assert fake.mmaps_at_run == [[]]
 
 
+MOP = centurion_like(map_names="mmmm_yy_xx")
+"""Centurion's shape on MoP's 4-digit map naming (T850 A2)."""
+
+
+def lay_server_4digit(server_dir: Path) -> None:
+    """`lay_server` under MoP's naming: `maps/MMMM_YY_XX.map`, `vmaps/MMMM.vmtree`."""
+    data = server_dir / "data"
+    (data / "maps").mkdir(parents=True)
+    (data / "vmaps").mkdir()
+    (data / "dbc").mkdir()
+    for map_id in (0, 1, 530):
+        (data / "maps" / f"{map_id:04}_32_48.map").write_bytes(b"MAPS")
+        (data / "vmaps" / f"{map_id:04}.vmtree").write_bytes(b"VMAP_4.8")
+    (data / "dbc" / "LiquidType.dbc").write_bytes(b"LIQUID")
+    (data / extract.EVIDENCE_FILE).write_text('{"plan_hash": "first"}\n', encoding="utf-8")
+    (server_dir / "etc").mkdir()
+    (server_dir / "etc" / "worldserver.conf").write_text(WORLD_CONF, encoding="utf-8")
+
+
+def test_a_start_under_the_mop_naming_reads_the_4_digit_map_files(tmp_path: Path) -> None:
+    """T850 A2: the start check follows the job's block, not a fixed `:03`."""
+    server_dir = tmp_path / "wow-mop-server"
+    lay_server_4digit(server_dir)
+    fake = FakeMmapsDocker()
+
+    said = start(server_dir, fake, entry=MOP)
+
+    assert "in the background" in said
+    assert len(fake.started) == 1
+
+
+def test_a_start_under_the_mop_naming_refuses_centurions_3_digit_map_data(tmp_path: Path) -> None:
+    server_dir = tmp_path / "wow-mop-server"
+    lay_server(server_dir)  # Centurion's names, which MoP's naming does not read
+    fake = FakeMmapsDocker()
+
+    with pytest.raises(mmaps.MmapsError) as caught:
+        start(server_dir, fake, entry=MOP)
+
+    assert "maps/0000_??_??.map" in str(caught.value)
+    assert fake.started == []
+
+
 # -- progress ---------------------------------------------------------------------------
 
 
@@ -259,6 +311,15 @@ def test_progress_is_read_from_the_generators_own_lines(server: Path) -> None:
     read = mmaps.read_record(server)
     assert read is not None and read.percent == 37, "its progress file, laid over the record"
     assert not now.restart_needed and not now.pathfinding_on
+
+
+def test_a_4_digit_map_id_in_the_progress_line_is_read_too(server: Path) -> None:
+    """T850 A2: MoP's generator prints `[Map %04i]` (PathGenerator.cpp:190); same line read."""
+    fake = FakeMmapsDocker()
+    start(server, fake)
+    fake.say("12% [Map 0000] Building tile [30,30]", "13% [Map 0001] Building tile [31,30]")
+    now = status(server, fake)
+    assert (now.state, now.percent, now.map) == ("running", 13, 1)
 
 
 def test_a_fresh_status_after_an_app_restart_reads_the_same_job(server: Path) -> None:
@@ -693,13 +754,22 @@ def test_uninstall_leaves_a_container_another_folder_named(tmp_path: Path) -> No
 # -- what it is offered for ---------------------------------------------------------------
 
 
-def test_only_a_background_trinitycore_block_has_a_job(tmp_path: Path) -> None:
+def test_the_background_job_is_exactly_the_shipped_entries_whose_block_sets_it(
+    tmp_path: Path,
+) -> None:
+    """A job exists precisely for a shipped trinitycore entry with `mmaps.background` set.
+
+    Today that is centurion (T179 Task 7) and mop (T850-D); no other shipped entry
+    sets it, and a non-trinitycore block cannot (`background_block` reads the
+    trinitycore block alone). Pinned as the set, so a new background entry is a
+    deliberate change to this line rather than a silent one.
+    """
     from yulon.catalog.catalog import load_catalog
 
-    for entry in load_catalog().games:
-        # Centurion, the one shipped TrinityCore entry (T179 Task 7), and no other.
-        has_job = mmaps.background_block(entry) is not None
-        assert has_job is (entry.id == "wow-centurion"), entry.id
+    with_job = {
+        entry.id for entry in load_catalog().games if mmaps.background_block(entry) is not None
+    }
+    assert with_job == {"wow-centurion", "wow-mop"}
     assert mmaps.background_block(ENTRY) is not None
     wotlk = load_catalog().get("wow-wotlk")
     with pytest.raises(mmaps.MmapsError, match="during the install"):

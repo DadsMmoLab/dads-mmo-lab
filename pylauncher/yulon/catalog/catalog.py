@@ -1548,11 +1548,14 @@ class TrinityCoreExtractPlan(ExtractPlan):
     copies differ from the server's in places.
     """
 
-    dbc_overlay_from: str = Field(
+    dbc_overlay_from: str | None = Field(
+        default=None,
         min_length=1,
         description=(
             "Directory inside the checkout (relative to `TrinityCoreData.checkout`) whose files "
-            "are copied over the extracted `data/dbc` after the extractors ran."
+            "are copied over the extracted `data/dbc` after the extractors ran. `None` when the "
+            "tree ships no DBCs of its own to lay over the extractor's, which are then used as "
+            "they were written (MoP: the core's DBCs come from the client)."
         ),
     )
 
@@ -1569,8 +1572,8 @@ class TrinityCoreExtractPlan(ExtractPlan):
 
     @field_validator("dbc_overlay_from")
     @classmethod
-    def _inside_the_checkout(cls, value: str) -> str:
-        return _below(value, "dbc_overlay_from", "the checkout")
+    def _inside_the_checkout(cls, value: str | None) -> str | None:
+        return None if value is None else _below(value, "dbc_overlay_from", "the checkout")
 
     client_archives: tuple[str, ...] = Field(
         min_length=1,
@@ -1685,6 +1688,21 @@ class TrinityCoreMmaps(MmapPlan):
     )
 
 
+class BotCountKeys(_Strict):
+    """The two keys a core's bot conf keeps its random-bot count in.
+
+    Centurion's `playerbots.conf` spells them `Playerbot.RandomPopulation.TargetMin`/
+    `TargetMax` (`bot_count.TC_MIN_KEY`/`TC_MAX_KEY`); TrinityCore 5.x/MoP keeps
+    AzerothCore's `AiPlayerbot.MinRandomBots`/`MaxRandomBots` (`bot_count.MIN_KEY`/
+    `MAX_KEY`). The count carry-over (`trinitycore._conf`) and the Bots tab
+    (`bot_population._count_conf`) both read this pair, so a tree that spells
+    them another way needs no code.
+    """
+
+    min: str = Field(min_length=1)
+    max: str = Field(min_length=1)
+
+
 class TrinityCoreConf(ConfPatchTable):
     """The conf table, the world server's conf in it, and the file that must sit beside it."""
 
@@ -1712,6 +1730,15 @@ class TrinityCoreConf(ConfPatchTable):
             "README.md:203-204), which the world server finds in its own conf's folder "
             "(AutoBalanceConfig.cpp:177-213, 761). Never patched and never one of `files`; "
             "Reset to default copies it from the checkout again."
+        ),
+    )
+    bot_count_keys: BotCountKeys | None = Field(
+        default=None,
+        description=(
+            "The two keys this core's bot conf keeps its random-bot count in, or `None` for "
+            "Centurion's `Playerbot.RandomPopulation.TargetMin`/`TargetMax`. The count is carried "
+            "over from the player's conf and read and written by the Bots tab (T117, T179 Task 5); "
+            "both sites read this pair."
         ),
     )
 
@@ -1895,13 +1922,112 @@ class TrinityCoreUpdates(_Strict):
         return value
 
 
+MapNames = Literal["mmmyyxx", "mmmm_yy_xx"]
+"""How a core names its map, vmap and mmap files: `mmmyyxx` is Centurion/AC/CMaNGOS's
+`maps/MMMYYXX.map`, `mmmm_yy_xx` is TrinityCore 5.x/MoP's `maps/MMMM_YY_XX.map`."""
+
+
+GITHUB_RELEASE_HOSTS: frozenset[str] = frozenset(
+    {"objects.githubusercontent.com", "release-assets.githubusercontent.com"}
+)
+"""The two hosts GitHub serves a release asset's bytes FROM (it answers github.com with a redirect).
+
+Named here for the server side, the way a client pack names them in its own
+`redirect_hosts` (T809): a download that follows GitHub's redirect lands on one of
+these, so anything that bounds a download's hosts has to be told both.
+"""
+
+
+RELEASE_HOSTS: frozenset[str] = frozenset({"github.com"}) | GITHUB_RELEASE_HOSTS
+"""Every host a release-asset download may go to: github.com, and the two it redirects to.
+
+Fixed data, never derived from an asset's own url (T850-B, review round 1): a fence
+built from the addresses it is meant to bound can refuse nothing. `ReleaseAsset`'s
+validator keeps every asset url on `github.com`, and a redirect off `github.com` may
+land only on the two hosts above -- never a wildcard, and never a host nobody named.
+"""
+
+
+class ReleaseAsset(_Strict):
+    """One zip a release page serves, used only at exactly this size and sha256 (T850-B).
+
+    Some trees do not ship their databases in the checkout at all: MoP's come from a
+    GitHub release asset whose zip is laid out FLAT -- four `.sql` files at the root,
+    no folder (GAP §0). So this model names the members rather than a folder to keep
+    (`VerifiedArchive.root`): the unpack writes exactly `members` and nothing else
+    the zip happens to hold, and `dest` says where they land.
+    """
+
+    url: str = Field(min_length=1)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    size: int = Field(gt=0, description="Bytes; a download of any other size is refused unread.")
+    dest: str = Field(
+        min_length=1,
+        description=(
+            "The folder under the server dir the members are unpacked into; relative, POSIX, "
+            "and inside the server dir by `GoToolchain.dest`'s rule."
+        ),
+    )
+    members: tuple[str, ...] = Field(
+        min_length=1,
+        description=(
+            "The zip's root-level files to unpack, by name. Each is a plain file name -- no "
+            "`/`, `\\`, `..` or `:` -- and no name is listed twice: this list is the whole of "
+            "what is written to the disk."
+        ),
+    )
+
+    @field_validator("url")
+    @classmethod
+    def _url_is_https_on_github(cls, value: str) -> str:
+        """An https url on `github.com`, the only host `RELEASE_HOSTS` fetches these from.
+
+        A release asset is pinned by size and sha256 as well, so a wrong host is not
+        a way to install something else -- but it is a url this app would fetch from
+        and this catalog never chose, so it is refused where it is written down.
+        """
+        value = _https_url(value, "release asset url")
+        host = urlsplit(value).hostname
+        if host != "github.com":
+            raise ValueError(f"release asset url must be on github.com, got {host!r} in {value!r}")
+        return value
+
+    @field_validator("dest")
+    @classmethod
+    def _dest_stays_inside_the_server_dir(cls, value: str) -> str:
+        return _inside(value, "release asset dest", names_a_file=True)
+
+    @field_validator("members")
+    @classmethod
+    def _members_are_plain_file_names(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        for name in value:
+            rel = PurePosixPath(name)
+            if (
+                not name
+                or "\\" in name
+                or ":" in name
+                or rel.is_absolute()
+                or ".." in rel.parts
+                or len(rel.parts) != 1
+            ):
+                raise ValueError(
+                    "release asset members must be plain file names at the zip's root, got "
+                    f"{name!r}"
+                )
+        if len(set(value)) != len(value):
+            raise ValueError(f"release asset members repeat a name: {list(value)}")
+        return value
+
+
 class TrinityCoreData(_Strict):
     """Everything the TrinityCore family needs that differs per game (T179).
 
     Shaped after `CmangosData`, with what Centurion (a TrinityCore 3.3.5 fork)
-    adds: a sparse checkout, CMake defines, a DBC overlay from the checkout, mmaps
-    in the background, a `playerbots.conf` beside `worldserver.conf`, renames in
-    the import, and the maps the start check requires. The facts are in
+    adds: a sparse checkout, CMake defines, a DBC overlay from the checkout (when
+    the tree ships one), mmaps in the background, a `playerbots.conf` beside
+    `worldserver.conf`, renames in the import, the maps the start check requires
+    and how the tree names them (`map_names`), and the keys its bot conf keeps the
+    random-bot count in (`conf.bot_count_keys`). The facts are in
     `.notes/tickets/T179-centurion-facts.md` (CENTURION @ faac5fc9).
     """
 
@@ -1940,6 +2066,18 @@ class TrinityCoreData(_Strict):
             "6c6472c3, read 2026-10-07, facts §3) -- 0 and 1, and 530 with `Expansion = 2`."
         ),
     )
+    map_names: MapNames = Field(
+        default="mmmyyxx",
+        description=(
+            "How the core names its map, vmap and mmap files, which the start check reads. "
+            "`mmmyyxx`: `maps/MMMYYXX.map`, a 3-digit map id then the two grid numbers with no "
+            "separator, and `vmaps/MMM.vmtree` -- Centurion/AC/CMaNGOS, e.g. `maps/0003248.map`, "
+            "`vmaps/000.vmtree`. `mmmm_yy_xx`: `maps/MMMM_YY_XX.map`, a 4-digit map id, `_YY_XX`, "
+            "and `vmaps/MMMM.vmtree` -- TrinityCore 5.x/MoP, e.g. `maps/0000_32_48.map`, "
+            "`vmaps/0000.vmtree`. The mmaps generator follows the same id width: "
+            "`mmaps/MMMM.mmap` and `mmaps/MMMM_YY_XX.mmtile`."
+        ),
+    )
     world_data_dirs: tuple[Annotated[str, Field(pattern=r"^[A-Za-z0-9_]+$")], ...] = Field(
         default=(),
         description=(
@@ -1973,6 +2111,15 @@ class TrinityCoreData(_Strict):
             "What an update to the latest code, or a return to the tested pin, does with a "
             "change to the SQL snapshot (T179 Task 6). Required when the entry offers "
             "`update_to_latest`."
+        ),
+    )
+    release_assets: tuple[ReleaseAsset, ...] = Field(
+        default=(),
+        description=(
+            "Zips this entry's install downloads from a release page, for a tree whose "
+            "databases are not in its checkout (T850-B). Empty -- every entry today but "
+            "MoP's -- means the family has no `fetch-release` stage at all, so an entry "
+            "that names none behaves exactly as it did before the stage existed."
         ),
     )
 
@@ -2753,7 +2900,10 @@ class AccountLevel(_Strict):
 class Accounts(_Strict):
     """Whether this app can create an account on this core by writing the row itself.
 
-    Three shapes, one per core family. AzerothCore uses `salt`/`verifier` with
+    Four shapes across five schemes: the trinitycore family carries two. The
+    credential and the GM level are independent halves, and exactly one scheme
+    mixes them — which is why `scheme` names a core's row shape rather than a
+    family. AzerothCore uses `salt`/`verifier` with
     the level in `account_access`. Tortoise uses `sha_pass_hash` with the level
     in `account.rank` — measured against a live server on 2026-08-26, where the
     core logged its own INSERT and `SHA1(UPPER(user):UPPER(pass))` matched it
@@ -2762,13 +2912,18 @@ class Accounts(_Strict):
     real clients (8.3b, 8.3c): `x = SHA1(reverse(s) + SHA1(UPPER(user:pass)))`
     little-endian, `v = 7^x mod N`, recomputed by hand and matching the row.
     This paragraph said "has not been measured, so it is declared unsupported"
-    for a day after it was (audit, 2026-09-08).
+    for a day after it was (audit, 2026-09-08). `trinitycore_sha` (T850-C) is
+    the TrinityCore family's Mists of Pandaria line: `mangos_sha`'s one
+    `sha_pass_hash` column (folded the same way, so the same recipe) with
+    `azerothcore`'s `account_access(id, gmlevel, RealmID)` for the level.
 
     Getting this wrong does not fail loudly — it inserts a row that looks
     correct and can never log in.
     """
 
-    scheme: Literal["azerothcore", "mangos_sha", "mangos_srp6", "trinitycore"] | None = Field(
+    scheme: (
+        Literal["azerothcore", "mangos_sha", "mangos_srp6", "trinitycore", "trinitycore_sha"] | None
+    ) = Field(
         default="azerothcore",
         description=(
             "How this core stores an account: `azerothcore` is SRP6 in binary salt/verifier "
@@ -2776,7 +2931,10 @@ class Accounts(_Strict):
             "in account.rank; `mangos_srp6` is the same SRP6 as AzerothCore stored as hex "
             "text in v/s with the level in account.gmlevel; `trinitycore` is TrinityCore's "
             "salt/verifier with the level in account_access(AccountID, SecurityLevel, RealmID) "
-            "with RealmID -1 (T179). None means this app does not "
+            "with RealmID -1 (T179); `trinitycore_sha` (T850-C) is that family's other shape, "
+            "which its Mists of Pandaria line writes: sha_pass_hash with v/s left '' for the "
+            "authserver to derive, and the level in account_access(id, gmlevel, RealmID). "
+            "None means this app does not "
             "write accounts for this core and "
             "the Accounts tab points at `console_command` instead. Never defaulted onto a "
             "core that has not been measured — a wrong scheme inserts a row that looks "
@@ -3578,10 +3736,22 @@ class ConfigWtf(_Strict):
     `always` is set at every Play (where the server is); `seed` only where
     the key is absent (a first-run preference the player may change after).
     A key in both would be a seed that is never a seed, so it is refused.
+    `remove` names keys whose lines are taken out of the file first, for a
+    client whose shipped `Config.wtf` sends it somewhere this server is not
+    (`portal`); a key that is also set or seeded is refused.
     """
 
     always: dict[WtfKey, WtfValue] = Field(default_factory=dict)
     seed: dict[WtfKey, WtfValue] = Field(default_factory=dict)
+    remove: tuple[WtfKey, ...] = Field(
+        default=(),
+        description=(
+            "Keys whose `SET` lines are taken out of the ready-to-play client's Config.wtf "
+            "before the merge, whatever they hold (MoP's shipped `portal`). Passed to "
+            "`client_config.merge_config_wtf(..., remove=...)` beside the launcher's own "
+            "removals. A key in both this and `always`/`seed` is refused."
+        ),
+    )
     remove_locale_realmlists: bool = Field(
         default=False,
         description=(
@@ -3595,6 +3765,15 @@ class ConfigWtf(_Strict):
         both = sorted(key for key in self.seed if key.casefold() in always)
         if both:
             raise ValueError(f"Config.wtf keys {both} are in both always and seed")
+        return self
+
+    @model_validator(mode="after")
+    def _a_key_is_never_both_set_and_removed(self) -> ConfigWtf:
+        """A key the merge removes and then sets (or seeds) would come back: refuse it."""
+        set_or_seeded = {key.casefold() for key in (*self.always, *self.seed)}
+        both = sorted(key for key in self.remove if key.casefold() in set_or_seeded)
+        if both:
+            raise ValueError(f"Config.wtf keys {both} are in remove and also in always or seed")
         return self
 
 
@@ -4253,8 +4432,9 @@ class CatalogEntry(_Strict):
         `databases` would point the dumps' triggers and procedures at somebody
         else's database (import.sh:41-43). And `accounts.scheme` defaults to
         AzerothCore's, whose `account_access(id, gmlevel)` is not TrinityCore's
-        `(AccountID, SecurityLevel)` (facts §5), so the entry must declare
-        `trinitycore` or no scheme at all.
+        `(AccountID, SecurityLevel)` (facts §5), so the entry must declare one
+        of this family's own schemes -- `trinitycore` (TrinityCore112/Centurion)
+        or `trinitycore_sha` (the MoP line, T850-C) -- or no scheme at all.
         """
         native = self.install.native
         block = native.trinitycore if native is not None else None
@@ -4266,9 +4446,10 @@ class CatalogEntry(_Strict):
                 f"trinitycore.checkout is {block.checkout!r}, which is not a dest of any of "
                 f"this entry's sources {sorted(dests)}"
             )
-        if self.accounts.scheme not in ("trinitycore", None):
+        if self.accounts.scheme not in ("trinitycore", "trinitycore_sha", None):
             raise ValueError(
-                f"a trinitycore entry's accounts.scheme must be 'trinitycore' or null, got "
+                f"a trinitycore entry's accounts.scheme must be 'trinitycore' or "
+                f"'trinitycore_sha' or null, got "
                 f"{self.accounts.scheme!r}: another core's columns write rows that look right "
                 "and grant nothing (an omitted accounts block inherits 'azerothcore')"
             )

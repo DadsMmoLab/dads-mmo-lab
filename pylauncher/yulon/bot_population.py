@@ -209,7 +209,10 @@ def _count_conf(entry: CatalogEntry) -> _CountConf | None:
         patch = table.files.get(table.playerbots_conf)
         if patch is not None:
             file = f"{ETC_DIR}/{table.playerbots_conf}"
-            return _CountConf(file, patch, TC_MIN_KEY, TC_MAX_KEY, None)
+            keys = table.bot_count_keys
+            low = keys.min if keys is not None else TC_MIN_KEY
+            high = keys.max if keys is not None else TC_MAX_KEY
+            return _CountConf(file, patch, low, high, None)
     return None
 
 

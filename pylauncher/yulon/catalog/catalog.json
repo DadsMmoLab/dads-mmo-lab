@@ -3385,6 +3385,481 @@
             "realm_id": 1,
             "offline_flag_column": "flag"
         }
+    },
+    {
+        "id": "wow-mop",
+        "name": "WoW Mists of Pandaria",
+        "status": "beta",
+        "description": "Mists of Pandaria 5.4.8 (Legends of Azeroth Pandaria) with 500 playerbots that quest, travel, group and level from 1 to 90, Pandaria included. Yu'lon builds the server from LoA Pandaria's own source and makes your English 5.4.8 client ready to play it. Bring the Recall WoW client.",
+        "notes": [
+            "T850: 1LineAtaTime/LoA-Pandaria-Playerbots, branch `playerbot` @ e135742e1891d3e653d27966da2dc70e793f203e (tag v1.0.4, 2026-10-26, \"Fix the Linux build\"): a TrinityCore/SkyFire-lineage 5.4.8 fork (Legends of Azeroth Pandaria) with mod_playerbots ported from AzerothCore. The lab's handoff of 2026-10-28 logged in, created a character and ran 500 bots on this exact commit on Docker Desktop; the catalog ENTRY is not live-tested (GAP §2 and §4).",
+            "The four databases come from the release asset LoA-Pandaria-Playerbots-v1.0.4-win64-database.zip (142,501,177 B, sha256 db8dd845e3a5da4bc3a6f28afa68ed839aceb222101db949ae74840a5a2365a0): four .sql files at the ZIP'S ROOT, no folder (GAP §0). Source pin, asset and zip layout read at GAP §0; NOT from the checkout, whose sql/base holds no world.",
+            "Client data is MPQ, not CASC: 5.4.8 predates CASC, and the extractors open fixed names (upstream src/tools/map_extractor/System.cpp:104-117,1275-1400 and vmap4_extractor/vmapexport.cpp:68-79,130-165). Target build is 18273 -- `18414 but Blizz didnt rename the MPQ files` (System.cpp:101) -- so the 18 wow-update MPQ names carry 16016..18273, never 18414.",
+            "GAP §2's \"Characters tab\" row: NOTHING has been run against a live LoA Pandaria server, so every Characters verb is withheld with the \"each is offered once it has been checked against a live server\" sentence, Revive included; fill them in after the first live check.",
+            "T850-F: the Bots tab's marker is `RNDBOT`, the stored form of `AiPlayerbot.RandomBotAccountPrefix`'s default `rndbot` (playerbots.conf.dist:621): the core upper-cases every account name in AccountMgr::normalizeString (AccountMgr.cpp:48-50,327-343). No registry table is named (`registry: null`) because this core's module creates none: the only playerbots table it touches is `playerbots_random_bots` (PlayerbotAIConfig.cpp:418), which it deletes from, and GAP §2 lists no account-type table for MoP -- so bots are found by the prefix arm alone until a live install shows a registry."
+        ],
+        "emulator": {
+            "name": "Legends of Azeroth Pandaria (TrinityCore 5.4.8 fork) + mod_playerbots",
+            "sources": [
+                {
+                    "repo": "1LineAtaTime/LoA-Pandaria-Playerbots",
+                    "branch": "playerbot",
+                    "dest": "src/mop",
+                    "rev": "e135742e1891d3e653d27966da2dc70e793f203e"
+                }
+            ]
+        },
+        "install": {
+            "platforms": [
+                "linux",
+                "windows"
+            ],
+            "default_server_dir": "yulon-mop",
+            "requires_client_dir": true,
+            "password": {
+                "mode": "generated",
+                "file": ".db_password",
+                "prefix": "tc-"
+            },
+            "native": {
+                "family": "trinitycore",
+                "update_to_latest": false,
+                "templates": "shared/trinitycore",
+                "dockerfile_dir": "wow-mop/native",
+                "image_prefix": "yulon.local/trinitycore-mop-",
+                "images": [
+                    "server"
+                ],
+                "min_ram_gb": 8,
+                "warn_ram_gb": 16,
+                "min_server_dir_gb": 14,
+                "warn_server_dir_gb": 25,
+                "db": {
+                    "image": "mysql:8.4",
+                    "client": "mysql",
+                    "user": "root"
+                },
+                "ready": {
+                    "world": "Starting up anti-freeze thread",
+                    "auth": null,
+                    "fatal": "Correct \\*\\.map files not found|Load playerbots failed",
+                    "regex": true,
+                    "timeout_s": 1800,
+                    "restart_loop": 4
+                },
+                "save_before_stop": {
+                    "command": "saveall",
+                    "first": ["server plimit administrator"],
+                    "if_given_up": ["server plimit reset"]
+                },
+                "trinitycore": {
+                    "checkout": "src/mop",
+                    "client": {
+                        "required_file": "Data/expansion4.MPQ",
+                        "archives_any_case": true,
+                        "min_mpq": 8,
+                        "mpq_depth": "recursive",
+                        "locale_mpq_required": true,
+                        "locales": [
+                            "enUS"
+                        ]
+                    },
+                    "sparse_exclude": [
+                        "sql/old",
+                        "sql/archive",
+                        "contrib"
+                    ],
+                    "dockerfile": {
+                        "make_jobs": 2,
+                        "cmake_options": [
+                            "-DCMAKE_BUILD_TYPE=RelWithDebInfo",
+                            "-DTOOLS=1",
+                            "-DELUNA=0"
+                        ]
+                    },
+                    "extract": {
+                        "image": "server",
+                        "tools": [
+                            {
+                                "name": "maps, dbc and cameras",
+                                "argv": [
+                                    "/opt/mop/bin/mapextractor",
+                                    "-i",
+                                    "/client",
+                                    "-o",
+                                    "/out"
+                                ],
+                                "produces": {
+                                    "maps": 100,
+                                    "dbc": 100,
+                                    "cameras": 1
+                                }
+                            },
+                            {
+                                "name": "vmap extract",
+                                "argv": [
+                                    "/opt/mop/bin/vmap4extractor",
+                                    "-d",
+                                    "/client/Data/"
+                                ],
+                                "produces": {
+                                    "Buildings": 100
+                                }
+                            },
+                            {
+                                "name": "vmap assemble",
+                                "argv": [
+                                    "/opt/mop/bin/vmap4assembler",
+                                    "Buildings",
+                                    "vmaps"
+                                ],
+                                "produces": {
+                                    "vmaps": 100
+                                }
+                            }
+                        ],
+                        "dbc_overlay_from": null,
+                        "client_archives": [
+                            "world.MPQ",
+                            "model.MPQ",
+                            "misc.MPQ",
+                            "expansion1.MPQ",
+                            "expansion2.MPQ",
+                            "expansion3.MPQ",
+                            "expansion4.MPQ",
+                            "wow-update-base-16016.MPQ",
+                            "wow-update-base-16048.MPQ",
+                            "wow-update-base-16057.MPQ",
+                            "wow-update-base-16309.MPQ",
+                            "wow-update-base-16357.MPQ",
+                            "wow-update-base-16516.MPQ",
+                            "wow-update-base-16650.MPQ",
+                            "wow-update-base-16844.MPQ",
+                            "wow-update-base-16965.MPQ",
+                            "wow-update-base-17116.MPQ",
+                            "wow-update-base-17266.MPQ",
+                            "wow-update-base-17325.MPQ",
+                            "wow-update-base-17345.MPQ",
+                            "wow-update-base-17538.MPQ",
+                            "wow-update-base-17645.MPQ",
+                            "wow-update-base-17688.MPQ",
+                            "wow-update-base-17898.MPQ",
+                            "wow-update-base-18273.MPQ",
+                            "{locale}/locale-{locale}.MPQ",
+                            "{locale}/wow-update-{locale}-16016.MPQ",
+                            "{locale}/wow-update-{locale}-16048.MPQ",
+                            "{locale}/wow-update-{locale}-16057.MPQ",
+                            "{locale}/wow-update-{locale}-16309.MPQ",
+                            "{locale}/wow-update-{locale}-16357.MPQ",
+                            "{locale}/wow-update-{locale}-16516.MPQ",
+                            "{locale}/wow-update-{locale}-16650.MPQ",
+                            "{locale}/wow-update-{locale}-16844.MPQ",
+                            "{locale}/wow-update-{locale}-16965.MPQ",
+                            "{locale}/wow-update-{locale}-17116.MPQ",
+                            "{locale}/wow-update-{locale}-17266.MPQ",
+                            "{locale}/wow-update-{locale}-17325.MPQ",
+                            "{locale}/wow-update-{locale}-17345.MPQ",
+                            "{locale}/wow-update-{locale}-17538.MPQ",
+                            "{locale}/wow-update-{locale}-17645.MPQ",
+                            "{locale}/wow-update-{locale}-17688.MPQ",
+                            "{locale}/wow-update-{locale}-17898.MPQ",
+                            "{locale}/wow-update-{locale}-18273.MPQ"
+                        ]
+                    },
+                    "mmaps": {
+                        "argv": [
+                            "stdbuf",
+                            "-oL",
+                            "/opt/mop/bin/mmaps_generator",
+                            "--threads",
+                            "{{THREADS}}"
+                        ],
+                        "min_files": 5000,
+                        "background": true,
+                        "generation": 1,
+                        "tile_header": {
+                            "length": 20,
+                            "magic": 1296908624,
+                            "size_offset": 12
+                        }
+                    },
+                    "conf": {
+                        "source_dir": "/opt/mop/etc",
+                        "files": {
+                            "worldserver.conf": {
+                                "keys": {
+                                    "Updates.EnableDatabases": "0",
+                                    "DataDir": "\"/opt/mop/data\"",
+                                    "LogsDir": "\"../logs\"",
+                                    "LoginDatabaseInfo": "\"{{DB_HOST}};3306;{{DB_USER}};{{DB_PASSWORD}};{{AUTH_DB}}\"",
+                                    "WorldDatabaseInfo": "\"{{DB_HOST}};3306;{{DB_USER}};{{DB_PASSWORD}};{{WORLD_DB}}\"",
+                                    "CharacterDatabaseInfo": "\"{{DB_HOST}};3306;{{DB_USER}};{{DB_PASSWORD}};{{CHAR_DB}}\"",
+                                    "PlayerbotsDatabaseInfo": "\"{{DB_HOST}};3306;{{DB_USER}};{{DB_PASSWORD}};{{PLAYERBOTS_DB}}\"",
+                                    "WorldServerPort": "{{WORLD_PORT}}",
+                                    "RealmID": "1",
+                                    "Console.Enable": "1",
+                                    "SOAP.Enabled": "1",
+                                    "SOAP.IP": "\"0.0.0.0\"",
+                                    "SOAP.Port": "7878",
+                                    "mmap.enablePathFinding": "0",
+                                    "MaxCoreStuckTime": "300"
+                                }
+                            },
+                            "authserver.conf": {
+                                "keys": {
+                                    "LogsDir": "\"../logs\"",
+                                    "LoginDatabaseInfo": "\"{{DB_HOST}};3306;{{DB_USER}};{{DB_PASSWORD}};{{AUTH_DB}}\""
+                                }
+                            },
+                            "playerbots.conf": {
+                                "keys": {
+                                    "PlayerbotsDatabaseInfo": "\"{{DB_HOST}};3306;{{DB_USER}};{{DB_PASSWORD}};{{PLAYERBOTS_DB}}\"",
+                                    "AiPlayerbot.Enabled": "1",
+                                    "AiPlayerbot.MinRandomBots": "500",
+                                    "AiPlayerbot.MaxRandomBots": "500",
+                                    "AiPlayerbot.RandomBotAccountCount": "200",
+                                    "AiPlayerbot.RandomBotMaxLevel": "90",
+                                    "AiPlayerbot.RandomBotMaps": "0,1,530,571,646,648,654,860,870,1064",
+                                    "AiPlayerbot.CommandServerPort": "0"
+                                }
+                            }
+                        },
+                        "playerbots_conf": "playerbots.conf",
+                        "bot_count_keys": {
+                            "min": "AiPlayerbot.MinRandomBots",
+                            "max": "AiPlayerbot.MaxRandomBots"
+                        }
+                    },
+                    "sql": {
+                        "create": [],
+                        "phases": [
+                            {
+                                "name": "databases",
+                                "statements": [
+                                    "CREATE DATABASE IF NOT EXISTS `{{AUTH_DB}}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci",
+                                    "CREATE DATABASE IF NOT EXISTS `{{CHAR_DB}}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci",
+                                    "CREATE DATABASE IF NOT EXISTS `{{WORLD_DB}}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci",
+                                    "CREATE DATABASE IF NOT EXISTS `{{PLAYERBOTS_DB}}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+                                ]
+                            },
+                            {
+                                "name": "auth",
+                                "into": "mop_auth",
+                                "files": [
+                                    "release/v1.0.4/db/auth.sql"
+                                ]
+                            },
+                            {
+                                "name": "characters",
+                                "into": "mop_characters",
+                                "files": [
+                                    "release/v1.0.4/db/characters.sql"
+                                ]
+                            },
+                            {
+                                "name": "world",
+                                "into": "mop_world",
+                                "files": [
+                                    "release/v1.0.4/db/world.sql"
+                                ]
+                            },
+                            {
+                                "name": "playerbots",
+                                "into": "mop_playerbots",
+                                "files": [
+                                    "release/v1.0.4/db/playerbots.sql"
+                                ]
+                            }
+                        ],
+                        "verify": [
+                            {
+                                "db": "mop_world",
+                                "query": "SELECT COUNT(*) FROM creature",
+                                "min": 300000
+                            },
+                            {
+                                "db": "mop_world",
+                                "query": "SELECT COUNT(*) FROM quest_template",
+                                "min": 18000
+                            },
+                            {
+                                "db": "mop_auth",
+                                "query": "SELECT COUNT(*) FROM realmlist WHERE id = 1",
+                                "min": 1
+                            }
+                        ],
+                        "player_data": [
+                            {
+                                "db": "mop_auth",
+                                "table": "account",
+                                "exclude_usernames": []
+                            }
+                        ],
+                        "marker_db": "mop_world"
+                    },
+                    "required_maps": [
+                        0,
+                        1,
+                        530,
+                        609,
+                        648,
+                        654,
+                        860
+                    ],
+                    "map_names": "mmmm_yy_xx",
+                    "world_data_dirs": [
+                        "dbc",
+                        "maps",
+                        "vmaps",
+                        "mmaps",
+                        "cameras"
+                    ],
+                    "world_data_gb": 8,
+                    "release_assets": [
+                        {
+                            "url": "https://github.com/1LineAtaTime/LoA-Pandaria-Playerbots/releases/download/v1.0.4/LoA-Pandaria-Playerbots-v1.0.4-win64-database.zip",
+                            "sha256": "db8dd845e3a5da4bc3a6f28afa68ed839aceb222101db949ae74840a5a2365a0",
+                            "size": 142501177,
+                            "dest": "release/v1.0.4/db",
+                            "members": [
+                                "auth.sql",
+                                "characters.sql",
+                                "playerbots.sql",
+                                "world.sql"
+                            ]
+                        }
+                    ]
+                }
+            }
+        },
+        "containers": {
+            "db": "mop-db",
+            "auth": "mop-authserver",
+            "world": "mop-worldserver"
+        },
+        "ports": {
+            "auth": 3724,
+            "world": 8085,
+            "db": 3306
+        },
+        "databases": {
+            "auth": "mop_auth",
+            "characters": "mop_characters",
+            "world": "mop_world",
+            "extra": [
+                "mop_playerbots"
+            ],
+            "playerbots": "mop_playerbots"
+        },
+        "realmlist": {
+            "table": "realmlist",
+            "address_column": "address",
+            "local_address_column": "localAddress"
+        },
+        "client": {
+            "addon_interface": 50400,
+            "version": "5.4.8",
+            "build": 18414,
+            "required_build": 18414,
+            "exe_names": [
+                "_wow-64.exe"
+            ],
+            "notes": [
+                "Get the client from Recall WoW (https://www.recallwow.online/, the Mists of Pandaria download): RecallWoWHDmodels.zip, 24.1 GB, sha256 fe93438d76ff785199cb4ce95723fb701bc78bbd69f0cfe572d04b0e4498e375. It unpacks to one folder, World of Warcraft 5.4.8; launch _Wow-64.exe. Yu'lon never downloads it.",
+                "The Recall client logs in to this server with no exe patch (handoff, 2026-10-28). The four Wow*.exe files are Tauri's 5.4.8 builds, which use grunt login: the login button is stock, so no @-name and no Battle.net."
+            ],
+            "config_wtf": {
+                "always": {
+                    "realmList": "127.0.0.1",
+                    "locale": "enUS",
+                    "installLocale": "enUS"
+                },
+                "seed": {
+                    "readTOS": "1",
+                    "readEULA": "1",
+                    "lastReadTOS": "50408",
+                    "lastReadEULA": "50408"
+                },
+                "remove": [
+                    "portal"
+                ],
+                "remove_locale_realmlists": true
+            }
+        },
+        "play": {
+            "equipped": {
+                "template_column": "itemEntry",
+                "instance_table": "item_instance",
+                "inventory_column": "item"
+            },
+            "teleport_command": "tele name",
+            "mail_item_cap": 12,
+            "rename_command": "character rename",
+            "set_level_command": "character level"
+        },
+        "accounts": {
+            "scheme": "trinitycore_sha",
+            "level": {
+                "table": "account_access",
+                "account_column": "id",
+                "level_column": "gmlevel",
+                "max_level": 3
+            }
+        },
+        "console": {
+            "prompt": "SF>",
+            "prompt_precedes_answer": true
+        },
+        "operations": {
+            "channel": "soap",
+            "namespace": "urn:TC",
+            "port": 7878,
+            "gm_level": 3,
+            "enable_conf": {
+                "file": "etc/worldserver.conf",
+                "keys": {
+                    "SOAP.Enabled": "1",
+                    "SOAP.IP": "0.0.0.0",
+                    "SOAP.Port": "7878"
+                }
+            },
+            "publish": true,
+            "must_not_listen": [
+                8888,
+                3443
+            ]
+        },
+        "observability": {
+            "characters": {
+                "table": "characters",
+                "account": "account",
+                "online": "online"
+            },
+            "bots": {
+                "account_prefix": "RNDBOT",
+                "prefix_conf_file": "etc/playerbots.conf",
+                "prefix_conf_key": "AiPlayerbot.RandomBotAccountPrefix",
+                "registry": null
+            }
+        },
+        "has_manifests": false,
+        "help_places": [
+            {
+                "label": "1LineAtaTime/LoA-Pandaria-Playerbots",
+                "url": "https://github.com/1LineAtaTime/LoA-Pandaria-Playerbots/issues",
+                "purpose": "Bugs in the Legends of Azeroth Pandaria server and its playerbots."
+            },
+            {
+                "label": "Recall WoW",
+                "url": "https://www.recallwow.online/",
+                "purpose": "Where the 5.4.8 client this server is played with comes from."
+            },
+            {
+                "label": "Yu'lon",
+                "url": "https://github.com/DadsMmoLab/dads-mmo-lab/issues",
+                "purpose": "Problems with Yu'lon itself: installing, starting, and this app."
+            }
+        ]
     }
   ],
   "single": [

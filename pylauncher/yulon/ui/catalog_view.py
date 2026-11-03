@@ -504,6 +504,15 @@ _CAMPAIGN_PRESENTATION: dict[str, _CampaignPresentation] = {
         subtitle="Level-60 PvP with bots",
         software="Centurion, a TrinityCore with its own playerbots",
     ),
+    # T850: the same family's second entry, and the same borrowed shield glyph for it.
+    # "with bots", not "with playerbots": the tile's tooltip may not spell the entry's
+    # branch, which upstream calls `playerbot` (test_catalog_view.py), and the substring
+    # is inside the longer word.
+    "wow-mop": _CampaignPresentation(
+        glyph="🛡️",
+        subtitle="Mists of Pandaria",
+        software="LoA Pandaria 5.4.8 with bots",
+    ),
     "ddon": _CampaignPresentation(
         glyph="🐉",
         subtitle="Dragon's Dogma Online",

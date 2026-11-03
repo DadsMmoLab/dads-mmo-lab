@@ -26,7 +26,6 @@ asks for no client, so the first Start on the server's tab is where it first run
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import shutil
@@ -39,7 +38,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 
 from yulon import platform, resources, runner
-from yulon.catalog import composegen, native
+from yulon.catalog import composegen, native, verified_download
 from yulon.catalog.catalog import SingleEntry, SingleProcess, VerifiedArchive
 from yulon.catalog.families import patch
 from yulon.catalog.installer import (
@@ -130,15 +129,6 @@ def go_env(server_dir: Path, process: SingleProcess) -> dict[str, str]:
 def _is_tarball(url: str) -> bool:
     """Whether an archive is a gzipped tar (Go's Linux release) rather than a zip."""
     return url.endswith((".tar.gz", ".tgz"))
-
-
-def sha256_of(path: Path) -> str:
-    """The file's sha256, read in chunks: the archives are tens of megabytes."""
-    digest = hashlib.sha256()
-    with path.open("rb") as fh:
-        while block := fh.read(CHUNK):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 def unpacked_from(folder: Path) -> str | None:
@@ -481,31 +471,19 @@ class ProcessInstaller:
             pass  # a folder still holding the other download, or one Windows has open
 
     def _download(self, archive: VerifiedArchive, zip_path: Path) -> Iterator[str]:
-        """Fetch `archive` to `zip_path` and refuse it unless its size and sha256 are the pin's.
+        """Fetch `archive` to `zip_path`, checked against its pin and retried once.
 
-        A file already at `zip_path` that fails the check is deleted and fetched once
-        more: `download_verified()` reuses a completed file as it finds it, and a
-        download cut off by a lost connection is complete by its own lights.
+        The rule itself is `verified_download.download_verified()`, shared with the
+        TrinityCore family's `fetch-release` stage (T850-B): one place says what a
+        download that does not match its pin costs, and both engines say it.
         """
-        for attempt in (1, 2):
-            if not zip_path.is_file():
-                yield f"Downloading {archive.url}"
-            try:
-                self._seams.download(archive.url, zip_path)
-            except OSError as exc:
-                raise InstallerError(f"{archive.url} could not be downloaded: {exc}") from exc
-            size = zip_path.stat().st_size
-            if size == archive.size and sha256_of(zip_path) == archive.sha256:
-                yield f"{zip_path.name} matches its pinned size and sha256."
-                return
-            zip_path.unlink(missing_ok=True)
-            if attempt == 2:
-                raise InstallerError(
-                    f"{archive.url} did not match the size and sha256 this version of Yu'lon "
-                    f"pins ({size} bytes, expected {archive.size}). It was deleted and nothing "
-                    "was unpacked."
-                )
-            yield "The download did not match its pinned sha256; fetching it again."
+        yield from verified_download.download_verified(
+            archive.url,
+            zip_path,
+            size=archive.size,
+            sha256=archive.sha256,
+            download=self._seams.download,
+        )
 
     def _unpack(
         self,

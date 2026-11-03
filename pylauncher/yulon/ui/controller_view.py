@@ -5195,7 +5195,7 @@ def _for_centurion(
     client_dir: Path | None,
     wsl_distro: str | None,
 ) -> ControllerServices:
-    """Centurion (TrinityCore, T179), through `controller_wow_centurion`.
+    """Centurion and Mists of Pandaria (TrinityCore, T179/T850), via `controller_wow_centurion`.
 
     Every seam is the entry's: the package takes the entry rather than reading
     the shipped catalog, because `wow-centurion` lands there only in T179 Task 7.
@@ -5205,7 +5205,8 @@ def _for_centurion(
     bots ride on `observability`; Accounts on `accounts.level`; Characters on
     `play`. What is not offered is said where it would be: My Party (the
     registry's note), the Modules tab (`NO_ADDON_MODULES`), and every Characters
-    verb Centurion withholds (`centurion_characters.withheld`).
+    verb this tree withholds (`centurion_characters.withheld`, keyed per id --
+    Centurion's five are its own live check's, MoP offers none yet).
 
     No `import_probe`: the import is the install engine's marker-gated SQL plan,
     and the Repair button's only action, `docker.repair_import()`, refuses an
@@ -5838,6 +5839,10 @@ _FACTORIES: dict[str, _Factory] = {
     # T179: the `trinitycore` family's first game. Its catalog entry is T179
     # Task 7's; until it ships, nothing in the catalog reaches this row.
     "wow-centurion": _for_centurion,
+    # T850: Mists of Pandaria is the same family and the same package, entry-driven
+    # like Unbound and CoA are over WotLK's; its own per-tree facts (the Characters
+    # verbs nobody has checked yet) live in `centurion_characters`.
+    "wow-mop": _for_centurion,
 }
 """Catalog id → the wiring for that game. `for_entry()` is the only reader.
 
@@ -14967,7 +14972,8 @@ class ControllerView(QWidget):
                     ) from exc
             # The catalog's `always` is the server's own: `launcher_config_keys` dropped every
             # pick it sets except a typed address's `realmList`/`patchList`, which win (lead
-            # ruling). A pick, or a removal, also takes a seed's place.
+            # ruling). A pick, or a removal, also takes a seed's place. The catalog's own
+            # `remove` (`portal`, T850 A5) goes in beside the picks' removals.
             taken = {key.casefold() for key in (*picked, *removed)}
             cfg = cfg.model_copy(
                 update={
@@ -14979,7 +14985,7 @@ class ControllerView(QWidget):
                 }
             )
             client_config.merge_config_wtf(
-                play, cfg, first_run=not record.config_seeded, remove=removed
+                play, cfg, first_run=not record.config_seeded, remove=(*removed, *cfg.remove)
             )
             seeded = True
             save()

@@ -72,6 +72,7 @@ NEW_BUILD_CHANGES: dict[str, tuple[str, ...]] = {
     "wow-vanilla": (),
     "wow-tortoise": ("auth", "characters", "world"),
     "wow-centurion": (),
+    "wow-mop": (),  # T850: same as Centurion's -- `Updates.EnableDatabases` is forced to 0
 }
 """Per shipped entry, by role: what its new build can write at its first start.
 
@@ -112,6 +113,7 @@ def test_every_shipped_entry_names_the_databases_its_new_build_changes() -> None
         ("wow-tbc", ()),
         ("wow-vanilla", ()),
         ("wow-centurion", ()),
+        ("wow-mop", ()),
     ],
 )
 def test_the_roles_resolve_to_the_entrys_own_schema_names(

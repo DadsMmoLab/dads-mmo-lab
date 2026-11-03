@@ -132,10 +132,10 @@ All of the below on Linux. On Windows, the command channel and the Accounts tab 
 
 ## Which servers
 
-The catalog lists six: WoW WotLK (stable), and WoW TBC, WoW Vanilla, WoW Tortoise, Centurion and
-WoW Unbound (beta). WotLK, TBC, Vanilla and Tortoise were exercised against a live server in
-Phase 8 -- TBC, Vanilla and Tortoise each on the test box with a real game client of its own
-version -- and every ticked box in `pyplan/checklist.md` says what was measured on which tree.
+The catalog lists eight: WoW WotLK (stable), and WoW TBC, WoW Vanilla, WoW Tortoise, Centurion, WoW Unbound,
+WoW Conquest of Azeroth and WoW Mists of Pandaria (beta). WotLK, TBC, Vanilla and Tortoise were exercised against a live server in
+Phase 8 -- TBC, Vanilla and Tortoise each on the test box with a real game client of its own version -- and
+every ticked box in `pyplan/checklist.md` says what was measured on which tree.
 
 ## Odds and ends
 
@@ -179,11 +179,14 @@ version -- and every ticked box in `pyplan/checklist.md` says what was measured 
   along. Hence the second artifact rather than a cleverer first one.
 - **You need your own copy of the game.** Yu'lon never bundles, sells or distributes a game client,
   and it cannot get you one. Two details worth stating plainly, because the short version of this
-  sentence is misleading: WoW TBC, Vanilla and Tortoise ask you to point at a client folder you
-  already have, and **WotLK does not** — its installer never asks, because the server fetches
-  AzerothCore's own client-data archive (maps, vmaps, mmaps, DBC) into a Docker volume. That is
-  server-side data the server cannot run without. It is not the client you log in with, and you
-  still have to supply that yourself.
+  sentence is misleading: WoW TBC, Vanilla, Tortoise and Mists of Pandaria ask you to point at a
+  client folder you already have, and **WotLK does not** — its installer never asks, because the
+  server fetches AzerothCore's own client-data archive (maps, vmaps, mmaps, DBC) into a Docker
+  volume. That is server-side data the server cannot run without. It is not the client you log in
+  with, and you still have to supply that yourself. For Mists of Pandaria, take the Mists of
+  Pandaria download at Recall WoW (https://www.recallwow.online/): `RecallWoWHDmodels.zip`
+  (24.1 GB). Unzip it and pick the `World of Warcraft 5.4.8` folder; Yu'lon launches `_Wow-64.exe`
+  from it.
 - Read [`../DISCLAIMER.md`](../DISCLAIMER.md) before running a server.
 - Releases, including the packaged builds: <https://github.com/DadsMmoLab/dads-mmo-lab/releases>.
 - On launch it asks GitHub Releases whether a newer **public** release exists — at most once a day,
