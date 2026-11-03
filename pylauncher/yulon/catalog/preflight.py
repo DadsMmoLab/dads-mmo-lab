@@ -245,8 +245,10 @@ class Spent:
     started (`native.BUILD_CACHE_FILE`), only when every stage before `build` is
     recorded and the build is not spent. 0 otherwise -- no record of the start,
     a cache now smaller than it, or Docker would not say. The whole machine's
-    cache is never credited: Yu'lon never prunes, so most of it can be another
-    server's, and the disk it would be credited against holds that server's
+    cache is never credited: most of it can be another server's or another Docker
+    project's (Yu'lon removes the cache only when the player ticks it in Free Docker
+    space…, T864; the credit then reads 0, because the cache is smaller than the recorded start),
+    and the disk it would be credited against holds that server's
     database (review, 2026-10-04). Ignored when `build` is True.
     """
 

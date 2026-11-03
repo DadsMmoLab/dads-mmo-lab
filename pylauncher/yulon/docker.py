@@ -2200,7 +2200,10 @@ def remove_image(ref: str, *, force: bool = False, wsl_distro: str | None = None
     `-rollback` tag on the daemon for ever, which is exactly what the round-3
     gate found. Forcing removes the NAME; the image it last pointed at becomes
     dangling and the exited container keeps running on the layers it already
-    has until compose next recreates it from the live tag. `(cannot be forced)`
+    has until compose next recreates it from the live tag. A successful build's
+    T864 pass removes such an image once no container holds it
+    (`remove_unused_image`), and the exited one-shot containers still hold it
+    until compose recreates them (T865 idea). `(cannot be forced)`
     -- a RUNNING container -- is a different answer, and this function passes
     both back for the caller to tell apart rather than retrying blind.
     """
@@ -8174,6 +8177,131 @@ def build_cache_bytes(*, wsl_distro: str | None = None) -> int | None:
         return size
     logger.info("`docker system df` printed no Build Cache row")
     return None
+
+
+IMAGE_IN_USE = "in use"
+IMAGE_GONE = "gone"
+BUILD_CACHE_PRUNE_TIMEOUT_SECONDS = 900.0
+
+
+def dangling_image_ids(label: str, *, wsl_distro: str | None = None) -> tuple[str, ...] | None:
+    """This daemon's dangling image ids carrying the label `label`, or None (T864).
+
+    `label` is either `PROJECT_LABEL` alone or `f"{PROJECT_LABEL}=<project>"`.
+    `-q` lists ids only and no `-a` is passed: BuildKit makes no intermediate
+    images, so every dangling image here is a build whose last name was let go.
+    The label filter keeps other daemons' images out: alpine/git is pulled by
+    digest and carries no compose label (measured on yulon-ubuntu2 it is not
+    even matched by `dangling=true`).
+    """
+    proc = _docker(
+        ["images", "-q", "--filter", "dangling=true", "--filter", f"label={label}"],
+        wsl_distro=wsl_distro,
+    )
+    if proc.returncode != 0:
+        logger.info(f"could not list dangling images: {proc.stderr.strip()}")
+        return None
+    seen: list[str] = []
+    for line in proc.stdout.splitlines():
+        image_id = line.strip()
+        if image_id and image_id not in seen:
+            seen.append(image_id)
+    return tuple(seen)
+
+
+@dataclass(frozen=True)
+class ImageFact:
+    image_id: str
+    size: int  # bytes, as `image inspect` gives `.Size`
+    project: str | None  # the compose project label, None without one
+
+
+def image_facts(
+    names: Sequence[str], *, wsl_distro: str | None = None
+) -> tuple[ImageFact, ...] | None:
+    """What `names` are, as one `image inspect` answers; None when it would not say (T864)."""
+    if not names:
+        return ()
+    proc = _docker(
+        ["image", "inspect", "--format", "{{.Id}}\t{{.Size}}\t{{json .Config.Labels}}", *names],
+        wsl_distro=wsl_distro,
+    )
+    rows: list[ImageFact] = []
+    for line in proc.stdout.splitlines():
+        fields = line.split("\t")
+        if len(fields) != 3:
+            logger.info(f"could not read an image inspect line: {line!r}")
+            continue
+        raw_id, raw_size, raw_labels = fields
+        image_id = raw_id.strip()
+        if not image_id:
+            logger.info(f"could not read an image inspect line: {line!r}")
+            continue
+        try:
+            size = int(raw_size.strip())
+        except ValueError:
+            logger.info(f"could not read an image size: {line!r}")
+            continue
+        try:
+            labels = json.loads(raw_labels)
+        except ValueError:
+            logger.info(f"could not read image labels: {line!r}")
+            continue
+        project: str | None = None
+        if isinstance(labels, dict):
+            found = labels.get(PROJECT_LABEL)
+            project = found if isinstance(found, str) else None
+        if all(row.image_id != image_id for row in rows):
+            rows.append(ImageFact(image_id=image_id, size=size, project=project))
+    if proc.returncode != 0 and not rows:
+        return None
+    return tuple(rows)
+
+
+def remove_unused_image(image_id: str, *, wsl_distro: str | None = None) -> str:
+    """Remove one dangling image by id. Returns why it could not be, or `""` (T864).
+
+    NEVER `-f`: forcing only takes the name off and leaves the layers, which is
+    the T79 leak this ticket cleans up.
+    """
+    proc = _docker(["image", "rm", image_id], wsl_distro=wsl_distro)
+    if proc.returncode == 0:
+        logger.info(f"removed image {image_id}")
+        return ""
+    said = proc.stderr.strip()
+    lowered = said.lower()
+    if "no such image" in lowered:
+        return IMAGE_GONE
+    if "conflict: unable to delete" in lowered:
+        logger.debug(f"{image_id} is still held by a container: {said}")
+        return IMAGE_IN_USE
+    logger.warning(f"could not remove image {image_id}: {said}")
+    return said
+
+
+def prune_build_cache(*, wsl_distro: str | None = None) -> str:
+    """Remove this daemon's unused build cache records; `""` when they went (T864).
+
+    Removes unused records only, of every builder user on this daemon; no image,
+    container, volume or database is touched; the next build compiles from the
+    start.
+    """
+    proc = _docker(
+        ["builder", "prune", "-f"], timeout=BUILD_CACHE_PRUNE_TIMEOUT_SECONDS, wsl_distro=wsl_distro
+    )
+    if proc.returncode == 0:
+        lines = proc.stdout.splitlines()
+        logger.info(f"pruned Docker's build cache: {lines[-1].strip() if lines else 'done'}")
+        return ""
+    said = proc.stderr.strip()
+    logger.warning(f"could not prune Docker's build cache: {said}")
+    return said
+
+
+def presses_running() -> tuple[str, ...]:
+    """Every press inside a reservation of any server in this process (T864)."""
+    with _HOLD_LOCK:
+        return tuple(p for presses in _PRESSES.values() for p in presses)
 
 
 def image_id(ref: str, *, wsl_distro: str | None = None) -> str | None:

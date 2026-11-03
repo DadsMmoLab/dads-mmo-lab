@@ -48,6 +48,7 @@ LABELS = (
     cv.UPDATE_TO_LATEST_BUTTON_LABEL,
     cv.RETURN_TO_PIN_BUTTON_LABEL,
     cv.PUT_THE_FOLDERS_BACK_BUTTON_LABEL,
+    cv.FREE_DOCKER_SPACE_LABEL,
 )
 FIELD = "{…}"
 STALE = re.compile(
@@ -69,6 +70,7 @@ STALE = re.compile(
     r"|\b[Pp]ress Return\b"
     r"|Update to latest"
     r"|Return to (?:the tested )?pin\b(?!…)"
+    r"|Free Docker space\b(?!…)"
     # T692a: the menu is gone, so its name is stale with or without the triangle,
     # and so is the section named on the tab it is not on.
     r"|Server build\b"
@@ -169,9 +171,10 @@ def test_the_rules_catch_each_way_a_press_is_typed_by_hand(tmp_path: Path) -> No
         "press_return": '"press Return to go back."',
         "update_to_latest": '"Update to latest brings it in."',
         "return_to_pin": '"Return to pin undoes it."',
+        "free_space_short": '"press Free Docker space to clear it."',
         "menu_without_triangle": '"under Server build on the Modules tab"',
-        "old_menu": '"under Server build \u25be on the Modules tab"',
-        "section_on_modules": '"under \u201cServer version\u201d on the Modules tab"',
+        "old_menu": '"under Server build \\u25be on the Modules tab"',
+        "section_on_modules": '"under \\u201cServer version\\u201d on the Modules tab"',
         "label_retyped": '"Press \\u201cRebuild the server\\u2026\\u201d now."',
         "label_split_by_field": 'f"Press Update the server {x}to latest\\u2026 now."',
         "label_split_by_plus": '"Press Update the server " + "to latest\\u2026 now."',

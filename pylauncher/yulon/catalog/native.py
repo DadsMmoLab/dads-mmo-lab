@@ -4635,6 +4635,11 @@ def parked_build_note(server_dir: Path) -> str | None:
     )
 
 
+def _no_size() -> int | None:
+    """No size answer: a kept-build route that does not weigh its images."""
+    return None
+
+
 @dataclass(frozen=True)
 class KeptBuildRoute:
     """The two halves of the Server tab's kept-build banner (T224, D3), wired for one install.
@@ -4642,10 +4647,12 @@ class KeptBuildRoute:
     `check` reads only `PARKED_BUILD_FILE` and never raises: the note, or None.
     `remove` lets the `-parked` names go and forgets the record, and returns the
     sentence that says what it did.
+    `size` is what the `-parked` images take, up to (T864); None unknown.
     """
 
     check: Callable[[], str | None]
     remove: Callable[[], str]
+    size: Callable[[], int | None] = _no_size
 
 
 @dataclass(frozen=True)
@@ -7483,6 +7490,7 @@ class Seams:
     images_built: Callable[[Sequence[str]], bool | None] = docker.images_built
     build_cache_bytes: Callable[[], int | None] = docker.build_cache_bytes
     """How much build cache Docker holds; preflight counts it for a resumed build (T203)."""
+    dangling_image_ids: Callable[[str], tuple[str, ...] | None] = docker.dangling_image_ids
     folder_bytes: Callable[[Path], int | None] = folder_bytes
     """What the server folder already holds; preflight counts it for a resumed build (T203)."""
     image_id: Callable[[str], str | None] = docker.image_id
@@ -7596,6 +7604,7 @@ class Seams:
     compile is a copy of the new build, and one restored without a recreate
     leaves the failed build running.
     """
+    remove_unused_image: Callable[[str], str] = docker.remove_unused_image
     wait_db_healthy: Callable[[docker.ContainerSpec], bool] = docker.wait_db_healthy_for
     wait_ready: Callable[[docker.ContainerSpec, docker.ReadySpec], bool] = docker.wait_ready_for
     container_tail: Callable[[str], str | None] = _container_tail
@@ -7920,6 +7929,7 @@ class Seams:
             blob_id=repo.blob_id,
             images_built=on(docker.images_built, wsl_distro=distro),
             build_cache_bytes=on(docker.build_cache_bytes, wsl_distro=distro),
+            dangling_image_ids=on(docker.dangling_image_ids, wsl_distro=distro),
             image_id=on(docker.image_id, wsl_distro=distro),
             build=on(docker.build_staged, wsl_distro=distro),
             context_fingerprint=_no_fingerprint,
@@ -7941,6 +7951,7 @@ class Seams:
             remove_service=on(docker.compose_remove_service, wsl_distro=distro),
             tag_image=on(docker.tag_image, wsl_distro=distro),
             remove_image=on(docker.remove_image, wsl_distro=distro),
+            remove_unused_image=on(docker.remove_unused_image, wsl_distro=distro),
             wait_db_healthy=on(docker.wait_db_healthy_for, wsl_distro=distro),
             wait_ready=on(docker.wait_ready_for, wsl_distro=distro),
             world_output=on(_world_output, wsl_distro=distro),
@@ -8709,6 +8720,7 @@ class StagedInstaller:
         # After the realm row, for `_advertise_realm()`'s reason: a background job
         # is a sentence, never a failed install (T179's movement maps).
         yield from self.after_ready(server_dir)
+        yield from self._free_own_old_images(server_dir)
         # The bash path logs `install of <id> finished` (installer.py); this path
         # logged nothing at the end, so the only sign a run had ended was the
         # compose-project pin - which is how a tester on yulon-win11 (2026-08-28)
@@ -10981,6 +10993,7 @@ class StagedInstaller:
         if held is not None:
             yield held_rebuild_ending(self.entry.name, server_dir)
             return
+        yield from self._free_own_old_images(server_dir)
         # T739: the update route's own work ran the importer too (T220) for the family whose
         # Rebuild imports, and may have applied SQL for the others; "ran no SQL" is said only
         # by a plain Rebuild that ran none.
@@ -13814,6 +13827,50 @@ class StagedInstaller:
                 f"this server is stopped."
             )
         return left
+
+    def _free_own_old_images(self, server_dir: Path) -> tuple[str, ...]:
+        """Remove this install's own dangling images after a successful build (T864 D1).
+
+        Dangling images of THIS compose project only (`com.docker.compose.project=<project>`,
+        where project is spelled exactly like `_db_volume()`), each removed by id with plain
+        `docker image rm` and never `-f`: forcing only takes the name off and leaves the
+        layers, which is the leak this pass cleans. An image a container still holds is
+        left for a later build. Anything else is never touched: other projects, unlabelled
+        images, volumes.
+
+        A failure here is one sentence at most and never fails the build that worked: the
+        returned lines are appended to the build's own success tail, after it.
+        """
+        from yulon import docker_space  # noqa: PLC0415 - native sits in docker_space's import chain
+
+        try:
+            project = composegen.project_name(
+                self.entry.id,
+                server_dir,
+                platform_id=self._seams.platform_id,
+                install_id=self._install_id(server_dir),
+            )
+            ids = self._seams.dangling_image_ids(f"{docker.PROJECT_LABEL}={project}")
+            failed = ids is None
+            for image in ids or ():
+                said = self._seams.remove_unused_image(image)
+                if said == "" or said == docker.IMAGE_GONE:
+                    logger.info(f"removed this install's old image {image}")
+                elif said == docker.IMAGE_IN_USE:
+                    logger.debug(f"{image} is still held by a container; left for a later build")
+                else:
+                    logger.warning(f"could not remove this install's old image {image}: {said}")
+                    failed = True
+            cache = self._seams.build_cache_bytes()
+        except Exception as exc:  # noqa: BLE001 - never fails a build that worked
+            logger.warning(f"could not remove this install's old images: {exc}")
+            return (docker_space.OLD_IMAGES_NOT_REMOVED,)
+        lines: list[str] = []
+        if failed:
+            lines.append(docker_space.OLD_IMAGES_NOT_REMOVED)
+        if cache is not None and cache > docker_space.CACHE_POINTER_BYTES:
+            lines.append(docker_space.cache_pointer(cache))
+        return tuple(lines)
 
     def _recipe_ground(self, server_dir: Path) -> dict[str, RecipeGround]:
         """The build-recipe files as found. Bytes, `None` for absent, `UNREADABLE` for neither.

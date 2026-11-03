@@ -103,6 +103,7 @@ from yulon import (
     default_addons,
     docker,
     docker_advice,
+    docker_space,
     forgetting,
     gaming_mode,
     hd_patches,
@@ -2301,6 +2302,11 @@ class ControllerServices:
     `None` lists the folder the way it was listed before: file names only, no Delete or
     Clean up. Every shipped entry wires it.
     """
+    docker_space: docker_space.Seam | None = None
+    """This install's Docker space, for the Free Docker space press (T864).
+
+    `None` hides the press.
+    """
     dashboard: Callable[[], dashboard_module.Verdict] | None = None
     """One tick of this install's dashboard, or `None` for a game whose block is unmeasured.
 
@@ -3806,6 +3812,8 @@ def _assemble(
         live_channel = getattr(channel_setup, "live_channel", None)
         if callable(live_channel):
             docker.save_through_channel(spec.world, server_dir, live_channel)
+    # T864: hoisted for the Docker space seam below, which frees the kept build.
+    kept_build = install_wiring.kept_build_for_app(entry, server_dir, wsl_distro=wsl_distro)
     return ControllerServices(
         client_dir=client_dir,
         steam=_steam_seam(entry, server_dir, client_dir),
@@ -3877,6 +3885,9 @@ def _assemble(
         interrupted_restore=lambda: wotlk_maintenance.interrupted_restore(server_dir),
         forget_interrupted=lambda: wotlk_maintenance.forget_interrupted_restore(server_dir),
         shelf=backup_shelf.Seam(server_dir, entry.id, spec=spec, wsl_distro=wsl_distro),
+        docker_space=docker_space.Seam(
+            server_dir, spec=spec, wsl_distro=wsl_distro, kept_build=kept_build
+        ),
         dashboard=dashboard,
         log_snapshot=log_snapshot,
         uninstall=uninstall,
@@ -4012,7 +4023,7 @@ def _assemble(
         ),
         # T224. Here for T106's reason: every native install can keep a build, and
         # the distro (D4) is a fact of the install, answered in `install_wiring`.
-        kept_build=install_wiring.kept_build_for_app(entry, server_dir, wsl_distro=wsl_distro),
+        kept_build=kept_build,
         # T99. HERE for the same reason: where a game keeps its bot count is a
         # catalog fact. Files only, so a server inside a WSL distro is served too.
         bot_population=botpop.bot_count_route(
@@ -6623,6 +6634,16 @@ MAINTENANCE_BACKUP_FAILED = "The backup did not finish. Details below says why."
 DELETE_BACKUP_LABEL = "Delete\u2026"
 READING_BACKUPS = "Reading backups\u2026"
 CLEAN_UP_LABEL = "Clean up\u2026"
+FREE_DOCKER_SPACE_LABEL = server_build_presses.FREE_DOCKER_SPACE
+DOCKER_SPACE_JOB = "the Docker clean-up"
+DOCKER_SPACE_READING = "Reading what Docker holds…"
+DOCKER_SPACE_FREEING = "Freeing up Docker's space…"
+DOCKER_SPACE_NOTHING = "Nothing was ticked, so nothing was removed."
+DOCKER_SPACE_FAILED = "Docker space was not freed. Details below says why."
+DOCKER_SPACE_BACKUPS_POINTER = (
+    f"Old database copies are not kept in Docker: {CLEAN_UP_LABEL} in the Backups box on this tab "
+    "removes them."
+)
 DELETE_PICK = "Pick a backup to delete."
 CLEAN_UP_NO_FOLDER_ACCESS = "Yu'lon cannot list the backups yet."
 MAINTENANCE_DELETE_FAILED = "The backups were not deleted. Details below says why."
@@ -19089,6 +19110,13 @@ class ControllerView(QWidget):
         shelf_row = QHBoxLayout()
         shelf_row.addWidget(self.delete_backup_button)
         shelf_row.addWidget(self.clean_up_button)
+        # T864: Free Docker space, beside Clean up. Greyed with its reason on the
+        # same line as Restore's.
+        self.free_docker_space_button = QPushButton(FREE_DOCKER_SPACE_LABEL, tab)
+        self.free_docker_space_button.clicked.connect(self.free_docker_space)
+        self.free_docker_space_button.setVisible(self.services.docker_space is not None)
+        self._docker_space_job = ""
+        shelf_row.addWidget(self.free_docker_space_button)
         shelf_row.addStretch(1)
 
         self.maintenance_report = QPlainTextEdit(tab)
@@ -19106,8 +19134,10 @@ class ControllerView(QWidget):
         self.restore_reasons.setParent(backups)
         self.delete_backup_button.setParent(backups)
         self.clean_up_button.setParent(backups)
+        self.free_docker_space_button.setParent(backups)
         self.restore_reasons.watch(self.delete_backup_button)
         self.restore_reasons.watch(self.clean_up_button)
+        self.restore_reasons.watch(self.free_docker_space_button)
         backups_box = QVBoxLayout(backups)
         backups_box.addLayout(top)
         backups_box.addWidget(self.backup_list, 2)
@@ -19308,6 +19338,7 @@ class ControllerView(QWidget):
 
     def _settle_shelf_buttons(self) -> None:
         """Grey Delete and Clean up with their reasons, or enable them (T604)."""
+        self._settle_docker_space_button()
         if self.services.shelf is None:
             return
         shelf = self._shelf
@@ -19328,6 +19359,84 @@ class ControllerView(QWidget):
                 delete = row.cannot_delete
         set_enabled_why(self.delete_backup_button, delete, self.restore_reasons)
         set_enabled_why(self.clean_up_button, clean, self.restore_reasons)
+
+    def _docker_space_waits_for(self) -> str | None:
+        """Why Free Docker space is greyed: its own job, a busy press, or the shelf's waits."""
+        if self._docker_space_job:
+            return wait_for(self._docker_space_job)
+        if self._busy:
+            return wait_for(self._busy_job)
+        return self._shelf_waits_for()
+
+    def _settle_docker_space_button(self) -> None:
+        """Grey Free Docker space with its reason, or enable it (T864)."""
+        if self.services.docker_space is None:
+            return
+        set_enabled_why(
+            self.free_docker_space_button, self._docker_space_waits_for(), self.restore_reasons
+        )
+
+    @Slot()
+    def free_docker_space(self) -> None:
+        """Read what Docker holds, ask what goes, then free it on a worker (T864)."""
+        seam = self.services.docker_space
+        if seam is None:
+            return
+        waits = self._docker_space_waits_for()
+        if waits:
+            self.maintenance_report.setPlainText(waits)
+            return
+        self._docker_space_job = DOCKER_SPACE_JOB
+        self._settle_shelf_buttons()
+        self.maintenance_report.setPlainText(DOCKER_SPACE_READING)
+        self._run(seam.read, self._docker_space_read, self._docker_space_failed)
+
+    @Slot(object)
+    def _docker_space_read(self, result: object) -> None:
+        self._docker_space_job = ""
+        self._settle_shelf_buttons()
+        if not isinstance(result, docker_space.Space):
+            return
+        from yulon.ui.widgets.free_docker_space_dialog import FreeDockerSpaceDialog
+
+        seam = self.services.docker_space
+        if seam is None:
+            return
+        dialog = FreeDockerSpaceDialog(
+            result,
+            backups_pointer=DOCKER_SPACE_BACKUPS_POINTER,
+            windows=platform.detect() == "windows",
+            parent=self,
+        )
+        try:
+            agreed = dialog.exec() == int(QDialog.DialogCode.Accepted)
+            choice = dialog.choice()
+        finally:
+            dialog.deleteLater()
+        if not agreed:
+            self.maintenance_report.setPlainText("")
+            return
+        if not (choice.cache or choice.old_builds or choice.kept_build):
+            self.maintenance_report.setPlainText(DOCKER_SPACE_NOTHING)
+            return
+        self._docker_space_job = DOCKER_SPACE_JOB
+        self._settle_shelf_buttons()
+        self.maintenance_report.setPlainText(DOCKER_SPACE_FREEING)
+        self._run(lambda: seam.free(choice), self._docker_space_done, self._docker_space_failed)
+
+    @Slot(object)
+    def _docker_space_done(self, result: object) -> None:
+        self._docker_space_job = ""
+        self._settle_shelf_buttons()
+        if isinstance(result, docker_space.Freed):
+            self.maintenance_report.setPlainText("\n".join(result.lines))
+        self.check_kept_build()
+
+    @Slot(object)
+    def _docker_space_failed(self, exc: object) -> None:
+        self._docker_space_job = ""
+        self._maintenance_failed(exc, DOCKER_SPACE_FAILED)
+        self._settle_shelf_buttons()
 
     @Slot()
     def delete_selected_backup(self) -> None:

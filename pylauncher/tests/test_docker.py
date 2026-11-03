@@ -7345,7 +7345,9 @@ def test_tag_image_reports_a_missing_source_in_the_daemons_own_words(
 
 
 def test_nothing_in_this_module_ever_prunes_the_daemon() -> None:
-    """`image prune`, `builder prune` and `system prune` reach every project on the box.
+    """`image prune` and `system prune` reach every project on the box; the one `builder
+    prune` here (T864) runs only when the player ticks Docker's build cache in Free Docker
+    space…, under the maintenance lease, refused while a build press runs.
 
     `alpine/git` shows on a real install as `<none>`-tagged - it LOOKS dangling
     - and it is the sha256-pinned image every install's clone stage depends on.
@@ -7353,7 +7355,8 @@ def test_nothing_in_this_module_ever_prunes_the_daemon() -> None:
     source = (Path(__file__).resolve().parents[1] / "yulon" / "docker.py").read_text(
         encoding="utf-8"
     )
-    assert '"prune"' not in source
+    assert source.count('"prune"') == 1, "a second prune reached the module"
+    assert '"builder", "prune", "-f"' in source, "the one prune is not the ticked cache prune"
     assert '"--rmi"' not in source
 
 
