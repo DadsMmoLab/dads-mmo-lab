@@ -1446,7 +1446,7 @@ AC_DIST_DIR = "/azerothcore/env/dist"
 `data`)."""
 
 AC_WORLD_COMMAND = ("/usr/bin/env", "bash", "/azerothcore/entrypoint.sh", "worldserver")
-"""The CoA worldserver image's own ENTRYPOINT + CMD (`apps/docker/Dockerfile:148,192` at 98570f24).
+"""The CoA worldserver image's own ENTRYPOINT + CMD (`apps/docker/Dockerfile:148,192` at a1e8c99e).
 A compose `entrypoint:` drops the image's CMD, so the Windows sync renders this as `command:` and
 `exec`s it; `tests/test_coa_world_data.py` reads it off a copy of that Dockerfile."""
 

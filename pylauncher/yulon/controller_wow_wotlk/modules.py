@@ -692,7 +692,7 @@ def importer_module_dirs(server_dir: Path, user_game: str = GAME) -> list[str] |
 
     `docker.module_dir_names()` minus the entry's `core_sql_modules` (T812 D14). The CoA
     core's importer prepends `mod-ascension,` to every `Updates.AllowedModules` it is
-    given (`src/tools/dbimport/Main.cpp:119-120` at 98570f24), and `UpdateFetcher` walks a
+    given (`src/tools/dbimport/Main.cpp:119-120` at a1e8c99e), and `UpdateFetcher` walks a
     module's `data/sql/db-*` once per time the name appears, so handing it the folder again
     made every file in it a "Duplicate filename" and the import aborted on the
     first database it reached with any (`acore_characters`, measured on yulon-ubuntu2

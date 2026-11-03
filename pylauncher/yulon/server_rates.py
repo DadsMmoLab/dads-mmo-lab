@@ -230,11 +230,11 @@ _GAMES: dict[str, _GameRates] = {
         notes={},
     ),
     # T812: the CoA fork's own world conf at its own pin (Rate.XP.* present in
-    # worldserver.conf.dist at 98570f24).
+    # worldserver.conf.dist at a1e8c99e).
     "wow-coa": _GameRates(
         file="env/dist/etc/worldserver.conf",
         repo="pjerra/azerothcore-wotlk-coa",
-        rev="98570f248b6095a23ef14bbbfac6731ac4c20d66",
+        rev="a1e8c99ecf2b5c088cc342188478db4891a07c47",
         keys=_ALL_KEYS,
         notes={},
     ),

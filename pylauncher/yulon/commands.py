@@ -81,7 +81,7 @@ NAME_LOOKUP_TREES = frozenset({"wow-wotlk", "wow-unbound", "wow-centurion", "wow
 
 `AccountMgr::GetId(accountName)`: AzerothCore 7f12e89e `cs_account.cpp:347`,
 TrinityCore112 faac5fc9 `cs_account.cpp:303`. `wow-unbound` is the same AzerothCore pin.
-`wow-coa` is the CoA fork at 98570f24, whose `cs_account.cpp:372` reads the name the same way.
+`wow-coa` is the CoA fork at a1e8c99e, whose `cs_account.cpp:372` reads the name the same way.
 `wow-mop` is MoP's fork at e135742e, the same file and the same call (GAP §0, upstream
 `AccountMgr.cpp:43-68,345-355`: `account set gmlevel <name> <lvl> <realm>` is looked up by
 NAME). Every other tree -- the CMaNGOS ones, and any added later until it is measured --

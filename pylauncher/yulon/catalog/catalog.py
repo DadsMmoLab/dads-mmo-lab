@@ -657,7 +657,7 @@ class AzerothCoreData(_Strict):
         description=(
             "Folders under `modules/` whose `data/sql/` the core's own importer always applies, "
             "so Yu'lon never names them in `AC_UPDATES_ALLOWED_MODULES` (T812 D14). The CoA "
-            "fork's `src/tools/dbimport/Main.cpp:119-120` (pin 98570f24) prepends "
+            "fork's `src/tools/dbimport/Main.cpp:119-120` (pin a1e8c99e) prepends "
             "`COA_DATABASE_MODULE_LIST` (`mod-ascension,`) to whatever list it is given, and "
             "`UpdateFetcher.cpp` walks a folder once per time its module is named, so a second "
             "`mod-ascension` made the importer abort on `Duplicate filename`. Empty: "
