@@ -77,10 +77,11 @@ def test_only_tortoisebots_follows_releases_in_the_catalog() -> None:
     assert follows["cmangos/mangos-tbc"] == "branch"
 
 
-def test_only_the_bots_manager_addon_follows_releases_among_the_manifests() -> None:
+def test_only_the_bots_manager_and_consoleport_addons_follow_releases_among_the_manifests() -> None:
     """TortoiseGMManager publishes no releases and no tags (read 2026-09-25).
 
-    So it keeps following its branch.
+    So it keeps following its branch. CoA's ConsolePort follows its releases on
+    purpose (T855): SuttonX/ConsolePortLK-Enhanced publishes them.
     """
     releasing = []
     for path in sorted(manifests_dir().glob("*/*/*.json")):
@@ -88,7 +89,10 @@ def test_only_the_bots_manager_addon_follows_releases_among_the_manifests() -> N
         source = data.get("source") if isinstance(data, dict) else None
         if isinstance(source, dict) and source.get("follow") == "releases":
             releasing.append((path.parent.parent.name, data["id"]))
-    assert releasing == [("wow-tortoise", "tortoise-bots-manager")]
+    assert releasing == [
+        ("wow-coa", "yulon-consoleport"),
+        ("wow-tortoise", "tortoise-bots-manager"),
+    ]
     # And it parses: the field is the shared `Source` model's, not a private key.
     assert _addon().source.follow == "releases"
 

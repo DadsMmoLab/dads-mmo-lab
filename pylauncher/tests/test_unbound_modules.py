@@ -229,6 +229,19 @@ def test_unbound_still_offers_wotlks_shipped_modules(tmp_path: Path) -> None:
     assert shipped <= set(_listed(unbound))
 
 
+def test_unbound_with_no_own_tree_reads_exactly_the_borrowed_lists(tmp_path: Path) -> None:
+    """T855-B: an entry with no own tree is byte-for-byte its borrowed lists."""
+    from yulon.manifest import ManifestType
+
+    unbound = ControllerServices.for_entry(entry("wow-unbound"), tmp_path)
+    assert (resources.manifests_dir() / "wow-unbound").is_dir() is False
+    assert unbound.store is not None and unbound.store.game == "wow-wotlk"
+    kinds: tuple[ManifestType, ...] = ("module", "mod", "ale", "keg")
+    for kind in kinds:
+        borrowed = ManifestStore(resources.manifests_dir(), "wow-wotlk").load_index(kind)
+        assert list(unbound.store.load_index(kind).items) == list(borrowed.items)
+
+
 def test_the_update_count_and_the_sql_run_read_unbounds_own_user_layer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -120,6 +120,35 @@ def test_the_route_knows_the_add_ons_the_game_ships_by_folder_name(tmp_path: Pat
     assert "tortoise-bots-manager" in services.client_addons.shipped_ids
 
 
+def test_coas_route_treats_the_shipped_consoleport_id_as_shipped(tmp_path: Path) -> None:
+    """M1 (braces): the CoA route's `shipped_ids` carry the merged mod list, so a
+    hand-written record naming `yulon-consoleport` refuses at the press and at
+    the write — the slug guard alone would not stop an id arriving by hand."""
+    from yulon import module_source
+
+    services = ControllerServices.for_entry(CATALOG.get("wow-coa"), tmp_path / "s")
+
+    assert services.client_addons is not None
+    assert "yulon-consoleport" in services.client_addons.shipped_ids
+
+    from yulon.manifest import parse_manifest
+
+    forged = parse_manifest(
+        {
+            "id": "yulon-consoleport",
+            "name": "ConsolePortLK",
+            "type": "mod",
+            "game": "wow-coa",
+            "origin": {"kind": "folder", "path": "/x", "added": "2026-11-02"},
+            "client": [{"src": ".", "dest": "addons", "name": "ConsolePort"}],
+        }
+    )
+    with pytest.raises(module_source.DeriveError, match="already ships"):
+        module_source.persist(
+            tmp_path / "u", forged, shipped_ids=services.client_addons.shipped_ids
+        )
+
+
 @pytest.mark.parametrize("game", ["wow-tbc", "wow-vanilla", "wow-centurion"])
 def test_a_game_with_no_record_seam_gets_the_routes_forget(game: str, tmp_path: Path) -> None:
     """So a Remove from the list drops an outside add-on's record, as on WotLK and Tortoise."""

@@ -128,6 +128,7 @@ from yulon import (
     server_time_zone,
     serverlock,
     sql_log_offer,
+    steam_input,
     stop_choice,
     table_repair,
     teardown,
@@ -1270,7 +1271,7 @@ class ClientOptionsBox(QWidget):
         required = sum(
             pack.size_hint or 0
             for pack in client.packs
-            if not pack.optional and pack.source.kind == "url"
+            if not pack.optional and pack.source.kind in ("url", "github_release")
         )
         self.required_label = QLabel("", self)
         self.required_label.setWordWrap(True)
@@ -1296,7 +1297,7 @@ class ClientOptionsBox(QWidget):
             if gone and pack.id not in installed:
                 check.setChecked(False)
                 check.setEnabled(False)
-            if pack.source.kind == "url":
+            if pack.source.kind in ("url", "github_release"):
                 self._sizes[pack.id] = pack.size_hint or 0
             check.toggled.connect(self._update_extra)
             self.pack_boxes[pack.id] = check
@@ -1335,7 +1336,10 @@ class ClientOptionsBox(QWidget):
         if pack.size_hint:
             text += f" ({size_text(pack.size_hint)})"
         if gone:
-            text += " — unavailable: the server's site no longer has it"
+            if pack.source.kind == "github_release":
+                text += " — unavailable: its GitHub release is not available right now"
+            else:
+                text += " — unavailable: the server's site no longer has it"
         return text
 
     def _update_extra(self) -> None:
@@ -3066,12 +3070,19 @@ def _with_client_addons(
         except Exception as exc:  # noqa: BLE001 - the route refuses; the log says why
             logger.warning(f"could not read {entry.id}'s shipped add-ons: {exc}")
             unreadable = " ".join(str(exc).split()) or type(exc).__name__
+    # T855: the merged mod list, own tree included, so a player-brought add-on
+    # deriving exactly the shipped `yulon-consoleport` id is refused (T855-D1).
+    # The folder-name refusal is narrower: a shipped item's add-on folders count
+    # as "Yu'lon installs this" only while that item is installed and completed
+    # for this server, so a player's own ConsolePort keeps working once the
+    # shipped one is gone (T855-D2).
     route = client_addons.ClientAddons(
         applier=applier,
         game=entry.id,
         interface=interface,
         shipped=client_addons.shipped_addons(shipped),
         shipped_ids=tuple(m.id for m in shipped),
+        shipped_items=tuple(shipped),
         shipped_unreadable=unreadable,
     )
     route.pack_addons = lambda: client_addons.pack_addon_names(
@@ -3625,6 +3636,22 @@ def _steam_seam(
     """
     if platform.detect() != "linux":
         return None
+    play_dir = client_dir
+    read_layout_choice: Callable[[], bool] | None
+    if entry.id == "wow-coa":
+        # T855: CoA has no ready-to-play client and no pack record — its
+        # switch is the Modules tab's own install record, read at press time
+        # off the GUI thread like T853's. A removed module reads not installed.
+        read_layout_choice = partial(steam_input.consoleport_module_installed, server_dir)
+    else:
+        read_layout_choice = (
+            # T853: the ready-to-play client's recorded ConsolePort choice, read at
+            # press time off the GUI thread — never at tab build. No ready-to-play
+            # client (or no record) writes no layout.
+            partial(steam_input.consoleport_chosen, play_dir)
+            if play_dir is not None
+            else None
+        )
     return steam_module.SteamShortcuts(
         game=entry.name,
         server_dir=server_dir,
@@ -3636,6 +3663,7 @@ def _steam_seam(
         # Steam Deck Gaming Mode: the Server tile starts the server through `yulon --server`
         # and stops it when the game closes, and a third tile stops it (`gaming_mode`).
         gaming=partial(_wow_gaming_scripts, entry, server_dir),
+        controller_layout=read_layout_choice,
     )
 
 
@@ -4304,22 +4332,30 @@ def _for_wotlk(
 
     Every seam is bound to `entry`'s own containers, never to WotLK's
     `docker_ctl.SPEC`, so a second AzerothCore server beside WotLK is managed
-    as itself (T552). The module seams read `manifests/wow-wotlk/`, so an
-    entry that names another tree is refused rather than handed WotLK's.
+    as itself (T552). The module seams read `_azeroth_manifest_store()` below:
+    the `manifests_from` tree when the entry names one, layered with its own
+    tree when `manifests/<entry id>/` is on disk (CoA, T855-B), so an entry
+    that names a tree this build does not know is refused rather than handed
+    WotLK's. WotLK and Unbound read WotLK's tree exactly as before.
     """
-    if entry.has_manifests and entry.manifest_game() != wotlk_modules.GAME:
-        raise UnsupportedGameError(
-            f"{entry.name} ({entry.id}) reads the modules of manifests/{entry.manifest_game()}/, "
-            f"and this build's AzerothCore tab only knows manifests/{wotlk_modules.GAME}/. "
-            "Nothing was opened."
-        )
+    if entry.has_manifests:
+        # The resolver refuses an entry naming an unknown tree; keep the refusal
+        # before any seam is built so nothing half-wired is handed back.
+        tab_store: ManifestStore | None = _azeroth_manifest_store(entry)
+    else:
+        tab_store = None
     spec = entry.container_spec()
-    # The shipped manifests are WotLK's for every server here; the modules the
-    # user ADDED are this server's own, under its game id (T554: a Remove on
-    # WoW Unbound never drops WotLK's record). For WotLK both are `wow-wotlk`.
+    # The shipped manifests are the entry's borrowed tree layered with its own
+    # (T855-B); the modules the user ADDED are this server's own, under its
+    # game id (T554: a Remove on WoW Unbound never drops WotLK's record). For
+    # WotLK all three are `wow-wotlk`.
     user_game = entry.id
-    record_backed = _record_backed_keys(wotlk_modules.store(user_game=user_game))
-    settings_mods = _settings_mods(wotlk_modules.store(user_game=user_game))
+    # The same store the tab lists, closed over lazily: the closures below only
+    # run when `entry.has_manifests`, so the fallback is never read — it only
+    # keeps their construction total.
+    listed_store = tab_store if tab_store is not None else wotlk_modules.store(user_game=user_game)
+    record_backed = _record_backed_keys(listed_store)
+    settings_mods = _settings_mods(listed_store)
     password = _db_password(entry, server_dir, wsl_distro=wsl_distro)
     sql = _sql_for(entry, password, wsl_distro=wsl_distro)
     mysql = _mysql_for(entry, password, wsl_distro=wsl_distro)
@@ -4621,7 +4657,7 @@ def _for_wotlk(
             scheme=wotlk_accounts.checked_scheme(entry.accounts.scheme, entry.id),
             names_are_names=entry.id in commands.NAME_LOOKUP_TREES,
         ),
-        store=wotlk_modules.store(user_game=user_game) if entry.has_manifests else None,
+        store=tab_store,
         applier=module_applier,
         # The other half of installing a module, and until now the half with no
         # button: `applier` clones the module and activates its conf, leaving
@@ -5808,6 +5844,34 @@ def _knowing_its_server_sources(
     return services
 
 
+def _azeroth_manifest_store(entry: CatalogEntry) -> ManifestStore:
+    """The one resolver from an AzerothCore entry to its manifest tree (T855-B).
+
+    An entry reads the `manifests_from` tree when it names one (Unbound and CoA
+    both read WotLK's) and its own tree when `manifests/<entry id>/` is on disk:
+    each index is the borrowed list followed by the own tree's items, and an own
+    item with the same id as a borrowed one replaces it (T855-B; none collide
+    today). Item files are looked up in the own tree first, then the borrowed
+    one. An entry with no own tree (Unbound) reads exactly its borrowed lists;
+    an entry with no `manifests_from` (WotLK) reads exactly its own tree — both
+    byte-for-byte as before. An entry naming a tree this build does not know is
+    refused rather than handed WotLK's.
+    """
+    from yulon import resources as _resources
+
+    borrowed = entry.manifest_game()
+    if borrowed != wotlk_modules.GAME:
+        raise UnsupportedGameError(
+            f"{entry.name} ({entry.id}) reads the modules of manifests/{borrowed}/, "
+            "and this build's AzerothCore tab has no store for that tree. "
+            "Nothing was opened."
+        )
+    own = entry.id if (_resources.manifests_dir() / entry.id).is_dir() else None
+    store = wotlk_modules.store(user_game=entry.id, own=own if own != borrowed else None)
+    assert isinstance(store, ManifestStore)
+    return store
+
+
 def manifest_store_for(entry: CatalogEntry) -> ManifestStore | None:
     """The Modules tab's manifest store for a server of `entry`, as its factory builds it (T601).
 
@@ -5817,7 +5881,7 @@ def manifest_store_for(entry: CatalogEntry) -> ManifestStore | None:
     if not entry.has_manifests:
         return None
     if _FACTORIES.get(entry.id) is _for_wotlk:
-        return wotlk_modules.store(user_game=entry.id)
+        return _azeroth_manifest_store(entry)
     stores: dict[str, Callable[[], ManifestStore]] = {
         "wow-tbc": tbc_modules.store,
         "wow-vanilla": vanilla_modules.store,
@@ -14768,6 +14832,14 @@ class ControllerView(QWidget):
                         progress=self._download_progress(pack),
                         cancelled=cancelled,
                     )
+                elif kind == "github_release":
+                    fetched = client_packs.fetch_github_release(
+                        pack,
+                        entry_id=game,
+                        allowed_hosts=client.pack_hosts(pack),
+                        progress=self._download_progress(pack),
+                        cancelled=cancelled,
+                    )
                 else:
                     assert_never(kind)
             except client_packs.Cancelled:
@@ -14775,10 +14847,17 @@ class ControllerView(QWidget):
             except client_packs.PackUnavailable as exc:
                 if pack.optional:
                     unavailable.add(pack.id)
-                    notes.append(
-                        f"{pack.label} is unavailable: the server's site no longer has it. "
-                        "What is installed stays until you switch it off."
-                    )
+                    if pack.source.kind == "github_release":
+                        notes.append(
+                            f"{pack.label} is unavailable: "
+                            "its GitHub release is not available right now. "
+                            "What is installed stays until you switch it off."
+                        )
+                    else:
+                        notes.append(
+                            f"{pack.label} is unavailable: the server's site no longer has it. "
+                            "What is installed stays until you switch it off."
+                        )
                     continue
                 raise _PackStopped(pack, str(exc)) from exc
             except client_packs.PackError as exc:
@@ -15174,6 +15253,14 @@ class ControllerView(QWidget):
                     pack,
                     entry_id=game,
                     allowed_hosts=client.hosts(),
+                    progress=self._download_progress(pack),
+                    cancelled=cancelled,
+                )
+            elif kind == "github_release":
+                fetched = client_packs.fetch_github_release(
+                    pack,
+                    entry_id=game,
+                    allowed_hosts=client.pack_hosts(pack),
                     progress=self._download_progress(pack),
                     cancelled=cancelled,
                 )

@@ -3142,6 +3142,16 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "(`client-packs/<entry>/<pack>/<digest>/`), renamed into place only once every file "
         "proved. Read-only on the checkout: nothing there is written or deleted because of it"
     ),
+    ("client_packs.py", "_newest_cached"): (
+        "T853 review 1 (G1). Lists one github_release pack's folder in Yu'lon's own "
+        "download cache (`client-packs/<entry>/<pack>/`) for the newest VERIFIED cached "
+        "version, newest fetch note first, when the release answer cannot be read or "
+        "names no proved file for this pack. Only one-plain-name folders, never through "
+        "a link, and only folders with a fetch note (`_note_fetch`: tag, asset, size, "
+        "sha256, verified_at); each zip is proved again against the note's own sha256 "
+        "before it stands in for the new release. Reads only: it decides which cached "
+        "version Play keeps with the kept sentence, and an OSError answers no cache."
+    ),
     ("client_packs.py", "prune_cache"): (
         "T181 b/c. Lists one pack's folder in Yu'lon's own download cache "
         "(`client-packs/<entry>/<pack>/`) for the cached "

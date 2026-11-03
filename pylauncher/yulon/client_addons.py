@@ -57,6 +57,7 @@ from yulon.apply import (
     FolderSource,
     UncheckedApproval,
     addon_only_refusal,
+    clone_install_completed,
 )
 from yulon.git import CloneSpec, Git
 from yulon.log import get_logger
@@ -226,6 +227,17 @@ class ClientAddons:
     Without the list nothing stops an outside add-on landing on a shipped one's
     folder, so the route says so instead of installing on a guess (review round 1).
     """
+    shipped_items: Sequence[Manifest] = ()
+    """The shipped `mod` manifests behind `shipped`/`shipped_ids`, for the install check.
+
+    Empty is the field's old reading: every name in `shipped` counts, whether or
+    not its item is installed. Set (the tab's route), only a shipped item whose
+    clone is installed and completed for this server counts: the eight
+    ConsolePort folders refuse a player's own ConsolePort only while Yu'lon's
+    own one is in Interface/AddOns, and a shipped item the player removed (or
+    never took) leaves its names free again. The `shipped_ids` refusal needs no
+    such check: an id is taken by the row itself, installed or not.
+    """
 
     # ------------------------------------------------------------------ where things are
 
@@ -265,13 +277,45 @@ class ClientAddons:
                 f"replace one of them. {NOTHING_CHANGED}"
             )
 
-    def _read(self, root: Path, label: str) -> tuple[Found, str]:
-        """The add-ons `root` holds, checked, and the item's name; raises with the sentence."""
+    def _shipped_names(self, *, installed_only: bool = False) -> Mapping[str, str]:
+        """The add-on folder names that count as Yu'lon's for this read.
+
+        The box (`from_folder`/`from_link`/a zip derive) refuses a new add-on
+        when any of its folders is one a shipped item of this server installs,
+        installed or not: every name in `shipped` counts. An existing player
+        record (`completer`, Play's put-back) is refused only when the shipped
+        item with that folder is installed and completed for this server
+        (`installed_only`), so a player's own ConsolePort keeps working once
+        the shipped one is gone. Without `shipped_items` (a route driven by
+        hand) every name in `shipped` counts either way.
+        """
+        if installed_only and self.shipped_items:
+            kept = [
+                manifest
+                for manifest in self.shipped_items
+                if clone_install_completed(
+                    self.applier.server_dir / CLONE_DIRS["mod"] / manifest.id,
+                    item_id=manifest.id,
+                )
+                is True
+            ]
+            return shipped_addons(kept)
+        return self.shipped
+
+    def _read(self, root: Path, label: str, *, installed_only: bool = False) -> tuple[Found, str]:
+        """The add-ons `root` holds, checked, and the item's name; raises with the sentence.
+
+        `installed_only` is the existing-record path: only the names of a
+        shipped item installed and completed for this server count as Yu'lon's.
+        """
         self._refuse_without_the_shipped_list()
         found = addon_layout.find_addons(
             root,
             interface=self.interface,
-            shipped={**self.pack_addons(), **self.shipped},
+            shipped={
+                **self.pack_addons(),
+                **self._shipped_names(installed_only=installed_only),
+            },
             installed=self._installed_names(),
             label=label,
         )
@@ -298,9 +342,12 @@ class ClientAddons:
                 f"needs letters or digits, at most {MAX_ID}. {NOTHING_CHANGED}"
             )
         if item_id in self.shipped_ids:
+            names = {manifest.id: manifest.name for manifest in self.shipped_items}
+            item = names.get(item_id, item_id)
             raise AddonRefusal(
-                f"{name} is an item Yu'lon already ships for this server: install it from its "
-                f"row on the Modules tab. {NOTHING_CHANGED}"
+                f"{name} would use the id {item_id}, which Yu'lon's own {item} uses on "
+                f"this server. Rename the add-on's folder, or use Yu'lon's row. "
+                f"{NOTHING_CHANGED}"
             )
         return parse_manifest(
             {
@@ -448,7 +495,7 @@ class ClientAddons:
         if not is_client_addon(manifest):
             return manifest
         try:
-            found, name = self._read(clone, manifest.name)
+            found, name = self._read(clone, manifest.name, installed_only=True)
         except AddonRefusal as refused:
             raise CompletionRefused(str(refused).removesuffix(" " + NOTHING_CHANGED)) from None
         if item_id_for(name) != manifest.id:
