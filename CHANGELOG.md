@@ -23,6 +23,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Conquest of Azeroth on Windows builds its map data hours faster: the last map step no longer reads through the Windows folder share.
 
 - The Conquest of Azeroth install on Windows no longer stops at the map step with "Permission denied" on a stock Ascension client.
+- Conquest of Azeroth: pressing Start with another realm type picked now offers to switch to it instead of starting the old one.
 
 ### Changed
 - Centurion and Mists of Pandaria on Windows build their map data inside Docker, not through the slow Windows folder share.
