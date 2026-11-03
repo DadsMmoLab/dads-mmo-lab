@@ -86,6 +86,7 @@ from yulon import (
     forgetting,
     git,
     module_answers,
+    module_moves,
     networking,
     platform,
     realm_flag,
@@ -100,7 +101,7 @@ from yulon import (
     update_failure,
 )
 from yulon.after_stop import PutBackAfterStop, TrueAfterStop, withdraw_stop
-from yulon.apply import module_git
+from yulon.apply import module_git, rebuilds_owed_now
 from yulon.catalog import (
     bot_count,
     build_context,
@@ -4105,7 +4106,10 @@ not write it (an older Yu'lon) are not trusted either.
 A file of its own and not a key in `STATE_FILE`, for `BUILD_CACHE_FILE`'s reason: the spine
 and the update route write the install record from copies taken at their start, which would
 put a forgotten key back. `.yulon*`, so outside the build fingerprint (`build_context`).
-`{"version": 1, "sources": {"<repo>": "<full sha>"}}`.
+`{"version": 1, "sources": {"<repo>": "<full sha>"}}`, and since T863 `"written":
+"<sha256>"` -- `written_digest()` of the files this app's write-back leaves in the
+checkouts. A record an older Yu'lon wrote has no `written`; a reader that needs it takes
+that as "a build is owed" rather than trusting the commits alone.
 """
 
 
@@ -4123,8 +4127,52 @@ def source_heads(server_dir: Path, sources: Sequence[EmulatorSource]) -> dict[st
     return heads
 
 
-def remember_built_from(server_dir: Path, heads: Mapping[str, str]) -> None:
+def written_digest(server_dir: Path, paths: Mapping[str, Sequence[str]]) -> str | None:
+    """A sha256 over the files this app's write-back may write in a checkout (T863).
+
+    `paths` is `StagedInstaller.app_written_paths()`: the compose files over a server
+    dir's own checkout, a family's carried patch targets. One entry per file, sorted by
+    the path relative to `server_dir`, and each entry is that path, a NUL, either the
+    sha256 of the file's bytes or the literal `missing`, and a NUL. So the same content
+    in the same places always hashes the same, and a write-back that creates a file
+    counts as a change.
+
+    Written into `BUILT_FROM_FILE` after a build finishes and compared with the files on
+    disk by the update route's no-move exit: a Yu'lon that writes content different from
+    what the running build was made from has left the image stale, and that press
+    recompiles.
+
+    `None` when a file that is there cannot be read: unknown, so no exit is taken.
+    """
+    rows: list[tuple[str, str]] = []
+    for key, relatives in paths.items():
+        root = server_dir / key
+        for relative in relatives:
+            path = root / relative
+            try:
+                content = hashlib.sha256(path.read_bytes()).hexdigest()
+            except FileNotFoundError:
+                content = "missing"
+            except OSError as exc:
+                logger.warning(f"could not read {path} to fingerprint what this app wrote: {exc}")
+                return None
+            rows.append((path.relative_to(server_dir).as_posix(), content))
+    digest = hashlib.sha256()
+    for relative, content in sorted(rows):
+        digest.update(relative.encode("utf-8") + b"\0")
+        digest.update(content.encode("utf-8") + b"\0")
+    return digest.hexdigest()
+
+
+def remember_built_from(
+    server_dir: Path, heads: Mapping[str, str], *, written: str | None = None
+) -> None:
     """Write `BUILT_FROM_FILE` (T589), or forget it when no checkout could be read. Never raises.
+
+    `written` (T863) is `written_digest()` of the files this app's write-back leaves in
+    the checkouts, taken after that write-back. `None` -- because a file could not be
+    read, or a caller that has nothing to compare -- writes the record an older Yu'lon
+    wrote: readable, and the no-move exit is not taken on it.
 
     A record that cannot be written is logged and left absent, which readers take as "not
     known": the cost is a button withheld, never one offered on the wrong build.
@@ -4134,7 +4182,9 @@ def remember_built_from(server_dir: Path, heads: Mapping[str, str]) -> None:
         return
     path = server_dir / BUILT_FROM_FILE
     staged = path.with_name(path.name + ".yulon-new")
-    record = {"version": 1, "sources": dict(sorted(heads.items()))}
+    record: dict[str, Any] = {"version": 1, "sources": dict(sorted(heads.items()))}
+    if written is not None:
+        record["written"] = written
     try:
         staged.write_text(json.dumps(record) + "\n", encoding="utf-8")
         os.replace(staged, path)
@@ -4174,6 +4224,58 @@ def read_built_from(server_dir: Path) -> dict[str, str]:
         for repo, sha in rows.items()
         if isinstance(repo, str) and isinstance(sha, str) and sha
     }
+
+
+def read_built_from_written(server_dir: Path) -> str | None:
+    """The `written` digest in `BUILT_FROM_FILE` (T863), or None for no record or an old one.
+
+    None is also a record this build cannot use: absent, unreadable, or written by a
+    Yu'lon older than T863, whose build was compiled from files nobody fingerprinted.
+    """
+    path = server_dir / BUILT_FROM_FILE
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as exc:
+        logger.warning(f"{path} could not be read ({exc}); the build is taken as not known")
+        return None
+    written = raw.get("written") if isinstance(raw, dict) else None
+    return written if isinstance(written, str) and written else None
+
+
+def module_moves_owed(server_dir: Path) -> bool:
+    """Is a module update nobody has built yet in the T557 record, or can it not be read?
+
+    The update route's no-move exit asks this before it ends without a build: a Modules-tab
+    Update resets the clone before anything compiles, and only a build settles it
+    (`module_moves.settle()`, which the Rebuild the exit would skip runs). Each move is
+    read against its clone's HEAD, exactly as `Applier.unbuilt_updates()` reads it.
+
+    A clone whose folder is not its id is not found here, and neither is a record that
+    cannot be read: both answer True, so the press rebuilds rather than skip a build it
+    may owe.
+    """
+    ledger = module_moves.read(server_dir)
+    if ledger is None:
+        return True
+    for item, move in ledger.moves.items():
+        family, _slash, item_id = item.partition("/")
+        if family != "module" or not item_id:
+            continue
+        head = read_head_file(server_dir / "modules" / item_id)
+        if head is None or move.unbuilt_at(head):
+            return True
+    return False
+
+
+NOTHING_BUILT = object()
+"""What `StagedInstaller.update_to_latest()` returns when it ended without compiling (T863).
+
+`install_wiring.with_module_moves()` reads the generator's return value: a press that
+builds settles the module-update record, and this one must not -- `module_moves.settle()`
+would erase moves nobody has built, which is exactly what the exit refused to skip.
+"""
 
 
 def built_carries_pin(built: str, pin: str, row: SourceRev | None) -> bool:
@@ -8076,7 +8178,7 @@ def _end_on_loss(
 
 def _reserving(
     press: str | Callable[[Mapping[str, Any]], str],
-) -> Callable[[Callable[..., Iterator[str]]], Callable[..., Iterator[str]]]:
+) -> Callable[[Callable[..., Iterator[str]]], Callable[..., Generator[str, None, object]]]:
     """Decorate a press (a generator method) so it holds its server's reservation (T568).
 
     The reservation is taken when the press starts running, after the player's Yes and
@@ -8087,20 +8189,29 @@ def _reserving(
     function of the call's arguments that says it (Update and Return to the pin are one method).
     """
 
-    def decorate(method: Callable[..., Iterator[str]]) -> Callable[..., Iterator[str]]:
+    def decorate(
+        method: Callable[..., Iterator[str]],
+    ) -> Callable[..., Generator[str, None, object]]:
         signature = inspect.signature(method)
 
         @functools.wraps(method)
-        def reserved(self: StagedInstaller, *args: Any, **kwargs: Any) -> Iterator[str]:
+        def reserved(
+            self: StagedInstaller, *args: Any, **kwargs: Any
+        ) -> Generator[str, None, object]:
             given = signature.bind(self, *args, **kwargs).arguments
             options = given.get("options") or InstallOptions()
             named = press if isinstance(press, str) else press(given)
             done = threading.Event()
+            returned: object = None
             with self._reservation(self.server_dir(options), named, given.get("cancel")) as held:
                 if held is not None:
                     kwargs["cancel"] = _end_on_loss(held, given.get("cancel"), done)
                 try:
-                    yield from method(self, *args, **kwargs)
+                    # T863: the value must reach the wiring (`with_module_moves()` reads
+                    # the Update's NOTHING_BUILT) as the method's own caller would see it.
+                    returned = yield from cast(
+                        Generator[str, None, object], method(self, *args, **kwargs)
+                    )
                 except GeneratorExit:
                     raise
                 except BaseException:
@@ -8109,6 +8220,7 @@ def _reserving(
                     raise
                 finally:
                     done.set()
+            return returned
 
         return reserved
 
@@ -10772,8 +10884,11 @@ class StagedInstaller:
                 # server never came up at all is a build worth putting back, and
                 # that is the whole of what this subclass separates.
                 yield from self._release(kept)
-                # T589: the new build is what the tags name, and it started.
-                remember_built_from(server_dir, compiled_from)
+                # T589: the new build is what the tags name, and it started. T863: and the
+                # files this app's write-back left in the checkouts, as it was compiled.
+                remember_built_from(
+                    server_dir, compiled_from, written=self._app_written_digest(server_dir)
+                )
                 # The new build started: as a success, the stopped build's record goes.
                 also = self._forget_the_stopped_build(server_dir)
                 # T680 (L11): and so do the two start records, as on a success. Every tag
@@ -10967,8 +11082,10 @@ class StagedInstaller:
         # T217: the build now running was made from the folders as they are.
         forget_sources_off(server_dir)
         # T589: and from these commits. Before `after_ready()`, which may start the movement
-        # map job that stamps its generation from this record.
-        remember_built_from(server_dir, compiled_from)
+        # map job that stamps its generation from this record. T863: the `written` half is
+        # the files this app's write-back left in the checkouts, hashed now that the press
+        # owns them; the update route's no-move exit compares it with them.
+        remember_built_from(server_dir, compiled_from, written=self._app_written_digest(server_dir))
         if landed is not None:
             landed()
         if own_copy is not None:
@@ -11347,61 +11464,55 @@ class StagedInstaller:
         self,
         moved: Sequence[tuple[EmulatorSource, Path, str]],
         earlier: Mapping[Path, SourceOff],
-        state: InstallState,
     ) -> bool:
-        """Did the moves loop leave every source on the commit its build is from (T863).
+        """Did the moves loop leave every source on the commit it was on before (T863).
 
         True only when each `(source, dest, old)` still reads as `old` off
-        `head_sha()`, no folder an earlier press left off its build is owed one
-        (`earlier`, T680/T758: a build IS owed then), and the build on disk is
-        that head: `source_revs` holds this repo's row and its `built` begins
-        with the head's sha. No row, or another commit, reads as owed -- a
-        folder moved here and built there would otherwise look unmoved and skip
-        the build it is owed, and no record is no proof the image matches the
-        heads. A head git will not answer (`None`) reads as moved: unknown, so
-        the normal path runs and its own refusals say so. The refusals at the
-        top of `update_to_latest()` already cover unfinished restores and
-        imports; nothing else is asked here.
+        `head_sha()` and no folder an earlier press left off its build is owed one
+        (`earlier`, T680/T758: a build IS owed then). A head git will not answer
+        (`None`) reads as moved: unknown, so the normal path runs and its own
+        refusals say so. The refusals at the top of `update_to_latest()` already
+        cover unfinished restores and imports; nothing else is asked here.
+
+        What the RUNNING build was compiled from is not asked here: that is
+        `_built_from_what_is_here()`, which reads the durable record rather than
+        what this press saw move.
         """
         if earlier:
             return False
-        for source, dest, old in moved:
+        for _source, dest, old in moved:
             head = self._seams.head_sha(dest)
             if head is None or head != old:
                 return False
-            rev = state.rev_for(source.repo)
-            built = rev.built.split(git.VERSION_SEPARATOR)[0].strip() if rev is not None else ""
-            if len(built) < _SHORT_SHA or not head.startswith(built):
-                return False
         return True
 
-    def _app_written_hashes(self, server_dir: Path) -> dict[Path, str] | None:
-        """A hash of every file this app's write-back may write in a checkout (T863).
+    def _app_written_digest(self, server_dir: Path) -> str | None:
+        """`written_digest()` of the files this installer's write-back writes (T863)."""
+        return written_digest(server_dir, self.app_written_paths(server_dir))
 
-        The naming is `app_written_paths()`: the compose files over a server
-        dir's own checkout, a family's carried patch targets. Taken before the
-        moves and again after the write-back, so a Yu'lon that writes content
-        different from what the image was built from (a changed template or
-        patch) sends the press down the full path instead of leaving the image
-        stale.
+    def _built_from_what_is_here(self, server_dir: Path) -> bool:
+        """Is the running build exactly what `BUILT_FROM_FILE` names? (T863)
 
-        `None` when one of the files cannot be read: unknown, so the no-move
-        exit is not taken. A file that is not there hashes as "", so a
-        write-back that creates one counts as a change.
+        The one check behind the no-move exit, and it asks the durable record rather
+        than what this press saw move: the record must name the commit each of this
+        entry's sources is on now, in full, and the `written` digest of the files this
+        app's write-back leaves in them.
+
+        Anything else reads as "a build is owed" and the press takes the full path: no
+        record, a record an older Yu'lon wrote (no `written`), a commit that differs, a
+        file that cannot be read, or a checkout git will not name. The commits are read
+        off `head_sha()`, the same seam `_nothing_moved()` uses, so a head git will not
+        answer is unknown rather than a match.
         """
-        found: dict[Path, str] = {}
-        for key, relatives in self.app_written_paths(server_dir).items():
-            root = server_dir / key
-            for relative in relatives:
-                path = root / relative
-                try:
-                    found[path] = hashlib.sha256(path.read_bytes()).hexdigest()
-                except FileNotFoundError:
-                    found[path] = ""
-                except OSError as exc:
-                    logger.warning(f"could not read {path} before the update: {exc}")
-                    return None
-        return found
+        record = read_built_from(server_dir)
+        written = read_built_from_written(server_dir)
+        if not record or written is None:
+            return False
+        for source in self.entry.emulator.sources:
+            head = self._seams.head_sha(server_dir / source.dest)
+            if head is None or record.get(source.repo) != head:
+                return False
+        return self._app_written_digest(server_dir) == written
 
     @_reserving(
         lambda given: (
@@ -11417,11 +11528,16 @@ class StagedInstaller:
         to_pin: bool = False,
         cancel: threading.Event | None = None,
         rewritten_ok: Collection[str] = (),
-    ) -> Iterator[str]:
+    ) -> Generator[str, None, object]:
         """Move this install's sources and rebuild on them. Yields output live (T64).
 
         `rewritten_ok` names the sources whose rewritten history the player's
         confirmation already described (T126); see `_release_targets()`.
+
+        The generator's return value is `NOTHING_BUILT` when the press ended without
+        compiling anything (T863): `install_wiring.with_module_moves()` reads it so a
+        press that built nothing does not settle the module-update record. Every other
+        return is the `None` it always was.
 
         The owner's ask of 2026-09-15, in one route for all four families: "a
         update server to latest, with a warning and recommendation to take a
@@ -11563,12 +11679,6 @@ class StagedInstaller:
             moved: list[tuple[EmulatorSource, Path, str]] = []
             # T680 (L12): what an earlier press left off its build keeps its own row.
             earlier = {row.dest: row for row in sources_still_off(server_dir)}
-            # T863: the files this app's write-back writes into the checkouts, as
-            # the image on disk was built from them. The reset a fetch does even
-            # when the commit is the same brings upstream's copies of these back,
-            # and the write-back puts this app's over them again; compared below,
-            # so a Yu'lon that writes different content recompiles.
-            written_before = self._app_written_hashes(server_dir)
             try:
                 for source, dest, old in plan:
                     self._check_cancel(cancel)
@@ -11627,54 +11737,53 @@ class StagedInstaller:
                     stood = earlier[dest].head if dest in earlier else None
                     yield self._moved_line(source, dest, old, stood)
                 self._check_cancel(cancel)
-                if self._nothing_moved(moved, earlier, state):
-                    # T863: every source read back as the commit its build is
-                    # from, and no folder an earlier press left off its build is
-                    # owed one. The fetch is still a `reset --hard` onto
-                    # upstream's files even when the commit did not change, so
-                    # this app's own files go back over the ones the move
-                    # brought FIRST, exactly as the full path does -- before the
-                    # row for the moved-commit is forgotten and before the
-                    # family's reading of the move. Hashed around that write,
-                    # because a Yu'lon that writes content different from what
-                    # the image was built from has left the image stale: that
-                    # press joins the full path below and recompiles. Every
-                    # failure here -- an UpdateRefused from the family included
-                    # -- reaches the outer handler, which remembers a refused
+                if self._nothing_moved(moved, earlier):
+                    # T863: no source moved, and no folder an earlier press left off
+                    # its build is owed one. The fetch is still a `reset --hard` onto
+                    # upstream's files even when the commit did not change, so this
+                    # app's own files go back over the ones the move brought FIRST,
+                    # exactly as the full path does -- before the family's reading of
+                    # the move. Every failure here -- an UpdateRefused from the family
+                    # included -- reaches the outer handler, which remembers a refused
                     # commit once, puts the sources back once and ends the press
                     # refused.
                     yield from self._rewrite_what_we_own(server_dir, opts, state)
                     changes = yield from self.check_moved_sources(server_dir, moved, to_pin=to_pin)
                     yield from self.check_carried_patches(server_dir)
                     yield from self.apply_carried_patches(server_dir)
-                    # The family's servers-down work is asked here because only
-                    # the family knows what a press that moved nothing still
-                    # owes: a pending world reimport (TrinityCore) is owed with
-                    # no source moved. CMaNGOS reports catch-up work from its
-                    # plan, so its Update still rebuilds (T866); this exit is
-                    # not for it. The exit fires when the family answers nothing
-                    # owed in EITHER of its two shapes: no work object (a
-                    # TrinityCore press with no imports, no map data and no
-                    # pending reimport), or no `changes` reading (the
-                    # AzerothCore update path, whose check returns None: its
-                    # remaining work is the idempotent start-time updater
-                    # one-shot, which a press that moved nothing has nothing to
-                    # feed).
-                    # A press that owes work joins the full path below: the
-                    # write-back, the family's reading and the patches above
-                    # already ran, so the full path must not run them again
-                    # (`_already_prepared`).
-                    written_after = self._app_written_hashes(server_dir)
-                    if written_before is None or written_after != written_before:
-                        _already_prepared = False
-                    elif (
-                        self.servers_down_work(server_dir, changes, press=press) is not None
-                        and changes is not None
+                    # T863 (round 2): the exit asks the durable build record, not what
+                    # this press saw move -- `_built_from_what_is_here()` compares the
+                    # record's commits AND the digest of the files written back above
+                    # with what is on disk now -- and the two records of other presses
+                    # that still owe work: an unbuilt module Update (T557) and a module
+                    # installed since the last build (T750). Anything else ends here
+                    # with `NOTHING_BUILT`, and the wiring keeps the module-update
+                    # record unsolved.
+                    #
+                    # The family's servers-down work is asked here too because only the
+                    # family knows what a press that moved nothing still owes: a pending
+                    # world reimport (TrinityCore) is owed with no source moved. CMaNGOS
+                    # reports catch-up work from its plan, so its Update still rebuilds
+                    # (T866); this exit is not for it. The exit fires when the family
+                    # answers nothing owed in EITHER of its two shapes: no work object (a
+                    # TrinityCore press with no imports, no map data and no pending
+                    # reimport), or no `changes` reading (the AzerothCore update path,
+                    # whose check returns None: its remaining work is the idempotent
+                    # start-time updater one-shot, which a press that moved nothing has
+                    # nothing to feed).
+                    #
+                    # A press that owes a build joins the full path below: the
+                    # write-back, the family's reading and the patches above already
+                    # ran, so the full path must not run them again -- nor forget to
+                    # stop the family's background work before the compile it does owe
+                    # (`before_rebuild()`, `_already_prepared`).
+                    work = self.servers_down_work(server_dir, changes, press=press)
+                    if (
+                        self._built_from_what_is_here(server_dir)
+                        and not module_moves_owed(server_dir)
+                        and not rebuilds_owed_now(server_dir)
+                        and (work is None or changes is None)
                     ):
-                        yield from self.before_rebuild(server_dir, route, press)
-                        _already_prepared = True
-                    else:
-                        _already_prepared = False
                         # What the success path records for releases keeps
                         # holding (a kept HEAD keeps its release branch,
                         # T862-E), and only that: with no build there is nothing
@@ -11696,7 +11805,9 @@ class StagedInstaller:
                                 f"{self.entry.name} is already on the newest code it follows, so "
                                 "nothing was rebuilt and the server was not stopped."
                             )
-                        return
+                        return NOTHING_BUILT
+                    yield from self.before_rebuild(server_dir, route, press)
+                    _already_prepared = True
                 else:
                     _already_prepared = False
                 # T179: the family reads what the move brought (TrinityCore's SQL
@@ -11996,6 +12107,9 @@ class StagedInstaller:
             # exceptions). It exists for a count asked WHILE the press ran,
             # which cached the moved -- or about-to-be-restored -- HEADs.
             upstream.forget(server_dir)
+        # T863: every way out that built something says so with the `None` it always did;
+        # only the no-move exit above returns `NOTHING_BUILT`.
+        return None
 
     def _release_targets(
         self,
@@ -16638,6 +16752,12 @@ class StagedInstaller:
         # T203: what the cache holds as this build starts, so the next press's
         # preflight can credit only what THIS build added to it -- or, after an
         # attempt that did not finish, what that one added (`BUILD_CACHE_FILE`).
+        # T589 (T863 round 2): from here this press can replace the server's build, and a
+        # compile that dies must leave "not known" rather than the record of the build it
+        # was replacing. Forgets what an install left before (a resumed install), as
+        # `rebuild()` does. Not before the skip above: a press that compiles nothing has
+        # not changed the build its record names.
+        forget_built_from(ctx.server_dir)
         # T589: what this compile is made from, read before it starts (the build context).
         heads = source_heads(ctx.server_dir, self.entry.emulator.sources)
         yield BUILD_CACHE_ASKING
@@ -16713,7 +16833,11 @@ class StagedInstaller:
             # T589: an install has no build from before to go back to, so the image this
             # compile tagged is the server's build. A rebuild records it once the press is
             # over (`rebuild()`), because until then a rollback can put the old one back.
-            remember_built_from(ctx.server_dir, heads)
+            # T863: the install's write-back (`generate-compose`, `patch-sources`) ran
+            # before this compile, so the files on disk now are the ones it was made from.
+            remember_built_from(
+                ctx.server_dir, heads, written=self._app_written_digest(ctx.server_dir)
+            )
         self._remember_built_prefix(ctx.server_dir)
         yield "The build finished."
 

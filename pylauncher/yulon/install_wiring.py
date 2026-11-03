@@ -58,6 +58,7 @@ from yulon.catalog.installer import (
     installer_for,
 )
 from yulon.catalog.native import (
+    NOTHING_BUILT,
     REPAIR_FILES_LABEL,
     WSL_DISTRO_STOPPED_NOTE,
     CatalogPin,
@@ -653,7 +654,11 @@ def with_module_moves(
     - **it returned**: every clone on disk was just compiled, so no update is
       unbuilt any more (`module_moves.settle()`); so does a build that was KEPT
       after its world came up (`WorldStoppedAfterReadyError`), when
-      `kept_settles`;
+      `kept_settles`. **Not when the generator's return value is
+      `native.NOTHING_BUILT` (T863)**: the Update that moved nothing and found
+      every record current ends without a compile, and settling there would
+      erase module moves nobody has built -- the very work the exit refused to
+      skip;
     - **Stop** (a failure that IS the Stop taking effect: `after_stop.stop_took_effect()`):
       nothing changes. The cancel event is not asked (T592): a compile error that
       lands as Stop is pressed is still the compile error, and its module goes back;
@@ -677,10 +682,22 @@ def with_module_moves(
     and "update mod-ale" is not the way out (`native.ale_playerbots_note()`).
     """
     scanner = module_moves.BuildErrorScanner()
-    try:
-        for line in lines:
+    returned: object = None
+
+    def scanned(through: Iterator[str]) -> Iterator[str]:
+        """`through`'s lines, fed to the scanner; its return value is kept (T863)."""
+        nonlocal returned
+        while True:
+            try:
+                line = next(through)
+            except StopIteration as done:
+                returned = done.value
+                return
             scanner.feed(line)
             yield line
+
+    try:
+        yield from scanned(lines)
     except WorldStoppedAfterReadyError:
         if kept_settles:
             _settle(server_dir)
@@ -713,7 +730,8 @@ def with_module_moves(
         close = getattr(lines, "close", None)
         if close is not None:
             close()
-    _settle(server_dir)
+    if returned is not NOTHING_BUILT:
+        _settle(server_dir)
 
 
 ModuleNote = Callable[[tuple[str, ...]], str]
