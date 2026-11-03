@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import difflib
 import functools
+import hashlib
 import inspect
 import io
 import json
@@ -11346,20 +11347,61 @@ class StagedInstaller:
         self,
         moved: Sequence[tuple[EmulatorSource, Path, str]],
         earlier: Mapping[Path, SourceOff],
+        state: InstallState,
     ) -> bool:
-        """Did the moves loop leave every source on the commit it came from (T863).
+        """Did the moves loop leave every source on the commit its build is from (T863).
 
         True only when each `(source, dest, old)` still reads as `old` off
-        `head_sha()`, and no folder an earlier press left off its build is owed
-        one (`earlier`, T680/T758: a build IS owed then). A head git will not
-        answer (`None`) reads as moved: unknown, so the normal path runs and its
-        own refusals say so. The refusals at the top of `update_to_latest()`
-        already cover unfinished restores and imports; nothing else is asked
-        here.
+        `head_sha()`, no folder an earlier press left off its build is owed one
+        (`earlier`, T680/T758: a build IS owed then), and the build on disk is
+        that head: `source_revs` holds this repo's row and its `built` begins
+        with the head's sha. No row, or another commit, reads as owed -- a
+        folder moved here and built there would otherwise look unmoved and skip
+        the build it is owed, and no record is no proof the image matches the
+        heads. A head git will not answer (`None`) reads as moved: unknown, so
+        the normal path runs and its own refusals say so. The refusals at the
+        top of `update_to_latest()` already cover unfinished restores and
+        imports; nothing else is asked here.
         """
         if earlier:
             return False
-        return all(self._seams.head_sha(dest) == old for _source, dest, old in moved)
+        for source, dest, old in moved:
+            head = self._seams.head_sha(dest)
+            if head is None or head != old:
+                return False
+            rev = state.rev_for(source.repo)
+            built = rev.built.split(git.VERSION_SEPARATOR)[0].strip() if rev is not None else ""
+            if len(built) < _SHORT_SHA or not head.startswith(built):
+                return False
+        return True
+
+    def _app_written_hashes(self, server_dir: Path) -> dict[Path, str] | None:
+        """A hash of every file this app's write-back may write in a checkout (T863).
+
+        The naming is `app_written_paths()`: the compose files over a server
+        dir's own checkout, a family's carried patch targets. Taken before the
+        moves and again after the write-back, so a Yu'lon that writes content
+        different from what the image was built from (a changed template or
+        patch) sends the press down the full path instead of leaving the image
+        stale.
+
+        `None` when one of the files cannot be read: unknown, so the no-move
+        exit is not taken. A file that is not there hashes as "", so a
+        write-back that creates one counts as a change.
+        """
+        found: dict[Path, str] = {}
+        for key, relatives in self.app_written_paths(server_dir).items():
+            root = server_dir / key
+            for relative in relatives:
+                path = root / relative
+                try:
+                    found[path] = hashlib.sha256(path.read_bytes()).hexdigest()
+                except FileNotFoundError:
+                    found[path] = ""
+                except OSError as exc:
+                    logger.warning(f"could not read {path} before the update: {exc}")
+                    return None
+        return found
 
     @_reserving(
         lambda given: (
@@ -11521,6 +11563,12 @@ class StagedInstaller:
             moved: list[tuple[EmulatorSource, Path, str]] = []
             # T680 (L12): what an earlier press left off its build keeps its own row.
             earlier = {row.dest: row for row in sources_still_off(server_dir)}
+            # T863: the files this app's write-back writes into the checkouts, as
+            # the image on disk was built from them. The reset a fetch does even
+            # when the commit is the same brings upstream's copies of these back,
+            # and the write-back puts this app's over them again; compared below,
+            # so a Yu'lon that writes different content recompiles.
+            written_before = self._app_written_hashes(server_dir)
             try:
                 for source, dest, old in plan:
                     self._check_cancel(cancel)
@@ -11579,77 +11627,65 @@ class StagedInstaller:
                     stood = earlier[dest].head if dest in earlier else None
                     yield self._moved_line(source, dest, old, stood)
                 self._check_cancel(cancel)
-                if self._nothing_moved(moved, earlier):
-                    # T863: every source read back as the commit it came from, and no
-                    # folder an earlier press left off its build is owed one. The
-                    # fetch is still a `reset --hard` onto upstream's files even
-                    # when the commit did not change, so this app's own files go
-                    # back over the ones the move brought FIRST, exactly as the
-                    # full path does -- before the row for the moved-commit is
-                    # forgotten and before the family's reading of the move. An
-                    # UpdateRefused from the family is remembered, so the news
-                    # stops offering that commit; then the restored folders go
-                    # back and the press ends refused. Anything else raised puts
-                    # the sources back the way the full path's stop step does.
-                    family_work: ServersDownWork | None = None
-                    try:
-                        yield from self._rewrite_what_we_own(server_dir, opts, state)
-                        changes = yield from self.check_moved_sources(
-                            server_dir, moved, to_pin=to_pin
-                        )
-                        yield from self.check_carried_patches(server_dir)
-                        yield from self.apply_carried_patches(server_dir)
-                        # The family's servers-down work is ledger-driven, not
-                        # diff-driven: a world file an earlier press left failed
-                        # (CMaNGOS T531/T534) or a pending world reimport
-                        # (TrinityCore) is still owed when no source moved, and
-                        # only the family knows. Asked here rather than guessed.
-                        # The exit fires when the family answers nothing owed in
-                        # EITHER of its two shapes: no work object (a TrinityCore
-                        # press with no imports, no map data and no pending
-                        # reimport), or no `changes` reading (the AzerothCore
-                        # update path, whose check returns None: its remaining
-                        # work is the idempotent start-time updater one-shot,
-                        # which a press that moved nothing has nothing to feed).
-                        # A press that owes work joins the full path below: the
-                        # write-back, the family's reading and the patches above
-                        # already ran, so the full path must not run them again
-                        # (`_already_prepared`).
-                        family_work = self.servers_down_work(server_dir, changes, press=press)
-                        if family_work is not None and changes is not None:
-                            yield from self.before_rebuild(server_dir, route, press)
-                            _already_prepared = True
-                        else:
-                            _already_prepared = False
-                    except UpdateRefused as exc:
-                        if not to_pin:
-                            self._remember_refused(server_dir, exc)
-                        failed = yield from self._restore_the_folder(
-                            moved, server_dir, opts, state, press
-                        )
-                        raise InstallerError(f"{exc} {_sources_note(failed)}") from exc
-                    except (InstallerError, OSError) as exc:
-                        failed = yield from self._restore_the_folder(
-                            moved, server_dir, opts, state, press
-                        )
-                        raise InstallerError(f"{exc} {_sources_note(failed)}") from exc
-                    if not _already_prepared:
-                        # What the success path records for releases keeps holding (a
-                        # kept HEAD keeps its release branch, T862-E), and only
-                        # that: with no build there is nothing new to record. The
-                        # press's own rows name folders still on their build
-                        # commit, so they are forgotten.
+                if self._nothing_moved(moved, earlier, state):
+                    # T863: every source read back as the commit its build is
+                    # from, and no folder an earlier press left off its build is
+                    # owed one. The fetch is still a `reset --hard` onto
+                    # upstream's files even when the commit did not change, so
+                    # this app's own files go back over the ones the move
+                    # brought FIRST, exactly as the full path does -- before the
+                    # row for the moved-commit is forgotten and before the
+                    # family's reading of the move. Hashed around that write,
+                    # because a Yu'lon that writes content different from what
+                    # the image was built from has left the image stale: that
+                    # press joins the full path below and recompiles. Every
+                    # failure here -- an UpdateRefused from the family included
+                    # -- reaches the outer handler, which remembers a refused
+                    # commit once, puts the sources back once and ends the press
+                    # refused.
+                    yield from self._rewrite_what_we_own(server_dir, opts, state)
+                    changes = yield from self.check_moved_sources(server_dir, moved, to_pin=to_pin)
+                    yield from self.check_carried_patches(server_dir)
+                    yield from self.apply_carried_patches(server_dir)
+                    # The family's servers-down work is asked here because only
+                    # the family knows what a press that moved nothing still
+                    # owes: a pending world reimport (TrinityCore) is owed with
+                    # no source moved. CMaNGOS reports catch-up work from its
+                    # plan, so its Update still rebuilds (T866); this exit is
+                    # not for it. The exit fires when the family answers nothing
+                    # owed in EITHER of its two shapes: no work object (a
+                    # TrinityCore press with no imports, no map data and no
+                    # pending reimport), or no `changes` reading (the
+                    # AzerothCore update path, whose check returns None: its
+                    # remaining work is the idempotent start-time updater
+                    # one-shot, which a press that moved nothing has nothing to
+                    # feed).
+                    # A press that owes work joins the full path below: the
+                    # write-back, the family's reading and the patches above
+                    # already ran, so the full path must not run them again
+                    # (`_already_prepared`).
+                    written_after = self._app_written_hashes(server_dir)
+                    if written_before is None or written_after != written_before:
+                        _already_prepared = False
+                    elif (
+                        self.servers_down_work(server_dir, changes, press=press) is not None
+                        and changes is not None
+                    ):
+                        yield from self.before_rebuild(server_dir, route, press)
+                        _already_prepared = True
+                    else:
+                        _already_prepared = False
+                        # What the success path records for releases keeps
+                        # holding (a kept HEAD keeps its release branch,
+                        # T862-E), and only that: with no build there is nothing
+                        # new to record, so just the names change and a refused
+                        # commit stays refused. The press's own rows name
+                        # folders still on their build commit, so they are
+                        # forgotten.
                         forget_sources_off(server_dir)
                         marked = {repo: said.tag for repo, said in targets.items() if said.tag}
                         if not to_pin and marked:
-                            fresh = read_state(server_dir, valid=self.stage_names())
-                            kept = (
-                                {rev.repo: rev.release for rev in fresh.source_revs}
-                                if fresh is not None
-                                else {}
-                            )
-                            if any(kept.get(repo, "") != tag for repo, tag in marked.items()):
-                                self._record_source_revs(server_dir, state, moved, marked)
+                            self._record_release_names(server_dir, marked)
                         if to_pin:
                             yield (
                                 f"{self.entry.name} is already on the commit this app was tested "
@@ -12926,6 +12962,31 @@ class StagedInstaller:
                 refused_updates=refused,
             ),
         )
+
+    def _record_release_names(self, server_dir: Path, releases: Mapping[str, str]) -> None:
+        """Name the release a no-move press kept, changing nothing else (T863, T862-E).
+
+        `_record_source_revs()` is the wrong tool here, and the reason is the
+        press it is now called for: it assumes a landing, rewrites
+        `built`/`pin`/`ahead` from the checkout and drops every
+        `refused_updates` entry for the repos it touches. A press that moved
+        nothing landed nowhere, and a refused commit already recorded for the
+        same repo must survive it. So this changes `release` and only `release`,
+        and only on rows that exist: without a row there is no `built` to keep
+        the name beside, and such a press could not be here (`_nothing_moved()`).
+
+        Best-effort like every write through `write_state()`: a record that
+        could not be written costs a release name, not the press.
+        """
+        fresh = read_state(server_dir, valid=self.stage_names())
+        if fresh is None:
+            return
+        rows = tuple(
+            replace(rev, release=releases[rev.repo]) if rev.repo in releases else rev
+            for rev in fresh.source_revs
+        )
+        if rows != fresh.source_revs:
+            write_state(server_dir, replace(fresh, source_revs=rows))
 
     def record_source_rows(self, server_dir: Path, rows: Sequence[SourceRev]) -> bool:
         """Write `rows` into the install record, keeping every other source's row (T601).
