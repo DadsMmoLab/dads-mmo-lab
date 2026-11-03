@@ -8999,14 +8999,16 @@ def install_tool_containers(
 
 
 def end_tool_container(name: str, *, wsl_distro: str | None = None) -> str | None:
-    """Kill and remove one extraction-tool container at once (`docker rm -f`, no grace).
+    """Kill and remove one extraction-tool container at once (`docker rm -f -v`, no grace).
+
+    `-v` takes only that container's own anonymous volumes (T846), never a named one.
 
     T854: for an uninstall, which deletes the data the tool writes, so there is nothing to
     wait for (`compose down` would give it `STOP_GRACE_SECONDS` first, twice). None once it is
     gone; otherwise Docker's reason in words. Never raises.
     """
     proc = _docker(
-        ["rm", "-f", name], timeout=container_end.END_CONTAINER_TIMEOUT, wsl_distro=wsl_distro
+        ["rm", "-f", "-v", name], timeout=container_end.END_CONTAINER_TIMEOUT, wsl_distro=wsl_distro
     )
     said = (proc.stderr or "").lower()
     if proc.returncode == 0 or "no such container" in said or "already in progress" in said:

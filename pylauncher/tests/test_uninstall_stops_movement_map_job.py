@@ -62,11 +62,13 @@ class _Daemon:
             ]
             return subprocess.CompletedProcess(argv, 0, "\n".join(rows), "")
         if argv[:2] == ["rm", "-f"]:
+            # T846: every removal of a container Yu'lon made takes its anonymous volumes.
+            assert argv[:3] == ["rm", "-f", "-v"], argv
             if self.rm_fails:
                 return subprocess.CompletedProcess(argv, 1, "", "Error: daemon refused")
-            self.removed.append(argv[2])
-            self.running.pop(argv[2], None)
-            return subprocess.CompletedProcess(argv, 0, argv[2], "")
+            self.removed.append(argv[3])
+            self.running.pop(argv[3], None)
+            return subprocess.CompletedProcess(argv, 0, argv[3], "")
         raise AssertionError(f"unexpected docker call {argv}")
 
 
@@ -295,7 +297,7 @@ def test_with_several_jobs_a_later_one_that_fails_says_how_many_were_ended(
     def refuse_the_second(
         argv: list[str], *a: object, **k: object
     ) -> subprocess.CompletedProcess[str]:
-        if argv[:3] == ["rm", "-f", second]:
+        if argv[:4] == ["rm", "-f", "-v", second]:
             return subprocess.CompletedProcess(argv, 1, "", "Error: daemon refused")
         return real_rm(argv, *a, **k)
 
