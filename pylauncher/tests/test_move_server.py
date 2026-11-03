@@ -11,11 +11,12 @@ from pathlib import Path
 
 import pytest
 
-from yulon import move_server
+from tests.test_move_package import dump, header
+from yulon import apply, move_server
 from yulon.catalog.catalog import CatalogEntry, load_catalog
 from yulon.manifest import Manifest, Origin
 from yulon.manifest_store import ManifestStore
-from yulon.move import PackedSource
+from yulon.move import PackedSource, read_package, write_package
 from yulon.move_flows import MoveError
 from yulon.resources import manifests_dir
 
@@ -265,6 +266,133 @@ def test_a_link_module_carries_its_manifest(tmp_path: Path) -> None:
     carried = [f for f in got.files if f.kind == "manifest"]
     assert [c.target for c in carried] == ["module/mod-linked"]
     assert Manifest.model_validate_json(carried[0].data) == linked
+
+
+def two_w() -> Manifest:
+    """A link module whose folder is the author's capitals, its id the lower-case slug."""
+    return Manifest.model_validate(
+        {
+            "id": "mod-twow-qol-followers",
+            "name": "Two W QOL",
+            "type": "module",
+            "game": "wow-wotlk",
+            "folder": "mod-twow-QOL-followers",
+            "source": {"repo": "someone/mod-twow-qol-followers"},
+            "origin": {"kind": "link", "added": "2026-10-01"},
+        }
+    )
+
+
+def mob_stats() -> Manifest:
+    """A folder-added module whose folder is `MobStats`, its id `mobstats`."""
+    return Manifest.model_validate(
+        {
+            "id": "mobstats",
+            "name": "Mob Stats",
+            "type": "module",
+            "game": "wow-wotlk",
+            "folder": "MobStats",
+            "origin": {"kind": "folder", "path": "/home/me/MobStats", "added": "2026-10-01"},
+        }
+    )
+
+
+def test_a_link_module_whose_folder_differs_from_its_id_is_packed(tmp_path: Path) -> None:
+    """D1: the store is keyed by id, so the pack must not ask it by the folder's spelling.
+
+    Mutation: `load_manifest(kind, clone_name)` again and the folder is refused as
+    undescribed, because no manifest is stored under `mod-twow-QOL-followers`.
+    """
+    server = wotlk_server(tmp_path)
+    head(server / "modules" / "mod-twow-QOL-followers", "e" * 40)
+    got = facts(server, load_manifest=lookup(extra={("module", "mod-twow-qol-followers"): two_w()}))
+
+    assert [
+        (m.type, m.id, m.origin, m.commit)
+        for m in got.spec.modules
+        if m.id == "mod-twow-qol-followers"
+    ] == [("module", "mod-twow-qol-followers", "link", "e" * 40)]
+    carried = next(
+        f for f in got.files if f.kind == "manifest" and f.target == "module/mod-twow-qol-followers"
+    )
+    assert Manifest.model_validate_json(carried.data).folder == "mod-twow-QOL-followers"
+
+
+def test_a_folder_module_whose_folder_differs_from_its_id_is_packed(tmp_path: Path) -> None:
+    """D1: a folder-added `MobStats` is found by the id `mobstats`, files and description."""
+    server = wotlk_server(tmp_path)
+    folder = server / "modules" / "MobStats"
+    folder.mkdir()
+    (folder / "MobStats.cpp").write_bytes(b"// stat\n")
+    got = facts(server, load_manifest=lookup(extra={("module", "mobstats"): mob_stats()}))
+
+    assert [(m.type, m.id, m.origin) for m in got.spec.modules if m.id == "mobstats"] == [
+        ("module", "mobstats", "folder")
+    ]
+    assert [f.target for f in got.files if f.kind == "module"] == ["module/mobstats/MobStats.cpp"]
+    carried = next(f for f in got.files if f.kind == "manifest" and f.target == "module/mobstats")
+    assert Manifest.model_validate_json(carried.data).folder == "MobStats"
+
+
+def test_both_folder_names_land_exactly_on_the_new_computer(tmp_path: Path) -> None:
+    """D1: pack, read back, and the plans point each clone at its author's exact folder.
+
+    The description travels inside the package for both a link and a folder module, so
+    the new computer's applier (`clone_dir` -> `clone_folder`) makes the same folder.
+    """
+    server = wotlk_server(tmp_path)
+    head(server / "modules" / "mod-twow-QOL-followers", "e" * 40)
+    (server / "modules" / "MobStats").mkdir()
+    (server / "modules" / "MobStats" / "MobStats.cpp").write_bytes(b"// stat\n")
+    got = facts(
+        server,
+        load_manifest=lookup(
+            extra={
+                ("module", "mod-twow-qol-followers"): two_w(),
+                ("module", "mobstats"): mob_stats(),
+            }
+        ),
+    )
+    dest = tmp_path / "whole-server.zip"
+    write_package(
+        dest,
+        header(),
+        [
+            dump(tmp_path, schema, role)
+            for schema, role in (
+                ("acore_auth", "auth"),
+                ("acore_characters", "characters"),
+                ("acore_world", "world"),
+            )
+        ],
+        server=got.spec,
+        files=got.files,
+    )
+
+    package = read_package(dest)
+    target = move_server.ModuleLookup(load=lookup(), shipped=lambda _kind, _item_id: False)
+    plans, refusals = move_server._module_plans(package, target, "wow-wotlk")
+
+    assert refusals == []
+    landed = {p.manifest.id: apply.clone_folder(p.manifest) for p in plans}
+    assert landed["mod-twow-qol-followers"] == "mod-twow-QOL-followers"
+    assert landed["mobstats"] == "MobStats"
+
+
+def test_a_case_variant_folder_with_no_record_is_still_refused(tmp_path: Path) -> None:
+    """D1: `MOD-TWOW-qol-followers` is not the item `mod-twow-QOL-followers`; no record names it."""
+    server = wotlk_server(tmp_path)
+    head(server / "modules" / "MOD-TWOW-qol-followers", "e" * 40)
+    with pytest.raises(MoveError) as raised:
+        facts(
+            server,
+            load_manifest=lookup(extra={("module", "mod-twow-qol-followers"): two_w()}),
+        )
+    assert str(raised.value) == (
+        "modules/MOD-TWOW-qol-followers is a module folder Yu'lon cannot name (no description "
+        "of it, or more than one), so the new computer could not install it again. Remove it, "
+        "or add it again on the Modules tab, then pack again. Nothing was packed."
+    )
 
 
 def test_a_clone_folder_nothing_describes_refuses_the_pack(tmp_path: Path) -> None:

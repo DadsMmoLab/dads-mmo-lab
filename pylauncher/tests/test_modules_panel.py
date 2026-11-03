@@ -963,6 +963,39 @@ def test_a_family_card_draws_its_hint_beside_the_installed_header(qapp: object) 
     assert hint.isVisibleTo(panel)
 
 
+def test_a_half_installed_clone_under_a_capitals_folder_offers_install_again(
+    tmp_path: Path,
+) -> None:
+    """R2: the claim's id and the row's id meet, so `install_incomplete` is set on it.
+
+    Mutation: `unfinished_clones()` returning folder names makes this key
+    `mod-twow-QOL-followers` miss the manifest's `mod-twow-qol-followers` row, which
+    then offers Remove for an install that never finished.
+    """
+    from yulon import apply as apply_module
+
+    clone = tmp_path / "modules" / "mod-twow-QOL-followers"
+    clone.mkdir(parents=True)
+    apply_module.write_clone_claim(
+        clone,
+        item_id="mod-twow-qol-followers",
+        url="https://github.com/u/mod-twow-QOL-followers.git",
+        completed=False,
+    )
+    manifest = _m("mod-twow-qol-followers", folder="mod-twow-QOL-followers")
+    rows = mp.build_module_rows(
+        [manifest],
+        {"module": frozenset({"mod-twow-qol-followers"})},
+        mp.SessionState(),
+        None,
+        unfinished=apply_module.unfinished_clones(tmp_path),
+    )
+
+    row = _row(rows, "mod-twow-qol-followers")
+    assert row.installed is True
+    assert row.install_incomplete is True
+
+
 # ------------------------------------------------------------------ badges (T44)
 def test_an_uncatalogued_clone_is_badged_installed() -> None:
     """T41's own rows have no manifest, and are installed by definition.

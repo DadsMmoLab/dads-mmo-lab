@@ -78,6 +78,7 @@ from yulon.apply import (
     SqlBackup,
     SqlRunner,
     UncheckedApproval,
+    clone_folder,
 )
 from yulon.catalog import upstream
 from yulon.dbreads import SqlReader
@@ -632,17 +633,30 @@ class GuardedApplier(Applier):
         """
         if manifest.type != "module" or manifest.origin is None:
             return
+        # T861: the FOLDER is what is laid over the core's (`Add<folder>Scripts`), and it can
+        # keep the author's capitals while the id is a lower-case slug.
+        folder = clone_folder(manifest)
         core = core_modules.same_name_in(
-            manifest.id, core_modules.names_in(self.server_dir / CORE_MODULES_DIR)
+            folder, core_modules.names_in(self.server_dir / CORE_MODULES_DIR)
         )
         if core is not None:
             installed = os.path.lexists(self.clone_dir(manifest))
-            said = core_modules.sentence(manifest.id, core, CORE_MODULES_DIR, installed=installed)
+            said = core_modules.sentence(folder, core, CORE_MODULES_DIR, installed=installed)
             raise ApplyRefusal(f"{said} Nothing was changed." if installed else said)
 
     def _head_of_an_outside_mod(self, manifest: Manifest) -> str | None:
-        """Where an outside add-on or database package's clone is, before its Update (T611)."""
-        if manifest.type != "mod" or manifest.origin is None:
+        """Where an outside add-on or database package's clone is, before its Update (T611).
+
+        A package brought from a link is a `mod` when the legacy route recorded it, and a
+        `module` with no C++ when T861's route did (`build.rebuild` is what `complete()`
+        measured), so both are read here: a `module` the next Rebuild would compile has
+        `build.rebuild` True and is a server module's question, not this one.
+        """
+        if manifest.origin is None:
+            return None
+        if manifest.type != "mod" and not (
+            manifest.type == "module" and not manifest.build.rebuild
+        ):
             return None
         head: str | None = self._reader("head_sha", HeadReader)(self.clone_dir(manifest))
         return head
@@ -652,6 +666,12 @@ class GuardedApplier(Applier):
             return self._put_a_mod_back(manifest, was_on)
         if manifest.type != "module" or manifest.origin is None:
             return ""
+        if not manifest.build.rebuild:
+            # T861: a link whose folder turned out to hold no C++ is an add-on or a database
+            # package, and no Rebuild compiles it. Saying "the next rebuild builds that one"
+            # would name a build step that does not exist for this item; the `mod` path's
+            # sentence is the true one.
+            return self._put_a_mod_back(manifest, was_on)
         last = self.last_update(manifest)
         if last is None:
             return ""

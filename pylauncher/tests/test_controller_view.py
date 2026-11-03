@@ -2587,7 +2587,7 @@ def test_the_modules_tab_shows_how_far_behind_each_installed_module_is(
 #
 # Prior art, `origin/rust-main`: the same control is
 # `launcher/src/lib/pages/ModuleManager.svelte:1473-1491` -- an "Install from
-# URL" card with a `mod-* repos only` hint and a button dead while the field is
+# URL" card with a repository-name hint and a button dead while the field is
 # empty -- and its handler at `:447-455` clears the field on success, after the
 # `await refresh()` at `:439` that re-reads the list.
 
@@ -2781,8 +2781,8 @@ def test_a_refused_link_says_the_sentence_and_installs_nothing(
 ) -> None:
     """A refusal is lane A's sentence, shown verbatim, with no job queued."""
     refusal = (
-        "The repository is named 'tools', and a custom module must be named "
-        "mod-<something> in lowercase letters, digits and hyphens. "
+        "The repository is named 'CMakeLists.txt', which is one of the files the core keeps "
+        "in its modules folder, so a module cannot take that name. "
         "Nothing on this machine was changed."
     )
     services = _services(ps, tmp_path, [])
@@ -21528,9 +21528,10 @@ def test_tortoises_box_offers_both_buttons_with_its_own_tips(
     assert view.module_link_button.toolTip() == controller_view_module.TORTOISE_LINK_TIP
     assert view.module_folder_button.toolTip() == controller_view_module.TORTOISE_FOLDER_TIP
     tip = view.module_link_button.toolTip()
-    assert "mod-" in tip and "tw-mod-" in tip and "rebuilt" in tip and "later" not in tip
+    assert "any name works" in tip and "rebuilt" in tip and "later" not in tip
     folder_tip = view.module_folder_button.toolTip()
-    assert "tw-mod-" in folder_tip and "rebuilt" in folder_tip
+    assert "any name works" in folder_tip and "rebuilt" in folder_tip
+    assert "tw-mod-" not in tip and "tw-mod-" not in folder_tip
 
 
 def test_wotlks_tips_are_unchanged_by_tortoises(qapp: object, ps: _Ps, tmp_path: Path) -> None:

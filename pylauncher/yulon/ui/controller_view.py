@@ -3544,14 +3544,25 @@ def _move_services(
     )
     alone = _database_alone(entry.container_spec(), server_dir, wsl_distro=wsl_distro)
 
-    def load_manifest(kind: ManifestType, item_id: str) -> Manifest | None:
+    def load_manifest(kind: ManifestType, item_id_or_folder: str) -> Manifest | None:
         if store is None:
             return None
         try:
-            return store.load(kind, item_id)
-        except Exception as exc:  # noqa: BLE001 - not a module this tab can name: said by the pack
-            logger.info(f"no description of {kind}/{item_id} for the move: {exc}")
-            return None
+            return store.load(kind, item_id_or_folder)
+        except Exception as exc:  # noqa: BLE001 - a folder is not always an id
+            # T861: the move reads CLONE FOLDERS, which can be the author's exact name.
+            try:
+                return next(
+                    (
+                        manifest
+                        for manifest in store.load_all(kind)
+                        if apply_module.clone_folder(manifest) == item_id_or_folder
+                    ),
+                    None,
+                )
+            except Exception:  # noqa: BLE001 - not a module this tab can name: said by the pack
+                logger.info(f"no description of {kind}/{item_id_or_folder} for the move: {exc}")
+                return None
 
     def whole() -> move.ServerFacts:
         """What a whole-server package holds besides the databases (T601 level 2)."""
@@ -4494,6 +4505,8 @@ def _for_wotlk(
                 server_dir, press=press, spec=spec, wsl_distro=wsl_distro, label=entry.name
             ),
             db_container=spec.db,
+            # T861: an id-only clone lookup asks THIS game's store.
+            user_game=user_game,
         )
         if entry.has_manifests
         else None
@@ -8912,22 +8925,22 @@ CUSTOM_MODULE_NO_ADDONS_LINE = "this server has no add-on modules"
 
 MODULE_LINK_TIP = (
     "Paste an https link to a module repository on github.com, gitlab.com or codeberg.org. "
-    "Its name must start with mod-. The module is cloned into this server's modules folder; "
-    "it does nothing until the server is rebuilt."
+    "Any repository name works (capitals included): it is cloned under the name its author "
+    "gave it into this server's modules folder, and does nothing until the server is rebuilt."
 )
 """Named before the press, the way `MODULE_SQL_TIP` is.
 
-Three refusals a user meets before anything happens — the host, the `mod-`
-name, and the fact that a clone is inert until a rebuild — said where they cost
-nothing rather than after a dialog has been filled in. The rust page's version
-of this was the four-word hint `mod-* repos only`
-(`ModuleManager.svelte:1491`).
+Three refusals a user meets before anything happens — the host, a name the core
+keeps for its build system, and the fact that a clone is inert until a rebuild —
+said where they cost nothing rather than after a dialog has been filled in. The
+`mod-` prefix is not one of them since T861: both cores find a module by its
+folder, whatever it is called.
 """
 
 MODULE_FOLDER_TIP = (
-    "Choose a folder on this computer holding a module (its name must start with mod-). "
-    "It is copied into this server's modules folder; the original is not touched, and it "
-    "does nothing until the server is rebuilt."
+    "Choose a folder on this computer holding a module. Any name works: it is copied under "
+    "that name into this server's modules folder, the original is not touched, and it does "
+    "nothing until the server is rebuilt."
 )
 """As `MODULE_LINK_TIP`, plus the one thing a copy has to promise: the folder
 the user points at is read, never moved and never written into."""
@@ -8944,20 +8957,19 @@ card's sentence (`CUSTOM_MODULE_NO_ROUTE_NOTE`) and no buttons.
 
 TORTOISE_LINK_TIP = (
     "Paste an https link to a repository on github.com, gitlab.com or codeberg.org holding a "
-    "server module (its repository is named mod-<name> or tw-mod-<name>, in lower case: it is "
-    "built into the server the next time it is rebuilt), a client add-on (a .toc file) or "
-    "database changes (.sql files in data/sql/auth, character or world). Database changes "
-    "need the world server stopped, and Yu'lon backs up the databases they change first."
+    "server module (any name works: C++ in src/ is built into the server the next time it is "
+    "rebuilt), a client add-on (a .toc file) or database changes (.sql files in data/sql/auth, "
+    "character or world). Database changes need the world server stopped, and Yu'lon backs up "
+    "the databases they change first."
 )
-"""Tortoise's link tooltip (T596): the three kinds it takes, the name rule and the rebuild
-a server module waits for, the stop-the-world rule and the backup."""
+"""Tortoise's link tooltip (T596): the three kinds it takes, that any name works (T861), the
+rebuild a server module waits for, the stop-the-world rule and the backup."""
 
 TORTOISE_FOLDER_TIP = (
-    "Choose a folder on this computer holding a server module (named mod-<name> or "
-    "tw-mod-<name>, in lower case; built in when the server is next rebuilt), a client add-on or "
-    "database changes, laid out as for a link. It is copied; the original is not touched. "
-    "Database changes need the world server stopped, and Yu'lon backs up the databases they "
-    "change first."
+    "Choose a folder on this computer holding a server module (any name works: C++ in src/ is "
+    "built in when the server is next rebuilt), a client add-on or database changes, laid out "
+    "as for a link. It is copied; the original is not touched. Database changes need the world "
+    "server stopped, and Yu'lon backs up the databases they change first."
 )
 """As `TORTOISE_LINK_TIP`, for a folder: read before it is copied, never written into."""
 
@@ -20413,7 +20425,17 @@ class ControllerView(QWidget):
         if reader is None:
             return None
         try:
-            return reader()
+            found = reader()
+            # T861: a clone folder can be the author's exact name (`mod-twow-QOL-followers/`)
+            # while the manifest's id is the lower-case slug. The listing is folders on disk;
+            # every row, chip and cache here is keyed by id, so the manifests say which is
+            # which -- and a folder no manifest names is read through its own claim, which is
+            # what an install that stopped before its record was saved has left (review round
+            # 2). Inside this `try` with `reader()`: either failing is the same "could not
+            # read" answer, not a reload that crashes.
+            return apply_module.folders_as_ids(
+                found, self._manifests.values(), self.services.controller.server_dir
+            )
         except Exception as exc:  # boundary: an unreadable folder must not kill the UI
             logger.warning(f"could not read which modules are installed: {exc}")
             return {}
@@ -20533,9 +20555,11 @@ class ControllerView(QWidget):
             # from the catalog alone, every installed module would read
             # "not installed" and offer Install.
             return
+        # T861: the manifests are read FIRST, because `_installed_clones()` asks them which
+        # folder belongs to which id. Neither read depends on the other's answer beyond that.
+        manifests, broken = self._load_manifests()
         answered = self._installed_clones()
         installed = answered if answered is not None else {}
-        manifests, broken = self._load_manifests()
         if answered is not None:
             self._forget_what_is_no_longer_installed(installed)
         self.modules_panel.set_rows(
@@ -20652,33 +20676,43 @@ class ControllerView(QWidget):
             row = widget.data
             if not row.installed or self._versions.has(server_dir, row.family, row.id):
                 continue
+            manifest = self._manifests.get((row.family, row.id))
+            folder = apply_module.clone_folder(manifest) if manifest is not None else row.id
             if platform.wsl_location(server_dir) is not None:
                 # T774: `docker run` per module must not run here. The row's
                 # key and clone path are bound now, on the GUI thread: the
                 # worker must not reach back into panel rows it may outlive.
                 self._run(
-                    self._version_job(server_dir, row.family, row.id),
+                    self._version_job(server_dir, row.family, row.id, folder),
                     self._version_read,
                     self._version_read_failed,
                 )
                 return
             self.modules_panel.set_version(
-                row.family, row.id, self._versions.fill(server_dir, row.family, row.id)
+                row.family,
+                row.id,
+                self._versions.fill(server_dir, row.family, row.id, folder),
             )
             QTimer.singleShot(0, self, self._fill_next_version)
             return
         self._filling_versions = False
 
-    def _version_job(self, server_dir: Path, family: str, item_id: str) -> Callable[[], object]:
+    def _version_job(
+        self, server_dir: Path, family: str, item_id: str, folder: str | None = None
+    ) -> Callable[[], object]:
         """One WSL version read as a job: the row's key plus its cached answer (T774).
 
         Bound here, on the GUI thread, so the worker takes no widget and no
         row: `fill()` caches by `(server_dir, family, item_id)` and the done
-        slot draws from the same key.
+        slot draws from the same key. `folder` is the clone's exact name (T861).
         """
 
         def read() -> tuple[str, str, str | None]:
-            return (family, item_id, self._versions.fill(server_dir, family, item_id))
+            return (
+                family,
+                item_id,
+                self._versions.fill(server_dir, family, item_id, folder),
+            )
 
         return read
 
@@ -23240,7 +23274,11 @@ class ControllerView(QWidget):
         moved = self._server_updated()
         for widget in self.modules_panel.rows():
             row = widget.data
-            if moved_by_server_update(row.family, row.id, moved):
+            # T861: the row is keyed by its ID, while the folder on disk can keep the
+            # author's capitals, so the predicate is handed the item's folder.
+            manifest = self._manifests.get((row.family, row.id))
+            folder = apply_module.clone_folder(manifest) if manifest is not None else row.id
+            if moved_by_server_update(row.family, row.id, moved, folder=folder):
                 self._behind.pop((row.family, row.id), None)
                 self._versions.forget(row.id)
 
@@ -23781,7 +23819,9 @@ class ControllerView(QWidget):
             core_files=self._tuning_core_files(),
             declared_files=tuple(dict.fromkeys(row.file for row in rows)),
             clone_dir=lambda manifest: (
-                server_dir / apply_module.CLONE_DIRS[manifest.type] / manifest.id
+                server_dir
+                / apply_module.CLONE_DIRS[manifest.type]
+                / apply_module.clone_folder(manifest)
             ),
         )
         # T302: the world conf's rates, read in the same pass -- one file, no job.

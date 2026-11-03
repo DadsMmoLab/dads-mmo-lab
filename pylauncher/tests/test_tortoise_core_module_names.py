@@ -223,10 +223,16 @@ def test_the_rebuild_question_is_asked_as_before_when_all_is_well(tmp_path: Path
 
 
 @needs_git
-def test_an_addon_with_a_core_modules_name_is_not_a_server_module_and_is_not_refused(
+def test_an_addon_link_named_after_a_core_module_is_refused_before_the_clone(
     tmp_path: Path,
 ) -> None:
-    """Only `<server>/modules/` is laid over the core's; an add-on is cloned elsewhere."""
+    """T861: a link is always a module and lands in `modules/`, so the core's folder is at stake.
+
+    An add-on whose repository is called `MobStats` would be cloned to
+    `modules/MobStats`, exactly the core's own module folder, and the image recipe
+    lays ours over the core's. The name guard therefore still applies (T611), now
+    to the FOLDER rather than to the kind the name used to decide.
+    """
     applier, origin, server, _git_seam = _rig(tmp_path)
     (origin / "MobStats.toc").write_text("## Interface: 11200\n", encoding="utf-8")
     (origin / "MobStats.lua").write_text("-- v1\n", encoding="utf-8")
@@ -234,11 +240,13 @@ def test_an_addon_with_a_core_modules_name_is_not_a_server_module_and_is_not_ref
     _git(origin, "commit", "-qm", "v1")
     _core_has(server, "MobStats")
 
-    tortoise_modules.install_custom(applier)(
-        tortoise_modules.derive_link("https://github.com/you/MobStats"), None
-    )
+    with pytest.raises(ApplyRefusal) as refused:
+        tortoise_modules.install_custom(applier)(
+            tortoise_modules.derive_link("https://github.com/you/MobStats"), None
+        )
 
-    assert (server / "sql_scripts" / "clones" / "mobstats" / "MobStats.toc").is_file()
+    assert "MobStats" in str(refused.value) and "overwrite" in str(refused.value)
+    assert not (server / "modules" / "MobStats").exists()
 
 
 def test_the_folder_read_is_the_core_checkouts_modules_in_the_catalog() -> None:

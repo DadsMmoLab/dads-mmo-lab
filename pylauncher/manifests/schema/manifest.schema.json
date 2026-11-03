@@ -880,6 +880,19 @@
       "title": "Description",
       "type": "string"
     },
+    "folder": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "The exact name of the folder this item's clone lives in, when it differs from the id. A core finds a module by its folder's name (AzerothCore's and Tortoise's `Add<folder>Scripts`), so a repository named `mod-twow-QOL-followers` keeps that name on disk while its id stays the lower-case slug. Null means the id.",
+      "title": "Folder"
+    },
     "folders": {
       "default": [],
       "description": "Empty folders, relative to the server dir, the install makes when they are not there: a place the module reads that the player fills (mod-ale's lua_scripts). Files already in one are never touched; a Remove takes back a folder that is still empty and leaves one that holds anything, and says so.",

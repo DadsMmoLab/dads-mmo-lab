@@ -456,7 +456,10 @@ def _clone_dir_of(kind: str) -> str:
 
 
 def moved_by_server_update(
-    family: str, item_id: str, server_updated: Collection[PurePosixPath]
+    family: str,
+    item_id: str,
+    server_updated: Collection[PurePosixPath],
+    folder: str | None = None,
 ) -> bool:
     """Is this family's folder `item_id` one that "Update the server to latest…" moves? (T146)
 
@@ -465,8 +468,13 @@ def moved_by_server_update(
     readers -- the row builder deciding the chip, and the view deciding which
     counts a finished server update has made stale -- so the two cannot
     disagree about which rows the button moved.
+
+    `folder` is the name this item's clone lives in when it differs from `item_id`
+    (`apply.clone_folder()`, T861). Both callers pass it: the row builder's T41
+    rows are uncatalogued and their `item_id` IS the folder, while the view hands
+    the manifest's folder for catalogued rows, whose id can be a lower-case slug.
     """
-    return PurePosixPath(_clone_dir_of(family)) / item_id in server_updated
+    return PurePosixPath(_clone_dir_of(family)) / (folder or item_id) in server_updated
 
 
 class VersionCache:
@@ -500,9 +508,11 @@ class VersionCache:
         self._read = read
         self._known: dict[tuple[Path, str, str], str | None] = {}
 
-    def path_of(self, server_dir: Path, family: str, item_id: str) -> Path:
-        """Where this family's clone of `item_id` lives, by `apply.CLONE_DIRS`."""
-        return server_dir / _clone_dir_of(family) / item_id
+    def path_of(
+        self, server_dir: Path, family: str, item_id: str, folder: str | None = None
+    ) -> Path:
+        """Where this family's clone of `item_id` lives, by `apply.CLONE_DIRS` (T861: by folder)."""
+        return server_dir / _clone_dir_of(family) / (folder or item_id)
 
     def has(self, server_dir: Path, family: str, item_id: str) -> bool:
         """Whether this clone has been read at all -- which "the answer was None" is not."""
@@ -517,11 +527,13 @@ class VersionCache:
         """
         return self._known.get((server_dir, family, item_id))
 
-    def fill(self, server_dir: Path, family: str, item_id: str) -> str | None:
+    def fill(
+        self, server_dir: Path, family: str, item_id: str, folder: str | None = None
+    ) -> str | None:
         """The answer, reading the clone once if it has not been read yet."""
         key = (server_dir, family, item_id)
         if key not in self._known:
-            self._known[key] = self._read(self.path_of(server_dir, family, item_id))
+            self._known[key] = self._read(self.path_of(server_dir, family, item_id, folder))
         return self._known[key]
 
     def forget(self, item_id: str) -> None:
@@ -990,7 +1002,12 @@ def build_module_rows(
                         session,
                         client_dir,
                         dependants.get(name, []),
-                        server_update=moved_by_server_update(kind, name, moved_by_server),
+                        # T861: an uncatalogued name is the FOLDER read from the disk, which
+                        # is the path component this predicate tests; a catalogued row is
+                        # keyed by id and its caller (`controller_view`) passes its folder.
+                        server_update=moved_by_server_update(
+                            kind, name, moved_by_server, folder=name
+                        ),
                     ),
                     removable=False,
                     remove_reason=None,

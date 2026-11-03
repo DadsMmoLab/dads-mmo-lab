@@ -18,7 +18,7 @@ import pytest
 from pydantic import ValidationError
 
 from yulon import manifest
-from yulon.manifest import ALLOWED_REPO_HOSTS, Manifest, parse_index, parse_manifest
+from yulon.manifest import ALLOWED_REPO_HOSTS, Manifest, id_for_folder, parse_index, parse_manifest
 
 MANIFESTS_DIR = Path(__file__).resolve().parents[1] / "manifests"
 SCHEMA_FILE = MANIFESTS_DIR / "schema" / "manifest.schema.json"
@@ -110,6 +110,126 @@ def test_readme_example_validates() -> None:
     assert m.sql[0].applied_by == "db-import"
     assert m.conf[0].keys[1].key == "AuctionHouseBot.GUID"
     assert m.conflicts_with == ("mod-ah-bot-plus",)
+
+
+def test_an_old_manifest_without_a_folder_parses_and_resolves_to_its_id() -> None:
+    """T861: `folder` is optional, so every already-persisted manifest keeps loading.
+
+    The applier's one helper reads the field, so `None` is not a second spelling
+    of the id anywhere else: `apply.clone_folder()` answers the id.
+    """
+    from yulon.apply import clone_folder
+
+    old = {**README_EXAMPLE}
+    assert "folder" not in old
+    m = parse_manifest(old)
+    assert m.folder is None
+    assert clone_folder(m) == m.id
+
+
+@pytest.mark.parametrize(
+    ("folder", "why"),
+    [
+        ("mod-ah-bot", ""),
+        ("Mod-Ah-Bot", ""),
+        ("mod--ah-bot", ""),
+        ("../x", "one plain folder name"),
+        (".hidden", "one plain folder name"),
+        ("a b", "one plain folder name"),
+        ("ending.", "one plain folder name"),
+        ("a" * 101, "one plain folder name"),
+        ("a" * 100, ""),
+        # N6: the core pastes the folder into `Add<folder, - to _>Scripts()`.
+        ("Mod.Ah.Bot", "no dot"),
+        # N6: names Windows keeps for its own devices, in any case.
+        ("CON", "Windows"),
+        ("prn", "Windows"),
+        ("nul", "Windows"),
+        ("COM3", "Windows"),
+        ("lpt9", "Windows"),
+    ],
+)
+def test_a_folder_is_one_plain_directory_name(folder: str, why: str) -> None:
+    """T861/N6: one directory name, no dot, and it must derive to this item's own id."""
+    derived = id_for_folder(folder)
+    value = {**README_EXAMPLE, "id": derived or README_EXAMPLE["id"], "folder": folder}
+    if why:
+        with pytest.raises(ValidationError, match=why):
+            parse_manifest(value)
+    else:
+        assert parse_manifest(value).folder == folder
+
+
+def test_a_folder_that_derives_to_another_items_id_is_refused() -> None:
+    """T861, round 1: a hand-edited manifest cannot point an item at another item's folder.
+
+    Every folder reader turns a directory name back into an id with
+    `id_for_folder()`, so an item whose folder derives to a different id would read
+    and delete that other item's claim receipts.
+    """
+    with pytest.raises(ValidationError, match="derives to the id"):
+        parse_manifest({**README_EXAMPLE, "folder": "Mod-Ah-Bot-Plus"})
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["mod-" + "a" * 64, "tw-mod-" + "a" * 64, "a" * 100, "mod-x"],
+)
+def test_a_name_that_is_already_a_slug_is_its_own_id_however_long(name: str) -> None:
+    """C1: ids persisted before T861 are 68 and 71 characters long, and are their own folder.
+
+    `id_for_folder` cut every name to 64, so a legacy id came back as a DIFFERENT id:
+    the claim readers and the unfinished read then looked the item up under a name that
+    no record and no claim spells. A name within a folder's length that is already a
+    slug is therefore returned as it stands.
+    """
+    assert id_for_folder(name) == name
+
+
+def test_a_name_past_the_folder_length_is_cut_to_it() -> None:
+    """C1: `ID_MAX` is the folder rule's own 100, not a number beside it."""
+    assert manifest.ID_MAX == 100
+    assert id_for_folder("a" * 101) == "a" * 100
+
+
+def test_a_manifest_with_no_folder_whose_id_is_a_windows_device_name_still_loads() -> None:
+    """D2: a legacy Linux record named like a Windows device is not hidden by this rule.
+
+    The device-name clause belongs to a folder being NAMED now. A `mod` persisted before
+    T861 has no `folder` and keeps its id, and on the Linux host that made it `aux` was a
+    legal folder; refusing it on load would remove an installed module from every list.
+    A folder that SPELLS one is still refused (the parametrized cases above), and so is a
+    name being derived (tests/test_module_source.py).
+
+    Mutation: ask the clause when `folder` is None again and this load is refused.
+    """
+    mod = parse_manifest({**README_EXAMPLE, "id": "aux", "type": "mod"})
+    assert mod.id == "aux"
+    assert mod.folder is None
+
+
+def test_a_core_file_name_is_refused_for_a_module_and_allowed_for_a_mod() -> None:
+    """C2: only a module's clone lands in `modules/`, where the core keeps `templates`."""
+    with pytest.raises(ValidationError, match="core keeps"):
+        parse_manifest({**README_EXAMPLE, "game": "wow-tortoise", "id": "templates"})
+    mod = parse_manifest(
+        {**README_EXAMPLE, "game": "wow-tortoise", "id": "templates", "type": "mod"}
+    )
+    assert mod.id == "templates"
+
+
+def test_an_id_longer_than_a_folder_name_can_be_is_refused() -> None:
+    """C2: an id names its own clone folder, and a folder name stops at 100 characters."""
+    with pytest.raises(ValidationError, match="one plain folder name"):
+        parse_manifest({**README_EXAMPLE, "id": "a" * 101})
+
+
+def test_a_folder_named_after_a_core_file_is_refused_when_the_manifest_loads() -> None:
+    """N6: the core-files list is one list, and the persisted manifest is held to it too."""
+    with pytest.raises(ValidationError, match="core keeps"):
+        parse_manifest(
+            {**README_EXAMPLE, "game": "wow-tortoise", "id": "templates", "folder": "templates"}
+        )
 
 
 def test_ale_and_keg_examples_validate() -> None:
@@ -405,6 +525,24 @@ def test_every_checked_in_index_and_its_items_validate(index_file: Path) -> None
     if item_dir.is_dir():
         orphans = sorted(p.stem for p in item_dir.glob("*.json"))
         assert set(orphans) <= set(index.items), f"not in {index_file.name}: {orphans}"
+
+
+def test_every_shipped_manifest_holds_the_effective_folder_rule() -> None:
+    """C2: the folder rule is asked of EVERY item, so it must pass for every item shipped.
+
+    Read from the disk, every game and every family, not through the indexes — the test
+    above is "a shipped file still loads", and this is the other half: the folder each
+    one is cloned into is a name this machine can hold, and it derives to the item's own
+    id. 57 files today, the longest id 29 characters.
+    """
+    items = sorted(p for p in MANIFESTS_DIR.glob("*/*/*.json") if p.parent.parent.name != "schema")
+    assert len(items) >= 57, "the shipped tree was not read, so this asserted nothing"
+    longest = 0
+    for path in items:
+        item = parse_manifest(json.loads(path.read_text(encoding="utf-8")))
+        assert item.id == id_for_folder(item.folder or item.id), path
+        longest = max(longest, len(item.id))
+    assert longest < manifest.ID_MAX
 
 
 def test_a_source_may_pin_a_full_commit_sha_and_nothing_else() -> None:
