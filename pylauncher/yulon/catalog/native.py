@@ -7478,7 +7478,7 @@ class Seams:
     blob_id: Callable[[Path, str, str], str | None] = _git_blob_id
     """T862: the blob of one file at one commit; `""` = no such file, None = no answer.
 
-    What an Update to latest asks of the world baseline file on both sides of a move.
+    What a move to a newer release asks of the world baseline file on both sides of the move.
     """
     images_built: Callable[[Sequence[str]], bool | None] = docker.images_built
     build_cache_bytes: Callable[[], int | None] = docker.build_cache_bytes

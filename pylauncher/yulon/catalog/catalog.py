@@ -706,9 +706,9 @@ class AzerothCoreData(_Strict):
         default=None,
         min_length=1,
         description=(
-            "T862: a file in the core checkout whose blob must not change across an Update "
-            "to latest: a new world baseline needs the world built again, which an update "
-            "does not do. None: not checked."
+            "T862: a file in the core checkout whose blob must not change when the "
+            "sources move to a newer release: a new world baseline needs the world "
+            "built again, which an update does not do. None: not checked."
         ),
     )
     realm_types: tuple[AcRealmType, ...] = Field(
