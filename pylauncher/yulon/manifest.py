@@ -33,6 +33,7 @@ from pydantic import (
     TypeAdapter,
     ValidationError,
     ValidationInfo,
+    WithJsonSchema,
     field_validator,
     model_validator,
 )
@@ -54,6 +55,15 @@ deliberately: the core pastes the folder into a C++ identifier and a dotted name
 does not compile. This is the ONE definition — `module_source` asks
 `folder_refusal()` rather than respelling it, and so does `Manifest`'s own
 validator below, for every item and not only those that spell a `folder`.
+"""
+Follow = Literal["branch", "releases", "release_branches", "release_tag"]
+"""What "latest" means for a source: its branch tip, its newest published release,
+the tip of its highest release branch, or the tag matching that release (T862).
+
+One module-level type so the catalog's `EmulatorSource.follow` override is the
+same type mypy sees on `Source.follow` (T862-D). Only ``branch``/``releases``
+are read through the manifest schema and its validator below; the two release
+modes are refused there and only read in the catalog's emulator sources.
 """
 _REPO_SLUG = r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
 
@@ -259,7 +269,9 @@ class Source(_Strict):
         ),
     )
 
-    follow: Literal["branch", "releases"] = Field(
+    follow: Annotated[
+        Follow, WithJsonSchema({"enum": ["branch", "releases"], "type": "string"})
+    ] = Field(
         default="branch",
         description=(
             'What "latest" means for this source (T126). `branch`: the tip of `branch` '
@@ -274,6 +286,10 @@ class Source(_Strict):
     @model_validator(mode="after")
     def _releases_are_githubs(self) -> Source:
         """`releases` is answered by GitHub's releases API, so it is refused elsewhere."""
+        if self.follow in ("release_branches", "release_tag"):
+            raise ValueError(
+                f"follow: {self.follow} is only read in the catalog's emulator sources"
+            )
         if self.follow == "releases" and "://" in self.repo:
             if (urlsplit(self.repo).hostname or "").lower() != "github.com":
                 raise ValueError(f"follow: releases needs a GitHub repository, got {self.repo!r}")

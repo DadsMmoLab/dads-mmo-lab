@@ -32,7 +32,7 @@ from pydantic import (
 
 from yulon import server_build_presses
 from yulon.docker import BotSavesSkippable, ContainerSpec, SaveFirst
-from yulon.manifest import ALLOWED_REPO_HOSTS, Db, Source, check_repo
+from yulon.manifest import ALLOWED_REPO_HOSTS, Db, Follow, Source, check_repo
 from yulon.platform import PlatformId
 
 CATALOG_FILE = Path(__file__).resolve().with_name("catalog.json")
@@ -64,7 +64,7 @@ class EmulatorSource(Source):
     server dir IS the checkout, as it is for AzerothCore.
     """
 
-    follow: Literal["branch", "releases", "release_branches", "release_tag"] = Field(
+    follow: Follow = Field(
         default="branch",
         description=(
             "`release_branches` = latest is the tip of the highest `<release_prefix><version>` "
@@ -101,6 +101,16 @@ class EmulatorSource(Source):
     def _repo_is_allowed(cls, value: str) -> str:
         """`Source`'s rule over the catalog's wider host list (`CATALOG_REPO_HOSTS`)."""
         return check_repo(value, CATALOG_REPO_HOSTS)
+
+    @model_validator(mode="after")
+    def _releases_are_githubs(self) -> EmulatorSource:
+        """`Source` refuses the two release modes; the catalog reads them, so allow them here."""
+        follow = self.follow
+        repo = self.repo
+        if follow == "releases" and "://" in repo:
+            if (urlsplit(repo).hostname or "").lower() != "github.com":
+                raise ValueError(f"follow: releases needs a GitHub repository, got {repo!r}")
+        return self
 
     @model_validator(mode="after")
     def _release_follow_is_whole(self) -> EmulatorSource:
