@@ -272,6 +272,192 @@ def test_a_scratched_tool_writes_into_the_scratch_folder_and_its_output_is_copie
     assert staging(out) == [], "the host moved the complete copy into place"
 
 
+def test_a_tool_arg_naming_a_folder_is_copied_instead_of_linked(tmp_path: Path) -> None:
+    """`vmap4_assembler Buildings vmaps` reads 18,202 files: from its own layer, not the bind.
+
+    T847: the script copies an `/out` entry the tool names on its own argv
+    instead of linking it. Mutation: replacing the copy with the link leaves
+    `Buildings` a symlink and this test red.
+    """
+    out = tmp_path / "out"
+    (out / "Buildings").mkdir(parents=True)
+    (out / "Buildings" / "f1").write_bytes(b"x")
+    stage(out, {"vmaps": 1})
+    result = run_scratched(
+        tmp_path,
+        out,
+        "if [ -L Buildings ]; then echo link > vmaps/saw; "
+        "elif [ -d Buildings ]; then echo dir > vmaps/saw; "
+        "else echo neither > vmaps/saw; fi\n"
+        "cat Buildings/f1 > vmaps/got\n",
+        "vmaps",
+        "Buildings",
+        "vmaps",
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    promote(out, {"vmaps": 1})
+    assert (out / "vmaps" / "saw").read_bytes() == b"dir\n"
+    assert (out / "vmaps" / "got").read_bytes() == b"x"
+    assert [path.name for path in (out / "Buildings").iterdir()] == ["f1"], "untouched"
+    assert staging(out) == []
+
+
+def test_an_entry_the_tool_does_not_name_is_still_a_link(tmp_path: Path) -> None:
+    """Only the argv-named inputs are copied; everything else reads through the bind."""
+    out = tmp_path / "out"
+    (out / "Buildings").mkdir(parents=True)
+    (out / "Buildings" / "f1").write_bytes(b"x")
+    (out / "maps").mkdir(parents=True)
+    (out / "maps" / "keep").write_bytes(b"k")
+    stage(out, {"vmaps": 1})
+    result = run_scratched(
+        tmp_path,
+        out,
+        "if [ -L maps ]; then echo link > vmaps/saw-maps; "
+        "else echo notlink > vmaps/saw-maps; fi\n"
+        "if [ -L Buildings ]; then echo link > vmaps/saw-buildings; "
+        "else echo notlink > vmaps/saw-buildings; fi\n"
+        "cat maps/keep > vmaps/got\n",
+        "vmaps",
+        "Buildings",
+        "vmaps",
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    promote(out, {"vmaps": 1})
+    assert (out / "vmaps" / "saw-maps").read_bytes() == b"link\n"
+    assert (out / "vmaps" / "saw-buildings").read_bytes() == b"notlink\n"
+    assert (out / "vmaps" / "got").read_bytes() == b"k"
+    assert staging(out) == []
+
+
+def test_a_produced_folder_named_on_the_argv_is_neither_copied_nor_linked(tmp_path: Path) -> None:
+    """The `case` skip comes first: `vmaps` on the argv is made empty, never copied in."""
+    out = tmp_path / "out"
+    (out / "vmaps").mkdir(parents=True)
+    (out / "vmaps" / "stale").write_bytes(b"old")
+    stage(out, {"vmaps": 1, "probe": 1})
+    result = run_scratched(
+        tmp_path,
+        out,
+        "if [ -L vmaps ]; then echo link > probe/saw; "
+        "elif [ -d vmaps ]; then echo dir > probe/saw; "
+        "else echo neither > probe/saw; fi\n"
+        "ls -A vmaps > probe/contents\n",
+        "vmaps probe",
+        "vmaps",
+        "probe",
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    promote(out, {"vmaps": 1, "probe": 1})
+    assert (out / "probe" / "saw").read_bytes() == b"dir\n"
+    assert (out / "probe" / "contents").read_bytes() == b""
+    got = [path.name for path in (out / "vmaps").iterdir()]
+    assert got == ["stale"], "the stale /out/vmaps was never copied or promoted: old folder"
+    assert staging(out) == []
+
+
+@NOT_ROOT
+def test_a_copy_that_fails_falls_back_to_the_link_and_keeps_the_tools_status(
+    tmp_path: Path,
+) -> None:
+    """T847: an unreadable file fails the copy-in; the tool reads through the bind instead.
+
+    The exact line is printed, the entry is a symlink while the tool runs, and
+    the tool's own status (7 here, so a masked status fails the assert) is what
+    the run reports. No new exit code: 93/94 are unchanged.
+    """
+    out = tmp_path / "out"
+    (out / "Buildings").mkdir(parents=True)
+    (out / "Buildings" / "f1").write_bytes(b"contents\n")
+    secret = out / "Buildings" / "secret"
+    secret.write_bytes(b"s")
+    secret.chmod(0o000)
+    stage(out, {"vmaps": 1})
+    result = run_scratched(
+        tmp_path,
+        out,
+        "if [ -L Buildings ]; then echo LINK; else echo NOTLINK; fi\ncat Buildings/f1\nexit 7\n",
+        "vmaps",
+        "Buildings",
+        "vmaps",
+    )
+    assert result.returncode == 7, result.stdout + result.stderr
+    assert (
+        "yulon: copying Buildings into the container failed; "
+        "the tool reads it from data/ instead (slower)." in result.stdout
+    )
+    assert "LINK" in result.stdout
+    assert "NOTLINK" not in result.stdout
+    assert "contents" in result.stdout
+    assert sorted(path.name for path in (out / "Buildings").iterdir()) == ["f1", "secret"]
+    promote(out, {"vmaps": 1}, returncode=7)
+    assert not (out / "vmaps").exists(), "a failed tool's output is discarded with the container"
+    assert staging(out) == []
+
+
+@NOT_ROOT
+def test_a_copy_that_fails_inside_a_read_only_folder_never_leaves_a_partial_tree(
+    tmp_path: Path,
+) -> None:
+    """Codex, T847: a partial copy holding a read-only folder must not stand in for the link.
+
+    `cp -r` gives the copied folder its source's mode, so a cleanup that just ran
+    `rm -rf` could not empty it, `ln -s` then made its link INSIDE the leftover
+    folder, and the tool ran on the incomplete tree. The copy lands under a
+    temporary name and is renamed only when whole, so the tool sees the link.
+    """
+    out = tmp_path / "out"
+    locked = out / "Buildings" / "locked"
+    locked.mkdir(parents=True)
+    (locked / "f1").write_bytes(b"contents\n")
+    secret = locked / "secret"
+    secret.write_bytes(b"s")
+    secret.chmod(0o000)
+    locked.chmod(0o555)
+    stage(out, {"vmaps": 1})
+    try:
+        result = run_scratched(
+            tmp_path,
+            out,
+            "if [ -L Buildings ]; then echo LINK; else echo NOTLINK; fi\n"
+            "cat Buildings/locked/f1\nexit 0\n",
+            "vmaps",
+            "Buildings",
+            "vmaps",
+        )
+    finally:
+        for folder in tmp_path.rglob("*"):
+            if folder.is_dir() and not folder.is_symlink():
+                folder.chmod(0o755)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "yulon: copying Buildings into the container failed" in result.stdout
+    assert "NOTLINK" not in result.stdout, result.stdout
+    assert "LINK" in result.stdout
+    assert "contents" in result.stdout
+
+
+def test_an_entry_whose_name_starts_with_a_dash_is_linked_not_read_as_an_option(
+    tmp_path: Path,
+) -> None:
+    """Codex, T847 round 2: `ln -s -- ...`, so `/out/-odd` is linked like any other entry."""
+    out = tmp_path / "out"
+    (out / "-odd").mkdir(parents=True)
+    (out / "-odd" / "f1").write_bytes(b"contents\n")
+    stage(out, {"vmaps": 1})
+    result = run_scratched(
+        tmp_path,
+        out,
+        "if [ -L ./-odd ]; then echo LINK; else echo NOTLINK; fi\ncat ./-odd/f1\nexit 0\n",
+        "vmaps",
+        "vmaps",
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert extract.SCRATCH_FAILED_MARKER not in result.stdout
+    assert "NOTLINK" not in result.stdout, result.stdout
+    assert "LINK" in result.stdout
+    assert "contents" in result.stdout
+
+
 def test_a_scratched_tool_reads_an_earlier_tools_output_through_a_link(tmp_path: Path) -> None:
     """`vmap assemble` reads `Buildings` from cwd: it is a link to `/out/Buildings`.
 
@@ -584,8 +770,20 @@ def test_the_script_is_its_own_home_for_its_paths_and_constants() -> None:
     assert extract.COPY_FAILED_MARKER in extract.SCRATCH_SCRIPT
     assert "status=94" in extract.SCRATCH_SCRIPT
     assert "--update=none" in extract.SCRATCH_SCRIPT
-    assert "rm -rf" not in extract.SCRATCH_SCRIPT, "the container cannot touch the top of /out"
-    assert " mv " not in extract.SCRATCH_SCRIPT, "the host does the swap, not the container"
+    # The only removal is T847's partial copy-in, by its bare name in the scratch cwd:
+    # the container still cannot touch the top of /out.
+    partial = 'rm -rf -- ".yulon-in-$name"'
+    assert extract.SCRATCH_SCRIPT.count("rm -rf") == extract.SCRATCH_SCRIPT.count(partial)
+    assert "rm -rf /out" not in extract.SCRATCH_SCRIPT, "the container cannot touch the top of /out"
+    assert 'for arg in "$@";' in extract.SCRATCH_SCRIPT
+    assert 'cp -r -- "$entry" ".yulon-in-$name"' in extract.SCRATCH_SCRIPT
+    assert "yulon: copying $name into the container failed" in extract.SCRATCH_SCRIPT
+    assert 'rm -rf -- ".yulon-in-$name"' in extract.SCRATCH_SCRIPT
+    # The host does the swap, not the container: the one `mv` is T847's rename of a
+    # whole copy-in inside the scratch cwd, never anything in /out.
+    rename = 'mv -- ".yulon-in-$name" "$name"'
+    assert extract.SCRATCH_SCRIPT.count(" mv ") == extract.SCRATCH_SCRIPT.count(" " + rename)
+    assert "/out" not in rename, "the host does the swap, not the container"
 
 
 # -- run_plan: the line, and the two refusals ---------------------------------
