@@ -79,8 +79,9 @@ CACHE_NOTE = (
 )
 OLD_BUILDS_NOTE = (
     "Old images that earlier builds of Yu'lon's servers left behind with no name, including "
-    "servers you removed. One that a running container still uses is left alone; a finished "
-    "one-shot container holding one is removed with it, and the next start makes it again."
+    "servers you removed. One is left alone while any container still uses it; an image held "
+    "only by finished one-shot containers of that same server (the import and download steps) "
+    "is removed with them, and the next start makes them again."
 )
 KEPT_NOTE = (
     f"The build this server kept from before its last rebuild. The next "
@@ -222,14 +223,24 @@ def remove_finished_holders_on(
     listing: Callable[[str], tuple[docker.ContainerRef, ...] | None],
     remove: Callable[[str], str],
 ) -> int:
-    """Remove the finished one-shot containers of `project` holding `image_id` (T864-E).
+    """Remove every finished one-shot container of `project` holding `image_id` (T864-E).
 
-    Every container the daemon lists for the image must be finished (the
-    listing asks for `status=exited`) AND carry the same compose project as the
-    image, or nothing is removed. A container of another project, one with no
-    project label, or a listing the daemon would not answer leaves every
-    container and the image alone: those are the cases where the holder may be
-    somebody else's, and an image id is not proof of ownership.
+    ALL or NOTHING: the image is removed only when EVERY container the daemon
+    lists for it is a finished one-shot container of the image's own compose
+    project. That is three rules per holder, and one failure removes nothing:
+
+    * `state == "exited"` -- a running, paused, created or restarting container
+      holds its image on purpose;
+    * `project == project` -- the image's own `com.docker.compose.project`; an
+      image id is not proof of ownership;
+    * `service in composegen.ONE_SHOT_SERVICES` -- the generated services that
+      run once and exit. A worldserver or authserver container is never one of
+      them, whatever its state: removing it would end a server somebody runs.
+
+    A holder with no project or no service label, a listing the daemon would not
+    answer, and the image having no project at all all leave every container and
+    the image alone. Removal is by `ref.id`, never by name: the next `compose
+    up` can take a stopped container's name, and the id cannot be taken.
 
     **Why this is safe.** A one-shot service (`ac-db-import`,
     `ac-client-data-init`, ...) runs once and exits; its container keeps the
@@ -248,17 +259,29 @@ def remove_finished_holders_on(
     listed = listing(image_id)
     if not listed:
         return 0
+    holding = ", ".join(f"{ref.name}={ref.project!r}/{ref.service!r}/{ref.state}" for ref in listed)
+    if any(ref.state != "exited" for ref in listed):
+        logger.info(
+            f"left the containers holding image {image_id}: not every one is finished ({holding})"
+        )
+        return 0
     if any(ref.project != project for ref in listed):
         logger.info(
             f"left the containers holding image {image_id}: not every one is of project {project} "
-            f"({', '.join(f'{ref.name}={ref.project!r}' for ref in listed)})"
+            f"({holding})"
+        )
+        return 0
+    if any(ref.service not in composegen.ONE_SHOT_SERVICES for ref in listed):
+        logger.info(
+            f"left the containers holding image {image_id}: not every one is a one-shot service "
+            f"({holding})"
         )
         return 0
     removed = 0
     for ref in listed:
-        said = remove(ref.name)
+        said = remove(ref.id)
         if said:
-            logger.warning(f"could not remove the finished container {ref.name}: {said}")
+            logger.warning(f"could not remove the finished container {ref.name} ({ref.id}): {said}")
             continue
         logger.info(f"removed the finished container {ref.name}, which held old image {image_id}")
         removed += 1
@@ -399,16 +422,14 @@ def _free_under_the_lease(
                 if said == docker.IMAGE_IN_USE:
                     # T864-E: a REBUILD never recreates the one-shot services (import,
                     # client-data), so their EXITED containers keep the old image
-                    # referenced and every pass left it. Cleared here -- this project's
-                    # own finished containers only -- and the image asked for once more.
-                    # Counted in the log, never in the player's line: a container is
-                    # not space.
+                    # referenced and every pass left it. Cleared here only when every
+                    # holder is a finished one-shot container of this image's project, and
+                    # then the image is asked for once more. Counted in the log, never in
+                    # the player's line: a container is not space.
                     cleared = remove_finished_holders_on(
                         build.image_id,
                         build.project,
-                        listing=lambda image: docker.exited_containers_on(
-                            image, wsl_distro=wsl_distro
-                        ),
+                        listing=lambda image: docker.containers_on(image, wsl_distro=wsl_distro),
                         remove=lambda name: docker.remove_finished_container(
                             name, wsl_distro=wsl_distro
                         ),

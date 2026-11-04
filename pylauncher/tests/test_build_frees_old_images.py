@@ -34,6 +34,8 @@ def _install(rec: Recorder, tmp_path: Path) -> Path:
     rec.calls.clear()
     rec.dangling_asked.clear()
     rec.unused_removed.clear()
+    rec.holders_asked.clear()
+    rec.containers_removed.clear()
     return server_dir
 
 
@@ -161,6 +163,19 @@ def test_at_most_one_failure_line_and_the_build_still_ends(tmp_path: Path) -> No
     assert before == [] and raising_calls != []
 
 
+def _holder(
+    name: str,
+    service: str,
+    *,
+    state: str = "exited",
+    project: str | None,
+) -> docker.ContainerRef:
+    """One container as `containers_on()` lists it: an id, its state and both labels."""
+    return docker.ContainerRef(
+        id=f"id-{name}", name=name, state=state, project=project, service=service
+    )
+
+
 def test_an_image_held_only_by_this_projects_finished_one_shot_is_removed(
     tmp_path: Path,
 ) -> None:
@@ -174,10 +189,10 @@ def test_an_image_held_only_by_this_projects_finished_one_shot_is_removed(
     project = _project(server_dir, rec)
     rec.dangling_ids = ("aaa",)
     rec.in_use_once = {"aaa"}
-    rec.exited_holders = {"aaa": (docker.ContainerRef("ac-db-import", project),)}
+    rec.holders = {"aaa": (_holder("ac-db-import", "ac-db-import", project=project),)}
     said = list(engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
-    assert rec.exited_asked == ["aaa"]
-    assert rec.containers_removed == ["ac-db-import"]
+    assert rec.holders_asked == ["aaa"]
+    assert rec.containers_removed == ["id-ac-db-import"]
     # Asked twice: refused while the container held it, removed after the container went.
     assert rec.unused_removed == ["aaa", "aaa"]
     assert all("old images" not in line for line in said), said
@@ -185,11 +200,15 @@ def test_an_image_held_only_by_this_projects_finished_one_shot_is_removed(
 
 
 def test_an_image_a_running_container_holds_is_left_alone(tmp_path: Path) -> None:
-    """T864-E: a RUNNING holder is not in the `status=exited` listing, so nothing goes."""
+    """T864-E: a RUNNING holder is listed, and every rule says leave it."""
     rec = Recorder()
     server_dir = _install(rec, tmp_path)
+    project = _project(server_dir, rec)
     rec.dangling_ids = ("aaa",)
-    rec.unused_answers = {"aaa": docker.IMAGE_IN_USE}
+    rec.in_use_once = {"aaa"}
+    rec.holders = {
+        "aaa": (_holder("ac-worldserver", "ac-worldserver", state="running", project=project),)
+    }
     said = list(engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
     assert rec.containers_removed == []
     assert rec.unused_removed == ["aaa"]
@@ -205,7 +224,7 @@ def test_an_image_whose_finished_holder_belongs_to_another_project_is_left_alone
     server_dir = _install(rec, tmp_path)
     rec.dangling_ids = ("aaa",)
     rec.in_use_once = {"aaa"}
-    rec.exited_holders = {"aaa": (docker.ContainerRef("other-import", "yulon-other"),)}
+    rec.holders = {"aaa": (_holder("other-import", "ac-db-import", project="yulon-other"),)}
     said = list(engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
     assert rec.containers_removed == []
     assert rec.unused_removed == ["aaa"]
@@ -220,9 +239,9 @@ def test_a_listing_that_failed_leaves_the_image_and_the_build_ends(tmp_path: Pat
     server_dir = _install(rec, tmp_path)
     rec.dangling_ids = ("aaa",)
     rec.in_use_once = {"aaa"}
-    rec.exited_holders = {"aaa": None}
+    rec.holders = {"aaa": None}
     said = list(engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
-    assert rec.exited_asked == ["aaa"]
+    assert rec.holders_asked == ["aaa"]
     assert rec.containers_removed == []
     assert rec.unused_removed == ["aaa"]
     assert said.count(docker_space.OLD_IMAGES_NOT_REMOVED) == 0, said

@@ -141,6 +141,60 @@ def render(server_dir: Path) -> composegen.ComposePlan:
     )
 
 
+def _one_shot_and_long_running(base: str) -> tuple[set[str], set[str]]:
+    """Split a rendered base file's services by whether compose would keep them up.
+
+    One-shot means the service has no `restart:` at all, says `restart: "no"`,
+    or is the target of a `condition: service_completed_successfully`
+    dependency — the three shapes the shipped templates use for a step that
+    runs once and exits (T864-E). Everything else is long-running.
+    """
+    services = yaml.safe_load(base)["services"]
+    one_shot: set[str] = set()
+    long_running: set[str] = set()
+    for name, service in services.items():
+        if str(service.get("restart", "no")).lower() == "no":
+            one_shot.add(name)
+        else:
+            long_running.add(name)
+        for dependency, edge in (service.get("depends_on") or {}).items():
+            if isinstance(edge, dict) and edge.get("condition") == "service_completed_successfully":
+                one_shot.add(dependency)
+    return one_shot, long_running
+
+
+def test_the_one_shot_service_list_is_exactly_what_the_templates_render(
+    tmp_path: Path,
+) -> None:
+    """`ONE_SHOT_SERVICES` is derived from the output, so it can never drift from it.
+
+    A service in that set may have its EXITED container removed by Free Docker
+    space and the post-build pass (T864-E). That makes an over-wide list a way
+    to end a server somebody stopped on purpose, and a stale one a silent return
+    of the leak this ticket closes; both directions fail here.
+    """
+    catalog = load_catalog()
+    derived: set[str] = set()
+    long_running: set[str] = set()
+    for index, entry in enumerate(catalog.games):
+        rendered = composegen.render(
+            entry,
+            tmp_path / f"install-{index}",
+            templates_root=TEMPLATES,
+            db_password="Zx9-safe-pass",
+            platform_id=lambda: "macos",
+        )
+        one_shot, up = _one_shot_and_long_running(rendered.base)
+        derived |= one_shot
+        long_running |= up
+    assert derived == composegen.ONE_SHOT_SERVICES
+    # The servers themselves are long-running in every family, and none of them
+    # may ever be removed as a "finished one-shot container".
+    assert {"ac-database", "ac-authserver", "ac-worldserver"} <= long_running
+    assert {"coa-database", "coa-authserver", "coa-worldserver"} <= long_running
+    assert long_running.isdisjoint(composegen.ONE_SHOT_SERVICES)
+
+
 def _services_with_user_key(base: str) -> set[str]:
     """Which services carry a service-level `user:`, by indentation.
 

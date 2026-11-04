@@ -7313,10 +7313,14 @@ def test_remove_image_reports_an_image_in_use_as_a_warning_not_a_failure(
 # -- T864-E: the finished one-shot containers that keep an old image alive ---------
 
 
-def test_remove_finished_container_sends_a_plain_rm_and_never_a_flag(
+def test_remove_finished_container_sends_a_plain_rm_of_the_id_and_never_a_flag(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """T864-E: never `-f` (a running holder must be refused) and never `-v` (a volume)."""
+    """T864-E: by the id the listing gave, never `-f` and never `-v`.
+
+    Mutation: pass the name through (or add `-f`) and this argv changes; a
+    running holder would then be killed instead of refused.
+    """
     calls: list[list[str]] = []
 
     def fake_run(cmd: list[str], cwd=None, timeout: float | None = None):
@@ -7324,8 +7328,8 @@ def test_remove_finished_container_sends_a_plain_rm_and_never_a_flag(
         return _completed()
 
     monkeypatch.setattr(docker.runner, "run", fake_run)
-    assert docker.remove_finished_container("ac-db-import") == ""
-    assert calls == [["docker", "rm", "ac-db-import"]]
+    assert docker.remove_finished_container("a1b2c3d4e5f6") == ""
+    assert calls == [["docker", "rm", "a1b2c3d4e5f6"]]
     for cmd in calls:
         for flag in ("-f", "--force", "-v", "--volumes"):
             assert flag not in cmd, cmd
@@ -7344,35 +7348,62 @@ def test_remove_finished_container_says_what_docker_said_when_it_refuses(
             "Error response from daemon: You cannot remove a running container abc",
         ),
     )
-    said = docker.remove_finished_container("ac-db-import")
+    said = docker.remove_finished_container("a1b2c3d4e5f6")
     assert said and "running container" in said
 
 
-def test_exited_containers_on_asks_ancestor_and_exited_and_keeps_name_and_project(
+def test_containers_on_lists_running_and_exited_with_id_state_and_both_labels(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """T864-E: the listing is scoped to one image AND to finished containers only."""
+    """T864-E: one image, EVERY container on it, and the fields the rules need.
+
+    Mutation guards, each pinned by a sibling test: a `status=` filter here
+    hides a RUNNING holder (the running+exited test removes the image then),
+    and the caller cannot apply any rule to a field this argv does not ask for.
+    """
     calls: list[list[str]] = []
-    stdout = "ac-db-import\tyulon-wow-coa-af665b68\nac-client-data-init\t\n"
+    stdout = (
+        "a1b2c3d4e5f6\tac-db-import\texited\tyulon-wow-coa-af665b68\tac-db-import\n"
+        "b2c3d4e5f6a1\tac-worldserver\trunning\tyulon-wow-coa-af665b68\tac-worldserver\n"
+    )
 
     def fake_run(cmd: list[str], cwd=None, timeout: float | None = None):
         calls.append(cmd)
         return _completed(0, stdout, "")
 
     monkeypatch.setattr(docker.runner, "run", fake_run)
-    refs = docker.exited_containers_on("sha256:aaa")
+    refs = docker.containers_on("sha256:aaa")
     assert calls[0][:2] == ["docker", "ps"]
     assert "ancestor=sha256:aaa" in calls[0], calls[0]
-    assert "status=exited" in calls[0], calls[0]
-    # Mutation guard: a listing without the status filter offers a RUNNING
-    # container to the caller, which would end something the player is using.
-    assert [(ref.name, ref.project) for ref in refs or ()] == [
-        ("ac-db-import", "yulon-wow-coa-af665b68"),
-        ("ac-client-data-init", None),
-    ]
+    assert not any(arg.startswith("status=") for arg in calls[0]), calls[0]
+    fmt = calls[0][calls[0].index("--format") + 1]
+    for field in (
+        "{{.ID}}",
+        "{{.Names}}",
+        "{{.State}}",
+        '{{.Label "com.docker.compose.project"}}',
+        '{{.Label "com.docker.compose.service"}}',
+    ):
+        assert field in fmt, (field, fmt)
+    assert refs == (
+        docker.ContainerRef(
+            id="a1b2c3d4e5f6",
+            name="ac-db-import",
+            state="exited",
+            project="yulon-wow-coa-af665b68",
+            service="ac-db-import",
+        ),
+        docker.ContainerRef(
+            id="b2c3d4e5f6a1",
+            name="ac-worldserver",
+            state="running",
+            project="yulon-wow-coa-af665b68",
+            service="ac-worldserver",
+        ),
+    )
 
 
-def test_exited_containers_on_answers_none_when_the_listing_failed(
+def test_containers_on_answers_none_when_the_listing_failed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """None, never `()`: "would not answer" must not read as "nothing holds it"."""
@@ -7381,7 +7412,7 @@ def test_exited_containers_on_answers_none_when_the_listing_failed(
         "run",
         lambda cmd, cwd=None, timeout=None: _completed(1, "", "daemon hung up"),
     )
-    assert docker.exited_containers_on("sha256:aaa") is None
+    assert docker.containers_on("sha256:aaa") is None
 
 
 def test_tag_image_gives_one_ref_a_second_name_and_touches_nothing_else(

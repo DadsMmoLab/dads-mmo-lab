@@ -8260,28 +8260,40 @@ def image_facts(
 
 @dataclass(frozen=True)
 class ContainerRef:
-    """One container the daemon listed: its name and its compose project (T864-E).
+    """One container the daemon listed on an image (T864-E).
 
-    `project` is the `com.docker.compose.project` label, or None when the
-    container carries none (something started by hand, or by a tool).
+    `id` is what `docker rm` is given: a name can be taken by the next `compose
+    up` between the listing and the removal, the id cannot. `state` is Docker's
+    own word (`running`, `exited`, `created`, ...), and `project`/`service` are
+    the two compose labels, each None when the container carries none
+    (something started by hand, or by a tool).
     """
 
+    id: str
     name: str
+    state: str
     project: str | None
+    service: str | None
 
 
-def exited_containers_on(
+def containers_on(
     image_id: str, *, wsl_distro: str | None = None
 ) -> tuple[ContainerRef, ...] | None:
-    """The FINISHED containers created from `image_id`, or None when unlisted (T864-E).
+    """EVERY container created from `image_id`, or None when unlisted (T864-E).
+
+    No `status=` filter, on purpose. The caller decides what may go, and it can
+    only decide that about holders it can see: a listing narrowed to `exited`
+    would hide a RUNNING container and let the caller remove the image it
+    holds, ending something the player is using.
+    `docker_space.remove_finished_holders_on()` is where that decision lives --
+    an image is removed only when all of its holders are exited one-shot
+    containers of the image's own project.
 
     A one-shot service's container (`ac-db-import`, `ac-client-data-init`, and
     the like) keeps its image referenced after it exits, and a rebuild never
     recreates it -- `compose up --force-recreate` does not select those
     services -- so the old image cannot be removed until the finished container
-    is. `status=exited` is the safety line, not a convenience: a RUNNING or
-    paused container still holds its image on purpose, and the caller must leave
-    the image alone rather than end something the player is using.
+    is.
 
     A nonzero exit is None, never `()`: "the daemon would not answer" is not
     "nothing holds it", and a caller that confused the two would go on to remove
@@ -8293,10 +8305,10 @@ def exited_containers_on(
             "-a",
             "--filter",
             f"ancestor={image_id}",
-            "--filter",
-            "status=exited",
             "--format",
-            '{{.Names}}\t{{.Label "com.docker.compose.project"}}',
+            "{{.ID}}\t{{.Names}}\t{{.State}}\t"
+            '{{.Label "com.docker.compose.project"}}\t'
+            '{{.Label "com.docker.compose.service"}}',
         ],
         wsl_distro=wsl_distro,
     )
@@ -8305,12 +8317,23 @@ def exited_containers_on(
         return None
     refs: list[ContainerRef] = []
     for line in proc.stdout.splitlines():
-        name, _, project = line.partition("\t")
-        name = name.strip()
-        if not name:
+        fields = line.split("\t")
+        if len(fields) != 5:
             logger.info(f"could not read a container listing line: {line!r}")
             continue
-        refs.append(ContainerRef(name=name, project=project.strip() or None))
+        ident, name, state, project, service = (field.strip() for field in fields)
+        if not ident or not name:
+            logger.info(f"could not read a container listing line: {line!r}")
+            continue
+        refs.append(
+            ContainerRef(
+                id=ident,
+                name=name,
+                state=state,
+                project=project or None,
+                service=service or None,
+            )
+        )
     return tuple(refs)
 
 
@@ -8347,8 +8370,13 @@ def remove_unused_image(image_id: str, *, wsl_distro: str | None = None) -> str:
     return said
 
 
-def remove_finished_container(name_or_id: str, *, wsl_distro: str | None = None) -> str:
-    """`docker rm <name_or_id>`: one FINISHED container only. `""` when it went (T864-E).
+def remove_finished_container(container_id: str, *, wsl_distro: str | None = None) -> str:
+    """`docker rm <container id>`: one FINISHED one-shot container. `""` when it went (T864-E).
+
+    The caller passes the ID the listing gave (`ContainerRef.id`), never the
+    name: `compose up` can take a stopped container's name for a new one between
+    the listing and this call, and removing by name would then take the new
+    container instead of the one that was seen.
 
     NEVER `-f`: a container that is somehow still running must be refused by the
     daemon, not killed, because the image it holds is then left alone too.
@@ -8364,12 +8392,12 @@ def remove_finished_container(name_or_id: str, *, wsl_distro: str | None = None)
     Returns:
         `""` when the container is gone, otherwise what Docker said, never empty.
     """
-    proc = _docker(["rm", name_or_id], wsl_distro=wsl_distro)
+    proc = _docker(["rm", container_id], wsl_distro=wsl_distro)
     if proc.returncode == 0:
-        logger.info(f"removed container {name_or_id}")
+        logger.info(f"removed container {container_id}")
         return ""
     said = _failure_said(proc)
-    logger.warning(f"could not remove container {name_or_id}: {said}")
+    logger.warning(f"could not remove container {container_id}: {said}")
     return said
 
 

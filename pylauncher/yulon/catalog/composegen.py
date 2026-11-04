@@ -433,6 +433,36 @@ distinction a hand-typed second copy of `"yulon-"` could quietly drift from.
 """
 
 
+ONE_SHOT_SERVICES = frozenset(
+    {
+        "ac-db-import",
+        "ac-client-data-init",
+        "ub-db-import",
+        "ub-client-data-init",
+        "coa-db-import",
+        "coa-tools",
+        "coa-world-bootstrap",
+    }
+)
+"""Every compose service this module emits that runs once and exits (T864-E).
+
+The full set, not a suffix rule: these are the keys the shipped templates
+write with no `restart:` at all (`db-import`, `client-data-init`,
+`world-bootstrap`) or `restart: "no"` (`tools`), and every one of them is
+either depended on with `condition: service_completed_successfully` or simply
+exits. `test_composegen.py` derives the set from the rendered base file of
+every entry and fails if this list and the templates ever disagree.
+
+Why a caller wants it: a finished container of one of these still references
+the image it ran from, while `compose up --force-recreate` never selects the
+service again. Such a container has no state of its own — what a one-shot wrote
+lives in the project's volumes and databases — so clearing it is safe, and
+`docker_space.remove_finished_holders_on()` allows that for these services
+ONLY. A database, authserver or worldserver container is never in this set:
+removing one would end a server somebody is running.
+"""
+
+
 def project_name(
     game_id: str,
     server_dir: Path,

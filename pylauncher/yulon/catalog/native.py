@@ -7502,13 +7502,12 @@ class Seams:
     build_cache_bytes: Callable[[], int | None] = docker.build_cache_bytes
     """How much build cache Docker holds; preflight counts it for a resumed build (T203)."""
     dangling_image_ids: Callable[[str], tuple[str, ...] | None] = docker.dangling_image_ids
-    exited_containers_on: Callable[[str], tuple[docker.ContainerRef, ...] | None] = (
-        docker.exited_containers_on
-    )
-    """T864-E: the finished containers still referencing an image; None = no answer."""
+    containers_on: Callable[[str], tuple[docker.ContainerRef, ...] | None] = docker.containers_on
+    """T864-E: every container still referencing an image, whatever its state; None = no
+    answer."""
     remove_finished_container: Callable[[str], str] = docker.remove_finished_container
-    """T864-E: `docker rm` of one finished container; `""` when it went, else the daemon's
-    sentence."""
+    """T864-E: `docker rm` of one finished container by its id; `""` when it went, else the
+    daemon's sentence."""
     folder_bytes: Callable[[Path], int | None] = folder_bytes
     """What the server folder already holds; preflight counts it for a resumed build (T203)."""
     image_id: Callable[[str], str | None] = docker.image_id
@@ -7948,7 +7947,7 @@ class Seams:
             images_built=on(docker.images_built, wsl_distro=distro),
             build_cache_bytes=on(docker.build_cache_bytes, wsl_distro=distro),
             dangling_image_ids=on(docker.dangling_image_ids, wsl_distro=distro),
-            exited_containers_on=on(docker.exited_containers_on, wsl_distro=distro),
+            containers_on=on(docker.containers_on, wsl_distro=distro),
             remove_finished_container=on(docker.remove_finished_container, wsl_distro=distro),
             image_id=on(docker.image_id, wsl_distro=distro),
             build=on(docker.build_staged, wsl_distro=distro),
@@ -13885,11 +13884,13 @@ class StagedInstaller:
         Dangling images of THIS compose project only (`com.docker.compose.project=<project>`,
         where project is spelled exactly like `_db_volume()`), each removed by id with plain
         `docker image rm` and never `-f`: forcing only takes the name off and leaves the
-        layers, which is the leak this pass cleans. An image a RUNNING container still holds
-        is left for a later build (T864-E); one held only by this project's finished
-        one-shot containers is removed after those containers are (`docker rm`, no `-f`, no
-        `-v`, in `docker_space.remove_finished_holders_on()`). Anything else is never
-        touched: other projects, unlabelled images, running containers, volumes.
+        layers, which is the leak this pass cleans. An image is left for a later build while
+        ANY container still uses it; one whose every holder is exited, of THIS project, and
+        serving a name in `composegen.ONE_SHOT_SERVICES` is removed after those containers
+        (`docker rm` by id, no `-f`, no `-v`, in
+        `docker_space.remove_finished_holders_on()`), and that is all or nothing. Anything
+        else is never touched: other projects, unlabelled images, running containers,
+        database/auth/world containers, volumes.
 
         A failure here is one sentence at most and never fails the build that worked: the
         returned lines are appended to the build's own success tail, after it.
@@ -13911,13 +13912,14 @@ class StagedInstaller:
                     # T864-E: a rebuild's recreate never selects the one-shot services
                     # (`ac-db-import`, `ac-client-data-init`), so their EXITED containers
                     # keep the pre-rebuild image referenced for ever. Cleared here, and
-                    # only when every holder is a finished container of THIS project;
-                    # the image is then asked for once more. See
-                    # `docker_space.remove_finished_holders_on()` for why that is safe.
+                    # only when every holder is exited, of THIS project, and its service
+                    # is in `composegen.ONE_SHOT_SERVICES`; the image is then asked for
+                    # once more. See `docker_space.remove_finished_holders_on()` for why
+                    # that is safe.
                     cleared = docker_space.remove_finished_holders_on(
                         image,
                         project,
-                        listing=self._seams.exited_containers_on,
+                        listing=self._seams.containers_on,
                         remove=self._seams.remove_finished_container,
                     )
                     if cleared:

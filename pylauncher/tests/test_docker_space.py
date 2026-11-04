@@ -353,9 +353,9 @@ def test_carry_out_removes_old_builds_then_kept_then_cache_in_order(
         return answers[image_id]
 
     monkeypatch.setattr(docker, "remove_unused_image", remove_unused)
-    # T864-E: the held image asks who holds it; answer "no finished container" here,
+    # T864-E: the held image asks who holds it; answer "no container at all" here,
     # so this test stays about the sentence and not about the new pass.
-    monkeypatch.setattr(docker, "exited_containers_on", lambda image, **_: ())
+    monkeypatch.setattr(docker, "containers_on", lambda image, **_: ())
     monkeypatch.setattr(docker_space, "_old_builds", lambda distro: old)
     caches = [30 * GIB, 2 * GIB]
     monkeypatch.setattr(docker, "build_cache_bytes", lambda **_: caches.pop(0) if caches else None)
@@ -383,25 +383,56 @@ def test_carry_out_removes_old_builds_then_kept_then_cache_in_order(
     assert "prune" in calls and "-f" not in " ".join(calls)
 
 
-def test_an_old_build_held_only_by_its_projects_finished_container_is_removed(
+PROJECT = "yulon-wow-coa-x"
+
+
+def _holder(
+    name: str,
+    service: str | None,
+    *,
+    state: str = "exited",
+    project: str | None = PROJECT,
+) -> docker.ContainerRef:
+    """One container as `containers_on()` lists it: an id, its state and both labels."""
+    return docker.ContainerRef(
+        id=f"id-{name}", name=name, state=state, project=project, service=service
+    )
+
+
+def test_an_old_build_held_only_by_its_projects_finished_one_shots_is_removed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """T864-E through the press: the container goes, then the image, and one line says so."""
+    """T864-E through the press: both containers go BY ID, then the image, and one line says so."""
     calls, freed = _press_an_old_build_held_by(
         tmp_path,
         monkeypatch,
-        holders=(docker.ContainerRef("ac-db-import", "yulon-wow-coa-x"),),
+        holders=(
+            _holder("ac-db-import", "ac-db-import"),
+            _holder("ac-client-data-init", "ac-client-data-init"),
+        ),
         still_held=False,
     )
-    assert calls == ["ac-db-import"]
+    assert calls == ["id-ac-db-import", "id-ac-client-data-init"]
     assert freed.lines[0] == "Yu'lon's old untagged builds: removed 1, up to 1.0 GB."
 
 
 def test_an_old_build_a_running_container_holds_is_left_by_the_press(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """T864-E: the listing is finished containers only, so a running holder frees nothing."""
-    calls, freed = _press_an_old_build_held_by(tmp_path, monkeypatch, holders=(), still_held=True)
+    """T864-E: the listing shows every state, and a RUNNING holder stops the whole pass.
+
+    Mutation: put `status=exited` back on the listing and this holder vanishes
+    from it, the other test's container is removed and the image goes with it.
+    """
+    calls, freed = _press_an_old_build_held_by(
+        tmp_path,
+        monkeypatch,
+        holders=(
+            _holder("ac-db-import", "ac-db-import"),
+            _holder("ac-worldserver", "ac-worldserver", state="running"),
+        ),
+        still_held=True,
+    )
     assert calls == []
     assert freed.lines[0] == (
         "Yu'lon's old untagged builds: removed 0, up to 0.0 GB. "
@@ -412,12 +443,78 @@ def test_an_old_build_a_running_container_holds_is_left_by_the_press(
 def test_an_old_build_whose_finished_holder_is_another_project_is_left(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """T864-E: the image's own project is the only one whose containers may be cleared."""
+    """T864-E: the image's own project is the only one whose containers may be cleared.
+
+    Mutation: weaken the project check from `any` to `all` and the mixed case
+    below removes the db-import while the other project's container keeps the
+    image.
+    """
     calls, freed = _press_an_old_build_held_by(
         tmp_path,
         monkeypatch,
-        holders=(docker.ContainerRef("other-import", "yulon-other"),),
-        still_held=False,
+        holders=(_holder("other-import", "ac-db-import", project="yulon-other"),),
+        still_held=True,
+    )
+    assert calls == []
+    assert freed.lines[0] == (
+        "Yu'lon's old untagged builds: removed 0, up to 0.0 GB. "
+        "1 still used by a container was left."
+    )
+
+
+def test_an_old_build_held_by_this_projects_and_anothers_container_is_left(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T864-E: all or nothing — one holder of another project keeps every one of them."""
+    calls, freed = _press_an_old_build_held_by(
+        tmp_path,
+        monkeypatch,
+        holders=(
+            _holder("ac-db-import", "ac-db-import"),
+            _holder("other-import", "ac-db-import", project="yulon-other"),
+        ),
+        still_held=True,
+    )
+    assert calls == []
+    assert freed.lines[0] == (
+        "Yu'lon's old untagged builds: removed 0, up to 0.0 GB. "
+        "1 still used by a container was left."
+    )
+
+
+def test_an_old_build_held_by_an_unlabelled_container_is_left(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T864-E: a container with no compose project is somebody else's; it stays."""
+    calls, freed = _press_an_old_build_held_by(
+        tmp_path,
+        monkeypatch,
+        holders=(
+            _holder("ac-db-import", "ac-db-import"),
+            _holder("hand-started", None, project=None),
+        ),
+        still_held=True,
+    )
+    assert calls == []
+    assert freed.lines[0] == (
+        "Yu'lon's old untagged builds: removed 0, up to 0.0 GB. "
+        "1 still used by a container was left."
+    )
+
+
+def test_an_old_build_held_by_an_exited_worldserver_is_left(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T864-E: `exited` is not enough; only a one-shot service's container may go.
+
+    Mutation: drop the `ONE_SHOT_SERVICES` check and this test removes a
+    worldserver container, which is a server somebody stopped on purpose.
+    """
+    calls, freed = _press_an_old_build_held_by(
+        tmp_path,
+        monkeypatch,
+        holders=(_holder("coa-worldserver", "coa-worldserver"),),
+        still_held=True,
     )
     assert calls == []
     assert freed.lines[0] == (
@@ -435,12 +532,12 @@ def _press_an_old_build_held_by(
 ) -> tuple[list[str], docker_space.Freed]:
     """One old build whose first `image rm` is refused by a container, through carry_out.
 
-    `still_held` keeps the retry refused, which is what a running holder (or a
-    removal that did not help) answers; False lets it succeed, as it does once
-    the finished one-shot container is gone.
+    `still_held` keeps the retry refused, which is what a holder the rules do
+    not allow, or a removal that did not help, leaves; False lets it succeed,
+    as it does once every finished one-shot container is gone.
     """
     calls: list[str] = []
-    old = (docker_space.OldBuild(image_id="aaa", size=GIB, project="yulon-wow-coa-x"),)
+    old = (docker_space.OldBuild(image_id="aaa", size=GIB, project=PROJECT),)
     monkeypatch.setattr(docker_space, "_old_builds", lambda distro: old)
     saids = [docker.IMAGE_IN_USE] + ([docker.IMAGE_IN_USE] * 3 if still_held else [""])
 
@@ -448,9 +545,9 @@ def _press_an_old_build_held_by(
         return saids.pop(0) if saids else docker.IMAGE_IN_USE
 
     monkeypatch.setattr(docker, "remove_unused_image", remove_unused)
-    monkeypatch.setattr(docker, "exited_containers_on", lambda image, **_: holders)
+    monkeypatch.setattr(docker, "containers_on", lambda image, **_: holders)
     monkeypatch.setattr(
-        docker, "remove_finished_container", lambda name, **_: calls.append(name) or ""
+        docker, "remove_finished_container", lambda container, **_: calls.append(container) or ""
     )
     monkeypatch.setattr(docker, "build_cache_bytes", lambda **_: None)
     monkeypatch.setattr(docker, "prune_build_cache", lambda **_: "")
