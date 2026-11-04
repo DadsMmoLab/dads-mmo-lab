@@ -11,7 +11,8 @@ D-pad's Down/Up reach the popup's rows through the gamepad Navigator.
 from __future__ import annotations
 
 import pytest
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QEvent, Qt
+from PySide6.QtGui import QKeyEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QComboBox, QVBoxLayout, QWidget
 
@@ -279,7 +280,7 @@ def test_deleted_source_does_not_break_the_next_relay(qapp: object) -> None:
 
 
 def test_relay_guard_cleared_after_a_failed_delivery(qapp: object) -> None:
-    """An exception during delivery still clears the guard flag (T875-B4)."""
+    """An exception during delivery still clears the relay view (T875-B4, C1)."""
     import yulon.ui.gamepad as gamepad_module
     from yulon.ui import gamepad as gamepad_pkg
 
@@ -294,9 +295,100 @@ def test_relay_guard_cleared_after_a_failed_delivery(qapp: object) -> None:
         gamepad_pkg.QApplication.sendEvent = boom  # type: ignore[method-assign]
         with pytest.raises(RuntimeError, match="delivery blew up"):
             gamepad_module._deliver_to_combo(box, Qt.Key.Key_Down)
-        assert gamepad_module._IN_COMBO_RELAY is False
+        assert gamepad_module._RELAY_VIEW is None
     finally:
         gamepad_pkg.QApplication.sendEvent = real_send  # type: ignore[method-assign]
+        keyboard.stop()
+        gamepad.stop()
+        win.close()
+        win.deleteLater()
+        process_events()
+
+
+def test_relay_lets_through_only_the_relayed_view(qapp: object) -> None:
+    """While the relay holds, other widgets' keys are still filtered (T875-C1)."""
+    import yulon.ui.gamepad as gamepad_module
+
+    win, box = _window_with_combo()
+    navigator, keyboard, gamepad = install_gamepad_navigation(win)
+    other = QWidget(win)
+    try:
+        win.show()
+        process_events()
+        box.showPopup()
+        process_events()
+        view = box.view()
+        popup = QApplication.activePopupWidget()
+        assert popup is not None
+        gamepad_module._RELAY_VIEW = view
+        try:
+            relayed_press = QKeyEvent(
+                QEvent.Type.KeyPress, Qt.Key.Key_Down, Qt.KeyboardModifier.NoModifier
+            )
+            assert keyboard.eventFilter(view, relayed_press) is False
+            popup_press = QKeyEvent(
+                QEvent.Type.KeyPress, Qt.Key.Key_Down, Qt.KeyboardModifier.NoModifier
+            )
+            assert keyboard.eventFilter(popup, popup_press) is False
+            stray_press = QKeyEvent(
+                QEvent.Type.KeyPress, Qt.Key.Key_Down, Qt.KeyboardModifier.NoModifier
+            )
+            assert keyboard.eventFilter(other, stray_press) is True
+        finally:
+            gamepad_module._RELAY_VIEW = None
+            box.hidePopup()
+            process_events()
+    finally:
+        keyboard.stop()
+        gamepad.stop()
+        win.close()
+        win.deleteLater()
+        process_events()
+
+
+def test_bumper_closes_the_dropdown_without_choosing_or_switching_tab(
+    qapp: object,
+) -> None:
+    """Popup open, RB: popup closed, tab and index unchanged (T875-C3)."""
+    from PySide6.QtWidgets import QTabWidget
+
+    win = QWidget()
+    tabs = QTabWidget(win)
+    box = QComboBox(tabs)
+    for index in range(40):
+        box.addItem(f"log {index}")
+    first, second = QWidget(), QWidget()
+    tabs.addTab(first, "first")
+    tabs.addTab(second, "second")
+    first_layout = QVBoxLayout(first)
+    first_layout.addWidget(box)
+    win_layout = QVBoxLayout(win)
+    win_layout.addWidget(tabs)
+    navigator, keyboard, gamepad = install_gamepad_navigation(win)
+    try:
+        apply_dadcraft_theme(win, width=1280, theme_name="arthas")
+        win.show()
+        win.activateWindow()
+        process_events()
+        box.setFocus()
+        process_events()
+        assert navigator.perform(Action.CONFIRM) is True
+        process_events()
+        assert QApplication.activePopupWidget() is not None
+        box.setCurrentIndex(0)
+        fired: list[int] = []
+        box.currentIndexChanged.connect(lambda index: fired.append(index))
+        process_events()
+        for _ in range(3):
+            assert navigator.navigate(Direction.DOWN) is True
+            process_events()
+        assert navigator.perform(Action.CYCLE_NEXT) is False
+        process_events()
+        assert QApplication.activePopupWidget() is None
+        assert tabs.currentIndex() == 0
+        assert box.currentIndex() == 0
+        assert fired == []
+    finally:
         keyboard.stop()
         gamepad.stop()
         win.close()

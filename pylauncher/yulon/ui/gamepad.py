@@ -410,8 +410,9 @@ def _open_combo_popup() -> QComboBox | None:
 
     A combo's popup holds a `QListView` of its rows, not focusable stops, so the
     D-pad walk finds nothing to move to in there. Qt's own `QComboBox` handling
-    already walks the rows and scrolls the view -- the arrows only have to reach
-    the combo as keys, the way a menu's own keys reach the menu (T89).
+    already walks the rows and scrolls -- but only the popup VIEW's keys reach
+    that handling, so the pad's arrows are routed to the view (see
+    `_deliver_to_combo`), the way a menu's own keys reach the menu (T89).
     """
     app = QApplication.instance()
     if isinstance(app, QApplication):
@@ -423,16 +424,18 @@ def _open_combo_popup() -> QComboBox | None:
     return None
 
 
-_IN_COMBO_RELAY = False
-"""Whether a routed pad press is being delivered to an open dropdown (T875).
+_RELAY_VIEW: QAbstractItemView | None = None
+"""The popup list a routed pad press is being delivered to (T875, C1).
 
 Set in a try/finally around the sent press in `_deliver_to_combo`, so
 `KeyboardSource`'s application-wide filter lets that press through to the
-popup list instead of routing it back into the relay forever. Delivery is
-synchronous (sent, not posted), so no two relays overlap; the finally keeps a
-failed delivery from wedging the guard set. A guard, not a per-source
-registry: a source whose window was deleted without `stop()` leaves nothing
-behind to break the next relay.
+popup list instead of routing it back into the relay forever. It stores the
+VIEW, not a bare flag, so the filter lets through only the relayed press
+(a press/release to that view) while a key aimed anywhere else is still
+filtered as normal. Delivery is synchronous (sent, not posted), so no two
+relays overlap; the finally keeps a failed delivery from wedging the guard
+set. A guard, not a per-source registry: a source whose window was deleted
+without `stop()` leaves nothing behind to break the next relay.
 """
 
 
@@ -448,29 +451,28 @@ def _press_into(target: QWidget, key: Qt.Key) -> bool:
 
 
 def _deliver_to_combo(combo: QComboBox, key: Qt.Key) -> bool:
-    """Send `key` through the open dropdown's popup list, past the pad filter (T875).
+    """Send `key` to the open dropdown's popup list, past the pad filter (T875).
 
     The press goes to the popup's list view, so only its HIGHLIGHT moves (the
     combo's `currentIndex` is untouched until the pad's A chooses, exactly like
     a keyboard user's arrows with the popup open); sending it to the combo
     instead would move the current row too and Qt would NOT commit that row on
-    A (see `perform(CONFIRM)`). The press is already routed, so the guard flag
-    (`_IN_COMBO_RELAY`, read by `KeyboardSource.eventFilter`) stays set for the
+    A (see `perform(CONFIRM)`). The press is already routed, so the relay view
+    (`_RELAY_VIEW`, read by `KeyboardSource.eventFilter`) stays set for the
     sent pair in a try/finally: a pass through the pad filter would route it
     back into this relay forever. Delivery stays synchronous (the highlight has
     moved before the next pad event resolves), and other filters still see the
     press. One function, not two: the move-highlight and the Return-to-choose
-    paths differ only in the key and the target view.
+    paths differ only in the key.
     """
-    global _IN_COMBO_RELAY
-    _IN_COMBO_RELAY = True
+    global _RELAY_VIEW
+    view = combo.view()
+    _RELAY_VIEW = view
     try:
         for kind in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease):
-            QApplication.sendEvent(
-                combo.view(), QKeyEvent(kind, key, Qt.KeyboardModifier.NoModifier)
-            )
+            QApplication.sendEvent(view, QKeyEvent(kind, key, Qt.KeyboardModifier.NoModifier))
     finally:
-        _IN_COMBO_RELAY = False
+        _RELAY_VIEW = None
     return True
 
 
@@ -1003,14 +1005,20 @@ class Navigator(QObject):
             if action is Action.CONFIRM:
                 return _press_into(menu, Qt.Key.Key_Return)
             return False
-        if action is Action.CONFIRM:
-            combo = _open_combo_popup()
-            if combo is not None:
-                # T875: A chooses the highlighted row: a Return to the popup's
-                # view makes the combo commit the highlight and close the
-                # popup, the way a keyboard user's Return does (one function:
-                # see `_deliver_to_combo`).
+        combo = _open_combo_popup()
+        if combo is not None and action is not Action.BACK:
+            # T89 for menus, T875-C3 for dropdowns: A chooses the highlighted
+            # row (a Return to the popup's view commits it and closes the
+            # popup, the way a keyboard user's Return does), a bumper closes
+            # the popup WITHOUT choosing and does NOT switch tab -- switching
+            # tab would act on a page its button is no longer on. B is
+            # `_back()`'s, below. (One relay function: see `_deliver_to_combo`.)
+            if action is Action.CONFIRM:
                 return _deliver_to_combo(combo, Qt.Key.Key_Return)
+            if action in (Action.CYCLE_PREV, Action.CYCLE_NEXT):
+                combo.hidePopup()
+            return False
+        if action is Action.CONFIRM:
             return self._confirm()
         if action is Action.BACK:
             return self._back()
@@ -1172,10 +1180,21 @@ class KeyboardSource(QObject):
             self._app = None
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
-        if _IN_COMBO_RELAY:
-            # T875: a routed dropdown press, already delivered to the popup
-            # list -- let it through so it cannot route back into the relay.
-            return False
+        relayed = _RELAY_VIEW
+        if relayed is not None:
+            # T875-C1: a routed dropdown press, already delivered to the popup
+            # list -- let ONLY it through: a KeyPress/Release to the relayed
+            # view or to the popup frame holding it. An unaccepted press
+            # propagates view -> popup, and the popup's own Return handling is
+            # what dismisses it after A commits the highlight; consuming that
+            # leg re-enters perform() with the popup already closed and
+            # reopens it. A key aimed anywhere else while the relay holds is
+            # still filtered as normal.
+            popup = relayed.window()
+            if event.type() in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease) and (
+                watched is relayed or watched is popup
+            ):
+                return False
         if event.type() == QEvent.Type.KeyPress and isinstance(event, QKeyEvent):
             key = int(event.key())
             if _open_menu() is not None:
