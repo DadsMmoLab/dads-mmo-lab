@@ -19,6 +19,7 @@ refused with the holder's sentence, before anything is imported.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
@@ -26,6 +27,8 @@ from pathlib import Path
 
 from yulon import coa_realm, docker
 from yulon.catalog.catalog import CatalogEntry
+
+logger = logging.getLogger(__name__)
 
 SWITCH_PRESS = "Switch realm type"
 """The press name the switch holds the server under, and the hold's sentence."""
@@ -79,33 +82,34 @@ class RealmSwitch:
         """Stop, move every table set to `target_id`, point the folder at it, start.
 
         The hold wraps the whole sequence, and the engine's own pre-checks run inside
-        it BEFORE the Stop: a refusal there stops nothing the switch started, and a
-        second switch while one holds is refused with the hold's sentence before the
-        engine is asked anything. After the Stop the press says what the failure left
-        behind: a failure BEFORE the engine's first database write starts the ORIGINAL
-        type again and says so in one plain sentence; a failure after the first write
-        (the crash marker now stands) leaves the server stopped, and the next press
-        of Switch finishes or undoes it. The engine still refuses on a running
-        server (metadata locks), so the Stop is what lets it through; the restart
-        after a pre-write failure runs only when the engine says starting is safe.
+        it BEFORE the Stop: a refusal there stops nothing but a database this press
+        started, and a second switch while one holds is refused with the hold's
+        sentence before the engine is asked anything. After the Stop the press says
+        what the failure left behind: a failure BEFORE the engine's first database
+        write starts the ORIGINAL type again and says so in one plain sentence; a
+        failure after the first write (the crash marker now stands) leaves the
+        server stopped, and the next press of Switch finishes or undoes it. The
+        engine still refuses on a running server (metadata locks), so the Stop is
+        what lets it through; the restart after a pre-write failure runs only when
+        the engine says starting is safe.
 
         The database alone is started BEFORE the first read (`start_db`, the start-db
         seam the install and the start gate use): a stopped server leaves its database
         down too, and every read of the switch needs it (T812 C8 D5, the live run:
         "the acore_characters schema could not be listed (container ... is not
-        running)"). Only a database this press started is stopped again on a pre-check
-        refusal, leaving the server as the player had it; a start_db failure refuses
-        before anything else is touched. After the Stop the database alone is started
-        again, before the engine reads anything; the world and auth stay down.
+        running)"). A pre-check refusal stops the database again only when this press
+        started it on a server that was not running, leaving the server as the player
+        had it; a down database beside running world/auth is a broken server, and a
+        validation refusal must not stop that. A start_db failure refuses before
+        anything else is touched. After the Stop the database alone is started again,
+        before the engine reads anything; the world and auth stay down.
         """
         with self._hold_server(SWITCH_PRESS):
+            was_running = self._servers_running()
             try:
                 db_was_down = bool(self._start_db())
             except Exception as exc:
-                raise coa_realm.RealmSwitchError(
-                    "The database could not be started to read the realm type "
-                    f"({exc}); nothing was switched."
-                ) from exc
+                raise _start_db_refusal(exc) from exc
             try:
                 original = coa_realm.pre_check(
                     self._entry,
@@ -116,8 +120,11 @@ class RealmSwitch:
                     check_import=self._check_import,
                 )
             except Exception:
-                if db_was_down:
-                    self._stop()
+                if db_was_down and not was_running:
+                    try:
+                        self._stop()
+                    except Exception as stop_exc:
+                        logger.warning(f"{self._entry.id}: the cleanup stop failed: {stop_exc}")
                 raise
             self._stop()
             before = len(_writes_of(self._sql))
@@ -160,6 +167,29 @@ def confirm_text(target_label: str, target_realm_name: str) -> str:
         f"The first switch to {target_label} sets up its databases (a few minutes).\n\n"
         f"Switch to {target_label} ({target_realm_name})?"
     )
+
+
+def _start_db_refusal(exc: BaseException) -> coa_realm.RealmSwitchError:
+    """A start_db failure as the switch's own refusal, without repeating itself.
+
+    The wiring's `start_db` already ends its sentence with "nothing was switched":
+    appending it again would say it twice, so such a message passes through as
+    written. Anything else is wrapped once, with "nothing was switched" appended.
+    A `detail` (the log command) rides on the chained exception AND on the refusal
+    itself, where the view reads it for Details; never in the message.
+    """
+    text = str(exc)
+    if text.rstrip().rstrip(".").endswith("nothing was switched"):
+        refused = coa_realm.RealmSwitchError(text)
+    else:
+        refused = coa_realm.RealmSwitchError(
+            "The database could not be started to read the realm type "
+            f"({exc}); nothing was switched."
+        )
+    detail = getattr(exc, "detail", "")
+    if detail:
+        refused.detail = detail
+    return refused
 
 
 def _writes_of(sql: coa_realm.SqlRunner) -> list[str]:

@@ -180,11 +180,16 @@ def test_a_switch_stops_switches_starts_in_order(tmp_path: Path) -> None:
         bot_prefix="rndbot",
     )
     list(switch.switch_to("hero"))
-    assert order[0] == "start-db", "the database starts before the first read, stopped or running"
-    assert order[1] == "check-import", "a first switch asks its import's refusals before the Stop"
-    row_at = order.index("row:CoA Free Pick")
-    assert order.index("stop") < order.index("start-db", 2) < row_at
-    assert row_at < order.index("override") < order.index("start")
+    assert order == [
+        "start-db",
+        "check-import",
+        "stop",
+        "start-db",
+        "check-import",
+        "row:CoA Free Pick",
+        "override",
+        "start",
+    ], "the database starts before the first read, then Stop, switch, Start"
 
 
 def test_switch_for_answers_a_switch_only_for_entries_with_types(tmp_path: Path) -> None:
@@ -511,6 +516,8 @@ def _t873_switch(
     started: list[str],
     starts: list[str],
     start_db: Any = None,
+    running: bool = False,
+    stop: Any = None,
 ) -> coa_switch.RealmSwitch:
     events: list[str] = []
     stops = stopped
@@ -528,12 +535,14 @@ def _t873_switch(
         tmp_path,
         hold_server=_Hold(events),
         sql=sql,
-        servers_running=lambda: False,
+        servers_running=lambda: running,
         run_import=lambda context: fresh_import(sql, context),
         check_import=lambda: None,
         set_realm_row=lambda name, port: sql.executed.append(f"REALM ROW {name} {port}"),
         write_override=lambda env: None,
-        stop=lambda: stops.append("stop") or not sql.stop_database(),
+        stop=(
+            stop if stop is not None else (lambda: stops.append("stop") or not sql.stop_database())
+        ),
         start_db=_start_db,
         start=lambda: boots.append("start"),
         bot_prefix="rndbot",
@@ -619,5 +628,93 @@ def test_a_database_that_will_not_start_switches_nothing(tmp_path: Path) -> None
     assert starts == ["start-db"]
     assert stopped == [] and started == []
     assert sql.executed == []
-    assert sql.db_up is False
     assert file_type(tmp_path) == "coa"
+
+
+def test_a_refused_switch_never_stops_a_server_that_was_running(tmp_path: Path) -> None:
+    """T873-B B1: db down beside running world/auth is broken; a refusal must not stop it."""
+    sql = FakeSql()
+    coa_schemas(sql, marker="hero")
+    sql.db_up = False
+    write_file(tmp_path, "coa")
+    stopped: list[str] = []
+    started: list[str] = []
+    starts: list[str] = []
+    switch = _t873_switch(
+        tmp_path, sql, "wc", stopped=stopped, started=started, starts=starts, running=True
+    )
+    with pytest.raises(coa_realm.RealmSwitchError, match="Switch realm type to hero"):
+        list(switch.switch_to("wc"))
+    assert starts == ["start-db"]
+    assert stopped == [], "a running server is never stopped on a validation refusal"
+    assert started == []
+    assert sql.db_up is True, "the database this press started stays up beside the running server"
+    assert file_type(tmp_path) == "coa"
+
+
+def test_a_failing_cleanup_stop_keeps_the_original_refusal(tmp_path: Path) -> None:
+    """T873-B B2: the cleanup stop raises: the refusal (its text) is what is raised."""
+    sql = FakeSql()
+    coa_schemas(sql, marker="hero")
+    sql.db_up = False
+    write_file(tmp_path, "coa")
+    stopped: list[str] = []
+    started: list[str] = []
+    starts: list[str] = []
+
+    def refuse_stop() -> bool:
+        stopped.append("stop")
+        sql.stop_database()
+        raise RuntimeError("the stop blew up")
+
+    switch = _t873_switch(
+        tmp_path, sql, "wc", stopped=stopped, started=started, starts=starts, stop=refuse_stop
+    )
+    with pytest.raises(coa_realm.RealmSwitchError, match="Switch realm type to hero"):
+        list(switch.switch_to("wc"))
+    assert stopped == ["stop"]
+    assert started == []
+
+
+def test_a_start_db_refusal_is_said_once_with_its_detail_kept(tmp_path: Path) -> None:
+    """T873-B B3: no doubled "nothing was switched"; the log command rides along for Details."""
+    from yulon import docker
+
+    already_said = docker.DockerRefusal(
+        "coa-database did not report healthy within 180s, so nothing was switched.",
+        detail="To read everything it printed, run this in /srv:\ndocker compose logs db",
+    )
+    refused = coa_switch._start_db_refusal(already_said)
+    assert str(refused) == str(already_said), "an already-complete sentence passes through"
+    assert str(refused).count("nothing was switched") == 1
+    assert refused.detail == already_said.detail
+
+    failed = docker.DockerRefusal(
+        "coa-database did not report healthy within 180s, so the realm type could not be read. "
+        "The database's own log says why.",
+        detail="To read everything it printed, run this in /srv:\ndocker compose logs db",
+    )
+
+    def refuse_db() -> object:
+        raise failed
+
+    sql = FakeSql()
+    coa_schemas(sql)
+    sql.db_up = False
+    write_file(tmp_path, "coa")
+    stopped: list[str] = []
+    started: list[str] = []
+    starts: list[str] = []
+    switch = _t873_switch(
+        tmp_path, sql, "hero", stopped=stopped, started=started, starts=starts, start_db=refuse_db
+    )
+    with pytest.raises(coa_realm.RealmSwitchError) as caught:
+        list(switch.switch_to("hero"))
+    said = str(caught.value)
+    assert said.count("nothing was switched") == 1, said
+    assert "did not report healthy within 180s" in said
+    assert said.count("The database's own log says why.") == 1, said
+    assert getattr(caught.value, "detail", "") == failed.detail
+    assert caught.value.__cause__ is failed
+    assert stopped == [] and started == []
+    assert sql.db_up is False
