@@ -55,7 +55,7 @@ from __future__ import annotations
 
 import os
 import threading
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, replace
 from datetime import date
@@ -85,7 +85,6 @@ from yulon.catalog.upstream import Comparison, Release, github_slug
 from yulon.catalog.upstream import cached_row as upstream_cached_row
 from yulon.controller_wow_tortoise import autoupdate, custom
 from yulon.controller_wow_tortoise.autoupdate import Arming, GuardedApplier
-from yulon.controller_wow_tortoise.botpool import Press
 from yulon.controller_wow_wotlk.maintenance import BackupReport, backups_dir
 
 # Explicit re-exports: the user layer's place, the copy and the replace question
@@ -507,22 +506,9 @@ def follow_with_addon(
     alone. The wrapper never raises after a finished update: the outcome's own
     sentence is the failure's line.
     """
-    if route is None:
-        return None
-
-    def run(inner: Press, cancel: threading.Event | None) -> Iterator[str]:
-        yield from inner(cancel)
-        if cancel is not None and cancel.is_set():
-            logger.info("the update was stopped, so the client addon was left as it is")
-            return
-        yield "Checking TortoiseBots Manager in your game client…"
-        try:
-            yield follow().sentence
-        except Exception as exc:  # noqa: BLE001 - the update is done; the addon step never fails it
-            logger.warning(f"following the server update for {ADDON_ID}: {exc}")
-            yield _default_addons.FOLLOW_FAILED.format(name="TortoiseBots Manager", why=_short(exc))
-
-    return replace(route, press=lambda cancel: run(route.press, cancel))
+    return _default_addons.follow_route(
+        route, follow, item_id=ADDON_ID, name="TortoiseBots Manager"
+    )
 
 
 def _short(exc: Exception) -> str:

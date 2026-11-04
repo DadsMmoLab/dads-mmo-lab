@@ -95,12 +95,14 @@ def test_no_other_game_lists_the_coa_item(game: str, tmp_path: Path) -> None:
 def test_default_addons_never_puts_consoleport_in(tmp_path: Path) -> None:
     """T1: assert on what `put_in()` installs, not on display names. The CoA
     services' `default_addons` holds no `yulon-consoleport`, so a Play or a
-    fresh install leaves the client alone until the Modules tab's own Install."""
+    fresh install leaves the client alone until the Modules tab's own Install.
+    SquidBots Lite is CoA's default (T870), ConsolePort stays opt-in."""
     from yulon import default_addons
 
     services = _services(tmp_path)
     assert services.store is not None
     assert services.default_addons == ()
+    assert "yulon-consoleport" not in services.default_addons
 
     manifests = list(services.store.load_all("mod"))
     assert "yulon-consoleport" in {m.id for m in manifests}

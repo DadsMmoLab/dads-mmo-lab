@@ -5,11 +5,14 @@ the `wow-coa` game id, where its bundled manifests live, the GitHub location
 they are refreshed from. Loading and validating (`yulon.manifest_store`) and
 applying (`yulon.apply`) are shared and game-agnostic (style-guide §4).
 
-What the tree holds, and why it is its own: ONE `mod`, `yulon-consoleport` — the
-ConsolePortLK Enhanced controller add-on, eight `client` steps into the
-player's own CoA client (`Interface/AddOns`). CoA's Modules tab reads WotLK's
-tree (`manifests_from: wow-wotlk`, restored by T855-B) PLUS this tree: every
-index is the borrowed list followed by this tree's items, and an item here
+What the tree holds, and why it is its own: TWO `mod`s, both add-ons for the
+player's own CoA client (`Interface/AddOns`) and nothing else. `yulon-consoleport`
+is the ConsolePortLK Enhanced controller add-on, eight `client` steps, OPT-IN
+(T855). `yulon-squidbots-lite` is the CoA Bots add-on (T870), one `client` step,
+and it is one of this game's DEFAULT add-ons: a fresh install, every tab open
+and Play put it in without a press (T612's rule). CoA's Modules tab reads
+WotLK's tree (`manifests_from: wow-wotlk`, restored by T855-B) PLUS this tree:
+every index is the borrowed list followed by this tree's items, and an item here
 with the same id as a borrowed one replaces it. `modules`, `ale` and `kegs`
 have no own index file (there are none: that is a fact, and the loader reads
 a missing own index as the borrowed list alone).
@@ -17,9 +20,11 @@ a missing own index as the borrowed list alone).
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from yulon import resources
+from yulon import default_addons, resources
 from yulon.manifest import Manifest, ManifestType
 from yulon.manifest_store import (
     HttpGet,
@@ -30,7 +35,25 @@ from yulon.manifest_store import (
     urllib_get,
 )
 
+if TYPE_CHECKING:
+    from yulon.catalog.native import LatestRoute
+    from yulon.default_addons import AddonFollow
+
 GAME = "wow-coa"
+
+ADDON_ID = "yulon-squidbots-lite"
+"""SquidBots Lite, the CoA Bots client add-on, paired with the server's bots by Update (T870)."""
+
+ADDON_NAME = "SquidBots Lite"
+"""Its name in the Play log and the update's lines (T870)."""
+
+DEFAULT_ADDONS = (ADDON_ID,)
+"""The client add-ons a CoA server puts into the game client by itself (T870, T612's rule).
+
+A new install, every tab open and Play ask `yulon.default_addons.put_in()` for them; a
+player's Remove is remembered per server and nothing puts it back. ConsolePort is NOT
+here: it is opt-in (T855).
+"""
 
 # The bundled manifest tree that ships with the app (source tree or PyInstaller bundle).
 BUNDLED_MANIFESTS_DIR = resources.manifests_dir()
@@ -83,3 +106,10 @@ def fetcher(cache_root: Path, http: HttpGet = urllib_get) -> ManifestFetcher:
 def refresh(cache_root: Path, kind: ManifestType, http: HttpGet = urllib_get) -> RefreshResult:
     """Refresh one family of CoA manifests into `cache_root` (ETag-revalidated)."""
     return fetcher(cache_root, http).refresh(GAME, kind)
+
+
+def follow_with_addon(
+    route: LatestRoute | None, follow: Callable[[], AddonFollow]
+) -> LatestRoute | None:
+    """CoA's update route with SquidBots Lite following a finished press (T870, T814's rule)."""
+    return default_addons.follow_route(route, follow, item_id=ADDON_ID, name=ADDON_NAME)

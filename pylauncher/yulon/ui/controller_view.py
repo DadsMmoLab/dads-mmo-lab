@@ -186,6 +186,7 @@ from yulon.controller_wow_centurion import characters as centurion_characters
 from yulon.controller_wow_centurion import console as centurion_console
 from yulon.controller_wow_centurion import controller as centurion_controller
 from yulon.controller_wow_centurion import maintenance as centurion_maintenance
+from yulon.controller_wow_coa import modules as coa_modules
 from yulon.controller_wow_tbc import accounts as tbc_accounts
 from yulon.controller_wow_tbc import console as tbc_console
 from yulon.controller_wow_tbc import controller as tbc_controller
@@ -2577,7 +2578,8 @@ class ControllerServices:
     A fresh install (`put_default_addons_in()`) and every Play (`_prepare_client()`) put
     each one in through `default_addons.put_in()`, unless the player removed it:
     the Modules tab's own Remove is remembered per server (`_module_done()`). Empty for
-    every game but Tortoise, which names its two Sagiroth addons.
+    every game but Tortoise, which names its two Sagiroth addons, and Conquest of Azeroth,
+    which names SquidBots Lite when its client folder is the game (T870).
     """
     module_forget: Callable[[Manifest], bool] | None = None
     """Drop this app's record of a custom module, answering whether there was one.
@@ -3100,6 +3102,18 @@ def _with_client_addons(
             services.module_forget if services.module_forget is not None else route.forget
         ),
     )
+
+
+def _outside_addons(entry: CatalogEntry) -> list[Manifest]:
+    """The add-ons the player brought for this game, as the add-on route lists them (T870 D6)."""
+    try:
+        records = ManifestStore(
+            Path(os.devnull), entry.id, wotlk_modules.user_manifests_dir(), shipped=False
+        ).load_all("mod")
+        return [m for m in records if client_addons.is_client_addon(m)]
+    except Exception as exc:  # noqa: BLE001 - unknown means "not the player's", never a refusal
+        logger.warning(f"could not read the add-ons brought for {entry.id}: {exc}")
+        return []
 
 
 def _with_take_back(services: ControllerServices) -> ControllerServices:
@@ -4511,7 +4525,13 @@ def _for_wotlk(
         if entry.has_manifests
         else None
     )
-    return _assemble(
+    # T870 D3: CoA's SquidBots Lite is a default add-on only for a folder that holds the game.
+    # The WotLK-family applier is handed the raw client folder (Tortoise's gets T30's
+    # `_client_dir_for_addons`), so a press-less write needs that evidence: `Interface/` or
+    # the entry's own exe. Read here, at tab build, so a later start reads it again.
+    coa = entry.id == coa_modules.GAME and module_applier is not None
+    default_ids = coa_modules.DEFAULT_ADDONS if coa and _a_game_client(entry, client_dir) else ()
+    services = _assemble(
         entry,
         server_dir,
         client_dir=client_dir,
@@ -4672,6 +4692,8 @@ def _for_wotlk(
         ),
         store=tab_store,
         applier=module_applier,
+        # T870: CoA's default add-on (SquidBots Lite), and nothing for every other game here.
+        default_addons=default_ids,
         # The other half of installing a module, and until now the half with no
         # button: `applier` clones the module and activates its conf, leaving
         # `data/sql/db-world/*.sql` "to ac-db-import on next start" — and no
@@ -4833,6 +4855,39 @@ def _for_wotlk(
             realm_type=_realm_type_of(entry, server_dir),
         ),
     )
+    # T870 D5: CoA's "Update the server to latest…" ends by bringing SquidBots Lite to the
+    # newest release, Tortoise's T814 pairing. `to_pin` is untouched (the way back leaves it
+    # alone), and a finished press never fails on the add-on. The add-on route is added to
+    # `services` later by `for_entry()` (`_with_client_addons`), so D6's question reads the
+    # player's records the way that route reads them rather than closing over a route.
+    if (
+        coa
+        and module_applier is not None
+        and services.store is not None
+        and services.update_to_latest is not None
+    ):
+        store = services.store
+        applier = module_applier
+        services = replace(
+            services,
+            update_to_latest=coa_modules.follow_with_addon(
+                services.update_to_latest,
+                lambda: default_addons.follow_server_update(
+                    server_dir,
+                    applier,
+                    lambda: store.load_all("mod"),
+                    coa_modules.ADDON_ID,
+                    place=lambda: default_addons.client_place(
+                        client_dir,
+                        applier.client_dir if _a_game_client(entry, applier.client_dir) else None,
+                    ),
+                    players_own=lambda: default_addons.players_own(
+                        coa_modules.ADDON_ID, store.load_all("mod"), _outside_addons(entry)
+                    ),
+                ),
+            ),
+        )
+    return services
 
 
 def _for_tbc(
@@ -5415,6 +5470,21 @@ def _has_interface(client_dir: Path) -> bool:
     """The client has its `Interface/` folder, whatever its case (`interface/` too, T261)."""
     found = client_names.find(client_dir, ADDONS_PARENT)
     return found is not None and found.is_dir()
+
+
+def _a_game_client(entry: CatalogEntry, client_dir: Path | None) -> bool:
+    """The folder holds the game: its `Interface/` or one of the entry's exes, any case (T870 D3).
+
+    `None` is False and an unreadable folder is False: this never raises.
+    """
+    if client_dir is None:
+        return False
+    try:
+        if _has_interface(client_dir):
+            return True
+        return any(client_names.find(client_dir, exe) is not None for exe in entry.client.exe_names)
+    except OSError:
+        return False
 
 
 def _client_dir_for_addons(client_dir: Path | None) -> Path | None:
@@ -15294,6 +15364,7 @@ class ControllerView(QWidget):
         is what the tab shows installed and what its Remove takes back. `clone=False` is Play:
         no git and no network, only the files a clone on disk has and the client lacks.
         `clone=True` (a fresh install, a tab opening) also installs an add-on with no clone.
+        A default whose folder the player's own add-on already writes is left out (T870 D6).
         Never raises: the lines come back as Play notes.
         """
         services = self.services
@@ -15301,10 +15372,22 @@ class ControllerView(QWidget):
         if not ids or services.applier is None or services.store is None:
             return ()
         try:
+            manifests = list(services.store.load_all("mod"))
+            # T870 D6: a copy the player brought wins over a default that writes the same folder.
+            outside: list[Manifest] = []
+            if services.client_addons is not None:
+                try:
+                    outside = services.client_addons.installed()
+                except Exception as exc:  # boundary: a broken record is "not the player's"
+                    logger.warning(f"outside client add-ons: {exc}")
+                    outside = []
+            ids = default_addons.ids_to_put_in(ids, manifests, outside)
+            if not ids:
+                return ()
             outcome = default_addons.put_in(
                 services.controller.server_dir,
                 services.applier,
-                services.store.load_all("mod"),
+                manifests,
                 ids,
                 clone=clone,
                 say=say,
