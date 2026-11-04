@@ -201,7 +201,10 @@ def test_putting_back_restores_every_byte_and_removes_the_record(tmp_path: Path)
     assert binding_bytes(tmp_path) == ALE_OLD.encode("utf-8")
     assert (tmp_path / BINDING).stat().st_mode & 0o777 == 0o640
     assert not (tmp_path / ale_playerbots.RECORD).exists()
-    assert any("PlayerBotAIMethods.h" in line for line in said), said
+    assert said == [
+        "mod-ale's changes for the compile were taken back out (1 file); its folder is as "
+        "mod-ale ships it."
+    ], said
 
 
 @pytest.mark.parametrize(

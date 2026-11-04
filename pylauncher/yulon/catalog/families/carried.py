@@ -20,7 +20,7 @@ from __future__ import annotations
 from collections.abc import Iterator, Sequence
 from pathlib import Path
 
-from yulon.catalog.catalog import SourcePatch
+from yulon.catalog.catalog import ModulePatch, SourcePatch
 from yulon.catalog.families import patch
 from yulon.catalog.families.cmangos import CATALOG_ERROR_TAIL
 from yulon.catalog.installer import InstallerError
@@ -28,7 +28,7 @@ from yulon.catalog.installer import InstallerError
 NONE_CARRIED = "This server carries no source patches."
 
 
-def patch_text(entry_name: str, installers_root: Path, spec: SourcePatch) -> str:
+def patch_text(entry_name: str, installers_root: Path, spec: SourcePatch | ModulePatch) -> str:
     """The patch file's text, or the catalog refusal for one this build does not ship."""
     path = installers_root / spec.file
     try:
