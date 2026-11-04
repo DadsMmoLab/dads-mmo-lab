@@ -3105,16 +3105,24 @@ def _with_client_addons(
     )
 
 
-def _outside_addons(entry: CatalogEntry) -> list[Manifest]:
-    """The add-ons the player brought for this game, as the add-on route lists them (T870 D6)."""
+def _outside_addons(entry: CatalogEntry) -> list[Manifest] | None:
+    """The add-ons the player brought for this game; `None` when the records cannot be read.
+
+    `None` is "unknown", never "not the player's" (T870 C2): a write path that treats it as
+    an empty list could put the shipped copy over one the player brought. The one log line
+    is here, and the callers skip their write without a player-facing failure.
+    """
     try:
         records = ManifestStore(
             Path(os.devnull), entry.id, wotlk_modules.user_manifests_dir(), shipped=False
         ).load_all("mod")
         return [m for m in records if client_addons.is_client_addon(m)]
-    except Exception as exc:  # noqa: BLE001 - unknown means "not the player's", never a refusal
-        logger.warning(f"could not read the add-ons brought for {entry.id}: {exc}")
-        return []
+    except Exception as exc:  # noqa: BLE001 - unknown is the player's, never a refusal
+        logger.warning(
+            f"could not read the add-ons brought for {entry.id}: {exc}; "
+            "no default add-on is written for it"
+        )
+        return None
 
 
 def _with_take_back(services: ControllerServices) -> ControllerServices:
@@ -4884,7 +4892,7 @@ def _for_wotlk(
                         client_dir,
                         applier.client_dir if _a_game_client(entry, applier.client_dir) else None,
                     ),
-                    players_own=lambda: default_addons.players_own(
+                    players_own=lambda: default_addons.players_own_or_unknown(
                         coa_modules.ADDON_ID, store.load_all("mod"), _outside_addons(entry)
                     ),
                 ),
@@ -5906,7 +5914,7 @@ def _for_tortoise(
                 # brought TortoiseBots Manager themselves has a record writing this addon's
                 # own folder, and "Update the server to latest…" must not clone the shipped
                 # one over it.
-                players_own=lambda: default_addons.players_own(
+                players_own=lambda: default_addons.players_own_or_unknown(
                     tortoise_modules.ADDON_ID, store.load_all("mod"), _outside_addons(entry)
                 ),
             ),
@@ -15399,15 +15407,21 @@ class ControllerView(QWidget):
         if self._default_addons_folder() is None:
             return ()
         try:
-            manifests = list(services.store.load_all("mod"))
-            # T870 D6: a copy the player brought wins over a default that writes the same folder.
+            # T870 D6 and review round 2 C2: a copy the player brought wins over a default
+            # that writes the same folder, and a record store nobody can read means the
+            # player MAY own it, so nothing is written. Read before the manifests: the same
+            # unreadable store may hold them, and a failure there is not this decision.
             outside: list[Manifest] = []
             if services.client_addons is not None:
                 try:
                     outside = services.client_addons.installed()
-                except Exception as exc:  # boundary: a broken record is "not the player's"
-                    logger.warning(f"outside client add-ons: {exc}")
-                    outside = []
+                except Exception as exc:  # boundary: unknown is the player's, never "no"
+                    logger.warning(
+                        "could not read the add-ons brought for this server "
+                        f"({exc}); no default add-on is put in"
+                    )
+                    return ()
+            manifests = list(services.store.load_all("mod"))
             ids = default_addons.ids_to_put_in(ids, manifests, outside)
             if not ids:
                 return ()
@@ -15418,6 +15432,9 @@ class ControllerView(QWidget):
                 ids,
                 clone=clone,
                 say=say,
+                # The write site asks too: this path can put back the files of an installed
+                # shipped clone, not only install (T870 review round 2 C1).
+                players_own=lambda item: default_addons.players_own(item, manifests, outside),
             )
         except Exception as exc:  # boundary: the addons are a courtesy, Play is the job
             logger.warning(f"default client addons: {exc}")

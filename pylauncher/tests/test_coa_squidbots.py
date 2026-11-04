@@ -368,9 +368,29 @@ def test_the_follow_leaves_the_players_own_copy_alone(tmp_path: Path) -> None:
 
     outcome = _follow(rig, players_own=lambda: True)
 
-    assert outcome.kind is default_addons.Followed.NOT_INSTALLED
+    assert outcome.kind is default_addons.Followed.PLAYERS_OWN
     assert outcome.sentence == default_addons.FOLLOW_PLAYERS_OWN.format(name=ADDON_NAME)
     assert not rig["applier"].clone_dir(rig["manifest"]).exists()
+    assert (rig["client"] / LUA).read_text(encoding="utf-8").strip() == f"-- {OLD_TAG}"
+
+
+@needs_git
+def test_the_follow_leaves_the_players_own_copy_alone_with_the_shipped_one_installed(
+    tmp_path: Path,
+) -> None:
+    """F: asking `players_own()` only inside the no-clone branch (T870 review round 2 C1)
+    updates the installed shipped clone over the copy the player brought."""
+    rig = _rig(tmp_path, install=True)
+    clone = rig["applier"].clone_dir(rig["manifest"])
+    assert clone.is_dir()
+    new = _publish(rig["origin"], ORIGIN_FILES, NEW_TAG)
+    rig["released"]["now"] = upstream.Release(NEW_TAG, new)
+
+    outcome = _follow(rig, players_own=lambda: True)
+
+    assert outcome.kind is default_addons.Followed.PLAYERS_OWN
+    assert outcome.sentence == default_addons.FOLLOW_PLAYERS_OWN.format(name=ADDON_NAME)
+    assert clone_release(clone, item_id=ADDON_ID) == OLD_TAG
     assert (rig["client"] / LUA).read_text(encoding="utf-8").strip() == f"-- {OLD_TAG}"
 
 

@@ -29,8 +29,11 @@ what a player removed.
 **A copy the player brought wins (T870).** When the player has an outside add-on record for
 this server (`yulon.client_addons`) whose steps write a folder one of the defaults writes,
 the default is left out (`ids_to_put_in()`, `players_own()`): two items owning one folder is
-a clash, and the copy the player chose is theirs. The follow after a server update says so
-(`FOLLOW_PLAYERS_OWN`) instead of installing.
+a clash, and the copy the player chose is theirs. The question is asked before EVERY write
+-- install, put-back, update, and whether or not the shipped clone is on disk -- and the
+follow after a server update says so (`FOLLOW_PLAYERS_OWN`) instead of writing. A record
+store nobody can read is "the player may own it", never "not the player's"
+(`players_own_or_unknown()`, review round 2).
 
 No Qt here.
 """
@@ -194,6 +197,7 @@ def put_in(
     what: str = "default add-on",
     say: Callable[[str], None] = lambda _line: None,
     now: Callable[[], float] = time.time,
+    players_own: Callable[[str], bool] | None = None,
 ) -> Outcome:
     """Put each of `ids` that is not removed into the client; see the module docstring.
 
@@ -205,6 +209,10 @@ def put_in(
     Never raises for one add-on: a failure is in `Outcome.failed` and the next add-on goes on,
     because a game that cannot reach GitHub must still start. Nothing is done without a client
     folder to put the files in, or a clone would read as installed with no files.
+
+    `players_own(item)` is asked before this function writes anything for `item` -- a put-back
+    as much as an install -- so a caller that has not filtered its ids cannot put the shipped
+    copy over the player's own (T870 review round 2).
     """
     manifests = list(manifests)
     out = Outcome(names={m.id: m.name for m in manifests})
@@ -224,6 +232,9 @@ def put_in(
         if manifest is None or item in removed:
             continue
         try:
+            if players_own is not None and players_own(item):
+                logger.info(f"{item} stays out: the player brought its add-on")
+                continue
             if item in present:
                 if applier.client_files_missing(manifest):
                     say(f"Putting the missing files of {manifest.name} back…")
@@ -281,6 +292,21 @@ def players_own(item_id: str, manifests: Iterable[Manifest], outside: Iterable[M
     return any(addon_folders(m) & ours for m in outside if m.id != item_id)
 
 
+def players_own_or_unknown(
+    item_id: str, manifests: Iterable[Manifest], outside: Iterable[Manifest] | None
+) -> bool:
+    """`players_own()`, with an unreadable record store counting as the player's (T870 C2).
+
+    `outside` is `None` when the player's add-on records could not be read at all. Unknown is
+    not "not the player's": writing there could replace the copy they brought, so the answer
+    is True and every write is skipped. The reader logs the one line; nothing here raises, and
+    `manifests` is not read either -- it may come from the same unreadable store.
+    """
+    if outside is None:
+        return True
+    return players_own(item_id, manifests, outside)
+
+
 def ids_to_put_in(
     ids: Sequence[str], manifests: Sequence[Manifest], outside: Sequence[Manifest]
 ) -> tuple[str, ...]:
@@ -332,6 +358,7 @@ class Followed(Enum):
     UNKNOWN = "unknown"
     ELSEWHERE = "elsewhere"
     NOT_INSTALLED = "not_installed"
+    PLAYERS_OWN = "players_own"
     FAILED = "failed"
 
 
@@ -409,9 +436,12 @@ def follow_server_update(
                 FOLLOW_FAILED.format(name=name, why="its description is missing"),
             )
         present = installed_clones(server_dir).get("mod", frozenset())
+        # T870 review round 2: asked before EVERY write -- the put-back and update of an
+        # installed shipped clone as much as the install -- because the player's own copy
+        # and the shipped one write the same folder.
+        if players_own():
+            return AddonFollow(Followed.PLAYERS_OWN, FOLLOW_PLAYERS_OWN.format(name=name))
         if item_id not in present:
-            if players_own():
-                return AddonFollow(Followed.NOT_INSTALLED, FOLLOW_PLAYERS_OWN.format(name=name))
             removed = declined(server_dir)
             if removed is None or item_id in removed:
                 return AddonFollow(Followed.NOT_INSTALLED, FOLLOW_NOT_INSTALLED.format(name=name))
