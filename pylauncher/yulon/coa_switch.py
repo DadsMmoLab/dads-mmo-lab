@@ -79,32 +79,46 @@ class RealmSwitch:
         """Stop, move every table set to `target_id`, point the folder at it, start.
 
         The hold wraps the whole sequence, and the engine's own pre-checks run inside
-        it BEFORE the Stop: a refusal there stops nothing, and a second switch while
-        one holds is refused with the hold's sentence before the engine is asked
-        anything. After the Stop the press says what the failure left behind: a
-        failure BEFORE the engine's first database write starts the ORIGINAL type
-        again and says so in one plain sentence; a failure after the first write
+        it BEFORE the Stop: a refusal there stops nothing the switch started, and a
+        second switch while one holds is refused with the hold's sentence before the
+        engine is asked anything. After the Stop the press says what the failure left
+        behind: a failure BEFORE the engine's first database write starts the ORIGINAL
+        type again and says so in one plain sentence; a failure after the first write
         (the crash marker now stands) leaves the server stopped, and the next press
         of Switch finishes or undoes it. The engine still refuses on a running
         server (metadata locks), so the Stop is what lets it through; the restart
         after a pre-write failure runs only when the engine says starting is safe.
 
-        The Stop is the tab's own (it saves every character) and stops the
-        database too, which every read of the switch needs (T812 C8 D5, the live
-        run: "the acore_characters schema could not be listed (container ... is
-        not running)"). So the database alone is started again right after it
-        (`start_db`, the start-db seam the install and the start gate use),
-        before the engine reads anything; the world and auth stay down.
+        The database alone is started BEFORE the first read (`start_db`, the start-db
+        seam the install and the start gate use): a stopped server leaves its database
+        down too, and every read of the switch needs it (T812 C8 D5, the live run:
+        "the acore_characters schema could not be listed (container ... is not
+        running)"). Only a database this press started is stopped again on a pre-check
+        refusal, leaving the server as the player had it; a start_db failure refuses
+        before anything else is touched. After the Stop the database alone is started
+        again, before the engine reads anything; the world and auth stay down.
         """
         with self._hold_server(SWITCH_PRESS):
-            original = coa_realm.pre_check(
-                self._entry,
-                self._server_dir,
-                target_id,
-                sql=self._sql,
-                bot_prefix=self._bot_prefix,
-                check_import=self._check_import,
-            )
+            try:
+                db_was_down = bool(self._start_db())
+            except Exception as exc:
+                raise coa_realm.RealmSwitchError(
+                    "The database could not be started to read the realm type "
+                    f"({exc}); nothing was switched."
+                ) from exc
+            try:
+                original = coa_realm.pre_check(
+                    self._entry,
+                    self._server_dir,
+                    target_id,
+                    sql=self._sql,
+                    bot_prefix=self._bot_prefix,
+                    check_import=self._check_import,
+                )
+            except Exception:
+                if db_was_down:
+                    self._stop()
+                raise
             self._stop()
             before = len(_writes_of(self._sql))
             try:

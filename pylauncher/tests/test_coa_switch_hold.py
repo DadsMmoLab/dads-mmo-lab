@@ -180,9 +180,10 @@ def test_a_switch_stops_switches_starts_in_order(tmp_path: Path) -> None:
         bot_prefix="rndbot",
     )
     list(switch.switch_to("hero"))
-    assert order[0] == "check-import", "a first switch asks its import's refusals before the Stop"
+    assert order[0] == "start-db", "the database starts before the first read, stopped or running"
+    assert order[1] == "check-import", "a first switch asks its import's refusals before the Stop"
     row_at = order.index("row:CoA Free Pick")
-    assert order.index("stop") < order.index("start-db") < row_at
+    assert order.index("stop") < order.index("start-db", 2) < row_at
     assert row_at < order.index("override") < order.index("start")
 
 
@@ -496,3 +497,127 @@ def test_the_realm_type_choice_shows_only_for_entries_with_types(
     assert plain.realm_type_label.isHidden()
     assert plain.realm_type_choice.isHidden()
     assert plain.realm_type_switch_button.isHidden()
+
+
+# -- T873: the switch on a stopped server ---------------------------------------
+
+
+def _t873_switch(
+    tmp_path: Path,
+    sql: FakeSql,
+    target: str,
+    *,
+    stopped: list[str],
+    started: list[str],
+    starts: list[str],
+    start_db: Any = None,
+) -> coa_switch.RealmSwitch:
+    events: list[str] = []
+    stops = stopped
+    boots = started
+    ups = starts
+
+    def _start_db() -> object:
+        ups.append("start-db")
+        if start_db is not None:
+            return start_db()
+        return sql.start_database()
+
+    return coa_switch.RealmSwitch(
+        coa(),
+        tmp_path,
+        hold_server=_Hold(events),
+        sql=sql,
+        servers_running=lambda: False,
+        run_import=lambda context: fresh_import(sql, context),
+        check_import=lambda: None,
+        set_realm_row=lambda name, port: sql.executed.append(f"REALM ROW {name} {port}"),
+        write_override=lambda env: None,
+        stop=lambda: stops.append("stop") or not sql.stop_database(),
+        start_db=_start_db,
+        start=lambda: boots.append("start"),
+        bot_prefix="rndbot",
+    )
+
+
+def test_a_stopped_server_starts_the_database_before_the_first_read(
+    tmp_path: Path,
+) -> None:
+    """T873: the database down until start_db: the switch succeeds; start_db < first query."""
+    sql = FakeSql()
+    coa_schemas(sql)
+    sql.db_up = False
+    write_file(tmp_path, "coa")
+    stopped: list[str] = []
+    started: list[str] = []
+    starts: list[str] = []
+    switch = _t873_switch(tmp_path, sql, "hero", stopped=stopped, started=started, starts=starts)
+    order = sql.queries
+    lines = list(switch.switch_to("hero"))
+    assert file_type(tmp_path) == "hero"
+    assert starts == ["start-db", "start-db"], "one start_db before pre_check, one after the Stop"
+    assert order, "no read ever reached the database"
+    assert any("hero" in line for line in lines)
+    assert stopped == ["stop"] and started == ["start"]
+
+
+def test_a_refused_switch_stops_a_database_it_started(tmp_path: Path) -> None:
+    """T873: pre_check refuses after this press started the db: stop() runs, error unchanged."""
+    sql = FakeSql()
+    coa_schemas(sql, marker="hero")
+    sql.db_up = False
+    write_file(tmp_path, "coa")
+    stopped: list[str] = []
+    started: list[str] = []
+    starts: list[str] = []
+    switch = _t873_switch(tmp_path, sql, "wc", stopped=stopped, started=started, starts=starts)
+    with pytest.raises(coa_realm.RealmSwitchError, match="Switch realm type to hero"):
+        list(switch.switch_to("wc"))
+    assert starts == ["start-db"]
+    assert stopped == ["stop"], "the database this press started was not stopped again"
+    assert started == []
+    assert sql.db_up is False
+    assert file_type(tmp_path) == "coa"
+
+
+def test_a_refused_switch_leaves_a_database_it_found_up_alone(tmp_path: Path) -> None:
+    """T873: pre_check refuses with the db already up: stop() is NOT called (today's behaviour)."""
+    sql = FakeSql()
+    coa_schemas(sql, marker="hero")
+    assert sql.db_up is True
+    write_file(tmp_path, "coa")
+    stopped: list[str] = []
+    started: list[str] = []
+    starts: list[str] = []
+    switch = _t873_switch(tmp_path, sql, "wc", stopped=stopped, started=started, starts=starts)
+    with pytest.raises(coa_realm.RealmSwitchError, match="Switch realm type to hero"):
+        list(switch.switch_to("wc"))
+    assert stopped == []
+    assert started == []
+    assert sql.db_up is True
+    assert file_type(tmp_path) == "coa"
+
+
+def test_a_database_that_will_not_start_switches_nothing(tmp_path: Path) -> None:
+    """T873: start_db raises: RealmSwitchError with "nothing was switched", nothing touched."""
+    sql = FakeSql()
+    coa_schemas(sql)
+    sql.db_up = False
+    write_file(tmp_path, "coa")
+    stopped: list[str] = []
+    started: list[str] = []
+    starts: list[str] = []
+
+    def refuse_db() -> object:
+        raise RuntimeError("the daemon refused")
+
+    switch = _t873_switch(
+        tmp_path, sql, "hero", stopped=stopped, started=started, starts=starts, start_db=refuse_db
+    )
+    with pytest.raises(coa_realm.RealmSwitchError, match="nothing was switched"):
+        list(switch.switch_to("hero"))
+    assert starts == ["start-db"]
+    assert stopped == [] and started == []
+    assert sql.executed == []
+    assert sql.db_up is False
+    assert file_type(tmp_path) == "coa"
