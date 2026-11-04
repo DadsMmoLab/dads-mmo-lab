@@ -103,9 +103,8 @@ index ba525a4..c57b658 100644
       */
      int IsBot(lua_State* L, Player* player)
      {
--    #if defined(MOD_PLAYERBOTS)
+     #if defined(MOD_PLAYERBOTS)
 -        ALE::Push(L, player->GetSession()->IsHeadless());
-+    #if defined(ALE_PLAYERBOTS_OFF_ON_COA)
 +        ALE::Push(L, player->GetSession()->IsBot());
      #else
          (void)player;

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 from collections.abc import Iterator
 from functools import partial
 from pathlib import Path
@@ -312,6 +313,25 @@ def test_a_file_that_cannot_be_read_keeps_its_row(tmp_path: Path) -> None:
     assert list(record["files"]) == [BINDING]
     assert any("could not be read" in line for line in said), said
     assert not any("as mod-ale ships it" in line for line in said), said
+
+
+@pytest.mark.skipif(os.name != "posix", reason="modes are a POSIX fact")
+def test_a_row_from_before_modes_restores_a_missing_file_as_0644(tmp_path: Path) -> None:
+    """T867-D D2: records written before the mode was stored still come back readable."""
+    lay(tmp_path, POST_RENAME_HEADER, ALE_OLD)
+    list(ale_playerbots.bridge(tmp_path))
+    record = tmp_path / ale_playerbots.RECORD
+    payload = json.loads(record.read_text(encoding="utf-8"))
+    for row in payload["files"].values():
+        row.pop("mode", None)
+    record.write_text(json.dumps(payload), encoding="utf-8")
+    (tmp_path / BINDING).unlink()
+
+    ale_playerbots.put_back(tmp_path)
+
+    assert binding_bytes(tmp_path) == ALE_OLD.encode("utf-8")
+    assert stat.S_IMODE((tmp_path / BINDING).stat().st_mode) == 0o644
+    assert not record.exists()
 
 
 def test_a_leftover_record_stops_the_next_bridge_before_it_lays_anything(

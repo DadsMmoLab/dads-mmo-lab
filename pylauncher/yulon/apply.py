@@ -4144,6 +4144,11 @@ class Applier:
         # T596: nothing at the path before this press, so a completion refused
         # below can take the folder back and "Nothing was changed" stays true.
         first = not os.path.lexists(clone)
+        if first:
+            # T867-D D1: a fresh clone is upstream's text by definition, so a
+            # mod-ale bridge record left by an earlier compile protects nothing
+            # here and must not survive into the new folder.
+            self._forget_a_bridge_record(manifest)
         self._check_hold()
         if folder is not None and manifest.source is not None:
             raise ApplyRefusal(
@@ -5425,6 +5430,9 @@ class Applier:
             self._check_hold()
             rmtree.remove_tree(clone)
             log.done.append(f"rm -r {_rel(self.server_dir, clone)}")
+        # T867-D D1: after the clone is gone, so the way out every kept bridge
+        # row names -- Remove and add mod-ale again -- actually clears it.
+        self._forget_a_bridge_record(manifest)
         if manifest.build.rebuild:
             # T750: a module that is gone owes no build of its own, and nothing that
             # requires it can be installed until it is back.
@@ -6819,6 +6827,28 @@ class Applier:
         direct = any(step.when == when and step.applied_by != "db-import" for step in manifest.sql)
         with self._held(f"{when.capitalize()} {manifest.name}", needed=direct):
             self._sql_held(manifest, clone, vals, when, log, undo)
+
+    def _forget_a_bridge_record(self, manifest: Manifest) -> None:
+        """Delete mod-ale's bridge record when this item's clone IS modules/mod-ale (T867-D D1).
+
+        A Remove has just deleted the clone, and a fresh Install is about to fill
+        it with upstream's text: either way every row in the record names a file
+        that no longer exists as Yu'lon left it, and `put_back()` could only keep
+        the row forever. Deleting it here is what makes the sentence every kept
+        row carries ("Remove and add mod-ale again") true. Not a refusal if the
+        file cannot be deleted: `put_back()` drops it on the absent folder too.
+        """
+        # Here for `_put_back_a_bridge()`'s reason: the families import this module.
+        from yulon import ale_playerbots  # noqa: PLC0415
+
+        if self.clone_dir(manifest) != self.server_dir / ale_playerbots.ALE:
+            return
+        try:
+            (self.server_dir / ale_playerbots.RECORD).unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            logger.warning(f"could not remove the mod-ale bridge record: {exc}")
 
     def _put_back_a_bridge(self, press: str) -> None:
         """Put back mod-ale files a compile Yu'lon never saw finish left bridged (T645).

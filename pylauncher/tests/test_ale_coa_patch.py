@@ -18,8 +18,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import platform
 import shutil
+import stat
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -38,7 +40,7 @@ from yulon.catalog.installer import InstallerError, InstallOptions
 from yulon.git import git_available
 
 PATCH_FILE = "wow-coa/patches/mod-ale-coa.patch"
-PATCH_SHA256 = "d6098aec49abddc2cf97427cf98bcfdbce7910afcedb259f220819539d1f21f3"
+PATCH_SHA256 = "da1df107edf8aefe89aad645a5df989991ad30aa10154a22b2fb00fd461a098e"
 ALE = ale_playerbots.ALE
 SC_PATH = "src/ALE_SC.cpp"
 METHODS_PATH = "src/LuaEngine/methods/PlayerMethods.h"
@@ -231,11 +233,15 @@ def test_the_install_build_stage_lays_the_patch_too(tmp_path: Path) -> None:
     seen: dict[str, bytes] = {}
     records: list[dict[str, Any]] = []
     made._seams = rec.seams(build=recording_build(rec, server_dir, seen, records))
+    rec.images_asked.clear()
 
     list(made.stage_named("build").run(build_ctx(made, server_dir)))
 
     assert seen == {name: text.encode("utf-8") for name, text in PATCHED.items()}
     assert tree_bytes(server_dir) == {name: text.encode("utf-8") for name, text in UPSTREAM.items()}
+    assert (
+        rec.images_asked == []
+    ), "a build that goes ahead asks the daemon nothing for a refusal it never makes"
 
 
 def test_a_failed_compile_still_puts_upstreams_files_back(tmp_path: Path) -> None:
@@ -634,3 +640,161 @@ def test_a_refusal_says_the_server_keeps_its_build_only_when_one_exists(
         list(made.stage_named("build").run(build_ctx(made, server_dir, completed=("build",))))
 
     assert "keeps the build it has" in str(again.value), str(again.value)
+
+
+# -- D5: Player:IsBot() still works where the Playerbots layer is left out ----
+
+
+def test_the_playerbot_guard_stays_and_isbot_uses_the_cores_session() -> None:
+    """D5: this one function needs no Playerbots API, so it is not turned off with the rest."""
+    hunks = [hunk for hunk in patch.parse(PATCH_TEXT) if hunk.path == METHODS_PATH]
+    assert len(hunks) == 1
+    after = "\n".join(hunks[0].after)
+    assert "#if defined(MOD_PLAYERBOTS)" in after
+    assert "player->GetSession()->IsBot()" in after
+    assert "ALE_PLAYERBOTS_OFF_ON_COA" not in after
+
+
+# -- D1/D2: the ways out, and the mode a recreated file comes back with ------
+
+
+def test_a_record_left_after_the_folder_was_deleted_by_hand_is_dropped(
+    tmp_path: Path,
+) -> None:
+    """D1: nothing is left to protect, so the next press drops the record silently."""
+    server_dir = tmp_path / "server"
+    lay_mod_ale(server_dir, UPSTREAM)
+    list(ale_playerbots.bridge(server_dir, PATCHES))
+    record = server_dir / ale_playerbots.RECORD
+    assert record.is_file()
+    shutil.rmtree(server_dir / ALE)
+
+    assert ale_playerbots.put_back(server_dir) == []
+    assert not record.exists()
+
+
+@pytest.mark.skipif(not git_available(), reason="needs a host git to make a real checkout")
+def test_remove_of_mod_ale_clears_the_record_so_the_next_build_does_not_refuse(
+    tmp_path: Path,
+) -> None:
+    """D1 (a): a crash leaves the record; Remove is the way out and it must clear it."""
+    applier, manifest, clone = _installed_clone(tmp_path)
+    tracked = clone / "src" / "LuaEngine" / "ALEConfig.cpp"
+    first = tracked.read_text(encoding="utf-8").split("\n", 1)[0]
+    tiny = (
+        "--- a/src/LuaEngine/ALEConfig.cpp\n"
+        "+++ b/src/LuaEngine/ALEConfig.cpp\n"
+        "@@ -1,1 +1,2 @@\n"
+        f" {first}\n"
+        "+// patched by Yu'lon\n"
+    )
+    list(
+        ale_playerbots.bridge(
+            applier.server_dir, (ale_playerbots.CompilePatch("tiny", tiny, "Fits it."),)
+        )
+    )
+    record = applier.server_dir / ale_playerbots.RECORD
+    assert record.is_file()
+
+    applier.remove(manifest)
+
+    assert not clone.exists()
+    assert not record.exists()
+    rec = Recorder(images=False)
+    made = make(scratch_entry(module_patches=MODULE_PATCHES), rec)
+    seen: dict[str, bytes] = {}
+    made._seams = rec.seams(build=recording_build(rec, applier.server_dir, seen, []))
+    list(made.stage_named("build").run(build_ctx(made, applier.server_dir)))
+    assert seen == {}
+
+
+@pytest.mark.skipif(not git_available(), reason="needs a host git to make a real checkout")
+def test_a_fresh_install_of_mod_ale_also_drops_a_record_left_behind(tmp_path: Path) -> None:
+    """D1: a fresh clone is upstream's text, so the record is deleted before it is laid."""
+    applier, manifest, clone = _installed_clone(tmp_path)
+    (clone / "src" / "LuaEngine").mkdir(parents=True, exist_ok=True)
+    tracked = clone / "src" / "LuaEngine" / "ALEConfig.cpp"
+    first = tracked.read_text(encoding="utf-8").split("\n", 1)[0]
+    tiny = (
+        "--- a/src/LuaEngine/ALEConfig.cpp\n"
+        "+++ b/src/LuaEngine/ALEConfig.cpp\n"
+        "@@ -1,1 +1,2 @@\n"
+        f" {first}\n"
+        "+// patched by Yu'lon\n"
+    )
+    list(
+        ale_playerbots.bridge(
+            applier.server_dir, (ale_playerbots.CompilePatch("tiny", tiny, "Fits it."),)
+        )
+    )
+    record = applier.server_dir / ale_playerbots.RECORD
+    shutil.rmtree(clone)
+    assert record.is_file()
+
+    applier.install(manifest)
+
+    assert clone.is_dir()
+    assert not record.exists()
+
+
+@pytest.mark.skipif(not git_available(), reason="needs a host git to make a real checkout")
+def test_remove_then_install_lets_the_patch_lay_normally_again(tmp_path: Path) -> None:
+    """D1 (b): a kept row must not survive the Remove-and-add-again way out."""
+    applier, manifest, clone = _installed_clone(tmp_path)
+    tracked = clone / "src" / "LuaEngine" / "ALEConfig.cpp"
+    first = tracked.read_text(encoding="utf-8").split("\n", 1)[0]
+    tiny = (
+        "--- a/src/LuaEngine/ALEConfig.cpp\n"
+        "+++ b/src/LuaEngine/ALEConfig.cpp\n"
+        "@@ -1,1 +1,2 @@\n"
+        f" {first}\n"
+        "+// patched by Yu'lon\n"
+    )
+    list(
+        ale_playerbots.bridge(
+            applier.server_dir, (ale_playerbots.CompilePatch("tiny", tiny, "Fits it."),)
+        )
+    )
+    tracked.write_text("// the player's own edit\n", encoding="utf-8")
+    said = ale_playerbots.put_back(applier.server_dir)
+    record = applier.server_dir / ale_playerbots.RECORD
+    assert record.is_file()
+    assert any(
+        line.startswith(f"{ale_playerbots.ALE}/src/LuaEngine/ALEConfig.cpp") for line in said
+    )
+
+    applier.remove(manifest)
+    applier.install(manifest)
+    assert not record.exists()
+
+    lay_mod_ale(applier.server_dir, UPSTREAM)
+    rec = Recorder(images=False)
+    made = make(scratch_entry(module_patches=MODULE_PATCHES), rec)
+    seen: dict[str, bytes] = {}
+    made._seams = rec.seams(build=recording_build(rec, applier.server_dir, seen, []))
+    list(made.stage_named("build").run(build_ctx(made, applier.server_dir)))
+    assert {name: seen.get(name) for name in PATCHED} == {
+        name: text.encode("utf-8") for name, text in PATCHED.items()
+    }
+
+
+def test_a_file_deleted_during_the_compile_comes_back_with_its_mode(tmp_path: Path) -> None:
+    """D2: a recreated file is not owner-only; it is the source file it was."""
+    rec, server_dir, made = installed(tmp_path)
+    lay_mod_ale(server_dir, UPSTREAM)
+    target = server_dir / ALE / SC_PATH
+    os.chmod(target, 0o644)
+    rec.images = True
+
+    def build(*args: object, **kwargs: object) -> docker.AttachedRun:
+        target.unlink()
+        rec.calls.append("build")
+        return docker.AttachedRun(0, ("built",))
+
+    made._seams = rec.seams(build=build)
+
+    list(made.rebuild(InstallOptions(server_dir=server_dir)))
+
+    assert target.read_text(encoding="utf-8") == UPSTREAM[SC_PATH]
+    if platform.system() != "Windows":
+        assert stat.S_IMODE(target.stat().st_mode) == 0o644

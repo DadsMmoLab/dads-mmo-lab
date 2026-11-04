@@ -718,8 +718,12 @@ class AzerothCoreInstaller(StagedInstaller):
         Also before the update route's dirty-tree guard: `_refuse_unless_updatable()`.
         """
         finished = False
+
+        def has_build() -> bool:
+            """Only asked when a refusal's sentence needs it (T867-D D3)."""
+            return ctx.state.has("build") or self.built_images(ctx) is True
+
         try:
-            has_build = ctx.state.has("build") or self.built_images(ctx) is True
             yield from ale_playerbots.bridge(
                 ctx.server_dir,
                 self._ale_compile_patches(ctx.server_dir),

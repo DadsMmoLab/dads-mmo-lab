@@ -72,11 +72,12 @@ import hashlib
 import json
 import os
 import re
+import stat
 import tempfile
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import NoReturn
+from typing import NoReturn, TypedDict
 
 from yulon import server_build_presses
 from yulon.catalog.families import conf, patch
@@ -179,8 +180,8 @@ _MISPLACED = (
 """A record path that is not a safe slot under this server's own mod-ale (T867-C C1)."""
 
 _NOT_PUT = (
-    "Yu'lon could not put {relative} back as mod-ale ships it ({error}); the next build puts it "
-    "back first."
+    "Yu'lon could not put {relative} back as mod-ale ships it ({error}); the next build stops "
+    "until mod-ale is removed and added again on the Modules tab."
 )
 """A file the put-back tried to write and could not (T867-C C1); the row is kept."""
 
@@ -203,6 +204,7 @@ class _Bridged:
     bridged: str
     renames: Mapping[str, str]
     session_renames: Mapping[str, str] = field(default_factory=dict)
+    mode: int = 0o644
 
 
 def session_renames_for(header: str, source: str) -> dict[str, str]:
@@ -315,20 +317,25 @@ def _header_text(server_dir: Path, relative: str) -> str | None:
     return _read_text(path)
 
 
-def _refuse_patch(server: str, detail: str, has_build: bool = False) -> NoReturn:
+def _refuse_patch(
+    server: str, detail: str, has_build: Callable[[], bool] | None = None
+) -> NoReturn:
     """Stop the press before the compile: mod-ale changed under a fix Yu'lon carries."""
     raise InstallerError(
         PATCH_REFUSED.format(
             server=server,
             rebuild=server_build_presses.under_server_build(server_build_presses.REBUILD),
             detail=detail,
-            kept=_KEPT_BUILD if has_build else "",
+            kept=_KEPT_BUILD if has_build is not None and has_build() else "",
         )
     )
 
 
 def _laid(
-    server_dir: Path, patches: Sequence[CompilePatch], server: str, has_build: bool = False
+    server_dir: Path,
+    patches: Sequence[CompilePatch],
+    server: str,
+    has_build: Callable[[], bool] | None = None,
 ) -> tuple[dict[str, str], tuple[str, ...]]:
     """Lay `patches` over the files on disk, in memory, before anything is written (T867).
 
@@ -457,14 +464,17 @@ def _plan(server_dir: Path, overlay: Mapping[str, str]) -> tuple[_Bridged, ...]:
                 bridged,
                 dict(renames),
                 dict(session_renames),
+                _mode_of(path),
             )
         )
     for relative in sorted(set(overlay) - seen):
         named = _inside(server_dir, relative)
-        original = _read_text(named) if named is not None else None
+        if named is None:
+            continue
+        original = _read_text(named)
         if original is None:
             continue
-        planned.append(_Bridged(relative, original, overlay[relative], {}, {}))
+        planned.append(_Bridged(relative, original, overlay[relative], {}, {}, _mode_of(named)))
     return tuple(planned)
 
 
@@ -481,7 +491,32 @@ def _digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _read_record(server_dir: Path) -> dict[str, dict[str, str]] | None:
+def _mode_of(path: Path) -> int:
+    """The file's permission bits, for the record to put them back (T867-D D2).
+
+    A file the put-back has to RECREATE gets this mode; one still on disk keeps
+    its own. 0644 when it cannot be read: the mode files in a checkout have.
+    """
+    try:
+        return stat.S_IMODE(path.stat().st_mode)
+    except OSError:
+        return 0o644
+
+
+class _Row(TypedDict):
+    """The two fields every record row has always had."""
+
+    original: str
+    bridged_sha256: str
+
+
+class _StoredRow(_Row, total=False):
+    """A row as stored: `mode` is absent in records written before T867-D."""
+
+    mode: int
+
+
+def _read_record(server_dir: Path) -> dict[str, _StoredRow] | None:
     """The record's files, `{}` for none; None when one is there and cannot be read."""
     path = server_dir / RECORD
     if not path.exists():
@@ -493,6 +528,7 @@ def _read_record(server_dir: Path) -> dict[str, dict[str, str]] | None:
             isinstance(row, dict)
             and isinstance(row.get("original"), str)
             and isinstance(row.get("bridged_sha256"), str)
+            and (row.get("mode") is None or isinstance(row.get("mode"), int))
             for row in files.values()
         ):
             raise ValueError("unexpected shape")
@@ -554,6 +590,11 @@ def put_back(server_dir: Path) -> list[str]:
       the compile), or no longer where the record put it is LEFT AS IT IS and its
       row is kept. `bridge()` refuses to compile over such a record.
 
+    With `modules/mod-ale` itself gone there is nothing left to protect, so the
+    record is deleted and nothing is said (T867-D D1). That is what makes the
+    way out every kept row names -- Remove and add mod-ale again -- work: Remove
+    deletes the clone, and the record must not outlive it.
+
     Files that came back clean fold into ONE line (T867): a module with eleven
     patched files would otherwise write eleven lines after every compile. Only when
     every row is back does that line say the folder is as mod-ale ships it; a kept
@@ -563,8 +604,17 @@ def put_back(server_dir: Path) -> list[str]:
     files = _read_record(server_dir)
     if not files:
         return []
+    record = server_dir / RECORD
+    if not (server_dir / ALE).is_dir():
+        try:
+            record.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            logger.warning(f"could not remove {record}: {exc}")
+        return []
     problems: list[str] = []
-    kept: dict[str, dict[str, str]] = {}
+    kept: dict[str, _StoredRow] = {}
     clean = 0
     total = len(files)
     for relative, row in files.items():
@@ -576,7 +626,7 @@ def put_back(server_dir: Path) -> list[str]:
                 problems.append(_MISPLACED.format(relative=relative))
                 continue
             try:
-                conf.replace_file(slot, row["original"])
+                conf.replace_file(slot, row["original"], mode=row.get("mode", 0o644))
             except InstallerError as exc:
                 logger.warning(f"could not put {slot} back: {exc}")
                 kept[relative] = row
@@ -629,7 +679,7 @@ def bridge(
     patches: Sequence[CompilePatch] = (),
     *,
     server: str = "this server",
-    has_build: bool = False,
+    has_build: Callable[[], bool] | None = None,
 ) -> list[str]:
     """Rewrite mod-ale's config and session-check names for the compile (T732), and lay
     Yu'lon's own fixes into it first (T867).
@@ -649,8 +699,11 @@ def bridge(
 
     The patch file is never read here: a caller that has no mod-ale passes none
     (D3), and one with a patch it cannot read learns that before this is called.
-    `has_build` is only for the refusal's sentence: True when a build already exists
-    (the state record or an image), so it may say the server keeps it (T867-C C4).
+    `has_build` is only for the refusal's sentence: a callable, asked only when a
+    refusal needs the clause, that says whether a build already exists (the state
+    record or an image), so the sentence may say the server keeps it (T867-C C4,
+    T867-D D3). Never asked on a build that goes ahead: no `docker image inspect`
+    is worth paying for a sentence nobody will read.
 
     Raises:
         InstallerError: an old record that cannot be read, a record a put-back could
@@ -693,7 +746,11 @@ def bridge(
         return said
     record = {
         "files": {
-            item.path: {"original": item.original, "bridged_sha256": _digest(item.bridged)}
+            item.path: {
+                "original": item.original,
+                "bridged_sha256": _digest(item.bridged),
+                "mode": item.mode,
+            }
             for item in planned
         }
     }
