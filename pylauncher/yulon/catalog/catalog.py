@@ -592,6 +592,13 @@ class AzerothCoreData(_Strict):
             "then the stage is not in its tuple at all."
         ),
     )
+    module_patches: tuple[ModulePatch, ...] = Field(
+        default=(),
+        description=(
+            "Unified diffs laid into a Modules-tab module's own clone for one compile and "
+            "taken back out after it (T867). Empty for an entry whose modules need none."
+        ),
+    )
     lua_scripts: tuple[LuaScripts, ...] = Field(
         default=(),
         description="Lua scripts the install lays into mod-ale's script folder (T553).",
@@ -1444,6 +1451,21 @@ class SqlPlan(_Strict):
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
 
 
+def _installers_path(value: str) -> str:
+    """A patch file's path: relative, POSIX, and inside `catalog/installers/`.
+
+    One rule for both patch kinds -- `SourcePatch` (applied to a checkout) and
+    `ModulePatch` (laid into a module for one compile) -- so neither can name a
+    file this build does not ship beside the catalog (`carried.patch_text()`).
+    """
+    path = PurePosixPath(value)
+    if "\\" in value or path.is_absolute() or ".." in path.parts:
+        raise ValueError(
+            f"file must be a relative POSIX path under catalog/installers/, got {value!r}"
+        )
+    return value
+
+
 class SourcePatch(_Strict):
     """One unified diff applied to one cloned source after `clone-sources` (`patch-sources`).
 
@@ -1495,12 +1517,45 @@ class SourcePatch(_Strict):
     @field_validator("file")
     @classmethod
     def _file_stays_inside_installers(cls, value: str) -> str:
-        path = PurePosixPath(value)
-        if "\\" in value or path.is_absolute() or ".." in path.parts:
-            raise ValueError(
-                f"file must be a relative POSIX path under catalog/installers/, got {value!r}"
-            )
-        return value
+        return _installers_path(value)
+
+
+class ModulePatch(_Strict):
+    """A unified diff laid into a Modules-tab module's clone for one compile, then taken out (T867).
+
+    Conquest of Azeroth's core moved hooks and menus that no mod-ale release
+    follows (`UnitScript::DealDamage` gained a fifth parameter, `PlayerMenu` is
+    no longer copyable), so mod-ale compiles there only with a small fix. The
+    fix cannot stay on disk -- the Modules tab's Update refuses a clone with
+    edited tracked files (T44/T47) -- and it cannot be a `SourcePatch`: that
+    must name an emulator `dest`, and its hunks are written into a checkout and
+    left there. So the diff is laid by `ale_playerbots.bridge()` for the compile
+    alone, recorded with the bridge's own record, and put back when the compile
+    ends; the clone is upstream's again for every git question asked outside it.
+    """
+
+    file: str = Field(
+        min_length=1,
+        description=(
+            "The patch, relative to catalog/installers/; its paths are relative to the "
+            "module's own folder."
+        ),
+    )
+    module: Literal["mod-ale"] = Field(
+        description=(
+            "The Modules-tab module it is for; the patch is laid only when modules/<module> "
+            "is there."
+        ),
+    )
+    reason: str = Field(
+        min_length=1,
+        description="One sentence the build log says when the patch is laid: what it fixes.",
+    )
+
+    @field_validator("file")
+    @classmethod
+    def _file_stays_inside_installers(cls, value: str) -> str:
+        return _installers_path(value)
 
 
 class RerunnableModule(_Strict):

@@ -673,26 +673,63 @@ class AzerothCoreInstaller(StagedInstaller):
         if written:
             yield "The extracted game data is left out of the build context."
 
+    def _ale_compile_patches(self, server_dir: Path) -> tuple[ale_playerbots.CompilePatch, ...]:
+        """Yu'lon's own mod-ale fixes for this compile, read from the catalog's files (T867).
+
+        Empty, and the patch file is not even read, when this server has no
+        `modules/mod-ale` (D3) or the entry carries none: a server without the
+        module never sees a sentence about it. The files are read on every
+        compile, never remembered: a patch laid for one compile is taken back
+        out after it, so there is no "already applied" state to trust.
+        """
+        specs = self._block().module_patches
+        if not specs or not (server_dir / ale_playerbots.ALE).is_dir():
+            return ()
+        return tuple(
+            ale_playerbots.CompilePatch(
+                spec.file,
+                carried.patch_text(self.entry.name, self.installers_root, spec),
+                spec.reason,
+            )
+            for spec in specs
+            if spec.module == ale_playerbots.MODULE
+        )
+
     def stage_build(self, ctx: StageContext) -> Iterator[str]:
         """The spine's compile, with mod-ale's Playerbots names bridged for it alone (T645).
 
         Every press that compiles comes through here: the install's `build` stage,
         `rebuild()`'s (Rebuild, "Update the server to latest…", "Return to the tested
         pin…", a moved-in server's rebuild). `ale_playerbots.bridge()` is a no-op unless
-        mod-ale and mod-playerbots disagree on a config name; whatever it rewrote is put
-        back once the compile returns, fails or is stopped, so no git question outside
-        the compile ever sees it. Not yielded from the `finally`: a generator closed
-        mid-compile must not yield, so there the lines go to the log.
+        mod-ale and mod-playerbots disagree on a config name or the entry carries a
+        `ModulePatch` for it (T867); whatever it rewrote or laid is put back once the
+        compile returns, fails or is stopped, so no git question outside the compile
+        ever sees it. Not yielded from the `finally`: a generator closed mid-compile
+        must not yield, so there the lines go to the log.
 
         The bridge runs INSIDE the `try` and returns its lines only once every write is
         done (cold review of db5da4df): a press closed at one of those lines (GeneratorExit)
         still reaches the put-back.
 
+        T867: the entry's module patches go in with the bridge and come out with it, in
+        the same record; `_ale_compile_patches()` reads none for a server without
+        mod-ale, so that server's build is exactly what it was.
+
         Also before the update route's dirty-tree guard: `_refuse_unless_updatable()`.
         """
         finished = False
+
+        def has_build() -> bool:
+            """Only asked when a refusal's sentence needs it (T867-D D3)."""
+            return ctx.state.has("build") or self.built_images(ctx) is True
+
         try:
-            yield from ale_playerbots.bridge(ctx.server_dir)
+            yield from ale_playerbots.bridge(
+                ctx.server_dir,
+                self._ale_compile_patches(ctx.server_dir),
+                server=self.entry.name,
+                has_build=has_build,
+            )
             yield from super().stage_build(ctx)
             finished = True
         finally:

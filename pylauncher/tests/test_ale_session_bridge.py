@@ -211,7 +211,10 @@ def test_putting_back_restores_mod_ales_bytes_and_removes_the_record(tmp_path: P
 
     assert methods_bytes(tmp_path) == ALE_NEW.encode("utf-8")
     assert not (tmp_path / ale_playerbots.RECORD).exists()
-    assert any("PlayerMethods.h" in line for line in said), said
+    assert said == [
+        "mod-ale's changes for the compile were taken back out (1 file); its folder is as "
+        "mod-ale ships it."
+    ], said
 
 
 def test_the_reverse_bridge_round_trips_too(tmp_path: Path) -> None:

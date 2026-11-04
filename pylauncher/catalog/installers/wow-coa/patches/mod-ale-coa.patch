@@ -1,0 +1,202 @@
+diff --git a/src/ALE_SC.cpp b/src/ALE_SC.cpp
+index d8886ce..5b632c8 100644
+--- a/src/ALE_SC.cpp
++++ b/src/ALE_SC.cpp
+@@ -1326,7 +1326,7 @@ public:
+         }
+     }
+ 
+-    uint32 DealDamage(Unit* AttackerUnit, Unit* pVictim, uint32 damage, DamageEffectType damagetype) override
++    uint32 DealDamage(Unit* AttackerUnit, Unit* pVictim, uint32 damage, DamageEffectType damagetype, std::optional<uint32>* /*scriptHealthLeechDamage*/) override
+     {
+         if (!AttackerUnit || !pVictim) return damage;
+ 
+diff --git a/src/LuaEngine/LuaFunctions.cpp b/src/LuaEngine/LuaFunctions.cpp
+index 2c9c4a9..300b032 100644
+--- a/src/LuaEngine/LuaFunctions.cpp
++++ b/src/LuaEngine/LuaFunctions.cpp
+@@ -59,7 +59,7 @@ extern "C"
+ 
+ luaL_Reg GlobalMethods[] =
+ {
+-#ifdef MOD_PLAYERBOTS
++#ifdef ALE_PLAYERBOTS_OFF_ON_COA
+     { "GetPlayerbotsMgr", &LuaPlayerBotsMgrGlobal::GetPlayerbotsMgr },
+     { "GetRandomPlayerbotMgr", &LuaRandomPlayerBotMgrGlobal::GetRandomPlayerbotMgr },
+     { "CreatePlayerbotFactory", &LuaPlayerBotFactoryGlobal::CreatePlayerbotFactory },
+@@ -861,7 +861,7 @@ ALERegister<Player> PlayerMethods[] =
+     { "SetCreationTime", &LuaPlayer::SetCreationTime },
+     { "ApplyRatingMod", &LuaPlayer::ApplyRatingMod },
+ 
+-#ifdef MOD_PLAYERBOTS
++#ifdef ALE_PLAYERBOTS_OFF_ON_COA
+     { "IsPlayerbot", &LuaPlayerBot::IsPlayerbot },
+     { "GetBotAI", &LuaPlayerBot::GetBotAI },
+     { "IsRealPlayer", &LuaPlayerBot::IsRealPlayer },
+@@ -892,7 +892,7 @@ ALERegister<Player> PlayerMethods[] =
+     { NULL, NULL }
+ };
+ 
+-#ifdef MOD_PLAYERBOTS
++#ifdef ALE_PLAYERBOTS_OFF_ON_COA
+ ALERegister<PlayerbotAI> PlayerbotAIMethods[] =
+ {
+     { "GetBot", &LuaPlayerBotAI::GetBot },
+@@ -2224,7 +2224,7 @@ void RegisterFunctions(ALE* E)
+     ALETemplate<Player>::SetMethods(E, UnitMethods);
+     ALETemplate<Player>::SetMethods(E, PlayerMethods);
+ 
+-#ifdef MOD_PLAYERBOTS
++#ifdef ALE_PLAYERBOTS_OFF_ON_COA
+     ALETemplate<PlayerbotAI>::Register(E, "PlayerbotAI");
+     ALETemplate<PlayerbotAI>::SetMethods(E, PlayerbotAIMethods);
+ 
+diff --git a/src/LuaEngine/hooks/GossipHooks.cpp b/src/LuaEngine/hooks/GossipHooks.cpp
+index 5fa3245..669c43c 100644
+--- a/src/LuaEngine/hooks/GossipHooks.cpp
++++ b/src/LuaEngine/hooks/GossipHooks.cpp
+@@ -116,7 +116,8 @@ bool ALE::OnGossipHello(Player* pPlayer, Creature* pCreature)
+ bool ALE::OnGossipSelect(Player* pPlayer, Creature* pCreature, uint32 sender, uint32 action)
+ {
+     START_HOOK_WITH_RETVAL(CreatureGossipBindings, GOSSIP_EVENT_ON_SELECT, pCreature->GetEntry(), false);
+-    auto originalMenu = *pPlayer->PlayerTalkClass;
++    auto originalGossip = pPlayer->PlayerTalkClass->GetGossipMenu();
++    auto originalQuest = pPlayer->PlayerTalkClass->GetQuestMenu();
+     pPlayer->PlayerTalkClass->ClearMenus();
+     Push(pPlayer);
+     Push(pCreature);
+@@ -124,7 +125,8 @@ bool ALE::OnGossipSelect(Player* pPlayer, Creature* pCreature, uint32 sender, ui
+     Push(action);
+     auto preventDefault = CallAllFunctionsBool(CreatureGossipBindings, key, true);
+     if (!preventDefault) {
+-        *pPlayer->PlayerTalkClass = originalMenu;
++        pPlayer->PlayerTalkClass->GetGossipMenu() = originalGossip;
++        pPlayer->PlayerTalkClass->GetQuestMenu() = originalQuest;
+     }
+     return preventDefault;
+ }
+@@ -132,7 +134,8 @@ bool ALE::OnGossipSelect(Player* pPlayer, Creature* pCreature, uint32 sender, ui
+ bool ALE::OnGossipSelectCode(Player* pPlayer, Creature* pCreature, uint32 sender, uint32 action, const char* code)
+ {
+     START_HOOK_WITH_RETVAL(CreatureGossipBindings, GOSSIP_EVENT_ON_SELECT, pCreature->GetEntry(), false);
+-    auto originalMenu = *pPlayer->PlayerTalkClass;
++    auto originalGossip = pPlayer->PlayerTalkClass->GetGossipMenu();
++    auto originalQuest = pPlayer->PlayerTalkClass->GetQuestMenu();
+     pPlayer->PlayerTalkClass->ClearMenus();
+     Push(pPlayer);
+     Push(pCreature);
+@@ -141,7 +144,8 @@ bool ALE::OnGossipSelectCode(Player* pPlayer, Creature* pCreature, uint32 sender
+     Push(code);
+     auto preventDefault = CallAllFunctionsBool(CreatureGossipBindings, key, true);
+     if (!preventDefault) {
+-        *pPlayer->PlayerTalkClass = originalMenu;
++        pPlayer->PlayerTalkClass->GetGossipMenu() = originalGossip;
++        pPlayer->PlayerTalkClass->GetQuestMenu() = originalQuest;
+     }
+     return preventDefault;
+ }
+diff --git a/src/LuaEngine/methods/PlayerMethods.h b/src/LuaEngine/methods/PlayerMethods.h
+index ba525a4..c57b658 100644
+--- a/src/LuaEngine/methods/PlayerMethods.h
++++ b/src/LuaEngine/methods/PlayerMethods.h
+@@ -5201,8 +5201,8 @@ namespace LuaPlayer
+      */
+     int IsBot(lua_State* L, Player* player)
+     {
+     #if defined(MOD_PLAYERBOTS)
+-        ALE::Push(L, player->GetSession()->IsHeadless());
++        ALE::Push(L, player->GetSession()->IsBot());
+     #else
+         (void)player;
+         ALE::Push(L, false);
+diff --git a/src/LuaEngine/methods/Playerbots/PlayerBotAIMethods.h b/src/LuaEngine/methods/Playerbots/PlayerBotAIMethods.h
+index 538b7d5..bc8ee3d 100644
+--- a/src/LuaEngine/methods/Playerbots/PlayerBotAIMethods.h
++++ b/src/LuaEngine/methods/Playerbots/PlayerBotAIMethods.h
+@@ -7,7 +7,7 @@
+ #ifndef PLAYERBOTAIMETHODS_H
+ #define PLAYERBOTAIMETHODS_H
+ 
+-#ifdef MOD_PLAYERBOTS
++#ifdef ALE_PLAYERBOTS_OFF_ON_COA
+ #include "PlayerbotAI.h"
+ #include "PlayerbotAIConfig.h"
+ #include "PlayerbotMgr.h"
+diff --git a/src/LuaEngine/methods/Playerbots/PlayerBotFactoryMethods.h b/src/LuaEngine/methods/Playerbots/PlayerBotFactoryMethods.h
+index b9c52da..fb5e8c1 100644
+--- a/src/LuaEngine/methods/Playerbots/PlayerBotFactoryMethods.h
++++ b/src/LuaEngine/methods/Playerbots/PlayerBotFactoryMethods.h
+@@ -7,7 +7,7 @@
+ #ifndef PLAYERBOTFACTORYMETHODS_H
+ #define PLAYERBOTFACTORYMETHODS_H
+ 
+-#ifdef MOD_PLAYERBOTS
++#ifdef ALE_PLAYERBOTS_OFF_ON_COA
+ #include "PlayerbotAI.h"
+ #include "PlayerbotFactory.h"
+ 
+diff --git a/src/LuaEngine/methods/Playerbots/PlayerBotHolderMethods.h b/src/LuaEngine/methods/Playerbots/PlayerBotHolderMethods.h
+index 7f83fc1..e164ef0 100644
+--- a/src/LuaEngine/methods/Playerbots/PlayerBotHolderMethods.h
++++ b/src/LuaEngine/methods/Playerbots/PlayerBotHolderMethods.h
+@@ -7,7 +7,7 @@
+ #ifndef PLAYERBOTHOLDERMETHODS_H
+ #define PLAYERBOTHOLDERMETHODS_H
+ 
+-#ifdef MOD_PLAYERBOTS
++#ifdef ALE_PLAYERBOTS_OFF_ON_COA
+ #include "PlayerbotAI.h"
+ #include "PlayerbotMgr.h"
+ 
+diff --git a/src/LuaEngine/methods/Playerbots/PlayerBotMethods.h b/src/LuaEngine/methods/Playerbots/PlayerBotMethods.h
+index 7c6def3..ae607a5 100644
+--- a/src/LuaEngine/methods/Playerbots/PlayerBotMethods.h
++++ b/src/LuaEngine/methods/Playerbots/PlayerBotMethods.h
+@@ -7,7 +7,7 @@
+ #ifndef PLAYERBOTMETHODS_H
+ #define PLAYERBOTMETHODS_H
+ 
+-#ifdef MOD_PLAYERBOTS
++#ifdef ALE_PLAYERBOTS_OFF_ON_COA
+ #include "PlayerbotAI.h"
+ #include "PlayerbotMgr.h"
+ #include "RandomPlayerbotMgr.h"
+diff --git a/src/LuaEngine/methods/Playerbots/PlayerBotMgrMethods.h b/src/LuaEngine/methods/Playerbots/PlayerBotMgrMethods.h
+index 08ec5cd..875db0c 100644
+--- a/src/LuaEngine/methods/Playerbots/PlayerBotMgrMethods.h
++++ b/src/LuaEngine/methods/Playerbots/PlayerBotMgrMethods.h
+@@ -7,7 +7,7 @@
+ #ifndef PLAYERBOTMGRMETHODS_H
+ #define PLAYERBOTMGRMETHODS_H
+ 
+-#ifdef MOD_PLAYERBOTS
++#ifdef ALE_PLAYERBOTS_OFF_ON_COA
+ #include "Chat.h"
+ #include "PlayerbotAI.h"
+ #include "PlayerbotMgr.h"
+diff --git a/src/LuaEngine/methods/Playerbots/PlayerBotsMgrMethods.h b/src/LuaEngine/methods/Playerbots/PlayerBotsMgrMethods.h
+index 08dde49..f0ad67e 100644
+--- a/src/LuaEngine/methods/Playerbots/PlayerBotsMgrMethods.h
++++ b/src/LuaEngine/methods/Playerbots/PlayerBotsMgrMethods.h
+@@ -7,7 +7,7 @@
+ #ifndef PLAYERBOTSMGRMETHODS_H
+ #define PLAYERBOTSMGRMETHODS_H
+ 
+-#ifdef MOD_PLAYERBOTS
++#ifdef ALE_PLAYERBOTS_OFF_ON_COA
+ #include "PlayerbotAI.h"
+ #include "PlayerbotMgr.h"
+ 
+diff --git a/src/LuaEngine/methods/Playerbots/RandomPlayerBotMgrMethods.h b/src/LuaEngine/methods/Playerbots/RandomPlayerBotMgrMethods.h
+index 07e8ad2..e0d033a 100644
+--- a/src/LuaEngine/methods/Playerbots/RandomPlayerBotMgrMethods.h
++++ b/src/LuaEngine/methods/Playerbots/RandomPlayerBotMgrMethods.h
+@@ -7,7 +7,7 @@
+ #ifndef RANDOMPLAYERBOTMGRMETHODS_H
+ #define RANDOMPLAYERBOTMGRMETHODS_H
+ 
+-#ifdef MOD_PLAYERBOTS
++#ifdef ALE_PLAYERBOTS_OFF_ON_COA
+ #include "PlayerbotAI.h"
+ #include "PlayerbotMgr.h"
+ #include "RandomPlayerbotMgr.h"

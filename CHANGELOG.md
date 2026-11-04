@@ -23,6 +23,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Conquest of Azeroth puts the SquidBots Lite bot add-on into your game client by itself and updates it with the server.
 
 ### Fixed
+- mod-ale builds on Conquest of Azeroth servers again; its Playerbots Lua functions are left out there.
 - Installs no longer leave unnamed Docker volumes behind (one per Conquest of Azeroth install, and one after a tool run was cut off).
 - Conquest of Azeroth on Windows builds its map data hours faster: the last map step no longer reads through the Windows folder share.
 - The Conquest of Azeroth install on Windows no longer stops at the map step with "Permission denied" on a stock Ascension client.
