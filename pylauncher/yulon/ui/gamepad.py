@@ -405,16 +405,77 @@ def _open_menu() -> QMenu | None:
     return None
 
 
-def _press_into(menu: QMenu, key: Qt.Key) -> bool:
-    """Deliver `key` to `menu` as a press and a release; the menu does the rest.
+def _open_combo_popup() -> QComboBox | None:
+    """The `QComboBox` whose list popup is open now, or None (T875).
 
-    Sent, not posted, so the menu has moved (or chosen, and closed) before the
-    pad's next event is resolved. It passes `KeyboardSource`'s filter on the way,
-    which lets it through because it is one of the menu's own keys (`_MENU_KEYS`).
+    A combo's popup holds a `QListView` of its rows, not focusable stops, so the
+    D-pad walk finds nothing to move to in there. Qt's own `QComboBox` handling
+    already walks the rows and scrolls the view -- the arrows only have to reach
+    the combo as keys, the way a menu's own keys reach the menu (T89).
+    """
+    app = QApplication.instance()
+    if isinstance(app, QApplication):
+        popup = app.activePopupWidget()
+        if popup is not None:
+            owner = popup.parentWidget()
+            if isinstance(owner, QComboBox):
+                return owner
+    return None
+
+
+def _press_into_combo(combo: QComboBox, key: Qt.Key) -> bool:
+    """Deliver `key` through the open `combo` with the pad filter detached (T875).
+
+    The press goes to the combo itself (the popup's parent), so the combo's own
+    key handling walks the current row and scrolls the view -- the same path a
+    keyboard user's arrows take when the popup is open. It must NOT go to the
+    popup's list view directly: rows pressed there do not move the current row.
+    The relayed press is already routed, so the pad filter (`KeyboardSource`,
+    registered on the app as `_keyboard_sources`) is detached for the duration
+    of the sent press: a second pass through it would route the press back into
+    the relay forever. Delivery stays synchronous (the row has moved before the
+    next pad event resolves), and other filters still see the press.
+    """
+    _deliver_to_combo(combo, key)
+    return True
+
+
+def _press_into(target: QWidget, key: Qt.Key) -> bool:
+    """Deliver `key` to `target` as a press and a release; the target does the rest.
+
+    Sent, not posted, so the target has moved (or chosen, and closed) before the
+    pad's next event is resolved.
     """
     for kind in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease):
-        QApplication.sendEvent(menu, QKeyEvent(kind, key, Qt.KeyboardModifier.NoModifier))
+        QApplication.sendEvent(target, QKeyEvent(kind, key, Qt.KeyboardModifier.NoModifier))
     return True
+
+
+def _deliver_to_combo(combo: QComboBox, key: Qt.Key) -> None:
+    """Deliver `key` to the open `combo` with the pad filter detached (T875).
+
+    Only the combo relay uses this: the relayed press is already routed, and a
+    pass through `KeyboardSource`'s application-wide filter would route it back
+    into the relay forever. Detaching the one filter for the duration of the
+    sent press keeps delivery synchronous (the row has moved before the next
+    pad event resolves) while the filter sees nothing to re-route. The combo's
+    own key handling still runs: `sendEvent` notifies the widget directly.
+    """
+    app = QApplication.instance()
+    sources: list[QObject] = []
+    if isinstance(app, QApplication):
+        registered = getattr(app, "_keyboard_sources", None)
+        if isinstance(registered, list):
+            sources = [source for source in registered if isinstance(source, QObject)]
+            for source in sources:
+                app.removeEventFilter(source)
+    try:
+        for kind in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease):
+            QApplication.sendEvent(combo, QKeyEvent(kind, key, Qt.KeyboardModifier.NoModifier))
+    finally:
+        if isinstance(app, QApplication):
+            for source in sources:
+                app.installEventFilter(source)
 
 
 def _center(w: QWidget, relative_to: QWidget) -> QPoint:
@@ -667,6 +728,14 @@ class Navigator(QObject):
         if menu is not None:
             # T89: an open menu moves its own highlight; see `_open_menu()`.
             return _press_into(menu, _DIRECTION_TO_KEY[direction])
+        combo = _open_combo_popup()
+        if combo is not None and direction in (Direction.UP, Direction.DOWN):
+            # T875: an open dropdown moves its own rows -- the D-pad walk finds
+            # no focusable stops in the popup list, and the combo's own key
+            # handling walks the current row and scrolls the view. Left/Right
+            # stay the navigator's: they close nothing and choose nothing.
+            _press_into_combo(combo, _DIRECTION_TO_KEY[direction])
+            return True
         root = self._context_root()
         candidates = self._focusable(root)
         current = QApplication.focusWidget()
@@ -1092,11 +1161,21 @@ class KeyboardSource(QObject):
         if isinstance(app, QApplication):
             self._app = app
             app.installEventFilter(self)
+            sources = getattr(app, "_keyboard_sources", None)
+            if isinstance(sources, list):
+                if all(source is not self for source in sources):
+                    sources.append(self)
+            else:
+                app._keyboard_sources = [self]  # type: ignore[attr-defined]
 
     def stop(self) -> None:
         """Remove the filter (used at teardown to avoid a dangling target)."""
         if self._app is not None:
             self._app.removeEventFilter(self)
+            sources = getattr(self._app, "_keyboard_sources", None)
+            if isinstance(sources, list):
+                while self in sources:
+                    sources.remove(self)
             self._app = None
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
@@ -1115,8 +1194,22 @@ class KeyboardSource(QObject):
                     self._navigator.perform(_KEY_TO_ACTION[key])
                     return True
                 return False
-
             if key in _KEY_TO_DIRECTION:
+                # T875: with a dropdown open, Up/Down are the popup list's own
+                # keys -- they walk the rows and scroll. They must reach the
+                # combo itself (the popup's parent: `navigate()` sends them
+                # there), NOT the navigator, which finds no focusable stops in
+                # the popup and would swallow them into nothing. Open popup
+                # only: with the combo closed the arrows stay the navigator's,
+                # so a held pad direction cannot leak into a widget and desync
+                # focus. The relay detaches the pad filter while delivering,
+                # so the synthesized press cannot route back here and recurse.
+                combo = _open_combo_popup()
+                if combo is not None and key in _KEY_TO_DIRECTION:
+                    direction = _KEY_TO_DIRECTION[key]
+                    if direction in (Direction.UP, Direction.DOWN):
+                        _press_into_combo(combo, _DIRECTION_TO_KEY[direction])
+                        return True
                 # Horizontal arrows double as typing keys: they move a caret in
                 # a field, so while a text field has focus they reach it instead
                 # of navigating (see `_TYPING_KEYS`). Every other direction key

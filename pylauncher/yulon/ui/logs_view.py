@@ -363,7 +363,8 @@ class LogsView(QWidget):
         self.source_picker.setSizeAdjustPolicy(
             QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
         )
-        self.source_picker.setMinimumContentsLength(24)
+        # T875: at most eight rows on a Steam Deck's 800 px screen, with room to spare.
+        self.source_picker.setMaxVisibleItems(8)
         self.source_picker.currentIndexChanged.connect(self._on_pick)
         self.viewer = QPlainTextEdit(self)
         self.viewer.setReadOnly(True)

@@ -1072,6 +1072,14 @@ QPlainTextEdit:disabled {{
     border: 1px solid {spec.border_deep};
 }}
 
+/* T875: every dropdown shows at most ten rows and scrolls. `combobox-popup: 0`
+   makes Qt use the list popup that honours `maxVisibleItems` (Qt's default is
+   10) on every platform; without it Linux/Fusion uses the menu-like popup that
+   shows EVERY item and runs off the screen. */
+QComboBox {{
+    combobox-popup: 0;
+}}
+
 QComboBox::drop-down {{
     subcontrol-origin: padding;
     subcontrol-position: top right;

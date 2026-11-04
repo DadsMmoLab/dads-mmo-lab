@@ -17,6 +17,8 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 
 ### Fixed
 
+- Long dropdowns, like the Logs tab's list of logs, now show ten rows at most and scroll, so they fit on a Steam Deck screen.
+
 ### Changed
 
 ## v0.9.31-Public — 2026-11-04
